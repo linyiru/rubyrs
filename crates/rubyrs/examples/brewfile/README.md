@@ -50,7 +50,7 @@ designed for.
   `link:`, etc.). The script uses our supported subset of Ruby
   (single-arg DSL methods, positional `mas` ID).
 - It is **not** a microbenchmark of "rubyrs vs CRuby on raw
-  arithmetic" — see [docs/BENCHMARKS.md](../../docs/BENCHMARKS.md)
+  arithmetic" — see [docs/BENCHMARKS.md](../../../../docs/BENCHMARKS.md)
   for that. On that axis CRuby's interpreter is 1.76× faster than
   us. On *embedded DSL latency* — what an actual DSL-hosting Rust
   app cares about — we're 42× faster end-to-end. Different shape of

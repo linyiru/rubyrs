@@ -1,4 +1,15 @@
-# rubyrs
+# rubyrs (workspace)
+
+This is a Cargo workspace. It currently hosts one crate
+([`crates/rubyrs/`](crates/rubyrs/)) — the Ruby-subset
+interpreter described below. A second crate, `rubund` (a Rust
+implementation of Bundler), is planned and will be added as a
+sibling under `crates/`. `rubund` is the first real driver of
+`rubyrs`'s embedding API — Gemfile and `*.gemspec` files are
+Ruby DSLs, so the Bundler-in-Rust work doubles as in-tree
+dogfooding of the interpreter.
+
+## rubyrs
 
 [![CI](https://github.com/linyiru/rubyrs/actions/workflows/ci.yml/badge.svg)](https://github.com/linyiru/rubyrs/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -110,14 +121,17 @@ rt.eval(r#"puts "pid is #{host_pid}""#, "inline").unwrap();
 
 The runtime is incremental — class and method definitions persist across
 `eval` calls, so you can split DSL setup and script execution into
-multiple chunks. See [`examples/embed.rs`](examples/embed.rs) for the
-fuller story (captured stdout, persistent classes, Trap propagation) and
-[`tests/embed.rs`](tests/embed.rs) for the pinned API surface.
+multiple chunks. See
+[`crates/rubyrs/examples/embed.rs`](crates/rubyrs/examples/embed.rs)
+for the fuller story (captured stdout, persistent classes, Trap
+propagation) and
+[`crates/rubyrs/tests/embed.rs`](crates/rubyrs/tests/embed.rs)
+for the pinned API surface.
 
 Run the example:
 
 ```bash
-cargo run --release --example embed
+cargo run --release -p rubyrs --example embed
 ```
 
 ## Status

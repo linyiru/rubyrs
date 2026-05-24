@@ -1,13 +1,23 @@
-[package]
-name = "rubyrs"
+[workspace]
+resolver = "3"
+members = [
+    "crates/rubyrs",
+    # `rubund` lands in the next commit so workspace builds today
+    # remain identical to the pre-monorepo state.
+]
+
+# Shared metadata — individual crates pick these up with
+# `version.workspace = true`, `edition.workspace = true`, etc.
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "A tiny Ruby-subset interpreter in Rust, built on top of Prism"
 repository = "https://github.com/linyiru/rubyrs"
+authors = ["rubyrs contributors"]
+rust-version = "1.85"
 
-[dependencies]
+# Centralise shared dependency versions. Crates opt in with
+# `<name>.workspace = true` under their `[dependencies]`.
+[workspace.dependencies]
 ruby-prism = "1.9"
-
-[build-dependencies]
 cc = "1"

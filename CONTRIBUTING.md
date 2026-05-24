@@ -31,13 +31,13 @@ cargo test --release
 
 1. **Branch** from `master`.
 2. **Implement** the change. Single concept per branch / PR.
-3. **Add a fixture test** in `tests/fixtures/`:
+3. **Add a fixture test** in `crates/rubyrs/tests/fixtures/`:
    ```bash
-   echo '...your Ruby program...' > tests/fixtures/myfeature.rb
-   UPDATE_EXPECTED=1 cargo test --release myfeature
+   echo '...your Ruby program...' > crates/rubyrs/tests/fixtures/myfeature.rb
+   UPDATE_EXPECTED=1 cargo test --release -p rubyrs myfeature
    # Inspect the generated .expected file.
    ```
-   Register the test in `tests/integration.rs`.
+   Register the test in `crates/rubyrs/tests/integration.rs`.
 4. **Run the full suite**: `cargo test --release`. All existing tests
    must still pass.
 5. **Update CHANGELOG.md** under `[Unreleased]`. User-facing items go in
@@ -51,7 +51,8 @@ cargo test --release
 - The codebase uses a deliberately compact style for short matches and
   test functions. `cargo fmt` is **not enforced** in CI. Match the
   surrounding code.
-- One file, `src/main.rs`. Don't split eagerly; see
+- rubyrs lives under `crates/rubyrs/`. Source files are kept
+  small and focused, but resist eager splitting; see
   [ARCHITECTURE.md § Why a single file](docs/ARCHITECTURE.md#why-a-single-file).
 - Comments explain *why*, not *what*. The code already says what.
 - No new dependencies without discussion in an issue. The whole point of
