@@ -46,6 +46,14 @@ enum Expr {
     },
     ArrayLit(Vec<Expr>),
     HashLit(Vec<(Expr, Expr)>),
+    CallWithBlock {
+        receiver: Option<Box<Expr>>,
+        name: String,
+        args: Vec<Expr>,
+        block_params: Vec<String>,
+        block_body: Vec<Expr>,
+    },
+    Yield(Vec<Expr>),
 }
 
 // ---------- Translate prism AST to Expr ----------
@@ -100,7 +108,29 @@ fn tr(node: &Node<'_>) -> Expr {
             .arguments()
             .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
+        if let Some(bnode) = n.block() {
+            if let Some(bn) = bnode.as_block_node() {
+                let block_params: Vec<String> = bn.parameters().and_then(|pn| pn.as_block_parameters_node()).and_then(|bp| bp.parameters())
+                    .map(|p| p.requireds().iter().filter_map(|r| r.as_required_parameter_node().map(|rp| cid_to_string(rp.name()))).collect())
+                    .unwrap_or_default();
+                let block_body: Vec<Expr> = match bn.body() {
+                    Some(b) => {
+                        if let Some(stmts) = b.as_statements_node() {
+                            stmts.body().iter().map(|c| tr(&c)).collect()
+                        } else { vec![tr(&b)] }
+                    }
+                    None => vec![],
+                };
+                return Expr::CallWithBlock { receiver, name, args, block_params, block_body };
+            }
+        }
         return Expr::Call { receiver, name, args };
+    }
+    if let Some(n) = node.as_yield_node() {
+        let args: Vec<Expr> = n.arguments()
+            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .unwrap_or_default();
+        return Expr::Yield(args);
     }
     if let Some(n) = node.as_if_node() {
         let cond = Box::new(tr(&n.predicate()));
@@ -189,6 +219,15 @@ enum Value {
     Object(ObjId),
     Array(ObjId),
     Hash(ObjId),
+    Block(Rc<BlockHandle>),
+}
+
+struct BlockHandle {
+    proto_idx: usize,
+    captured: Rc<RefCell<Vec<Value>>>,
+    self_val: Value,
+    param_start: u16,
+    n_params: u16,
 }
 
 struct Class {
@@ -310,14 +349,21 @@ impl Heap {
     }
 
     fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
-        let id = match v {
-            Value::Object(id) | Value::Array(id) | Value::Hash(id) => *id,
-            _ => return,
-        };
-        let i = id.0 as usize;
-        if !marks[i] {
-            marks[i] = true;
-            worklist.push(id);
+        match v {
+            Value::Object(id) | Value::Array(id) | Value::Hash(id) => {
+                let i = id.0 as usize;
+                if !marks[i] {
+                    marks[i] = true;
+                    worklist.push(*id);
+                }
+            }
+            Value::Block(b) => {
+                // Walk captured locals; also walk self_val
+                let snapshot: Vec<Value> = b.captured.borrow().iter().cloned().collect();
+                for v in &snapshot { Heap::visit_value(v, marks, worklist); }
+                Heap::visit_value(&b.self_val.clone(), marks, worklist);
+            }
+            _ => {}
         }
     }
 }
@@ -336,6 +382,7 @@ impl Value {
             Value::Object(_) => "Object",
             Value::Array(_) => "Array",
             Value::Hash(_) => "Hash",
+            Value::Block(_) => "Proc",
         }
     }
     fn to_display(&self, heap: &Heap) -> String {
@@ -359,6 +406,7 @@ impl Value {
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
+            Value::Block(_) => "#<Proc>".into(),
         }
     }
     fn to_inspect(&self, heap: &Heap) -> String {
@@ -409,8 +457,12 @@ enum Op {
     CallNoRecv(u32, u8), // implicit self / builtin / toplevel
     DefMethod(u32, u32), // name idx, proto idx
     DefClass(u32, u32),  // name idx, body proto idx
-    NewArray(u16),       // pop N values, build array
-    NewHash(u16),        // pop 2N values (key, val, key, val, ...), build hash
+    NewArray(u16),
+    NewHash(u16),
+    CreateBlock(u32, u16, u16), // proto_idx, param_start, n_params
+    CallBlock(u32, u8),         // name, argc; expects [recv, block, ...args]
+    CallNoRecvBlock(u32, u8),   // name, argc; expects [block, ...args]
+    Yield(u8),
     Return,
 }
 
@@ -588,6 +640,28 @@ fn compile_expr(b: &mut ProtoBuilder, e: &Expr, protos: &mut Vec<Proto>) {
             }
             b.emit(Op::NewHash(pairs.len() as u16));
         }
+        Expr::CallWithBlock { receiver, name, args, block_params, block_body } => {
+            // Compile block as child proto sharing parent's local layout
+            let (block_proto_idx, param_start, n_params) =
+                compile_block(b, block_params, block_body, protos);
+            let name_idx = b.intern(name);
+            let has_recv = receiver.is_some();
+            if let Some(r) = receiver { compile_expr(b, r, protos); }
+            // Push block value
+            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
+            // Then args
+            for a in args { compile_expr(b, a, protos); }
+            let argc = args.len() as u8;
+            if has_recv {
+                b.emit(Op::CallBlock(name_idx, argc));
+            } else {
+                b.emit(Op::CallNoRecvBlock(name_idx, argc));
+            }
+        }
+        Expr::Yield(args) => {
+            for a in args { compile_expr(b, a, protos); }
+            b.emit(Op::Yield(args.len() as u8));
+        }
     }
 }
 
@@ -600,16 +674,36 @@ fn compile_proto(name: String, params: Vec<String>, body: &[Expr], protos: &mut 
     idx
 }
 
+fn compile_block(parent: &ProtoBuilder, block_params: &[String], body: &[Expr], protos: &mut Vec<Proto>) -> (usize, u16, u16) {
+    // Block proto inherits parent's locals layout so reads/writes to outer
+    // names use the same slots. Block-own params and locals extend the layout.
+    let mut b = ProtoBuilder {
+        code: vec![],
+        strings: vec![],
+        locals: parent.locals.clone(),
+        n_locals: parent.n_locals,
+    };
+    let param_start = b.n_locals;
+    for p in block_params { b.local_slot(p); }
+    let n_params = block_params.len() as u16;
+    compile_body(&mut b, body, protos);
+    b.emit(Op::Return);
+    let idx = protos.len();
+    protos.push(b.build("<block>".into(), block_params.to_vec()));
+    (idx, param_start, n_params)
+}
+
 // ---------- VM ----------
 
 struct Frame {
     proto_idx: usize,
     ip: usize,
-    locals: Vec<Value>,
+    locals: Rc<RefCell<Vec<Value>>>,
     self_val: Value,
     base_sp: usize,
     is_class_body: bool,
-    swap_return: Option<Value>, // when Some, discard the frame's return and push this instead
+    swap_return: Option<Value>,
+    block_arg: Option<Rc<BlockHandle>>,
 }
 
 struct Vm {
@@ -641,161 +735,24 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx: entry,
             ip: 0,
-            locals: vec_nil(n_locals),
+            locals: Rc::new(RefCell::new(vec_nil(n_locals))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None,
+            is_class_body: false, swap_return: None, block_arg: None,
         });
         self.dispatch();
         self.stack.pop().unwrap_or(Value::Nil)
     }
 
     fn dispatch(&mut self) {
-        'outer: loop {
-            // SAFETY: frame index valid while running
+        while !self.frames.is_empty() {
             let (proto_idx, ip) = {
                 let f = self.frames.last().unwrap();
                 (f.proto_idx, f.ip)
             };
             let op = self.protos[proto_idx].code[ip].clone();
             self.frames.last_mut().unwrap().ip += 1;
-
-            match op {
-                Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
-                Op::LoadConstStr(idx) => {
-                    let s = self.protos[proto_idx].strings[idx as usize].clone();
-                    self.stack.push(Value::Str(Rc::new(s)));
-                }
-                Op::LoadNil => self.stack.push(Value::Nil),
-                Op::LoadTrue => self.stack.push(Value::Bool(true)),
-                Op::LoadFalse => self.stack.push(Value::Bool(false)),
-                Op::LoadSelf => {
-                    let v = self.frames.last().unwrap().self_val.clone();
-                    self.stack.push(v);
-                }
-                Op::LoadLocal(s) => {
-                    let v = self.frames.last().unwrap().locals[s as usize].clone();
-                    self.stack.push(v);
-                }
-                Op::StoreLocal(s) => {
-                    let v = self.stack.pop().unwrap();
-                    self.frames.last_mut().unwrap().locals[s as usize] = v;
-                }
-                Op::Dup => {
-                    let v = self.stack.last().unwrap().clone();
-                    self.stack.push(v);
-                }
-                Op::Pop => { self.stack.pop(); }
-                Op::LoadIvar(idx) => {
-                    let name = self.protos[proto_idx].strings[idx as usize].clone();
-                    let id_opt = if let Value::Object(id) = &self.frames.last().unwrap().self_val {
-                        Some(*id)
-                    } else { None };
-                    let v = if let Some(id) = id_opt {
-                        self.heap.instance(id).ivars.get(&name).cloned().unwrap_or(Value::Nil)
-                    } else { Value::Nil };
-                    self.stack.push(v);
-                }
-                Op::StoreIvar(idx) => {
-                    let name = self.protos[proto_idx].strings[idx as usize].clone();
-                    let v = self.stack.pop().unwrap();
-                    let id_opt = if let Value::Object(id) = &self.frames.last().unwrap().self_val {
-                        Some(*id)
-                    } else { None };
-                    if let Some(id) = id_opt {
-                        self.heap.instance_mut(id).ivars.insert(name, v);
-                    }
-                }
-                Op::LoadConst(idx) => {
-                    let name = &self.protos[proto_idx].strings[idx as usize];
-                    let v = self.classes.get(name).map(|c| Value::Class(c.clone())).unwrap_or(Value::Nil);
-                    self.stack.push(v);
-                }
-                Op::Jump(off) => {
-                    let f = self.frames.last_mut().unwrap();
-                    f.ip = (f.ip as i32 + off) as usize;
-                }
-                Op::JumpIfFalse(off) => {
-                    let v = self.stack.pop().unwrap();
-                    if !v.is_truthy() {
-                        let f = self.frames.last_mut().unwrap();
-                        f.ip = (f.ip as i32 + off) as usize;
-                    }
-                }
-                Op::Call(name_idx, argc) => {
-                    let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                    self.do_call(name, argc as usize, false);
-                }
-                Op::CallNoRecv(name_idx, argc) => {
-                    let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                    self.do_call(name, argc as usize, true);
-                }
-                Op::DefMethod(name_idx, p_idx) => {
-                    let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                    let proto = &self.protos[p_idx as usize];
-                    let m = Rc::new(Method { params: proto.params.clone(), proto_idx: p_idx as usize });
-                    if let Some(cls) = self.class_stack.last() {
-                        cls.methods.borrow_mut().insert(name, m);
-                    } else {
-                        self.toplevel_methods.insert(name, m);
-                    }
-                    self.stack.push(Value::Nil);
-                }
-                Op::DefClass(name_idx, p_idx) => {
-                    let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                    let cls = self.classes.entry(name.clone()).or_insert_with(|| Rc::new(Class {
-                        name: name.clone(),
-                        methods: RefCell::new(HashMap::new()),
-                    })).clone();
-                    self.class_stack.push(cls.clone());
-                    // Invoke class body proto with self = Class
-                    let proto = &self.protos[p_idx as usize];
-                    let n_locals = proto.n_locals as usize;
-                    self.frames.push(Frame {
-                        proto_idx: p_idx as usize,
-                        ip: 0,
-                        locals: vec_nil(n_locals),
-                        self_val: Value::Class(cls.clone()),
-                        base_sp: self.stack.len(),
-                        is_class_body: true, swap_return: None,
-                    });
-                }
-                Op::NewArray(n) => {
-                    self.maybe_gc();
-                    let n = n as usize;
-                    let split = self.stack.len() - n;
-                    let elems: Vec<Value> = self.stack.drain(split..).collect();
-                    let id = self.heap.alloc(HeapObj::Array(elems));
-                    self.stack.push(Value::Array(id));
-                }
-                Op::NewHash(n) => {
-                    self.maybe_gc();
-                    let n = n as usize;
-                    let split = self.stack.len() - n * 2;
-                    let flat: Vec<Value> = self.stack.drain(split..).collect();
-                    let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n);
-                    let mut iter = flat.into_iter();
-                    while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
-                        pairs.push((k, v));
-                    }
-                    let id = self.heap.alloc(HeapObj::Hash(pairs));
-                    self.stack.push(Value::Hash(id));
-                }
-                Op::Return => {
-                    let f = self.frames.pop().unwrap();
-                    let ret = self.stack.pop().unwrap_or(Value::Nil);
-                    self.stack.truncate(f.base_sp);
-                    if f.is_class_body {
-                        let cls = self.class_stack.pop().unwrap();
-                        self.stack.push(Value::Class(cls));
-                    } else if let Some(replacement) = f.swap_return {
-                        self.stack.push(replacement);
-                    } else {
-                        self.stack.push(ret);
-                    }
-                    if self.frames.is_empty() { break 'outer; }
-                }
-            }
+            if !self.step(op, proto_idx) { return; }
         }
     }
 
@@ -943,13 +900,21 @@ impl Vm {
         for v in &self.stack { roots.push(v.clone()); }
         for f in &self.frames {
             roots.push(f.self_val.clone());
-            for v in &f.locals { roots.push(v.clone()); }
+            for v in f.locals.borrow().iter() { roots.push(v.clone()); }
             if let Some(v) = &f.swap_return { roots.push(v.clone()); }
+            if let Some(b) = &f.block_arg {
+                for v in b.captured.borrow().iter() { roots.push(v.clone()); }
+                roots.push(b.self_val.clone());
+            }
         }
         self.heap.collect(&roots);
     }
 
     fn invoke_method(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>) {
+        self.invoke_method_with_block(m, self_val, args, None);
+    }
+
+    fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<Rc<BlockHandle>>) {
         if m.params.len() != args.len() {
             panic!("wrong number of arguments (given {}, expected {})", args.len(), m.params.len());
         }
@@ -962,11 +927,309 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
-            locals,
+            locals: Rc::new(RefCell::new(locals)),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None,
+            is_class_body: false, swap_return: None, block_arg: block,
         });
+    }
+
+    fn invoke_block(&mut self, block: Rc<BlockHandle>, args: Vec<Value>) {
+        let proto = &self.protos[block.proto_idx];
+        let needed = proto.n_locals as usize;
+        {
+            let mut locals = block.captured.borrow_mut();
+            if locals.len() < needed {
+                while locals.len() < needed { locals.push(Value::Nil); }
+            }
+            // Place args into the block's param slots
+            for (i, a) in args.into_iter().enumerate() {
+                if i < block.n_params as usize {
+                    locals[block.param_start as usize + i] = a;
+                }
+            }
+        }
+        self.frames.push(Frame {
+            proto_idx: block.proto_idx,
+            ip: 0,
+            locals: block.captured.clone(),
+            self_val: block.self_val.clone(),
+            base_sp: self.stack.len(),
+            is_class_body: false, swap_return: None, block_arg: None,
+        });
+    }
+
+    fn do_call_block(&mut self, name: String, argc: usize, no_recv: bool) {
+        // Stack layout:
+        //   CallBlock:        [..., recv, block, arg1..argc]
+        //   CallNoRecvBlock:  [..., block, arg1..argc]
+        let split = self.stack.len() - argc;
+        let args: Vec<Value> = self.stack.drain(split..).collect();
+        let block_val = self.stack.pop().unwrap();
+        let block = if let Value::Block(b) = block_val { b } else {
+            panic!("CallBlock without Block value on stack");
+        };
+        let recv = if no_recv { None } else { Some(self.stack.pop().unwrap()) };
+
+        // Builtins that consume blocks (each, map, etc.)
+        if let Some(r) = &recv {
+            if let Some(v) = self.collection_call_block(r, &name, &args, &block) {
+                self.stack.push(v);
+                return;
+            }
+        }
+
+        // Otherwise: dispatch like a normal call but pass the block along.
+        if no_recv {
+            if let Some(v) = self.builtin_call(&name, &args) { self.stack.push(v); return; }
+            let self_val = self.frames.last().unwrap().self_val.clone();
+            if let Value::Object(id) = &self_val {
+                let cls = self.heap.instance(*id).class.clone();
+                if let Some(m) = cls.methods.borrow().get(&name).cloned() {
+                    self.invoke_method_with_block(m, self_val.clone(), args, Some(block));
+                    return;
+                }
+            }
+            if let Some(m) = self.toplevel_methods.get(&name).cloned() {
+                self.invoke_method_with_block(m, self_val, args, Some(block));
+                return;
+            }
+            panic!("undefined method `{}'", name);
+        }
+        let recv = recv.unwrap();
+        if let Some(v) = primitive_call(&recv, &name, &args) { self.stack.push(v); return; }
+        if name == "new" {
+            if let Value::Class(cls) = &recv {
+                self.maybe_gc();
+                let id = self.heap.alloc(HeapObj::Instance(Instance {
+                    class: cls.clone(), ivars: HashMap::new(),
+                }));
+                let obj = Value::Object(id);
+                if let Some(m) = cls.methods.borrow().get("initialize").cloned() {
+                    self.invoke_method_with_block(m, obj.clone(), args, Some(block));
+                    self.frames.last_mut().unwrap().swap_return = Some(obj);
+                } else {
+                    self.stack.push(obj);
+                }
+                return;
+            }
+        }
+        if let Value::Object(id) = &recv {
+            let cls = self.heap.instance(*id).class.clone();
+            if let Some(m) = cls.methods.borrow().get(&name).cloned() {
+                self.invoke_method_with_block(m, recv.clone(), args, Some(block));
+                return;
+            }
+        }
+        panic!("undefined method `{}' for {} (with block)", name, recv.type_name());
+    }
+
+    fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: &Rc<BlockHandle>) -> Option<Value> {
+        match (recv, name, args) {
+            (Value::Array(id), "each", []) => {
+                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                let pre_frames = self.frames.len();
+                for v in snapshot {
+                    self.invoke_block(block.clone(), vec![v]);
+                    // Run until block frame returns
+                    self.dispatch_until(pre_frames);
+                    self.stack.pop(); // drop block's return value
+                }
+                Some(Value::Array(*id))
+            }
+            (Value::Array(id), "map", []) => {
+                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                let mut results: Vec<Value> = Vec::with_capacity(snapshot.len());
+                let pre_frames = self.frames.len();
+                for v in snapshot {
+                    self.invoke_block(block.clone(), vec![v]);
+                    self.dispatch_until(pre_frames);
+                    results.push(self.stack.pop().unwrap_or(Value::Nil));
+                }
+                self.maybe_gc();
+                let nid = self.heap.alloc(HeapObj::Array(results));
+                Some(Value::Array(nid))
+            }
+            (Value::Hash(id), "each", []) => {
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                let pre_frames = self.frames.len();
+                for (k, v) in snapshot {
+                    self.invoke_block(block.clone(), vec![k, v]);
+                    self.dispatch_until(pre_frames);
+                    self.stack.pop();
+                }
+                Some(Value::Hash(*id))
+            }
+            (Value::Int(n), "times", []) => {
+                let pre_frames = self.frames.len();
+                for i in 0..*n {
+                    self.invoke_block(block.clone(), vec![Value::Int(i)]);
+                    self.dispatch_until(pre_frames);
+                    self.stack.pop();
+                }
+                Some(Value::Int(*n))
+            }
+            _ => None,
+        }
+    }
+
+    /// Run dispatch loop until the frame stack returns to `until_depth`.
+    fn dispatch_until(&mut self, until_depth: usize) {
+        // Self-contained loop variant — duplicates dispatch logic but exits early.
+        while self.frames.len() > until_depth {
+            let (proto_idx, ip) = {
+                let f = self.frames.last().unwrap();
+                (f.proto_idx, f.ip)
+            };
+            let op = self.protos[proto_idx].code[ip].clone();
+            self.frames.last_mut().unwrap().ip += 1;
+            if !self.step(op, proto_idx) { return; }
+        }
+    }
+
+    /// Execute one op; returns false if we just popped the last frame.
+    fn step(&mut self, op: Op, proto_idx: usize) -> bool {
+        match op {
+            Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
+            Op::LoadConstStr(idx) => {
+                let s = self.protos[proto_idx].strings[idx as usize].clone();
+                self.stack.push(Value::Str(Rc::new(s)));
+            }
+            Op::LoadNil => self.stack.push(Value::Nil),
+            Op::LoadTrue => self.stack.push(Value::Bool(true)),
+            Op::LoadFalse => self.stack.push(Value::Bool(false)),
+            Op::LoadSelf => {
+                let v = self.frames.last().unwrap().self_val.clone();
+                self.stack.push(v);
+            }
+            Op::LoadLocal(s) => {
+                let v = self.frames.last().unwrap().locals.borrow()[s as usize].clone();
+                self.stack.push(v);
+            }
+            Op::StoreLocal(s) => {
+                let v = self.stack.pop().unwrap();
+                self.frames.last().unwrap().locals.borrow_mut()[s as usize] = v;
+            }
+            Op::Dup => { let v = self.stack.last().unwrap().clone(); self.stack.push(v); }
+            Op::Pop => { self.stack.pop(); }
+            Op::LoadIvar(idx) => {
+                let name = self.protos[proto_idx].strings[idx as usize].clone();
+                let id_opt = if let Value::Object(id) = &self.frames.last().unwrap().self_val { Some(*id) } else { None };
+                let v = if let Some(id) = id_opt {
+                    self.heap.instance(id).ivars.get(&name).cloned().unwrap_or(Value::Nil)
+                } else { Value::Nil };
+                self.stack.push(v);
+            }
+            Op::StoreIvar(idx) => {
+                let name = self.protos[proto_idx].strings[idx as usize].clone();
+                let v = self.stack.pop().unwrap();
+                let id_opt = if let Value::Object(id) = &self.frames.last().unwrap().self_val { Some(*id) } else { None };
+                if let Some(id) = id_opt { self.heap.instance_mut(id).ivars.insert(name, v); }
+            }
+            Op::LoadConst(idx) => {
+                let name = &self.protos[proto_idx].strings[idx as usize];
+                let v = self.classes.get(name).map(|c| Value::Class(c.clone())).unwrap_or(Value::Nil);
+                self.stack.push(v);
+            }
+            Op::Jump(off) => {
+                let f = self.frames.last_mut().unwrap();
+                f.ip = (f.ip as i32 + off) as usize;
+            }
+            Op::JumpIfFalse(off) => {
+                let v = self.stack.pop().unwrap();
+                if !v.is_truthy() {
+                    let f = self.frames.last_mut().unwrap();
+                    f.ip = (f.ip as i32 + off) as usize;
+                }
+            }
+            Op::Call(name_idx, argc) => {
+                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
+                self.do_call(name, argc as usize, false);
+            }
+            Op::CallNoRecv(name_idx, argc) => {
+                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
+                self.do_call(name, argc as usize, true);
+            }
+            Op::CallBlock(name_idx, argc) => {
+                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
+                self.do_call_block(name, argc as usize, false);
+            }
+            Op::CallNoRecvBlock(name_idx, argc) => {
+                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
+                self.do_call_block(name, argc as usize, true);
+            }
+            Op::CreateBlock(p_idx, param_start, n_params) => {
+                let captured = self.frames.last().unwrap().locals.clone();
+                let self_val = self.frames.last().unwrap().self_val.clone();
+                let h = BlockHandle { proto_idx: p_idx as usize, captured, self_val, param_start, n_params };
+                self.stack.push(Value::Block(Rc::new(h)));
+            }
+            Op::Yield(argc) => {
+                let block = self.frames.last().unwrap().block_arg.clone().expect("no block given");
+                let argc = argc as usize;
+                let split = self.stack.len() - argc;
+                let args: Vec<Value> = self.stack.drain(split..).collect();
+                self.invoke_block(block, args);
+            }
+            Op::DefMethod(name_idx, p_idx) => {
+                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
+                let proto = &self.protos[p_idx as usize];
+                let m = Rc::new(Method { params: proto.params.clone(), proto_idx: p_idx as usize });
+                if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name, m); }
+                else { self.toplevel_methods.insert(name, m); }
+                self.stack.push(Value::Nil);
+            }
+            Op::DefClass(name_idx, p_idx) => {
+                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
+                let cls = self.classes.entry(name.clone()).or_insert_with(|| Rc::new(Class {
+                    name: name.clone(), methods: RefCell::new(HashMap::new()),
+                })).clone();
+                self.class_stack.push(cls.clone());
+                let proto = &self.protos[p_idx as usize];
+                let n_locals = proto.n_locals as usize;
+                self.frames.push(Frame {
+                    proto_idx: p_idx as usize, ip: 0,
+                    locals: Rc::new(RefCell::new(vec_nil(n_locals))),
+                    self_val: Value::Class(cls.clone()),
+                    base_sp: self.stack.len(),
+                    is_class_body: true, swap_return: None, block_arg: None,
+                });
+            }
+            Op::NewArray(n) => {
+                self.maybe_gc();
+                let n = n as usize;
+                let split = self.stack.len() - n;
+                let elems: Vec<Value> = self.stack.drain(split..).collect();
+                let id = self.heap.alloc(HeapObj::Array(elems));
+                self.stack.push(Value::Array(id));
+            }
+            Op::NewHash(n) => {
+                self.maybe_gc();
+                let n = n as usize;
+                let split = self.stack.len() - n * 2;
+                let flat: Vec<Value> = self.stack.drain(split..).collect();
+                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n);
+                let mut iter = flat.into_iter();
+                while let (Some(k), Some(v)) = (iter.next(), iter.next()) { pairs.push((k, v)); }
+                let id = self.heap.alloc(HeapObj::Hash(pairs));
+                self.stack.push(Value::Hash(id));
+            }
+            Op::Return => {
+                let f = self.frames.pop().unwrap();
+                let ret = self.stack.pop().unwrap_or(Value::Nil);
+                self.stack.truncate(f.base_sp);
+                if f.is_class_body {
+                    let cls = self.class_stack.pop().unwrap();
+                    self.stack.push(Value::Class(cls));
+                } else if let Some(replacement) = f.swap_return {
+                    self.stack.push(replacement);
+                } else {
+                    self.stack.push(ret);
+                }
+                if self.frames.is_empty() { return false; }
+            }
+        }
+        true
     }
 }
 
