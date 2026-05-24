@@ -166,4 +166,11 @@ the next gating question is whether Arrays, blocks, and exceptions can be
 added without bloating the runtime past the point where mruby is still a
 better choice.
 
-License: MIT or Apache-2.0 (TBD).
+## License
+
+Dual-licensed under either of
+
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://www.apache.org/licenses/LICENSE-2.0)
+
+at your option.
