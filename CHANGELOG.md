@@ -7,6 +7,19 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Interner cap** (P2-14b). New `Config::max_symbols:
+  Option<usize>`. Runtime intern paths (currently `String#to_sym`)
+  check the cap before adding a fresh symbol and trap with
+  `ResourceExhausted("interner exhausted: N symbols")` if the
+  count would exceed `N`. Re-interning a string that already
+  lives in the table re-resolves without growth, so loops like
+  `500.times { "foo".to_sym }` stay free; only fresh strings
+  count. Compile-time intern (method names, ivar names, source
+  string literals) is not capped — it's already bounded by the
+  source size the host chose to feed `eval`. CLI exposes the
+  knob via `RUBYRS_MAX_SYMBOLS=N`. New `Runtime::symbol_count()`
+  lets hosts size the cap relative to the baseline set up by
+  the preamble.
 - **Wall-clock deadline cap** (P2-14a). New `Config::deadline:
   Option<Duration>`. When set, `eval` traps with
   `ResourceExhausted("wall-clock deadline exceeded")` if it

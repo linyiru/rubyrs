@@ -15,6 +15,7 @@ fn main() {
         eprintln!("  RUBYRS_MAX_OBJECTS=N    trap when live heap objects > N");
         eprintln!("  RUBYRS_MAX_FRAMES=N     trap when frame stack depth > N");
         eprintln!("  RUBYRS_DEADLINE_MS=N    trap when wall-clock per eval exceeds N ms");
+        eprintln!("  RUBYRS_MAX_SYMBOLS=N    trap when interner grows beyond N symbols");
         process::exit(1);
     }
     let path = Path::new(&args[1]);
@@ -27,6 +28,7 @@ fn main() {
         deadline: env::var("RUBYRS_DEADLINE_MS").ok()
             .and_then(|s| s.parse::<u64>().ok())
             .map(std::time::Duration::from_millis),
+        max_symbols: env::var("RUBYRS_MAX_SYMBOLS").ok().and_then(|s| s.parse().ok()),
     };
 
     let mut rt = Runtime::with_config(cfg);

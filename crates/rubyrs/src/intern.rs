@@ -33,4 +33,17 @@ impl Interner {
     pub(crate) fn resolve(&self, id: SymId) -> &Rc<str> {
         &self.vec[id.0 as usize]
     }
+
+    /// Current number of interned symbols. The interner ID space is
+    /// `[0, len())`. Used by `Vm` to enforce `Config::max_symbols`
+    /// before interning a fresh string.
+    pub(crate) fn len(&self) -> usize { self.vec.len() }
+
+    /// Is `s` already interned? Lets cap-checking callers
+    /// distinguish "would create a new symbol" (count against cap)
+    /// from "lookup existing" (always allowed). Reuses the same
+    /// hash probe `intern` would do.
+    pub(crate) fn contains(&self, s: &str) -> bool {
+        self.map.contains_key(s)
+    }
 }

@@ -56,6 +56,15 @@ pub struct Config {
     /// returns a `ResourceExhausted` trap before the host's Rust stack
     /// can overflow.
     pub max_frames: Option<usize>,
+    /// If `Some(n)`, runtime `String#to_sym` (and any other future
+    /// script-driven intern path) traps when interning would push
+    /// the total beyond `n` distinct symbols. Compile-time intern
+    /// (method names, ivar names, string literals in source) is
+    /// not capped — it's bounded by source size, which the host
+    /// already controls by how big a script it feeds `eval`.
+    /// Defends against `arr.map { |x| x.to_s.to_sym }`-style loops
+    /// that fuel can't usefully bound.
+    pub max_symbols: Option<usize>,
     /// If `Some(d)`, an `eval` call that runs longer than `d`
     /// wall-clock time returns a `ResourceExhausted` trap. Checked
     /// every 1024 ops (cheap and precise enough for the host-side
@@ -98,6 +107,7 @@ impl Runtime {
         vm.fuel = cfg.fuel;
         vm.max_frames = cfg.max_frames;
         vm.heap.max_live = cfg.max_heap_objects;
+        vm.max_symbols = cfg.max_symbols;
         let mut rt = Runtime {
             vm, sources: HashMap::new(), cache_counter: 0,
             deadline: cfg.deadline,
@@ -236,6 +246,14 @@ end
             pinned_before, self.vm.pinned.len(),
         );
         result
+    }
+
+    /// Number of distinct symbols currently interned by this
+    /// runtime. Hosts can use this to size `Config::max_symbols`
+    /// relative to the baseline established by the preamble + any
+    /// prior `eval` calls.
+    pub fn symbol_count(&self) -> usize {
+        self.vm.interner.len()
     }
 
     pub fn eval_file(&mut self, path: &Path) -> Result<Value, Trap> {

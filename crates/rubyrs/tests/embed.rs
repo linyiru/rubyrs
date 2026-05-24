@@ -455,6 +455,65 @@ fn deadline_resets_between_eval_calls() {
 }
 
 #[test]
+fn interner_cap_traps_to_sym_in_loop() {
+    // P2-14b: `String#to_sym` in a loop is the classic
+    // interner-growth vector. With `Config::max_symbols` set, the
+    // VM traps the moment the cap would be exceeded. Existing
+    // symbols always re-resolve (no growth), so the script can
+    // still `:foo.to_sym` many times — only fresh strings count.
+    //
+    // The cap is per-Runtime, not per-eval: the preamble pre-loads
+    // a chunk of symbols (class names, method names) so we
+    // measure relative to where the interner already sits.
+    let mut rt0 = Runtime::new();
+    rt0.eval("", "warmup.rb").unwrap();
+    let baseline = rt0.symbol_count();
+    let mut rt = Runtime::with_config(Config {
+        max_symbols: Some(baseline + 20),
+        ..Default::default()
+    });
+    let err = rt.eval(
+        r#"
+        i = 0
+        while i < 1000
+          ("k" + i.to_s).to_sym
+          i = i + 1
+        end
+        "#,
+        "intern_blowup.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { ref msg } if msg.contains("interner")),
+        "expected ResourceExhausted/interner, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn interner_cap_allows_reusing_existing_symbols() {
+    // The cap should only fire when a *new* symbol would be
+    // interned. Repeatedly calling `.to_sym` on the same string
+    // re-resolves the existing slot and is free.
+    let mut rt0 = Runtime::new();
+    rt0.eval("", "warmup.rb").unwrap();
+    let baseline = rt0.symbol_count();
+    let mut rt = Runtime::with_config(Config {
+        // 2 spare slots beyond baseline — enough for `"foo"` once.
+        max_symbols: Some(baseline + 2),
+        ..Default::default()
+    });
+    rt.eval(
+        r#"
+        i = 0
+        while i < 500
+          "foo".to_sym
+          i = i + 1
+        end
+        "#,
+        "intern_reuse.rb",
+    ).unwrap();
+}
+
+#[test]
 fn frame_cap_traps_deep_recursion() {
     let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
     let err = rt.eval(

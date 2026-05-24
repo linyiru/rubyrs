@@ -158,6 +158,11 @@ pub(crate) struct Vm {
     /// only call `Instant::now()` periodically. Wraps; we only
     /// inspect the low bits.
     pub(crate) op_counter: u32,
+    /// Cap on distinct interned symbols (P2-14b). `None` means
+    /// unlimited. Checked at runtime intern sites (`to_sym`) before
+    /// the actual `intern()` call; compile-time intern is not
+    /// capped because it's already bounded by source size.
+    pub(crate) max_symbols: Option<usize>,
     /// Per-call-site monomorphic inline cache for method dispatch on
     /// `Value::Object`. One slot per `Op::Call(...,cache_id)` /
     /// `Op::CallNoRecv` / `Op::CallBlock` / `Op::CallNoRecvBlock` site.
@@ -205,6 +210,7 @@ impl Vm {
             max_frames: None,
             deadline_at: None,
             op_counter: 0,
+            max_symbols: None,
             call_caches: Vec::new(),
             method_gen: 0,
             break_signaled: false,
@@ -470,7 +476,7 @@ impl Vm {
                 return Ok(());
             }
         }
-        if let Some(v) = self.collection_call(&recv, &name, &args) {
+        if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());
         }
@@ -479,8 +485,8 @@ impl Vm {
         }))
     }
 
-    pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
-        match recv {
+    pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
+        Ok(match recv {
             Value::Array(id) => {
                 let id = *id;
                 match (name, args) {
@@ -522,33 +528,33 @@ impl Vm {
                         for v in a {
                             match v {
                                 Value::Int(n) => s = s.wrapping_add(*n),
-                                _ => return None,
+                                _ => return Ok(None),
                             }
                         }
                         Some(Value::Int(s))
                     }
                     ("min", []) => {
                         let a = self.heap.array(id);
-                        if a.is_empty() { return Some(Value::Nil); }
+                        if a.is_empty() { return Ok(Some(Value::Nil)); }
                         let mut best = a[0].clone();
                         for v in &a[1..] {
                             match value_cmp_v(v, &best, &self.interner) {
                                 Some(std::cmp::Ordering::Less) => best = v.clone(),
                                 Some(_) => {}
-                                None => return None,
+                                None => return Ok(None),
                             }
                         }
                         Some(best)
                     }
                     ("max", []) => {
                         let a = self.heap.array(id);
-                        if a.is_empty() { return Some(Value::Nil); }
+                        if a.is_empty() { return Ok(Some(Value::Nil)); }
                         let mut best = a[0].clone();
                         for v in &a[1..] {
                             match value_cmp_v(v, &best, &self.interner) {
                                 Some(std::cmp::Ordering::Greater) => best = v.clone(),
                                 Some(_) => {}
-                                None => return None,
+                                None => return Ok(None),
                             }
                         }
                         Some(best)
@@ -556,7 +562,7 @@ impl Vm {
                     ("sort", []) => {
                         let mut copy: Vec<Value> = self.heap.array(id).clone();
                         if copy.windows(2).any(|w| value_cmp_v(&w[0], &w[1], &self.interner).is_none()) {
-                            return None;
+                            return Ok(None);
                         }
                         let interner = &self.interner;
                         copy.sort_by(|a, b| value_cmp_v(a, b, interner).unwrap_or(std::cmp::Ordering::Equal));
@@ -566,14 +572,14 @@ impl Vm {
                     }
                     ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
                         let a = self.heap.array(id).clone();
-                        if a.is_empty() { return Some(Value::Nil); }
+                        if a.is_empty() { return Ok(Some(Value::Nil)); }
                         let op_name = self.interner.resolve(*op_sym).clone();
-                        let kind = crate::bytecode::BinOpKind::from_op_name(&op_name)?;
+                        let kind = match crate::bytecode::BinOpKind::from_op_name(&op_name) { Some(k) => k, None => return Ok(None) };
                         let mut acc = a[0].clone();
                         for v in &a[1..] {
                             match (&acc, v) {
                                 (Value::Int(x), Value::Int(y)) => acc = kind.apply_int(*x, *y),
-                                _ => return None,
+                                _ => return Ok(None),
                             }
                         }
                         Some(acc)
@@ -684,7 +690,7 @@ impl Vm {
                     ("[]", [k]) => {
                         let h = self.heap.hash(id);
                         for (key, val) in h {
-                            if key.ruby_eq(k, &self.heap) { return Some(val.clone()); }
+                            if key.ruby_eq(k, &self.heap) { return Ok(Some(val.clone())); }
                         }
                         Some(Value::Nil)
                     }
@@ -838,6 +844,18 @@ impl Vm {
                         Some(Value::Array(id))
                     }
                     ("to_sym", []) => {
+                        // P2-14b: cap the interner before a hot loop
+                        // (`arr.map { |x| x.to_s.to_sym }` and similar)
+                        // can quietly grow it without bound. Existing
+                        // symbols always re-resolve; only fresh strings
+                        // count against the cap.
+                        if let Some(max) = self.max_symbols {
+                            if !self.interner.contains(&s) && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                        }
                         let sym = self.interner.intern(&s);
                         Some(Value::Sym(sym))
                     }
@@ -852,7 +870,7 @@ impl Vm {
                 };
                 let (bi, ei) = match (&b, &e) {
                     (Value::Int(a), Value::Int(c)) => (*a, *c),
-                    _ => return None,
+                    _ => return Ok(None),
                 };
                 let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
                 match (name, args) {
@@ -876,22 +894,22 @@ impl Vm {
                     ("sum", []) | ("sum", [Value::Int(_)]) => {
                         let init = match args { [Value::Int(n)] => *n, _ => 0 };
                         let end_inc = if excl { ei - 1 } else { ei };
-                        if bi > end_inc { return Some(Value::Int(init)); }
+                        if bi > end_inc { return Ok(Some(Value::Int(init))); }
                         let n = end_inc - bi + 1;
                         let s = n.wrapping_mul(bi.wrapping_add(end_inc)) / 2;
                         Some(Value::Int(init.wrapping_add(s)))
                     }
                     ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
                         let end_inc = if excl { ei - 1 } else { ei };
-                        if bi > end_inc { return Some(Value::Nil); }
+                        if bi > end_inc { return Ok(Some(Value::Nil)); }
                         let op_name = self.interner.resolve(*op_sym).clone();
-                        let kind = crate::bytecode::BinOpKind::from_op_name(&op_name)?;
+                        let kind = match crate::bytecode::BinOpKind::from_op_name(&op_name) { Some(k) => k, None => return Ok(None) };
                         let mut acc = Value::Int(bi);
                         let mut i = bi + 1;
                         while i <= end_inc {
                             match &acc {
                                 Value::Int(x) => acc = kind.apply_int(*x, i),
-                                _ => return None,
+                                _ => return Ok(None),
                             }
                             i += 1;
                         }
@@ -901,7 +919,7 @@ impl Vm {
                 }
             }
             _ => None,
-        }
+        })
     }
 
     /// Convert a Ruby-level `raise` argument into an Exception instance.
