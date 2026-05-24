@@ -6,6 +6,27 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Fixed
+- **`ResourceExhausted` can no longer be swallowed by `rescue => e`**
+  (P0-1). The preamble had `class ResourceExhausted < StandardError`,
+  which meant a bare `rescue` clause — CRuby-style shorthand for
+  `rescue StandardError => e` — could silently catch the resource
+  trap and keep burning fuel/heap. Two changes:
+  1. Preamble re-roots the kill switch directly under `Exception`,
+     alongside CRuby's `SystemExit` and `Interrupt`.
+  2. `RescueHandler` gains a `filter_class: Option<Rc<Class>>` field;
+     every `Op::PushRescue` populates it with `StandardError` (the
+     bare-rescue default), and `unwind_with_exception` now pops past
+     handlers whose filter doesn't match the raised exception's
+     class chain. `Op::PushEnsure` leaves the filter as `None`, so
+     `ensure` runs unconditionally — matching Ruby semantics.
+  Three new tests in `tests/embed.rs`: one proves a hostile
+  `begin/rescue/end` around `while true` no longer eats the trap,
+  one locks in that bare `rescue` still catches `raise "boom"` (i.e.
+  RuntimeError under StandardError), and one placeholder reserves
+  the contract that explicit `rescue Exception` will work once
+  class filtering lands (P1-10). ADR 0008 updated.
+
 ### Added
 - **Hash extras + short-circuit `||` and `&&`** (P3-B-3). New
   `Hash` methods: `merge` (other's keys overwrite, ordering

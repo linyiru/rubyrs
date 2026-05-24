@@ -93,6 +93,45 @@ on `Config`.
 - Per-op cost weighting (e.g. `NewArray` costs more than `LoadNil`).
   Premature: we don't have benchmarks showing the difference matters.
 
+## `ResourceExhausted` is outside the StandardError subtree
+
+When the caps were first added we put `ResourceExhausted` under
+`StandardError` for cheap parity with the rest of the exception
+hierarchy. That was a security bug: every Ruby program with a bare
+`rescue => e` clause (the conventional shorthand for
+`rescue StandardError => e`) could silently swallow the kill switch
+and keep burning the host's quota — exactly the scenario this ADR
+exists to prevent.
+
+The trap is now rooted **directly under `Exception`**, alongside
+CRuby's `SystemExit` and `Interrupt`:
+
+```ruby
+class ResourceExhausted < Exception
+end
+```
+
+This means:
+
+- Bare `rescue` clauses (`rescue => e`) do **not** catch
+  `ResourceExhausted`. The default StandardError filter walks past
+  it, and the trap propagates to the host as a `Trap` out of
+  `Runtime::eval`.
+- A script that *deliberately* wants to handle resource exhaustion
+  can still write `rescue Exception => e` once explicit class
+  filtering lands in P1-10. This is opt-in and explicit — no
+  accidental swallowing.
+- Hosts that want to retry should construct a fresh
+  `Runtime::with_config` and re-evaluate; the trap is not the
+  script's responsibility to decide about.
+
+The `unwind_with_exception` path enforces this: every
+`Op::PushRescue` attaches `filter_class: Some(StandardError)` to its
+handler, and the unwinder discards handlers whose filter doesn't
+match the raised exception's class chain. `Op::PushEnsure` keeps
+`filter_class: None` — `ensure` always runs regardless of class,
+matching Ruby semantics.
+
 ## Consequences
 
 Wins:

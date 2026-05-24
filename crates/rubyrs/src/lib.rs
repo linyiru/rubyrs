@@ -117,7 +117,14 @@ class TypeError < StandardError
 end
 class NameError < StandardError
 end
-class ResourceExhausted < StandardError
+## Intentionally `< Exception`, NOT `< StandardError`. A bare
+## `rescue => e` clause filters on `StandardError` by default,
+## so attaching `ResourceExhausted` outside that subtree means
+## user scripts cannot accidentally — or deliberately — swallow
+## their own fuel / heap / frame trap and keep burning quota.
+## CRuby uses the same pattern for `SystemExit` and `Interrupt`.
+## See docs/adr/0008-resource-caps-for-untrusted-scripts.md.
+class ResourceExhausted < Exception
 end
 "#;
         self.eval(PREAMBLE, "<rubyrs:preamble>")

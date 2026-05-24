@@ -72,6 +72,16 @@ pub(crate) struct RescueHandler {
     /// unwinder pushes the exception onto the operand stack (rather than
     /// binding to a local). The ensure body re-raises with `Op::Raise`.
     pub(crate) is_ensure: bool,
+    /// Class filter for `rescue`. `None` means catch-all (used for
+    /// `ensure` and as a future hook for internal/host-only handlers).
+    /// `Some(cls)` means the handler only fires when the raised
+    /// exception's class is `cls` or a descendant. Bare `rescue` (no
+    /// class listed) populates this with `StandardError`, so any
+    /// exception that intentionally lives outside the StandardError
+    /// subtree (e.g. `ResourceExhausted`) cannot be silently swallowed
+    /// by `rescue => e`. Explicit `rescue ClassName => e` is a P1-10
+    /// follow-up; today every PushRescue uses StandardError.
+    pub(crate) filter_class: Option<Rc<Class>>,
 }
 
 pub(crate) type HostFn = dyn Fn(&[Value]) -> Result<Value, Trap>;
@@ -850,9 +860,37 @@ impl Vm {
     }
 
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) {
+        // Resolve the raised value's class once up front; the unwind loop
+        // may probe many handlers before finding (or not finding) a match.
+        let exc_class: Option<Rc<Class>> = match &exc {
+            Value::Object(id) => Some(self.heap.instance(*id).class.clone()),
+            _ => None,
+        };
         loop {
-            let f = self.frames.last_mut().expect("ICE: unwind with empty frames");
-            if let Some(h) = f.rescues.pop() {
+            // Pop rescue handlers off this frame one by one. A non-ensure
+            // handler with a `filter_class` skips if the exception's class
+            // is outside that filter — this is what keeps
+            // `ResourceExhausted` (rooted at Exception) from being caught
+            // by a bare `rescue => e` (rooted at StandardError). A handler
+            // that doesn't match is dropped, not re-pushed: the rescue
+            // clause was tied to *this* begin/end scope, which we're
+            // unwinding past anyway.
+            let chosen = {
+                let f = self.frames.last_mut().expect("ICE: unwind with empty frames");
+                let mut chosen = None;
+                while let Some(h) = f.rescues.pop() {
+                    let matches = if h.is_ensure {
+                        true
+                    } else if let Some(filter) = &h.filter_class {
+                        exc_class.as_ref().map_or(false, |cls| class_is_a(cls, filter))
+                    } else {
+                        true
+                    };
+                    if matches { chosen = Some(h); break; }
+                }
+                chosen
+            };
+            if let Some(h) = chosen {
                 self.stack.truncate(h.stack_depth);
                 let f = self.frames.last_mut().expect("ICE: frames disappeared");
                 f.ip = h.handler_ip;
@@ -867,6 +905,7 @@ impl Vm {
                 }
                 return;
             }
+            // No matching handler in this frame — pop it and try the caller.
             let f = self.frames.pop().expect("ICE: unwind pop empty");
             self.stack.truncate(f.base_sp);
             if f.is_class_body { self.class_stack.pop(); }
@@ -1873,8 +1912,15 @@ impl Vm {
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
+                // Bare `rescue` (the only form we compile today) filters on
+                // StandardError to match CRuby's default. Lookup at push-
+                // time costs one Interner hit + HashMap probe; the class
+                // hierarchy is already loaded by the preamble.
+                let stderr_id = self.interner.intern("StandardError");
+                let filter = self.classes.get(&stderr_id).cloned();
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
+                    filter_class: filter,
                 });
             }
             Op::PopRescue => {
@@ -1886,6 +1932,7 @@ impl Vm {
                 let depth = self.stack.len();
                 self.frames.last_mut().expect("ICE: PushEnsure no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
+                    filter_class: None, // ensure is unconditional
                 });
             }
             Op::PopEnsure => {
