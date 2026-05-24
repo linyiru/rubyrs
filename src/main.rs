@@ -44,6 +44,8 @@ enum Expr {
         name: String,
         body: Vec<Expr>,
     },
+    ArrayLit(Vec<Expr>),
+    HashLit(Vec<(Expr, Expr)>),
 }
 
 // ---------- Translate prism AST to Expr ----------
@@ -141,6 +143,16 @@ fn tr(node: &Node<'_>) -> Expr {
         };
         return Expr::Def { name, params, body };
     }
+    if let Some(n) = node.as_array_node() {
+        let elems: Vec<Expr> = n.elements().iter().map(|e| tr(&e)).collect();
+        return Expr::ArrayLit(elems);
+    }
+    if let Some(n) = node.as_hash_node() {
+        let pairs: Vec<(Expr, Expr)> = n.elements().iter().filter_map(|e| {
+            e.as_assoc_node().map(|a| (tr(&a.key()), tr(&a.value())))
+        }).collect();
+        return Expr::HashLit(pairs);
+    }
     if let Some(n) = node.as_class_node() {
         let name = if let Some(cr) = n.constant_path().as_constant_read_node() {
             cid_to_string(cr.name())
@@ -164,8 +176,8 @@ fn seq(stmts: Vec<Expr>) -> Expr {
 
 // ---------- Values ----------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct InstanceId(u32);
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct ObjId(u32);
 
 #[derive(Clone)]
 enum Value {
@@ -174,7 +186,9 @@ enum Value {
     Bool(bool),
     Nil,
     Class(Rc<Class>),
-    Object(InstanceId),
+    Object(ObjId),
+    Array(ObjId),
+    Hash(ObjId),
 }
 
 struct Class {
@@ -192,10 +206,16 @@ struct Method {
     proto_idx: usize,
 }
 
-// ---------- GC Heap (mark-sweep on Instance only) ----------
+// ---------- GC Heap ----------
+
+enum HeapObj {
+    Instance(Instance),
+    Array(Vec<Value>),
+    Hash(Vec<(Value, Value)>), // insertion-ordered, linear lookup (PoC)
+}
 
 enum Slot {
-    Live(Instance),
+    Live(HeapObj),
     Dead,
 }
 
@@ -204,52 +224,74 @@ struct Heap {
     marks: Vec<bool>,
     free: Vec<u32>,
     live_count: usize,
-    next_gc: usize, // trigger GC when live_count reaches this
+    next_gc: usize,
 }
 
 impl Heap {
     fn new() -> Self {
         Heap { slots: vec![], marks: vec![], free: vec![], live_count: 0, next_gc: 1024 }
     }
-    fn alloc(&mut self, inst: Instance) -> InstanceId {
+    fn alloc(&mut self, obj: HeapObj) -> ObjId {
         self.live_count += 1;
         if let Some(i) = self.free.pop() {
-            self.slots[i as usize] = Slot::Live(inst);
+            self.slots[i as usize] = Slot::Live(obj);
             self.marks[i as usize] = false;
-            return InstanceId(i);
+            return ObjId(i);
         }
         let i = self.slots.len() as u32;
-        self.slots.push(Slot::Live(inst));
+        self.slots.push(Slot::Live(obj));
         self.marks.push(false);
-        InstanceId(i)
+        ObjId(i)
     }
-    fn get(&self, id: InstanceId) -> &Instance {
+    fn get(&self, id: ObjId) -> &HeapObj {
         match &self.slots[id.0 as usize] {
-            Slot::Live(i) => i,
-            Slot::Dead => panic!("use-after-free InstanceId({})", id.0),
+            Slot::Live(o) => o,
+            Slot::Dead => panic!("use-after-free ObjId({})", id.0),
         }
     }
-    fn get_mut(&mut self, id: InstanceId) -> &mut Instance {
+    fn get_mut(&mut self, id: ObjId) -> &mut HeapObj {
         match &mut self.slots[id.0 as usize] {
-            Slot::Live(i) => i,
-            Slot::Dead => panic!("use-after-free InstanceId({})", id.0),
+            Slot::Live(o) => o,
+            Slot::Dead => panic!("use-after-free ObjId({})", id.0),
         }
+    }
+    fn instance(&self, id: ObjId) -> &Instance {
+        if let HeapObj::Instance(i) = self.get(id) { i } else { panic!("not instance") }
+    }
+    fn instance_mut(&mut self, id: ObjId) -> &mut Instance {
+        if let HeapObj::Instance(i) = self.get_mut(id) { i } else { panic!("not instance") }
+    }
+    fn array(&self, id: ObjId) -> &Vec<Value> {
+        if let HeapObj::Array(a) = self.get(id) { a } else { panic!("not array") }
+    }
+    fn array_mut(&mut self, id: ObjId) -> &mut Vec<Value> {
+        if let HeapObj::Array(a) = self.get_mut(id) { a } else { panic!("not array") }
+    }
+    fn hash(&self, id: ObjId) -> &Vec<(Value, Value)> {
+        if let HeapObj::Hash(h) = self.get(id) { h } else { panic!("not hash") }
+    }
+    fn hash_mut(&mut self, id: ObjId) -> &mut Vec<(Value, Value)> {
+        if let HeapObj::Hash(h) = self.get_mut(id) { h } else { panic!("not hash") }
     }
     fn should_gc(&self) -> bool { self.live_count >= self.next_gc }
 
-    /// Mark-sweep starting from the given root Values.
     fn collect(&mut self, roots: &[Value]) {
         for m in self.marks.iter_mut() { *m = false; }
-        let mut worklist: Vec<InstanceId> = Vec::new();
+        let mut worklist: Vec<ObjId> = Vec::new();
         for v in roots { Heap::visit_value(v, &mut self.marks, &mut worklist); }
         while let Some(id) = worklist.pop() {
-            if let Slot::Live(inst) = &self.slots[id.0 as usize] {
-                // Clone Values out so we can release the borrow before recursing
-                let vals: Vec<Value> = inst.ivars.values().cloned().collect();
-                for v in &vals { Heap::visit_value(v, &mut self.marks, &mut worklist); }
-            }
+            let children: Vec<Value> = match &self.slots[id.0 as usize] {
+                Slot::Live(HeapObj::Instance(i)) => i.ivars.values().cloned().collect(),
+                Slot::Live(HeapObj::Array(a)) => a.clone(),
+                Slot::Live(HeapObj::Hash(h)) => {
+                    let mut v = Vec::with_capacity(h.len() * 2);
+                    for (k, val) in h { v.push(k.clone()); v.push(val.clone()); }
+                    v
+                }
+                _ => vec![],
+            };
+            for v in &children { Heap::visit_value(v, &mut self.marks, &mut worklist); }
         }
-        // Sweep
         let mut live = 0usize;
         for i in 0..self.slots.len() {
             match &self.slots[i] {
@@ -264,17 +306,18 @@ impl Heap {
             }
         }
         self.live_count = live;
-        // Grow threshold to 2× current live count, never below 1024
         self.next_gc = (live * 2).max(1024);
     }
 
-    fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<InstanceId>) {
-        if let Value::Object(id) = v {
-            let i = id.0 as usize;
-            if !marks[i] {
-                marks[i] = true;
-                worklist.push(*id);
-            }
+    fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
+        let id = match v {
+            Value::Object(id) | Value::Array(id) | Value::Hash(id) => *id,
+            _ => return,
+        };
+        let i = id.0 as usize;
+        if !marks[i] {
+            marks[i] = true;
+            worklist.push(id);
         }
     }
 }
@@ -291,6 +334,8 @@ impl Value {
             Value::Nil => "NilClass",
             Value::Class(_) => "Class",
             Value::Object(_) => "Object",
+            Value::Array(_) => "Array",
+            Value::Hash(_) => "Hash",
         }
     }
     fn to_display(&self, heap: &Heap) -> String {
@@ -301,7 +346,42 @@ impl Value {
             Value::Bool(false) => "false".into(),
             Value::Nil => "".into(),
             Value::Class(c) => c.name.clone(),
-            Value::Object(id) => format!("#<{}>", heap.get(*id).class.name),
+            Value::Object(id) => format!("#<{}>", heap.instance(*id).class.name),
+            Value::Array(id) => {
+                let a = heap.array(*id);
+                let parts: Vec<String> = a.iter().map(|v| v.to_inspect(heap)).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Value::Hash(id) => {
+                let h = heap.hash(*id);
+                let parts: Vec<String> = h.iter()
+                    .map(|(k, v)| format!("{}=>{}", k.to_inspect(heap), v.to_inspect(heap)))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+        }
+    }
+    fn to_inspect(&self, heap: &Heap) -> String {
+        match self {
+            Value::Str(s) => format!("\"{}\"", s),
+            Value::Nil => "nil".into(),
+            _ => self.to_display(heap),
+        }
+    }
+    fn ruby_eq(&self, other: &Value, heap: &Heap) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => **a == **b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Nil, Value::Nil) => true,
+            (Value::Object(a), Value::Object(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => {
+                if a == b { return true; }
+                let x = heap.array(*a); let y = heap.array(*b);
+                x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| p.ruby_eq(q, heap))
+            }
+            (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
+            _ => false,
         }
     }
 }
@@ -329,6 +409,8 @@ enum Op {
     CallNoRecv(u32, u8), // implicit self / builtin / toplevel
     DefMethod(u32, u32), // name idx, proto idx
     DefClass(u32, u32),  // name idx, body proto idx
+    NewArray(u16),       // pop N values, build array
+    NewHash(u16),        // pop 2N values (key, val, key, val, ...), build hash
     Return,
 }
 
@@ -495,6 +577,17 @@ fn compile_expr(b: &mut ProtoBuilder, e: &Expr, protos: &mut Vec<Proto>) {
             let name_idx = b.intern(name);
             b.emit(Op::DefClass(name_idx, proto_idx as u32));
         }
+        Expr::ArrayLit(elems) => {
+            for e in elems { compile_expr(b, e, protos); }
+            b.emit(Op::NewArray(elems.len() as u16));
+        }
+        Expr::HashLit(pairs) => {
+            for (k, v) in pairs {
+                compile_expr(b, k, protos);
+                compile_expr(b, v, protos);
+            }
+            b.emit(Op::NewHash(pairs.len() as u16));
+        }
     }
 }
 
@@ -599,7 +692,7 @@ impl Vm {
                         Some(*id)
                     } else { None };
                     let v = if let Some(id) = id_opt {
-                        self.heap.get(id).ivars.get(&name).cloned().unwrap_or(Value::Nil)
+                        self.heap.instance(id).ivars.get(&name).cloned().unwrap_or(Value::Nil)
                     } else { Value::Nil };
                     self.stack.push(v);
                 }
@@ -610,7 +703,7 @@ impl Vm {
                         Some(*id)
                     } else { None };
                     if let Some(id) = id_opt {
-                        self.heap.get_mut(id).ivars.insert(name, v);
+                        self.heap.instance_mut(id).ivars.insert(name, v);
                     }
                 }
                 Op::LoadConst(idx) => {
@@ -667,6 +760,27 @@ impl Vm {
                         is_class_body: true, swap_return: None,
                     });
                 }
+                Op::NewArray(n) => {
+                    self.maybe_gc();
+                    let n = n as usize;
+                    let split = self.stack.len() - n;
+                    let elems: Vec<Value> = self.stack.drain(split..).collect();
+                    let id = self.heap.alloc(HeapObj::Array(elems));
+                    self.stack.push(Value::Array(id));
+                }
+                Op::NewHash(n) => {
+                    self.maybe_gc();
+                    let n = n as usize;
+                    let split = self.stack.len() - n * 2;
+                    let flat: Vec<Value> = self.stack.drain(split..).collect();
+                    let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n);
+                    let mut iter = flat.into_iter();
+                    while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+                        pairs.push((k, v));
+                    }
+                    let id = self.heap.alloc(HeapObj::Hash(pairs));
+                    self.stack.push(Value::Hash(id));
+                }
                 Op::Return => {
                     let f = self.frames.pop().unwrap();
                     let ret = self.stack.pop().unwrap_or(Value::Nil);
@@ -700,7 +814,7 @@ impl Vm {
             // implicit self (object method)
             let self_val = self.frames.last().unwrap().self_val.clone();
             if let Value::Object(id) = &self_val {
-                let cls = self.heap.get(*id).class.clone();
+                let cls = self.heap.instance(*id).class.clone();
                 if let Some(m) = cls.methods.borrow().get(&name).cloned() {
                     self.invoke_method(m, self_val.clone(), args);
                     return;
@@ -723,10 +837,10 @@ impl Vm {
         if name == "new" {
             if let Value::Class(cls) = &recv {
                 self.maybe_gc();
-                let id = self.heap.alloc(Instance {
+                let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(),
                     ivars: HashMap::new(),
-                });
+                }));
                 let obj = Value::Object(id);
                 if let Some(m) = cls.methods.borrow().get("initialize").cloned() {
                     self.invoke_method(m, obj.clone(), args);
@@ -739,13 +853,87 @@ impl Vm {
         }
 
         if let Value::Object(id) = &recv {
-            let cls = self.heap.get(*id).class.clone();
+            let cls = self.heap.instance(*id).class.clone();
             if let Some(m) = cls.methods.borrow().get(&name).cloned() {
                 self.invoke_method(m, recv.clone(), args);
                 return;
             }
         }
+        if let Some(v) = self.collection_call(&recv, &name, &args) {
+            self.stack.push(v);
+            return;
+        }
         panic!("undefined method `{}' for {}", name, recv.type_name());
+    }
+
+    fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
+        match recv {
+            Value::Array(id) => {
+                let id = *id;
+                match (name, args) {
+                    ("length", []) | ("size", []) => Some(Value::Int(self.heap.array(id).len() as i64)),
+                    ("push", [v]) | ("<<", [v]) => {
+                        self.heap.array_mut(id).push(v.clone());
+                        Some(Value::Array(id))
+                    }
+                    ("[]", [Value::Int(i)]) => {
+                        let a = self.heap.array(id);
+                        let idx = if *i < 0 { a.len() as i64 + *i } else { *i };
+                        Some(a.get(idx as usize).cloned().unwrap_or(Value::Nil))
+                    }
+                    ("[]=", [Value::Int(i), v]) => {
+                        let a = self.heap.array_mut(id);
+                        let idx = if *i < 0 { a.len() as i64 + *i } else { *i } as usize;
+                        while a.len() <= idx { a.push(Value::Nil); }
+                        a[idx] = v.clone();
+                        Some(v.clone())
+                    }
+                    ("first", []) => Some(self.heap.array(id).first().cloned().unwrap_or(Value::Nil)),
+                    ("last", []) => Some(self.heap.array(id).last().cloned().unwrap_or(Value::Nil)),
+                    ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
+                    _ => None,
+                }
+            }
+            Value::Hash(id) => {
+                let id = *id;
+                match (name, args) {
+                    ("length", []) | ("size", []) => Some(Value::Int(self.heap.hash(id).len() as i64)),
+                    ("[]", [k]) => {
+                        let h = self.heap.hash(id);
+                        for (key, val) in h {
+                            if key.ruby_eq(k, &self.heap) { return Some(val.clone()); }
+                        }
+                        Some(Value::Nil)
+                    }
+                    ("[]=", [k, v]) => {
+                        // Need a way to compare without borrowing heap while mutating.
+                        // Snapshot positions first.
+                        let pos = self.heap.hash(id).iter()
+                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                        let h = self.heap.hash_mut(id);
+                        if let Some(p) = pos {
+                            h[p].1 = v.clone();
+                        } else {
+                            h.push((k.clone(), v.clone()));
+                        }
+                        Some(v.clone())
+                    }
+                    ("empty?", []) => Some(Value::Bool(self.heap.hash(id).is_empty())),
+                    ("keys", []) => {
+                        let keys: Vec<Value> = self.heap.hash(id).iter().map(|(k, _)| k.clone()).collect();
+                        let nid = self.heap.alloc(HeapObj::Array(keys));
+                        Some(Value::Array(nid))
+                    }
+                    ("values", []) => {
+                        let vals: Vec<Value> = self.heap.hash(id).iter().map(|(_, v)| v.clone()).collect();
+                        let nid = self.heap.alloc(HeapObj::Array(vals));
+                        Some(Value::Array(nid))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     fn maybe_gc(&mut self) {
