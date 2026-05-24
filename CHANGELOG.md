@@ -7,6 +7,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Changed
+- **`Op::BinOpInt` fuses `LoadConstInt + BinOp`** (Tier1-4). For
+  any binary op where the right-hand side is a literal integer
+  (`n % 15`, `... == 0`, `i <= 1000000`, …), the compiler now
+  emits a single `BinOpInt(kind, i64)` op instead of the previous
+  pair. Each fused expression saves one dispatch and one stack
+  round-trip. Microbench: fizzbuzz 1M 364 ms → **332 ms (~9%)**.
+  rubyrs vs CRuby on fizzbuzz: **1.80×** (was 1.94×).
 - **`Op::IncIvar` fast path for `@x = @x + 1`** (Tier1-3).
   Symmetric to Tier1-2 but on the receiver's ivar table. Hot
   path: in-place increment of the Int; slow path: synth a `+` call.

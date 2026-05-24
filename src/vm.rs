@@ -799,6 +799,26 @@ impl Vm {
                 let v = self.stack.pop().unwrap_or(Value::Nil);
                 self.unwind_with_exception(v);
             }
+            Op::BinOpInt(kind, rhs) => {
+                let a = self.stack.pop().expect("ICE: BinOpInt lhs underflow");
+                if let Value::Int(x) = a {
+                    self.stack.push(kind.apply_int(x, rhs));
+                } else {
+                    // Cold path: behave as if a generic `<op>` was dispatched
+                    // with rhs boxed as an Int.
+                    let b_val = Value::Int(rhs);
+                    if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b_val)) {
+                        self.stack.push(v);
+                    } else if let Some(v) = self.sym_primitive(&a, kind.name(), std::slice::from_ref(&b_val)) {
+                        self.stack.push(v);
+                    } else {
+                        self.stack.push(a);
+                        self.stack.push(b_val);
+                        let name_id = self.interner.intern(kind.name());
+                        self.do_call(name_id, 1, false)?;
+                    }
+                }
+            }
             Op::BinOp(kind) => {
                 let b = self.stack.pop().expect("ICE: BinOp rhs underflow");
                 let a = self.stack.pop().expect("ICE: BinOp lhs underflow");

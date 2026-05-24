@@ -207,8 +207,14 @@ pub(crate) fn compile_expr(
             }
             if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {
                 compile_expr(b, r, protos, interner);
-                compile_expr(b, &args[0], protos, interner);
-                b.emit(Op::BinOp(kind));
+                // Fuse `<expr> <op> <int_literal>` into a single op so the
+                // LoadConstInt + BinOp pair becomes one BinOpInt.
+                if let Expr::IntLit(rhs) = &args[0].node {
+                    b.emit(Op::BinOpInt(kind, *rhs));
+                } else {
+                    compile_expr(b, &args[0], protos, interner);
+                    b.emit(Op::BinOp(kind));
+                }
                 b.current_span = prev_span;
                 return;
             }

@@ -41,6 +41,11 @@ pub(crate) enum Op {
     CallNoRecvBlock(SymId, u8),
     Yield(u8),
     BinOp(BinOpKind),
+    /// Fast path for `recv <op> <int_literal>` — fuses the preceding
+    /// `LoadConstInt` into the BinOp. Saves one op and one stack
+    /// round-trip per such expression. Falls back to generic dispatch
+    /// when LHS isn't an `Int`.
+    BinOpInt(BinOpKind, i64),
     PushRescue(i32, u16, u8),
     PopRescue,
     Raise,
