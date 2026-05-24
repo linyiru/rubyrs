@@ -6,6 +6,15 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Changed
+- **User errors no longer panic the host process** (P0-B-2). Undefined
+  method, wrong arity, and `yield` outside a block now build a `Trap`
+  that bubbles up through every dispatch path (`Result<_, Trap>`
+  everywhere), is printed at process exit, and returns a non-zero
+  exit code. Internal invariants (heap UAF, empty frame stack while
+  dispatching, stack underflow) remain `panic!` but are now marked
+  `"ICE: ..."` to make the distinction explicit when one fires.
+
 ### Internal
 - **Error / Span infrastructure** (P0-B-1): new `src/error.rs` with
   `Span` (byte offset into source), `RubyError` (closed set covering

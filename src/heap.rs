@@ -42,32 +42,32 @@ impl Heap {
     pub(crate) fn get(&self, id: ObjId) -> &HeapObj {
         match &self.slots[id.0 as usize] {
             Slot::Live(o) => o,
-            Slot::Dead => panic!("use-after-free ObjId({})", id.0),
+            Slot::Dead => panic!("ICE: use-after-free ObjId({})", id.0),
         }
     }
     pub(crate) fn get_mut(&mut self, id: ObjId) -> &mut HeapObj {
         match &mut self.slots[id.0 as usize] {
             Slot::Live(o) => o,
-            Slot::Dead => panic!("use-after-free ObjId({})", id.0),
+            Slot::Dead => panic!("ICE: use-after-free ObjId({})", id.0),
         }
     }
     pub(crate) fn instance(&self, id: ObjId) -> &Instance {
-        if let HeapObj::Instance(i) = self.get(id) { i } else { panic!("not instance") }
+        if let HeapObj::Instance(i) = self.get(id) { i } else { panic!("ICE: heap slot is not an Instance") }
     }
     pub(crate) fn instance_mut(&mut self, id: ObjId) -> &mut Instance {
-        if let HeapObj::Instance(i) = self.get_mut(id) { i } else { panic!("not instance") }
+        if let HeapObj::Instance(i) = self.get_mut(id) { i } else { panic!("ICE: heap slot is not an Instance") }
     }
     pub(crate) fn array(&self, id: ObjId) -> &Vec<Value> {
-        if let HeapObj::Array(a) = self.get(id) { a } else { panic!("not array") }
+        if let HeapObj::Array(a) = self.get(id) { a } else { panic!("ICE: heap slot is not an Array") }
     }
     pub(crate) fn array_mut(&mut self, id: ObjId) -> &mut Vec<Value> {
-        if let HeapObj::Array(a) = self.get_mut(id) { a } else { panic!("not array") }
+        if let HeapObj::Array(a) = self.get_mut(id) { a } else { panic!("ICE: heap slot is not an Array") }
     }
     pub(crate) fn hash(&self, id: ObjId) -> &Vec<(Value, Value)> {
-        if let HeapObj::Hash(h) = self.get(id) { h } else { panic!("not hash") }
+        if let HeapObj::Hash(h) = self.get(id) { h } else { panic!("ICE: heap slot is not a Hash") }
     }
     pub(crate) fn hash_mut(&mut self, id: ObjId) -> &mut Vec<(Value, Value)> {
-        if let HeapObj::Hash(h) = self.get_mut(id) { h } else { panic!("not hash") }
+        if let HeapObj::Hash(h) = self.get_mut(id) { h } else { panic!("ICE: heap slot is not a Hash") }
     }
     pub(crate) fn should_gc(&self) -> bool { self.live_count >= self.next_gc }
 

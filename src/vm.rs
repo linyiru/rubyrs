@@ -4,6 +4,7 @@ use std::env;
 use std::rc::Rc;
 
 use crate::bytecode::{Op, Proto};
+use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::heap::{Heap, HeapObj};
 use crate::value::{BlockHandle, Class, Instance, Method, Value};
 
@@ -58,7 +59,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn run(&mut self, entry: usize) -> Value {
+    pub(crate) fn run(&mut self, entry: usize) -> Result<Value, Trap> {
         let proto = &self.protos[entry];
         let n_locals = proto.n_locals as usize;
         self.frames.push(Frame {
@@ -69,55 +70,76 @@ impl Vm {
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, rescues: vec![],
         });
-        self.dispatch();
-        self.stack.pop().unwrap_or(Value::Nil)
+        self.dispatch()?;
+        Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
 
-    pub(crate) fn dispatch(&mut self) {
+    pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
             let (proto_idx, ip) = {
-                let f = self.frames.last().unwrap();
+                let f = self.frames.last().expect("ICE: dispatch with empty frame stack");
                 (f.proto_idx, f.ip)
             };
             let op = self.protos[proto_idx].code[ip];
-            self.frames.last_mut().unwrap().ip += 1;
-            if !self.step(op, proto_idx) { return; }
+            self.frames.last_mut().expect("ICE: frame disappeared").ip += 1;
+            if !self.step(op, proto_idx)? { return Ok(()); }
         }
+        Ok(())
     }
 
-    pub(crate) fn do_call(&mut self, name: String, argc: usize, no_recv: bool) {
-        // Collect args
+    /// Build a Trap with a backtrace snapshot taken at the current frame stack.
+    pub(crate) fn trap(&self, err: RubyError) -> Trap {
+        let mut bt = Vec::with_capacity(self.frames.len());
+        for f in self.frames.iter().rev() {
+            let proto = &self.protos[f.proto_idx];
+            // ip points just past the op we executed; the span we want is the
+            // op we just dispatched, at ip-1.
+            let op_ip = if f.ip == 0 { 0 } else { f.ip - 1 };
+            let span = proto.op_spans.get(op_ip).copied().unwrap_or(Span::ZERO);
+            bt.push(TrapFrame {
+                method: Rc::from(proto.name.as_str()),
+                span,
+            });
+        }
+        Trap { err, backtrace: bt }
+    }
+
+    pub(crate) fn do_call(&mut self, name: String, argc: usize, no_recv: bool) -> Result<(), Trap> {
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
-        let recv = if no_recv { None } else { Some(self.stack.pop().unwrap()) };
+        let recv = if no_recv {
+            None
+        } else {
+            Some(self.stack.pop().expect("ICE: stack underflow before do_call receiver"))
+        };
 
         if no_recv {
-            // builtin
             if let Some(v) = self.builtin_call(&name, &args) {
                 self.stack.push(v);
-                return;
+                return Ok(());
             }
-            // implicit self (object method)
-            let self_val = self.frames.last().unwrap().self_val.clone();
+            let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
                 if let Some(m) = cls.methods.borrow().get(&name).cloned() {
-                    self.invoke_method(m, self_val.clone(), args);
-                    return;
+                    self.invoke_method(m, self_val.clone(), args)?;
+                    return Ok(());
                 }
             }
             if let Some(m) = self.toplevel_methods.get(&name).cloned() {
-                self.invoke_method(m, self_val, args);
-                return;
+                self.invoke_method(m, self_val, args)?;
+                return Ok(());
             }
-            panic!("undefined method `{}'", name);
+            return Err(self.trap(RubyError::NoMethodError {
+                method: name, recv_type: self_val.type_name(),
+            }));
         }
 
-        let recv = recv.unwrap();
+        let recv = recv.expect("ICE: receiver missing");
 
         if let Some(v) = primitive_call(&recv, &name, &args) {
             self.stack.push(v);
-            return;
+            return Ok(());
         }
 
         if name == "new" {
@@ -129,27 +151,29 @@ impl Vm {
                 }));
                 let obj = Value::Object(id);
                 if let Some(m) = cls.methods.borrow().get("initialize").cloned() {
-                    self.invoke_method(m, obj.clone(), args);
-                    self.frames.last_mut().unwrap().swap_return = Some(obj);
+                    self.invoke_method(m, obj.clone(), args)?;
+                    self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
                     self.stack.push(obj);
                 }
-                return;
+                return Ok(());
             }
         }
 
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
             if let Some(m) = cls.methods.borrow().get(&name).cloned() {
-                self.invoke_method(m, recv.clone(), args);
-                return;
+                self.invoke_method(m, recv.clone(), args)?;
+                return Ok(());
             }
         }
         if let Some(v) = self.collection_call(&recv, &name, &args) {
             self.stack.push(v);
-            return;
+            return Ok(());
         }
-        panic!("undefined method `{}' for {}", name, recv.type_name());
+        Err(self.trap(RubyError::NoMethodError {
+            method: name, recv_type: recv.type_name(),
+        }))
     }
 
     pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
@@ -224,17 +248,17 @@ impl Vm {
 
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) {
         loop {
-            let f = self.frames.last_mut().unwrap();
+            let f = self.frames.last_mut().expect("ICE: unwind with empty frames");
             if let Some(h) = f.rescues.pop() {
                 self.stack.truncate(h.stack_depth);
-                let f = self.frames.last_mut().unwrap();
+                let f = self.frames.last_mut().expect("ICE: frames disappeared");
                 f.ip = h.handler_ip;
                 if let Some(slot) = h.bind_slot {
                     f.locals.borrow_mut()[slot as usize] = exc;
                 }
                 return;
             }
-            let f = self.frames.pop().unwrap();
+            let f = self.frames.pop().expect("ICE: unwind pop empty");
             self.stack.truncate(f.base_sp);
             if f.is_class_body { self.class_stack.pop(); }
             if self.frames.is_empty() {
@@ -264,13 +288,15 @@ impl Vm {
         self.heap.collect(&roots);
     }
 
-    pub(crate) fn invoke_method(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>) {
-        self.invoke_method_with_block(m, self_val, args, None);
+    pub(crate) fn invoke_method(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>) -> Result<(), Trap> {
+        self.invoke_method_with_block(m, self_val, args, None)
     }
 
-    pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<Rc<BlockHandle>>) {
+    pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<Rc<BlockHandle>>) -> Result<(), Trap> {
         if m.params.len() != args.len() {
-            panic!("wrong number of arguments (given {}, expected {})", args.len(), m.params.len());
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected {})", args.len(), m.params.len()),
+            }));
         }
         let proto = &self.protos[m.proto_idx];
         let n_locals = proto.n_locals as usize;
@@ -286,6 +312,7 @@ impl Vm {
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: block, rescues: vec![],
         });
+        Ok(())
     }
 
     pub(crate) fn invoke_block(&mut self, block: Rc<BlockHandle>, args: Vec<Value>) {
@@ -313,45 +340,46 @@ impl Vm {
         });
     }
 
-    pub(crate) fn do_call_block(&mut self, name: String, argc: usize, no_recv: bool) {
-        // Stack layout:
-        //   CallBlock:        [..., recv, block, arg1..argc]
-        //   CallNoRecvBlock:  [..., block, arg1..argc]
+    pub(crate) fn do_call_block(&mut self, name: String, argc: usize, no_recv: bool) -> Result<(), Trap> {
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
-        let block_val = self.stack.pop().unwrap();
+        let block_val = self.stack.pop().expect("ICE: stack underflow before block");
         let block = if let Value::Block(b) = block_val { b } else {
-            panic!("CallBlock without Block value on stack");
+            panic!("ICE: CallBlock without Block value on stack");
         };
-        let recv = if no_recv { None } else { Some(self.stack.pop().unwrap()) };
+        let recv = if no_recv {
+            None
+        } else {
+            Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
+        };
 
-        // Builtins that consume blocks (each, map, etc.)
         if let Some(r) = &recv {
-            if let Some(v) = self.collection_call_block(r, &name, &args, &block) {
+            if let Some(v) = self.collection_call_block(r, &name, &args, &block)? {
                 self.stack.push(v);
-                return;
+                return Ok(());
             }
         }
 
-        // Otherwise: dispatch like a normal call but pass the block along.
         if no_recv {
-            if let Some(v) = self.builtin_call(&name, &args) { self.stack.push(v); return; }
-            let self_val = self.frames.last().unwrap().self_val.clone();
+            if let Some(v) = self.builtin_call(&name, &args) { self.stack.push(v); return Ok(()); }
+            let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
                 if let Some(m) = cls.methods.borrow().get(&name).cloned() {
-                    self.invoke_method_with_block(m, self_val.clone(), args, Some(block));
-                    return;
+                    self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
+                    return Ok(());
                 }
             }
             if let Some(m) = self.toplevel_methods.get(&name).cloned() {
-                self.invoke_method_with_block(m, self_val, args, Some(block));
-                return;
+                self.invoke_method_with_block(m, self_val, args, Some(block))?;
+                return Ok(());
             }
-            panic!("undefined method `{}'", name);
+            return Err(self.trap(RubyError::NoMethodError {
+                method: name, recv_type: self_val.type_name(),
+            }));
         }
-        let recv = recv.unwrap();
-        if let Some(v) = primitive_call(&recv, &name, &args) { self.stack.push(v); return; }
+        let recv = recv.expect("ICE: receiver missing for block call");
+        if let Some(v) = primitive_call(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
         if name == "new" {
             if let Value::Class(cls) = &recv {
                 self.maybe_gc();
@@ -360,43 +388,41 @@ impl Vm {
                 }));
                 let obj = Value::Object(id);
                 if let Some(m) = cls.methods.borrow().get("initialize").cloned() {
-                    self.invoke_method_with_block(m, obj.clone(), args, Some(block));
-                    self.frames.last_mut().unwrap().swap_return = Some(obj);
+                    self.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
+                    self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
                     self.stack.push(obj);
                 }
-                return;
+                return Ok(());
             }
         }
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
             if let Some(m) = cls.methods.borrow().get(&name).cloned() {
-                self.invoke_method_with_block(m, recv.clone(), args, Some(block));
-                return;
+                self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
+                return Ok(());
             }
         }
-        panic!("undefined method `{}' for {} (with block)", name, recv.type_name());
+        Err(self.trap(RubyError::NoMethodError {
+            method: name, recv_type: recv.type_name(),
+        }))
     }
 
-    pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: &Rc<BlockHandle>) -> Option<Value> {
-        match (recv, name, args) {
+    pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: &Rc<BlockHandle>) -> Result<Option<Value>, Trap> {
+        Ok(match (recv, name, args) {
             (Value::Array(id), "each", []) => {
-                // Pin source so its elements survive any GC triggered inside the block body.
                 self.pinned.push(Value::Array(*id));
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let pre_frames = self.frames.len();
                 for v in snapshot {
                     self.invoke_block(block.clone(), vec![v]);
-                    self.dispatch_until(pre_frames);
+                    self.dispatch_until(pre_frames)?;
                     self.stack.pop();
                 }
                 self.pinned.pop();
                 Some(Value::Array(*id))
             }
             (Value::Array(id), "map", []) => {
-                // Pin source AND the accumulating result array. Without this,
-                // the block body's allocations can trigger a GC that sweeps
-                // either of them — see ADR/P0-A.
                 self.pinned.push(Value::Array(*id));
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 self.maybe_gc();
@@ -405,12 +431,12 @@ impl Vm {
                 let pre_frames = self.frames.len();
                 for v in snapshot {
                     self.invoke_block(block.clone(), vec![v]);
-                    self.dispatch_until(pre_frames);
+                    self.dispatch_until(pre_frames)?;
                     let r = self.stack.pop().unwrap_or(Value::Nil);
                     self.heap.array_mut(result_id).push(r);
                 }
-                self.pinned.pop(); // result
-                self.pinned.pop(); // source
+                self.pinned.pop();
+                self.pinned.pop();
                 Some(Value::Array(result_id))
             }
             (Value::Hash(id), "each", []) => {
@@ -419,42 +445,41 @@ impl Vm {
                 let pre_frames = self.frames.len();
                 for (k, v) in snapshot {
                     self.invoke_block(block.clone(), vec![k, v]);
-                    self.dispatch_until(pre_frames);
+                    self.dispatch_until(pre_frames)?;
                     self.stack.pop();
                 }
                 self.pinned.pop();
                 Some(Value::Hash(*id))
             }
             (Value::Int(n), "times", []) => {
-                // Int and block params here are not heap-refs; no pin needed.
                 let pre_frames = self.frames.len();
                 for i in 0..*n {
                     self.invoke_block(block.clone(), vec![Value::Int(i)]);
-                    self.dispatch_until(pre_frames);
+                    self.dispatch_until(pre_frames)?;
                     self.stack.pop();
                 }
                 Some(Value::Int(*n))
             }
             _ => None,
-        }
+        })
     }
 
     /// Run dispatch loop until the frame stack returns to `until_depth`.
-    pub(crate) fn dispatch_until(&mut self, until_depth: usize) {
-        // Self-contained loop variant — duplicates dispatch logic but exits early.
+    pub(crate) fn dispatch_until(&mut self, until_depth: usize) -> Result<(), Trap> {
         while self.frames.len() > until_depth {
             let (proto_idx, ip) = {
-                let f = self.frames.last().unwrap();
+                let f = self.frames.last().expect("ICE: dispatch_until no frame");
                 (f.proto_idx, f.ip)
             };
             let op = self.protos[proto_idx].code[ip];
-            self.frames.last_mut().unwrap().ip += 1;
-            if !self.step(op, proto_idx) { return; }
+            self.frames.last_mut().expect("ICE: frames empty").ip += 1;
+            if !self.step(op, proto_idx)? { return Ok(()); }
         }
+        Ok(())
     }
 
-    /// Execute one op; returns false if we just popped the last frame.
-    pub(crate) fn step(&mut self, op: Op, proto_idx: usize) -> bool {
+    /// Execute one op; returns Ok(false) if we just popped the last frame.
+    pub(crate) fn step(&mut self, op: Op, proto_idx: usize) -> Result<bool, Trap> {
         match op {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
             Op::LoadConstStr(idx) => {
@@ -469,22 +494,25 @@ impl Vm {
             Op::LoadTrue => self.stack.push(Value::Bool(true)),
             Op::LoadFalse => self.stack.push(Value::Bool(false)),
             Op::LoadSelf => {
-                let v = self.frames.last().unwrap().self_val.clone();
+                let v = self.frames.last().expect("ICE: LoadSelf no frame").self_val.clone();
                 self.stack.push(v);
             }
             Op::LoadLocal(s) => {
-                let v = self.frames.last().unwrap().locals.borrow()[s as usize].clone();
+                let v = self.frames.last().expect("ICE: LoadLocal no frame").locals.borrow()[s as usize].clone();
                 self.stack.push(v);
             }
             Op::StoreLocal(s) => {
-                let v = self.stack.pop().unwrap();
-                self.frames.last().unwrap().locals.borrow_mut()[s as usize] = v;
+                let v = self.stack.pop().expect("ICE: StoreLocal stack underflow");
+                self.frames.last().expect("ICE: StoreLocal no frame").locals.borrow_mut()[s as usize] = v;
             }
-            Op::Dup => { let v = self.stack.last().unwrap().clone(); self.stack.push(v); }
+            Op::Dup => {
+                let v = self.stack.last().expect("ICE: Dup stack underflow").clone();
+                self.stack.push(v);
+            }
             Op::Pop => { self.stack.pop(); }
             Op::LoadIvar(idx) => {
                 let name = self.protos[proto_idx].strings[idx as usize].clone();
-                let id_opt = if let Value::Object(id) = &self.frames.last().unwrap().self_val { Some(*id) } else { None };
+                let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: LoadIvar no frame").self_val { Some(*id) } else { None };
                 let v = if let Some(id) = id_opt {
                     self.heap.instance(id).ivars.get(&name).cloned().unwrap_or(Value::Nil)
                 } else { Value::Nil };
@@ -492,8 +520,8 @@ impl Vm {
             }
             Op::StoreIvar(idx) => {
                 let name = self.protos[proto_idx].strings[idx as usize].clone();
-                let v = self.stack.pop().unwrap();
-                let id_opt = if let Value::Object(id) = &self.frames.last().unwrap().self_val { Some(*id) } else { None };
+                let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
+                let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: StoreIvar no frame").self_val { Some(*id) } else { None };
                 if let Some(id) = id_opt { self.heap.instance_mut(id).ivars.insert(name, v); }
             }
             Op::LoadConst(idx) => {
@@ -502,40 +530,46 @@ impl Vm {
                 self.stack.push(v);
             }
             Op::Jump(off) => {
-                let f = self.frames.last_mut().unwrap();
+                let f = self.frames.last_mut().expect("ICE: Jump no frame");
                 f.ip = (f.ip as i32 + off) as usize;
             }
             Op::JumpIfFalse(off) => {
-                let v = self.stack.pop().unwrap();
+                let v = self.stack.pop().expect("ICE: JumpIfFalse stack underflow");
                 if !v.is_truthy() {
-                    let f = self.frames.last_mut().unwrap();
+                    let f = self.frames.last_mut().expect("ICE: JumpIfFalse no frame");
                     f.ip = (f.ip as i32 + off) as usize;
                 }
             }
             Op::Call(name_idx, argc) => {
                 let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                self.do_call(name, argc as usize, false);
+                self.do_call(name, argc as usize, false)?;
             }
             Op::CallNoRecv(name_idx, argc) => {
                 let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                self.do_call(name, argc as usize, true);
+                self.do_call(name, argc as usize, true)?;
             }
             Op::CallBlock(name_idx, argc) => {
                 let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                self.do_call_block(name, argc as usize, false);
+                self.do_call_block(name, argc as usize, false)?;
             }
             Op::CallNoRecvBlock(name_idx, argc) => {
                 let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                self.do_call_block(name, argc as usize, true);
+                self.do_call_block(name, argc as usize, true)?;
             }
             Op::CreateBlock(p_idx, param_start, n_params) => {
-                let captured = self.frames.last().unwrap().locals.clone();
-                let self_val = self.frames.last().unwrap().self_val.clone();
+                let f = self.frames.last().expect("ICE: CreateBlock no frame");
+                let captured = f.locals.clone();
+                let self_val = f.self_val.clone();
                 let h = BlockHandle { proto_idx: p_idx as usize, captured, self_val, param_start, n_params };
                 self.stack.push(Value::Block(Rc::new(h)));
             }
             Op::Yield(argc) => {
-                let block = self.frames.last().unwrap().block_arg.clone().expect("no block given");
+                let block = match self.frames.last().expect("ICE: Yield no frame").block_arg.clone() {
+                    Some(b) => b,
+                    None => return Err(self.trap(RubyError::RuntimeError {
+                        msg: "no block given (yield)".to_string(),
+                    })),
+                };
                 let argc = argc as usize;
                 let split = self.stack.len() - argc;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
@@ -585,56 +619,51 @@ impl Vm {
                 self.stack.push(Value::Hash(id));
             }
             Op::PushRescue(off, slot, bind) => {
-                let ip = self.frames.last().unwrap().ip;
+                let ip = self.frames.last().expect("ICE: PushRescue no frame").ip;
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
-                self.frames.last_mut().unwrap().rescues.push(RescueHandler {
+                self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot,
                 });
             }
             Op::PopRescue => {
-                self.frames.last_mut().unwrap().rescues.pop();
+                self.frames.last_mut().expect("ICE: PopRescue no frame").rescues.pop();
             }
             Op::Raise => {
                 let v = self.stack.pop().unwrap_or(Value::Nil);
                 self.unwind_with_exception(v);
             }
             Op::BinOp(kind) => {
-                let b = self.stack.pop().unwrap();
-                let a = self.stack.pop().unwrap();
-                // Hot path: Int op Int
+                let b = self.stack.pop().expect("ICE: BinOp rhs underflow");
+                let a = self.stack.pop().expect("ICE: BinOp lhs underflow");
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
                     self.stack.push(kind.apply_int(*x, *y));
+                } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b)) {
+                    self.stack.push(v);
                 } else {
-                    // Cold path: fall back to generic dispatch
-                    if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b)) {
-                        self.stack.push(v);
-                    } else {
-                        // user-defined: synthesize a Call
-                        self.stack.push(a);
-                        self.stack.push(b);
-                        let name = kind.name().to_string();
-                        self.do_call(name, 1, false);
-                    }
+                    self.stack.push(a);
+                    self.stack.push(b);
+                    let name = kind.name().to_string();
+                    self.do_call(name, 1, false)?;
                 }
             }
             Op::Return => {
-                let f = self.frames.pop().unwrap();
+                let f = self.frames.pop().expect("ICE: Return no frame");
                 let ret = self.stack.pop().unwrap_or(Value::Nil);
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
-                    let cls = self.class_stack.pop().unwrap();
+                    let cls = self.class_stack.pop().expect("ICE: class_stack empty on class-body return");
                     self.stack.push(Value::Class(cls));
                 } else if let Some(replacement) = f.swap_return {
                     self.stack.push(replacement);
                 } else {
                     self.stack.push(ret);
                 }
-                if self.frames.is_empty() { return false; }
+                if self.frames.is_empty() { return Ok(false); }
             }
         }
-        true
+        Ok(true)
     }
 }
 

@@ -46,11 +46,33 @@ fn main() {
         }
     }
     let mut vm = Vm::new(protos);
-    vm.run(entry);
+    let outcome = vm.run(entry);
     if env::var("GC_STATS").is_ok() {
         eprintln!(
             "gc: live={} slots={} freed_slots={}",
             vm.heap.live_count, vm.heap.slots.len(), vm.heap.free.len()
         );
     }
+    if let Err(trap) = outcome {
+        eprintln!("{}: {} ({})", trap_origin(&trap), trap.err.message(), trap.err.class_name());
+        for f in trap.backtrace.iter().skip(1) {
+            eprintln!("\tfrom {}:in `{}'", source_loc(&source, f.span.byte_offset), f.method);
+        }
+        process::exit(1);
+    }
+}
+
+fn trap_origin(trap: &error::Trap) -> String {
+    if let Some(f) = trap.backtrace.first() {
+        // Span resolution happens in main where we still hold `source`.
+        format!("in `{}'", f.method)
+    } else {
+        "rubyrs".into()
+    }
+}
+
+fn source_loc(_source: &str, _byte_offset: u32) -> String {
+    // Placeholder; the next commit (P0-B-3) replaces this with CRuby-style
+    // "file:line:in `method'" once we have line resolution in place.
+    "?".into()
 }
