@@ -28,6 +28,7 @@ const GEM_VERSION: &str = "1.5.0";
 const GLOBAL_CACHE_DIR: &str = "./.rubund_global_cache";
 const PROJECT_GEMS_DIR: &str = "./.rubund_project_gems";
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct GemRequirement {
     name: String,

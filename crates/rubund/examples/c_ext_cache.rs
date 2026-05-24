@@ -156,15 +156,13 @@ fn perform_c_extension_compilation(extracted_dir: &Path) {
     fs::create_dir_all(&bin_cache_path).unwrap();
     
     // Check if we have the compiled binary in our cache
-    let mut compiled_file_name = "msgpack.bundle"; // default macOS
-    #[cfg(target_os = "linux")]
-    {
-        compiled_file_name = "msgpack.so";
-    }
-    #[cfg(target_os = "windows")]
-    {
-        compiled_file_name = "msgpack.dll";
-    }
+    let compiled_file_name = if cfg!(target_os = "linux") {
+        "msgpack.so"
+    } else if cfg!(target_os = "windows") {
+        "msgpack.dll"
+    } else {
+        "msgpack.bundle" // default macOS
+    };
 
     let cached_binary = bin_cache_path.join(compiled_file_name);
     let target_binary_in_gem = ext_dir.join(compiled_file_name);
