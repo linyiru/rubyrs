@@ -1,6 +1,6 @@
 //! Rubund Production Gemfile Parallel Installer.
 //!
-//! Run with: `cargo run --release -p rubund --example manekineko_install`
+//! Run with: `cargo run --release -p rubund --example manekineko_install -- <path/to/Gemfile>`
 
 use std::cell::RefCell;
 use std::fs::{self, File};

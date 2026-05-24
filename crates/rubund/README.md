@@ -68,7 +68,7 @@ for src in &lockfile.sources {
     match src.type_ {
         SourceType::Gem => println!("gem remote: {}", src.remote),
         SourceType::Git => println!("git remote: {} @ {:?}", src.remote, src.revision),
-        SourceType::Path => println!("path: {:?}", src.path),
+        SourceType::Path => println!("path: {}", src.remote),
     }
 }
 ```
@@ -95,7 +95,7 @@ The [`examples/`](examples/) directory contains runnable demonstrations:
 | Example | Description | Command |
 | :--- | :--- | :--- |
 | [`lockfile_parser`](examples/lockfile_parser.rs) | Parse & pretty-print a production `Gemfile.lock` with timing | `cargo run -p rubund --example lockfile_parser` |
-| [`manekineko_install`](examples/manekineko_install.rs) | Full parallel download + extract of 196 gems | `cargo run --release -p rubund --example manekineko_install` |
+| [`manekineko_install`](examples/manekineko_install.rs) | Full parallel download + extract of 196 gems | `cargo run --release -p rubund --example manekineko_install -- <path/to/Gemfile>` |
 | [`real_install`](examples/real_install.rs) | Single-gem fetch + extract flow | `cargo run -p rubund --example real_install` |
 | [`c_ext_cache`](examples/c_ext_cache.rs) | Gem with C extension + binary caching | `cargo run -p rubund --example c_ext_cache` |
 
@@ -104,13 +104,14 @@ The [`examples/`](examples/) directory contains runnable demonstrations:
 ## Testing
 
 ```bash
-# Run the integration test suite (4 test cases)
+# Run the integration test suite (5 test cases)
 cargo test -p rubund
 
 # Test cases include:
 #   • Standard GEM source parsing
 #   • GIT-pinned dependency parsing
 #   • Multi-source (GEM + GIT) with cross-platform platforms
+#   • PATH source parsing (local gem)
 #   • Official Bundler RSpec test vector (lockfile_parser_spec.rb)
 ```
 

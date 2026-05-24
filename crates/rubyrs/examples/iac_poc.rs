@@ -8,7 +8,7 @@
 //!    returning a nested Hash/Array data structure representing the topology. The
 //!    host resolves and unpacks the returned structure using the new host APIs.
 //!
-//! Run with: `cargo run --release --example iac_poc`
+//! Run with: `cargo run --release -p rubyrs --example iac_poc`
 
 use std::cell::RefCell;
 use std::rc::Rc;
