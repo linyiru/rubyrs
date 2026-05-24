@@ -1,6 +1,6 @@
 # Architecture
 
-A single-file interpreter in ~1800 lines of Rust (`src/main.rs`). The pipeline:
+A ~1600-line interpreter split across a handful of focused modules. The pipeline:
 
 ```
 .rb source bytes
@@ -30,19 +30,21 @@ Three reasons this structure is the way it is:
 3. **No JIT.** rubyrs' niche is fast cold start and tiny memory; a JIT
    directly conflicts with both. See [ADR 0002](adr/0002-bytecode-vm-not-jit.md).
 
-## Modules in `src/main.rs`
+## Modules
 
-The file is sectioned by `// ---------- HEADING ----------` markers:
+| File | Lines (~) | Role |
+|------|-----------|------|
+| `src/ast.rs` | 240 | `Expr` enum + `tr()`: walk Prism `Node<'pr>`, drop the parser lifetime |
+| `src/value.rs` | 45 | `Value`, `Class`, `Instance`, `Method`, `BlockHandle`, `ObjId` |
+| `src/heap.rs` | 200 | `Heap`, `HeapObj`, `Slot`, mark-sweep collection; `impl Value` for display / equality (it needs `&Heap`) |
+| `src/bytecode.rs` | 85 | `Op` enum, `BinOpKind`, `Proto` |
+| `src/compiler.rs` | 280 | `ProtoBuilder`, `compile_expr`, `compile_proto`, `compile_block` |
+| `src/vm.rs` | 700 | `Vm`, `Frame`, `RescueHandler`, `step()`, dispatch loop, `primitive_call`, `collection_call_block`, builtins |
+| `src/main.rs` | 55 | CLI entry: argv parsing, env-var flags, file I/O |
 
-| Section | Lines (~) | Role |
-|---------|-----------|------|
-| IR | 1–70 | `Expr` enum: owned, mirror of Prism nodes we care about |
-| Translate prism AST to Expr | 70–230 | `tr()`: walk `Node<'pr>`, return `Expr` |
-| Values | 230–320 | `Value`, `Class`, `Instance`, `Method`, `BlockHandle` |
-| GC Heap | 320–470 | `Heap`, `HeapObj`, mark-sweep |
-| Bytecode | 470–560 | `Op` enum, `BinOpKind`, `Proto` |
-| Compiler | 560–780 | `ProtoBuilder`, `compile_expr`, `compile_proto`, `compile_block` |
-| VM | 780–end | `Vm`, `Frame`, `step()`, dispatch loop, builtins |
+Cross-module dependency is acyclic: `ast` and `bytecode` have no internal
+deps; `value` depends on stdlib only; `heap` depends on `value`; `compiler`
+depends on `ast` + `bytecode`; `vm` depends on all of the above.
 
 ## The Value type
 
@@ -142,15 +144,17 @@ stack to that depth and jump.
 If unwind reaches an empty frame stack, we print `uncaught exception: ...`
 and `exit(1)`. Class-body frames pop their `class_stack` entry on the way.
 
-## Why a single file
+## Why split now
 
-Modules would normally split this up. Single-file is on purpose for now:
+We were a single file for the first ~1600 lines. We split at the seam
+between P0 (correctness) and P1 (structure) milestones for three reasons:
 
-- The whole runtime fits in one `cargo build`; no inter-module borrow puzzles.
-- Cross-cutting concerns (the dispatch loop touches Value, Heap, Frame,
-  every Op handler) are easier to read top-to-bottom.
-- ~1800 lines is still mentally tractable.
+1. **PR conflict reduction** — every change touched `src/main.rs`; any
+   two parallel branches conflicted on the same file.
+2. **Embedding API runway** (P1-C) — exposing a `lib.rs` requires
+   visible module boundaries anyway.
+3. **Readability had a ceiling** — beyond ~2000 lines, scrolling
+   become its own friction.
 
-We'll split when something else demands it (e.g. exposing a public API for
-embedding, multiple binaries, or `tools/spec_extract` reusing the parser
-layer).
+The split was a move-only refactor: stdout was bit-identical to the
+pre-split binary across all fixtures. No logic moved between sections.

@@ -7,6 +7,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Internal
+- **Module split** (P1-A): `src/main.rs` (1600 lines) split into
+  `ast.rs`, `value.rs`, `heap.rs`, `bytecode.rs`, `compiler.rs`,
+  `vm.rs`, plus a 55-line CLI `main.rs`. Move-only refactor:
+  fixtures emit stdout bit-identical to the pre-split binary. Sets
+  up the seam for the upcoming `lib.rs` / embedding API (P1-C).
 - `Op` and `BinOpKind` now derive `Copy` (P0-C). The dispatch loop's
   `code[ip].clone()` becomes a plain `Copy`. The previous `clone()` was
   already optimised away by LLVM (all payloads were already POD), so
