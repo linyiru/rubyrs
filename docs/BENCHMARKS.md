@@ -24,14 +24,41 @@ scripting).
 
 | Implementation | Time | Peak RSS |
 |----------------|------|---------|
-| rubyrs (bytecode VM + BinOp + SymId interner) | **0.41 s** | 2.1 MB |
+| rubyrs (current: bytecode + IC + Inc*+ BinOpInt + stmt-pos elision) | **0.33 s** | 2.1 MB |
 | rubyrs.wasm via wasmtime | ~0.86 s | ~16.7 MB |
 | CRuby 3.4 (no YJIT) | 0.19 s | 18.4 MB |
 | CRuby 3.4 + YJIT | 0.15 s | 19.1 MB |
 
-We're 2.3× slower than CRuby's interpreter, ~3× slower than YJIT.
-The remaining gap is method-dispatch overhead (every call routes through
-a `HashMap<String, _>` lookup; method inline caching is on the roadmap).
+rubyrs is **1.76× of CRuby's interpreter** on fizzbuzz, ~2.2× of CRuby+YJIT.
+
+Method-dispatch-heavy workloads close the gap further. `Counter.inc × 1M`
+(every iteration is a method call into `@count = @count + 1`):
+
+| Implementation | Time |
+|----------------|------|
+| rubyrs | 0.15 s |
+| CRuby 3.4 (no YJIT) | 0.11 s |
+
+rubyrs is **1.43× of CRuby** there — the single-slot inline method cache
+(ADR 0007 / Tier1-1) plus `Op::IncIvar` (Tier1-3) collectively close the
+gap for this shape of workload.
+
+### Tier 1 progression (5 small commits)
+
+Starting from `dd7826c` (the P1-B interner landing, before any Tier 1
+work), each commit verified against the 10-fixture CRuby diff harness:
+
+| Commit | Change | fizzbuzz | vs CRuby |
+|--------|--------|---------:|---------:|
+| baseline | post P1-B interner | 408 ms | 2.17× |
+| Tier1-1  | single-slot method cache | 386 ms | 2.05× |
+| Tier1-2  | `Op::IncLocal` (`i = i + 1`) | 369 ms | 1.96× |
+| Tier1-3  | `Op::IncIvar` (`@x = @x + 1`) | 364 ms | 1.94× |
+| Tier1-4  | `Op::BinOpInt` (fuse LoadConstInt + BinOp) | 332 ms | 1.78× |
+| Tier1-5  | stmt-position omits Dup/Pop | **327 ms** | **1.76×** |
+
+20% wall-clock improvement; gap to CRuby's interpreter closed from
+2.17× to 1.76×.
 
 ## Memory
 

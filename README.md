@@ -42,8 +42,12 @@ to WebAssembly.
 
 | 1M fizzbuzz | rubyrs | CRuby | CRuby + YJIT |
 |-------------|--------|-------|--------------|
-| Time | 0.41 s | 0.19 s | 0.15 s |
+| Time | 0.33 s (1.76× of CRuby) | 0.19 s | 0.15 s |
 | Peak memory | 2.1 MB | 18.4 MB | 19.1 MB |
+
+| Method-heavy (Counter.inc × 1M) | rubyrs | CRuby (no JIT) |
+|---------------------------------|--------|----------------|
+| Time | 0.15 s (**1.43× of CRuby**) | 0.11 s |
 
 If you need Rails, Sinatra, Bundler, or gems — use CRuby.
 
