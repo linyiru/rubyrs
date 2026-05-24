@@ -7,6 +7,29 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`ensure` clause** (P2-C-3). `begin ... ensure ... end` now runs
+  the ensure body on both the normal-exit path and the exception
+  path. The compiler emits a `PushEnsure(handler)` before the
+  body; on normal completion it emits `PopEnsure` and the ensure
+  body inline, then jumps past. On exception, the unwinder treats
+  ensure handlers specially: it pushes the exception value onto
+  the operand stack and jumps to the handler, which runs the same
+  ensure body and ends with `Raise` to rethrow. Compose freely
+  with `rescue`: `begin body rescue => e rescue_body ensure
+  cleanup end` all work.
+- **`raise "msg"` auto-wraps to `RuntimeError.new("msg")`** at the
+  Op::Raise site (new `Vm::normalize_exception`). Brings rubyrs
+  in line with CRuby's Kernel#raise convention so `e.message`
+  works after `raise "..."`. Already-Exception instances pass
+  through unchanged.
+- New diff fixture `ensure_basics.rb` covers four shapes: normal
+  body+ensure, rescue+ensure, ensure-around-uncaught (exception
+  still propagates), and multi-statement ensure body. Byte-
+  identical to CRuby.
+- `tests/fixtures/exception.rb` updated to use `e.message` since
+  `raise "x"` now produces an Exception instance, not a String.
+
+### Added
 - **Built-in exception class hierarchy** (P2-C-2). `Runtime::new`
   now `eval`s a small preamble that defines `Exception`,
   `StandardError`, `RuntimeError`, `NoMethodError`,

@@ -335,7 +335,14 @@ pub(crate) fn compile_expr(
             for a in args { compile_expr(b, a, protos, interner); }
             b.emit(Op::Yield(args.len() as u8));
         }
-        Expr::Begin { body, rescue } => {
+        Expr::Begin { body, rescue, ensure } => {
+            // Emit, layered: optional outer ensure, optional inner rescue,
+            // then the body itself. Both clauses are optional and any combo
+            // is valid (`begin body end`, `begin body rescue end`,
+            // `begin body ensure end`, `begin body rescue end`).
+            let pe = ensure.as_ref().map(|_| b.emit(Op::PushEnsure(0)));
+
+            // Inner: rescue (if any) wrapping body
             match rescue {
                 None => compile_body(b, body, protos, interner),
                 Some(rc) => {
@@ -354,6 +361,25 @@ pub(crate) fn compile_expr(
                     let end = b.pos();
                     b.patch_jump(je, end);
                 }
+            }
+
+            // Ensure layer (compile body twice — once inline for the normal
+            // path, once for the exception path which ends in Raise).
+            if let (Some(eb), Some(pe)) = (ensure.as_ref(), pe) {
+                b.emit(Op::PopEnsure);
+                // Normal path: run ensure body, then jump past handler.
+                for stmt in eb { compile_stmt(b, stmt, protos, interner); }
+                let je = b.emit(Op::Jump(0));
+                // Exception path: PushEnsure target. Exception value is on
+                // top of stack; ensure body must not touch the stack (we
+                // call compile_stmt which preserves it); then Raise re-throws.
+                let handler_start = b.pos();
+                let off = handler_start as i32 - pe as i32 - 1;
+                if let Op::PushEnsure(o) = &mut b.code[pe] { *o = off; }
+                for stmt in eb { compile_stmt(b, stmt, protos, interner); }
+                b.emit(Op::Raise);
+                let end = b.pos();
+                b.patch_jump(je, end);
             }
         }
     }

@@ -68,6 +68,7 @@ pub(crate) enum Expr {
     Begin {
         body: Vec<SExpr>,
         rescue: Option<RescueClause>,
+        ensure: Option<Vec<SExpr>>,
     },
 }
 
@@ -274,7 +275,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             });
             RescueClause { body, var }
         });
-        return sp(node, Expr::Begin { body, rescue });
+        let ensure = n.ensure_clause().map(|ec| {
+            ec.statements()
+                .map(|s| s.body().iter().map(|c| tr(&c)).collect::<Vec<SExpr>>())
+                .unwrap_or_default()
+        });
+        return sp(node, Expr::Begin { body, rescue, ensure });
     }
     panic!("unsupported node: {:?}", node);
 }

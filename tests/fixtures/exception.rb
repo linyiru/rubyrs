@@ -3,7 +3,7 @@ begin
   raise "something went wrong"
   puts "unreached"
 rescue => e
-  puts "caught: " + e
+  puts "caught: " + e.message
 end
 
 def boom
@@ -13,7 +13,7 @@ end
 begin
   boom
 rescue => e
-  puts "outer: " + e
+  puts "outer: " + e.message
 end
 
 # nested
@@ -21,11 +21,11 @@ begin
   begin
     raise "inner"
   rescue => e
-    puts "inner caught: " + e
+    puts "inner caught: " + e.message
     raise "rethrow"
   end
 rescue => e
-  puts "outer caught: " + e
+  puts "outer caught: " + e.message
 end
 
 # no exception path

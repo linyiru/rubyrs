@@ -53,6 +53,13 @@ pub(crate) enum Op {
     BinOpInt(BinOpKind, i64),
     PushRescue(i32, u16, u8),
     PopRescue,
+    /// Like PushRescue but for `ensure` clauses. When an exception is
+    /// unwinding and hits a PushEnsure handler, the exception value is
+    /// pushed onto the operand stack and control jumps to the handler;
+    /// the handler runs the ensure body (which must leave the stack
+    /// unchanged) and ends with `Raise` to rethrow.
+    PushEnsure(i32),
+    PopEnsure,
     Raise,
     Return,
 }

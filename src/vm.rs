@@ -29,6 +29,10 @@ pub(crate) struct RescueHandler {
     pub(crate) handler_ip: usize,
     pub(crate) stack_depth: usize,
     pub(crate) bind_slot: Option<u16>,
+    /// When true this entry was emitted by `Op::PushEnsure` and the
+    /// unwinder pushes the exception onto the operand stack (rather than
+    /// binding to a local). The ensure body re-raises with `Op::Raise`.
+    pub(crate) is_ensure: bool,
 }
 
 pub(crate) type HostFn = dyn Fn(&[Value]) -> Result<Value, Trap>;
@@ -374,6 +378,32 @@ impl Vm {
         }
     }
 
+    /// Convert a Ruby-level `raise` argument into an Exception instance.
+    /// `raise "msg"` becomes `RuntimeError.new("msg")` — we construct the
+    /// instance directly (skipping the `initialize` dispatch) and set
+    /// `@message`. Already-Exception instances pass through unchanged.
+    pub(crate) fn normalize_exception(&mut self, v: Value) -> Value {
+        match &v {
+            Value::Object(_) => v,
+            Value::Str(_) => {
+                let rt_err_id = self.interner.intern("RuntimeError");
+                if let Some(cls) = self.classes.get(&rt_err_id).cloned() {
+                    self.maybe_gc();
+                    let id = self.heap.alloc(HeapObj::Instance(Instance {
+                        class: cls,
+                        ivars: HashMap::new(),
+                    }));
+                    let msg_id = self.interner.intern("@message");
+                    self.heap.instance_mut(id).ivars.insert(msg_id, v);
+                    Value::Object(id)
+                } else {
+                    v
+                }
+            }
+            _ => v,
+        }
+    }
+
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) {
         loop {
             let f = self.frames.last_mut().expect("ICE: unwind with empty frames");
@@ -381,7 +411,13 @@ impl Vm {
                 self.stack.truncate(h.stack_depth);
                 let f = self.frames.last_mut().expect("ICE: frames disappeared");
                 f.ip = h.handler_ip;
-                if let Some(slot) = h.bind_slot {
+                if h.is_ensure {
+                    // ensure handler: push the exception onto the operand
+                    // stack; the handler's compiled code ends in `Op::Raise`
+                    // which will pop it and rethrow after the ensure body
+                    // has run.
+                    self.stack.push(exc);
+                } else if let Some(slot) = h.bind_slot {
                     f.locals.borrow_mut()[slot as usize] = exc;
                 }
                 return;
@@ -870,15 +906,27 @@ impl Vm {
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
-                    handler_ip: target, stack_depth: depth, bind_slot,
+                    handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
                 });
             }
             Op::PopRescue => {
                 self.frames.last_mut().expect("ICE: PopRescue no frame").rescues.pop();
             }
+            Op::PushEnsure(off) => {
+                let ip = self.frames.last().expect("ICE: PushEnsure no frame").ip;
+                let target = (ip as i32 + off) as usize;
+                let depth = self.stack.len();
+                self.frames.last_mut().expect("ICE: PushEnsure no frame").rescues.push(RescueHandler {
+                    handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
+                });
+            }
+            Op::PopEnsure => {
+                self.frames.last_mut().expect("ICE: PopEnsure no frame").rescues.pop();
+            }
             Op::Raise => {
                 let v = self.stack.pop().unwrap_or(Value::Nil);
-                self.unwind_with_exception(v);
+                let exc = self.normalize_exception(v);
+                self.unwind_with_exception(exc);
             }
             Op::BinOpInt(kind, rhs) => {
                 let a = self.stack.pop().expect("ICE: BinOpInt lhs underflow");
