@@ -7,6 +7,22 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Enumerable filtering: `select` / `reject` / `find` / `any?` /
+  `all?` / `none?` / `include?`** across `Array`, `Hash`, and
+  `Range` (P3-A-2). Block-taking variants share a single iterator
+  driver per receiver type — `iter_array_filter`,
+  `iter_hash_filter`, `iter_range_filter` — parameterised by an
+  `IterMode` enum so the GC-pinning / break-propagation /
+  short-circuit logic only lives in one place per collection.
+  `filter` is registered as an alias for `select`; `detect` as an
+  alias for `find`; `has_key?` / `key?` / `member?` as aliases
+  for `Hash#include?`. `Hash#find` returns a `[k, v]` Array (or
+  `nil`) to match CRuby. Empty-collection cases preserve Ruby's
+  vacuous-truth semantics (`[].all? → true`, `[].none? → true`,
+  `[].any? → false`). New diff fixture `enumerable_filter.rb`
+  (~85 lines) covers every method on every receiver, alias
+  dispatch, empty-collection edges, chaining (`select.map.each`),
+  and use inside a class body. Byte-identical to CRuby.
 - **`Range` values + `Range#each` + Range basics** (P3-A-1).
   `1..5` and `1...5` (exclusive) now parse. New `Value::Range`
   (heap-managed; the existing GC walks `begin` and `end`). New

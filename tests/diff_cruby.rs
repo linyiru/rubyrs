@@ -88,3 +88,4 @@ fn run_diff(name: &str) {
 #[test] fn ensure_basics() { run_diff("ensure_basics"); }
 #[test] fn control_flow() { run_diff("control_flow"); }
 #[test] fn range_basics() { run_diff("range_basics"); }
+#[test] fn enumerable_filter() { run_diff("enumerable_filter"); }

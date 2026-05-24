@@ -9,9 +9,27 @@ use crate::bytecode::{Op, Proto};
 use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::heap::{Heap, HeapObj};
 use crate::intern::{Interner, SymId};
-use crate::value::{BlockHandle, Class, Instance, Method, Value};
+use crate::value::{BlockHandle, Class, Instance, Method, ObjId, Value};
 
 // ---------- VM ----------
+
+/// Which Enumerable predicate-iterator a call dispatches to.
+/// `NoneM` is named with a trailing M because `None` collides with
+/// `Option::None` in match arms.
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum IterMode { Select, Reject, Find, Any, All, NoneM }
+
+impl IterMode {
+    fn bool_init(self) -> bool {
+        // For `all?` we start at true and flip to false on first
+        // falsy; for `none?` likewise. `any?` starts false.
+        match self {
+            IterMode::Any => false,
+            IterMode::All | IterMode::NoneM => true,
+            _ => false,
+        }
+    }
+}
 
 pub(crate) struct Frame {
     pub(crate) proto_idx: usize,
@@ -374,6 +392,11 @@ impl Vm {
                     ("first", []) => Some(self.heap.array(id).first().cloned().unwrap_or(Value::Nil)),
                     ("last", []) => Some(self.heap.array(id).last().cloned().unwrap_or(Value::Nil)),
                     ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
+                    ("include?", [needle]) => {
+                        let a = self.heap.array(id);
+                        let hit = a.iter().any(|x| x.ruby_eq(needle, &self.heap));
+                        Some(Value::Bool(hit))
+                    }
                     _ => None,
                 }
             }
@@ -402,6 +425,11 @@ impl Vm {
                         Some(v.clone())
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.hash(id).is_empty())),
+                    ("include?", [k]) | ("has_key?", [k]) | ("key?", [k]) | ("member?", [k]) => {
+                        let h = self.heap.hash(id);
+                        let hit = h.iter().any(|(key, _)| key.ruby_eq(k, &self.heap));
+                        Some(Value::Bool(hit))
+                    }
                     ("keys", []) => {
                         let keys: Vec<Value> = self.heap.hash(id).iter().map(|(k, _)| k.clone()).collect();
                         self.maybe_gc();
@@ -664,6 +692,160 @@ impl Vm {
         }))
     }
 
+    /// Drives an iterator-with-predicate over an Array. Used by
+    /// `select` / `reject` / `find` / `any?` / `all?` / `none?`.
+    /// On `break val` (caught via `self.break_signaled`) returns `val`
+    /// to match CRuby's "break value short-circuits the enumerator".
+    pub(crate) fn iter_array_filter(&mut self, id: ObjId, mode: IterMode, block: &Rc<BlockHandle>) -> Result<Value, Trap> {
+        let snapshot: Vec<Value> = self.heap.array(id).clone();
+        self.pinned.push(Value::Array(id));
+        let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
+            self.maybe_gc();
+            self.check_alloc()?;
+            let rid = self.heap.alloc(HeapObj::Array(Vec::new()));
+            self.pinned.push(Value::Array(rid));
+            Some(rid)
+        } else { None };
+        let pre_frames = self.frames.len();
+        let mut early: Option<Value> = None;
+        let mut find_val = Value::Nil;
+        let mut bool_acc = mode.bool_init();
+        for v in snapshot {
+            self.invoke_block(block.clone(), vec![v.clone()])?;
+            self.dispatch_until(pre_frames)?;
+            let r = self.stack.pop().unwrap_or(Value::Nil);
+            if self.break_signaled {
+                self.break_signaled = false;
+                early = Some(r);
+                break;
+            }
+            let truthy = r.is_truthy();
+            match mode {
+                IterMode::Select => if truthy { self.heap.array_mut(acc_id.unwrap()).push(v); }
+                IterMode::Reject => if !truthy { self.heap.array_mut(acc_id.unwrap()).push(v); }
+                IterMode::Find => if truthy { find_val = v; break; }
+                IterMode::Any => if truthy { bool_acc = true; break; }
+                IterMode::All => if !truthy { bool_acc = false; break; }
+                IterMode::NoneM => if truthy { bool_acc = false; break; }
+            }
+        }
+        if acc_id.is_some() { self.pinned.pop(); }
+        self.pinned.pop();
+        if let Some(e) = early { return Ok(e); }
+        Ok(match mode {
+            IterMode::Select | IterMode::Reject => Value::Array(acc_id.unwrap()),
+            IterMode::Find => find_val,
+            IterMode::Any | IterMode::All | IterMode::NoneM => Value::Bool(bool_acc),
+        })
+    }
+
+    /// Same shape as `iter_array_filter`, but the source is a Hash.
+    /// The block receives two args (key, value). `select`/`reject`
+    /// return a Hash; `find` returns a `[k, v]` two-element Array (or nil).
+    pub(crate) fn iter_hash_filter(&mut self, id: ObjId, mode: IterMode, block: &Rc<BlockHandle>) -> Result<Value, Trap> {
+        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+        self.pinned.push(Value::Hash(id));
+        let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
+            self.maybe_gc();
+            self.check_alloc()?;
+            let rid = self.heap.alloc(HeapObj::Hash(Vec::new()));
+            self.pinned.push(Value::Hash(rid));
+            Some(rid)
+        } else { None };
+        let pre_frames = self.frames.len();
+        let mut early: Option<Value> = None;
+        let mut find_val = Value::Nil;
+        let mut bool_acc = mode.bool_init();
+        for (k, v) in snapshot {
+            self.invoke_block(block.clone(), vec![k.clone(), v.clone()])?;
+            self.dispatch_until(pre_frames)?;
+            let r = self.stack.pop().unwrap_or(Value::Nil);
+            if self.break_signaled {
+                self.break_signaled = false;
+                early = Some(r);
+                break;
+            }
+            let truthy = r.is_truthy();
+            match mode {
+                IterMode::Select => if truthy { self.heap.hash_mut(acc_id.unwrap()).push((k, v)); }
+                IterMode::Reject => if !truthy { self.heap.hash_mut(acc_id.unwrap()).push((k, v)); }
+                IterMode::Find => if truthy {
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let pair = self.heap.alloc(HeapObj::Array(vec![k, v]));
+                    find_val = Value::Array(pair);
+                    break;
+                }
+                IterMode::Any => if truthy { bool_acc = true; break; }
+                IterMode::All => if !truthy { bool_acc = false; break; }
+                IterMode::NoneM => if truthy { bool_acc = false; break; }
+            }
+        }
+        if acc_id.is_some() { self.pinned.pop(); }
+        self.pinned.pop();
+        if let Some(e) = early { return Ok(e); }
+        Ok(match mode {
+            IterMode::Select | IterMode::Reject => Value::Hash(acc_id.unwrap()),
+            IterMode::Find => find_val,
+            IterMode::Any | IterMode::All | IterMode::NoneM => Value::Bool(bool_acc),
+        })
+    }
+
+    /// Same shape as `iter_array_filter`, but iterates an Int Range.
+    /// Returns `None` (Option) to the caller if the range's endpoints
+    /// aren't both Ints — callers fall through to NoMethodError.
+    pub(crate) fn iter_range_filter(&mut self, id: ObjId, mode: IterMode, block: &Rc<BlockHandle>) -> Result<Option<Value>, Trap> {
+        let (bi, ei, excl) = {
+            let r = self.heap.range(id);
+            match (&r.begin, &r.end) {
+                (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                _ => return Ok(None),
+            }
+        };
+        self.pinned.push(Value::Range(id));
+        let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
+            self.maybe_gc();
+            self.check_alloc()?;
+            let rid = self.heap.alloc(HeapObj::Array(Vec::new()));
+            self.pinned.push(Value::Array(rid));
+            Some(rid)
+        } else { None };
+        let pre_frames = self.frames.len();
+        let mut early: Option<Value> = None;
+        let mut find_val = Value::Nil;
+        let mut bool_acc = mode.bool_init();
+        let end_inc = if excl { ei - 1 } else { ei };
+        let mut i = bi;
+        while i <= end_inc {
+            self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+            self.dispatch_until(pre_frames)?;
+            let r = self.stack.pop().unwrap_or(Value::Nil);
+            if self.break_signaled {
+                self.break_signaled = false;
+                early = Some(r);
+                break;
+            }
+            let truthy = r.is_truthy();
+            match mode {
+                IterMode::Select => if truthy { self.heap.array_mut(acc_id.unwrap()).push(Value::Int(i)); }
+                IterMode::Reject => if !truthy { self.heap.array_mut(acc_id.unwrap()).push(Value::Int(i)); }
+                IterMode::Find => if truthy { find_val = Value::Int(i); break; }
+                IterMode::Any => if truthy { bool_acc = true; break; }
+                IterMode::All => if !truthy { bool_acc = false; break; }
+                IterMode::NoneM => if truthy { bool_acc = false; break; }
+            }
+            i += 1;
+        }
+        if acc_id.is_some() { self.pinned.pop(); }
+        self.pinned.pop();
+        if let Some(e) = early { return Ok(Some(e)); }
+        Ok(Some(match mode {
+            IterMode::Select | IterMode::Reject => Value::Array(acc_id.unwrap()),
+            IterMode::Find => find_val,
+            IterMode::Any | IterMode::All | IterMode::NoneM => Value::Bool(bool_acc),
+        }))
+    }
+
     pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: &Rc<BlockHandle>) -> Result<Option<Value>, Trap> {
         Ok(match (recv, name, args) {
             (Value::Array(id), "each", []) => {
@@ -768,6 +950,27 @@ impl Vm {
                 self.pinned.pop();
                 Some(early.unwrap_or(Value::Range(*id)))
             }
+            (Value::Array(id), "select", []) | (Value::Array(id), "filter", []) => Some(self.iter_array_filter(*id, IterMode::Select, block)?),
+            (Value::Array(id), "reject", []) => Some(self.iter_array_filter(*id, IterMode::Reject, block)?),
+            (Value::Array(id), "find", []) | (Value::Array(id), "detect", []) => Some(self.iter_array_filter(*id, IterMode::Find, block)?),
+            (Value::Array(id), "any?", []) => Some(self.iter_array_filter(*id, IterMode::Any, block)?),
+            (Value::Array(id), "all?", []) => Some(self.iter_array_filter(*id, IterMode::All, block)?),
+            (Value::Array(id), "none?", []) => Some(self.iter_array_filter(*id, IterMode::NoneM, block)?),
+
+            (Value::Hash(id), "select", []) | (Value::Hash(id), "filter", []) => Some(self.iter_hash_filter(*id, IterMode::Select, block)?),
+            (Value::Hash(id), "reject", []) => Some(self.iter_hash_filter(*id, IterMode::Reject, block)?),
+            (Value::Hash(id), "find", []) | (Value::Hash(id), "detect", []) => Some(self.iter_hash_filter(*id, IterMode::Find, block)?),
+            (Value::Hash(id), "any?", []) => Some(self.iter_hash_filter(*id, IterMode::Any, block)?),
+            (Value::Hash(id), "all?", []) => Some(self.iter_hash_filter(*id, IterMode::All, block)?),
+            (Value::Hash(id), "none?", []) => Some(self.iter_hash_filter(*id, IterMode::NoneM, block)?),
+
+            (Value::Range(id), "select", []) | (Value::Range(id), "filter", []) => self.iter_range_filter(*id, IterMode::Select, block)?,
+            (Value::Range(id), "reject", []) => self.iter_range_filter(*id, IterMode::Reject, block)?,
+            (Value::Range(id), "find", []) | (Value::Range(id), "detect", []) => self.iter_range_filter(*id, IterMode::Find, block)?,
+            (Value::Range(id), "any?", []) => self.iter_range_filter(*id, IterMode::Any, block)?,
+            (Value::Range(id), "all?", []) => self.iter_range_filter(*id, IterMode::All, block)?,
+            (Value::Range(id), "none?", []) => self.iter_range_filter(*id, IterMode::NoneM, block)?,
+
             (Value::Range(id), "map", []) => {
                 let (bi, ei, excl) = {
                     let r = self.heap.range(*id);
