@@ -229,10 +229,27 @@ fn perform_parallel_install(reqs: &[GemRequirement]) {
 // Utilities
 // -----------------------------------------------------------------------------
 fn clean_version(v: &str) -> String {
-    let cleaned: String = v.chars()
-        .filter(|&c| c.is_digit(10) || c == '.' || c == '-')
+    // Strip leading constraint operators (~>, >=, <=, >, <, =, ~, !)
+    let stripped = v.trim_start_matches(|c: char| c == '~' || c == '>' || c == '<' || c == '=' || c == '!' || c == ' ');
+    // Keep alphanumeric, dots, and hyphens (preserves pre-release tags like rc, beta)
+    let cleaned: String = stripped.chars()
+        .filter(|&c| c.is_alphanumeric() || c == '.' || c == '-')
         .collect();
-    let trimmed = cleaned.trim_matches('.');
+    // Collapse consecutive dots and trim edges
+    let mut collapsed = String::new();
+    let mut prev_dot = false;
+    for c in cleaned.chars() {
+        if c == '.' {
+            if !prev_dot && !collapsed.is_empty() {
+                collapsed.push(c);
+            }
+            prev_dot = true;
+        } else {
+            prev_dot = false;
+            collapsed.push(c);
+        }
+    }
+    let trimmed = collapsed.trim_matches('.');
     if trimmed.is_empty() {
         return "1.0.0".to_string();
     }
