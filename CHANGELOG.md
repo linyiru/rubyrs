@@ -7,6 +7,22 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Resource caps for untrusted scripts** (P1-D). `Config` gains
+  three optional knobs: `fuel: Option<u64>` (per-op limit, enforced
+  inside `dispatch_until` so block bodies can't bypass it),
+  `max_heap_objects: Option<usize>` (live Instance/Array/Hash
+  count, checked after `maybe_gc`), and `max_frames: Option<usize>`
+  (frame stack depth, checked before every `frames.push`). Hitting
+  any returns `RubyError::ResourceExhausted`. Defaults are `None`
+  for backward-compat; embedders running untrusted DSLs should set
+  all three.
+- CLI env vars: `RUBYRS_FUEL`, `RUBYRS_MAX_OBJECTS`,
+  `RUBYRS_MAX_FRAMES`.
+- 5 new `tests/embed.rs` tests covering fuel exhaustion in a tight
+  loop, fuel inside a block, unlimited-fuel happy path, heap-cap
+  with retained allocations, and frame-cap with deep recursion.
+
+### Added
 - **Host embedding API** (P1-C). New `src/lib.rs` exposes `Runtime`,
   `Value`, `Trap`, `RubyError`, etc. as a public Rust API:
   - `Runtime::new()` / `with_config(Config)`

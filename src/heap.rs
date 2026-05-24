@@ -22,11 +22,15 @@ pub(crate) struct Heap {
     pub(crate) free: Vec<u32>,
     pub(crate) live_count: usize,
     pub(crate) next_gc: usize,
+    /// When `Some(n)`, the runtime refuses to allocate past `n` live
+    /// objects; the caller traps with `ResourceExhausted`. Hosts running
+    /// untrusted scripts should set this; default (None) is unlimited.
+    pub(crate) max_live: Option<usize>,
 }
 
 impl Heap {
     pub(crate) fn new() -> Self {
-        Heap { slots: vec![], marks: vec![], free: vec![], live_count: 0, next_gc: 1024 }
+        Heap { slots: vec![], marks: vec![], free: vec![], live_count: 0, next_gc: 1024, max_live: None }
     }
     pub(crate) fn alloc(&mut self, obj: HeapObj) -> ObjId {
         self.live_count += 1;

@@ -42,6 +42,9 @@ pub enum RubyError {
     TypeError { msg: String },
     RuntimeError { msg: String },
     NameError { msg: String },
+    /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
+    /// when a Runtime was configured with caps for untrusted scripts.
+    ResourceExhausted { msg: String },
 }
 
 impl RubyError {
@@ -53,6 +56,7 @@ impl RubyError {
             RubyError::TypeError { .. } => "TypeError",
             RubyError::RuntimeError { .. } => "RuntimeError",
             RubyError::NameError { .. } => "NameError",
+            RubyError::ResourceExhausted { .. } => "ResourceExhausted",
         }
     }
     pub(crate) fn message(&self) -> String {
@@ -61,7 +65,8 @@ impl RubyError {
             | RubyError::ArgumentError { msg }
             | RubyError::TypeError { msg }
             | RubyError::RuntimeError { msg }
-            | RubyError::NameError { msg } => msg.clone(),
+            | RubyError::NameError { msg }
+            | RubyError::ResourceExhausted { msg } => msg.clone(),
             RubyError::NoMethodError { method, recv_type } => {
                 format!("undefined method `{}' for {}", method, recv_type)
             }

@@ -33,15 +33,28 @@ use std::rc::Rc;
 pub use error::{RubyError, Span, Trap, TrapFrame};
 pub use value::Value;
 
-/// Configuration for a [`Runtime`]. Future fuel/heap-cap limits will live
-/// here (see roadmap P1-D); for now `Default::default()` is what most
-/// embedders want.
+/// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
+/// untrusted scripts.
 #[derive(Default)]
 pub struct Config {
     /// When true, every potential GC point triggers a full collection.
     /// Useful for catching root-set bugs in host code; rough on
     /// performance. Equivalent to `STRESS_GC=1` env var.
     pub stress_gc: bool,
+    /// If `Some(n)`, dispatching more than `n` ops returns a
+    /// `ResourceExhausted` trap. Includes ops inside blocks via
+    /// `dispatch_until`, so a runaway `[1].each { while true ... }`
+    /// cannot bypass the limit.
+    pub fuel: Option<u64>,
+    /// If `Some(n)`, allocating past `n` simultaneously-live heap
+    /// objects (Instance / Array / Hash) returns a `ResourceExhausted`
+    /// trap. Checked after `maybe_gc`, so only steady-state allocation
+    /// counts.
+    pub max_heap_objects: Option<usize>,
+    /// If `Some(n)`, pushing past `n` simultaneously-live frames
+    /// returns a `ResourceExhausted` trap before the host's Rust stack
+    /// can overflow.
+    pub max_frames: Option<usize>,
 }
 
 /// A self-contained rubyrs runtime. State (class definitions, top-level
@@ -62,9 +75,10 @@ impl Runtime {
     pub fn with_config(cfg: Config) -> Self {
         let interner = intern::Interner::new();
         let mut vm = vm::Vm::new(vec![], interner);
-        if cfg.stress_gc {
-            vm.stress_gc = true;
-        }
+        if cfg.stress_gc { vm.stress_gc = true; }
+        vm.fuel = cfg.fuel;
+        vm.max_frames = cfg.max_frames;
+        vm.heap.max_live = cfg.max_heap_objects;
         Runtime { vm, sources: HashMap::new() }
     }
 

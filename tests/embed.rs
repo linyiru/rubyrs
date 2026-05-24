@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
-use rubyrs::{Runtime, Value};
+use rubyrs::{Config, Runtime, RubyError, Value};
 
 #[derive(Clone)]
 struct SharedBuf(Rc<RefCell<Vec<u8>>>);
@@ -106,4 +106,74 @@ fn syntax_error_does_not_panic() {
     let mut rt = Runtime::new();
     let res = rt.eval(r#"def foo("#, "broken.rb");
     assert!(res.is_err(), "syntax errors should bubble up as Trap");
+}
+
+// ---------- P1-D: resource caps ----------
+
+#[test]
+fn fuel_traps_infinite_loop() {
+    let mut rt = Runtime::with_config(Config { fuel: Some(10_000), ..Default::default() });
+    let err = rt.eval(r#"i = 0; while true; i = i + 1; end"#, "spin.rb").unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err
+    );
+}
+
+#[test]
+fn fuel_is_not_bypassed_by_block_iteration() {
+    // Without per-op fuel inside dispatch_until, an each-block could spin forever.
+    let mut rt = Runtime::with_config(Config { fuel: Some(50_000), ..Default::default() });
+    let err = rt.eval(
+        r#"
+        nums = []
+        i = 0
+        while i < 100
+          nums << i
+          i = i + 1
+        end
+        nums.each { |x| j = 0; while true; j = j + 1; end }
+        "#,
+        "spin_in_block.rb",
+    ).unwrap_err();
+    assert!(matches!(err.err, RubyError::ResourceExhausted { .. }));
+}
+
+#[test]
+fn unlimited_fuel_runs_normally() {
+    let mut rt = Runtime::new();
+    rt.eval(r#"i = 0; while i < 100; i = i + 1; end"#, "ok.rb").unwrap();
+}
+
+#[test]
+fn heap_cap_traps_retained_allocations() {
+    let mut rt = Runtime::with_config(Config { max_heap_objects: Some(50), ..Default::default() });
+    // Each inner Array is retained via `all`, so live_count grows linearly.
+    let err = rt.eval(
+        r#"
+        all = []
+        i = 0
+        while i < 200
+          all << [i, i + 1]
+          i = i + 1
+        end
+        "#,
+        "alloc_storm.rb",
+    ).unwrap_err();
+    assert!(matches!(err.err, RubyError::ResourceExhausted { .. }));
+}
+
+#[test]
+fn frame_cap_traps_deep_recursion() {
+    let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
+    let err = rt.eval(
+        r#"
+        def rec(n)
+          rec(n + 1)
+        end
+        rec(0)
+        "#,
+        "deep.rb",
+    ).unwrap_err();
+    assert!(matches!(err.err, RubyError::ResourceExhausted { .. }));
 }

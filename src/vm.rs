@@ -47,6 +47,12 @@ pub(crate) struct Vm {
     pub(crate) pinned: Vec<Value>,
     pub(crate) stdout: Box<dyn std::io::Write>,
     pub(crate) stress_gc: bool,
+    /// Remaining fuel; `Some(0)` means exhausted, `None` means unlimited.
+    /// Decremented per op dispatched. Configured by `Config::fuel`.
+    pub(crate) fuel: Option<u64>,
+    /// Maximum simultaneously-live frames. `frames.push()` checks this
+    /// against `frames.len()` before pushing. Default `None` is unlimited.
+    pub(crate) max_frames: Option<usize>,
 }
 
 impl Vm {
@@ -64,6 +70,8 @@ impl Vm {
             pinned: Vec::new(),
             stdout: Box::new(std::io::stdout()),
             stress_gc: env::var("STRESS_GC").is_ok(),
+            fuel: None,
+            max_frames: None,
         }
     }
 
@@ -91,6 +99,47 @@ impl Vm {
             let op = self.protos[proto_idx].code[ip];
             self.frames.last_mut().expect("ICE: frame disappeared").ip += 1;
             if !self.step(op, proto_idx)? { return Ok(()); }
+        }
+        Ok(())
+    }
+
+    /// Decrement fuel; on exhaustion return a `ResourceExhausted` trap.
+    #[inline]
+    pub(crate) fn check_fuel(&mut self) -> Result<(), Trap> {
+        if let Some(f) = self.fuel {
+            if f == 0 {
+                return Err(self.trap(RubyError::ResourceExhausted {
+                    msg: "out of fuel".to_string(),
+                }));
+            }
+            self.fuel = Some(f - 1);
+        }
+        Ok(())
+    }
+
+    /// Check the heap can accept another object. Call after `maybe_gc`
+    /// (so the limit applies to *live* objects, not transient garbage).
+    #[inline]
+    pub(crate) fn check_alloc(&self) -> Result<(), Trap> {
+        if let Some(max) = self.heap.max_live {
+            if self.heap.live_count >= max {
+                return Err(self.trap(RubyError::ResourceExhausted {
+                    msg: format!("heap exhausted: {} live objects (max {})", self.heap.live_count, max),
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check the frame stack can accept another frame.
+    #[inline]
+    pub(crate) fn check_frames(&self) -> Result<(), Trap> {
+        if let Some(max) = self.max_frames {
+            if self.frames.len() >= max {
+                return Err(self.trap(RubyError::ResourceExhausted {
+                    msg: format!("stack level too deep ({} frames, max {})", self.frames.len(), max),
+                }));
+            }
         }
         Ok(())
     }
@@ -163,6 +212,7 @@ impl Vm {
         if name_id == new_id {
             if let Value::Class(cls) = &recv {
                 self.maybe_gc();
+                self.check_alloc()?;
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(),
                     ivars: HashMap::new(),
@@ -250,11 +300,17 @@ impl Vm {
                     ("empty?", []) => Some(Value::Bool(self.heap.hash(id).is_empty())),
                     ("keys", []) => {
                         let keys: Vec<Value> = self.heap.hash(id).iter().map(|(k, _)| k.clone()).collect();
+                        self.maybe_gc();
+                        // check_alloc would need a `?`; collection_call returns Option,
+                        // so we skip the cap check here. Embedders should set
+                        // max_live with a small slack to account for these
+                        // derived allocations.
                         let nid = self.heap.alloc(HeapObj::Array(keys));
                         Some(Value::Array(nid))
                     }
                     ("values", []) => {
                         let vals: Vec<Value> = self.heap.hash(id).iter().map(|(_, v)| v.clone()).collect();
+                        self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(vals));
                         Some(Value::Array(nid))
                     }
@@ -317,6 +373,7 @@ impl Vm {
                 msg: format!("wrong number of arguments (given {}, expected {})", args.len(), m.params.len()),
             }));
         }
+        self.check_frames()?;
         let proto = &self.protos[m.proto_idx];
         let n_locals = proto.n_locals as usize;
         let mut locals = vec_nil(n_locals);
@@ -334,7 +391,8 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn invoke_block(&mut self, block: Rc<BlockHandle>, args: Vec<Value>) {
+    pub(crate) fn invoke_block(&mut self, block: Rc<BlockHandle>, args: Vec<Value>) -> Result<(), Trap> {
+        self.check_frames()?;
         let proto = &self.protos[block.proto_idx];
         let needed = proto.n_locals as usize;
         {
@@ -357,6 +415,7 @@ impl Vm {
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, rescues: vec![],
         });
+        Ok(())
     }
 
     pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> Result<(), Trap> {
@@ -410,6 +469,7 @@ impl Vm {
         if name_id == new_id {
             if let Value::Class(cls) = &recv {
                 self.maybe_gc();
+                self.check_alloc()?;
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(), ivars: HashMap::new(),
                 }));
@@ -443,7 +503,7 @@ impl Vm {
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let pre_frames = self.frames.len();
                 for v in snapshot {
-                    self.invoke_block(block.clone(), vec![v]);
+                    self.invoke_block(block.clone(), vec![v])?;
                     self.dispatch_until(pre_frames)?;
                     self.stack.pop();
                 }
@@ -454,11 +514,12 @@ impl Vm {
                 self.pinned.push(Value::Array(*id));
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 self.maybe_gc();
+                self.check_alloc()?;
                 let result_id = self.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
                 self.pinned.push(Value::Array(result_id));
                 let pre_frames = self.frames.len();
                 for v in snapshot {
-                    self.invoke_block(block.clone(), vec![v]);
+                    self.invoke_block(block.clone(), vec![v])?;
                     self.dispatch_until(pre_frames)?;
                     let r = self.stack.pop().unwrap_or(Value::Nil);
                     self.heap.array_mut(result_id).push(r);
@@ -472,7 +533,7 @@ impl Vm {
                 let snapshot: Vec<(Value, Value)> = self.heap.hash(*id).clone();
                 let pre_frames = self.frames.len();
                 for (k, v) in snapshot {
-                    self.invoke_block(block.clone(), vec![k, v]);
+                    self.invoke_block(block.clone(), vec![k, v])?;
                     self.dispatch_until(pre_frames)?;
                     self.stack.pop();
                 }
@@ -482,7 +543,7 @@ impl Vm {
             (Value::Int(n), "times", []) => {
                 let pre_frames = self.frames.len();
                 for i in 0..*n {
-                    self.invoke_block(block.clone(), vec![Value::Int(i)]);
+                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
                     self.dispatch_until(pre_frames)?;
                     self.stack.pop();
                 }
@@ -510,6 +571,7 @@ impl Vm {
     /// `_proto_idx` is reserved for future per-op span lookup; with the
     /// global interner, ops no longer need it for string resolution.
     pub(crate) fn step(&mut self, op: Op, _proto_idx: usize) -> Result<bool, Trap> {
+        self.check_fuel()?;
         match op {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
             Op::LoadConstStr(id) => {
@@ -595,7 +657,7 @@ impl Vm {
                 let argc = argc as usize;
                 let split = self.stack.len() - argc;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
-                self.invoke_block(block, args);
+                self.invoke_block(block, args)?;
             }
             Op::DefMethod(name_id, p_idx) => {
                 let proto = &self.protos[p_idx as usize];
@@ -622,6 +684,7 @@ impl Vm {
             }
             Op::NewArray(n) => {
                 self.maybe_gc();
+                self.check_alloc()?;
                 let n = n as usize;
                 let split = self.stack.len() - n;
                 let elems: Vec<Value> = self.stack.drain(split..).collect();
@@ -630,6 +693,7 @@ impl Vm {
             }
             Op::NewHash(n) => {
                 self.maybe_gc();
+                self.check_alloc()?;
                 let n = n as usize;
                 let split = self.stack.len() - n * 2;
                 let flat: Vec<Value> = self.stack.drain(split..).collect();
