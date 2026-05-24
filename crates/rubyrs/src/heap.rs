@@ -92,20 +92,38 @@ impl Heap {
         for m in self.marks.iter_mut() { *m = false; }
         let mut worklist: Vec<ObjId> = Vec::new();
         for v in roots { Heap::visit_value(v, &mut self.marks, &mut worklist); }
+        // Mark phase: iterate each greyed object's children in place.
+        // The previous impl `let children: Vec<Value> = ...clone()` per
+        // pop step turned every mark visit into a full copy of the
+        // container's contents — quadratic on a heap that's mostly one
+        // large Array. Split-borrow `self.slots` (read) vs `self.marks`
+        // (write) on disjoint fields lets us walk references directly.
         while let Some(id) = worklist.pop() {
-            let children: Vec<Value> = match &self.slots[id.0 as usize] {
-                Slot::Live(HeapObj::Instance(i)) => i.ivars.values().cloned().collect(),
-                Slot::Live(HeapObj::Array(a)) => a.clone(),
-                Slot::Live(HeapObj::Hash(h)) => {
-                    let mut v = Vec::with_capacity(h.len() * 2);
-                    for (k, val) in h { v.push(k.clone()); v.push(val.clone()); }
-                    v
+            match &self.slots[id.0 as usize] {
+                Slot::Live(HeapObj::Instance(inst)) => {
+                    for v in inst.ivars.values() {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
                 }
-                Slot::Live(HeapObj::Range(r)) => vec![r.begin.clone(), r.end.clone()],
-                _ => vec![],
-            };
-            for v in &children { Heap::visit_value(v, &mut self.marks, &mut worklist); }
+                Slot::Live(HeapObj::Array(a)) => {
+                    for v in a {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                }
+                Slot::Live(HeapObj::Hash(h)) => {
+                    for (k, v) in h {
+                        Heap::visit_value(k, &mut self.marks, &mut worklist);
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                }
+                Slot::Live(HeapObj::Range(r)) => {
+                    Heap::visit_value(&r.begin, &mut self.marks, &mut worklist);
+                    Heap::visit_value(&r.end, &mut self.marks, &mut worklist);
+                }
+                _ => {}
+            }
         }
+        // Sweep phase: unchanged from before.
         let mut live = 0usize;
         for i in 0..self.slots.len() {
             match &self.slots[i] {

@@ -7,6 +7,25 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Changed
+- **GC mark walks children in place instead of cloning** (P0-3).
+  `Heap::collect`'s mark phase previously built a fresh
+  `Vec<Value>` per popped worklist entry by cloning the entire
+  `HeapObj::Array` / `HeapObj::Hash` / `HeapObj::Instance.ivars`
+  contents on every visit. On a heap whose largest object is one
+  big Array, that turned each full collection into quadratic
+  work and pushed stress-GC runs into wall-clock territory the
+  test suite would actually notice. Rewrote the loop to
+  split-borrow `self.slots` (read) against `self.marks` (write)
+  on disjoint fields and iterate children by reference — no
+  intermediate allocation, same mark/sweep semantics. The
+  external `visit_value` signature is unchanged so the Block
+  walk path (which still clones `BlockHandle.captured`) keeps
+  working until `BlockHandle` moves into the heap in P2-13.
+  Existing 1M-fizzbuzz benchmark is unaffected (~307ms steady)
+  because fizzbuzz isn't GC-bound; the win is on workloads with
+  many or large container objects.
+
+### Changed
 - **`Vm.pinned` is now managed by a `PinGuard` RAII type** (P0-2).
   Native iterator drivers — Array/Hash/Range `#each` / `#map`,
   `#each_with_index`, the Enumerable filter family
