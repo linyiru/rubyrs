@@ -21,12 +21,25 @@ pub enum Value {
     Array(ObjId),
     Hash(ObjId),
     Range(ObjId),
-    Block(Rc<BlockHandle>),
+    /// `Proc`-flavoured block value. Heap-managed since P2-13 —
+    /// before that this was `Block(Rc<BlockHandle>)`, which formed
+    /// an Rc cycle whenever a block's `captured` slots held the
+    /// block itself (e.g. `p = proc { p }` patterns common in
+    /// callback DSLs). Now the BlockHandle lives in a heap slot
+    /// and is mark-swept like Array/Hash/Range.
+    Block(ObjId),
 }
 
 #[derive(Debug)]
 pub struct BlockHandle {
     pub(crate) proto_idx: usize,
+    /// Shared with the frame the block executes in: when
+    /// `Vm::invoke_block` pushes a frame for this block, the frame
+    /// borrows the SAME `Rc<RefCell<Vec<Value>>>`, so writes to
+    /// outer-frame variables inside the block are visible to
+    /// subsequent invocations. The Rc here is shared frame-wise,
+    /// not as a back-edge for ownership of the BlockHandle itself
+    /// — that's the heap slot's job.
     pub(crate) captured: Rc<RefCell<Vec<Value>>>,
     pub(crate) self_val: Value,
     pub(crate) param_start: u16,

@@ -6,6 +6,35 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Changed
+- **`BlockHandle` now lives in the GC heap** (P2-13). `Value::Block`
+  changed from `Rc<BlockHandle>` to `ObjId`, and `HeapObj` gained
+  a `Block(BlockHandle)` variant. `Heap::collect` walks
+  `BlockHandle.captured` and `self_val` as children, putting
+  blocks on the same mark/sweep footing as `Array` / `Hash` /
+  `Range`. `Frame.block_arg` and every function that previously
+  took `Rc<BlockHandle>` (`invoke_block`, `invoke_method_with_block`,
+  the iterator drivers, `collection_call_block`) now take an
+  `ObjId`. Inline `block.clone()` Rc-bumps disappear — `ObjId`
+  is `Copy`. Iterator drivers (`iter_array_filter` etc.) and
+  every inline block-arm in `collection_call_block` now pin the
+  block alongside the source receiver so the GC's root walk
+  reaches it during the iteration. Without this, the existing
+  `pin_guard_balanced_when_block_raises_inside_iterator` test
+  would have caught a slot-reuse panic immediately.
+  Why this matters: with the `Rc<BlockHandle>` form, a block
+  that captured itself (e.g. callback-DSL `proc { p }` patterns
+  once `proc` / `lambda` are added — P3+) formed an Rc cycle
+  that the mark-sweep collector couldn't reach to break.
+  Eliminating that future hazard is the structural payoff.
+  Subset doesn't expose `proc` yet, so this is largely
+  preventive maintenance, but the iterator paths exercise the
+  new heap-block plumbing every test run. `heap.rs` panic
+  budget bumped from 9 to 10 (the new `heap.block(id)` accessor).
+  New regression test `blocks_are_gc_reclaimed_under_stress`
+  loops 200× over `[1,2,3].each { ... }` with stress-GC and a
+  `max_heap_objects: 50` cap, proving blocks get reclaimed.
+
 ### Added
 - **`rescue ClassName => e` (class-filtered rescue)** and
   multiple `rescue` clauses per `begin/end` (P1-10). `RescueClause`

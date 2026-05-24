@@ -25,16 +25,22 @@ Every site falls into one of three buckets:
 | 🟡 **ICE-but-fuzzy** | Theoretically an invariant, but hard to prove. Reachable via internal bugs (e.g. GC slot reuse), not directly by user code. | Keep, but exercise via cargo-fuzz (P3-17). |
 | 🔴 **User-reachable** | A specific Ruby program triggers it. Bug-class. | Convert to `Trap`. |
 
-## Current budget (2026-05-24, after P0-4)
+## Current budget (2026-05-24, after P0-4 + P2-13)
 
 | File | Count | All ICE? |
 |---|---|---|
 | `crates/rubyrs/src/vm.rs` | 61 | 🟢 |
-| `crates/rubyrs/src/heap.rs` | 9 | 🟡 |
+| `crates/rubyrs/src/heap.rs` | 10 | 🟡 |
 | `crates/rubyrs/src/ast.rs` | 3 | 🟢 |
 | `crates/rubyrs/src/lib.rs` | 1 | 🟢 (bootstrap) |
 | `crates/rubyrs/src/compiler.rs` | 1 | 🟢 |
-| **Total (excl. doc comments)** | **75** | |
+| **Total (excl. doc comments)** | **76** | |
+
+P2-13 bumped heap.rs from 9 to 10 by adding the
+`heap.block(id) -> &BlockHandle` accessor (a "heap slot is not
+a Block" panic of the same shape as the existing array/hash/range
+accessors). Same 🟡 classification — only reachable via a real
+GC slot-reuse bug.
 
 CI threshold is set per-file to these exact numbers. Any
 increase fails the build.

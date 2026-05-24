@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::intern::Interner;
-use crate::value::{Instance, ObjId, Value};
+use crate::value::{BlockHandle, Instance, ObjId, Value};
 
 // ---------- GC Heap ----------
 
@@ -10,6 +10,10 @@ pub(crate) enum HeapObj {
     Array(Vec<Value>),
     Hash(Vec<(Value, Value)>),
     Range(RangeObj),
+    /// A `proc { ... }` value. Lives in the heap (P2-13) so blocks
+    /// participate in mark-sweep — earlier `Rc<BlockHandle>` form
+    /// cycled whenever a block's `captured` held the block itself.
+    Block(BlockHandle),
 }
 
 /// A Ruby Range. For our subset, both endpoints must be `Value::Int`.
@@ -86,6 +90,9 @@ impl Heap {
     pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
         if let HeapObj::Range(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Range") }
     }
+    pub(crate) fn block(&self, id: ObjId) -> &BlockHandle {
+        if let HeapObj::Block(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a Block") }
+    }
     pub(crate) fn should_gc(&self) -> bool { self.live_count >= self.next_gc }
 
     pub(crate) fn collect(&mut self, roots: &[Value]) {
@@ -120,6 +127,21 @@ impl Heap {
                     Heap::visit_value(&r.begin, &mut self.marks, &mut worklist);
                     Heap::visit_value(&r.end, &mut self.marks, &mut worklist);
                 }
+                Slot::Live(HeapObj::Block(bh)) => {
+                    // Walk captured locals (shared Rc<RefCell> with
+                    // any frame currently executing this block, but
+                    // immutably borrowed only here) and the block's
+                    // `self_val`. The visit_value calls do not
+                    // recurse — they mark + worklist-push only —
+                    // so the RefCell borrow stays scoped to this
+                    // arm and can't conflict with itself.
+                    let captured = bh.captured.borrow();
+                    for v in captured.iter() {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    drop(captured);
+                    Heap::visit_value(&bh.self_val, &mut self.marks, &mut worklist);
+                }
                 _ => {}
             }
         }
@@ -143,18 +165,12 @@ impl Heap {
 
     pub(crate) fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
         match v {
-            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) => {
+            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) | Value::Block(id) => {
                 let i = id.0 as usize;
                 if !marks[i] {
                     marks[i] = true;
                     worklist.push(*id);
                 }
-            }
-            Value::Block(b) => {
-                // Walk captured locals; also walk self_val
-                let snapshot: Vec<Value> = b.captured.borrow().iter().cloned().collect();
-                for v in &snapshot { Heap::visit_value(v, marks, worklist); }
-                Heap::visit_value(&b.self_val.clone(), marks, worklist);
             }
             _ => {}
         }
@@ -177,7 +193,7 @@ impl Value {
             Value::Array(_) => "Array",
             Value::Hash(_) => "Hash",
             Value::Range(_) => "Range",
-            Value::Block(_) => "Proc",
+            Value::Block(_) => "Proc", // block lives in heap now (P2-13); type name unchanged
         }
     }
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {

@@ -83,7 +83,7 @@ jobs:
             fi
           }
           check crates/rubyrs/src/vm.rs       61
-          check crates/rubyrs/src/heap.rs      9
+          check crates/rubyrs/src/heap.rs     10
           check crates/rubyrs/src/ast.rs       3
           check crates/rubyrs/src/lib.rs       1
           check crates/rubyrs/src/compiler.rs  1

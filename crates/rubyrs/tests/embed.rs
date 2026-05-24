@@ -375,6 +375,36 @@ fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
 }
 
 #[test]
+fn blocks_are_gc_reclaimed_under_stress() {
+    // P2-13 regression: with BlockHandle now in the GC heap, a
+    // tight loop that creates many block values must let the GC
+    // reclaim each block once the iteration moves on. Before
+    // P2-13 blocks were Rc-managed and a (then-theoretical)
+    // self-capturing cycle would leak; now they're swept like
+    // Array/Hash.
+    //
+    // We set a small heap cap so any leak surfaces as a
+    // ResourceExhausted trap rather than a slow degradation.
+    // 200 iterations × {1 Array + 1 Block per iter} = 400 allocs.
+    // Steady-state live_count should be O(1), well under 50.
+    let mut rt = Runtime::with_config(Config {
+        stress_gc: true,
+        max_heap_objects: Some(50),
+        ..Default::default()
+    });
+    rt.eval(
+        r#"
+        i = 0
+        while i < 200
+          [1, 2, 3].each { |x| i = i + 1 }
+        end
+        puts i
+        "#,
+        "many_blocks.rb",
+    ).unwrap();
+}
+
+#[test]
 fn frame_cap_traps_deep_recursion() {
     let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
     let err = rt.eval(

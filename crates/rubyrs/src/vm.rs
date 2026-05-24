@@ -60,7 +60,12 @@ pub(crate) struct Frame {
     pub(crate) base_sp: usize,
     pub(crate) is_class_body: bool,
     pub(crate) swap_return: Option<Value>,
-    pub(crate) block_arg: Option<Rc<BlockHandle>>,
+    /// Block passed to this method, as a heap-managed `Value::Block`
+    /// id. Used by `yield`. `None` if the method was called without
+    /// a block. Since P2-13 the block lives in the GC heap and we
+    /// reference it by `ObjId` — earlier code held an
+    /// `Rc<BlockHandle>` here which could cycle.
+    pub(crate) block_arg: Option<ObjId>,
     pub(crate) rescues: Vec<RescueHandler>,
 }
 
@@ -989,9 +994,12 @@ impl Vm {
             roots.push(f.self_val.clone());
             for v in f.locals.borrow().iter() { roots.push(v.clone()); }
             if let Some(v) = &f.swap_return { roots.push(v.clone()); }
-            if let Some(b) = &f.block_arg {
-                for v in b.captured.borrow().iter() { roots.push(v.clone()); }
-                roots.push(b.self_val.clone());
+            if let Some(id) = f.block_arg {
+                // Block lives in the GC heap now (P2-13). Pushing
+                // the Value::Block root is enough — the mark phase
+                // walks the BlockHandle's `captured` and `self_val`
+                // when it reaches the slot.
+                roots.push(Value::Block(id));
             }
         }
         self.heap.collect(&roots);
@@ -1001,7 +1009,7 @@ impl Vm {
         self.invoke_method_with_block(m, self_val, args, None)
     }
 
-    pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<Rc<BlockHandle>>) -> Result<(), Trap> {
+    pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
         if m.params.len() != args.len() {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected {})", args.len(), m.params.len()),
@@ -1025,27 +1033,34 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn invoke_block(&mut self, block: Rc<BlockHandle>, args: Vec<Value>) -> Result<(), Trap> {
+    pub(crate) fn invoke_block(&mut self, block_id: ObjId, args: Vec<Value>) -> Result<(), Trap> {
         self.check_frames()?;
-        let proto = &self.protos[block.proto_idx];
+        // Snapshot what we need out of the block's heap slot before
+        // taking any `&mut self` action. BlockHandle.captured is a
+        // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
+        let (proto_idx, captured, self_val, param_start, n_params) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(), bh.param_start, bh.n_params)
+        };
+        let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         {
-            let mut locals = block.captured.borrow_mut();
+            let mut locals = captured.borrow_mut();
             if locals.len() < needed {
                 while locals.len() < needed { locals.push(Value::Nil); }
             }
             // Place args into the block's param slots
             for (i, a) in args.into_iter().enumerate() {
-                if i < block.n_params as usize {
-                    locals[block.param_start as usize + i] = a;
+                if i < n_params as usize {
+                    locals[param_start as usize + i] = a;
                 }
             }
         }
         self.frames.push(Frame {
-            proto_idx: block.proto_idx,
+            proto_idx,
             ip: 0,
-            locals: block.captured.clone(),
-            self_val: block.self_val.clone(),
+            locals: captured,
+            self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, rescues: vec![],
         });
@@ -1057,7 +1072,7 @@ impl Vm {
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
-        let block = if let Value::Block(b) = block_val { b } else {
+        let block = if let Value::Block(id) = block_val { id } else {
             panic!("ICE: CallBlock without Block value on stack");
         };
         let recv = if no_recv {
@@ -1066,8 +1081,17 @@ impl Vm {
             Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
         };
 
+        // P2-13: `block` (now an ObjId in a Rust local) is no
+        // longer rooted after popping off the stack. Each native
+        // iterator driver (`iter_array_filter`, the inline
+        // `each` / `map` arms, etc.) pins the block alongside its
+        // source receiver, so we don't need a guard at the
+        // dispatch boundary itself. The `invoke_method_with_block`
+        // path on the no_recv / Object-recv branches doesn't
+        // trigger GC before installing the block as the frame's
+        // `block_arg`, so the gap is safe there too.
         if let Some(r) = &recv {
-            if let Some(v) = self.collection_call_block(r, &name, &args, &block)? {
+            if let Some(v) = self.collection_call_block(r, &name, &args, block)? {
                 self.stack.push(v);
                 return Ok(());
             }
@@ -1140,10 +1164,14 @@ impl Vm {
     /// `select` / `reject` / `find` / `any?` / `all?` / `none?`.
     /// On `break val` (caught via `self.break_signaled`) returns `val`
     /// to match CRuby's "break value short-circuits the enumerator".
-    pub(crate) fn iter_array_filter(&mut self, id: ObjId, mode: IterMode, block: &Rc<BlockHandle>) -> Result<Value, Trap> {
+    pub(crate) fn iter_array_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
         let snapshot: Vec<Value> = self.heap.array(id).clone();
         let mut g = PinGuard::new(self);
         g.pin(Value::Array(id));
+        // P2-13: block lives in the GC heap; pin it for the
+        // duration of the iteration so any GC fired by the block
+        // body doesn't sweep it.
+        g.pin(Value::Block(block));
         let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
@@ -1156,7 +1184,7 @@ impl Vm {
         let mut find_val = Value::Nil;
         let mut bool_acc = mode.bool_init();
         for v in snapshot {
-            g.vm.invoke_block(block.clone(), vec![v.clone()])?;
+            g.vm.invoke_block(block,vec![v.clone()])?;
             g.vm.dispatch_until(pre_frames)?;
             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
             if g.vm.break_signaled {
@@ -1186,10 +1214,11 @@ impl Vm {
     /// Same shape as `iter_array_filter`, but the source is a Hash.
     /// The block receives two args (key, value). `select`/`reject`
     /// return a Hash; `find` returns a `[k, v]` two-element Array (or nil).
-    pub(crate) fn iter_hash_filter(&mut self, id: ObjId, mode: IterMode, block: &Rc<BlockHandle>) -> Result<Value, Trap> {
+    pub(crate) fn iter_hash_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
         let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
         let mut g = PinGuard::new(self);
         g.pin(Value::Hash(id));
+        g.pin(Value::Block(block));
         let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
@@ -1202,7 +1231,7 @@ impl Vm {
         let mut find_val = Value::Nil;
         let mut bool_acc = mode.bool_init();
         for (k, v) in snapshot {
-            g.vm.invoke_block(block.clone(), vec![k.clone(), v.clone()])?;
+            g.vm.invoke_block(block,vec![k.clone(), v.clone()])?;
             g.vm.dispatch_until(pre_frames)?;
             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
             if g.vm.break_signaled {
@@ -1237,7 +1266,7 @@ impl Vm {
     /// Same shape as `iter_array_filter`, but iterates an Int Range.
     /// Returns `None` (Option) to the caller if the range's endpoints
     /// aren't both Ints — callers fall through to NoMethodError.
-    pub(crate) fn iter_range_filter(&mut self, id: ObjId, mode: IterMode, block: &Rc<BlockHandle>) -> Result<Option<Value>, Trap> {
+    pub(crate) fn iter_range_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Option<Value>, Trap> {
         let (bi, ei, excl) = {
             let r = self.heap.range(id);
             match (&r.begin, &r.end) {
@@ -1247,6 +1276,7 @@ impl Vm {
         };
         let mut g = PinGuard::new(self);
         g.pin(Value::Range(id));
+        g.pin(Value::Block(block));
         let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
@@ -1261,7 +1291,7 @@ impl Vm {
         let end_inc = if excl { ei - 1 } else { ei };
         let mut i = bi;
         while i <= end_inc {
-            g.vm.invoke_block(block.clone(), vec![Value::Int(i)])?;
+            g.vm.invoke_block(block,vec![Value::Int(i)])?;
             g.vm.dispatch_until(pre_frames)?;
             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
             if g.vm.break_signaled {
@@ -1288,16 +1318,17 @@ impl Vm {
         }))
     }
 
-    pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: &Rc<BlockHandle>) -> Result<Option<Value>, Trap> {
+    pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId) -> Result<Option<Value>, Trap> {
         Ok(match (recv, name, args) {
             (Value::Array(id), "each", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for v in snapshot {
-                    g.vm.invoke_block(block.clone(), vec![v])?;
+                    g.vm.invoke_block(block,vec![v])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1311,6 +1342,7 @@ impl Vm {
             (Value::Array(id), "map", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
@@ -1319,7 +1351,7 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for v in snapshot {
-                    g.vm.invoke_block(block.clone(), vec![v])?;
+                    g.vm.invoke_block(block,vec![v])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1335,11 +1367,12 @@ impl Vm {
                 let id = *id;
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
                 let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    g.vm.invoke_block(block.clone(), vec![k, v])?;
+                    g.vm.invoke_block(block,vec![k, v])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1357,7 +1390,7 @@ impl Vm {
                 let mut early = None;
                 let mut i = start;
                 while i <= stop {
-                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    self.invoke_block(block,vec![Value::Int(i)])?;
                     self.dispatch_until(pre_frames)?;
                     let r = self.stack.pop().unwrap_or(Value::Nil);
                     if self.break_signaled {
@@ -1376,7 +1409,7 @@ impl Vm {
                 let mut early = None;
                 let mut i = start;
                 while i >= stop {
-                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    self.invoke_block(block,vec![Value::Int(i)])?;
                     self.dispatch_until(pre_frames)?;
                     let r = self.stack.pop().unwrap_or(Value::Nil);
                     if self.break_signaled {
@@ -1392,7 +1425,7 @@ impl Vm {
                 let pre_frames = self.frames.len();
                 let mut early = None;
                 for i in 0..*n {
-                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    self.invoke_block(block,vec![Value::Int(i)])?;
                     self.dispatch_until(pre_frames)?;
                     let r = self.stack.pop().unwrap_or(Value::Nil);
                     if self.break_signaled {
@@ -1413,12 +1446,13 @@ impl Vm {
                 };
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Range(*id));
+                g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 let end_inc = if excl { ei - 1 } else { ei };
                 let mut i = bi;
                 while i <= end_inc {
-                    g.vm.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    g.vm.invoke_block(block,vec![Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1433,11 +1467,12 @@ impl Vm {
             (Value::Array(id), "each_with_index", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (i, v) in snapshot.into_iter().enumerate() {
-                    g.vm.invoke_block(block.clone(), vec![v, Value::Int(i as i64)])?;
+                    g.vm.invoke_block(block,vec![v, Value::Int(i as i64)])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1456,12 +1491,13 @@ impl Vm {
                 // types fall through to NoMethodError.
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
                 let mut early = None;
                 for v in snapshot {
-                    g.vm.invoke_block(block.clone(), vec![v.clone()])?;
+                    g.vm.invoke_block(block,vec![v.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let key = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1488,11 +1524,12 @@ impl Vm {
                 if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut acc = snapshot[0].clone();
                 let mut early = None;
                 for v in &snapshot[1..] {
-                    g.vm.invoke_block(block.clone(), vec![acc.clone(), v.clone()])?;
+                    g.vm.invoke_block(block,vec![acc.clone(), v.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1508,11 +1545,12 @@ impl Vm {
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut acc = init.clone();
                 let mut early = None;
                 for v in &snapshot {
-                    g.vm.invoke_block(block.clone(), vec![acc.clone(), v.clone()])?;
+                    g.vm.invoke_block(block,vec![acc.clone(), v.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1528,11 +1566,12 @@ impl Vm {
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut n: i64 = 0;
                 let mut early = None;
                 for v in snapshot {
-                    g.vm.invoke_block(block.clone(), vec![v])?;
+                    g.vm.invoke_block(block,vec![v])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1556,12 +1595,13 @@ impl Vm {
                 if bi > end_inc { return Ok(Some(Value::Nil)); }
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Range(*id));
+                g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut acc = Value::Int(bi);
                 let mut early = None;
                 let mut i = bi + 1;
                 while i <= end_inc {
-                    g.vm.invoke_block(block.clone(), vec![acc.clone(), Value::Int(i)])?;
+                    g.vm.invoke_block(block,vec![acc.clone(), Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1585,12 +1625,13 @@ impl Vm {
                 let end_inc = if excl { ei - 1 } else { ei };
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Range(*id));
+                g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut acc = init.clone();
                 let mut early = None;
                 let mut i = bi;
                 while i <= end_inc {
-                    g.vm.invoke_block(block.clone(), vec![acc.clone(), Value::Int(i)])?;
+                    g.vm.invoke_block(block,vec![acc.clone(), Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1614,12 +1655,13 @@ impl Vm {
                 let end_inc = if excl { ei - 1 } else { ei };
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Range(*id));
+                g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
                 let mut n: i64 = 0;
                 let mut early = None;
                 let mut i = bi;
                 while i <= end_inc {
-                    g.vm.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    g.vm.invoke_block(block,vec![Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1664,6 +1706,7 @@ impl Vm {
                 };
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Range(*id));
+                g.pin(Value::Block(block));
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
@@ -1674,7 +1717,7 @@ impl Vm {
                 let end_inc = if excl { ei - 1 } else { ei };
                 let mut i = bi;
                 while i <= end_inc {
-                    g.vm.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    g.vm.invoke_block(block,vec![Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
@@ -1867,14 +1910,28 @@ impl Vm {
                 self.do_call_block(name_id, argc as usize, true, cache_id)?;
             }
             Op::CreateBlock(p_idx, param_start, n_params) => {
-                let f = self.frames.last().expect("ICE: CreateBlock no frame");
-                let captured = f.locals.clone();
-                let self_val = f.self_val.clone();
-                let h = BlockHandle { proto_idx: p_idx as usize, captured, self_val, param_start, n_params };
-                self.stack.push(Value::Block(Rc::new(h)));
+                // Snapshot the surrounding frame's captured locals
+                // (shared Rc with subsequent invocations of this
+                // block) and self before any mutable borrow of
+                // `self`, then allocate the BlockHandle into the
+                // heap. The stack value is a plain `ObjId`.
+                let (captured, self_val) = {
+                    let f = self.frames.last().expect("ICE: CreateBlock no frame");
+                    (f.locals.clone(), f.self_val.clone())
+                };
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Block(BlockHandle {
+                    proto_idx: p_idx as usize,
+                    captured,
+                    self_val,
+                    param_start,
+                    n_params,
+                }));
+                self.stack.push(Value::Block(id));
             }
             Op::Yield(argc) => {
-                let block = match self.frames.last().expect("ICE: Yield no frame").block_arg.clone() {
+                let block = match self.frames.last().expect("ICE: Yield no frame").block_arg {
                     Some(b) => b,
                     None => return Err(self.trap(RubyError::RuntimeError {
                         msg: "no block given (yield)".to_string(),
