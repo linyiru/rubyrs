@@ -6,6 +6,17 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **CRuby-style error format with backtrace** (P0-B-3). Trap output
+  now prints `file:line:in 'method': msg (Class)` plus one
+  `\tfrom file:line:in 'method'` line per frame, structurally
+  matching CRuby. File and line resolve against the source via
+  `error::line_col`.
+- New `tests/fixtures/errors/` directory + `run_error_fixture()` in
+  the integration harness. Each `.rb` has an `.expected_err` golden
+  for stderr; the test expects a non-zero exit. Seeded with
+  `nomethod`, `wrong_args`, `yield_no_block`.
+
 ### Changed
 - **User errors no longer panic the host process** (P0-B-2). Undefined
   method, wrong arity, and `yield` outside a block now build a `Trap`

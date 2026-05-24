@@ -1,0 +1,2 @@
+tests/fixtures/errors/yield_no_block.rb:2:in `shout': no block given (yield) (RuntimeError)
+	from tests/fixtures/errors/yield_no_block.rb:5:in `<main>'

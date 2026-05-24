@@ -1,0 +1,1 @@
+tests/fixtures/errors/wrong_args.rb:5:in `<main>': wrong number of arguments (given 1, expected 2) (ArgumentError)

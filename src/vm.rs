@@ -92,11 +92,10 @@ impl Vm {
         let mut bt = Vec::with_capacity(self.frames.len());
         for f in self.frames.iter().rev() {
             let proto = &self.protos[f.proto_idx];
-            // ip points just past the op we executed; the span we want is the
-            // op we just dispatched, at ip-1.
             let op_ip = if f.ip == 0 { 0 } else { f.ip - 1 };
             let span = proto.op_spans.get(op_ip).copied().unwrap_or(Span::ZERO);
             bt.push(TrapFrame {
+                filename: proto.filename.clone(),
                 method: Rc::from(proto.name.as_str()),
                 span,
             });

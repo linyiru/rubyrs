@@ -71,6 +71,7 @@ impl RubyError {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TrapFrame {
+    pub(crate) filename: Rc<str>,
     pub(crate) method: Rc<str>,
     pub(crate) span: Span,
 }

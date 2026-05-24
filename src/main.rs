@@ -54,25 +54,24 @@ fn main() {
         );
     }
     if let Err(trap) = outcome {
-        eprintln!("{}: {} ({})", trap_origin(&trap), trap.err.message(), trap.err.class_name());
-        for f in trap.backtrace.iter().skip(1) {
-            eprintln!("\tfrom {}:in `{}'", source_loc(&source, f.span.byte_offset), f.method);
-        }
+        print_trap(&trap, &source);
         process::exit(1);
     }
 }
 
-fn trap_origin(trap: &error::Trap) -> String {
-    if let Some(f) = trap.backtrace.first() {
-        // Span resolution happens in main where we still hold `source`.
-        format!("in `{}'", f.method)
+/// Format a Trap in CRuby's `file:line:in 'method': msg (Class)` style.
+fn print_trap(trap: &error::Trap, source: &str) {
+    let frames = &trap.backtrace;
+    let cls = trap.err.class_name();
+    let msg = trap.err.message();
+    if let Some(top) = frames.first() {
+        let (line, _col) = error::line_col(source, top.span.byte_offset);
+        eprintln!("{}:{}:in `{}': {} ({})", top.filename, line, top.method, msg, cls);
+        for f in frames.iter().skip(1) {
+            let (line, _) = error::line_col(source, f.span.byte_offset);
+            eprintln!("\tfrom {}:{}:in `{}'", f.filename, line, f.method);
+        }
     } else {
-        "rubyrs".into()
+        eprintln!("rubyrs: {} ({})", msg, cls);
     }
-}
-
-fn source_loc(_source: &str, _byte_offset: u32) -> String {
-    // Placeholder; the next commit (P0-B-3) replaces this with CRuby-style
-    // "file:line:in `method'" once we have line resolution in place.
-    "?".into()
 }
