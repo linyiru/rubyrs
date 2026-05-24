@@ -1,3 +1,6 @@
+use std::rc::Rc;
+
+use crate::error::Span;
 use crate::value::Value;
 
 // ---------- Bytecode ----------
@@ -84,4 +87,11 @@ pub(crate) struct Proto {
     pub(crate) n_locals: u16,
     pub(crate) code: Vec<Op>,
     pub(crate) strings: Vec<String>,
+    /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.
+    /// Used by Trap formatting in P0-B-2.
+    #[allow(dead_code)]
+    pub(crate) op_spans: Vec<Span>,
+    /// Source filename — used when formatting a Trap backtrace in P0-B-2.
+    #[allow(dead_code)]
+    pub(crate) filename: Rc<str>,
 }

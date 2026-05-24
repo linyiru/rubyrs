@@ -1,63 +1,77 @@
 use ruby_prism::Node;
 
+use crate::error::Span;
+
 // ---------- IR ----------
+
+#[derive(Debug, Clone)]
+pub(crate) struct Spanned<T> {
+    pub(crate) span: Span,
+    pub(crate) node: T,
+}
+
+impl<T> Spanned<T> {
+    pub(crate) fn new(span: Span, node: T) -> Self { Spanned { span, node } }
+}
+
+pub(crate) type SExpr = Spanned<Expr>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum Expr {
     IntLit(i64),
     StrLit(String),
     SymbolLit(String),
-    InterpolatedStr(Vec<Expr>),
+    InterpolatedStr(Vec<SExpr>),
     BoolLit(bool),
     Nil,
     LVarRead(String),
-    LVarWrite(String, Box<Expr>),
+    LVarWrite(String, Box<SExpr>),
     IVarRead(String),
-    IVarWrite(String, Box<Expr>),
+    IVarWrite(String, Box<SExpr>),
     SelfExpr,
     ConstRead(String),
     Call {
-        receiver: Option<Box<Expr>>,
+        receiver: Option<Box<SExpr>>,
         name: String,
-        args: Vec<Expr>,
+        args: Vec<SExpr>,
     },
     If {
-        cond: Box<Expr>,
-        then_body: Vec<Expr>,
-        else_body: Vec<Expr>,
+        cond: Box<SExpr>,
+        then_body: Vec<SExpr>,
+        else_body: Vec<SExpr>,
     },
     While {
-        cond: Box<Expr>,
-        body: Vec<Expr>,
+        cond: Box<SExpr>,
+        body: Vec<SExpr>,
     },
     Def {
         name: String,
         params: Vec<String>,
-        body: Vec<Expr>,
+        body: Vec<SExpr>,
     },
     Class {
         name: String,
-        body: Vec<Expr>,
+        body: Vec<SExpr>,
     },
-    ArrayLit(Vec<Expr>),
-    HashLit(Vec<(Expr, Expr)>),
+    ArrayLit(Vec<SExpr>),
+    HashLit(Vec<(SExpr, SExpr)>),
     CallWithBlock {
-        receiver: Option<Box<Expr>>,
+        receiver: Option<Box<SExpr>>,
         name: String,
-        args: Vec<Expr>,
+        args: Vec<SExpr>,
         block_params: Vec<String>,
-        block_body: Vec<Expr>,
+        block_body: Vec<SExpr>,
     },
-    Yield(Vec<Expr>),
+    Yield(Vec<SExpr>),
     Begin {
-        body: Vec<Expr>,
+        body: Vec<SExpr>,
         rescue: Option<RescueClause>,
     },
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RescueClause {
-    pub(crate) body: Vec<Expr>,
+    pub(crate) body: Vec<SExpr>,
     pub(crate) var: Option<String>,
 }
 
@@ -67,67 +81,77 @@ pub(crate) fn cid_to_string(id: ruby_prism::ConstantId<'_>) -> String {
     String::from_utf8_lossy(id.as_slice()).into_owned()
 }
 
-pub(crate) fn tr(node: &Node<'_>) -> Expr {
+fn node_span(node: &Node<'_>) -> Span {
+    Span::at(node.location().start_offset())
+}
+
+fn sp(node: &Node<'_>, e: Expr) -> SExpr {
+    Spanned::new(node_span(node), e)
+}
+
+pub(crate) fn tr(node: &Node<'_>) -> SExpr {
+    let span = node_span(node);
     if let Some(n) = node.as_program_node() {
-        let stmts: Vec<Expr> = n.statements().body().iter().map(|c| tr(&c)).collect();
+        let stmts: Vec<SExpr> = n.statements().body().iter().map(|c| tr(&c)).collect();
         return if stmts.len() == 1 {
             stmts.into_iter().next().unwrap()
         } else {
-            seq(stmts)
+            Spanned::new(span, seq_inner(stmts))
         };
     }
     if let Some(n) = node.as_statements_node() {
-        let stmts: Vec<Expr> = n.body().iter().map(|c| tr(&c)).collect();
-        return seq(stmts);
+        let stmts: Vec<SExpr> = n.body().iter().map(|c| tr(&c)).collect();
+        return Spanned::new(span, seq_inner(stmts));
     }
     if let Some(n) = node.as_integer_node() {
         let v: i32 = n.value().try_into().unwrap_or(0);
-        return Expr::IntLit(v as i64);
+        return sp(node, Expr::IntLit(v as i64));
     }
     if let Some(n) = node.as_string_node() {
-        return Expr::StrLit(String::from_utf8_lossy(n.unescaped()).into_owned());
+        return sp(node, Expr::StrLit(String::from_utf8_lossy(n.unescaped()).into_owned()));
     }
     if let Some(n) = node.as_symbol_node() {
-        return Expr::SymbolLit(String::from_utf8_lossy(n.unescaped()).into_owned());
+        return sp(node, Expr::SymbolLit(String::from_utf8_lossy(n.unescaped()).into_owned()));
     }
     if let Some(n) = node.as_interpolated_string_node() {
-        let parts: Vec<Expr> = n.parts().iter().map(|p| {
+        let parts: Vec<SExpr> = n.parts().iter().map(|p| {
             if let Some(es) = p.as_embedded_statements_node() {
-                let stmts: Vec<Expr> = es.statements()
+                let stmts: Vec<SExpr> = es.statements()
                     .map(|s| s.body().iter().map(|c| tr(&c)).collect())
                     .unwrap_or_default();
-                if stmts.len() == 1 { stmts.into_iter().next().unwrap() } else { seq(stmts) }
+                if stmts.len() == 1 { stmts.into_iter().next().unwrap() }
+                else { Spanned::new(node_span(&p), seq_inner(stmts)) }
             } else if let Some(ev) = p.as_embedded_variable_node() {
                 tr(&ev.variable())
             } else {
                 tr(&p)
             }
         }).collect();
-        return Expr::InterpolatedStr(parts);
+        return sp(node, Expr::InterpolatedStr(parts));
     }
-    if node.as_true_node().is_some() { return Expr::BoolLit(true); }
-    if node.as_false_node().is_some() { return Expr::BoolLit(false); }
-    if node.as_nil_node().is_some() { return Expr::Nil; }
-    if node.as_self_node().is_some() { return Expr::SelfExpr; }
+    if node.as_true_node().is_some() { return sp(node, Expr::BoolLit(true)); }
+    if node.as_false_node().is_some() { return sp(node, Expr::BoolLit(false)); }
+    if node.as_nil_node().is_some() { return sp(node, Expr::Nil); }
+    if node.as_self_node().is_some() { return sp(node, Expr::SelfExpr); }
     if let Some(n) = node.as_constant_read_node() {
-        return Expr::ConstRead(cid_to_string(n.name()));
+        return sp(node, Expr::ConstRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_local_variable_read_node() {
-        return Expr::LVarRead(cid_to_string(n.name()));
+        return sp(node, Expr::LVarRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_local_variable_write_node() {
-        return Expr::LVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value())));
+        return sp(node, Expr::LVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
     if let Some(n) = node.as_instance_variable_read_node() {
-        return Expr::IVarRead(cid_to_string(n.name()));
+        return sp(node, Expr::IVarRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_instance_variable_write_node() {
-        return Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value())));
+        return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
     if let Some(n) = node.as_call_node() {
         let receiver = n.receiver().map(|r| Box::new(tr(&r)));
         let name = cid_to_string(n.name());
-        let args: Vec<Expr> = n
+        let args: Vec<SExpr> = n
             .arguments()
             .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
@@ -136,7 +160,7 @@ pub(crate) fn tr(node: &Node<'_>) -> Expr {
                 let block_params: Vec<String> = bn.parameters().and_then(|pn| pn.as_block_parameters_node()).and_then(|bp| bp.parameters())
                     .map(|p| p.requireds().iter().filter_map(|r| r.as_required_parameter_node().map(|rp| cid_to_string(rp.name()))).collect())
                     .unwrap_or_default();
-                let block_body: Vec<Expr> = match bn.body() {
+                let block_body: Vec<SExpr> = match bn.body() {
                     Some(b) => {
                         if let Some(stmts) = b.as_statements_node() {
                             stmts.body().iter().map(|c| tr(&c)).collect()
@@ -144,23 +168,23 @@ pub(crate) fn tr(node: &Node<'_>) -> Expr {
                     }
                     None => vec![],
                 };
-                return Expr::CallWithBlock { receiver, name, args, block_params, block_body };
+                return sp(node, Expr::CallWithBlock { receiver, name, args, block_params, block_body });
             }
         }
-        return Expr::Call { receiver, name, args };
+        return sp(node, Expr::Call { receiver, name, args });
     }
     if let Some(n) = node.as_yield_node() {
-        let args: Vec<Expr> = n.arguments()
+        let args: Vec<SExpr> = n.arguments()
             .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
-        return Expr::Yield(args);
+        return sp(node, Expr::Yield(args));
     }
     if let Some(n) = node.as_if_node() {
         let cond = Box::new(tr(&n.predicate()));
-        let then_body: Vec<Expr> = n.statements()
+        let then_body: Vec<SExpr> = n.statements()
             .map(|s| s.body().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
-        let else_body: Vec<Expr> = match n.subsequent() {
+        let else_body: Vec<SExpr> = match n.subsequent() {
             Some(sub) => {
                 if let Some(en) = sub.as_else_node() {
                     en.statements().map(|s| s.body().iter().map(|c| tr(&c)).collect()).unwrap_or_default()
@@ -170,14 +194,14 @@ pub(crate) fn tr(node: &Node<'_>) -> Expr {
             }
             None => vec![],
         };
-        return Expr::If { cond, then_body, else_body };
+        return sp(node, Expr::If { cond, then_body, else_body });
     }
     if let Some(n) = node.as_while_node() {
         let cond = Box::new(tr(&n.predicate()));
-        let body: Vec<Expr> = n.statements()
+        let body: Vec<SExpr> = n.statements()
             .map(|s| s.body().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
-        return Expr::While { cond, body };
+        return sp(node, Expr::While { cond, body });
     }
     if let Some(n) = node.as_def_node() {
         let name = cid_to_string(n.name());
@@ -186,7 +210,7 @@ pub(crate) fn tr(node: &Node<'_>) -> Expr {
                 .filter_map(|r| r.as_required_parameter_node().map(|rp| cid_to_string(rp.name())))
                 .collect()
         }).unwrap_or_default();
-        let body: Vec<Expr> = match n.body() {
+        let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
                     stmts.body().iter().map(|c| tr(&c)).collect()
@@ -194,23 +218,23 @@ pub(crate) fn tr(node: &Node<'_>) -> Expr {
             }
             None => vec![],
         };
-        return Expr::Def { name, params, body };
+        return sp(node, Expr::Def { name, params, body });
     }
     if let Some(n) = node.as_array_node() {
-        let elems: Vec<Expr> = n.elements().iter().map(|e| tr(&e)).collect();
-        return Expr::ArrayLit(elems);
+        let elems: Vec<SExpr> = n.elements().iter().map(|e| tr(&e)).collect();
+        return sp(node, Expr::ArrayLit(elems));
     }
     if let Some(n) = node.as_hash_node() {
-        let pairs: Vec<(Expr, Expr)> = n.elements().iter().filter_map(|e| {
+        let pairs: Vec<(SExpr, SExpr)> = n.elements().iter().filter_map(|e| {
             e.as_assoc_node().map(|a| (tr(&a.key()), tr(&a.value())))
         }).collect();
-        return Expr::HashLit(pairs);
+        return sp(node, Expr::HashLit(pairs));
     }
     if let Some(n) = node.as_class_node() {
         let name = if let Some(cr) = n.constant_path().as_constant_read_node() {
             cid_to_string(cr.name())
         } else { "?".to_string() };
-        let body: Vec<Expr> = match n.body() {
+        let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
                     stmts.body().iter().map(|c| tr(&c)).collect()
@@ -218,14 +242,14 @@ pub(crate) fn tr(node: &Node<'_>) -> Expr {
             }
             None => vec![],
         };
-        return Expr::Class { name, body };
+        return sp(node, Expr::Class { name, body });
     }
     if let Some(n) = node.as_begin_node() {
-        let body: Vec<Expr> = n.statements()
+        let body: Vec<SExpr> = n.statements()
             .map(|s| s.body().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
         let rescue = n.rescue_clause().map(|rc| {
-            let body: Vec<Expr> = rc.statements()
+            let body: Vec<SExpr> = rc.statements()
                 .map(|s| s.body().iter().map(|c| tr(&c)).collect())
                 .unwrap_or_default();
             let var = rc.reference().and_then(|r| {
@@ -233,11 +257,16 @@ pub(crate) fn tr(node: &Node<'_>) -> Expr {
             });
             RescueClause { body, var }
         });
-        return Expr::Begin { body, rescue };
+        return sp(node, Expr::Begin { body, rescue });
     }
     panic!("unsupported node: {:?}", node);
 }
 
-pub(crate) fn seq(stmts: Vec<Expr>) -> Expr {
+fn seq_inner(stmts: Vec<SExpr>) -> Expr {
     Expr::Call { receiver: None, name: "__seq__".to_string(), args: stmts }
+}
+
+#[allow(dead_code)]
+pub(crate) fn seq(stmts: Vec<SExpr>) -> SExpr {
+    Spanned::new(Span::ZERO, seq_inner(stmts))
 }

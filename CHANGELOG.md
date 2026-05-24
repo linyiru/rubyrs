@@ -7,6 +7,15 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Internal
+- **Error / Span infrastructure** (P0-B-1): new `src/error.rs` with
+  `Span` (byte offset into source), `RubyError` (closed set covering
+  SyntaxError / NoMethodError / ArgumentError / TypeError / RuntimeError
+  / NameError), `TrapFrame`, and `Trap` (error + backtrace). `Expr`
+  is now wrapped as `Spanned<Expr>` (alias `SExpr`); `Proto` gets a
+  parallel `op_spans: Vec<Span>` and a `filename: Rc<str>`. The
+  panic→Trap migration itself is the next commit; this one just
+  wires the plumbing so spans flow from Prism → Expr → Op without
+  changing observable behaviour.
 - **Module split** (P1-A): `src/main.rs` (1600 lines) split into
   `ast.rs`, `value.rs`, `heap.rs`, `bytecode.rs`, `compiler.rs`,
   `vm.rs`, plus a 55-line CLI `main.rs`. Move-only refactor:
