@@ -65,6 +65,16 @@ pub(crate) enum Expr {
         block_body: Vec<SExpr>,
     },
     Yield(Vec<SExpr>),
+    /// `return [val]` — exits the current method/block frame with `val`.
+    Return(Option<Box<SExpr>>),
+    /// `next [val]` — exits the current block iteration with `val`.
+    /// Outside a block CRuby raises LocalJumpError; we treat it as Return
+    /// of the current frame (acceptable for the niches we serve).
+    Next(Option<Box<SExpr>>),
+    /// `break [val]` — exits the current block AND terminates the
+    /// iteration in the calling driver (e.g. `arr.each`), making the
+    /// driver's return value `val`.
+    Break(Option<Box<SExpr>>),
     Begin {
         body: Vec<SExpr>,
         rescue: Option<RescueClause>,
@@ -175,6 +185,24 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
         }
         return sp(node, Expr::Call { receiver, name, args });
+    }
+    if let Some(n) = node.as_return_node() {
+        let val = n.arguments().and_then(|a| {
+            a.arguments().iter().next().map(|first| Box::new(tr(&first)))
+        });
+        return sp(node, Expr::Return(val));
+    }
+    if let Some(n) = node.as_next_node() {
+        let val = n.arguments().and_then(|a| {
+            a.arguments().iter().next().map(|first| Box::new(tr(&first)))
+        });
+        return sp(node, Expr::Next(val));
+    }
+    if let Some(n) = node.as_break_node() {
+        let val = n.arguments().and_then(|a| {
+            a.arguments().iter().next().map(|first| Box::new(tr(&first)))
+        });
+        return sp(node, Expr::Break(val));
     }
     if let Some(n) = node.as_yield_node() {
         let args: Vec<SExpr> = n.arguments()

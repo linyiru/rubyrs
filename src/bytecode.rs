@@ -61,6 +61,11 @@ pub(crate) enum Op {
     PushEnsure(i32),
     PopEnsure,
     Raise,
+    /// Signals the current iteration driver (Array#each, #map, etc.) to
+    /// stop and use the value on top of the operand stack as the call's
+    /// return value. Almost always emitted as `<val>; Break; Return` so
+    /// the block frame also pops.
+    Break,
     Return,
 }
 

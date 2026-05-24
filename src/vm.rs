@@ -67,6 +67,8 @@ pub(crate) struct Vm {
     /// rare in hot loops) a single slot wins most of the time and a
     /// per-call-site cache is deferred until measurement says otherwise.
     pub(crate) call_cache: Option<(usize, SymId, Rc<Method>)>,
+    /// `Op::Break` sets this; iteration drivers check and consume.
+    pub(crate) break_signaled: bool,
 }
 
 impl Vm {
@@ -87,6 +89,7 @@ impl Vm {
             fuel: None,
             max_frames: None,
             call_cache: None,
+            break_signaled: false,
         }
     }
 
@@ -591,13 +594,19 @@ impl Vm {
                 self.pinned.push(Value::Array(*id));
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let pre_frames = self.frames.len();
+                let mut early = None;
                 for v in snapshot {
                     self.invoke_block(block.clone(), vec![v])?;
                     self.dispatch_until(pre_frames)?;
-                    self.stack.pop();
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
                 }
                 self.pinned.pop();
-                Some(Value::Array(*id))
+                Some(early.unwrap_or(Value::Array(*id)))
             }
             (Value::Array(id), "map", []) => {
                 self.pinned.push(Value::Array(*id));
@@ -607,36 +616,54 @@ impl Vm {
                 let result_id = self.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
                 self.pinned.push(Value::Array(result_id));
                 let pre_frames = self.frames.len();
+                let mut early = None;
                 for v in snapshot {
                     self.invoke_block(block.clone(), vec![v])?;
                     self.dispatch_until(pre_frames)?;
                     let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
                     self.heap.array_mut(result_id).push(r);
                 }
                 self.pinned.pop();
                 self.pinned.pop();
-                Some(Value::Array(result_id))
+                Some(early.unwrap_or(Value::Array(result_id)))
             }
             (Value::Hash(id), "each", []) => {
                 self.pinned.push(Value::Hash(*id));
                 let snapshot: Vec<(Value, Value)> = self.heap.hash(*id).clone();
                 let pre_frames = self.frames.len();
+                let mut early = None;
                 for (k, v) in snapshot {
                     self.invoke_block(block.clone(), vec![k, v])?;
                     self.dispatch_until(pre_frames)?;
-                    self.stack.pop();
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
                 }
                 self.pinned.pop();
-                Some(Value::Hash(*id))
+                Some(early.unwrap_or(Value::Hash(*id)))
             }
             (Value::Int(n), "times", []) => {
                 let pre_frames = self.frames.len();
+                let mut early = None;
                 for i in 0..*n {
                     self.invoke_block(block.clone(), vec![Value::Int(i)])?;
                     self.dispatch_until(pre_frames)?;
-                    self.stack.pop();
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
                 }
-                Some(Value::Int(*n))
+                Some(early.unwrap_or(Value::Int(*n)))
             }
             _ => None,
         })
@@ -927,6 +954,13 @@ impl Vm {
                 let v = self.stack.pop().unwrap_or(Value::Nil);
                 let exc = self.normalize_exception(v);
                 self.unwind_with_exception(exc);
+            }
+            Op::Break => {
+                // Mark the surrounding native-driven loop to terminate.
+                // The value the user passed (or `nil`) stays on the
+                // operand stack and rides out with the subsequent
+                // Op::Return; collection_call_block reads it then.
+                self.break_signaled = true;
             }
             Op::BinOpInt(kind, rhs) => {
                 let a = self.stack.pop().expect("ICE: BinOpInt lhs underflow");

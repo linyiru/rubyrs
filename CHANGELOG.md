@@ -7,6 +7,33 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`return` / `break` / `next`** (P2-C-4). All three compile to
+  the existing Op::Return frame-pop, with `Op::Break` adding a
+  `Vm.break_signaled` flag check that iteration drivers
+  (Array#each, Array#map, Hash#each, Integer#times) consult after
+  each block invocation. When set, the driver clears the flag,
+  uses the block's last produced value as the iterator's return
+  value, and stops the loop. Without `break`, drivers return their
+  documented default (source for #each, accumulator for #map).
+- New diff fixture `control_flow.rb` covers `return` mid-method,
+  `return` with no arg, `break <val>` from inside a block,
+  `break` without arg returning nil, `next` to skip an iteration
+  of #each, `break` inside #map returning the break value, and
+  `5.times { break i if i == 2 }`. Byte-identical to CRuby.
+
+### Fixed
+- **Block param shadows outer scope correctly**. Discovered by the
+  new control_flow fixture: when a block param's name collided
+  with a local in the enclosing scope (e.g. an outer `x` then
+  `each { |x| ... }`), `compile_block` was reusing the outer
+  scope's slot for the block param while still emitting a
+  param_start above it, leaving the block reading garbage. Block
+  params now always allocate fresh slots via a new
+  `define_local_slot` (vs the existing `local_slot` which
+  reuses), shadowing the outer binding to match modern CRuby's
+  "block local variable" semantics.
+
+### Added
 - **`ensure` clause** (P2-C-3). `begin ... ensure ... end` now runs
   the ensure body on both the normal-exit path and the exception
   path. The compiler emits a `PushEnsure(handler)` before the

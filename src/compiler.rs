@@ -37,6 +37,17 @@ impl ProtoBuilder {
         self.n_locals += 1;
         s
     }
+
+    /// Force-allocate a fresh slot for `name`, overwriting any prior
+    /// binding. Used for block parameters: in Ruby, a block param shadows
+    /// any outer-scope variable of the same name (modern Ruby; "block
+    /// local variable" semantics).
+    pub(crate) fn define_local_slot(&mut self, name: &str) -> u16 {
+        let s = self.n_locals;
+        self.locals.insert(name.to_string(), s);
+        self.n_locals += 1;
+        s
+    }
     pub(crate) fn emit(&mut self, op: Op) -> usize {
         let i = self.code.len();
         self.code.push(op);
@@ -331,6 +342,31 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecvBlock(name_id, argc));
             }
         }
+        Expr::Return(val) | Expr::Next(val) => {
+            // `next` exits the current block iteration; `return` exits the
+            // method/block frame. Both pop the current frame via Op::Return,
+            // which already does the right thing in our subset.
+            match val {
+                Some(e) => compile_expr(b, e, protos, interner),
+                None => { b.emit(Op::LoadNil); }
+            }
+            b.emit(Op::Return);
+            // Sentinel value for stack-balance (unreachable in well-formed code).
+            b.emit(Op::LoadNil);
+            b.current_span = prev_span;
+            return;
+        }
+        Expr::Break(val) => {
+            match val {
+                Some(e) => compile_expr(b, e, protos, interner),
+                None => { b.emit(Op::LoadNil); }
+            }
+            b.emit(Op::Break);
+            b.emit(Op::Return);
+            b.emit(Op::LoadNil);
+            b.current_span = prev_span;
+            return;
+        }
         Expr::Yield(args) => {
             for a in args { compile_expr(b, a, protos, interner); }
             b.emit(Op::Yield(args.len() as u8));
@@ -411,7 +447,9 @@ pub(crate) fn compile_block(
         filename: parent.filename.clone(),
     };
     let param_start = b.n_locals;
-    for p in block_params { b.local_slot(p); }
+    // Block params get fresh slots and shadow any outer binding of the
+    // same name; matching CRuby's "block local variable" semantics.
+    for p in block_params { b.define_local_slot(p); }
     let n_params = block_params.len() as u16;
     compile_body(&mut b, body, protos, interner);
     b.emit(Op::Return);

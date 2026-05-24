@@ -86,3 +86,4 @@ fn run_diff(name: &str) {
 #[test] fn inheritance() { run_diff("inheritance"); }
 #[test] fn custom_exception() { run_diff("custom_exception"); }
 #[test] fn ensure_basics() { run_diff("ensure_basics"); }
+#[test] fn control_flow() { run_diff("control_flow"); }
