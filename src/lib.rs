@@ -65,6 +65,10 @@ pub struct Runtime {
     /// Source text per filename, retained so that backtrace formatting can
     /// resolve byte offsets to line/column without re-reading the file.
     sources: HashMap<Rc<str>, Rc<str>>,
+    /// Per-call-site inline-cache id allocator, monotonically increasing
+    /// across every `eval` call so subsequent compiles don't collide with
+    /// cached methods from earlier ones.
+    cache_counter: u32,
 }
 
 impl Runtime {
@@ -79,7 +83,7 @@ impl Runtime {
         vm.fuel = cfg.fuel;
         vm.max_frames = cfg.max_frames;
         vm.heap.max_live = cfg.max_heap_objects;
-        let mut rt = Runtime { vm, sources: HashMap::new() };
+        let mut rt = Runtime { vm, sources: HashMap::new(), cache_counter: 0 };
         rt.load_preamble();
         rt
     }
@@ -160,8 +164,9 @@ end
         let prog = ast::tr(&parse_result.node());
         let entry = compiler::compile_proto(
             "<main>".into(), vec![], &[prog], filename_rc,
-            &mut self.vm.protos, &mut self.vm.interner,
+            &mut self.vm.protos, &mut self.vm.interner, &mut self.cache_counter,
         );
+        self.vm.ensure_call_caches(self.cache_counter as usize);
         self.vm.run(entry)
     }
 

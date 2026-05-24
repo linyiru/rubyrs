@@ -76,7 +76,7 @@ impl ProtoBuilder {
 
 pub(crate) fn compile_body(
     b: &mut ProtoBuilder, exprs: &[SExpr],
-    protos: &mut Vec<Proto>, interner: &mut Interner,
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) {
     if exprs.is_empty() {
         b.emit(Op::LoadNil);
@@ -86,11 +86,11 @@ pub(crate) fn compile_body(
     for (i, e) in exprs.iter().enumerate() {
         if i == last {
             // The final expression's value becomes the body's value.
-            compile_expr(b, e, protos, interner);
+            compile_expr(b, e, protos, interner, cc);
         } else {
             // Intermediate: value is discarded. Specialised stmt emit
             // skips the Dup-for-result + trailing Pop pair where possible.
-            compile_stmt(b, e, protos, interner);
+            compile_stmt(b, e, protos, interner, cc);
         }
     }
 }
@@ -101,7 +101,7 @@ pub(crate) fn compile_body(
 /// falls back to `compile_expr` + `Pop`.
 fn compile_stmt(
     b: &mut ProtoBuilder, e: &SExpr,
-    protos: &mut Vec<Proto>, interner: &mut Interner,
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) {
     let prev_span = b.current_span;
     b.current_span = e.span;
@@ -119,7 +119,7 @@ fn compile_stmt(
                     }
                 }
             }
-            compile_expr(b, val, protos, interner);
+            compile_expr(b, val, protos, interner, cc);
             let slot = b.local_slot(name);
             b.emit(Op::StoreLocal(slot));
         }
@@ -136,12 +136,12 @@ fn compile_stmt(
                     }
                 }
             }
-            compile_expr(b, val, protos, interner);
+            compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
             b.emit(Op::StoreIvar(id));
         }
         _ => {
-            compile_expr(b, e, protos, interner);
+            compile_expr(b, e, protos, interner, cc);
             b.emit(Op::Pop);
         }
     }
@@ -150,7 +150,7 @@ fn compile_stmt(
 
 pub(crate) fn compile_expr(
     b: &mut ProtoBuilder, e: &SExpr,
-    protos: &mut Vec<Proto>, interner: &mut Interner,
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) {
     let prev_span = b.current_span;
     b.current_span = e.span;
@@ -166,10 +166,11 @@ pub(crate) fn compile_expr(
                 let to_s = interner.intern("to_s");
                 for (idx, p) in parts.iter().enumerate() {
                     match &p.node {
-                        Expr::StrLit(_) => compile_expr(b, p, protos, interner),
+                        Expr::StrLit(_) => compile_expr(b, p, protos, interner, cc),
                         _ => {
-                            compile_expr(b, p, protos, interner);
-                            b.emit(Op::Call(to_s, 0));
+                            compile_expr(b, p, protos, interner, cc);
+                            let cid = *cc as u16; *cc += 1;
+                            b.emit(Op::Call(to_s, 0, cid));
                         }
                     }
                     if idx > 0 {
@@ -202,7 +203,7 @@ pub(crate) fn compile_expr(
                     }
                 }
             }
-            compile_expr(b, val, protos, interner);
+            compile_expr(b, val, protos, interner, cc);
             let slot = b.local_slot(name);
             b.emit(Op::Dup);
             b.emit(Op::StoreLocal(slot));
@@ -225,7 +226,7 @@ pub(crate) fn compile_expr(
                     }
                 }
             }
-            compile_expr(b, val, protos, interner);
+            compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
             b.emit(Op::Dup);
             b.emit(Op::StoreIvar(id));
@@ -235,21 +236,21 @@ pub(crate) fn compile_expr(
             b.emit(Op::LoadConst(id));
         }
         Expr::If { cond, then_body, else_body } => {
-            compile_expr(b, cond, protos, interner);
+            compile_expr(b, cond, protos, interner, cc);
             let jf = b.emit(Op::JumpIfFalse(0));
-            compile_body(b, then_body, protos, interner);
+            compile_body(b, then_body, protos, interner, cc);
             let je = b.emit(Op::Jump(0));
             let else_start = b.pos();
             b.patch_jump(jf, else_start);
-            compile_body(b, else_body, protos, interner);
+            compile_body(b, else_body, protos, interner, cc);
             let end = b.pos();
             b.patch_jump(je, end);
         }
         Expr::While { cond, body } => {
             let start = b.pos();
-            compile_expr(b, cond, protos, interner);
+            compile_expr(b, cond, protos, interner, cc);
             let jf = b.emit(Op::JumpIfFalse(0));
-            compile_body(b, body, protos, interner);
+            compile_body(b, body, protos, interner, cc);
             b.emit(Op::Pop);
             let j = b.emit(Op::Jump(0));
             b.patch_jump(j, start);
@@ -259,7 +260,7 @@ pub(crate) fn compile_expr(
         }
         Expr::Call { receiver, name, args } => {
             if receiver.is_none() && name == "__seq__" {
-                compile_body(b, args, protos, interner);
+                compile_body(b, args, protos, interner, cc);
                 b.current_span = prev_span;
                 return;
             }
@@ -267,7 +268,7 @@ pub(crate) fn compile_expr(
                 if args.is_empty() {
                     b.emit(Op::LoadNil);
                 } else {
-                    compile_expr(b, &args[0], protos, interner);
+                    compile_expr(b, &args[0], protos, interner, cc);
                 }
                 b.emit(Op::Raise);
                 b.emit(Op::LoadNil);
@@ -275,13 +276,13 @@ pub(crate) fn compile_expr(
                 return;
             }
             if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {
-                compile_expr(b, r, protos, interner);
+                compile_expr(b, r, protos, interner, cc);
                 // Fuse `<expr> <op> <int_literal>` into a single op so the
                 // LoadConstInt + BinOp pair becomes one BinOpInt.
                 if let Expr::IntLit(rhs) = &args[0].node {
                     b.emit(Op::BinOpInt(kind, *rhs));
                 } else {
-                    compile_expr(b, &args[0], protos, interner);
+                    compile_expr(b, &args[0], protos, interner, cc);
                     b.emit(Op::BinOp(kind));
                 }
                 b.current_span = prev_span;
@@ -289,23 +290,24 @@ pub(crate) fn compile_expr(
             }
             let name_id = interner.intern(name);
             let has_recv = receiver.is_some();
-            if let Some(r) = receiver { compile_expr(b, r, protos, interner); }
-            for a in args { compile_expr(b, a, protos, interner); }
+            if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
+            for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
+            let cid = *cc as u16; *cc += 1;
             if has_recv {
-                b.emit(Op::Call(name_id, argc));
+                b.emit(Op::Call(name_id, argc, cid));
             } else {
-                b.emit(Op::CallNoRecv(name_id, argc));
+                b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
         Expr::Def { name, params, body } => {
-            let proto_idx = compile_proto(name.clone(), params.clone(), body, b.filename.clone(), protos, interner);
+            let proto_idx = compile_proto(name.clone(), params.clone(), body, b.filename.clone(), protos, interner, cc);
             let name_id = interner.intern(name);
             b.emit(Op::DefMethod(name_id, proto_idx as u32));
             b.emit(Op::LoadNil);
         }
         Expr::Class { name, superclass, body } => {
-            let proto_idx = compile_proto(format!("<class:{}>", name), vec![], body, b.filename.clone(), protos, interner);
+            let proto_idx = compile_proto(format!("<class:{}>", name), vec![], body, b.filename.clone(), protos, interner, cc);
             // Push the superclass (or Nil for "default to Object") for DefClass to pop.
             if let Some(parent) = superclass {
                 let parent_id = interner.intern(parent);
@@ -317,29 +319,30 @@ pub(crate) fn compile_expr(
             b.emit(Op::DefClass(name_id, proto_idx as u32));
         }
         Expr::ArrayLit(elems) => {
-            for e in elems { compile_expr(b, e, protos, interner); }
+            for e in elems { compile_expr(b, e, protos, interner, cc); }
             b.emit(Op::NewArray(elems.len() as u16));
         }
         Expr::HashLit(pairs) => {
             for (k, v) in pairs {
-                compile_expr(b, k, protos, interner);
-                compile_expr(b, v, protos, interner);
+                compile_expr(b, k, protos, interner, cc);
+                compile_expr(b, v, protos, interner, cc);
             }
             b.emit(Op::NewHash(pairs.len() as u16));
         }
         Expr::CallWithBlock { receiver, name, args, block_params, block_body } => {
             let (block_proto_idx, param_start, n_params) =
-                compile_block(b, block_params, block_body, protos, interner);
+                compile_block(b, block_params, block_body, protos, interner, cc);
             let name_id = interner.intern(name);
             let has_recv = receiver.is_some();
-            if let Some(r) = receiver { compile_expr(b, r, protos, interner); }
+            if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
             b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
-            for a in args { compile_expr(b, a, protos, interner); }
+            for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
+            let cid = *cc as u16; *cc += 1;
             if has_recv {
-                b.emit(Op::CallBlock(name_id, argc));
+                b.emit(Op::CallBlock(name_id, argc, cid));
             } else {
-                b.emit(Op::CallNoRecvBlock(name_id, argc));
+                b.emit(Op::CallNoRecvBlock(name_id, argc, cid));
             }
         }
         Expr::Return(val) | Expr::Next(val) => {
@@ -347,7 +350,7 @@ pub(crate) fn compile_expr(
             // method/block frame. Both pop the current frame via Op::Return,
             // which already does the right thing in our subset.
             match val {
-                Some(e) => compile_expr(b, e, protos, interner),
+                Some(e) => compile_expr(b, e, protos, interner, cc),
                 None => { b.emit(Op::LoadNil); }
             }
             b.emit(Op::Return);
@@ -358,7 +361,7 @@ pub(crate) fn compile_expr(
         }
         Expr::Break(val) => {
             match val {
-                Some(e) => compile_expr(b, e, protos, interner),
+                Some(e) => compile_expr(b, e, protos, interner, cc),
                 None => { b.emit(Op::LoadNil); }
             }
             b.emit(Op::Break);
@@ -368,7 +371,7 @@ pub(crate) fn compile_expr(
             return;
         }
         Expr::Yield(args) => {
-            for a in args { compile_expr(b, a, protos, interner); }
+            for a in args { compile_expr(b, a, protos, interner, cc); }
             b.emit(Op::Yield(args.len() as u8));
         }
         Expr::Begin { body, rescue, ensure } => {
@@ -380,20 +383,20 @@ pub(crate) fn compile_expr(
 
             // Inner: rescue (if any) wrapping body
             match rescue {
-                None => compile_body(b, body, protos, interner),
+                None => compile_body(b, body, protos, interner, cc),
                 Some(rc) => {
                     let (slot, bind) = match &rc.var {
                         Some(name) => (b.local_slot(name), 1u8),
                         None => (0u16, 0u8),
                     };
                     let pr = b.emit(Op::PushRescue(0, slot, bind));
-                    compile_body(b, body, protos, interner);
+                    compile_body(b, body, protos, interner, cc);
                     b.emit(Op::PopRescue);
                     let je = b.emit(Op::Jump(0));
                     let handler_start = b.pos();
                     let off = handler_start as i32 - pr as i32 - 1;
                     if let Op::PushRescue(o, _, _) = &mut b.code[pr] { *o = off; }
-                    compile_body(b, &rc.body, protos, interner);
+                    compile_body(b, &rc.body, protos, interner, cc);
                     let end = b.pos();
                     b.patch_jump(je, end);
                 }
@@ -404,7 +407,7 @@ pub(crate) fn compile_expr(
             if let (Some(eb), Some(pe)) = (ensure.as_ref(), pe) {
                 b.emit(Op::PopEnsure);
                 // Normal path: run ensure body, then jump past handler.
-                for stmt in eb { compile_stmt(b, stmt, protos, interner); }
+                for stmt in eb { compile_stmt(b, stmt, protos, interner, cc); }
                 let je = b.emit(Op::Jump(0));
                 // Exception path: PushEnsure target. Exception value is on
                 // top of stack; ensure body must not touch the stack (we
@@ -412,7 +415,7 @@ pub(crate) fn compile_expr(
                 let handler_start = b.pos();
                 let off = handler_start as i32 - pe as i32 - 1;
                 if let Op::PushEnsure(o) = &mut b.code[pe] { *o = off; }
-                for stmt in eb { compile_stmt(b, stmt, protos, interner); }
+                for stmt in eb { compile_stmt(b, stmt, protos, interner, cc); }
                 b.emit(Op::Raise);
                 let end = b.pos();
                 b.patch_jump(je, end);
@@ -424,10 +427,10 @@ pub(crate) fn compile_expr(
 
 pub(crate) fn compile_proto(
     name: String, params: Vec<String>, body: &[SExpr],
-    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner,
+    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> usize {
     let mut b = ProtoBuilder::new(&params, filename);
-    compile_body(&mut b, body, protos, interner);
+    compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let idx = protos.len();
     protos.push(b.build(name, params));
@@ -436,7 +439,7 @@ pub(crate) fn compile_proto(
 
 pub(crate) fn compile_block(
     parent: &ProtoBuilder, block_params: &[String], body: &[SExpr],
-    protos: &mut Vec<Proto>, interner: &mut Interner,
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> (usize, u16, u16) {
     let mut b = ProtoBuilder {
         code: vec![],
@@ -451,7 +454,7 @@ pub(crate) fn compile_block(
     // same name; matching CRuby's "block local variable" semantics.
     for p in block_params { b.define_local_slot(p); }
     let n_params = block_params.len() as u16;
-    compile_body(&mut b, body, protos, interner);
+    compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let idx = protos.len();
     protos.push(b.build("<block>".into(), block_params.to_vec()));

@@ -57,18 +57,32 @@ pub(crate) struct Vm {
     /// Maximum simultaneously-live frames. `frames.push()` checks this
     /// against `frames.len()` before pushing. Default `None` is unlimited.
     pub(crate) max_frames: Option<usize>,
-    /// Single-slot monomorphic inline cache for method dispatch on
-    /// `Value::Object`. Holds the (class identity, method name, resolved
-    /// `Method`) of the most recent successful lookup; subsequent calls
-    /// that match both fields skip the `HashMap<SymId, _>::get`.
+    /// Per-call-site monomorphic inline cache for method dispatch on
+    /// `Value::Object`. One slot per `Op::Call(...,cache_id)` /
+    /// `Op::CallNoRecv` / `Op::CallBlock` / `Op::CallNoRecvBlock` site.
+    /// Each entry remembers the (class identity, gen-at-time-of-cache,
+    /// resolved Method) of the last successful lookup at that site.
     ///
-    /// Invalidated whenever a method is (re)defined on any class —
-    /// `Op::DefMethod` clears it. For our subset (method redefinition is
-    /// rare in hot loops) a single slot wins most of the time and a
-    /// per-call-site cache is deferred until measurement says otherwise.
-    pub(crate) call_cache: Option<(usize, SymId, Rc<Method>)>,
+    /// Lookups compare against the receiver's class pointer AND the
+    /// current `method_gen`. Any `Op::DefMethod` bumps `method_gen`,
+    /// which effectively invalidates every cache entry — re-fill is
+    /// lazy on the next call at each site.
+    pub(crate) call_caches: Vec<CallCache>,
+    pub(crate) method_gen: u32,
     /// `Op::Break` sets this; iteration drivers check and consume.
     pub(crate) break_signaled: bool,
+}
+
+/// One entry in the per-call-site inline cache.
+#[derive(Clone)]
+pub(crate) struct CallCache {
+    pub(crate) class_ptr: usize, // 0 = empty
+    pub(crate) generation: u32,
+    pub(crate) method: Option<Rc<Method>>,
+}
+
+impl Default for CallCache {
+    fn default() -> Self { CallCache { class_ptr: 0, generation: 0, method: None } }
 }
 
 impl Vm {
@@ -88,25 +102,55 @@ impl Vm {
             stress_gc: env::var("STRESS_GC").is_ok(),
             fuel: None,
             max_frames: None,
-            call_cache: None,
+            call_caches: Vec::new(),
+            method_gen: 0,
             break_signaled: false,
         }
     }
 
-    /// Look up a method on `cls`, walking its superclass chain. Consults
-    /// the single-slot inline cache first; on miss caches the result.
+    /// Make sure `call_caches` has at least `n` entries (one per
+    /// emitted call op). Called by the host (`Runtime::eval`) after a
+    /// compile pass when the cache-id counter is known.
+    pub(crate) fn ensure_call_caches(&mut self, n: usize) {
+        if self.call_caches.len() < n {
+            self.call_caches.resize(n, CallCache::default());
+        }
+    }
+
+    /// Per-call-site cached lookup. `cache_id` is the slot from the
+    /// `Op::Call(...,cache_id)` instruction. Hit when both class
+    /// pointer and `method_gen` match what was cached.
     #[inline]
-    pub(crate) fn lookup_method_cached(&mut self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+    pub(crate) fn lookup_method_cached(&mut self, cls: &Rc<Class>, name_id: SymId, cache_id: u16) -> Option<Rc<Method>> {
         let class_ptr = Rc::as_ptr(cls) as usize;
-        if let Some((cached_ptr, cached_name, cached_method)) = &self.call_cache {
-            if *cached_ptr == class_ptr && *cached_name == name_id {
-                return Some(cached_method.clone());
+        let idx = cache_id as usize;
+        // Fast path
+        if idx < self.call_caches.len() {
+            let c = &self.call_caches[idx];
+            if c.class_ptr == class_ptr && c.generation == self.method_gen {
+                return c.method.clone();
             }
         }
+        // Miss: walk the chain, populate slot
+        let m = self.lookup_method_uncached(cls, name_id);
+        if idx < self.call_caches.len() {
+            self.call_caches[idx] = CallCache {
+                class_ptr,
+                generation: self.method_gen,
+                method: m.clone(),
+            };
+        }
+        m
+    }
+
+    /// Plain method lookup walking the class chain, with no cache touch.
+    /// Used for paths that don't benefit from caching (e.g. `initialize`
+    /// resolution during `Class.new`).
+    #[inline]
+    pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
         let mut current = cls.clone();
         loop {
             if let Some(m) = current.methods.borrow().get(&name_id).cloned() {
-                self.call_cache = Some((class_ptr, name_id, m.clone()));
                 return Some(m);
             }
             let parent = current.superclass.borrow().clone();
@@ -220,7 +264,7 @@ impl Vm {
         Trap { err, backtrace: bt }
     }
 
-    pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> Result<(), Trap> {
+    pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
@@ -243,7 +287,7 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
-                if let Some(m) = self.lookup_method_cached(&cls, name_id) {
+                if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                     self.invoke_method(m, self_val.clone(), args)?;
                     return Ok(());
                 }
@@ -279,7 +323,7 @@ impl Vm {
                 }));
                 let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
-                if let Some(m) = self.lookup_method_cached(&cls, init_id) {
+                if let Some(m) = self.lookup_method_uncached(&cls, init_id) {
                     self.invoke_method(m, obj.clone(), args)?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
@@ -291,7 +335,7 @@ impl Vm {
 
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
-            if let Some(m) = self.lookup_method_cached(&cls, name_id) {
+            if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
             }
@@ -510,7 +554,7 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> Result<(), Trap> {
+    pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
@@ -541,7 +585,7 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
-                if let Some(m) = self.lookup_method_cached(&cls, name_id) {
+                if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                     self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
                     return Ok(());
                 }
@@ -567,7 +611,7 @@ impl Vm {
                 }));
                 let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
-                if let Some(m) = self.lookup_method_cached(&cls, init_id) {
+                if let Some(m) = self.lookup_method_uncached(&cls, init_id) {
                     self.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
@@ -578,7 +622,7 @@ impl Vm {
         }
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
-            if let Some(m) = self.lookup_method_cached(&cls, name_id) {
+            if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
                 return Ok(());
             }
@@ -723,7 +767,7 @@ impl Vm {
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
-                    self.do_call(plus_id, 1, false)?;
+                    self.do_call(plus_id, 1, false, u16::MAX)?;
                     let v = self.stack.pop().unwrap_or(Value::Nil);
                     self.frames.last().expect("ICE").locals.borrow_mut()[slot] = v;
                 }
@@ -742,7 +786,7 @@ impl Vm {
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
-                    self.do_call(plus_id, 1, false)?;
+                    self.do_call(plus_id, 1, false, u16::MAX)?;
                     let new_val = self.stack.last().expect("ICE: IncLocal slow path no result").clone();
                     self.frames.last().expect("ICE").locals.borrow_mut()[slot] = new_val;
                 }
@@ -779,7 +823,7 @@ impl Vm {
                             self.stack.push(cur_v);
                             self.stack.push(Value::Int(1));
                             let plus_id = self.interner.intern("+");
-                            self.do_call(plus_id, 1, false)?;
+                            self.do_call(plus_id, 1, false, u16::MAX)?;
                             let v = self.stack.pop().unwrap_or(Value::Nil);
                             self.heap.instance_mut(inst_id).ivars.insert(name_id, v);
                         }
@@ -804,7 +848,7 @@ impl Vm {
                             self.stack.push(cur_v);
                             self.stack.push(Value::Int(1));
                             let plus_id = self.interner.intern("+");
-                            self.do_call(plus_id, 1, false)?;
+                            self.do_call(plus_id, 1, false, u16::MAX)?;
                             let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
                             self.heap.instance_mut(inst_id).ivars.insert(name_id, v);
                         }
@@ -814,7 +858,7 @@ impl Vm {
                     self.stack.push(Value::Nil);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
-                    self.do_call(plus_id, 1, false)?;
+                    self.do_call(plus_id, 1, false, u16::MAX)?;
                 }
             }
             Op::LoadConst(name_id) => {
@@ -832,17 +876,17 @@ impl Vm {
                     f.ip = (f.ip as i32 + off) as usize;
                 }
             }
-            Op::Call(name_id, argc) => {
-                self.do_call(name_id, argc as usize, false)?;
+            Op::Call(name_id, argc, cache_id) => {
+                self.do_call(name_id, argc as usize, false, cache_id)?;
             }
-            Op::CallNoRecv(name_id, argc) => {
-                self.do_call(name_id, argc as usize, true)?;
+            Op::CallNoRecv(name_id, argc, cache_id) => {
+                self.do_call(name_id, argc as usize, true, cache_id)?;
             }
-            Op::CallBlock(name_id, argc) => {
-                self.do_call_block(name_id, argc as usize, false)?;
+            Op::CallBlock(name_id, argc, cache_id) => {
+                self.do_call_block(name_id, argc as usize, false, cache_id)?;
             }
-            Op::CallNoRecvBlock(name_id, argc) => {
-                self.do_call_block(name_id, argc as usize, true)?;
+            Op::CallNoRecvBlock(name_id, argc, cache_id) => {
+                self.do_call_block(name_id, argc as usize, true, cache_id)?;
             }
             Op::CreateBlock(p_idx, param_start, n_params) => {
                 let f = self.frames.last().expect("ICE: CreateBlock no frame");
@@ -870,7 +914,7 @@ impl Vm {
                 else { self.toplevel_methods.insert(name_id, m); }
                 // Conservatively invalidate the inline cache — any previous
                 // cache entry could in theory be made stale by this definition.
-                self.call_cache = None;
+                self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
             Op::DefClass(name_id, p_idx) => {
@@ -894,7 +938,7 @@ impl Vm {
                         *sc = Some(p.clone());
                     }
                 }
-                self.call_cache = None; // class structure changed
+                self.method_gen = self.method_gen.wrapping_add(1); // class structure changed
                 self.class_stack.push(cls.clone());
                 let proto = &self.protos[p_idx as usize];
                 let n_locals = proto.n_locals as usize;
@@ -978,7 +1022,7 @@ impl Vm {
                         self.stack.push(a);
                         self.stack.push(b_val);
                         let name_id = self.interner.intern(kind.name());
-                        self.do_call(name_id, 1, false)?;
+                        self.do_call(name_id, 1, false, u16::MAX)?;
                     }
                 }
             }
@@ -993,7 +1037,7 @@ impl Vm {
                     self.stack.push(a);
                     self.stack.push(b);
                     let name_id = self.interner.intern(kind.name());
-                    self.do_call(name_id, 1, false)?;
+                    self.do_call(name_id, 1, false, u16::MAX)?;
                 }
             }
             Op::Return => {

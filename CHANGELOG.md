@@ -6,6 +6,28 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Changed
+- **Per-call-site method inline cache** (P1-B upgrade). The
+  single-slot cache from Tier1-1 is replaced with a per-site
+  cache: every `Op::Call` / `Op::CallNoRecv` / `Op::CallBlock` /
+  `Op::CallNoRecvBlock` carries a `u16` cache slot id assigned at
+  compile time, and `Vm.call_caches: Vec<CallCache>` is sized to
+  match. Lookups index directly by site, so call sites that
+  dispatch on different classes (polymorphic) no longer thrash
+  each other.
+  Invalidation: `Op::DefMethod` and `Op::DefClass` bump
+  `Vm.method_gen`; cache entries store the gen at fill time and
+  miss when it shifts. `lookup_method_uncached` is the fallback
+  for paths that shouldn't cache (e.g. `initialize` during
+  `Class.new`).
+  Microbench (vs the Tier1-1 single-slot baseline):
+    - fizzbuzz 1M:        327 ms → **322 ms** (1.76× → 1.72× of CRuby)
+    - Counter.inc × 1M:   153 ms → **148 ms** (1.43× → 1.37× of CRuby)
+  Monomorphic gains are small (single-slot was already hitting),
+  but the structural change matters for polymorphic dispatch (two
+  alternating call sites in a loop), which would have made
+  single-slot miss on every call.
+
 ### Added
 - **Brewfile DSL demo + benchmark** (P2-A). New
   `examples/brewfile/` directory: a 50-line Brewfile-shaped Ruby
