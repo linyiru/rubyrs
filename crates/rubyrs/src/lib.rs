@@ -55,6 +55,15 @@ pub struct Config {
     /// returns a `ResourceExhausted` trap before the host's Rust stack
     /// can overflow.
     pub max_frames: Option<usize>,
+    /// If `Some(d)`, an `eval` call that runs longer than `d`
+    /// wall-clock time returns a `ResourceExhausted` trap. Checked
+    /// every 1024 ops (cheap and precise enough for the host-side
+    /// timeouts this is meant to enforce — request budgets,
+    /// gemspec-evaluation guards, similar). The deadline is
+    /// per-`eval`: each call re-anchors the clock, so a host can
+    /// reuse a Runtime across many short evaluations without each
+    /// one inheriting the previous timer.
+    pub deadline: Option<std::time::Duration>,
 }
 
 /// A self-contained rubyrs runtime. State (class definitions, top-level
@@ -69,6 +78,11 @@ pub struct Runtime {
     /// across every `eval` call so subsequent compiles don't collide with
     /// cached methods from earlier ones.
     cache_counter: u32,
+    /// Per-`eval` wall-clock budget (P2-14a). Retained as a
+    /// Duration; an absolute `Instant` is computed at the start of
+    /// each `eval` call and stored on `Vm.deadline_at`. `None` means
+    /// unlimited.
+    deadline: Option<std::time::Duration>,
 }
 
 impl Runtime {
@@ -83,7 +97,10 @@ impl Runtime {
         vm.fuel = cfg.fuel;
         vm.max_frames = cfg.max_frames;
         vm.heap.max_live = cfg.max_heap_objects;
-        let mut rt = Runtime { vm, sources: HashMap::new(), cache_counter: 0 };
+        let mut rt = Runtime {
+            vm, sources: HashMap::new(), cache_counter: 0,
+            deadline: cfg.deadline,
+        };
         rt.load_preamble();
         rt
     }
@@ -184,13 +201,34 @@ end
             &mut self.vm.protos, &mut self.vm.interner, &mut self.cache_counter,
         );
         self.vm.ensure_call_caches(self.cache_counter as usize);
-        // Every code path through `Vm::run` (success, Trap-via-`?`,
-        // or an uncaught Ruby exception that exits the process) should
-        // leave `pinned` empty — that's the whole point of P0-2's
-        // PinGuard. Debug-only assertion: in release we leave the
-        // check out so a regression doesn't crash production hosts.
+        // A previous `eval` on this Runtime may have left frames,
+        // operand-stack residue, or pins behind if it ended in a
+        // Trap (uncaught exception, fuel exhaustion, deadline hit).
+        // Class definitions and the heap legitimately persist
+        // across calls — that's part of the embedding contract.
+        // The dispatch state shouldn't. Clear it now so the new
+        // eval starts from a known baseline.
+        self.vm.frames.clear();
+        self.vm.stack.clear();
+        self.vm.pinned.clear();
+        self.vm.break_signaled = false;
+        // Anchor the wall-clock deadline (P2-14a) to *this* eval
+        // call. Each `eval` re-computes the absolute Instant from
+        // the runtime's stored Duration, so a host can reuse a
+        // Runtime across many short evaluations without inheriting
+        // a stale timer. `None` (unlimited) is the default.
+        if let Some(d) = self.deadline {
+            self.vm.deadline_at = Some(std::time::Instant::now() + d);
+            self.vm.op_counter = 0;
+        }
+        // PinGuard balance check: pinned was just zeroed; after
+        // run, it must still be zero. The assert is debug-only —
+        // release builds skip so a regression won't crash a host.
         let pinned_before = self.vm.pinned.len();
         let result = self.vm.run(entry);
+        // Clear the deadline after eval so subsequent calls don't
+        // inherit a (now-stale) Instant.
+        self.vm.deadline_at = None;
         debug_assert_eq!(
             self.vm.pinned.len(), pinned_before,
             "PinGuard imbalance: pinned was {}, now {} after eval",

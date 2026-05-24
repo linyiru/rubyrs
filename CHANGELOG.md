@@ -6,6 +6,34 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **Wall-clock deadline cap** (P2-14a). New `Config::deadline:
+  Option<Duration>`. When set, `eval` traps with
+  `ResourceExhausted("wall-clock deadline exceeded")` if it
+  runs longer than the budget. The check is amortised — once
+  every 1024 ops via a wrapping op counter — so the no-deadline
+  case adds one increment plus one bitmask per op and never
+  reaches for `Instant::now()`. The deadline is per-`eval`: each
+  call re-anchors the clock so a host can reuse a `Runtime`
+  across many short evaluations without inheriting a stale
+  timer. CLI exposes the knob via `RUBYRS_DEADLINE_MS=N`.
+
+### Fixed
+- **`eval` no longer inherits leftover dispatch state from a
+  previous Trap.** A previous `eval` that ended in a Trap
+  (uncaught exception, fuel exhaustion, deadline hit) left its
+  frames, operand-stack residue, and pins on the `Vm`. The next
+  call would push a new entry frame on top, run, hit Return,
+  and fall back into the abandoned frame from the earlier call
+  — at best confusing, at worst running stale bytecode. Class
+  definitions and the heap legitimately persist across `eval`
+  calls (that's the embedding contract); the dispatch state
+  shouldn't. `Runtime::eval` now clears `frames`, `stack`,
+  `pinned`, and `break_signaled` at the start of every call.
+  Surfaced by the new `deadline_resets_between_eval_calls`
+  test — the existing fuel/heap/frame tests each used a single
+  eval per Runtime so the bug stayed hidden.
+
 ### Changed
 - **`BlockHandle` now lives in the GC heap** (P2-13). `Value::Block`
   changed from `Rc<BlockHandle>` to `ObjId`, and `HeapObj` gained

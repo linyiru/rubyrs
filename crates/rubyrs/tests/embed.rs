@@ -405,6 +405,56 @@ fn blocks_are_gc_reclaimed_under_stress() {
 }
 
 #[test]
+fn wall_clock_deadline_traps_long_running_eval() {
+    // P2-14a: with `Config::deadline: Some(50ms)` a script that
+    // would otherwise spin for seconds gets stopped within roughly
+    // a millisecond of the budget (we only check every 1024 ops,
+    // so there's a small tail).
+    let mut rt = Runtime::with_config(Config {
+        deadline: Some(std::time::Duration::from_millis(50)),
+        ..Default::default()
+    });
+    let start = std::time::Instant::now();
+    let err = rt.eval(
+        r#"
+        i = 0
+        while true
+          i = i + 1
+        end
+        "#,
+        "spin.rb",
+    ).unwrap_err();
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { ref msg } if msg.contains("deadline")),
+        "expected ResourceExhausted/deadline, got {:?}",
+        err.err,
+    );
+    // Generous upper bound — CI runners are noisy. The point is
+    // we stopped before the test harness's own per-test timeout.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "deadline did not fire in time; elapsed {:?}",
+        elapsed,
+    );
+}
+
+#[test]
+fn deadline_resets_between_eval_calls() {
+    // The deadline is per-eval, not lifetime-cumulative. After the
+    // first script trips the budget, a second eval on the same
+    // Runtime gets a fresh 50ms allotment and a fast script
+    // succeeds.
+    let mut rt = Runtime::with_config(Config {
+        deadline: Some(std::time::Duration::from_millis(50)),
+        ..Default::default()
+    });
+    let _ = rt.eval("while true; end", "spin.rb").unwrap_err();
+    // The previous eval consumed the budget; a new eval re-anchors.
+    rt.eval("puts 1 + 2", "fast.rb").unwrap();
+}
+
+#[test]
 fn frame_cap_traps_deep_recursion() {
     let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
     let err = rt.eval(

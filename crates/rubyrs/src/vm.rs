@@ -148,6 +148,16 @@ pub(crate) struct Vm {
     /// Maximum simultaneously-live frames. `frames.push()` checks this
     /// against `frames.len()` before pushing. Default `None` is unlimited.
     pub(crate) max_frames: Option<usize>,
+    /// Absolute wall-clock instant past which `eval` traps with
+    /// `ResourceExhausted("wall-clock deadline exceeded")`. `None`
+    /// means unlimited. Computed at `Runtime::eval` entry from the
+    /// `Config::deadline` duration. Checked every 1024 ops (cheap
+    /// enough that the syscall amortises out).
+    pub(crate) deadline_at: Option<std::time::Instant>,
+    /// Lightweight counter incremented per op so deadline checks
+    /// only call `Instant::now()` periodically. Wraps; we only
+    /// inspect the low bits.
+    pub(crate) op_counter: u32,
     /// Per-call-site monomorphic inline cache for method dispatch on
     /// `Value::Object`. One slot per `Op::Call(...,cache_id)` /
     /// `Op::CallNoRecv` / `Op::CallBlock` / `Op::CallNoRecvBlock` site.
@@ -193,6 +203,8 @@ impl Vm {
             stress_gc: env::var("STRESS_GC").is_ok(),
             fuel: None,
             max_frames: None,
+            deadline_at: None,
+            op_counter: 0,
             call_caches: Vec::new(),
             method_gen: 0,
             break_signaled: false,
@@ -308,6 +320,22 @@ impl Vm {
                 }));
             }
             self.fuel = Some(f - 1);
+        }
+        // Wall-clock deadline: piggyback on `check_fuel` since both
+        // fire on every op. `Instant::now()` is a syscall on most
+        // platforms, so we only call it every 1024 ops; this keeps
+        // the no-deadline case to a single conditional + an i32
+        // increment per op. The op_counter is intentionally `u32`
+        // (wraps freely) — we never read its absolute value.
+        self.op_counter = self.op_counter.wrapping_add(1);
+        if self.op_counter & 1023 == 0 {
+            if let Some(at) = self.deadline_at {
+                if std::time::Instant::now() >= at {
+                    return Err(self.trap(RubyError::ResourceExhausted {
+                        msg: "wall-clock deadline exceeded".to_string(),
+                    }));
+                }
+            }
         }
         Ok(())
     }
