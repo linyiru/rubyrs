@@ -79,7 +79,45 @@ impl Runtime {
         vm.fuel = cfg.fuel;
         vm.max_frames = cfg.max_frames;
         vm.heap.max_live = cfg.max_heap_objects;
-        Runtime { vm, sources: HashMap::new() }
+        let mut rt = Runtime { vm, sources: HashMap::new() };
+        rt.load_preamble();
+        rt
+    }
+
+    /// Bootstrap the built-in Ruby class hierarchy (currently just
+    /// exceptions) by `eval`-ing a small Ruby preamble. Done with the
+    /// runtime's own machinery so the resulting classes look identical
+    /// to user-defined ones (no special-cased C structs).
+    fn load_preamble(&mut self) {
+        const PREAMBLE: &str = r#"
+class Exception
+  def initialize(msg)
+    @message = msg
+  end
+  def message
+    @message
+  end
+  def to_s
+    @message
+  end
+end
+class StandardError < Exception
+end
+class RuntimeError < StandardError
+end
+class NoMethodError < StandardError
+end
+class ArgumentError < StandardError
+end
+class TypeError < StandardError
+end
+class NameError < StandardError
+end
+class ResourceExhausted < StandardError
+end
+"#;
+        self.eval(PREAMBLE, "<rubyrs:preamble>")
+            .expect("ICE: failed to load built-in exception preamble");
     }
 
     /// Replace the runtime's stdout sink. Lets a host capture `puts` /

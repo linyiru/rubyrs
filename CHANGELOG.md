@@ -7,6 +7,29 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Built-in exception class hierarchy** (P2-C-2). `Runtime::new`
+  now `eval`s a small preamble that defines `Exception`,
+  `StandardError`, `RuntimeError`, `NoMethodError`,
+  `ArgumentError`, `TypeError`, `NameError`, `ResourceExhausted`,
+  with `Exception` providing `initialize`, `message`, `to_s`.
+  Each `StandardError` descendant inherits from the level above.
+  This is deliberately *Ruby code at the Ruby level* (no special-
+  cased C structs), so user-defined `class MyErr < StandardError;
+  end` Just Works and `raise MyErr.new("x"); rescue => e;
+  puts e.message` produces the same output as CRuby.
+- New diff fixture `custom_exception.rb` covers user-defined
+  exception subclasses, `e.message` / `e.to_s`, raise-in-method
+  + rescue-in-caller, and multiple sequential rescue blocks
+  for different classes. Byte-identical to CRuby.
+
+Known divergence: CRuby's `Exception#message` reads an internal
+mesg slot set by the C-level Exception.new, not the `@message`
+ivar. Our preamble-based implementation reads `@message`, so a
+user override of `initialize` that sets `@message` directly is
+visible to `message` in rubyrs but not in CRuby. Documented;
+won't be fixed until we have a clear use case demanding parity.
+
+### Added
 - **Class inheritance** (P2-C-1). `class Foo < Bar` is now parsed
   and a `Class` stores its superclass (`Rc<Class>`). Method lookup
   walks the chain via the existing `lookup_method_cached` helper
