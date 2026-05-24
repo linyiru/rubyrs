@@ -32,6 +32,7 @@ use std::rc::Rc;
 
 pub use error::{RubyError, Span, Trap, TrapFrame};
 pub use value::Value;
+pub use intern::SymId;
 
 /// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
 /// untrusted scripts.
@@ -210,6 +211,31 @@ end
         match self.sources.get(filename) {
             Some(src) => error::line_col(src, byte_offset).0,
             None => 0,
+        }
+    }
+
+    /// Resolve a `SymId` back to its string representation.
+    pub fn resolve_sym(&self, sym: SymId) -> &str {
+        self.vm.interner.resolve(sym)
+    }
+
+    /// Unpack a `Value::Array` into a Rust `Vec<Value>` by cloning elements.
+    /// Returns `None` if the value is not an Array.
+    pub fn resolve_array(&self, val: &Value) -> Option<Vec<Value>> {
+        if let Value::Array(id) = val {
+            Some(self.vm.heap.array(*id).clone())
+        } else {
+            None
+        }
+    }
+
+    /// Unpack a `Value::Hash` into a Rust `Vec<(Value, Value)>` by cloning.
+    /// Returns `None` if the value is not a Hash.
+    pub fn resolve_hash(&self, val: &Value) -> Option<Vec<(Value, Value)>> {
+        if let Value::Hash(id) = val {
+            Some(self.vm.heap.hash(*id).clone())
+        } else {
+            None
         }
     }
 }
