@@ -8,31 +8,37 @@
 This document explains how we keep rubyrs honest as it grows, and the
 pipeline we are building to scale that.
 
-## Three layers
+## Four layers
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer 1: unit tests (in src/main.rs, #[cfg(test)])              │
+│  Layer 1: unit tests (in modules, #[cfg(test)])                  │
 │  - Tight Rust-level checks for individual functions              │
-│  - Currently sparse; we lean on layers 2 and 3                   │
+│  - Currently sparse; we lean on layers 2/3/4                     │
 └─────────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 2: integration fixtures (tests/integration.rs)            │
-│  - Each fixture is a .rb file + a .expected golden file          │
-│  - `cargo test` execs the rubyrs binary, asserts stdout matches  │
-│  - Use `UPDATE_EXPECTED=1 cargo test` to regenerate expected     │
+│  - .rb file + .expected golden file for stdout                   │
+│  - tests/fixtures/errors/ for .expected_err (stderr) cases       │
+│  - `cargo test` execs the rubyrs binary, diffs                   │
+│  - UPDATE_EXPECTED=1 cargo test regenerates the goldens          │
 └─────────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer 3: ruby/spec coverage (planned, see below)                │
+│  Layer 3: public API smoke tests (tests/embed.rs)                │
+│  - Calls Runtime/Config/register_fn/set_stdout/format_trap       │
+│  - Pins the embedding API surface so accidental breakage shows   │
+│    up in CI; also exercises resource caps (fuel/heap/frames)     │
+└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer 4: ruby/spec coverage (planned, see below)                │
 │  - Spec files from upstream ruby/spec, mechanically translated   │
 │  - Run on rubyrs AND CRuby; compare PASS counts                  │
 │  - SPEC_STATUS.md is auto-generated; coverage drives credibility │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Layer 2 is good enough for individual feature work but is *hand-curated* —
-we choose the cases. Layer 3 is the antidote: an external standard chooses
-the cases for us.
+Layers 2 and 3 are *hand-curated* — we choose the cases. Layer 4 is
+the antidote: an external standard chooses the cases for us.
 
 ## Why ruby/spec, not our own tests
 

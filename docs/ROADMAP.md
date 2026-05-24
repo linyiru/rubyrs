@@ -13,37 +13,64 @@ See [TESTING.md](TESTING.md) for the ingestion pipeline. We do not ship a
 new feature without spec coverage that demonstrates we got the semantics
 right.
 
-## Near term (next ~10 commits)
+## Done
 
-In rough order of ROI for getting out of "toy" status:
+These are landed and locked down by tests:
 
-1. **`Range`** (`1..10`, `1...10`, `each`, `to_a`, `include?`, `each_with_index`)
+- **P0-A** Fix the GC root hole in native-driven iterators + `STRESS_GC=1`
+  mode (commit `483f45d`)
+- **P0-B** `panic!` → `Result<_, Trap>` with CRuby-style backtrace; new
+  `tests/fixtures/errors/` golden harness (commits `d941d7a`–`cdc027f`)
+- **P0-C** `Op` / `BinOpKind` derive `Copy` (commit `3fce237`)
+- **P1-A** Single-file `main.rs` split into focused modules: `ast`,
+  `value`, `heap`, `bytecode`, `compiler`, `vm`, plus `error`, `intern`,
+  `lib` added later (commit `c37ded7`)
+- **P1-B** Global `Interner` + `SymId`; method dispatch on u32 keys;
+  `Value::Sym` becomes a `SymId`. Microbench fizzbuzz 484 ms → 408 ms
+  (commit `dd7826c`)
+- **P1-C** Host embedding API — `lib.rs`, `Runtime`, `register_fn`,
+  `set_stdout`, `format_trap`. `tests/embed.rs` and `examples/embed.rs`
+  pin the surface down (commit `9beded8`)
+- **P1-D** Resource caps: `Config { fuel, max_heap_objects, max_frames }`.
+  `RubyError::ResourceExhausted` covers all three. CLI env vars
+  `RUBYRS_FUEL`, `RUBYRS_MAX_OBJECTS`, `RUBYRS_MAX_FRAMES` (commit
+  `9172868`)
+
+## Near term
+
+In rough order of ROI for the embedding / DSL use case:
+
+1. **`Range`** (`1..10`, `1...10`, `each`, `to_a`, `include?`,
+   `each_with_index`)
 2. **More `Enumerable`**: `select`, `reject`, `inject`/`reduce`, `find`,
    `any?`, `all?`, `include?`, `count`, `sort`, `sort_by`
-3. **`String` methods**: `split`, `gsub`, `sub`, `chomp`, `strip`, `upcase`,
-   `downcase`, `chars`, `start_with?`, `end_with?`
-4. **`Module` + `include`** — at minimum enough to define and mix
-   `Enumerable` once
+3. **`String` methods**: `split`, `gsub`, `sub`, `chomp`, `strip`,
+   `upcase`, `downcase`, `chars`, `start_with?`, `end_with?`
+4. **`Module` + `include`** — at minimum enough to mix `Enumerable` once
 5. **Class inheritance + `super`** — `class Foo < Bar` and method override
 6. **`attr_reader / writer / accessor`** as built-in macros
-7. **Method dispatch inline cache** (per-call-site monomorphic IC)
-8. **spec_extract v0.1** + first SPEC_STATUS.md
-9. **Exception class hierarchy + `ensure`**
-10. **`return / break / next`** — proper non-local exits
-
-By the end of this list, the language is past "toy" — most short Ruby
-programs work, spec coverage is publishable, and there's a feedback loop
-that grows by itself.
+7. **P2-A Pivot demo + benchmark**: pick a Ruby DSL (Brewfile leading
+   candidate) and demonstrate it running on rubyrs.wasm under wasmtime
+   with cold start + memory numbers vs CRuby and ruby.wasm. This is the
+   *decision gate* for the embedding-niche thesis
+8. **P2-B Spec ingestion v0.1** — `tools/spec_extract` from ruby/spec,
+   first SPEC_STATUS.md report
+9. **P2-C Exception class hierarchy + `ensure` + `return / break / next`**
+10. **Method dispatch inline cache** (per-call-site monomorphic IC) — was
+    P1-B in the original brief; deferred because `BinOp` fast path already
+    skips the hot dispatch on integer ops. Becomes the bottleneck once
+    class-method-heavy code dominates the benchmark mix
 
 ## Medium term
 
 - **`Float` + mixed numeric arithmetic** with promotion rules
 - **`Proc` and `lambda`** with `&block` parameter passing
-- **Pattern matching** (`case ... in`) — the modern way
+- **Pattern matching** (`case ... in`)
 - **WASM packaging story**: published as a `wasi-component`, with a small
   JS binding example for browsers
-- **Embedding API**: `librubyrs` C-ABI and Rust API for hosts to call into
 - **Better `String`**: byte-aware indexing, basic encoding tag
+- **`HostCtx`** parameter on `register_fn` so host functions can allocate
+  Arrays/Hashes that show up Ruby-side
 
 ## Long term
 

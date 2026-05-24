@@ -42,7 +42,7 @@ to WebAssembly.
 
 | 1M fizzbuzz | rubyrs | CRuby | CRuby + YJIT |
 |-------------|--------|-------|--------------|
-| Time | 0.44 s | 0.19 s | 0.15 s |
+| Time | 0.41 s | 0.19 s | 0.15 s |
 | Peak memory | 2.1 MB | 18.4 MB | 19.1 MB |
 
 If you need Rails, Sinatra, Bundler, or gems — use CRuby.
@@ -54,8 +54,20 @@ cargo build --release
 ./target/release/rubyrs your_script.rb
 ```
 
-For the `wasm32-wasip1` build and other details, see
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Per-run resource caps (useful when running scripts you don't fully
+trust):
+
+```bash
+RUBYRS_FUEL=1000000 \
+RUBYRS_MAX_OBJECTS=10000 \
+RUBYRS_MAX_FRAMES=128 \
+  ./target/release/rubyrs script.rb
+```
+
+Any cap that trips returns a `ResourceExhausted` trap with a normal
+backtrace (no host panic). See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full list of env
+vars and the `wasm32-wasip1` build instructions.
 
 ## Embedding
 
@@ -63,25 +75,32 @@ rubyrs is also a Rust crate: drop it into a `Cargo.toml`, build a
 `Runtime`, and run scripts in process.
 
 ```rust
-use rubyrs::{Runtime, Value};
+use rubyrs::{Config, Runtime, Value};
 
-let mut rt = Runtime::new();
+let mut rt = Runtime::with_config(Config {
+    // Resource caps for untrusted scripts. All optional; None = unlimited.
+    fuel: Some(1_000_000),
+    max_heap_objects: Some(10_000),
+    max_frames: Some(128),
+    ..Default::default()
+});
 
 // Expose a host function to the Ruby side.
 rt.register_fn("host_pid", |_args| {
     Ok(Value::Int(std::process::id() as i64))
 });
 
-// Capture stdout into your own sink (optional; defaults to process stdout).
+// Capture stdout into your own sink (defaults to process stdout).
 // rt.set_stdout(Box::new(my_writer));
 
 rt.eval(r#"puts "pid is #{host_pid}""#, "inline").unwrap();
 ```
 
 The runtime is incremental — class and method definitions persist across
-`eval` calls, so you can split your DSL setup and script execution into
+`eval` calls, so you can split DSL setup and script execution into
 multiple chunks. See [`examples/embed.rs`](examples/embed.rs) for the
-fuller story (captured stdout, persistent classes, Trap propagation).
+fuller story (captured stdout, persistent classes, Trap propagation) and
+[`tests/embed.rs`](tests/embed.rs) for the pinned API surface.
 
 Run the example:
 

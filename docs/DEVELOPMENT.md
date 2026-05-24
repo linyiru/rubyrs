@@ -13,13 +13,21 @@ cargo build --release
 ./target/release/rubyrs path/to/script.rb
 ```
 
-Debug flags via environment variables:
+Debug + safety flags via environment variables:
 
 | Var | Effect |
 |-----|--------|
 | `DEBUG_AST=1` | Print the translated `Expr` IR before execution |
 | `DEBUG_BC=1` | Print compiled bytecode (every Proto, every Op) |
 | `GC_STATS=1` | Print final heap stats on exit |
+| `STRESS_GC=1` | Collect on every potential GC point (debug / regression) |
+| `RUBYRS_FUEL=N` | Trap as `ResourceExhausted` after `N` ops dispatched |
+| `RUBYRS_MAX_OBJECTS=N` | Trap when live heap objects exceed `N` |
+| `RUBYRS_MAX_FRAMES=N` | Trap when frame stack depth exceeds `N` |
+
+The four `RUBYRS_*` variables are useful when running untrusted scripts
+from the CLI; they are the same knobs exposed via [`Config`](#embedding)
+to library users.
 
 ## Tests
 
@@ -89,6 +97,35 @@ hyperfine --warmup 2 \
 See [BENCHMARKS.md](BENCHMARKS.md) for the canonical numbers and
 methodology.
 
+## Embedding
+
+rubyrs ships as both a binary and a library. See
+[ARCHITECTURE.md § Public embedding API](ARCHITECTURE.md#public-embedding-api)
+for the surface, [`examples/embed.rs`](../examples/embed.rs) for a
+worked example, and `tests/embed.rs` for the pinned semantics.
+
+Add to `Cargo.toml`:
+
+```toml
+[dependencies]
+rubyrs = "0.1"
+```
+
+Use:
+
+```rust
+use rubyrs::{Runtime, Config, Value};
+
+let mut rt = Runtime::with_config(Config {
+    fuel: Some(1_000_000),
+    max_heap_objects: Some(10_000),
+    max_frames: Some(128),
+    ..Default::default()
+});
+rt.register_fn("now_ms", |_| Ok(Value::Int(/* ... */ 0)));
+rt.eval(r#"puts "ok at #{now_ms}""#, "snippet")?;
+```
+
 ## Project layout
 
 ```
@@ -96,20 +133,33 @@ rubyrs/
 ├── Cargo.toml
 ├── build.rs                  # WASI stub linker shim
 ├── src/
-│   └── main.rs               # The whole runtime, one file
+│   ├── lib.rs                # Public API (Runtime, Config, re-exports)
+│   ├── main.rs               # CLI shim around Runtime
+│   ├── ast.rs                # Expr IR + Prism→Expr translation
+│   ├── value.rs              # Value enum + heap-object structs
+│   ├── intern.rs             # SymId + Interner
+│   ├── heap.rs               # Mark-sweep GC heap
+│   ├── bytecode.rs           # Op + Proto
+│   ├── compiler.rs           # Expr → bytecode
+│   ├── error.rs              # Span, RubyError, Trap
+│   └── vm.rs                 # Vm, dispatch, builtins, host fn dispatch
+├── examples/
+│   └── embed.rs              # Worked embedding example
 ├── tests/
-│   ├── integration.rs        # Fixture-based golden test harness
-│   └── fixtures/             # .rb + .expected pairs
+│   ├── integration.rs        # Fixture-based golden harness (stdout)
+│   ├── embed.rs              # Public API smoke tests
+│   └── fixtures/             # .rb + .expected pairs, plus errors/
 ├── docs/
 │   ├── ARCHITECTURE.md       # How it works internally
-│   ├── ROADMAP.md            # What's next
+│   ├── ROADMAP.md            # What's done + what's next
 │   ├── TESTING.md            # ruby/spec ingestion strategy
 │   ├── SUBSET.md             # What we do / don't support
 │   ├── BENCHMARKS.md         # Performance numbers + how to reproduce
 │   ├── DEVELOPMENT.md        # This file
-│   └── adr/                  # Architecture Decision Records
+│   └── adr/                  # Architecture Decision Records (8 so far)
 ├── README.md                 # Drive-by visitor pitch
-└── CHANGELOG.md              # Per-version user-facing changes
+├── CHANGELOG.md              # Per-version user-facing changes
+└── CONTRIBUTING.md           # PR flow
 ```
 
 ## Common pitfalls
