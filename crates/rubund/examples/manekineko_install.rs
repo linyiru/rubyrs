@@ -18,7 +18,6 @@ use flate2::read::GzDecoder;
 use rubyrs::{Runtime, Value};
 use tar::Archive;
 
-const DYNAMIC_GEMFILE_PATH: &str = "/Users/linyiru/Projects/manekineko/apps/rails/Gemfile";
 const GLOBAL_CACHE_DIR: &str = "./.rubund_global_cache";
 const PROJECT_GEMS_DIR: &str = "./.rubund_project_gems";
 
@@ -33,7 +32,11 @@ fn main() {
     println!("    🚀 RUBUND: Production Parallel Installer 🚀   ");
     println!("==================================================");
 
-    let gemfile_path = Path::new(DYNAMIC_GEMFILE_PATH);
+    let gemfile_arg = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("Usage: cargo run --release -p rubund --example manekineko_install -- <path/to/Gemfile>");
+        std::process::exit(1);
+    });
+    let gemfile_path = Path::new(&gemfile_arg);
     if !gemfile_path.exists() {
         println!("❌ Error: Could not find Gemfile at {}", gemfile_path.display());
         return;
