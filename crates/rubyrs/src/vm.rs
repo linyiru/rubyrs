@@ -893,6 +893,22 @@ impl Vm {
                     v
                 }
             }
+            Value::Class(cls) => {
+                // `raise SomeClass` with no message: instantiate
+                // an empty Exception of that class. We skip the
+                // `initialize` dispatch — there's no argument to
+                // pass — and leave `@message` unset. CRuby's
+                // `SomeClass.exception` for the no-arg form would
+                // call `initialize` with no args; the user's
+                // `initialize` (if any) accepting a default-nil
+                // message would produce the same end-state.
+                self.maybe_gc();
+                let id = self.heap.alloc(HeapObj::Instance(Instance {
+                    class: cls.clone(),
+                    ivars: HashMap::new(),
+                }));
+                Value::Object(id)
+            }
             _ => v,
         }
     }
@@ -918,11 +934,18 @@ impl Vm {
                 let mut chosen = None;
                 while let Some(h) = f.rescues.pop() {
                     let matches = if h.is_ensure {
+                        // ensure is unconditional — always runs.
                         true
                     } else if let Some(filter) = &h.filter_class {
+                        // explicit class filter (including bare
+                        // `rescue` which compiles to StandardError).
                         exc_class.as_ref().map_or(false, |cls| class_is_a(cls, filter))
                     } else {
-                        true
+                        // Non-ensure handler with no resolved filter
+                        // class means the source said `rescue Foo`
+                        // where `Foo` wasn't loaded at push-time.
+                        // Matches nothing — keep unwinding.
+                        false
                     };
                     if matches { chosen = Some(h); break; }
                 }
@@ -1936,17 +1959,20 @@ impl Vm {
                 let id = self.heap.alloc(HeapObj::Hash(pairs));
                 self.stack.push(Value::Hash(id));
             }
-            Op::PushRescue(off, slot, bind) => {
+            Op::PushRescue(off, slot, bind, filter_sym) => {
                 let ip = self.frames.last().expect("ICE: PushRescue no frame").ip;
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
-                // Bare `rescue` (the only form we compile today) filters on
-                // StandardError to match CRuby's default. Lookup at push-
-                // time costs one Interner hit + HashMap probe; the class
-                // hierarchy is already loaded by the preamble.
-                let stderr_id = self.interner.intern("StandardError");
-                let filter = self.classes.get(&stderr_id).cloned();
+                // The compiler emits the SymId of the class to filter
+                // by — for bare `rescue` that's `StandardError`. If the
+                // class hasn't been loaded into `self.classes` yet
+                // (e.g. `rescue MyUndefinedError`), `filter_class`
+                // becomes `None` and the handler will fail every
+                // match check in `unwind_with_exception`. That's
+                // closer to CRuby's behaviour than silently catching
+                // everything would be.
+                let filter = self.classes.get(&filter_sym).cloned();
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
                     filter_class: filter,

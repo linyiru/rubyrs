@@ -7,6 +7,41 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`rescue ClassName => e` (class-filtered rescue)** and
+  multiple `rescue` clauses per `begin/end` (P1-10). `RescueClause`
+  in the AST gains `classes: Vec<String>` and `Expr::Begin.rescue`
+  becomes `Vec<RescueClause>` (chained via Prism's `subsequent()`).
+  `Op::PushRescue` carries a `SymId` filter; the VM resolves it
+  to a class at push-time and `unwind_with_exception` pops past
+  handlers whose filter doesn't match the raised exception's
+  class chain. Multiple clauses are pushed in REVERSE source
+  order so the LIFO unwinder checks them in source order. Bare
+  `rescue` (no class) still compiles with `StandardError` as the
+  filter — same behaviour P0-1 introduced. `raise SomeError`
+  (no message) and `raise SomeError, "msg"` are now supported:
+  the latter desugars to `SomeError.new("msg")` at compile time
+  so the user's `initialize` runs. New diff fixture
+  `rescue_by_class.rb` covers exact-class catch, superclass
+  catch, source-order priority on multiple clauses, no-bind
+  form, and a `begin/rescue/ensure` combo. Byte-identical to
+  CRuby.
+- **`docs/SUBSET.md § Divergences`**: documents the cases where
+  rubyrs intentionally diverges from CRuby — unresolved class
+  in `rescue`, `ResourceExhausted` un-catchability,
+  single-class-only in multi-class rescue, `Foo::Bar` falling
+  back to the trailing segment. Each pinned by a test.
+
+### Fixed
+- **ADR 0008 retraction**: the earlier draft promised that
+  `rescue Exception => e` would catch `ResourceExhausted`
+  after P1-10. It doesn't, and shouldn't — the resource trap
+  is a host-level `Trap`, not a Ruby-level `raise`, so it
+  bypasses `unwind_with_exception` entirely. The ADR and a
+  matching test
+  (`resource_exhausted_is_uncatchable_even_with_rescue_exception`)
+  now lock the actual contract in.
+
+### Added
 - **`docs/PANIC_AUDIT.md`** (P0-4): classification of every
   `panic!` / `.unwrap()` / `.expect(...)` in the rubyrs crate.
   Three buckets — 🟢 ICE (compiler-guaranteed invariant), 🟡

@@ -93,3 +93,4 @@ fn run_diff(name: &str) {
 #[test] fn int_string_basics() { run_diff("int_string_basics"); }
 #[test] fn array_extras() { run_diff("array_extras"); }
 #[test] fn hash_extras() { run_diff("hash_extras"); }
+#[test] fn rescue_by_class() { run_diff("rescue_by_class"); }

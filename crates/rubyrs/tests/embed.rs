@@ -229,14 +229,85 @@ fn rescue_still_catches_standard_error_descendants() {
 }
 
 #[test]
-fn explicit_rescue_exception_can_catch_resource_exhausted() {
-    // Escape hatch: a script that *explicitly* asks for `rescue Exception`
-    // is opting in to seeing the resource trap. This will become
-    // testable once P1-10 lands class filtering; for now we just
-    // document the intended behaviour as a `#[ignore]`d test so the
-    // contract is recorded somewhere checkable.
-    //
-    // TODO(P1-10): drop the `#[ignore]` once `rescue ClassName` works.
+fn resource_exhausted_is_uncatchable_even_with_rescue_exception() {
+    // P0-1 / P1-10 contract clarification: ResourceExhausted is
+    // a HOST-level Trap, not a Ruby-level `raise`. It bypasses
+    // `unwind_with_exception` entirely — the trap propagates up
+    // via `?` from `Vm::run` straight to `Runtime::eval`. That
+    // means even a script that explicitly writes
+    // `rescue Exception => e` cannot intercept it. The trap is
+    // not a Ruby exception at all; it's the embedding API's
+    // way of saying "the script has used its budget, stop".
+    let buf = SharedBuf::new();
+    let mut rt = Runtime::with_config(Config { fuel: Some(50_000), ..Default::default() });
+    rt.set_stdout(Box::new(buf.clone()));
+    let err = rt.eval(
+        r#"
+        begin
+          while true
+          end
+        rescue Exception => e
+          puts "should not run"
+        end
+        "#,
+        "explicit_catch.rb",
+    ).unwrap_err();
+    assert!(matches!(err.err, RubyError::ResourceExhausted { .. }));
+    assert!(!buf.snapshot().contains("should not run"));
+}
+
+#[test]
+fn rescue_class_filter_catches_matching_subclass() {
+    // Bread-and-butter P1-10 case: a user class hierarchy under
+    // StandardError, and `rescue ParentClass` catches a child.
+    let buf = SharedBuf::new();
+    let mut rt = Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r#"
+        class AppError < StandardError; end
+        class NotFound < AppError; end
+        begin
+          raise NotFound, "missing"
+        rescue AppError => e
+          puts "got: #{e.message}"
+        end
+        "#,
+        "subclass_catch.rb",
+    ).unwrap();
+    // Our `Object#class` returns the class; to_display formats it
+    // as the class name.
+    assert!(buf.snapshot().contains("missing"), "stdout: {}", buf.snapshot());
+}
+
+#[test]
+fn rescue_with_unresolved_class_does_not_catch() {
+    // Documented divergence from CRuby. CRuby raises NameError
+    // eagerly when the rescue clause would fire. rubyrs silently
+    // skips the clause: the class lookup at PushRescue time
+    // misses, and the unwinder treats a non-ensure handler with
+    // an unresolved filter as "matches nothing". The outer
+    // rescue then catches the original exception.
+    let buf = SharedBuf::new();
+    let mut rt = Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r#"
+        class Real < StandardError
+        end
+        begin
+          begin
+            raise Real, "boom"
+          rescue NeverDefined => e
+            puts "inner should not match"
+          end
+        rescue Real => e
+          puts "outer: #{e.message}"
+        end
+        "#,
+        "unresolved_rescue.rb",
+    ).unwrap();
+    assert_eq!(buf.snapshot(), "outer: boom\n");
 }
 
 #[test]

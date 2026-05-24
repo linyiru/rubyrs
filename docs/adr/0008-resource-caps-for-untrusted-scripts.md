@@ -117,10 +117,17 @@ This means:
   `ResourceExhausted`. The default StandardError filter walks past
   it, and the trap propagates to the host as a `Trap` out of
   `Runtime::eval`.
-- A script that *deliberately* wants to handle resource exhaustion
-  can still write `rescue Exception => e` once explicit class
-  filtering lands in P1-10. This is opt-in and explicit — no
-  accidental swallowing.
+- A script **cannot** catch the trap, even with an explicit
+  `rescue Exception => e`. The resource trap is a host-level
+  `Trap` raised directly out of `Vm::run` via `?` — it bypasses
+  `unwind_with_exception` entirely and never appears as a Ruby
+  exception to the script. (Earlier drafts of this ADR said
+  `rescue Exception` *could* catch it; that was aspirational
+  and is retracted — see `docs/SUBSET.md § Divergences`. P1-10
+  exposed the mismatch; the test
+  `resource_exhausted_is_uncatchable_even_with_rescue_exception`
+  in `crates/rubyrs/tests/embed.rs` locks in the actual
+  contract.)
 - Hosts that want to retry should construct a fresh
   `Runtime::with_config` and re-evaluate; the trap is not the
   script's responsibility to decide about.

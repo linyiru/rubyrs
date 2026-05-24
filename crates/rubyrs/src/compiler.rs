@@ -301,10 +301,32 @@ pub(crate) fn compile_expr(
                 return;
             }
             if receiver.is_none() && name == "raise" {
-                if args.is_empty() {
-                    b.emit(Op::LoadNil);
-                } else {
-                    compile_expr(b, &args[0], protos, interner, cc);
+                match args.len() {
+                    0 => { b.emit(Op::LoadNil); }
+                    1 => {
+                        // Single arg: a String literal (wrap as
+                        // RuntimeError), an Exception instance
+                        // (pass-through), or an Exception class
+                        // (instantiate via `normalize_exception`).
+                        compile_expr(b, &args[0], protos, interner, cc);
+                    }
+                    _ => {
+                        // `raise SomeClass, "msg", *more` — synthesise
+                        // `SomeClass.new("msg", *more)` so the regular
+                        // `new` path runs `initialize` with the
+                        // remaining args. The Instance returned is the
+                        // value `Raise` consumes; `normalize_exception`
+                        // sees an Object and leaves it alone.
+                        let new_call = SExpr {
+                            span: args[0].span,
+                            node: Expr::Call {
+                                receiver: Some(Box::new(args[0].clone())),
+                                name: "new".to_string(),
+                                args: args[1..].to_vec(),
+                            },
+                        };
+                        compile_expr(b, &new_call, protos, interner, cc);
+                    }
                 }
                 b.emit(Op::Raise);
                 b.emit(Op::LoadNil);
@@ -416,31 +438,68 @@ pub(crate) fn compile_expr(
             b.emit(Op::Yield(args.len() as u8));
         }
         Expr::Begin { body, rescue, ensure } => {
-            // Emit, layered: optional outer ensure, optional inner rescue,
-            // then the body itself. Both clauses are optional and any combo
-            // is valid (`begin body end`, `begin body rescue end`,
-            // `begin body ensure end`, `begin body rescue end`).
+            // Layered: optional outer ensure, zero-or-more inner
+            // rescue clauses, then the body. With multiple `rescue`
+            // clauses we want the first source-listed clause to be
+            // tried first; the VM's unwinder pops handlers LIFO, so
+            // we push them in REVERSE source order. Each clause
+            // declaring an explicit class (or none = bare = filter
+            // StandardError) gets its own PushRescue. A single
+            // clause with multiple classes (`rescue A, B`) currently
+            // honours only the first class — multi-class rescue
+            // expansion is a follow-up. ConstantPath
+            // (`Foo::Bar`) uses the trailing segment.
             let pe = ensure.as_ref().map(|_| b.emit(Op::PushEnsure(0)));
 
-            // Inner: rescue (if any) wrapping body
-            match rescue {
-                None => compile_body(b, body, protos, interner, cc),
-                Some(rc) => {
+            if rescue.is_empty() {
+                compile_body(b, body, protos, interner, cc);
+            } else {
+                // Ruby semantics: the first source-listed `rescue`
+                // clause is tried first. The VM's unwinder pops the
+                // rescues stack LIFO, so we PUSH in REVERSE source
+                // order — the first source clause ends up on top.
+                let stderr_sym = interner.intern("StandardError");
+                let mut placeholders: Vec<usize> = Vec::with_capacity(rescue.len());
+                for rc in rescue.iter().rev() {
                     let (slot, bind) = match &rc.var {
                         Some(name) => (b.local_slot(name), 1u8),
                         None => (0u16, 0u8),
                     };
-                    let pr = b.emit(Op::PushRescue(0, slot, bind));
-                    compile_body(b, body, protos, interner, cc);
-                    b.emit(Op::PopRescue);
-                    let je = b.emit(Op::Jump(0));
-                    let handler_start = b.pos();
-                    let off = handler_start as i32 - pr as i32 - 1;
-                    if let Op::PushRescue(o, _, _) = &mut b.code[pr] { *o = off; }
-                    compile_body(b, &rc.body, protos, interner, cc);
-                    let end = b.pos();
-                    b.patch_jump(je, end);
+                    // Single-class rescue today: we honour the first
+                    // class in the clause's list. Multi-class
+                    // (`rescue A, B => e`) is a follow-up — for now
+                    // the second-and-later classes are silently
+                    // ignored. Documented in ADR-pending.
+                    let filter_sym = match rc.classes.first() {
+                        Some(name) => interner.intern(name),
+                        None => stderr_sym,
+                    };
+                    placeholders.push(b.emit(Op::PushRescue(0, slot, bind, filter_sym)));
                 }
+                compile_body(b, body, protos, interner, cc);
+                for _ in &placeholders { b.emit(Op::PopRescue); }
+                // Normal-path exit from body jumps past every
+                // handler body to the merge point. Each handler
+                // body also jumps to the same merge after running.
+                let mut jump_to_end: Vec<usize> = Vec::with_capacity(rescue.len() + 1);
+                jump_to_end.push(b.emit(Op::Jump(0)));
+                // Handler bodies emitted in the same order as the
+                // PushRescues we collected (reverse source order).
+                // Handler-body order in code doesn't affect runtime
+                // semantics — each PushRescue carries its own
+                // handler_ip — so we keep the iteration consistent.
+                for (i, rc) in rescue.iter().rev().enumerate() {
+                    let placeholder = placeholders[i];
+                    let handler_start = b.pos();
+                    let off = handler_start as i32 - placeholder as i32 - 1;
+                    if let Op::PushRescue(o, _, _, _) = &mut b.code[placeholder] {
+                        *o = off;
+                    }
+                    compile_body(b, &rc.body, protos, interner, cc);
+                    jump_to_end.push(b.emit(Op::Jump(0)));
+                }
+                let end = b.pos();
+                for j in jump_to_end { b.patch_jump(j, end); }
             }
 
             // Ensure layer (compile body twice — once inline for the normal
