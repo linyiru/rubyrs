@@ -225,16 +225,18 @@ fn perform_linking(extracted_dir: &Path) {
 
     println!("  └─ 🔗 Linking cache files into project folder...");
     
-    #[cfg(unix)]
-    {
-        let abs_extracted = fs::canonicalize(extracted_dir).unwrap();
-        symlink(&abs_extracted, &dest_link).expect("Failed to create symlink");
-    }
-    
-    #[cfg(windows)]
-    {
-        let abs_extracted = fs::canonicalize(extracted_dir).unwrap();
-        std::os::windows::fs::symlink_dir(&abs_extracted, &dest_link).expect("Failed to create symlink");
+    if !dest_link.exists() {
+        #[cfg(unix)]
+        {
+            let abs_extracted = fs::canonicalize(extracted_dir).unwrap();
+            symlink(&abs_extracted, &dest_link).expect("Failed to create symlink");
+        }
+
+        #[cfg(windows)]
+        {
+            let abs_extracted = fs::canonicalize(extracted_dir).unwrap();
+            std::os::windows::fs::symlink_dir(&abs_extracted, &dest_link).expect("Failed to create symlink");
+        }
     }
 
     println!("       -> Linked instantly in {:?}", start_time.elapsed());
