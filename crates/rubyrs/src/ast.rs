@@ -1,6 +1,30 @@
+use std::cell::RefCell;
+
 use ruby_prism::Node;
 
 use crate::error::Span;
+
+// AST translation collects unsupported-node messages here instead of
+// panicking. `tr_with_errors` clears + drains; bare `tr` (kept for
+// the recursive internal API) still walks the whole tree, leaving a
+// `Expr::Nil` placeholder wherever it bailed. The caller is
+// responsible for checking the collected errors and surfacing a
+// SyntaxError Trap before any compile/exec happens.
+thread_local! {
+    static AST_ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Translate a Prism root node, returning the SExpr plus any
+/// unsupported-node messages collected along the way. Empty `errs`
+/// means the whole tree was within the supported subset. If `errs`
+/// is non-empty the returned SExpr may contain `Expr::Nil`
+/// placeholders where translation failed — don't compile it.
+pub(crate) fn tr_with_errors(node: &Node<'_>) -> (SExpr, Vec<String>) {
+    AST_ERRORS.with(|cell| cell.borrow_mut().clear());
+    let prog = tr(node);
+    let errs = AST_ERRORS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    (prog, errs)
+}
 
 // ---------- IR ----------
 
@@ -336,7 +360,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         });
         return sp(node, Expr::Begin { body, rescue, ensure });
     }
-    panic!("unsupported node: {:?}", node);
+    // Unsupported Prism node — record the message and return a
+    // placeholder. The eval entry point checks `AST_ERRORS` after
+    // tr returns and surfaces a SyntaxError Trap, so the
+    // placeholder never reaches the compiler in practice.
+    AST_ERRORS.with(|cell| cell.borrow_mut().push(format!("unsupported node: {:?}", node)));
+    sp(node, Expr::Nil)
 }
 
 fn seq_inner(stmts: Vec<SExpr>) -> Expr {

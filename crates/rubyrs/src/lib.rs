@@ -168,7 +168,17 @@ end
                 backtrace: vec![],
             });
         }
-        let prog = ast::tr(&parse_result.node());
+        let (prog, ast_errors) = ast::tr_with_errors(&parse_result.node());
+        if !ast_errors.is_empty() {
+            // AST translation hit one or more Prism nodes the
+            // language subset doesn't cover. Surface as a
+            // SyntaxError so embedders see a Trap they can format
+            // and report, rather than a host-side panic.
+            return Err(Trap {
+                err: RubyError::SyntaxError { msg: ast_errors.join("; ") },
+                backtrace: vec![],
+            });
+        }
         let entry = compiler::compile_proto(
             "<main>".into(), vec![], &[prog], filename_rc,
             &mut self.vm.protos, &mut self.vm.interner, &mut self.cache_counter,

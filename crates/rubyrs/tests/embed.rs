@@ -274,6 +274,36 @@ fn pin_guard_balanced_when_block_raises_inside_iterator() {
 }
 
 #[test]
+fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
+    // P0-4: prior to this change, any Prism node the AST translator
+    // didn't handle (case/when, regex literal, lambda, etc.) hit
+    // `panic!("unsupported node: ...")` and tore down the host
+    // process. With rubund evaluating gemspecs from rubygems.org —
+    // arbitrary third-party Ruby — that's a denial-of-service waiting
+    // to happen.
+    //
+    // `case` is currently outside the supported subset and reaches
+    // the unsupported-node fallback. We expect a SyntaxError Trap
+    // back, not a SIGABRT.
+    let mut rt = Runtime::new();
+    let err = rt.eval(
+        r#"
+        x = 1
+        case x
+        when 1 then puts "one"
+        else        puts "other"
+        end
+        "#,
+        "case.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::SyntaxError { .. }),
+        "expected SyntaxError, got {:?}",
+        err.err,
+    );
+}
+
+#[test]
 fn frame_cap_traps_deep_recursion() {
     let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
     let err = rt.eval(

@@ -6,6 +6,36 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **`docs/PANIC_AUDIT.md`** (P0-4): classification of every
+  `panic!` / `.unwrap()` / `.expect(...)` in the rubyrs crate.
+  Three buckets — 🟢 ICE (compiler-guaranteed invariant), 🟡
+  ICE-but-fuzzy (reachable via internal bugs only, exercised
+  in P3-17 fuzz target), 🔴 user-reachable (must be converted
+  to `Trap`). Current totals: vm.rs 61 / heap.rs 9 / ast.rs 3
+  / lib.rs 1 / compiler.rs 1, all 🟢 or 🟡 after this change.
+- **CI `panic-budget` job** (P0-5): counts panics per file and
+  fails the build if any count rises above the threshold
+  recorded in `docs/PANIC_AUDIT.md`. Doc-comment occurrences
+  (`///` / `//!` lines) are excluded. Direction is one-way:
+  budgets may only ratchet down.
+
+### Fixed
+- **Unsupported AST nodes return `SyntaxError` instead of
+  panicking** (P0-4). Any Prism node outside the supported
+  subset (e.g. `case/when`, regex literals, lambdas) used to
+  hit `panic!("unsupported node: ...")` in `ast::tr`, tearing
+  down the host process. AST translation now records the
+  message on a thread-local error buffer and returns an
+  `Expr::Nil` placeholder; `Runtime::eval` checks the buffer
+  after `tr_with_errors` and returns a `Trap` with
+  `RubyError::SyntaxError` before compilation runs. With
+  rubund eventually evaluating gemspecs from rubygems.org —
+  arbitrary third-party Ruby — this was a denial-of-service
+  surface that had to close. New `embed.rs` test exercises
+  the case statement (currently unsupported) and asserts a
+  Trap, not a SIGABRT.
+
 ### Changed
 - **GC mark walks children in place instead of cloning** (P0-3).
   `Heap::collect`'s mark phase previously built a fresh
