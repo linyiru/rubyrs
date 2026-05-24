@@ -14,14 +14,22 @@ use crate::value::{BlockHandle, Class, Instance, Method, ObjId, Value};
 // ---------- VM ----------
 
 /// Ordering for built-in aggregation methods (`min` / `max` /
-/// `sort`). Only homogeneous Int / Str arrays are supported; other
-/// shapes return `None` so the caller can fall through to
+/// `sort`). Only homogeneous Int / Str / Sym arrays are supported;
+/// other shapes return `None` so the caller can fall through to
 /// NoMethodError. With a block-taking comparator we'd handle this
 /// generically, but that's deferred to a later milestone.
-fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+///
+/// Symbol comparison uses the interned string — CRuby orders
+/// `:apple < :banana` lexicographically, not by interning order.
+fn value_cmp_v(a: &Value, b: &Value, interner: &Interner) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
         (Value::Str(x), Value::Str(y)) => Some((**x).cmp(&**y)),
+        (Value::Sym(x), Value::Sym(y)) => {
+            let sx = interner.resolve(*x);
+            let sy = interner.resolve(*y);
+            Some((**sx).cmp(&**sy))
+        }
         _ => None,
     }
 }
@@ -441,7 +449,7 @@ impl Vm {
                         if a.is_empty() { return Some(Value::Nil); }
                         let mut best = a[0].clone();
                         for v in &a[1..] {
-                            match value_cmp(v, &best) {
+                            match value_cmp_v(v, &best, &self.interner) {
                                 Some(std::cmp::Ordering::Less) => best = v.clone(),
                                 Some(_) => {}
                                 None => return None,
@@ -454,7 +462,7 @@ impl Vm {
                         if a.is_empty() { return Some(Value::Nil); }
                         let mut best = a[0].clone();
                         for v in &a[1..] {
-                            match value_cmp(v, &best) {
+                            match value_cmp_v(v, &best, &self.interner) {
                                 Some(std::cmp::Ordering::Greater) => best = v.clone(),
                                 Some(_) => {}
                                 None => return None,
@@ -464,10 +472,11 @@ impl Vm {
                     }
                     ("sort", []) => {
                         let mut copy: Vec<Value> = self.heap.array(id).clone();
-                        if copy.windows(2).any(|w| value_cmp(&w[0], &w[1]).is_none()) {
+                        if copy.windows(2).any(|w| value_cmp_v(&w[0], &w[1], &self.interner).is_none()) {
                             return None;
                         }
-                        copy.sort_by(|a, b| value_cmp(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                        let interner = &self.interner;
+                        copy.sort_by(|a, b| value_cmp_v(a, b, interner).unwrap_or(std::cmp::Ordering::Equal));
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(copy));
                         Some(Value::Array(nid))
@@ -630,6 +639,86 @@ impl Vm {
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(vals));
                         Some(Value::Array(nid))
+                    }
+                    ("to_h", []) => Some(Value::Hash(id)),
+                    ("to_a", []) => {
+                        // Hash#to_a returns an Array of two-element Arrays.
+                        // Each inner [k, v] is freshly heap-allocated; we
+                        // need to pin every inner Array onto `self.pinned`
+                        // as we accumulate, otherwise the next loop iter's
+                        // `maybe_gc` will sweep the previous pair (it's
+                        // only live via the Rust-local Vec, not via any GC
+                        // root). Failing to pin produces slot-reuse cycles
+                        // that explode `to_display`'s recursion later.
+                        // Also pin the source Hash since recv was popped
+                        // off the operand stack before we got here.
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        self.pinned.push(Value::Hash(id));
+                        let pair_count = pairs.len();
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(pair_count);
+                        for (k, v) in pairs {
+                            self.maybe_gc();
+                            let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
+                            self.pinned.push(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(pair_ids));
+                        for _ in 0..pair_count { self.pinned.pop(); }
+                        self.pinned.pop(); // source Hash
+                        Some(Value::Array(nid))
+                    }
+                    ("merge", [Value::Hash(other)]) => {
+                        // CRuby: keys in `other` overwrite keys in `self`,
+                        // and `other`'s key-order is appended after self's
+                        // (existing keys retain their position).
+                        let mut out: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
+                        for (k, v) in extra {
+                            let pos = out.iter().position(|(ek, _)| ek.ruby_eq(&k, &self.heap));
+                            if let Some(p) = pos {
+                                out[p].1 = v;
+                            } else {
+                                out.push((k, v));
+                            }
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Hash(out));
+                        Some(Value::Hash(nid))
+                    }
+                    ("delete", [k]) => {
+                        let pos = self.heap.hash(id).iter()
+                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                        if let Some(p) = pos {
+                            let removed = self.heap.hash_mut(id).remove(p).1;
+                            Some(removed)
+                        } else {
+                            Some(Value::Nil)
+                        }
+                    }
+                    ("invert", []) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).iter()
+                            .map(|(k, v)| (v.clone(), k.clone()))
+                            .collect();
+                        // Later duplicates win for invert — same as CRuby:
+                        // if two original values collide as inverted keys,
+                        // the last one through wins. Dedup keeping latest.
+                        let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+                        for (k, v) in pairs {
+                            let pos = out.iter().position(|(ek, _)| ek.ruby_eq(&k, &self.heap));
+                            if let Some(p) = pos { out[p].1 = v; } else { out.push((k, v)); }
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Hash(out));
+                        Some(Value::Hash(nid))
+                    }
+                    ("store", [k, v]) => {
+                        let pos = self.heap.hash(id).iter()
+                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                        let h = self.heap.hash_mut(id);
+                        if let Some(p) = pos { h[p].1 = v.clone(); }
+                        else { h.push((k.clone(), v.clone())); }
+                        Some(v.clone())
                     }
                     _ => None,
                 }
@@ -1144,9 +1233,10 @@ impl Vm {
                 self.pinned.pop();
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
-            (Value::Hash(id), "each", []) => {
-                self.pinned.push(Value::Hash(*id));
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+            (Value::Hash(id), "each", []) | (Value::Hash(id), "each_pair", []) => {
+                let id = *id;
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                self.pinned.push(Value::Hash(id));
                 let pre_frames = self.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
@@ -1160,7 +1250,7 @@ impl Vm {
                     }
                 }
                 self.pinned.pop();
-                Some(early.unwrap_or(Value::Hash(*id)))
+                return Ok(Some(early.unwrap_or(Value::Hash(id))));
             }
             (Value::Int(start), "upto", [Value::Int(stop)]) => {
                 let start = *start;
@@ -1288,11 +1378,12 @@ impl Vm {
                 }
                 // Bail if any key is uncomparable — leave callers a path to
                 // see NoMethodError instead of a silent equal-everywhere sort.
-                if pairs.iter().any(|(k1, _)| pairs.iter().any(|(k2, _)| value_cmp(k1, k2).is_none())) {
+                if pairs.iter().any(|(k1, _)| pairs.iter().any(|(k2, _)| value_cmp_v(k1, k2, &self.interner).is_none())) {
                     self.pinned.pop();
                     return Ok(None);
                 }
-                pairs.sort_by(|a, b| value_cmp(&a.0, &b.0).unwrap_or(std::cmp::Ordering::Equal));
+                let interner = &self.interner;
+                pairs.sort_by(|a, b| value_cmp_v(&a.0, &b.0, interner).unwrap_or(std::cmp::Ordering::Equal));
                 let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
                 self.maybe_gc();
                 self.check_alloc()?;

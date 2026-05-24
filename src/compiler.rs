@@ -246,6 +246,42 @@ pub(crate) fn compile_expr(
             let end = b.pos();
             b.patch_jump(je, end);
         }
+        Expr::Or(lhs, rhs) => {
+            // a || b — keep a if truthy, otherwise eval b.
+            // We only have JumpIfFalse (pops top) so the lowering is:
+            //   <a>; Dup; JumpIfFalse to_skip
+            //   Jump end                  ; a was truthy: leave the kept copy
+            //   to_skip: Pop              ; pop the falsy a we kept on stack
+            //            <b>
+            //   end:
+            compile_expr(b, lhs, protos, interner, cc);
+            b.emit(Op::Dup);
+            let jf = b.emit(Op::JumpIfFalse(0));
+            let je = b.emit(Op::Jump(0));
+            let to_skip = b.pos();
+            b.patch_jump(jf, to_skip);
+            b.emit(Op::Pop);
+            compile_expr(b, rhs, protos, interner, cc);
+            let end = b.pos();
+            b.patch_jump(je, end);
+        }
+        Expr::And(lhs, rhs) => {
+            // a && b — keep a if falsy, otherwise eval b.
+            //   <a>; Dup; JumpIfFalse to_skip   ; truthy: fall through
+            //   Pop; <b>; Jump end              ; truthy: eval and use b
+            //   to_skip:                        ; falsy: leave a as result
+            //   end:
+            compile_expr(b, lhs, protos, interner, cc);
+            b.emit(Op::Dup);
+            let jf = b.emit(Op::JumpIfFalse(0));
+            b.emit(Op::Pop);
+            compile_expr(b, rhs, protos, interner, cc);
+            let je = b.emit(Op::Jump(0));
+            let to_skip = b.pos();
+            b.patch_jump(jf, to_skip);
+            let end = b.pos();
+            b.patch_jump(je, end);
+        }
         Expr::While { cond, body } => {
             let start = b.pos();
             compile_expr(b, cond, protos, interner, cc);

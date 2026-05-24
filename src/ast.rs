@@ -78,6 +78,10 @@ pub(crate) enum Expr {
     /// iteration in the calling driver (e.g. `arr.each`), making the
     /// driver's return value `val`.
     Break(Option<Box<SExpr>>),
+    /// `a || b` — short-circuit: returns `a` if truthy, else `b`.
+    Or(Box<SExpr>, Box<SExpr>),
+    /// `a && b` — short-circuit: returns `b` if `a` truthy, else `a`.
+    And(Box<SExpr>, Box<SExpr>),
     Begin {
         body: Vec<SExpr>,
         rescue: Option<RescueClause>,
@@ -229,6 +233,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             None => vec![],
         };
         return sp(node, Expr::If { cond, then_body, else_body });
+    }
+    if let Some(n) = node.as_or_node() {
+        return sp(node, Expr::Or(Box::new(tr(&n.left())), Box::new(tr(&n.right()))));
+    }
+    if let Some(n) = node.as_and_node() {
+        return sp(node, Expr::And(Box::new(tr(&n.left())), Box::new(tr(&n.right()))));
     }
     if let Some(n) = node.as_while_node() {
         let cond = Box::new(tr(&n.predicate()));

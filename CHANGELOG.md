@@ -7,6 +7,36 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Hash extras + short-circuit `||` and `&&`** (P3-B-3). New
+  `Hash` methods: `merge` (other's keys overwrite, ordering
+  follows CRuby), `to_h` (identity), `to_a` (Array of `[k, v]`
+  Arrays), `delete(k)` (returns removed value or nil, mutates),
+  `invert` (later-source-key wins on collision), `store(k, v)`
+  (alias for `[]=`). `each` now also matches `each_pair`. Adds
+  `Expr::Or` and `Expr::And` to the AST, wires Prism's
+  `OrNode`/`AndNode`, and compiles them with short-circuit
+  semantics using `Dup` + `JumpIfFalse` (`||` keeps `a` if
+  truthy; `&&` keeps `a` if falsy). Sort comparator now also
+  orders `Symbol`s lexicographically (by interned string), so
+  `hash.keys.sort` works on symbol-keyed hashes. New diff
+  fixture `hash_extras.rb` (~100 lines) covers each method,
+  empty-collection edges, an invert-collision case, a chained
+  `merge.each` pattern, and a `Tally` class that uses
+  `(@counts[key] || 0) + 1` + `keys.sort` + method chaining.
+
+### Fixed
+- **GC root hole in `Hash#to_a`**. Each `[k, v]` pair is a fresh
+  heap Array; the loop accumulated them into a Rust-local Vec
+  while calling `maybe_gc` between iterations. Under stress-GC
+  that swept earlier pairs, the alloc allocator reused their
+  slots for later pairs, and the final outer Array could land
+  in a reused slot too — yielding a self-referential Array that
+  blew the stack inside `to_display`'s recursion. Fix: pin the
+  source Hash and every accumulated pair onto `Vm.pinned` for
+  the alloc window, pop on exit. Same pattern the iterator
+  drivers use.
+
+### Added
 - **Array combination & iteration extras** (P3-B-2). New
   no-block methods on `Array`: `reverse`, `uniq` (uses Ruby
   equality, preserves first-seen order), `compact` (drops nils),
