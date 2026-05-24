@@ -468,3 +468,51 @@ fn frame_cap_traps_deep_recursion() {
     ).unwrap_err();
     assert!(matches!(err.err, RubyError::ResourceExhausted { .. }));
 }
+
+// ---------- resolve_* helpers ----------
+
+#[test]
+fn resolve_array_unpacks_elements() {
+    let mut rt = Runtime::new();
+    let val = rt.eval("[10, 20, 30]", "t.rb").unwrap();
+    let elems = rt.resolve_array(&val).expect("should be an Array");
+    assert_eq!(elems.len(), 3);
+    assert!(matches!(elems[0], Value::Int(10)));
+    assert!(matches!(elems[1], Value::Int(20)));
+    assert!(matches!(elems[2], Value::Int(30)));
+}
+
+#[test]
+fn resolve_array_returns_none_for_non_array() {
+    let rt = Runtime::new();
+    assert!(rt.resolve_array(&Value::Int(42)).is_none());
+}
+
+#[test]
+fn resolve_hash_unpacks_pairs() {
+    let mut rt = Runtime::new();
+    let val = rt.eval(r#"{ "a" => 1, "b" => 2 }"#, "t.rb").unwrap();
+    let pairs = rt.resolve_hash(&val).expect("should be a Hash");
+    assert_eq!(pairs.len(), 2);
+    assert!(matches!(&pairs[0].0, Value::Str(s) if &**s == "a"));
+    assert!(matches!(&pairs[0].1, Value::Int(1)));
+    assert!(matches!(&pairs[1].0, Value::Str(s) if &**s == "b"));
+    assert!(matches!(&pairs[1].1, Value::Int(2)));
+}
+
+#[test]
+fn resolve_hash_returns_none_for_non_hash() {
+    let rt = Runtime::new();
+    assert!(rt.resolve_hash(&Value::Nil).is_none());
+}
+
+#[test]
+fn resolve_sym_roundtrips_symbol() {
+    let mut rt = Runtime::new();
+    let val = rt.eval(":hello", "t.rb").unwrap();
+    if let Value::Sym(id) = val {
+        assert_eq!(rt.resolve_sym(id), "hello");
+    } else {
+        panic!("expected Value::Sym, got {:?}", val);
+    }
+}

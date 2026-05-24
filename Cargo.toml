@@ -19,4 +19,7 @@ rust-version = "1.85"
 # `<name>.workspace = true` under their `[dependencies]`.
 [workspace.dependencies]
 ruby-prism = "1.9"
+ureq = "2.9"
+tar = "0.4"
+flate2 = "1.0"
 cc = "1"
