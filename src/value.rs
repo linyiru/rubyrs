@@ -6,11 +6,11 @@ use crate::intern::SymId;
 
 // ---------- Values ----------
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ObjId(pub(crate) u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ObjId(pub(crate) u32);
 
-#[derive(Clone)]
-pub(crate) enum Value {
+#[derive(Clone, Debug)]
+pub enum Value {
     Int(i64),
     Str(Rc<str>),
     Sym(SymId),
@@ -23,7 +23,8 @@ pub(crate) enum Value {
     Block(Rc<BlockHandle>),
 }
 
-pub(crate) struct BlockHandle {
+#[derive(Debug)]
+pub struct BlockHandle {
     pub(crate) proto_idx: usize,
     pub(crate) captured: Rc<RefCell<Vec<Value>>>,
     pub(crate) self_val: Value,
@@ -31,17 +32,20 @@ pub(crate) struct BlockHandle {
     pub(crate) n_params: u16,
 }
 
-pub(crate) struct Class {
+#[derive(Debug)]
+pub struct Class {
     pub(crate) name: String,
     pub(crate) methods: RefCell<HashMap<SymId, Rc<Method>>>,
 }
 
-pub(crate) struct Instance {
+#[derive(Debug)]
+pub struct Instance {
     pub(crate) class: Rc<Class>,
     pub(crate) ivars: HashMap<SymId, Value>,
 }
 
-pub(crate) struct Method {
+#[derive(Debug)]
+pub struct Method {
     pub(crate) params: Vec<String>,
     pub(crate) proto_idx: usize,
 }

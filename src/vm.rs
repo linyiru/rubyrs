@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::env;
 use std::rc::Rc;
 
+use std::io::Write;
+
 use crate::bytecode::{Op, Proto};
 use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::heap::{Heap, HeapObj};
@@ -29,17 +31,21 @@ pub(crate) struct RescueHandler {
     pub(crate) bind_slot: Option<u16>,
 }
 
+pub(crate) type HostFn = dyn Fn(&[Value]) -> Result<Value, Trap>;
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     pub(crate) interner: Interner,
     pub(crate) classes: HashMap<SymId, Rc<Class>>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
+    pub(crate) host_fns: HashMap<SymId, Rc<HostFn>>,
     pub(crate) class_stack: Vec<Rc<Class>>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
     /// Native-code holding pen for heap values across GC points; see ADR 0005.
     pub(crate) pinned: Vec<Value>,
+    pub(crate) stdout: Box<dyn std::io::Write>,
     pub(crate) stress_gc: bool,
 }
 
@@ -50,11 +56,13 @@ impl Vm {
             interner,
             classes: HashMap::new(),
             toplevel_methods: HashMap::new(),
+            host_fns: HashMap::new(),
             class_stack: vec![],
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),
             pinned: Vec::new(),
+            stdout: Box::new(std::io::stdout()),
             stress_gc: env::var("STRESS_GC").is_ok(),
         }
     }
@@ -114,7 +122,12 @@ impl Vm {
         };
 
         if no_recv {
-            if let Some(v) = self.builtin_call(&name, &args) {
+            if let Some(res) = self.builtin_call(&name, &args) {
+                self.stack.push(res?);
+                return Ok(());
+            }
+            if let Some(host) = self.host_fns.get(&name_id).cloned() {
+                let v = host(&args)?;
                 self.stack.push(v);
                 return Ok(());
             }
@@ -368,7 +381,12 @@ impl Vm {
         }
 
         if no_recv {
-            if let Some(v) = self.builtin_call(&name, &args) { self.stack.push(v); return Ok(()); }
+            if let Some(res) = self.builtin_call(&name, &args) { self.stack.push(res?); return Ok(()); }
+            if let Some(host) = self.host_fns.get(&name_id).cloned() {
+                let v = host(&args)?;
+                self.stack.push(v);
+                return Ok(());
+            }
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
@@ -677,16 +695,25 @@ pub(crate) fn vec_nil(n: usize) -> Vec<Value> {
 }
 
 impl Vm {
-    pub(crate) fn builtin_call(&self, name: &str, args: &[Value]) -> Option<Value> {
+    pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
         match name {
             "puts" => {
-                if args.is_empty() { println!(); }
-                else { for a in args { println!("{}", a.to_display(&self.heap, &self.interner)); } }
-                Some(Value::Nil)
+                if args.is_empty() {
+                    let _ = writeln!(self.stdout);
+                } else {
+                    for a in args {
+                        let s = a.to_display(&self.heap, &self.interner);
+                        let _ = writeln!(self.stdout, "{}", s);
+                    }
+                }
+                Some(Ok(Value::Nil))
             }
             "print" => {
-                for a in args { print!("{}", a.to_display(&self.heap, &self.interner)); }
-                Some(Value::Nil)
+                for a in args {
+                    let s = a.to_display(&self.heap, &self.interner);
+                    let _ = write!(self.stdout, "{}", s);
+                }
+                Some(Ok(Value::Nil))
             }
             _ => None,
         }

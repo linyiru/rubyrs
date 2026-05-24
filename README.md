@@ -57,6 +57,38 @@ cargo build --release
 For the `wasm32-wasip1` build and other details, see
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
+## Embedding
+
+rubyrs is also a Rust crate: drop it into a `Cargo.toml`, build a
+`Runtime`, and run scripts in process.
+
+```rust
+use rubyrs::{Runtime, Value};
+
+let mut rt = Runtime::new();
+
+// Expose a host function to the Ruby side.
+rt.register_fn("host_pid", |_args| {
+    Ok(Value::Int(std::process::id() as i64))
+});
+
+// Capture stdout into your own sink (optional; defaults to process stdout).
+// rt.set_stdout(Box::new(my_writer));
+
+rt.eval(r#"puts "pid is #{host_pid}""#, "inline").unwrap();
+```
+
+The runtime is incremental — class and method definitions persist across
+`eval` calls, so you can split your DSL setup and script execution into
+multiple chunks. See [`examples/embed.rs`](examples/embed.rs) for the
+fuller story (captured stdout, persistent classes, Trap propagation).
+
+Run the example:
+
+```bash
+cargo run --release --example embed
+```
+
 ## Status
 
 Experimental. See [docs/SUBSET.md](docs/SUBSET.md) for what works today

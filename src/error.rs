@@ -9,7 +9,7 @@ use std::rc::Rc;
 /// Source position. Byte offset is what Prism gives us cheaply; line/column
 /// are resolved lazily at display time against the original source.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Span {
+pub struct Span {
     pub(crate) byte_offset: u32,
 }
 
@@ -35,7 +35,7 @@ pub(crate) fn line_col(source: &str, byte_offset: u32) -> (u32, u32) {
 /// A Ruby-visible error. Today this is the closed set rubyrs can produce;
 /// we'll grow it to a class hierarchy with the rescue-by-class feature.
 #[derive(Debug)]
-pub(crate) enum RubyError {
+pub enum RubyError {
     SyntaxError { msg: String },
     NoMethodError { method: String, recv_type: &'static str },
     ArgumentError { msg: String },
@@ -70,16 +70,25 @@ impl RubyError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct TrapFrame {
-    pub(crate) filename: Rc<str>,
-    pub(crate) method: Rc<str>,
-    pub(crate) span: Span,
+pub struct TrapFrame {
+    pub filename: Rc<str>,
+    pub method: Rc<str>,
+    pub span: Span,
 }
 
 /// A unwinding error. Carries the Ruby-visible cause and the call-stack
 /// snapshot at the throw site.
 #[derive(Debug)]
-pub(crate) struct Trap {
-    pub(crate) err: RubyError,
-    pub(crate) backtrace: Vec<TrapFrame>,
+pub struct Trap {
+    pub err: RubyError,
+    pub backtrace: Vec<TrapFrame>,
+}
+
+impl Trap {
+    /// Convenience constructor for host fns that want to raise an error
+    /// with no backtrace; the dispatch loop fills the backtrace from the
+    /// caller's frames.
+    pub fn new(err: RubyError) -> Self {
+        Trap { err, backtrace: vec![] }
+    }
 }

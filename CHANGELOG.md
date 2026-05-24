@@ -6,6 +6,24 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **Host embedding API** (P1-C). New `src/lib.rs` exposes `Runtime`,
+  `Value`, `Trap`, `RubyError`, etc. as a public Rust API:
+  - `Runtime::new()` / `with_config(Config)`
+  - `rt.eval(source, filename)` and `rt.eval_file(path)` —
+    incremental: class/method defs persist across calls
+  - `rt.register_fn(name, |args| ...)` — host functions callable
+    from Ruby
+  - `rt.set_stdout(Box<dyn Write>)` — capture/redirect `puts`/`print`
+  - `rt.format_trap(&trap)` — CRuby-style backtrace formatting
+- `examples/embed.rs` demonstrating all four capabilities
+- `tests/embed.rs` locking down the API surface (7 tests)
+- ADR 0007: Host embedding API design
+
+### Changed
+- `src/main.rs` shrinks to a 20-line CLI wrapper around `Runtime`.
+  Behaviour is identical to before.
+
 ### Changed
 - **Global string interner** (P1-B). Method names, ivar names, class
   names, and string literals all live in a single Vm-owned `Interner`

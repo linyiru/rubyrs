@@ -5,7 +5,7 @@ use std::rc::Rc;
 /// single u32 compare, which is what makes Ruby `Symbol#==`, method-dispatch
 /// hash keys, and IVar lookups O(1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct SymId(pub(crate) u32);
+pub struct SymId(pub(crate) u32);
 
 /// Global string-intern table. Compile-time strings (method names, ivar
 /// names, class names, string literals) live here as `Rc<str>`; each unique
