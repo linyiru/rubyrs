@@ -1,0 +1,6 @@
+before
+caught: something went wrong
+outer: oops
+inner caught: inner
+outer caught: rethrow
+3

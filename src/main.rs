@@ -54,6 +54,16 @@ enum Expr {
         block_body: Vec<Expr>,
     },
     Yield(Vec<Expr>),
+    Begin {
+        body: Vec<Expr>,
+        rescue: Option<RescueClause>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct RescueClause {
+    body: Vec<Expr>,
+    var: Option<String>,
 }
 
 // ---------- Translate prism AST to Expr ----------
@@ -196,6 +206,21 @@ fn tr(node: &Node<'_>) -> Expr {
             None => vec![],
         };
         return Expr::Class { name, body };
+    }
+    if let Some(n) = node.as_begin_node() {
+        let body: Vec<Expr> = n.statements()
+            .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+            .unwrap_or_default();
+        let rescue = n.rescue_clause().map(|rc| {
+            let body: Vec<Expr> = rc.statements()
+                .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                .unwrap_or_default();
+            let var = rc.reference().and_then(|r| {
+                r.as_local_variable_target_node().map(|lvt| cid_to_string(lvt.name()))
+            });
+            RescueClause { body, var }
+        });
+        return Expr::Begin { body, rescue };
     }
     panic!("unsupported node: {:?}", node);
 }
@@ -463,8 +488,10 @@ enum Op {
     CallBlock(u32, u8),         // name, argc; expects [recv, block, ...args]
     CallNoRecvBlock(u32, u8),   // name, argc; expects [block, ...args]
     Yield(u8),
-    /// Binary op with Int+Int fast path; falls back to generic dispatch.
     BinOp(BinOpKind),
+    PushRescue(i32, u16, u8), // handler relative offset, slot to bind exception (u16), 1 if bind else 0
+    PopRescue,
+    Raise,
     Return,
 }
 
@@ -649,6 +676,17 @@ fn compile_expr(b: &mut ProtoBuilder, e: &Expr, protos: &mut Vec<Proto>) {
                 compile_body(b, args, protos);
                 return;
             }
+            // Special: raise as built-in control flow
+            if receiver.is_none() && name == "raise" {
+                if args.is_empty() {
+                    b.emit(Op::LoadNil);
+                } else {
+                    compile_expr(b, &args[0], protos);
+                }
+                b.emit(Op::Raise);
+                b.emit(Op::LoadNil); // unreachable but type-balance
+                return;
+            }
             // Fast path: binary operator with one arg and a receiver — emit BinOp
             if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {
                 compile_expr(b, r, protos);
@@ -711,6 +749,28 @@ fn compile_expr(b: &mut ProtoBuilder, e: &Expr, protos: &mut Vec<Proto>) {
             for a in args { compile_expr(b, a, protos); }
             b.emit(Op::Yield(args.len() as u8));
         }
+        Expr::Begin { body, rescue } => {
+            match rescue {
+                None => compile_body(b, body, protos),
+                Some(rc) => {
+                    let (slot, bind) = match &rc.var {
+                        Some(name) => (b.local_slot(name), 1u8),
+                        None => (0u16, 0u8),
+                    };
+                    let pr = b.emit(Op::PushRescue(0, slot, bind));
+                    compile_body(b, body, protos);
+                    b.emit(Op::PopRescue);
+                    let je = b.emit(Op::Jump(0));
+                    let handler_start = b.pos();
+                    // Patch PushRescue's offset
+                    let off = handler_start as i32 - pr as i32 - 1;
+                    if let Op::PushRescue(o, _, _) = &mut b.code[pr] { *o = off; }
+                    compile_body(b, &rc.body, protos);
+                    let end = b.pos();
+                    b.patch_jump(je, end);
+                }
+            }
+        }
     }
 }
 
@@ -753,6 +813,13 @@ struct Frame {
     is_class_body: bool,
     swap_return: Option<Value>,
     block_arg: Option<Rc<BlockHandle>>,
+    rescues: Vec<RescueHandler>,
+}
+
+struct RescueHandler {
+    handler_ip: usize,
+    stack_depth: usize,
+    bind_slot: Option<u16>,
 }
 
 struct Vm {
@@ -787,7 +854,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(vec_nil(n_locals))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None,
+            is_class_body: false, swap_return: None, block_arg: None, rescues: vec![],
         });
         self.dispatch();
         self.stack.pop().unwrap_or(Value::Nil)
@@ -942,6 +1009,28 @@ impl Vm {
         }
     }
 
+    fn unwind_with_exception(&mut self, exc: Value) {
+        loop {
+            let f = self.frames.last_mut().unwrap();
+            if let Some(h) = f.rescues.pop() {
+                self.stack.truncate(h.stack_depth);
+                let f = self.frames.last_mut().unwrap();
+                f.ip = h.handler_ip;
+                if let Some(slot) = h.bind_slot {
+                    f.locals.borrow_mut()[slot as usize] = exc;
+                }
+                return;
+            }
+            let f = self.frames.pop().unwrap();
+            self.stack.truncate(f.base_sp);
+            if f.is_class_body { self.class_stack.pop(); }
+            if self.frames.is_empty() {
+                eprintln!("uncaught exception: {}", exc.to_display(&self.heap));
+                std::process::exit(1);
+            }
+        }
+    }
+
     fn maybe_gc(&mut self) {
         if !self.heap.should_gc() { return; }
         // Gather roots: stack + every frame's locals + self_val + swap_return + class_stack (no instances)
@@ -979,7 +1068,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(locals)),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block,
+            is_class_body: false, swap_return: None, block_arg: block, rescues: vec![],
         });
     }
 
@@ -1004,7 +1093,7 @@ impl Vm {
             locals: block.captured.clone(),
             self_val: block.self_val.clone(),
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None,
+            is_class_body: false, swap_return: None, block_arg: None, rescues: vec![],
         });
     }
 
@@ -1241,7 +1330,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None,
+                    is_class_body: true, swap_return: None, block_arg: None, rescues: vec![],
                 });
             }
             Op::NewArray(n) => {
@@ -1262,6 +1351,22 @@ impl Vm {
                 while let (Some(k), Some(v)) = (iter.next(), iter.next()) { pairs.push((k, v)); }
                 let id = self.heap.alloc(HeapObj::Hash(pairs));
                 self.stack.push(Value::Hash(id));
+            }
+            Op::PushRescue(off, slot, bind) => {
+                let ip = self.frames.last().unwrap().ip;
+                let target = (ip as i32 + off) as usize;
+                let depth = self.stack.len();
+                let bind_slot = if bind != 0 { Some(slot) } else { None };
+                self.frames.last_mut().unwrap().rescues.push(RescueHandler {
+                    handler_ip: target, stack_depth: depth, bind_slot,
+                });
+            }
+            Op::PopRescue => {
+                self.frames.last_mut().unwrap().rescues.pop();
+            }
+            Op::Raise => {
+                let v = self.stack.pop().unwrap_or(Value::Nil);
+                self.unwind_with_exception(v);
             }
             Op::BinOp(kind) => {
                 let b = self.stack.pop().unwrap();

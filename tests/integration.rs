@@ -45,3 +45,4 @@ fn run_fixture(name: &str) {
 #[test] fn class() { run_fixture("class"); }
 #[test] fn array_hash() { run_fixture("array_hash"); }
 #[test] fn block() { run_fixture("block"); }
+#[test] fn exception() { run_fixture("exception"); }
