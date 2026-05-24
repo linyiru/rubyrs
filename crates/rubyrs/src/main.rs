@@ -16,6 +16,7 @@ fn main() {
         eprintln!("  RUBYRS_MAX_FRAMES=N     trap when frame stack depth > N");
         eprintln!("  RUBYRS_DEADLINE_MS=N    trap when wall-clock per eval exceeds N ms");
         eprintln!("  RUBYRS_MAX_SYMBOLS=N    trap when interner grows beyond N symbols");
+        eprintln!("  RUBYRS_MAX_VALUE_BYTES=N trap when any single String/Array/Hash exceeds N bytes");
         process::exit(1);
     }
     let path = Path::new(&args[1]);
@@ -29,6 +30,7 @@ fn main() {
             .and_then(|s| s.parse::<u64>().ok())
             .map(std::time::Duration::from_millis),
         max_symbols: env::var("RUBYRS_MAX_SYMBOLS").ok().and_then(|s| s.parse().ok()),
+        max_value_bytes: env::var("RUBYRS_MAX_VALUE_BYTES").ok().and_then(|s| s.parse().ok()),
     };
 
     let mut rt = Runtime::with_config(cfg);

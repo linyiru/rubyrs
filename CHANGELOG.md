@@ -7,6 +7,25 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Per-value byte cap** (P2-14c). New `Config::max_value_bytes:
+  Option<usize>`. Individual `String` / `Array` / `Hash` values
+  can't grow past `n` bytes of content. String size is byte
+  length; Array size is `len * size_of::<Value>()`; Hash size
+  is `len * size_of::<(Value, Value)>()`. Checked at the
+  mutation points the cap exists for: `String#+` and `String#*`
+  refuse before allocating the result; `Array#push` / `Array#<<`
+  / `Array#[]=` refuse before appending; `Hash#[]=` refuses
+  before inserting a new key (existing-key updates pass
+  through). Closes the `"a" * 10_000_000` and `arr << i` in a
+  loop attack vectors — both used to be single ops or single
+  objects (no fuel/heap-cap signal) that hogged RAM. CLI:
+  `RUBYRS_MAX_VALUE_BYTES=N` env var. `primitive_call` upgraded
+  to `Result<Option<Value>, RubyError>` so its string arms can
+  surface the trap; the four callers (do_call, do_call_block,
+  the two BinOpInt fallback paths) wrap the error via
+  `Vm::trap`.
+
+### Added
 - **Interner cap** (P2-14b). New `Config::max_symbols:
   Option<usize>`. Runtime intern paths (currently `String#to_sym`)
   check the cap before adding a fresh symbol and trap with

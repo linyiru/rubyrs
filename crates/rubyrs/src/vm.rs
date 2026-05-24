@@ -163,6 +163,11 @@ pub(crate) struct Vm {
     /// the actual `intern()` call; compile-time intern is not
     /// capped because it's already bounded by source size.
     pub(crate) max_symbols: Option<usize>,
+    /// Per-value byte cap (P2-14c). Defends against single
+    /// values that hog memory (`"a" * 10_000_000`, `arr <<` in
+    /// a tight loop). Checked at mutation sites; see
+    /// `Config::max_value_bytes` for the model.
+    pub(crate) max_value_bytes: Option<usize>,
     /// Per-call-site monomorphic inline cache for method dispatch on
     /// `Value::Object`. One slot per `Op::Call(...,cache_id)` /
     /// `Op::CallNoRecv` / `Op::CallBlock` / `Op::CallNoRecvBlock` site.
@@ -211,6 +216,7 @@ impl Vm {
             deadline_at: None,
             op_counter: 0,
             max_symbols: None,
+            max_value_bytes: None,
             call_caches: Vec::new(),
             method_gen: 0,
             break_signaled: false,
@@ -428,7 +434,8 @@ impl Vm {
 
         let recv = recv.expect("ICE: receiver missing");
 
-        if let Some(v) = primitive_call(&recv, &name, &args) {
+        if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
+            .map_err(|e| self.trap(e))? {
             self.stack.push(v);
             return Ok(());
         }
@@ -492,6 +499,18 @@ impl Vm {
                 match (name, args) {
                     ("length", []) | ("size", []) => Some(Value::Int(self.heap.array(id).len() as i64)),
                     ("push", [v]) | ("<<", [v]) => {
+                        // P2-14c: refuse a push that would make this
+                        // Array's storage exceed the per-value byte
+                        // cap. We size in bytes-of-Value because that's
+                        // what the host actually pays for in RAM.
+                        let new_len = self.heap.array(id).len().saturating_add(1);
+                        if let Some(max) = self.max_value_bytes {
+                            if new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array.push would exceed {max} bytes"),
+                                }));
+                            }
+                        }
                         self.heap.array_mut(id).push(v.clone());
                         Some(Value::Array(id))
                     }
@@ -503,6 +522,18 @@ impl Vm {
                     ("[]=", [Value::Int(i), v]) => {
                         let a = self.heap.array_mut(id);
                         let idx = if *i < 0 { a.len() as i64 + *i } else { *i } as usize;
+                        // Same cap check as `push` — `[]=` past the
+                        // end pads with `nil` and so can grow the
+                        // backing Vec without bound.
+                        let needed_len = idx.saturating_add(1).max(a.len());
+                        if let Some(max) = self.max_value_bytes {
+                            if needed_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array []= would exceed {max} bytes"),
+                                }));
+                            }
+                        }
+                        let a = self.heap.array_mut(id);
                         while a.len() <= idx { a.push(Value::Nil); }
                         a[idx] = v.clone();
                         Some(v.clone())
@@ -699,6 +730,19 @@ impl Vm {
                         // Snapshot positions first.
                         let pos = self.heap.hash(id).iter()
                             .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                        // P2-14c byte cap: only a key that isn't
+                        // already present grows the table. Update
+                        // of an existing key is free (size-wise).
+                        if pos.is_none() {
+                            let new_len = self.heap.hash(id).len().saturating_add(1);
+                            if let Some(max) = self.max_value_bytes {
+                                if new_len.saturating_mul(std::mem::size_of::<(Value, Value)>()) > max {
+                                    return Err(self.trap(RubyError::ResourceExhausted {
+                                        msg: format!("Hash []= would exceed {max} bytes"),
+                                    }));
+                                }
+                            }
+                        }
                         let h = self.heap.hash_mut(id);
                         if let Some(p) = pos {
                             h[p].1 = v.clone();
@@ -1167,7 +1211,7 @@ impl Vm {
             }));
         }
         let recv = recv.expect("ICE: receiver missing for block call");
-        if let Some(v) = primitive_call(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
+        if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
         let new_id = self.interner.intern("new");
         if name_id == new_id {
@@ -2116,7 +2160,7 @@ impl Vm {
                     // Cold path: behave as if a generic `<op>` was dispatched
                     // with rhs boxed as an Int.
                     let b_val = Value::Int(rhs);
-                    if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b_val)) {
+                    if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b_val), self.max_value_bytes).map_err(|e| self.trap(e))? {
                         self.stack.push(v);
                     } else if let Some(v) = self.sym_primitive(&a, kind.name(), std::slice::from_ref(&b_val)) {
                         self.stack.push(v);
@@ -2133,7 +2177,7 @@ impl Vm {
                 let a = self.stack.pop().expect("ICE: BinOp lhs underflow");
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
                     self.stack.push(kind.apply_int(*x, *y));
-                } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b)) {
+                } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b), self.max_value_bytes).map_err(|e| self.trap(e))? {
                     self.stack.push(v);
                 } else {
                     self.stack.push(a);
@@ -2193,8 +2237,21 @@ impl Vm {
     }
 }
 
-pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
-    match (recv, name, args) {
+pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value_bytes: Option<usize>) -> Result<Option<Value>, RubyError> {
+    // Helper: enforce the per-value byte cap (P2-14c) at every
+    // string-growing arm. Returns Err if the projected size would
+    // exceed the cap; callers wrap it in `Trap` via `Vm::trap`.
+    let check = |new_len: usize| -> Result<(), RubyError> {
+        if let Some(max) = max_value_bytes {
+            if new_len > max {
+                return Err(RubyError::ResourceExhausted {
+                    msg: format!("value size {new_len} bytes > cap {max}"),
+                });
+            }
+        }
+        Ok(())
+    };
+    Ok(match (recv, name, args) {
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
@@ -2222,6 +2279,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option
         (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => Some(Value::Int(a.wrapping_add(1))),
         (Value::Int(a), "pred", []) => Some(Value::Int(a.wrapping_sub(1))),
         (Value::Str(a), "+", [Value::Str(b)]) => {
+            check(a.len().saturating_add(b.len()))?;
             let mut s = a.to_string();
             s.push_str(b);
             Some(Value::Str(Rc::from(s.as_str())))
@@ -2261,6 +2319,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option
         }
         (Value::Str(a), "*", [Value::Int(n)]) => {
             let n = (*n).max(0) as usize;
+            check(a.len().saturating_mul(n))?;
             Some(Value::Str(Rc::from(a.repeat(n).as_str())))
         }
         (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(**a < **b)),
@@ -2274,7 +2333,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option
         (Value::Nil, "nil?", []) => Some(Value::Bool(true)),
         (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::from(if *b { "true" } else { "false" }))),
         _ => None,
-    }
+    })
 }
 
 /// `Symbol#to_s` / `to_sym` need the Interner to resolve the underlying name,

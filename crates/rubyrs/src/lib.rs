@@ -65,6 +65,16 @@ pub struct Config {
     /// Defends against `arr.map { |x| x.to_s.to_sym }`-style loops
     /// that fuel can't usefully bound.
     pub max_symbols: Option<usize>,
+    /// If `Some(n)`, individual `String` / `Array` / `Hash` values
+    /// can't grow past `n` bytes of content. String size is the
+    /// byte length; Array/Hash size is `len * size_of::<Value>()`
+    /// (or `* size_of::<(Value, Value)>()` for Hash). Checked at
+    /// mutation sites: `String#+` / `String#*` / `Array#push` /
+    /// `Array#<<` / `Array#[]=` / `Hash#[]=`. Heap-cap caps
+    /// *number* of live objects (good against shallow alloc
+    /// storms); this caps *individual* object size (good against
+    /// `"a" * 10_000_000`, which is one heap object that grabs 10 MB).
+    pub max_value_bytes: Option<usize>,
     /// If `Some(d)`, an `eval` call that runs longer than `d`
     /// wall-clock time returns a `ResourceExhausted` trap. Checked
     /// every 1024 ops (cheap and precise enough for the host-side
@@ -108,6 +118,7 @@ impl Runtime {
         vm.max_frames = cfg.max_frames;
         vm.heap.max_live = cfg.max_heap_objects;
         vm.max_symbols = cfg.max_symbols;
+        vm.max_value_bytes = cfg.max_value_bytes;
         let mut rt = Runtime {
             vm, sources: HashMap::new(), cache_counter: 0,
             deadline: cfg.deadline,

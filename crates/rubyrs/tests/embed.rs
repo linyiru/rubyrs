@@ -514,6 +514,92 @@ fn interner_cap_allows_reusing_existing_symbols() {
 }
 
 #[test]
+fn value_bytes_cap_traps_string_repeat_blowup() {
+    // P2-14c: `"a" * N` is one heap object that quietly grabs N
+    // bytes of RAM. Fuel doesn't catch it (it's a single op);
+    // heap-object cap doesn't catch it (still one object).
+    // max_value_bytes does.
+    let mut rt = Runtime::with_config(Config {
+        max_value_bytes: Some(1024),
+        ..Default::default()
+    });
+    let err = rt.eval(r#"s = "a" * 10000"#, "blowup.rb").unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { ref msg } if msg.contains("bytes")),
+        "expected ResourceExhausted/bytes, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn value_bytes_cap_traps_string_concat_blowup() {
+    // `s = s + "a"` in a loop is the slow-growth flavour of the
+    // same attack — each iteration allocates a fresh string one
+    // byte longer than the last.
+    let mut rt = Runtime::with_config(Config {
+        max_value_bytes: Some(512),
+        ..Default::default()
+    });
+    let err = rt.eval(
+        r#"
+        s = "a"
+        i = 0
+        while i < 1000
+          s = s + "a"
+          i = i + 1
+        end
+        "#,
+        "concat.rb",
+    ).unwrap_err();
+    assert!(matches!(err.err, RubyError::ResourceExhausted { .. }));
+}
+
+#[test]
+fn value_bytes_cap_traps_array_unbounded_push() {
+    // `arr << x` in a hot loop grows the backing Vec linearly.
+    // 100 elements × ~24 bytes/Value = ~2400 bytes; cap at 1000
+    // and we should trap well before the loop finishes.
+    let mut rt = Runtime::with_config(Config {
+        max_value_bytes: Some(1000),
+        ..Default::default()
+    });
+    let err = rt.eval(
+        r#"
+        arr = []
+        i = 0
+        while i < 1000
+          arr << i
+          i = i + 1
+        end
+        "#,
+        "push.rb",
+    ).unwrap_err();
+    assert!(matches!(err.err, RubyError::ResourceExhausted { .. }));
+}
+
+#[test]
+fn value_bytes_cap_allows_small_strings_and_arrays() {
+    // Sanity check the no-trap path: with a generous cap, normal
+    // ops should run untouched.
+    let mut rt = Runtime::with_config(Config {
+        max_value_bytes: Some(1_000_000),
+        ..Default::default()
+    });
+    rt.eval(
+        r#"
+        s = "hello, " + "world"
+        arr = [1, 2, 3]
+        arr << 4
+        h = { a: 1 }
+        h[:b] = 2
+        puts s
+        puts arr.length
+        puts h.size
+        "#,
+        "small.rb",
+    ).unwrap();
+}
+
+#[test]
 fn frame_cap_traps_deep_recursion() {
     let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
     let err = rt.eval(
