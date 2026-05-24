@@ -13,6 +13,19 @@ use crate::value::{BlockHandle, Class, Instance, Method, ObjId, Value};
 
 // ---------- VM ----------
 
+/// Ordering for built-in aggregation methods (`min` / `max` /
+/// `sort`). Only homogeneous Int / Str arrays are supported; other
+/// shapes return `None` so the caller can fall through to
+/// NoMethodError. With a block-taking comparator we'd handle this
+/// generically, but that's deferred to a later milestone.
+fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
+        (Value::Str(x), Value::Str(y)) => Some((**x).cmp(&**y)),
+        _ => None,
+    }
+}
+
 /// Which Enumerable predicate-iterator a call dispatches to.
 /// `NoneM` is named with a trailing M because `None` collides with
 /// `Option::None` in match arms.
@@ -333,12 +346,20 @@ impl Vm {
         let new_id = self.interner.intern("new");
         if name_id == new_id {
             if let Value::Class(cls) = &recv {
+                // `args` and `recv` were popped off the operand stack by
+                // do_call's setup; while we're about to trigger GC via
+                // `maybe_gc`, they exist only as Rust locals. Pin any
+                // heap values inside `args` (Class is `Rc`-managed and
+                // doesn't need pinning) so the GC's root walk sees them.
+                let pin_n = args.len();
+                for a in &args { self.pinned.push(a.clone()); }
                 self.maybe_gc();
                 self.check_alloc()?;
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(),
                     ivars: HashMap::new(),
                 }));
+                for _ in 0..pin_n { self.pinned.pop(); }
                 let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
                 if let Some(m) = self.lookup_method_uncached(&cls, init_id) {
@@ -396,6 +417,74 @@ impl Vm {
                         let a = self.heap.array(id);
                         let hit = a.iter().any(|x| x.ruby_eq(needle, &self.heap));
                         Some(Value::Bool(hit))
+                    }
+                    ("count", []) => Some(Value::Int(self.heap.array(id).len() as i64)),
+                    ("count", [needle]) => {
+                        let a = self.heap.array(id);
+                        let n = a.iter().filter(|x| x.ruby_eq(needle, &self.heap)).count();
+                        Some(Value::Int(n as i64))
+                    }
+                    ("sum", []) | ("sum", [Value::Int(_)]) => {
+                        let init = match args { [Value::Int(n)] => *n, _ => 0 };
+                        let a = self.heap.array(id);
+                        let mut s: i64 = init;
+                        for v in a {
+                            match v {
+                                Value::Int(n) => s = s.wrapping_add(*n),
+                                _ => return None,
+                            }
+                        }
+                        Some(Value::Int(s))
+                    }
+                    ("min", []) => {
+                        let a = self.heap.array(id);
+                        if a.is_empty() { return Some(Value::Nil); }
+                        let mut best = a[0].clone();
+                        for v in &a[1..] {
+                            match value_cmp(v, &best) {
+                                Some(std::cmp::Ordering::Less) => best = v.clone(),
+                                Some(_) => {}
+                                None => return None,
+                            }
+                        }
+                        Some(best)
+                    }
+                    ("max", []) => {
+                        let a = self.heap.array(id);
+                        if a.is_empty() { return Some(Value::Nil); }
+                        let mut best = a[0].clone();
+                        for v in &a[1..] {
+                            match value_cmp(v, &best) {
+                                Some(std::cmp::Ordering::Greater) => best = v.clone(),
+                                Some(_) => {}
+                                None => return None,
+                            }
+                        }
+                        Some(best)
+                    }
+                    ("sort", []) => {
+                        let mut copy: Vec<Value> = self.heap.array(id).clone();
+                        if copy.windows(2).any(|w| value_cmp(&w[0], &w[1]).is_none()) {
+                            return None;
+                        }
+                        copy.sort_by(|a, b| value_cmp(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(copy));
+                        Some(Value::Array(nid))
+                    }
+                    ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
+                        let a = self.heap.array(id).clone();
+                        if a.is_empty() { return Some(Value::Nil); }
+                        let op_name = self.interner.resolve(*op_sym).clone();
+                        let kind = crate::bytecode::BinOpKind::from_op_name(&op_name)?;
+                        let mut acc = a[0].clone();
+                        for v in &a[1..] {
+                            match (&acc, v) {
+                                (Value::Int(x), Value::Int(y)) => acc = kind.apply_int(*x, *y),
+                                _ => return None,
+                            }
+                        }
+                        Some(acc)
                     }
                     _ => None,
                 }
@@ -477,6 +566,30 @@ impl Vm {
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(nid))
+                    }
+                    ("sum", []) | ("sum", [Value::Int(_)]) => {
+                        let init = match args { [Value::Int(n)] => *n, _ => 0 };
+                        let end_inc = if excl { ei - 1 } else { ei };
+                        if bi > end_inc { return Some(Value::Int(init)); }
+                        let n = end_inc - bi + 1;
+                        let s = n.wrapping_mul(bi.wrapping_add(end_inc)) / 2;
+                        Some(Value::Int(init.wrapping_add(s)))
+                    }
+                    ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
+                        let end_inc = if excl { ei - 1 } else { ei };
+                        if bi > end_inc { return Some(Value::Nil); }
+                        let op_name = self.interner.resolve(*op_sym).clone();
+                        let kind = crate::bytecode::BinOpKind::from_op_name(&op_name)?;
+                        let mut acc = Value::Int(bi);
+                        let mut i = bi + 1;
+                        while i <= end_inc {
+                            match &acc {
+                                Value::Int(x) => acc = kind.apply_int(*x, i),
+                                _ => return None,
+                            }
+                            i += 1;
+                        }
+                        Some(acc)
                     }
                     _ => None,
                 }
@@ -664,11 +777,16 @@ impl Vm {
         let new_id = self.interner.intern("new");
         if name_id == new_id {
             if let Value::Class(cls) = &recv {
+                // Pin args during the alloc window — see the matching
+                // comment in `do_call`'s new-branch for the rationale.
+                let pin_n = args.len();
+                for a in &args { self.pinned.push(a.clone()); }
                 self.maybe_gc();
                 self.check_alloc()?;
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(), ivars: HashMap::new(),
                 }));
+                for _ in 0..pin_n { self.pinned.pop(); }
                 let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
                 if let Some(m) = self.lookup_method_uncached(&cls, init_id) {
@@ -950,6 +1068,156 @@ impl Vm {
                 self.pinned.pop();
                 Some(early.unwrap_or(Value::Range(*id)))
             }
+            (Value::Array(id), "inject", []) | (Value::Array(id), "reduce", []) => {
+                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
+                self.pinned.push(Value::Array(*id));
+                let pre_frames = self.frames.len();
+                let mut acc = snapshot[0].clone();
+                let mut early = None;
+                for v in &snapshot[1..] {
+                    self.invoke_block(block.clone(), vec![acc.clone(), v.clone()])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    acc = r;
+                }
+                self.pinned.pop();
+                Some(early.unwrap_or(acc))
+            }
+            (Value::Array(id), "inject", [init]) | (Value::Array(id), "reduce", [init]) => {
+                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                self.pinned.push(Value::Array(*id));
+                let pre_frames = self.frames.len();
+                let mut acc = init.clone();
+                let mut early = None;
+                for v in &snapshot {
+                    self.invoke_block(block.clone(), vec![acc.clone(), v.clone()])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    acc = r;
+                }
+                self.pinned.pop();
+                Some(early.unwrap_or(acc))
+            }
+            (Value::Array(id), "count", []) => {
+                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                self.pinned.push(Value::Array(*id));
+                let pre_frames = self.frames.len();
+                let mut n: i64 = 0;
+                let mut early = None;
+                for v in snapshot {
+                    self.invoke_block(block.clone(), vec![v])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() { n += 1; }
+                }
+                self.pinned.pop();
+                Some(early.unwrap_or(Value::Int(n)))
+            }
+            (Value::Range(id), "inject", []) | (Value::Range(id), "reduce", []) => {
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Ok(None),
+                    }
+                };
+                let end_inc = if excl { ei - 1 } else { ei };
+                if bi > end_inc { return Ok(Some(Value::Nil)); }
+                self.pinned.push(Value::Range(*id));
+                let pre_frames = self.frames.len();
+                let mut acc = Value::Int(bi);
+                let mut early = None;
+                let mut i = bi + 1;
+                while i <= end_inc {
+                    self.invoke_block(block.clone(), vec![acc.clone(), Value::Int(i)])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    acc = r;
+                    i += 1;
+                }
+                self.pinned.pop();
+                Some(early.unwrap_or(acc))
+            }
+            (Value::Range(id), "inject", [init]) | (Value::Range(id), "reduce", [init]) => {
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Ok(None),
+                    }
+                };
+                let end_inc = if excl { ei - 1 } else { ei };
+                self.pinned.push(Value::Range(*id));
+                let pre_frames = self.frames.len();
+                let mut acc = init.clone();
+                let mut early = None;
+                let mut i = bi;
+                while i <= end_inc {
+                    self.invoke_block(block.clone(), vec![acc.clone(), Value::Int(i)])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    acc = r;
+                    i += 1;
+                }
+                self.pinned.pop();
+                Some(early.unwrap_or(acc))
+            }
+            (Value::Range(id), "count", []) => {
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Ok(None),
+                    }
+                };
+                let end_inc = if excl { ei - 1 } else { ei };
+                self.pinned.push(Value::Range(*id));
+                let pre_frames = self.frames.len();
+                let mut n: i64 = 0;
+                let mut early = None;
+                let mut i = bi;
+                while i <= end_inc {
+                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() { n += 1; }
+                    i += 1;
+                }
+                self.pinned.pop();
+                Some(early.unwrap_or(Value::Int(n)))
+            }
+
             (Value::Array(id), "select", []) | (Value::Array(id), "filter", []) => Some(self.iter_array_filter(*id, IterMode::Select, block)?),
             (Value::Array(id), "reject", []) => Some(self.iter_array_filter(*id, IterMode::Reject, block)?),
             (Value::Array(id), "find", []) | (Value::Array(id), "detect", []) => Some(self.iter_array_filter(*id, IterMode::Find, block)?),

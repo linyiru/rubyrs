@@ -7,6 +7,38 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Enumerable aggregation: `inject` / `reduce`, `sum`, `count`,
+  `min` / `max`, `sort`** (P3-A-3). `inject`/`reduce` support all
+  three CRuby call shapes: block-only (first element seeds),
+  block-with-init, and symbol-shorthand (`:+` / `:-` / `:*` etc.,
+  dispatched through `BinOpKind::from_op_name`). `sum` accepts an
+  optional Int initial value. `count` supports the no-arg form
+  (= `size`), the eql-needle form, and the block form (count
+  truthy). `min`/`max`/`sort` accept no comparator and work on
+  homogeneous arrays of Int or String — block-comparator forms
+  are deferred. Range#sum uses the closed-form n(n+1)/2 instead
+  of materialising the elements.
+- New diff fixture `enumerable_aggregate.rb` covers ~40 cases
+  across Array and Range, including method-call inside a class
+  (`@values.inject(0) { ... }`), Range#sum on 1..100 = 5050,
+  empty-collection edges, and idioms like `select.sum` and
+  `map.inject(:+)`. Byte-identical to CRuby.
+
+### Fixed
+- **GC root hole during `Class.new` arg drain**. Allocating an
+  Instance from `Class.new(args...)` first popped `args` off the
+  operand stack into a Rust local, then called `maybe_gc` before
+  allocating the instance. Under stress-GC any heap value in
+  `args` (a literal `Array`, `Hash`, etc.) was unreachable from
+  GC roots during that window and could be swept; the freshly
+  allocated Instance would then reuse the swept slot id, leaving
+  the caller's `args` pointing at the new Instance. The bug only
+  surfaced once aggregation tests exercised `Stats.new([…])
+  -> @values.inject(...)` under stress-GC. Fix: pin `args` onto
+  `Vm.pinned` around the alloc window in both `do_call` and
+  `do_call_block`. Same pattern as the existing iterator drivers.
+
+### Added
 - **Enumerable filtering: `select` / `reject` / `find` / `any?` /
   `all?` / `none?` / `include?`** across `Array`, `Hash`, and
   `Range` (P3-A-2). Block-taking variants share a single iterator
