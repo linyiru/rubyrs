@@ -463,7 +463,49 @@ enum Op {
     CallBlock(u32, u8),         // name, argc; expects [recv, block, ...args]
     CallNoRecvBlock(u32, u8),   // name, argc; expects [block, ...args]
     Yield(u8),
+    /// Binary op with Int+Int fast path; falls back to generic dispatch.
+    BinOp(BinOpKind),
     Return,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinOpKind { Add, Sub, Mul, Div, Mod, Lt, Le, Gt, Ge, Eq, Ne }
+
+impl BinOpKind {
+    fn name(self) -> &'static str {
+        match self {
+            BinOpKind::Add => "+", BinOpKind::Sub => "-", BinOpKind::Mul => "*",
+            BinOpKind::Div => "/", BinOpKind::Mod => "%",
+            BinOpKind::Lt => "<", BinOpKind::Le => "<=",
+            BinOpKind::Gt => ">", BinOpKind::Ge => ">=",
+            BinOpKind::Eq => "==", BinOpKind::Ne => "!=",
+        }
+    }
+    fn from_op_name(s: &str) -> Option<Self> {
+        Some(match s {
+            "+" => BinOpKind::Add, "-" => BinOpKind::Sub, "*" => BinOpKind::Mul,
+            "/" => BinOpKind::Div, "%" => BinOpKind::Mod,
+            "<" => BinOpKind::Lt, "<=" => BinOpKind::Le,
+            ">" => BinOpKind::Gt, ">=" => BinOpKind::Ge,
+            "==" => BinOpKind::Eq, "!=" => BinOpKind::Ne,
+            _ => return None,
+        })
+    }
+    fn apply_int(self, a: i64, b: i64) -> Value {
+        match self {
+            BinOpKind::Add => Value::Int(a.wrapping_add(b)),
+            BinOpKind::Sub => Value::Int(a.wrapping_sub(b)),
+            BinOpKind::Mul => Value::Int(a.wrapping_mul(b)),
+            BinOpKind::Div => Value::Int(a.wrapping_div(b)),
+            BinOpKind::Mod => Value::Int(a.wrapping_rem(b)),
+            BinOpKind::Lt => Value::Bool(a < b),
+            BinOpKind::Le => Value::Bool(a <= b),
+            BinOpKind::Gt => Value::Bool(a > b),
+            BinOpKind::Ge => Value::Bool(a >= b),
+            BinOpKind::Eq => Value::Bool(a == b),
+            BinOpKind::Ne => Value::Bool(a != b),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -605,6 +647,13 @@ fn compile_expr(b: &mut ProtoBuilder, e: &Expr, protos: &mut Vec<Proto>) {
             // Special: __seq__ as compiler-level sequence
             if receiver.is_none() && name == "__seq__" {
                 compile_body(b, args, protos);
+                return;
+            }
+            // Fast path: binary operator with one arg and a receiver — emit BinOp
+            if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {
+                compile_expr(b, r, protos);
+                compile_expr(b, &args[0], protos);
+                b.emit(Op::BinOp(kind));
                 return;
             }
             let name_idx = b.intern(name);
@@ -1213,6 +1262,25 @@ impl Vm {
                 while let (Some(k), Some(v)) = (iter.next(), iter.next()) { pairs.push((k, v)); }
                 let id = self.heap.alloc(HeapObj::Hash(pairs));
                 self.stack.push(Value::Hash(id));
+            }
+            Op::BinOp(kind) => {
+                let b = self.stack.pop().unwrap();
+                let a = self.stack.pop().unwrap();
+                // Hot path: Int op Int
+                if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+                    self.stack.push(kind.apply_int(*x, *y));
+                } else {
+                    // Cold path: fall back to generic dispatch
+                    if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b)) {
+                        self.stack.push(v);
+                    } else {
+                        // user-defined: synthesize a Call
+                        self.stack.push(a);
+                        self.stack.push(b);
+                        let name = kind.name().to_string();
+                        self.do_call(name, 1, false);
+                    }
+                }
             }
             Op::Return => {
                 let f = self.frames.pop().unwrap();
