@@ -623,6 +623,22 @@ impl Vm {
                 let v = self.stack.pop().expect("ICE: StoreLocal stack underflow");
                 self.frames.last().expect("ICE: StoreLocal no frame").locals.borrow_mut()[s as usize] = v;
             }
+            Op::IncLocalNoPush(s) => {
+                let slot = s as usize;
+                let frame = self.frames.last().expect("ICE: IncLocalNoPush no frame");
+                let cur = frame.locals.borrow()[slot].clone();
+                if let Value::Int(n) = cur {
+                    frame.locals.borrow_mut()[slot] = Value::Int(n.wrapping_add(1));
+                } else {
+                    // Slow path: rebind via `+`. push, dispatch, store, drop result.
+                    self.stack.push(cur);
+                    self.stack.push(Value::Int(1));
+                    let plus_id = self.interner.intern("+");
+                    self.do_call(plus_id, 1, false)?;
+                    let v = self.stack.pop().unwrap_or(Value::Nil);
+                    self.frames.last().expect("ICE").locals.borrow_mut()[slot] = v;
+                }
+            }
             Op::IncLocal(s) => {
                 let slot = s as usize;
                 let frame = self.frames.last().expect("ICE: IncLocal no frame");
@@ -658,6 +674,28 @@ impl Vm {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
                 let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: StoreIvar no frame").self_val { Some(*id) } else { None };
                 if let Some(id) = id_opt { self.heap.instance_mut(id).ivars.insert(name_id, v); }
+            }
+            Op::IncIvarNoPush(name_id) => {
+                let inst_id = if let Value::Object(id) = &self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val {
+                    Some(*id)
+                } else { None };
+                if let Some(inst_id) = inst_id {
+                    let cur = self.heap.instance(inst_id).ivars.get(&name_id).cloned();
+                    match cur {
+                        Some(Value::Int(n)) => {
+                            self.heap.instance_mut(inst_id).ivars.insert(name_id, Value::Int(n.wrapping_add(1)));
+                        }
+                        _ => {
+                            let cur_v = cur.unwrap_or(Value::Nil);
+                            self.stack.push(cur_v);
+                            self.stack.push(Value::Int(1));
+                            let plus_id = self.interner.intern("+");
+                            self.do_call(plus_id, 1, false)?;
+                            let v = self.stack.pop().unwrap_or(Value::Nil);
+                            self.heap.instance_mut(inst_id).ivars.insert(name_id, v);
+                        }
+                    }
+                }
             }
             Op::IncIvar(name_id) => {
                 let inst_id = if let Value::Object(id) = &self.frames.last().expect("ICE: IncIvar no frame").self_val {

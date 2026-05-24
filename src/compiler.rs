@@ -71,12 +71,70 @@ pub(crate) fn compile_body(
         b.emit(Op::LoadNil);
         return;
     }
+    let last = exprs.len() - 1;
     for (i, e) in exprs.iter().enumerate() {
-        compile_expr(b, e, protos, interner);
-        if i < exprs.len() - 1 {
+        if i == last {
+            // The final expression's value becomes the body's value.
+            compile_expr(b, e, protos, interner);
+        } else {
+            // Intermediate: value is discarded. Specialised stmt emit
+            // skips the Dup-for-result + trailing Pop pair where possible.
+            compile_stmt(b, e, protos, interner);
+        }
+    }
+}
+
+/// Compile `e` in *statement* position — its result is discarded. For
+/// assignment-shaped expressions we emit the store directly (no `Dup`),
+/// and for the `Inc*` ops we use the `NoPush` variants. Anything else
+/// falls back to `compile_expr` + `Pop`.
+fn compile_stmt(
+    b: &mut ProtoBuilder, e: &SExpr,
+    protos: &mut Vec<Proto>, interner: &mut Interner,
+) {
+    let prev_span = b.current_span;
+    b.current_span = e.span;
+    match &e.node {
+        Expr::LVarWrite(name, val) => {
+            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node {
+                if op == "+" && args.len() == 1 {
+                    if let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node) {
+                        if rn == name {
+                            let slot = b.local_slot(name);
+                            b.emit(Op::IncLocalNoPush(slot));
+                            b.current_span = prev_span;
+                            return;
+                        }
+                    }
+                }
+            }
+            compile_expr(b, val, protos, interner);
+            let slot = b.local_slot(name);
+            b.emit(Op::StoreLocal(slot));
+        }
+        Expr::IVarWrite(name, val) => {
+            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node {
+                if op == "+" && args.len() == 1 {
+                    if let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node) {
+                        if rn == name {
+                            let id = interner.intern(name);
+                            b.emit(Op::IncIvarNoPush(id));
+                            b.current_span = prev_span;
+                            return;
+                        }
+                    }
+                }
+            }
+            compile_expr(b, val, protos, interner);
+            let id = interner.intern(name);
+            b.emit(Op::StoreIvar(id));
+        }
+        _ => {
+            compile_expr(b, e, protos, interner);
             b.emit(Op::Pop);
         }
     }
+    b.current_span = prev_span;
 }
 
 pub(crate) fn compile_expr(

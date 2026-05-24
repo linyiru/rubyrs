@@ -20,6 +20,9 @@ pub(crate) enum Op {
     /// Fast path for `name = name + 1`: increment slot in place, push new value.
     /// Falls back to a synthesised `BinOp::Add` if the slot doesn't hold an Int.
     IncLocal(u16),
+    /// Same as `IncLocal` but does *not* push the resulting value. Emitted
+    /// in statement position where the body discards the value anyway.
+    IncLocalNoPush(u16),
     Dup,
     Pop,
     LoadIvar(SymId),
@@ -27,6 +30,8 @@ pub(crate) enum Op {
     /// Fast path for `@name = @name + 1`. Same shape as IncLocal but on
     /// self's ivar table.
     IncIvar(SymId),
+    /// Same as `IncIvar` but does *not* push the resulting value.
+    IncIvarNoPush(SymId),
     LoadConst(SymId),
     Jump(i32),
     JumpIfFalse(i32),

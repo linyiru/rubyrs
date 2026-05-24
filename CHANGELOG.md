@@ -7,6 +7,14 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Changed
+- **Statement-position avoids redundant `Dup`/`Pop`** (Tier1-5).
+  `compile_body` now distinguishes the last expression of a body
+  (whose value is the body's value) from intermediate ones (whose
+  value is discarded). Intermediate `Expr::LVarWrite` /
+  `Expr::IVarWrite` emit `StoreLocal` / `StoreIvar` directly with
+  no preceding `Dup`. The `Inc*` ops get matching `NoPush`
+  variants emitted in stmt position. Microbench: fizzbuzz 1M 332
+  ms → **327 ms**.
 - **`Op::BinOpInt` fuses `LoadConstInt + BinOp`** (Tier1-4). For
   any binary op where the right-hand side is a literal integer
   (`n % 15`, `... == 0`, `i <= 1000000`, …), the compiler now
