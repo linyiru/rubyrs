@@ -623,6 +623,25 @@ impl Vm {
                 let v = self.stack.pop().expect("ICE: StoreLocal stack underflow");
                 self.frames.last().expect("ICE: StoreLocal no frame").locals.borrow_mut()[s as usize] = v;
             }
+            Op::IncLocal(s) => {
+                let slot = s as usize;
+                let frame = self.frames.last().expect("ICE: IncLocal no frame");
+                let cur = frame.locals.borrow()[slot].clone();
+                if let Value::Int(n) = cur {
+                    let new_n = n.wrapping_add(1);
+                    frame.locals.borrow_mut()[slot] = Value::Int(new_n);
+                    self.stack.push(Value::Int(new_n));
+                } else {
+                    // Slow path: replicate `slot = slot + 1` via BinOp semantics,
+                    // including user-defined `+` on the receiver type.
+                    self.stack.push(cur);
+                    self.stack.push(Value::Int(1));
+                    let plus_id = self.interner.intern("+");
+                    self.do_call(plus_id, 1, false)?;
+                    let new_val = self.stack.last().expect("ICE: IncLocal slow path no result").clone();
+                    self.frames.last().expect("ICE").locals.borrow_mut()[slot] = new_val;
+                }
+            }
             Op::Dup => {
                 let v = self.stack.last().expect("ICE: Dup stack underflow").clone();
                 self.stack.push(v);

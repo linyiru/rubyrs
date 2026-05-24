@@ -7,6 +7,18 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Changed
+- **`Op::IncLocal` fast path for `i = i + 1`** (Tier1-2). The
+  compiler now recognises the syntactic pattern
+  `name = name + 1` (literal `+ 1`) and emits a single
+  `IncLocal(slot)` op instead of the previous 5-op sequence
+  (LoadLocal, LoadConstInt(1), BinOp::Add, Dup, StoreLocal).
+  Read-modify-write happens in place against the slot. On
+  non-Int payloads the op falls back to a synthesised
+  `+`-call so user-defined types with their own `+` keep
+  working (CRuby semantics preserved). Microbench: fizzbuzz
+  386 ms → **369 ms**; Counter.inc × 1M loop 203 ms → **179 ms**
+  (the outer `i = i + 1` benefits; the inner `@count = @count + 1`
+  still goes through the generic path — IncIvar is a follow-up).
 - **Single-slot inline method cache** (Tier1-1). `Vm.call_cache`
   holds the (class identity, method name, resolved `Method`) of
   the last successful `Value::Object` dispatch; subsequent calls

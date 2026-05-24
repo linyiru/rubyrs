@@ -118,6 +118,21 @@ pub(crate) fn compile_expr(
             b.emit(Op::LoadLocal(slot));
         }
         Expr::LVarWrite(name, val) => {
+            // Fast path: `name = name + 1` — extremely common in `while i < N`
+            // counters and `each` accumulators. Compile to a single `IncLocal`
+            // that does the read-modify-write in place.
+            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node {
+                if op == "+" && args.len() == 1 {
+                    if let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node) {
+                        if rn == name {
+                            let slot = b.local_slot(name);
+                            b.emit(Op::IncLocal(slot));
+                            b.current_span = prev_span;
+                            return;
+                        }
+                    }
+                }
+            }
             compile_expr(b, val, protos, interner);
             let slot = b.local_slot(name);
             b.emit(Op::Dup);

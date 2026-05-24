@@ -17,6 +17,9 @@ pub(crate) enum Op {
     LoadSelf,
     LoadLocal(u16),
     StoreLocal(u16),
+    /// Fast path for `name = name + 1`: increment slot in place, push new value.
+    /// Falls back to a synthesised `BinOp::Add` if the slot doesn't hold an Int.
+    IncLocal(u16),
     Dup,
     Pop,
     LoadIvar(SymId),
