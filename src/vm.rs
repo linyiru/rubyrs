@@ -53,6 +53,16 @@ pub(crate) struct Vm {
     /// Maximum simultaneously-live frames. `frames.push()` checks this
     /// against `frames.len()` before pushing. Default `None` is unlimited.
     pub(crate) max_frames: Option<usize>,
+    /// Single-slot monomorphic inline cache for method dispatch on
+    /// `Value::Object`. Holds the (class identity, method name, resolved
+    /// `Method`) of the most recent successful lookup; subsequent calls
+    /// that match both fields skip the `HashMap<SymId, _>::get`.
+    ///
+    /// Invalidated whenever a method is (re)defined on any class —
+    /// `Op::DefMethod` clears it. For our subset (method redefinition is
+    /// rare in hot loops) a single slot wins most of the time and a
+    /// per-call-site cache is deferred until measurement says otherwise.
+    pub(crate) call_cache: Option<(usize, SymId, Rc<Method>)>,
 }
 
 impl Vm {
@@ -72,7 +82,24 @@ impl Vm {
             stress_gc: env::var("STRESS_GC").is_ok(),
             fuel: None,
             max_frames: None,
+            call_cache: None,
         }
+    }
+
+    /// Look up a method on `cls`, consulting the single-slot inline cache
+    /// first. On miss, fall through to the class's `methods` HashMap and
+    /// update the cache.
+    #[inline]
+    pub(crate) fn lookup_method_cached(&mut self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+        let class_ptr = Rc::as_ptr(cls) as usize;
+        if let Some((cached_ptr, cached_name, cached_method)) = &self.call_cache {
+            if *cached_ptr == class_ptr && *cached_name == name_id {
+                return Some(cached_method.clone());
+            }
+        }
+        let m = cls.methods.borrow().get(&name_id).cloned()?;
+        self.call_cache = Some((class_ptr, name_id, m.clone()));
+        Some(m)
     }
 
     pub(crate) fn run(&mut self, entry: usize) -> Result<Value, Trap> {
@@ -183,7 +210,7 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
-                if let Some(m) = cls.methods.borrow().get(&name_id).cloned() {
+                if let Some(m) = self.lookup_method_cached(&cls, name_id) {
                     self.invoke_method(m, self_val.clone(), args)?;
                     return Ok(());
                 }
@@ -231,7 +258,7 @@ impl Vm {
 
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
-            if let Some(m) = cls.methods.borrow().get(&name_id).cloned() {
+            if let Some(m) = self.lookup_method_cached(&cls, name_id) {
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
             }
@@ -449,7 +476,7 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
-                if let Some(m) = cls.methods.borrow().get(&name_id).cloned() {
+                if let Some(m) = self.lookup_method_cached(&cls, name_id) {
                     self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
                     return Ok(());
                 }
@@ -486,7 +513,7 @@ impl Vm {
         }
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
-            if let Some(m) = cls.methods.borrow().get(&name_id).cloned() {
+            if let Some(m) = self.lookup_method_cached(&cls, name_id) {
                 self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
                 return Ok(());
             }
@@ -664,6 +691,9 @@ impl Vm {
                 let m = Rc::new(Method { params: proto.params.clone(), proto_idx: p_idx as usize });
                 if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
+                // Conservatively invalidate the inline cache — any previous
+                // cache entry could in theory be made stale by this definition.
+                self.call_cache = None;
                 self.stack.push(Value::Nil);
             }
             Op::DefClass(name_id, p_idx) => {

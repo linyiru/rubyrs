@@ -6,6 +6,21 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Changed
+- **Single-slot inline method cache** (Tier1-1). `Vm.call_cache`
+  holds the (class identity, method name, resolved `Method`) of
+  the last successful `Value::Object` dispatch; subsequent calls
+  with matching class + name skip the `HashMap<SymId, _>::get`.
+  Invalidated conservatively on `Op::DefMethod`. Helper
+  `Vm::lookup_method_cached` is shared across all four
+  Object-dispatch sites (do_call no_recv, do_call with recv,
+  do_call_block no_recv, do_call_block with recv).
+  Microbench: fizzbuzz 408 ms → **386 ms** (~5%, BinOp-dominated
+  workload limits the cache's reach). Counter.inc × 1M
+  (method-dispatch-dominated): 203 ms vs CRuby's 108 ms — we
+  are now within **1.87×** of CRuby's interpreter on this shape
+  of workload.
+
 ### Added
 - **CRuby differential testing harness** (P2-B-1). New
   `tests/diff_cruby.rs` runs each `tests/diff/*.rb` under both rubyrs
