@@ -42,6 +42,8 @@ pub(crate) enum Op {
     DefClass(SymId, u32),
     NewArray(u16),
     NewHash(u16),
+    /// Pops two values (begin, end). u8 nonzero = exclusive (`...`).
+    NewRange(u8),
     CreateBlock(u32, u16, u16),    // proto_idx, param_start, n_params
     CallBlock(SymId, u8, u16),
     CallNoRecvBlock(SymId, u8, u16),

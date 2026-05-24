@@ -20,6 +20,7 @@ pub enum Value {
     Object(ObjId),
     Array(ObjId),
     Hash(ObjId),
+    Range(ObjId),
     Block(Rc<BlockHandle>),
 }
 

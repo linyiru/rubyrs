@@ -421,6 +421,38 @@ impl Vm {
                     _ => None,
                 }
             }
+            Value::Range(id) => {
+                let id = *id;
+                let (b, e, excl) = {
+                    let r = self.heap.range(id);
+                    (r.begin.clone(), r.end.clone(), r.exclusive)
+                };
+                let (bi, ei) = match (&b, &e) {
+                    (Value::Int(a), Value::Int(c)) => (*a, *c),
+                    _ => return None,
+                };
+                let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
+                match (name, args) {
+                    ("begin", []) | ("first", []) | ("min", []) => Some(b.clone()),
+                    ("end", []) | ("last", []) => Some(e.clone()),
+                    ("max", []) => Some(if excl { Value::Int(ei - 1) } else { e.clone() }),
+                    ("size", []) | ("length", []) | ("count", []) => Some(Value::Int(count)),
+                    ("exclude_end?", []) => Some(Value::Bool(excl)),
+                    ("include?", [Value::Int(v)]) => {
+                        let in_r = if excl { *v >= bi && *v < ei } else { *v >= bi && *v <= ei };
+                        Some(Value::Bool(in_r))
+                    }
+                    ("to_a", []) => {
+                        let mut elems = Vec::with_capacity(count.max(0) as usize);
+                        let end_inclusive = if excl { ei - 1 } else { ei };
+                        for v in bi..=end_inclusive { elems.push(Value::Int(v)); }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(nid))
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -709,6 +741,67 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Int(*n)))
             }
+            (Value::Range(id), "each", []) => {
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Ok(None),
+                    }
+                };
+                self.pinned.push(Value::Range(*id));
+                let pre_frames = self.frames.len();
+                let mut early = None;
+                let end_inc = if excl { ei - 1 } else { ei };
+                let mut i = bi;
+                while i <= end_inc {
+                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    i += 1;
+                }
+                self.pinned.pop();
+                Some(early.unwrap_or(Value::Range(*id)))
+            }
+            (Value::Range(id), "map", []) => {
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Ok(None),
+                    }
+                };
+                self.pinned.push(Value::Range(*id));
+                self.maybe_gc();
+                self.check_alloc()?;
+                let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
+                let result_id = self.heap.alloc(HeapObj::Array(Vec::with_capacity(count as usize)));
+                self.pinned.push(Value::Array(result_id));
+                let pre_frames = self.frames.len();
+                let mut early = None;
+                let end_inc = if excl { ei - 1 } else { ei };
+                let mut i = bi;
+                while i <= end_inc {
+                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    self.heap.array_mut(result_id).push(r);
+                    i += 1;
+                }
+                self.pinned.pop();
+                self.pinned.pop();
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
             _ => None,
         })
     }
@@ -958,6 +1051,16 @@ impl Vm {
                 let elems: Vec<Value> = self.stack.drain(split..).collect();
                 let id = self.heap.alloc(HeapObj::Array(elems));
                 self.stack.push(Value::Array(id));
+            }
+            Op::NewRange(excl) => {
+                self.maybe_gc();
+                self.check_alloc()?;
+                let end = self.stack.pop().expect("ICE: NewRange end underflow");
+                let begin = self.stack.pop().expect("ICE: NewRange begin underflow");
+                let id = self.heap.alloc(HeapObj::Range(crate::heap::RangeObj {
+                    begin, end, exclusive: excl != 0,
+                }));
+                self.stack.push(Value::Range(id));
             }
             Op::NewHash(n) => {
                 self.maybe_gc();

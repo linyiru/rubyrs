@@ -322,6 +322,11 @@ pub(crate) fn compile_expr(
             for e in elems { compile_expr(b, e, protos, interner, cc); }
             b.emit(Op::NewArray(elems.len() as u16));
         }
+        Expr::RangeLit { begin, end, exclusive } => {
+            compile_expr(b, begin, protos, interner, cc);
+            compile_expr(b, end, protos, interner, cc);
+            b.emit(Op::NewRange(if *exclusive { 1 } else { 0 }));
+        }
         Expr::HashLit(pairs) => {
             for (k, v) in pairs {
                 compile_expr(b, k, protos, interner, cc);

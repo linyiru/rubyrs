@@ -6,6 +6,21 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **`Range` values + `Range#each` + Range basics** (P3-A-1).
+  `1..5` and `1...5` (exclusive) now parse. New `Value::Range`
+  (heap-managed; the existing GC walks `begin` and `end`). New
+  `Op::NewRange(excl_flag)` pops two values from the stack and
+  allocates the Range. Integer-endpoint ranges support
+  `.each { |i| ... }`, `.map { |i| ... }`, `.to_a`, `.size` /
+  `.length` / `.count`, `.first` / `.begin`, `.last` / `.end`,
+  `.min`, `.max` (respects `exclude_end?`), `.include?(n)`, and
+  `.exclude_end?`. Non-Int endpoints (e.g. `:a..:z`) are out of
+  scope for now and fall through to NoMethodError.
+- New diff fixture `range_basics.rb` exercises both inclusive and
+  exclusive ranges, iteration, mapping, empty/inverted ranges,
+  and Range usage inside a class method. Byte-identical to CRuby.
+
 ### Changed
 - **Per-call-site method inline cache** (P1-B upgrade). The
   single-slot cache from Tier1-1 is replaced with a per-site

@@ -8,7 +8,16 @@ use crate::value::{Instance, ObjId, Value};
 pub(crate) enum HeapObj {
     Instance(Instance),
     Array(Vec<Value>),
-    Hash(Vec<(Value, Value)>), // insertion-ordered, linear lookup (PoC)
+    Hash(Vec<(Value, Value)>),
+    Range(RangeObj),
+}
+
+/// A Ruby Range. For our subset, both endpoints must be `Value::Int`.
+#[derive(Clone)]
+pub(crate) struct RangeObj {
+    pub(crate) begin: Value,
+    pub(crate) end: Value,
+    pub(crate) exclusive: bool,
 }
 
 pub(crate) enum Slot {
@@ -74,6 +83,9 @@ impl Heap {
     pub(crate) fn hash_mut(&mut self, id: ObjId) -> &mut Vec<(Value, Value)> {
         if let HeapObj::Hash(h) = self.get_mut(id) { h } else { panic!("ICE: heap slot is not a Hash") }
     }
+    pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
+        if let HeapObj::Range(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Range") }
+    }
     pub(crate) fn should_gc(&self) -> bool { self.live_count >= self.next_gc }
 
     pub(crate) fn collect(&mut self, roots: &[Value]) {
@@ -89,6 +101,7 @@ impl Heap {
                     for (k, val) in h { v.push(k.clone()); v.push(val.clone()); }
                     v
                 }
+                Slot::Live(HeapObj::Range(r)) => vec![r.begin.clone(), r.end.clone()],
                 _ => vec![],
             };
             for v in &children { Heap::visit_value(v, &mut self.marks, &mut worklist); }
@@ -112,7 +125,7 @@ impl Heap {
 
     pub(crate) fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
         match v {
-            Value::Object(id) | Value::Array(id) | Value::Hash(id) => {
+            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) => {
                 let i = id.0 as usize;
                 if !marks[i] {
                     marks[i] = true;
@@ -145,6 +158,7 @@ impl Value {
             Value::Object(_) => "Object",
             Value::Array(_) => "Array",
             Value::Hash(_) => "Hash",
+            Value::Range(_) => "Range",
             Value::Block(_) => "Proc",
         }
     }
@@ -169,6 +183,11 @@ impl Value {
                     .map(|(k, v)| format!("{}=>{}", k.to_inspect(heap, interner), v.to_inspect(heap, interner)))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
+            }
+            Value::Range(id) => {
+                let r = heap.range(*id);
+                let sep = if r.exclusive { "..." } else { ".." };
+                format!("{}{}{}", r.begin.to_display(heap, interner), sep, r.end.to_display(heap, interner))
             }
             Value::Block(_) => "#<Proc>".into(),
         }

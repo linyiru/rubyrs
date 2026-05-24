@@ -57,6 +57,9 @@ pub(crate) enum Expr {
     },
     ArrayLit(Vec<SExpr>),
     HashLit(Vec<(SExpr, SExpr)>),
+    /// `begin..end` (exclusive=false) or `begin...end` (exclusive=true).
+    /// Both endpoints must be present in our subset.
+    RangeLit { begin: Box<SExpr>, end: Box<SExpr>, exclusive: bool },
     CallWithBlock {
         receiver: Option<Box<SExpr>>,
         name: String,
@@ -250,6 +253,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             None => vec![],
         };
         return sp(node, Expr::Def { name, params, body });
+    }
+    if let Some(n) = node.as_range_node() {
+        // Beginless / endless ranges (`..3`, `1..`) are not yet supported;
+        // we treat the missing endpoint as `nil` which will fail at runtime
+        // when something tries to iterate. For our subset, both ends should
+        // be present.
+        let begin = n.left().map(|c| tr(&c)).unwrap_or_else(|| sp(node, Expr::Nil));
+        let end = n.right().map(|c| tr(&c)).unwrap_or_else(|| sp(node, Expr::Nil));
+        return sp(node, Expr::RangeLit {
+            begin: Box::new(begin),
+            end: Box::new(end),
+            exclusive: n.is_exclude_end(),
+        });
     }
     if let Some(n) = node.as_array_node() {
         let elems: Vec<SExpr> = n.elements().iter().map(|e| tr(&e)).collect();
