@@ -13,6 +13,8 @@ use ruby_prism::Node;
 enum Expr {
     IntLit(i64),
     StrLit(String),
+    SymbolLit(String),
+    InterpolatedStr(Vec<Expr>),
     BoolLit(bool),
     Nil,
     LVarRead(String),
@@ -91,6 +93,24 @@ fn tr(node: &Node<'_>) -> Expr {
     }
     if let Some(n) = node.as_string_node() {
         return Expr::StrLit(String::from_utf8_lossy(n.unescaped()).into_owned());
+    }
+    if let Some(n) = node.as_symbol_node() {
+        return Expr::SymbolLit(String::from_utf8_lossy(n.unescaped()).into_owned());
+    }
+    if let Some(n) = node.as_interpolated_string_node() {
+        let parts: Vec<Expr> = n.parts().iter().map(|p| {
+            if let Some(es) = p.as_embedded_statements_node() {
+                let stmts: Vec<Expr> = es.statements()
+                    .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                    .unwrap_or_default();
+                if stmts.len() == 1 { stmts.into_iter().next().unwrap() } else { seq(stmts) }
+            } else if let Some(ev) = p.as_embedded_variable_node() {
+                tr(&ev.variable())
+            } else {
+                tr(&p)
+            }
+        }).collect();
+        return Expr::InterpolatedStr(parts);
     }
     if node.as_true_node().is_some() { return Expr::BoolLit(true); }
     if node.as_false_node().is_some() { return Expr::BoolLit(false); }
@@ -238,6 +258,7 @@ struct ObjId(u32);
 enum Value {
     Int(i64),
     Str(Rc<String>),
+    Sym(Rc<String>),
     Bool(bool),
     Nil,
     Class(Rc<Class>),
@@ -401,6 +422,7 @@ impl Value {
         match self {
             Value::Int(_) => "Integer",
             Value::Str(_) => "String",
+            Value::Sym(_) => "Symbol",
             Value::Bool(_) => "Boolean",
             Value::Nil => "NilClass",
             Value::Class(_) => "Class",
@@ -414,6 +436,7 @@ impl Value {
         match self {
             Value::Int(i) => i.to_string(),
             Value::Str(s) => (**s).clone(),
+            Value::Sym(s) => (**s).clone(),
             Value::Bool(true) => "true".into(),
             Value::Bool(false) => "false".into(),
             Value::Nil => "".into(),
@@ -437,6 +460,7 @@ impl Value {
     fn to_inspect(&self, heap: &Heap) -> String {
         match self {
             Value::Str(s) => format!("\"{}\"", s),
+            Value::Sym(s) => format!(":{}", s),
             Value::Nil => "nil".into(),
             _ => self.to_display(heap),
         }
@@ -445,6 +469,7 @@ impl Value {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => **a == **b,
+            (Value::Sym(a), Value::Sym(b)) => Rc::ptr_eq(a, b) || **a == **b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             (Value::Object(a), Value::Object(b)) => a == b,
@@ -465,6 +490,7 @@ impl Value {
 enum Op {
     LoadConstInt(i64),
     LoadConstStr(u32),   // proto.strings idx
+    LoadSymbol(u32),     // proto.strings idx
     LoadNil,
     LoadTrue,
     LoadFalse,
@@ -619,6 +645,27 @@ fn compile_expr(b: &mut ProtoBuilder, e: &Expr, protos: &mut Vec<Proto>) {
     match e {
         Expr::IntLit(i) => { b.emit(Op::LoadConstInt(*i)); }
         Expr::StrLit(s) => { let i = b.intern(s); b.emit(Op::LoadConstStr(i)); }
+        Expr::SymbolLit(s) => { let i = b.intern(s); b.emit(Op::LoadSymbol(i)); }
+        Expr::InterpolatedStr(parts) => {
+            if parts.is_empty() {
+                let i = b.intern("");
+                b.emit(Op::LoadConstStr(i));
+                return;
+            }
+            let to_s = b.intern("to_s");
+            for (idx, p) in parts.iter().enumerate() {
+                match p {
+                    Expr::StrLit(_) => compile_expr(b, p, protos),
+                    _ => {
+                        compile_expr(b, p, protos);
+                        b.emit(Op::Call(to_s, 0));
+                    }
+                }
+                if idx > 0 {
+                    b.emit(Op::BinOp(BinOpKind::Add));
+                }
+            }
+        }
         Expr::BoolLit(true) => { b.emit(Op::LoadTrue); }
         Expr::BoolLit(false) => { b.emit(Op::LoadFalse); }
         Expr::Nil => { b.emit(Op::LoadNil); }
@@ -1233,6 +1280,10 @@ impl Vm {
                 let s = self.protos[proto_idx].strings[idx as usize].clone();
                 self.stack.push(Value::Str(Rc::new(s)));
             }
+            Op::LoadSymbol(idx) => {
+                let s = self.protos[proto_idx].strings[idx as usize].clone();
+                self.stack.push(Value::Sym(Rc::new(s)));
+            }
             Op::LoadNil => self.stack.push(Value::Nil),
             Op::LoadTrue => self.stack.push(Value::Bool(true)),
             Op::LoadFalse => self.stack.push(Value::Bool(false)),
@@ -1454,6 +1505,14 @@ fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
         (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(**a == **b)),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
         (Value::Str(a), "length", []) => Some(Value::Int(a.chars().count() as i64)),
+        (Value::Sym(a), "to_s", []) => Some(Value::Str(a.clone())),
+        (Value::Sym(a), "to_sym", []) => Some(Value::Sym(a.clone())),
+        (Value::Sym(a), "==", [Value::Sym(b)]) => Some(Value::Bool(**a == **b)),
+        (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(**a != **b)),
+        (Value::Nil, "to_s", []) => Some(Value::Str(Rc::new(String::new()))),
+        (Value::Nil, "inspect", []) => Some(Value::Str(Rc::new("nil".into()))),
+        (Value::Nil, "nil?", []) => Some(Value::Bool(true)),
+        (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::new(if *b { "true" } else { "false" }.into()))),
         _ => None,
     }
 }
