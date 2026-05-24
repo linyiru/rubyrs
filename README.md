@@ -150,6 +150,10 @@ is described in [docs/TESTING.md](docs/TESTING.md).
 - [docs/TESTING.md](docs/TESTING.md) — testing strategy and `ruby/spec`
   ingestion
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what's next and why
+- [docs/SECURITY.md](docs/SECURITY.md) — trust model, resource
+  caps, and known attack surface
+- [docs/PANIC_AUDIT.md](docs/PANIC_AUDIT.md) — inventory of every
+  `panic!` / `unwrap` / `expect` and how the CI ratchet works
 - [docs/adr/](docs/adr/) — Architecture Decision Records
 - [CONTRIBUTING.md](CONTRIBUTING.md) — PR flow
 

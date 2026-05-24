@@ -7,6 +7,18 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`docs/SECURITY.md`** (P2-15): trust model, configuration
+  recipe for the semi-trusted profile, known attack surface
+  with what each cap defends against, and an explicit
+  "rubyrs is a hardening layer, not a sandbox" boundary —
+  WebAssembly + `wasmtime` is the answer for untrusted code,
+  not the rubyrs caps alone. Catalogues residual risks the
+  caps don't cover (host-function blocking, stdout
+  back-pressure, HashMap order side channel, the
+  `uncaught exception → process::exit(1)` gap). Cross-linked
+  from the README.
+
+### Added
 - **Per-value byte cap** (P2-14c). New `Config::max_value_bytes:
   Option<usize>`. Individual `String` / `Array` / `Hash` values
   can't grow past `n` bytes of content. String size is byte
