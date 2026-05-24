@@ -6,6 +6,27 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Changed
+- **`Vm.pinned` is now managed by a `PinGuard` RAII type** (P0-2).
+  Native iterator drivers — Array/Hash/Range `#each` / `#map`,
+  `#each_with_index`, the Enumerable filter family
+  (`iter_array_filter` etc.), the aggregation family (`#inject`,
+  `#count`, `#sort_by`), and the `Class.new` allocator — used to
+  do `self.pinned.push(...); ...; ?; ...; self.pinned.pop();` by
+  hand. Once those bodies started using `?` for fuel traps and
+  host-fn errors, the pop could be skipped, leaving dead values
+  pinned. The GC then kept marking those values as live every
+  cycle — a slow leak that mostly only showed up under stress-GC.
+  Replaced every push/pop pair with `PinGuard::new(self)` plus
+  `g.pin(v)`; the guard's `Drop` pops exactly what was pinned, on
+  both the success and `?`-unwind paths. Added a `debug_assert!`
+  in `Runtime::eval` that the pinned-stack length is unchanged
+  across every call — release builds skip the check so a
+  regression doesn't crash production hosts. New regression test
+  `pin_guard_balanced_when_block_raises_inside_iterator` hammers
+  `[1,2,3].map { ... raise ... }` 50× under stress-GC to fire
+  the assertion on any leak.
+
 ### Fixed
 - **`ResourceExhausted` can no longer be swallowed by `rescue => e`**
   (P0-1). The preamble had `class ResourceExhausted < StandardError`,

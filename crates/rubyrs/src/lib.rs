@@ -174,7 +174,19 @@ end
             &mut self.vm.protos, &mut self.vm.interner, &mut self.cache_counter,
         );
         self.vm.ensure_call_caches(self.cache_counter as usize);
-        self.vm.run(entry)
+        // Every code path through `Vm::run` (success, Trap-via-`?`,
+        // or an uncaught Ruby exception that exits the process) should
+        // leave `pinned` empty — that's the whole point of P0-2's
+        // PinGuard. Debug-only assertion: in release we leave the
+        // check out so a regression doesn't crash production hosts.
+        let pinned_before = self.vm.pinned.len();
+        let result = self.vm.run(entry);
+        debug_assert_eq!(
+            self.vm.pinned.len(), pinned_before,
+            "PinGuard imbalance: pinned was {}, now {} after eval",
+            pinned_before, self.vm.pinned.len(),
+        );
+        result
     }
 
     pub fn eval_file(&mut self, path: &Path) -> Result<Value, Trap> {

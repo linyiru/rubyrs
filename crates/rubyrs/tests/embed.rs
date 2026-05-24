@@ -240,6 +240,40 @@ fn explicit_rescue_exception_can_catch_resource_exhausted() {
 }
 
 #[test]
+fn pin_guard_balanced_when_block_raises_inside_iterator() {
+    // P0-2 regression: when a block running inside Array#each / #map /
+    // any of the iterator drivers raises, the surrounding native code
+    // used to leak `pinned` entries because the manual
+    // `self.pinned.pop()` came AFTER the `?` early-return.
+    //
+    // The debug_assert in `Runtime::eval` catches an imbalanced pinned
+    // stack at the end of every script. We hammer the path 50 times
+    // under stress-GC to make sure the assertion doesn't fire and that
+    // GC doesn't end up dragging zombie roots around.
+    let mut rt = Runtime::with_config(Config { stress_gc: true, ..Default::default() });
+    for _ in 0..50 {
+        let _ = rt.eval(
+            r#"
+            begin
+              [1, 2, 3].map { |x| raise "boom" if x == 2; x * 2 }
+            rescue => _e
+              # swallow the synthetic RuntimeError so the script returns
+              # normally; the *invariant* we're checking is that the
+              # native side cleaned up its pins on the way out, not the
+              # script's behaviour.
+            end
+            "#,
+            "leak.rb",
+        );
+    }
+    // If we got here without the debug_assert in eval firing, the
+    // PinGuard's Drop was wired up correctly for every iterator
+    // exit path. The assertion is the real test; this expression
+    // just keeps the loop in scope.
+    assert!(true);
+}
+
+#[test]
 fn frame_cap_traps_deep_recursion() {
     let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
     let err = rt.eval(
