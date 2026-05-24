@@ -166,7 +166,10 @@ fn perform_parallel_install(reqs: &[GemRequirement]) {
                         Ok(response) => {
                             let mut reader = response.into_reader();
                             if let Ok(mut out_file) = File::create(&gem_path) {
-                                let _ = std::io::copy(&mut reader, &mut out_file);
+                                if std::io::copy(&mut reader, &mut out_file).is_err() {
+                                    let _ = fs::remove_file(&gem_path);
+                                    continue;
+                                }
                             }
                         }
                         Err(_) => {
