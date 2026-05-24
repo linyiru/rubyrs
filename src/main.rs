@@ -486,7 +486,7 @@ impl Value {
 
 // ---------- Bytecode ----------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum Op {
     LoadConstInt(i64),
     LoadConstStr(u32),   // proto.strings idx
@@ -921,7 +921,7 @@ impl Vm {
                 let f = self.frames.last().unwrap();
                 (f.proto_idx, f.ip)
             };
-            let op = self.protos[proto_idx].code[ip].clone();
+            let op = self.protos[proto_idx].code[ip];
             self.frames.last_mut().unwrap().ip += 1;
             if !self.step(op, proto_idx) { return; }
         }
@@ -1289,7 +1289,7 @@ impl Vm {
                 let f = self.frames.last().unwrap();
                 (f.proto_idx, f.ip)
             };
-            let op = self.protos[proto_idx].code[ip].clone();
+            let op = self.protos[proto_idx].code[ip];
             self.frames.last_mut().unwrap().ip += 1;
             if !self.step(op, proto_idx) { return; }
         }

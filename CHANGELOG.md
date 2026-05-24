@@ -6,6 +6,14 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Internal
+- `Op` and `BinOpKind` now derive `Copy` (P0-C). The dispatch loop's
+  `code[ip].clone()` becomes a plain `Copy`. The previous `clone()` was
+  already optimised away by LLVM (all payloads were already POD), so
+  this is a structural correctness change rather than a measurable
+  speedup. Future Op variants must remain POD or carry a `SymId` /
+  similar index instead of an `Rc<str>`.
+
 ### Fixed
 - **GC root hole in native-driven iterators** (P0-A). `Array#map`,
   `Array#each`, and `Hash#each` accumulated state in Rust-local `Vec`s
