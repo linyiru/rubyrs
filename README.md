@@ -36,6 +36,14 @@ rubyrs is **not** a CRuby replacement. It targets the same niche as
 Ruby-flavored runtime — but written in Rust, with the option of compiling
 to WebAssembly.
 
+| End-to-end DSL hosting (Brewfile, ~50 lines) | rubyrs | CRuby 3.4 | CRuby + YJIT |
+|----------------------------------------------|--------|-----------|--------------|
+| Time | **1.8 ms** | 74.7 ms | 75.5 ms |
+
+→ **rubyrs is 42× faster end-to-end** on this shape of workload — the
+actual product-niche benchmark. See
+[`examples/brewfile/`](examples/brewfile/).
+
 | Cold start | rubyrs (native) | rubyrs.wasm | CRuby 3.4 |
 |------------|----------------|-------------|-----------|
 | `puts 1+2` | **1.5 ms** | 12.7 ms | 78 ms |

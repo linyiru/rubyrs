@@ -7,6 +7,21 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Brewfile DSL demo + benchmark** (P2-A). New
+  `examples/brewfile/` directory: a 50-line Brewfile-shaped Ruby
+  script (`tap`, `brew`, `cask`, `mas`, plus a class definition
+  and a `.each` loop) hosted via four `Runtime::register_fn`
+  calls. End-to-end wall time including cold start, parse, and
+  eval:
+    - rubyrs (embedded):  1.8 ms
+    - CRuby 3.4 no-JIT:  74.7 ms
+    - CRuby 3.4 + YJIT:  75.5 ms
+  **42× faster end-to-end** for this shape of workload (YJIT
+  doesn't help because most of CRuby's time goes to startup, not
+  arithmetic). The product-niche benchmark.
+- README and `docs/BENCHMARKS.md` now lead with this number.
+
+### Added
 - **`return` / `break` / `next`** (P2-C-4). All three compile to
   the existing Op::Return frame-pop, with `Op::Break` adding a
   `Vm.break_signaled` flag check that iteration drivers

@@ -3,6 +3,28 @@
 All numbers from an Apple Silicon (M-series) machine, `--release` builds.
 Reproduce with the commands at the bottom.
 
+## End-to-end DSL hosting (Brewfile demo)
+
+The product-niche benchmark. A small Brewfile-shaped DSL (~50 lines
+of Ruby: `tap "x"`, `brew "y"`, `cask "z"`, plus a class def and a
+`.each` loop) is run end-to-end on each runtime. See
+[`examples/brewfile/`](../examples/brewfile/) for the script and
+host code.
+
+| Runtime | Time (incl. process start) |
+|---------|---:|
+| rubyrs (embedded via Runtime API) | **1.8 ms** |
+| CRuby 3.4 (no YJIT) | 74.7 ms |
+| CRuby 3.4 + YJIT | 75.5 ms |
+
+**rubyrs is 42.5× faster end-to-end** for this shape of workload.
+YJIT doesn't help because almost all of CRuby's wall-time goes to
+process startup and the gem loader, not arithmetic.
+
+This is what rubyrs is built for: a host Rust app embedding a Ruby
+DSL where script execution time is dwarfed by per-invocation
+overhead.
+
 ## Cold start
 
 Trivial program: `puts 1 + 2`. Time to first output.
