@@ -54,3 +54,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0002 — Bytecode VM, not a JIT](0002-bytecode-vm-not-jit.md)
 - [0003 — Hybrid Rc + mark-sweep GC](0003-rc-plus-mark-sweep-hybrid-gc.md)
 - [0004 — Block locals share parent's Rc](0004-block-locals-share-parent-rc.md)
+- [0005 — Pinned stack for native-driven loops](0005-pinned-stack-for-native-driven-loops.md)

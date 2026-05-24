@@ -6,7 +6,17 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Fixed
+- **GC root hole in native-driven iterators** (P0-A). `Array#map`,
+  `Array#each`, and `Hash#each` accumulated state in Rust-local `Vec`s
+  that weren't visible to the mark phase; a sufficiently large `map`
+  could read use-after-free objects. Now uses an explicit `Vm.pinned`
+  root list. `STRESS_GC=1 cargo test` exercises this in CI.
+
 ### Added
+- `STRESS_GC=1` env flag forces a full collection on every potential
+  GC point. Wired into CI as a second job.
+- ADR 0005: pinned stack for native-driven loops.
 - Symbol literal (`:foo`) and shorthand hash key syntax (`{name: "x"}`)
 - String interpolation: `"hello #{name}"`, mixed with method calls and math
 - `Nil#to_s` / `inspect` / `nil?`, `Bool#to_s` to round out built-ins

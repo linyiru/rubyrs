@@ -47,3 +47,4 @@ fn run_fixture(name: &str) {
 #[test] fn block() { run_fixture("block"); }
 #[test] fn exception() { run_fixture("exception"); }
 #[test] fn symbol_interp() { run_fixture("symbol_interp"); }
+#[test] fn gc_block() { run_fixture("gc_block"); }

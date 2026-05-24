@@ -877,6 +877,12 @@ struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
     heap: Heap,
+    /// Native-code holding pen for heap values that need to stay alive across
+    /// a GC trigger but aren't on the operand stack or in a Frame. Drivers
+    /// like collection_call_block push their intermediate accumulator here
+    /// before any block invocation that might allocate.
+    pinned: Vec<Value>,
+    stress_gc: bool,
 }
 
 impl Vm {
@@ -889,6 +895,8 @@ impl Vm {
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),
+            pinned: Vec::new(),
+            stress_gc: env::var("STRESS_GC").is_ok(),
         }
     }
 
@@ -1079,10 +1087,13 @@ impl Vm {
     }
 
     fn maybe_gc(&mut self) {
-        if !self.heap.should_gc() { return; }
-        // Gather roots: stack + every frame's locals + self_val + swap_return + class_stack (no instances)
-        let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() + 64);
+        if !self.stress_gc && !self.heap.should_gc() { return; }
+        // Gather roots: stack + every frame's locals + self_val + swap_return
+        // + pinned (native-code accumulators). class_stack holds Rc<Class>
+        // which isn't GC-managed, so we don't need to walk it.
+        let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() + self.pinned.len() + 64);
         for v in &self.stack { roots.push(v.clone()); }
+        for v in &self.pinned { roots.push(v.clone()); }
         for f in &self.frames {
             roots.push(f.self_val.clone());
             for v in f.locals.borrow().iter() { roots.push(v.clone()); }
@@ -1212,30 +1223,40 @@ impl Vm {
     fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: &Rc<BlockHandle>) -> Option<Value> {
         match (recv, name, args) {
             (Value::Array(id), "each", []) => {
+                // Pin source so its elements survive any GC triggered inside the block body.
+                self.pinned.push(Value::Array(*id));
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let pre_frames = self.frames.len();
                 for v in snapshot {
                     self.invoke_block(block.clone(), vec![v]);
-                    // Run until block frame returns
                     self.dispatch_until(pre_frames);
-                    self.stack.pop(); // drop block's return value
+                    self.stack.pop();
                 }
+                self.pinned.pop();
                 Some(Value::Array(*id))
             }
             (Value::Array(id), "map", []) => {
+                // Pin source AND the accumulating result array. Without this,
+                // the block body's allocations can trigger a GC that sweeps
+                // either of them — see ADR/P0-A.
+                self.pinned.push(Value::Array(*id));
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
-                let mut results: Vec<Value> = Vec::with_capacity(snapshot.len());
+                self.maybe_gc();
+                let result_id = self.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                self.pinned.push(Value::Array(result_id));
                 let pre_frames = self.frames.len();
                 for v in snapshot {
                     self.invoke_block(block.clone(), vec![v]);
                     self.dispatch_until(pre_frames);
-                    results.push(self.stack.pop().unwrap_or(Value::Nil));
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    self.heap.array_mut(result_id).push(r);
                 }
-                self.maybe_gc();
-                let nid = self.heap.alloc(HeapObj::Array(results));
-                Some(Value::Array(nid))
+                self.pinned.pop(); // result
+                self.pinned.pop(); // source
+                Some(Value::Array(result_id))
             }
             (Value::Hash(id), "each", []) => {
+                self.pinned.push(Value::Hash(*id));
                 let snapshot: Vec<(Value, Value)> = self.heap.hash(*id).clone();
                 let pre_frames = self.frames.len();
                 for (k, v) in snapshot {
@@ -1243,9 +1264,11 @@ impl Vm {
                     self.dispatch_until(pre_frames);
                     self.stack.pop();
                 }
+                self.pinned.pop();
                 Some(Value::Hash(*id))
             }
             (Value::Int(n), "times", []) => {
+                // Int and block params here are not heap-refs; no pin needed.
                 let pre_frames = self.frames.len();
                 for i in 0..*n {
                     self.invoke_block(block.clone(), vec![Value::Int(i)]);
