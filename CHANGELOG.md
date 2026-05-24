@@ -7,6 +7,16 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **CRuby differential testing harness** (P2-B-1). New
+  `tests/diff_cruby.rs` runs each `tests/diff/*.rb` under both rubyrs
+  and the system `ruby` binary; stdout must match byte-for-byte. CI
+  pins Ruby 3.4 via `ruby/setup-ruby@v1` so the comparison is
+  reproducible. Seeded with 10 fixtures (integer/string/array/hash/
+  block/class/symbol/interpolation/rescue/fizzbuzz). Running the
+  fixtures immediately caught a parser gap (`ParenthesesNode` was
+  unsupported); fixed in the same commit.
+
+### Added
 - **Resource caps for untrusted scripts** (P1-D). `Config` gains
   three optional knobs: `fuel: Option<u64>` (per-op limit, enforced
   inside `dispatch_until` so block bodies can't bypass it),

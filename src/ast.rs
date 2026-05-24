@@ -244,6 +244,18 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::Class { name, body });
     }
+    if let Some(n) = node.as_parentheses_node() {
+        // `(expr)` — just unwrap to the inner expression / statements.
+        if let Some(body) = n.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                let v: Vec<SExpr> = stmts.body().iter().map(|c| tr(&c)).collect();
+                return if v.len() == 1 { v.into_iter().next().unwrap() }
+                       else { Spanned::new(span, seq_inner(v)) };
+            }
+            return tr(&body);
+        }
+        return sp(node, Expr::Nil);
+    }
     if let Some(n) = node.as_begin_node() {
         let body: Vec<SExpr> = n.statements()
             .map(|s| s.body().iter().map(|c| tr(&c)).collect())
