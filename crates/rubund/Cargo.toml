@@ -18,6 +18,8 @@ path = "src/main.rs"
 # API outside its own tests/examples — every breaking change
 # here is a tripwire for that API.
 rubyrs = { path = "../rubyrs" }
+
+[dev-dependencies]
 ureq.workspace = true
 tar.workspace = true
 flate2.workspace = true
