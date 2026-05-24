@@ -6,6 +6,7 @@ use std::rc::Rc;
 use crate::bytecode::{Op, Proto};
 use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::heap::{Heap, HeapObj};
+use crate::intern::{Interner, SymId};
 use crate::value::{BlockHandle, Class, Instance, Method, Value};
 
 // ---------- VM ----------
@@ -30,24 +31,23 @@ pub(crate) struct RescueHandler {
 
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
-    pub(crate) classes: HashMap<String, Rc<Class>>,
-    pub(crate) toplevel_methods: HashMap<String, Rc<Method>>,
+    pub(crate) interner: Interner,
+    pub(crate) classes: HashMap<SymId, Rc<Class>>,
+    pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) class_stack: Vec<Rc<Class>>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
-    /// Native-code holding pen for heap values that need to stay alive across
-    /// a GC trigger but aren't on the operand stack or in a Frame. Drivers
-    /// like collection_call_block push their intermediate accumulator here
-    /// before any block invocation that might allocate.
+    /// Native-code holding pen for heap values across GC points; see ADR 0005.
     pub(crate) pinned: Vec<Value>,
     pub(crate) stress_gc: bool,
 }
 
 impl Vm {
-    pub(crate) fn new(protos: Vec<Proto>) -> Self {
+    pub(crate) fn new(protos: Vec<Proto>, interner: Interner) -> Self {
         Vm {
             protos,
+            interner,
             classes: HashMap::new(),
             toplevel_methods: HashMap::new(),
             class_stack: vec![],
@@ -103,7 +103,8 @@ impl Vm {
         Trap { err, backtrace: bt }
     }
 
-    pub(crate) fn do_call(&mut self, name: String, argc: usize, no_recv: bool) -> Result<(), Trap> {
+    pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> Result<(), Trap> {
+        let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let recv = if no_recv {
@@ -120,17 +121,17 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
-                if let Some(m) = cls.methods.borrow().get(&name).cloned() {
+                if let Some(m) = cls.methods.borrow().get(&name_id).cloned() {
                     self.invoke_method(m, self_val.clone(), args)?;
                     return Ok(());
                 }
             }
-            if let Some(m) = self.toplevel_methods.get(&name).cloned() {
+            if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
-                method: name, recv_type: self_val.type_name(),
+                method: name.to_string(), recv_type: self_val.type_name(),
             }));
         }
 
@@ -140,8 +141,13 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        if let Some(v) = self.sym_primitive(&recv, &name, &args) {
+            self.stack.push(v);
+            return Ok(());
+        }
 
-        if name == "new" {
+        let new_id = self.interner.intern("new");
+        if name_id == new_id {
             if let Value::Class(cls) = &recv {
                 self.maybe_gc();
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
@@ -149,7 +155,8 @@ impl Vm {
                     ivars: HashMap::new(),
                 }));
                 let obj = Value::Object(id);
-                if let Some(m) = cls.methods.borrow().get("initialize").cloned() {
+                let init_id = self.interner.intern("initialize");
+                if let Some(m) = cls.methods.borrow().get(&init_id).cloned() {
                     self.invoke_method(m, obj.clone(), args)?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
@@ -161,7 +168,7 @@ impl Vm {
 
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
-            if let Some(m) = cls.methods.borrow().get(&name).cloned() {
+            if let Some(m) = cls.methods.borrow().get(&name_id).cloned() {
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
             }
@@ -171,7 +178,7 @@ impl Vm {
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
-            method: name, recv_type: recv.type_name(),
+            method: name.to_string(), recv_type: recv.type_name(),
         }))
     }
 
@@ -261,7 +268,7 @@ impl Vm {
             self.stack.truncate(f.base_sp);
             if f.is_class_body { self.class_stack.pop(); }
             if self.frames.is_empty() {
-                eprintln!("uncaught exception: {}", exc.to_display(&self.heap));
+                eprintln!("uncaught exception: {}", exc.to_display(&self.heap, &self.interner));
                 std::process::exit(1);
             }
         }
@@ -339,7 +346,8 @@ impl Vm {
         });
     }
 
-    pub(crate) fn do_call_block(&mut self, name: String, argc: usize, no_recv: bool) -> Result<(), Trap> {
+    pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> Result<(), Trap> {
+        let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
@@ -364,29 +372,32 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.instance(*id).class.clone();
-                if let Some(m) = cls.methods.borrow().get(&name).cloned() {
+                if let Some(m) = cls.methods.borrow().get(&name_id).cloned() {
                     self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
                     return Ok(());
                 }
             }
-            if let Some(m) = self.toplevel_methods.get(&name).cloned() {
+            if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
-                method: name, recv_type: self_val.type_name(),
+                method: name.to_string(), recv_type: self_val.type_name(),
             }));
         }
         let recv = recv.expect("ICE: receiver missing for block call");
         if let Some(v) = primitive_call(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
-        if name == "new" {
+        if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
+        let new_id = self.interner.intern("new");
+        if name_id == new_id {
             if let Value::Class(cls) = &recv {
                 self.maybe_gc();
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(), ivars: HashMap::new(),
                 }));
                 let obj = Value::Object(id);
-                if let Some(m) = cls.methods.borrow().get("initialize").cloned() {
+                let init_id = self.interner.intern("initialize");
+                if let Some(m) = cls.methods.borrow().get(&init_id).cloned() {
                     self.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
@@ -397,13 +408,13 @@ impl Vm {
         }
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
-            if let Some(m) = cls.methods.borrow().get(&name).cloned() {
+            if let Some(m) = cls.methods.borrow().get(&name_id).cloned() {
                 self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
                 return Ok(());
             }
         }
         Err(self.trap(RubyError::NoMethodError {
-            method: name, recv_type: recv.type_name(),
+            method: name.to_string(), recv_type: recv.type_name(),
         }))
     }
 
@@ -478,16 +489,17 @@ impl Vm {
     }
 
     /// Execute one op; returns Ok(false) if we just popped the last frame.
-    pub(crate) fn step(&mut self, op: Op, proto_idx: usize) -> Result<bool, Trap> {
+    /// `_proto_idx` is reserved for future per-op span lookup; with the
+    /// global interner, ops no longer need it for string resolution.
+    pub(crate) fn step(&mut self, op: Op, _proto_idx: usize) -> Result<bool, Trap> {
         match op {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
-            Op::LoadConstStr(idx) => {
-                let s = self.protos[proto_idx].strings[idx as usize].clone();
-                self.stack.push(Value::Str(Rc::new(s)));
+            Op::LoadConstStr(id) => {
+                let s = self.interner.resolve(id).clone();
+                self.stack.push(Value::Str(s));
             }
-            Op::LoadSymbol(idx) => {
-                let s = self.protos[proto_idx].strings[idx as usize].clone();
-                self.stack.push(Value::Sym(Rc::new(s)));
+            Op::LoadSymbol(id) => {
+                self.stack.push(Value::Sym(id));
             }
             Op::LoadNil => self.stack.push(Value::Nil),
             Op::LoadTrue => self.stack.push(Value::Bool(true)),
@@ -509,23 +521,20 @@ impl Vm {
                 self.stack.push(v);
             }
             Op::Pop => { self.stack.pop(); }
-            Op::LoadIvar(idx) => {
-                let name = self.protos[proto_idx].strings[idx as usize].clone();
+            Op::LoadIvar(name_id) => {
                 let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: LoadIvar no frame").self_val { Some(*id) } else { None };
                 let v = if let Some(id) = id_opt {
-                    self.heap.instance(id).ivars.get(&name).cloned().unwrap_or(Value::Nil)
+                    self.heap.instance(id).ivars.get(&name_id).cloned().unwrap_or(Value::Nil)
                 } else { Value::Nil };
                 self.stack.push(v);
             }
-            Op::StoreIvar(idx) => {
-                let name = self.protos[proto_idx].strings[idx as usize].clone();
+            Op::StoreIvar(name_id) => {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
                 let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: StoreIvar no frame").self_val { Some(*id) } else { None };
-                if let Some(id) = id_opt { self.heap.instance_mut(id).ivars.insert(name, v); }
+                if let Some(id) = id_opt { self.heap.instance_mut(id).ivars.insert(name_id, v); }
             }
-            Op::LoadConst(idx) => {
-                let name = &self.protos[proto_idx].strings[idx as usize];
-                let v = self.classes.get(name).map(|c| Value::Class(c.clone())).unwrap_or(Value::Nil);
+            Op::LoadConst(name_id) => {
+                let v = self.classes.get(&name_id).map(|c| Value::Class(c.clone())).unwrap_or(Value::Nil);
                 self.stack.push(v);
             }
             Op::Jump(off) => {
@@ -539,21 +548,17 @@ impl Vm {
                     f.ip = (f.ip as i32 + off) as usize;
                 }
             }
-            Op::Call(name_idx, argc) => {
-                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                self.do_call(name, argc as usize, false)?;
+            Op::Call(name_id, argc) => {
+                self.do_call(name_id, argc as usize, false)?;
             }
-            Op::CallNoRecv(name_idx, argc) => {
-                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                self.do_call(name, argc as usize, true)?;
+            Op::CallNoRecv(name_id, argc) => {
+                self.do_call(name_id, argc as usize, true)?;
             }
-            Op::CallBlock(name_idx, argc) => {
-                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                self.do_call_block(name, argc as usize, false)?;
+            Op::CallBlock(name_id, argc) => {
+                self.do_call_block(name_id, argc as usize, false)?;
             }
-            Op::CallNoRecvBlock(name_idx, argc) => {
-                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                self.do_call_block(name, argc as usize, true)?;
+            Op::CallNoRecvBlock(name_id, argc) => {
+                self.do_call_block(name_id, argc as usize, true)?;
             }
             Op::CreateBlock(p_idx, param_start, n_params) => {
                 let f = self.frames.last().expect("ICE: CreateBlock no frame");
@@ -574,18 +579,17 @@ impl Vm {
                 let args: Vec<Value> = self.stack.drain(split..).collect();
                 self.invoke_block(block, args);
             }
-            Op::DefMethod(name_idx, p_idx) => {
-                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
+            Op::DefMethod(name_id, p_idx) => {
                 let proto = &self.protos[p_idx as usize];
                 let m = Rc::new(Method { params: proto.params.clone(), proto_idx: p_idx as usize });
-                if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name, m); }
-                else { self.toplevel_methods.insert(name, m); }
+                if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
+                else { self.toplevel_methods.insert(name_id, m); }
                 self.stack.push(Value::Nil);
             }
-            Op::DefClass(name_idx, p_idx) => {
-                let name = self.protos[proto_idx].strings[name_idx as usize].clone();
-                let cls = self.classes.entry(name.clone()).or_insert_with(|| Rc::new(Class {
-                    name: name.clone(), methods: RefCell::new(HashMap::new()),
+            Op::DefClass(name_id, p_idx) => {
+                let name_str = self.interner.resolve(name_id).to_string();
+                let cls = self.classes.entry(name_id).or_insert_with(|| Rc::new(Class {
+                    name: name_str, methods: RefCell::new(HashMap::new()),
                 })).clone();
                 self.class_stack.push(cls.clone());
                 let proto = &self.protos[p_idx as usize];
@@ -643,8 +647,8 @@ impl Vm {
                 } else {
                     self.stack.push(a);
                     self.stack.push(b);
-                    let name = kind.name().to_string();
-                    self.do_call(name, 1, false)?;
+                    let name_id = self.interner.intern(kind.name());
+                    self.do_call(name_id, 1, false)?;
                 }
             }
             Op::Return => {
@@ -677,11 +681,11 @@ impl Vm {
         match name {
             "puts" => {
                 if args.is_empty() { println!(); }
-                else { for a in args { println!("{}", a.to_display(&self.heap)); } }
+                else { for a in args { println!("{}", a.to_display(&self.heap, &self.interner)); } }
                 Some(Value::Nil)
             }
             "print" => {
-                for a in args { print!("{}", a.to_display(&self.heap)); }
+                for a in args { print!("{}", a.to_display(&self.heap, &self.interner)); }
                 Some(Value::Nil)
             }
             _ => None,
@@ -705,23 +709,33 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option
             ">=" => Some(Value::Bool(a >= b)),
             _ => None,
         },
-        (Value::Int(a), "to_s", []) => Some(Value::Str(Rc::new(a.to_string()))),
+        (Value::Int(a), "to_s", []) => Some(Value::Str(Rc::from(a.to_string().as_str()))),
         (Value::Str(a), "+", [Value::Str(b)]) => {
-            let mut s = (**a).clone();
+            let mut s = a.to_string();
             s.push_str(b);
-            Some(Value::Str(Rc::new(s)))
+            Some(Value::Str(Rc::from(s.as_str())))
         }
         (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(**a == **b)),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
         (Value::Str(a), "length", []) => Some(Value::Int(a.chars().count() as i64)),
-        (Value::Sym(a), "to_s", []) => Some(Value::Str(a.clone())),
-        (Value::Sym(a), "to_sym", []) => Some(Value::Sym(a.clone())),
-        (Value::Sym(a), "==", [Value::Sym(b)]) => Some(Value::Bool(**a == **b)),
-        (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(**a != **b)),
-        (Value::Nil, "to_s", []) => Some(Value::Str(Rc::new(String::new()))),
-        (Value::Nil, "inspect", []) => Some(Value::Str(Rc::new("nil".into()))),
+        (Value::Sym(a), "==", [Value::Sym(b)]) => Some(Value::Bool(a == b)),
+        (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(a != b)),
+        (Value::Nil, "to_s", []) => Some(Value::Str(Rc::from(""))),
+        (Value::Nil, "inspect", []) => Some(Value::Str(Rc::from("nil"))),
         (Value::Nil, "nil?", []) => Some(Value::Bool(true)),
-        (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::new(if *b { "true" } else { "false" }.into()))),
+        (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::from(if *b { "true" } else { "false" }))),
         _ => None,
+    }
+}
+
+/// `Symbol#to_s` / `to_sym` need the Interner to resolve the underlying name,
+/// so they live as a method on Vm rather than in the pure `primitive_call`.
+impl Vm {
+    pub(crate) fn sym_primitive(&self, recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
+        match (recv, name, args) {
+            (Value::Sym(id), "to_s", []) => Some(Value::Str(self.interner.resolve(*id).clone())),
+            (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
+            _ => None,
+        }
     }
 }

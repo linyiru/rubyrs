@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use crate::intern::Interner;
 use crate::value::{Instance, ObjId, Value};
 
 // ---------- GC Heap ----------
@@ -143,11 +144,11 @@ impl Value {
             Value::Block(_) => "Proc",
         }
     }
-    pub(crate) fn to_display(&self, heap: &Heap) -> String {
+    pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
             Value::Int(i) => i.to_string(),
-            Value::Str(s) => (**s).clone(),
-            Value::Sym(s) => (**s).clone(),
+            Value::Str(s) => s.to_string(),
+            Value::Sym(id) => interner.resolve(*id).to_string(),
             Value::Bool(true) => "true".into(),
             Value::Bool(false) => "false".into(),
             Value::Nil => "".into(),
@@ -155,32 +156,32 @@ impl Value {
             Value::Object(id) => format!("#<{}>", heap.instance(*id).class.name),
             Value::Array(id) => {
                 let a = heap.array(*id);
-                let parts: Vec<String> = a.iter().map(|v| v.to_inspect(heap)).collect();
+                let parts: Vec<String> = a.iter().map(|v| v.to_inspect(heap, interner)).collect();
                 format!("[{}]", parts.join(", "))
             }
             Value::Hash(id) => {
                 let h = heap.hash(*id);
                 let parts: Vec<String> = h.iter()
-                    .map(|(k, v)| format!("{}=>{}", k.to_inspect(heap), v.to_inspect(heap)))
+                    .map(|(k, v)| format!("{}=>{}", k.to_inspect(heap, interner), v.to_inspect(heap, interner)))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Value::Block(_) => "#<Proc>".into(),
         }
     }
-    pub(crate) fn to_inspect(&self, heap: &Heap) -> String {
+    pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
             Value::Str(s) => format!("\"{}\"", s),
-            Value::Sym(s) => format!(":{}", s),
+            Value::Sym(id) => format!(":{}", interner.resolve(*id)),
             Value::Nil => "nil".into(),
-            _ => self.to_display(heap),
+            _ => self.to_display(heap, interner),
         }
     }
     pub(crate) fn ruby_eq(&self, other: &Value, heap: &Heap) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => **a == **b,
-            (Value::Sym(a), Value::Sym(b)) => Rc::ptr_eq(a, b) || **a == **b,
+            (Value::Sym(a), Value::Sym(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             (Value::Object(a), Value::Object(b)) => a == b,

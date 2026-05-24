@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::error::Span;
+use crate::intern::SymId;
 use crate::value::Value;
 
 // ---------- Bytecode ----------
@@ -8,33 +9,33 @@ use crate::value::Value;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
     LoadConstInt(i64),
-    LoadConstStr(u32),   // proto.strings idx
-    LoadSymbol(u32),     // proto.strings idx
+    LoadConstStr(SymId),
+    LoadSymbol(SymId),
     LoadNil,
     LoadTrue,
     LoadFalse,
     LoadSelf,
     LoadLocal(u16),
-    StoreLocal(u16),     // pops
+    StoreLocal(u16),
     Dup,
     Pop,
-    LoadIvar(u32),       // proto.strings idx
-    StoreIvar(u32),      // pops
-    LoadConst(u32),      // class name idx
+    LoadIvar(SymId),
+    StoreIvar(SymId),
+    LoadConst(SymId),
     Jump(i32),
-    JumpIfFalse(i32),    // pops cond
-    Call(u32, u8),       // name idx, argc; receiver on stack BELOW args
-    CallNoRecv(u32, u8), // implicit self / builtin / toplevel
-    DefMethod(u32, u32), // name idx, proto idx
-    DefClass(u32, u32),  // name idx, body proto idx
+    JumpIfFalse(i32),
+    Call(SymId, u8),
+    CallNoRecv(SymId, u8),
+    DefMethod(SymId, u32),         // name, proto_idx
+    DefClass(SymId, u32),
     NewArray(u16),
     NewHash(u16),
-    CreateBlock(u32, u16, u16), // proto_idx, param_start, n_params
-    CallBlock(u32, u8),         // name, argc; expects [recv, block, ...args]
-    CallNoRecvBlock(u32, u8),   // name, argc; expects [block, ...args]
+    CreateBlock(u32, u16, u16),    // proto_idx, param_start, n_params
+    CallBlock(SymId, u8),
+    CallNoRecvBlock(SymId, u8),
     Yield(u8),
     BinOp(BinOpKind),
-    PushRescue(i32, u16, u8), // handler relative offset, slot to bind exception (u16), 1 if bind else 0
+    PushRescue(i32, u16, u8),
     PopRescue,
     Raise,
     Return,
@@ -86,12 +87,8 @@ pub(crate) struct Proto {
     pub(crate) params: Vec<String>,
     pub(crate) n_locals: u16,
     pub(crate) code: Vec<Op>,
-    pub(crate) strings: Vec<String>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.
-    /// Used by Trap formatting in P0-B-2.
-    #[allow(dead_code)]
     pub(crate) op_spans: Vec<Span>,
-    /// Source filename — used when formatting a Trap backtrace in P0-B-2.
-    #[allow(dead_code)]
+    /// Source filename — used by Trap backtrace formatting.
     pub(crate) filename: Rc<str>,
 }

@@ -55,3 +55,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0003 — Hybrid Rc + mark-sweep GC](0003-rc-plus-mark-sweep-hybrid-gc.md)
 - [0004 — Block locals share parent's Rc](0004-block-locals-share-parent-rc.md)
 - [0005 — Pinned stack for native-driven loops](0005-pinned-stack-for-native-driven-loops.md)
+- [0006 — Global string interner with SymId](0006-global-string-intern.md)

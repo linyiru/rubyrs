@@ -3,6 +3,7 @@ mod bytecode;
 mod compiler;
 mod error;
 mod heap;
+mod intern;
 mod value;
 mod vm;
 
@@ -36,7 +37,8 @@ fn main() {
 
     let filename: std::rc::Rc<str> = std::rc::Rc::from(args[1].clone());
     let mut protos: Vec<Proto> = vec![];
-    let entry = compile_proto("<main>".into(), vec![], &[prog], filename, &mut protos);
+    let mut interner = intern::Interner::new();
+    let entry = compile_proto("<main>".into(), vec![], &[prog], filename, &mut protos, &mut interner);
     if env::var("DEBUG_BC").is_ok() {
         for (i, p) in protos.iter().enumerate() {
             eprintln!("proto {} {}", i, p.name);
@@ -45,7 +47,7 @@ fn main() {
             }
         }
     }
-    let mut vm = Vm::new(protos);
+    let mut vm = Vm::new(protos, interner);
     let outcome = vm.run(entry);
     if env::var("GC_STATS").is_ok() {
         eprintln!(

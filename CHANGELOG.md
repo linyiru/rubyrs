@@ -6,6 +6,20 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Changed
+- **Global string interner** (P1-B). Method names, ivar names, class
+  names, and string literals all live in a single Vm-owned `Interner`
+  and are referenced by `SymId(u32)`. `Proto.strings` is gone;
+  `Value::Sym` carries a `SymId` instead of `Rc<String>`;
+  `Value::Str` carries `Rc<str>`. `Class.methods`, `Instance.ivars`,
+  and `Vm.classes` are now keyed on `SymId`. Symbol equality is a
+  single u32 compare; method dispatch hashes on a tight key.
+  Microbench: 1M fizzbuzz 484 ms → **408 ms (1.18× faster)**;
+  distance to CRuby + YJIT 3.44× → 2.82×.
+
+### Added
+- ADR 0006: Global string interner with SymId.
+
 ### Added
 - **CRuby-style error format with backtrace** (P0-B-3). Trap output
   now prints `file:line:in 'method': msg (Class)` plus one

@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::intern::SymId;
+
 // ---------- Values ----------
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -10,8 +12,8 @@ pub(crate) struct ObjId(pub(crate) u32);
 #[derive(Clone)]
 pub(crate) enum Value {
     Int(i64),
-    Str(Rc<String>),
-    Sym(Rc<String>),
+    Str(Rc<str>),
+    Sym(SymId),
     Bool(bool),
     Nil,
     Class(Rc<Class>),
@@ -31,12 +33,12 @@ pub(crate) struct BlockHandle {
 
 pub(crate) struct Class {
     pub(crate) name: String,
-    pub(crate) methods: RefCell<HashMap<String, Rc<Method>>>,
+    pub(crate) methods: RefCell<HashMap<SymId, Rc<Method>>>,
 }
 
 pub(crate) struct Instance {
     pub(crate) class: Rc<Class>,
-    pub(crate) ivars: HashMap<String, Value>,
+    pub(crate) ivars: HashMap<SymId, Value>,
 }
 
 pub(crate) struct Method {

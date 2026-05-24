@@ -24,7 +24,7 @@ scripting).
 
 | Implementation | Time | Peak RSS |
 |----------------|------|---------|
-| rubyrs (bytecode VM + BinOp fast path) | **0.44 s** | 2.1 MB |
+| rubyrs (bytecode VM + BinOp + SymId interner) | **0.41 s** | 2.1 MB |
 | rubyrs.wasm via wasmtime | 0.86 s | 16.7 MB |
 | CRuby 3.4 (no YJIT) | 0.19 s | 18.4 MB |
 | CRuby 3.4 + YJIT | 0.15 s | 19.1 MB |
