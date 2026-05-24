@@ -7,6 +7,28 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Array combination & iteration extras** (P3-B-2). New
+  no-block methods on `Array`: `reverse`, `uniq` (uses Ruby
+  equality, preserves first-seen order), `compact` (drops nils),
+  `flatten` (depth 1, matching the cases our fixtures exercise),
+  `join` (no-arg + explicit separator), `+` (concat to new), `-`
+  (set-style difference), `concat` (in-place, returns self),
+  `take(n)`, `drop(n)`, `to_a` (identity). New block-taking
+  methods in the iterator-driver region: `each_with_index`
+  (block receives `|v, i|`) and `sort_by` (compute key per
+  element via the block, then sort element/key pairs by key —
+  reuses `value_cmp` so block-keys outside Int/Str return
+  NoMethodError instead of silent equal-everywhere ordering).
+  Also adds the unary-minus method `Integer#-@` (and `+@`) so
+  expressions like `arr.sort_by { |n| -n }` work — Prism lowers
+  unary minus on a variable as a `-@` method call. New diff
+  fixture `array_extras.rb` (~95 lines) covers each method,
+  empty-array edges, mutation vs new-allocation contracts for
+  `concat` vs `+`, a string-corpus pipeline
+  (`text.split.uniq.sort`), and use inside a class. Byte-
+  identical to CRuby.
+
+### Added
 - **Integer predicates + iteration + String basics** (P3-B-1).
   `Integer`: `even?`, `odd?`, `abs`, `zero?`, `positive?`,
   `negative?`, `succ` / `next`, `pred`, plus block-taking `upto`

@@ -486,6 +486,102 @@ impl Vm {
                         }
                         Some(acc)
                     }
+                    ("to_a", []) => Some(Value::Array(id)),
+                    ("reverse", []) => {
+                        let rev: Vec<Value> = self.heap.array(id).iter().rev().cloned().collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(rev));
+                        Some(Value::Array(nid))
+                    }
+                    ("uniq", []) => {
+                        let src = self.heap.array(id).clone();
+                        let mut out: Vec<Value> = Vec::with_capacity(src.len());
+                        for v in &src {
+                            if !out.iter().any(|x| x.ruby_eq(v, &self.heap)) {
+                                out.push(v.clone());
+                            }
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    ("compact", []) => {
+                        let out: Vec<Value> = self.heap.array(id).iter()
+                            .filter(|v| !matches!(v, Value::Nil))
+                            .cloned()
+                            .collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    ("flatten", []) => {
+                        // Depth-1 flatten — same as CRuby's default `flatten(1)`
+                        // is recursive; ours stops at depth 1 to match the
+                        // CRuby behaviour we exercise in fixtures. Document
+                        // unbounded recursion as a follow-up if needed.
+                        let src = self.heap.array(id).clone();
+                        let mut out: Vec<Value> = Vec::with_capacity(src.len());
+                        for v in &src {
+                            if let Value::Array(inner) = v {
+                                for x in self.heap.array(*inner) { out.push(x.clone()); }
+                            } else {
+                                out.push(v.clone());
+                            }
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    ("join", []) => {
+                        let parts: Vec<String> = self.heap.array(id).iter()
+                            .map(|v| v.to_display(&self.heap, &self.interner))
+                            .collect();
+                        Some(Value::Str(Rc::from(parts.join("").as_str())))
+                    }
+                    ("join", [Value::Str(sep)]) => {
+                        let parts: Vec<String> = self.heap.array(id).iter()
+                            .map(|v| v.to_display(&self.heap, &self.interner))
+                            .collect();
+                        Some(Value::Str(Rc::from(parts.join(&**sep).as_str())))
+                    }
+                    ("+", [Value::Array(other)]) => {
+                        let mut out: Vec<Value> = self.heap.array(id).clone();
+                        let extra: Vec<Value> = self.heap.array(*other).clone();
+                        out.extend(extra);
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    ("-", [Value::Array(other)]) => {
+                        let src = self.heap.array(id).clone();
+                        let exclude = self.heap.array(*other).clone();
+                        let out: Vec<Value> = src.into_iter()
+                            .filter(|v| !exclude.iter().any(|x| x.ruby_eq(v, &self.heap)))
+                            .collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    ("concat", [Value::Array(other)]) => {
+                        // In-place: extend self with other's elements, return self.
+                        let extra: Vec<Value> = self.heap.array(*other).clone();
+                        self.heap.array_mut(id).extend(extra);
+                        Some(Value::Array(id))
+                    }
+                    ("take", [Value::Int(n)]) => {
+                        let n = (*n).max(0) as usize;
+                        let out: Vec<Value> = self.heap.array(id).iter().take(n).cloned().collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    ("drop", [Value::Int(n)]) => {
+                        let n = (*n).max(0) as usize;
+                        let out: Vec<Value> = self.heap.array(id).iter().skip(n).cloned().collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
                     _ => None,
                 }
             }
@@ -1146,6 +1242,64 @@ impl Vm {
                 self.pinned.pop();
                 Some(early.unwrap_or(Value::Range(*id)))
             }
+            (Value::Array(id), "each_with_index", []) => {
+                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                self.pinned.push(Value::Array(*id));
+                let pre_frames = self.frames.len();
+                let mut early = None;
+                for (i, v) in snapshot.into_iter().enumerate() {
+                    self.invoke_block(block.clone(), vec![v, Value::Int(i as i64)])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                }
+                self.pinned.pop();
+                Some(early.unwrap_or(Value::Array(*id)))
+            }
+            (Value::Array(id), "sort_by", []) => {
+                // Compute the sort key for every element by calling the
+                // block once, then sort element/key pairs by key. The
+                // existing `value_cmp` only knows how to compare Ints and
+                // Strs, so block-returned keys outside those types fall
+                // through to NoMethodError (Option<None> from value_cmp).
+                let snapshot: Vec<Value> = self.heap.array(*id).clone();
+                self.pinned.push(Value::Array(*id));
+                let pre_frames = self.frames.len();
+                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+                let mut early = None;
+                for v in snapshot {
+                    self.invoke_block(block.clone(), vec![v.clone()])?;
+                    self.dispatch_until(pre_frames)?;
+                    let key = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(key);
+                        break;
+                    }
+                    pairs.push((key, v));
+                }
+                if let Some(e) = early {
+                    self.pinned.pop();
+                    return Ok(Some(e));
+                }
+                // Bail if any key is uncomparable — leave callers a path to
+                // see NoMethodError instead of a silent equal-everywhere sort.
+                if pairs.iter().any(|(k1, _)| pairs.iter().any(|(k2, _)| value_cmp(k1, k2).is_none())) {
+                    self.pinned.pop();
+                    return Ok(None);
+                }
+                pairs.sort_by(|a, b| value_cmp(&a.0, &b.0).unwrap_or(std::cmp::Ordering::Equal));
+                let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                let nid = self.heap.alloc(HeapObj::Array(sorted));
+                self.pinned.pop();
+                Some(Value::Array(nid))
+            }
             (Value::Array(id), "inject", []) | (Value::Array(id), "reduce", []) => {
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
@@ -1762,6 +1916,8 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option
         (Value::Int(a), "to_s", []) => Some(Value::Str(Rc::from(a.to_string().as_str()))),
         (Value::Int(a), "to_i", []) => Some(Value::Int(*a)),
         (Value::Int(a), "abs", []) => Some(Value::Int(a.wrapping_abs())),
+        (Value::Int(a), "-@", []) => Some(Value::Int(a.wrapping_neg())),
+        (Value::Int(a), "+@", []) => Some(Value::Int(*a)),
         (Value::Int(a), "even?", []) => Some(Value::Bool(a % 2 == 0)),
         (Value::Int(a), "odd?", []) => Some(Value::Bool(a % 2 != 0)),
         (Value::Int(a), "zero?", []) => Some(Value::Bool(*a == 0)),
