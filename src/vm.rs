@@ -538,6 +538,46 @@ impl Vm {
                     _ => None,
                 }
             }
+            Value::Str(s) => {
+                let s = s.clone();
+                match (name, args) {
+                    ("chars", []) => {
+                        let elems: Vec<Value> = s.chars()
+                            .map(|c| Value::Str(Rc::from(c.to_string().as_str())))
+                            .collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    ("split", []) => {
+                        // No-arg `split` matches CRuby's `split(nil)`:
+                        // splits on runs of whitespace, drops the
+                        // leading empty token.
+                        let elems: Vec<Value> = s.split_whitespace()
+                            .map(|t| Value::Str(Rc::from(t)))
+                            .collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    ("split", [Value::Str(sep)]) => {
+                        let elems: Vec<Value> = if sep.is_empty() {
+                            // CRuby: empty-sep split returns each character.
+                            s.chars().map(|c| Value::Str(Rc::from(c.to_string().as_str()))).collect()
+                        } else {
+                            s.split(&**sep).map(|t| Value::Str(Rc::from(t))).collect()
+                        };
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    ("to_sym", []) => {
+                        let sym = self.interner.intern(&s);
+                        Some(Value::Sym(sym))
+                    }
+                    _ => None,
+                }
+            }
             Value::Range(id) => {
                 let id = *id;
                 let (b, e, excl) = {
@@ -1025,6 +1065,44 @@ impl Vm {
                 }
                 self.pinned.pop();
                 Some(early.unwrap_or(Value::Hash(*id)))
+            }
+            (Value::Int(start), "upto", [Value::Int(stop)]) => {
+                let start = *start;
+                let stop = *stop;
+                let pre_frames = self.frames.len();
+                let mut early = None;
+                let mut i = start;
+                while i <= stop {
+                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    i += 1;
+                }
+                Some(early.unwrap_or(Value::Int(start)))
+            }
+            (Value::Int(start), "downto", [Value::Int(stop)]) => {
+                let start = *start;
+                let stop = *stop;
+                let pre_frames = self.frames.len();
+                let mut early = None;
+                let mut i = start;
+                while i >= stop {
+                    self.invoke_block(block.clone(), vec![Value::Int(i)])?;
+                    self.dispatch_until(pre_frames)?;
+                    let r = self.stack.pop().unwrap_or(Value::Nil);
+                    if self.break_signaled {
+                        self.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    i -= 1;
+                }
+                Some(early.unwrap_or(Value::Int(start)))
             }
             (Value::Int(n), "times", []) => {
                 let pre_frames = self.frames.len();
@@ -1682,6 +1760,15 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option
             _ => None,
         },
         (Value::Int(a), "to_s", []) => Some(Value::Str(Rc::from(a.to_string().as_str()))),
+        (Value::Int(a), "to_i", []) => Some(Value::Int(*a)),
+        (Value::Int(a), "abs", []) => Some(Value::Int(a.wrapping_abs())),
+        (Value::Int(a), "even?", []) => Some(Value::Bool(a % 2 == 0)),
+        (Value::Int(a), "odd?", []) => Some(Value::Bool(a % 2 != 0)),
+        (Value::Int(a), "zero?", []) => Some(Value::Bool(*a == 0)),
+        (Value::Int(a), "positive?", []) => Some(Value::Bool(*a > 0)),
+        (Value::Int(a), "negative?", []) => Some(Value::Bool(*a < 0)),
+        (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => Some(Value::Int(a.wrapping_add(1))),
+        (Value::Int(a), "pred", []) => Some(Value::Int(a.wrapping_sub(1))),
         (Value::Str(a), "+", [Value::Str(b)]) => {
             let mut s = a.to_string();
             s.push_str(b);
@@ -1689,7 +1776,45 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value]) -> Option
         }
         (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(**a == **b)),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
-        (Value::Str(a), "length", []) => Some(Value::Int(a.chars().count() as i64)),
+        (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => Some(Value::Int(a.chars().count() as i64)),
+        (Value::Str(a), "empty?", []) => Some(Value::Bool(a.is_empty())),
+        (Value::Str(a), "upcase", []) => Some(Value::Str(Rc::from(a.to_uppercase().as_str()))),
+        (Value::Str(a), "downcase", []) => Some(Value::Str(Rc::from(a.to_lowercase().as_str()))),
+        (Value::Str(a), "reverse", []) => Some(Value::Str(Rc::from(a.chars().rev().collect::<String>().as_str()))),
+        (Value::Str(a), "strip", []) => Some(Value::Str(Rc::from(a.trim()))),
+        (Value::Str(a), "lstrip", []) => Some(Value::Str(Rc::from(a.trim_start()))),
+        (Value::Str(a), "rstrip", []) => Some(Value::Str(Rc::from(a.trim_end()))),
+        (Value::Str(a), "include?", [Value::Str(b)]) => Some(Value::Bool(a.contains(&**b))),
+        (Value::Str(a), "start_with?", [Value::Str(b)]) => Some(Value::Bool(a.starts_with(&**b))),
+        (Value::Str(a), "end_with?", [Value::Str(b)]) => Some(Value::Bool(a.ends_with(&**b))),
+        (Value::Str(a), "to_i", []) => {
+            // CRuby's `String#to_i` is famously lenient: leading
+            // whitespace, optional sign, then as many digits as it
+            // can read; non-numeric tail (or empty input) gives 0.
+            let s = a.trim_start();
+            let (sign, rest) = match s.as_bytes().first() {
+                Some(b'-') => (-1i64, &s[1..]),
+                Some(b'+') => (1i64, &s[1..]),
+                _ => (1i64, s),
+            };
+            let mut n: i64 = 0;
+            let mut saw_digit = false;
+            for c in rest.chars() {
+                if let Some(d) = c.to_digit(10) {
+                    saw_digit = true;
+                    n = n.wrapping_mul(10).wrapping_add(d as i64);
+                } else { break; }
+            }
+            Some(Value::Int(if saw_digit { sign.wrapping_mul(n) } else { 0 }))
+        }
+        (Value::Str(a), "*", [Value::Int(n)]) => {
+            let n = (*n).max(0) as usize;
+            Some(Value::Str(Rc::from(a.repeat(n).as_str())))
+        }
+        (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(**a < **b)),
+        (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(**a <= **b)),
+        (Value::Str(a), ">", [Value::Str(b)]) => Some(Value::Bool(**a > **b)),
+        (Value::Str(a), ">=", [Value::Str(b)]) => Some(Value::Bool(**a >= **b)),
         (Value::Sym(a), "==", [Value::Sym(b)]) => Some(Value::Bool(a == b)),
         (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(a != b)),
         (Value::Nil, "to_s", []) => Some(Value::Str(Rc::from(""))),

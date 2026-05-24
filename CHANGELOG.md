@@ -7,6 +7,25 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **Integer predicates + iteration + String basics** (P3-B-1).
+  `Integer`: `even?`, `odd?`, `abs`, `zero?`, `positive?`,
+  `negative?`, `succ` / `next`, `pred`, plus block-taking `upto`
+  and `downto` that mirror `Range#each`'s short-circuit-on-break
+  behaviour. `String`: `length` / `size`, `empty?`, `upcase`,
+  `downcase`, `reverse`, `strip` / `lstrip` / `rstrip`,
+  `include?`, `start_with?`, `end_with?`, `to_i` (CRuby-lenient:
+  leading whitespace, optional sign, trailing junk -> 0),
+  `*` (repeat), lexicographic `<` / `<=` / `>` / `>=`,
+  `chars` (returns an Array of single-char strings), `split`
+  (no-arg = whitespace; explicit separator; empty separator =
+  per-character), and `to_sym`. New diff fixture
+  `int_string_basics.rb` (~90 lines) covers every method plus
+  chained idioms (`split.map { ... }`), use inside a class with
+  string interpolation, and edge cases like negative `abs`,
+  `to_i` on garbage input, and `upto` with start > stop.
+  Byte-identical to CRuby.
+
+### Added
 - **Enumerable aggregation: `inject` / `reduce`, `sum`, `count`,
   `min` / `max`, `sort`** (P3-A-3). `inject`/`reduce` support all
   three CRuby call shapes: block-only (first element seeds),
