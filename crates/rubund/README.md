@@ -77,7 +77,7 @@ for src in &lockfile.sources {
 
 The parser handles every standard `Gemfile.lock` section:
 
-- **`GEM`** — remote URL(s), specs with transitive dependencies
+- **`GEM`** — remote URL, specs with transitive dependencies
 - **`GIT`** — remote, revision, branch, specs
 - **`PATH`** — local path, specs
 - **`PLATFORMS`** — target platform triples
