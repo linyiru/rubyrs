@@ -126,6 +126,51 @@ BUNDLED WITH
 }
 
 #[test]
+fn test_case_4_path_source() {
+    let case4 = r#"PATH
+  remote: ../my_local_gem
+  specs:
+    my_local_gem (0.1.0)
+      activesupport (>= 6.0)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    activesupport (7.2.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  my_local_gem!
+
+BUNDLED WITH
+   2.5.11
+"#;
+
+    let lock = parse_lockfile(case4);
+
+    assert_eq!(lock.sources.len(), 2);
+    assert_eq!(lock.sources[0].type_, SourceType::Path);
+    assert_eq!(lock.sources[0].remote, "../my_local_gem");
+    assert_eq!(lock.sources[1].type_, SourceType::Gem);
+    assert_eq!(lock.sources[1].remote, "https://rubygems.org/");
+
+    assert_eq!(lock.specs.len(), 2);
+    assert_eq!(lock.specs[0].name, "my_local_gem");
+    assert_eq!(lock.specs[0].version, "0.1.0");
+    assert_eq!(lock.specs[0].source_index, 0);
+    assert_eq!(lock.specs[0].dependencies.len(), 1);
+    assert_eq!(lock.specs[0].dependencies[0], ("activesupport", Some(">= 6.0")));
+    assert_eq!(lock.specs[1].name, "activesupport");
+    assert_eq!(lock.specs[1].source_index, 1);
+
+    assert_eq!(lock.dependencies.len(), 1);
+    assert_eq!(lock.dependencies[0], ("my_local_gem", None));
+    assert_eq!(lock.bundled_with, Some("2.5.11"));
+}
+
+#[test]
 fn test_case_5_official_rspec_vector() {
     let case5 = r#"GIT
   remote: https://github.com/alloy/peiji-san.git
