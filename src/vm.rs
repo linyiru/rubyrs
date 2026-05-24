@@ -659,6 +659,37 @@ impl Vm {
                 let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: StoreIvar no frame").self_val { Some(*id) } else { None };
                 if let Some(id) = id_opt { self.heap.instance_mut(id).ivars.insert(name_id, v); }
             }
+            Op::IncIvar(name_id) => {
+                let inst_id = if let Value::Object(id) = &self.frames.last().expect("ICE: IncIvar no frame").self_val {
+                    Some(*id)
+                } else { None };
+                if let Some(inst_id) = inst_id {
+                    let cur = self.heap.instance(inst_id).ivars.get(&name_id).cloned();
+                    match cur {
+                        Some(Value::Int(n)) => {
+                            let new_n = n.wrapping_add(1);
+                            self.heap.instance_mut(inst_id).ivars.insert(name_id, Value::Int(new_n));
+                            self.stack.push(Value::Int(new_n));
+                        }
+                        _ => {
+                            // Slow path: @x is nil or non-Int — replicate full `@x = @x + 1`.
+                            let cur_v = cur.unwrap_or(Value::Nil);
+                            self.stack.push(cur_v);
+                            self.stack.push(Value::Int(1));
+                            let plus_id = self.interner.intern("+");
+                            self.do_call(plus_id, 1, false)?;
+                            let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
+                            self.heap.instance_mut(inst_id).ivars.insert(name_id, v);
+                        }
+                    }
+                } else {
+                    // Outside class context: nil + 1 — let CRuby semantics dictate
+                    self.stack.push(Value::Nil);
+                    self.stack.push(Value::Int(1));
+                    let plus_id = self.interner.intern("+");
+                    self.do_call(plus_id, 1, false)?;
+                }
+            }
             Op::LoadConst(name_id) => {
                 let v = self.classes.get(&name_id).map(|c| Value::Class(c.clone())).unwrap_or(Value::Nil);
                 self.stack.push(v);

@@ -143,6 +143,19 @@ pub(crate) fn compile_expr(
             b.emit(Op::LoadIvar(id));
         }
         Expr::IVarWrite(name, val) => {
+            // Fast path: @name = @name + 1
+            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node {
+                if op == "+" && args.len() == 1 {
+                    if let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node) {
+                        if rn == name {
+                            let id = interner.intern(name);
+                            b.emit(Op::IncIvar(id));
+                            b.current_span = prev_span;
+                            return;
+                        }
+                    }
+                }
+            }
             compile_expr(b, val, protos, interner);
             let id = interner.intern(name);
             b.emit(Op::Dup);

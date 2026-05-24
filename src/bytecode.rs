@@ -24,6 +24,9 @@ pub(crate) enum Op {
     Pop,
     LoadIvar(SymId),
     StoreIvar(SymId),
+    /// Fast path for `@name = @name + 1`. Same shape as IncLocal but on
+    /// self's ivar table.
+    IncIvar(SymId),
     LoadConst(SymId),
     Jump(i32),
     JumpIfFalse(i32),

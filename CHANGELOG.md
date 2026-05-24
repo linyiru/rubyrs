@@ -7,6 +7,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Changed
+- **`Op::IncIvar` fast path for `@x = @x + 1`** (Tier1-3).
+  Symmetric to Tier1-2 but on the receiver's ivar table. Hot
+  path: in-place increment of the Int; slow path: synth a `+` call.
+  Microbench: Counter.inc × 1M (the `@count = @count + 1` inside
+  `inc`): 179 ms → **153 ms (~15%)**. rubyrs is now within
+  **1.42×** of CRuby's interpreter on method-dispatch-dominated
+  workloads. Fizzbuzz unchanged (no ivars in the hot path).
 - **`Op::IncLocal` fast path for `i = i + 1`** (Tier1-2). The
   compiler now recognises the syntactic pattern
   `name = name + 1` (literal `+ 1`) and emits a single
