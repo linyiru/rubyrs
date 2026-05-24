@@ -36,7 +36,10 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 - `Symbol` literal: `:foo`; shorthand hash key `{name: "x"}`
 - Block syntax: `arr.each { |x| ... }` and `arr.each do |x| ... end`
 - `yield`
-- `begin / rescue => e / end`, nested rescue with rethrow, `raise "msg"`
+- `begin / rescue => e / end`, nested rescue with rethrow,
+  `raise "msg"`, `raise SomeError`, `raise SomeError, "msg"`
+- `rescue ClassName => e` (class-filtered) and multiple `rescue`
+  clauses in source order — see Divergences below
 - Array and hash literals: `[1, 2]`, `{a: 1}`
 - Integer arithmetic: `+ - * / %`, comparisons: `== != < <= > >=`
 
@@ -59,6 +62,79 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
   [ADR 0008](adr/0008-resource-caps-for-untrusted-scripts.md) for
   the embedding API and per-runtime resource caps (`fuel`,
   `max_heap_objects`, `max_frames`).
+
+## Divergences from CRuby
+
+Deliberate behavioural differences. Each is locked in by a
+test so it stays a choice, not drift.
+
+### `rescue` with an unresolved class name
+
+```ruby
+begin
+  raise SomeError
+rescue NeverDefined => e   # NeverDefined isn't loaded
+  puts "won't reach"
+end
+```
+
+- CRuby raises `NameError: uninitialized constant NeverDefined`
+  eagerly when the rescue clause would fire.
+- rubyrs silently skips the clause. The `PushRescue` op resolves
+  the class via `Vm.classes` at push-time; if the lookup misses,
+  the handler stores `filter_class: None` and the unwinder
+  treats it as "matches nothing", so the original exception
+  continues unwinding.
+- Why: chasing CRuby's eager-NameError semantics for the
+  rescue-class case would require a separate per-handler check
+  in the unwinder and an extra error path that would itself
+  need a class lookup. Not worth the complexity for the
+  embedding use-cases we serve.
+- Test: `rescue_with_unresolved_class_does_not_catch` in
+  `crates/rubyrs/tests/embed.rs`.
+
+### `ResourceExhausted` is host-only, not script-visible
+
+```ruby
+begin
+  while true; end             # exhausts fuel
+rescue Exception => e         # explicit Exception filter
+  puts "won't reach"
+end
+```
+
+- The resource trap (fuel / heap-cap / frame-cap) propagates as
+  a host-level `Trap` directly out of `Runtime::eval`. It does
+  not go through `unwind_with_exception`, so no `rescue` clause
+  — bare or class-filtered, even `rescue Exception` — can
+  intercept it.
+- See [ADR 0008](adr/0008-resource-caps-for-untrusted-scripts.md).
+  The earlier promise in that ADR that `rescue Exception` could
+  catch the trap was aspirational; it's been retracted.
+- Tests: `resource_exhausted_cannot_be_swallowed_by_bare_rescue`
+  and `resource_exhausted_is_uncatchable_even_with_rescue_exception`.
+
+### Multi-class `rescue A, B => e`
+
+```ruby
+begin ...
+rescue A, B => e
+  ...
+end
+```
+
+- CRuby matches A or B.
+- rubyrs honours only the **first** class (`A`). The remaining
+  classes are silently ignored at compile time. Document the
+  gap as a P1-10 follow-up.
+
+### `Foo::Bar` constant-path in `rescue`
+
+- We extract only the trailing segment (`Bar`) and look it up
+  at the top level. If `Foo::Bar` shadows a top-level `Bar`
+  with different semantics, the rescue may behave unexpectedly.
+- Most real Bundler / Gemfile uses (`rescue Gem::LoadError`) work
+  if the trailing name is defined at the top level.
 
 ## Not supported (today, but candidates for the roadmap)
 

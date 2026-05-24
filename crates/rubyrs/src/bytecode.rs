@@ -54,7 +54,14 @@ pub(crate) enum Op {
     /// round-trip per such expression. Falls back to generic dispatch
     /// when LHS isn't an `Int`.
     BinOpInt(BinOpKind, i64),
-    PushRescue(i32, u16, u8),
+    /// Args: handler-offset, bind-slot, bind-flag, filter-class
+    /// SymId. The filter SymId is resolved to a class at push-time
+    /// by looking it up in `Vm.classes`. Bare `rescue` (no class
+    /// listed) is compiled with the SymId of `StandardError`, so
+    /// the lookup always succeeds for any well-formed program; an
+    /// unresolved class (e.g. `rescue UndefinedConst`) makes the
+    /// handler match nothing — see `unwind_with_exception`.
+    PushRescue(i32, u16, u8, SymId),
     PopRescue,
     /// Like PushRescue but for `ensure` clauses. When an exception is
     /// unwinding and hits a PushEnsure handler, the exception value is

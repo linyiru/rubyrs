@@ -1,6 +1,30 @@
+use std::cell::RefCell;
+
 use ruby_prism::Node;
 
 use crate::error::Span;
+
+// AST translation collects unsupported-node messages here instead of
+// panicking. `tr_with_errors` clears + drains; bare `tr` (kept for
+// the recursive internal API) still walks the whole tree, leaving a
+// `Expr::Nil` placeholder wherever it bailed. The caller is
+// responsible for checking the collected errors and surfacing a
+// SyntaxError Trap before any compile/exec happens.
+thread_local! {
+    static AST_ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Translate a Prism root node, returning the SExpr plus any
+/// unsupported-node messages collected along the way. Empty `errs`
+/// means the whole tree was within the supported subset. If `errs`
+/// is non-empty the returned SExpr may contain `Expr::Nil`
+/// placeholders where translation failed — don't compile it.
+pub(crate) fn tr_with_errors(node: &Node<'_>) -> (SExpr, Vec<String>) {
+    AST_ERRORS.with(|cell| cell.borrow_mut().clear());
+    let prog = tr(node);
+    let errs = AST_ERRORS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    (prog, errs)
+}
 
 // ---------- IR ----------
 
@@ -84,13 +108,25 @@ pub(crate) enum Expr {
     And(Box<SExpr>, Box<SExpr>),
     Begin {
         body: Vec<SExpr>,
-        rescue: Option<RescueClause>,
+        /// Zero or more `rescue` clauses, in source order. Empty
+        /// vector means `begin ... end` without any rescue.
+        /// Multiple clauses chain via Prism's `subsequent()`.
+        rescue: Vec<RescueClause>,
         ensure: Option<Vec<SExpr>>,
     },
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RescueClause {
+    /// Class names to filter on. Empty = bare `rescue` (treated as
+    /// `rescue StandardError` per Ruby semantics — see ADR 0008).
+    /// Names that fail to resolve as classes at run-time
+    /// (e.g. `rescue UndefinedConst`) make the clause never fire,
+    /// matching CRuby's "skip handlers whose class isn't loaded"
+    /// behaviour for our subset. ConstantPath names like
+    /// `Foo::Bar` aren't yet supported and fall back to the
+    /// last segment (`Bar`).
+    pub(crate) classes: Vec<String>,
     pub(crate) body: Vec<SExpr>,
     pub(crate) var: Option<String>,
 }
@@ -320,15 +356,42 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let body: Vec<SExpr> = n.statements()
             .map(|s| s.body().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
-        let rescue = n.rescue_clause().map(|rc| {
+        // Prism chains rescue clauses via `subsequent()`. Walk the
+        // chain and flatten to a Vec so the compiler can emit one
+        // PushRescue per clause in the right order.
+        let mut rescue: Vec<RescueClause> = Vec::new();
+        let mut cur = n.rescue_clause();
+        while let Some(rc) = cur {
             let body: Vec<SExpr> = rc.statements()
                 .map(|s| s.body().iter().map(|c| tr(&c)).collect())
                 .unwrap_or_default();
             let var = rc.reference().and_then(|r| {
                 r.as_local_variable_target_node().map(|lvt| cid_to_string(lvt.name()))
             });
-            RescueClause { body, var }
-        });
+            // Extract class filter names. We accept ConstantReadNode
+            // (`MyError`) directly. ConstantPathNode (`Foo::Bar`)
+            // is a follow-up — for now we resolve it to the last
+            // segment so `rescue Gem::LoadError` at least matches
+            // a top-level `LoadError` class if defined.
+            let mut classes: Vec<String> = Vec::new();
+            for exc in rc.exceptions().iter() {
+                if let Some(c) = exc.as_constant_read_node() {
+                    classes.push(cid_to_string(c.name()));
+                } else if let Some(cp) = exc.as_constant_path_node() {
+                    // Use the trailing name. Better than nothing
+                    // until P1-10b adds proper qualified-class
+                    // resolution. `cp.name()` is `Option<ConstantId>`
+                    // because Prism allows dynamic constant paths.
+                    if let Some(name_id) = cp.name() {
+                        classes.push(cid_to_string(name_id));
+                    }
+                }
+                // Anything else (dynamic expression in rescue
+                // position) is dropped silently for now.
+            }
+            rescue.push(RescueClause { classes, body, var });
+            cur = rc.subsequent();
+        }
         let ensure = n.ensure_clause().map(|ec| {
             ec.statements()
                 .map(|s| s.body().iter().map(|c| tr(&c)).collect::<Vec<SExpr>>())
@@ -336,7 +399,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         });
         return sp(node, Expr::Begin { body, rescue, ensure });
     }
-    panic!("unsupported node: {:?}", node);
+    // Unsupported Prism node — record the message and return a
+    // placeholder. The eval entry point checks `AST_ERRORS` after
+    // tr returns and surfaces a SyntaxError Trap, so the
+    // placeholder never reaches the compiler in practice.
+    AST_ERRORS.with(|cell| cell.borrow_mut().push(format!("unsupported node: {:?}", node)));
+    sp(node, Expr::Nil)
 }
 
 fn seq_inner(stmts: Vec<SExpr>) -> Expr {

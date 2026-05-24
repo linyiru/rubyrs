@@ -164,6 +164,247 @@ fn heap_cap_traps_retained_allocations() {
 }
 
 #[test]
+fn resource_exhausted_cannot_be_swallowed_by_bare_rescue() {
+    // P0-1: `ResourceExhausted < Exception` (not StandardError), so bare
+    // `rescue => e` — which CRuby-style filters on StandardError — must
+    // not catch it. Otherwise a hostile script can spin in a rescue loop
+    // and burn fuel forever, defeating the kill switch entirely.
+    //
+    // We give the script a generous outer fuel budget. The inner
+    // `while true` will trip the fuel trap; if the bare `rescue`
+    // swallowed it, the script would either run to completion (printing
+    // "caught" once per outer iteration) or loop forever. Instead we
+    // expect `eval` itself to surface the ResourceExhausted trap to
+    // the host because no in-script handler matched.
+    let buf = SharedBuf::new();
+    let mut rt = Runtime::with_config(Config { fuel: Some(50_000), ..Default::default() });
+    rt.set_stdout(Box::new(buf.clone()));
+    let err = rt.eval(
+        r#"
+        begin
+          i = 0
+          while true
+            i = i + 1
+          end
+        rescue => e
+          puts "caught"
+        end
+        puts "after"
+        "#,
+        "uncatchable.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted to propagate past `rescue => e`, got {:?}",
+        err.err,
+    );
+    let out = buf.snapshot();
+    assert!(
+        !out.contains("caught") && !out.contains("after"),
+        "bare rescue should not have run; stdout was:\n{out}",
+    );
+}
+
+#[test]
+fn rescue_still_catches_standard_error_descendants() {
+    // Locking in the partner invariant: bare `rescue` is now class-
+    // filtered, but it must still catch StandardError + descendants the
+    // way Ruby programs expect — every existing fixture relies on this.
+    // `raise "boom"` normalises to RuntimeError, which is rooted under
+    // StandardError, so the rescue clause runs.
+    let buf = SharedBuf::new();
+    let mut rt = Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r#"
+        begin
+          raise "boom"
+        rescue => e
+          puts "got: #{e.message}"
+        end
+        "#,
+        "rescue_runtime.rb",
+    ).unwrap();
+    assert_eq!(buf.snapshot(), "got: boom\n");
+}
+
+#[test]
+fn resource_exhausted_is_uncatchable_even_with_rescue_exception() {
+    // P0-1 / P1-10 contract clarification: ResourceExhausted is
+    // a HOST-level Trap, not a Ruby-level `raise`. It bypasses
+    // `unwind_with_exception` entirely — the trap propagates up
+    // via `?` from `Vm::run` straight to `Runtime::eval`. That
+    // means even a script that explicitly writes
+    // `rescue Exception => e` cannot intercept it. The trap is
+    // not a Ruby exception at all; it's the embedding API's
+    // way of saying "the script has used its budget, stop".
+    let buf = SharedBuf::new();
+    let mut rt = Runtime::with_config(Config { fuel: Some(50_000), ..Default::default() });
+    rt.set_stdout(Box::new(buf.clone()));
+    let err = rt.eval(
+        r#"
+        begin
+          while true
+          end
+        rescue Exception => e
+          puts "should not run"
+        end
+        "#,
+        "explicit_catch.rb",
+    ).unwrap_err();
+    assert!(matches!(err.err, RubyError::ResourceExhausted { .. }));
+    assert!(!buf.snapshot().contains("should not run"));
+}
+
+#[test]
+fn rescue_class_filter_catches_matching_subclass() {
+    // Bread-and-butter P1-10 case: a user class hierarchy under
+    // StandardError, and `rescue ParentClass` catches a child.
+    let buf = SharedBuf::new();
+    let mut rt = Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r#"
+        class AppError < StandardError; end
+        class NotFound < AppError; end
+        begin
+          raise NotFound, "missing"
+        rescue AppError => e
+          puts "got: #{e.message}"
+        end
+        "#,
+        "subclass_catch.rb",
+    ).unwrap();
+    // Our `Object#class` returns the class; to_display formats it
+    // as the class name.
+    assert!(buf.snapshot().contains("missing"), "stdout: {}", buf.snapshot());
+}
+
+#[test]
+fn rescue_with_unresolved_class_does_not_catch() {
+    // Documented divergence from CRuby. CRuby raises NameError
+    // eagerly when the rescue clause would fire. rubyrs silently
+    // skips the clause: the class lookup at PushRescue time
+    // misses, and the unwinder treats a non-ensure handler with
+    // an unresolved filter as "matches nothing". The outer
+    // rescue then catches the original exception.
+    let buf = SharedBuf::new();
+    let mut rt = Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        r#"
+        class Real < StandardError
+        end
+        begin
+          begin
+            raise Real, "boom"
+          rescue NeverDefined => e
+            puts "inner should not match"
+          end
+        rescue Real => e
+          puts "outer: #{e.message}"
+        end
+        "#,
+        "unresolved_rescue.rb",
+    ).unwrap();
+    assert_eq!(buf.snapshot(), "outer: boom\n");
+}
+
+#[test]
+fn pin_guard_balanced_when_block_raises_inside_iterator() {
+    // P0-2 regression: when a block running inside Array#each / #map /
+    // any of the iterator drivers raises, the surrounding native code
+    // used to leak `pinned` entries because the manual
+    // `self.pinned.pop()` came AFTER the `?` early-return.
+    //
+    // The debug_assert in `Runtime::eval` catches an imbalanced pinned
+    // stack at the end of every script. We hammer the path 50 times
+    // under stress-GC to make sure the assertion doesn't fire and that
+    // GC doesn't end up dragging zombie roots around.
+    let mut rt = Runtime::with_config(Config { stress_gc: true, ..Default::default() });
+    for _ in 0..50 {
+        let _ = rt.eval(
+            r#"
+            begin
+              [1, 2, 3].map { |x| raise "boom" if x == 2; x * 2 }
+            rescue => _e
+              # swallow the synthetic RuntimeError so the script returns
+              # normally; the *invariant* we're checking is that the
+              # native side cleaned up its pins on the way out, not the
+              # script's behaviour.
+            end
+            "#,
+            "leak.rb",
+        );
+    }
+    // If we got here without the debug_assert in eval firing, the
+    // PinGuard's Drop was wired up correctly for every iterator
+    // exit path. The assertion is the real test; this expression
+    // just keeps the loop in scope.
+    assert!(true);
+}
+
+#[test]
+fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
+    // P0-4: prior to this change, any Prism node the AST translator
+    // didn't handle (case/when, regex literal, lambda, etc.) hit
+    // `panic!("unsupported node: ...")` and tore down the host
+    // process. With rubund evaluating gemspecs from rubygems.org —
+    // arbitrary third-party Ruby — that's a denial-of-service waiting
+    // to happen.
+    //
+    // `case` is currently outside the supported subset and reaches
+    // the unsupported-node fallback. We expect a SyntaxError Trap
+    // back, not a SIGABRT.
+    let mut rt = Runtime::new();
+    let err = rt.eval(
+        r#"
+        x = 1
+        case x
+        when 1 then puts "one"
+        else        puts "other"
+        end
+        "#,
+        "case.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::SyntaxError { .. }),
+        "expected SyntaxError, got {:?}",
+        err.err,
+    );
+}
+
+#[test]
+fn blocks_are_gc_reclaimed_under_stress() {
+    // P2-13 regression: with BlockHandle now in the GC heap, a
+    // tight loop that creates many block values must let the GC
+    // reclaim each block once the iteration moves on. Before
+    // P2-13 blocks were Rc-managed and a (then-theoretical)
+    // self-capturing cycle would leak; now they're swept like
+    // Array/Hash.
+    //
+    // We set a small heap cap so any leak surfaces as a
+    // ResourceExhausted trap rather than a slow degradation.
+    // 200 iterations × {1 Array + 1 Block per iter} = 400 allocs.
+    // Steady-state live_count should be O(1), well under 50.
+    let mut rt = Runtime::with_config(Config {
+        stress_gc: true,
+        max_heap_objects: Some(50),
+        ..Default::default()
+    });
+    rt.eval(
+        r#"
+        i = 0
+        while i < 200
+          [1, 2, 3].each { |x| i = i + 1 }
+        end
+        puts i
+        "#,
+        "many_blocks.rb",
+    ).unwrap();
+}
+
+#[test]
 fn frame_cap_traps_deep_recursion() {
     let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
     let err = rt.eval(

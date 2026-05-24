@@ -118,7 +118,14 @@ class TypeError < StandardError
 end
 class NameError < StandardError
 end
-class ResourceExhausted < StandardError
+## Intentionally `< Exception`, NOT `< StandardError`. A bare
+## `rescue => e` clause filters on `StandardError` by default,
+## so attaching `ResourceExhausted` outside that subtree means
+## user scripts cannot accidentally — or deliberately — swallow
+## their own fuel / heap / frame trap and keep burning quota.
+## CRuby uses the same pattern for `SystemExit` and `Interrupt`.
+## See docs/adr/0008-resource-caps-for-untrusted-scripts.md.
+class ResourceExhausted < Exception
 end
 "#;
         self.eval(PREAMBLE, "<rubyrs:preamble>")
@@ -162,13 +169,35 @@ end
                 backtrace: vec![],
             });
         }
-        let prog = ast::tr(&parse_result.node());
+        let (prog, ast_errors) = ast::tr_with_errors(&parse_result.node());
+        if !ast_errors.is_empty() {
+            // AST translation hit one or more Prism nodes the
+            // language subset doesn't cover. Surface as a
+            // SyntaxError so embedders see a Trap they can format
+            // and report, rather than a host-side panic.
+            return Err(Trap {
+                err: RubyError::SyntaxError { msg: ast_errors.join("; ") },
+                backtrace: vec![],
+            });
+        }
         let entry = compiler::compile_proto(
             "<main>".into(), vec![], &[prog], filename_rc,
             &mut self.vm.protos, &mut self.vm.interner, &mut self.cache_counter,
         );
         self.vm.ensure_call_caches(self.cache_counter as usize);
-        self.vm.run(entry)
+        // Every code path through `Vm::run` (success, Trap-via-`?`,
+        // or an uncaught Ruby exception that exits the process) should
+        // leave `pinned` empty — that's the whole point of P0-2's
+        // PinGuard. Debug-only assertion: in release we leave the
+        // check out so a regression doesn't crash production hosts.
+        let pinned_before = self.vm.pinned.len();
+        let result = self.vm.run(entry);
+        debug_assert_eq!(
+            self.vm.pinned.len(), pinned_before,
+            "PinGuard imbalance: pinned was {}, now {} after eval",
+            pinned_before, self.vm.pinned.len(),
+        );
+        result
     }
 
     pub fn eval_file(&mut self, path: &Path) -> Result<Value, Trap> {

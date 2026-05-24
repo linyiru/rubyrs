@@ -1,4 +1,5 @@
 /target
 .antigravitycli/
+.claude/
 .rubund_global_cache/
 .rubund_project_gems/

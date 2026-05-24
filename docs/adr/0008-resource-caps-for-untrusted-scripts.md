@@ -93,6 +93,52 @@ on `Config`.
 - Per-op cost weighting (e.g. `NewArray` costs more than `LoadNil`).
   Premature: we don't have benchmarks showing the difference matters.
 
+## `ResourceExhausted` is outside the StandardError subtree
+
+When the caps were first added we put `ResourceExhausted` under
+`StandardError` for cheap parity with the rest of the exception
+hierarchy. That was a security bug: every Ruby program with a bare
+`rescue => e` clause (the conventional shorthand for
+`rescue StandardError => e`) could silently swallow the kill switch
+and keep burning the host's quota — exactly the scenario this ADR
+exists to prevent.
+
+The trap is now rooted **directly under `Exception`**, alongside
+CRuby's `SystemExit` and `Interrupt`:
+
+```ruby
+class ResourceExhausted < Exception
+end
+```
+
+This means:
+
+- Bare `rescue` clauses (`rescue => e`) do **not** catch
+  `ResourceExhausted`. The default StandardError filter walks past
+  it, and the trap propagates to the host as a `Trap` out of
+  `Runtime::eval`.
+- A script **cannot** catch the trap, even with an explicit
+  `rescue Exception => e`. The resource trap is a host-level
+  `Trap` raised directly out of `Vm::run` via `?` — it bypasses
+  `unwind_with_exception` entirely and never appears as a Ruby
+  exception to the script. (Earlier drafts of this ADR said
+  `rescue Exception` *could* catch it; that was aspirational
+  and is retracted — see `docs/SUBSET.md § Divergences`. P1-10
+  exposed the mismatch; the test
+  `resource_exhausted_is_uncatchable_even_with_rescue_exception`
+  in `crates/rubyrs/tests/embed.rs` locks in the actual
+  contract.)
+- Hosts that want to retry should construct a fresh
+  `Runtime::with_config` and re-evaluate; the trap is not the
+  script's responsibility to decide about.
+
+The `unwind_with_exception` path enforces this: every
+`Op::PushRescue` attaches `filter_class: Some(StandardError)` to its
+handler, and the unwinder discards handlers whose filter doesn't
+match the raised exception's class chain. `Op::PushEnsure` keeps
+`filter_class: None` — `ensure` always runs regardless of class,
+matching Ruby semantics.
+
 ## Consequences
 
 Wins:

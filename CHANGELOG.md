@@ -6,6 +6,161 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Changed
+- **`BlockHandle` now lives in the GC heap** (P2-13). `Value::Block`
+  changed from `Rc<BlockHandle>` to `ObjId`, and `HeapObj` gained
+  a `Block(BlockHandle)` variant. `Heap::collect` walks
+  `BlockHandle.captured` and `self_val` as children, putting
+  blocks on the same mark/sweep footing as `Array` / `Hash` /
+  `Range`. `Frame.block_arg` and every function that previously
+  took `Rc<BlockHandle>` (`invoke_block`, `invoke_method_with_block`,
+  the iterator drivers, `collection_call_block`) now take an
+  `ObjId`. Inline `block.clone()` Rc-bumps disappear — `ObjId`
+  is `Copy`. Iterator drivers (`iter_array_filter` etc.) and
+  every inline block-arm in `collection_call_block` now pin the
+  block alongside the source receiver so the GC's root walk
+  reaches it during the iteration. Without this, the existing
+  `pin_guard_balanced_when_block_raises_inside_iterator` test
+  would have caught a slot-reuse panic immediately.
+  Why this matters: with the `Rc<BlockHandle>` form, a block
+  that captured itself (e.g. callback-DSL `proc { p }` patterns
+  once `proc` / `lambda` are added — P3+) formed an Rc cycle
+  that the mark-sweep collector couldn't reach to break.
+  Eliminating that future hazard is the structural payoff.
+  Subset doesn't expose `proc` yet, so this is largely
+  preventive maintenance, but the iterator paths exercise the
+  new heap-block plumbing every test run. `heap.rs` panic
+  budget bumped from 9 to 10 (the new `heap.block(id)` accessor).
+  New regression test `blocks_are_gc_reclaimed_under_stress`
+  loops 200× over `[1,2,3].each { ... }` with stress-GC and a
+  `max_heap_objects: 50` cap, proving blocks get reclaimed.
+
+### Added
+- **`rescue ClassName => e` (class-filtered rescue)** and
+  multiple `rescue` clauses per `begin/end` (P1-10). `RescueClause`
+  in the AST gains `classes: Vec<String>` and `Expr::Begin.rescue`
+  becomes `Vec<RescueClause>` (chained via Prism's `subsequent()`).
+  `Op::PushRescue` carries a `SymId` filter; the VM resolves it
+  to a class at push-time and `unwind_with_exception` pops past
+  handlers whose filter doesn't match the raised exception's
+  class chain. Multiple clauses are pushed in REVERSE source
+  order so the LIFO unwinder checks them in source order. Bare
+  `rescue` (no class) still compiles with `StandardError` as the
+  filter — same behaviour P0-1 introduced. `raise SomeError`
+  (no message) and `raise SomeError, "msg"` are now supported:
+  the latter desugars to `SomeError.new("msg")` at compile time
+  so the user's `initialize` runs. New diff fixture
+  `rescue_by_class.rb` covers exact-class catch, superclass
+  catch, source-order priority on multiple clauses, no-bind
+  form, and a `begin/rescue/ensure` combo. Byte-identical to
+  CRuby.
+- **`docs/SUBSET.md § Divergences`**: documents the cases where
+  rubyrs intentionally diverges from CRuby — unresolved class
+  in `rescue`, `ResourceExhausted` un-catchability,
+  single-class-only in multi-class rescue, `Foo::Bar` falling
+  back to the trailing segment. Each pinned by a test.
+
+### Fixed
+- **ADR 0008 retraction**: the earlier draft promised that
+  `rescue Exception => e` would catch `ResourceExhausted`
+  after P1-10. It doesn't, and shouldn't — the resource trap
+  is a host-level `Trap`, not a Ruby-level `raise`, so it
+  bypasses `unwind_with_exception` entirely. The ADR and a
+  matching test
+  (`resource_exhausted_is_uncatchable_even_with_rescue_exception`)
+  now lock the actual contract in.
+
+### Added
+- **`docs/PANIC_AUDIT.md`** (P0-4): classification of every
+  `panic!` / `.unwrap()` / `.expect(...)` in the rubyrs crate.
+  Three buckets — 🟢 ICE (compiler-guaranteed invariant), 🟡
+  ICE-but-fuzzy (reachable via internal bugs only, exercised
+  in P3-17 fuzz target), 🔴 user-reachable (must be converted
+  to `Trap`). Current totals: vm.rs 61 / heap.rs 9 / ast.rs 3
+  / lib.rs 1 / compiler.rs 1, all 🟢 or 🟡 after this change.
+- **CI `panic-budget` job** (P0-5): counts panics per file and
+  fails the build if any count rises above the threshold
+  recorded in `docs/PANIC_AUDIT.md`. Doc-comment occurrences
+  (`///` / `//!` lines) are excluded. Direction is one-way:
+  budgets may only ratchet down.
+
+### Fixed
+- **Unsupported AST nodes return `SyntaxError` instead of
+  panicking** (P0-4). Any Prism node outside the supported
+  subset (e.g. `case/when`, regex literals, lambdas) used to
+  hit `panic!("unsupported node: ...")` in `ast::tr`, tearing
+  down the host process. AST translation now records the
+  message on a thread-local error buffer and returns an
+  `Expr::Nil` placeholder; `Runtime::eval` checks the buffer
+  after `tr_with_errors` and returns a `Trap` with
+  `RubyError::SyntaxError` before compilation runs. With
+  rubund eventually evaluating gemspecs from rubygems.org —
+  arbitrary third-party Ruby — this was a denial-of-service
+  surface that had to close. New `embed.rs` test exercises
+  the case statement (currently unsupported) and asserts a
+  Trap, not a SIGABRT.
+
+### Changed
+- **GC mark walks children in place instead of cloning** (P0-3).
+  `Heap::collect`'s mark phase previously built a fresh
+  `Vec<Value>` per popped worklist entry by cloning the entire
+  `HeapObj::Array` / `HeapObj::Hash` / `HeapObj::Instance.ivars`
+  contents on every visit. On a heap whose largest object is one
+  big Array, that turned each full collection into quadratic
+  work and pushed stress-GC runs into wall-clock territory the
+  test suite would actually notice. Rewrote the loop to
+  split-borrow `self.slots` (read) against `self.marks` (write)
+  on disjoint fields and iterate children by reference — no
+  intermediate allocation, same mark/sweep semantics. The
+  external `visit_value` signature is unchanged so the Block
+  walk path (which still clones `BlockHandle.captured`) keeps
+  working until `BlockHandle` moves into the heap in P2-13.
+  Existing 1M-fizzbuzz benchmark is unaffected (~307ms steady)
+  because fizzbuzz isn't GC-bound; the win is on workloads with
+  many or large container objects.
+
+### Changed
+- **`Vm.pinned` is now managed by a `PinGuard` RAII type** (P0-2).
+  Native iterator drivers — Array/Hash/Range `#each` / `#map`,
+  `#each_with_index`, the Enumerable filter family
+  (`iter_array_filter` etc.), the aggregation family (`#inject`,
+  `#count`, `#sort_by`), and the `Class.new` allocator — used to
+  do `self.pinned.push(...); ...; ?; ...; self.pinned.pop();` by
+  hand. Once those bodies started using `?` for fuel traps and
+  host-fn errors, the pop could be skipped, leaving dead values
+  pinned. The GC then kept marking those values as live every
+  cycle — a slow leak that mostly only showed up under stress-GC.
+  Replaced every push/pop pair with `PinGuard::new(self)` plus
+  `g.pin(v)`; the guard's `Drop` pops exactly what was pinned, on
+  both the success and `?`-unwind paths. Added a `debug_assert!`
+  in `Runtime::eval` that the pinned-stack length is unchanged
+  across every call — release builds skip the check so a
+  regression doesn't crash production hosts. New regression test
+  `pin_guard_balanced_when_block_raises_inside_iterator` hammers
+  `[1,2,3].map { ... raise ... }` 50× under stress-GC to fire
+  the assertion on any leak.
+
+### Fixed
+- **`ResourceExhausted` can no longer be swallowed by `rescue => e`**
+  (P0-1). The preamble had `class ResourceExhausted < StandardError`,
+  which meant a bare `rescue` clause — CRuby-style shorthand for
+  `rescue StandardError => e` — could silently catch the resource
+  trap and keep burning fuel/heap. Two changes:
+  1. Preamble re-roots the kill switch directly under `Exception`,
+     alongside CRuby's `SystemExit` and `Interrupt`.
+  2. `RescueHandler` gains a `filter_class: Option<Rc<Class>>` field;
+     every `Op::PushRescue` populates it with `StandardError` (the
+     bare-rescue default), and `unwind_with_exception` now pops past
+     handlers whose filter doesn't match the raised exception's
+     class chain. `Op::PushEnsure` leaves the filter as `None`, so
+     `ensure` runs unconditionally — matching Ruby semantics.
+  Three new tests in `tests/embed.rs`: one proves a hostile
+  `begin/rescue/end` around `while true` no longer eats the trap,
+  one locks in that bare `rescue` still catches `raise "boom"` (i.e.
+  RuntimeError under StandardError), and one placeholder reserves
+  the contract that explicit `rescue Exception` will work once
+  class filtering lands (P1-10). ADR 0008 updated.
+
 ### Added
 - **Hash extras + short-circuit `||` and `&&`** (P3-B-3). New
   `Hash` methods: `merge` (other's keys overwrite, ordering

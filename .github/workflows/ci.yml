@@ -50,3 +50,41 @@ jobs:
         run: cargo test --release --verbose
         env:
           STRESS_GC: "1"
+
+  panic-budget:
+    name: Panic budget (per-file ratchet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count panics
+        # Counts `panic!`, `.unwrap()`, `.expect(` in each rubyrs
+        # source file (doc-comment lines starting with `///` or `//!`
+        # are excluded — they're text, not code). Per-file budgets
+        # were set at P0-4 and may only go down; see
+        # docs/PANIC_AUDIT.md for the classification and how to
+        # lower a budget.
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            local file="$1" budget="$2"
+            # Strip leading whitespace before grepping for comment
+            # markers so indented doc lines (rare but real) are
+            # also excluded.
+            local count
+            count=$(grep -cE 'panic!|\.unwrap\(\)|\.expect\(' "$file" || true)
+            local doc
+            doc=$(grep -E '^[[:space:]]*(///|//!)' "$file" | grep -cE 'panic!|\.unwrap\(\)|\.expect\(' || true)
+            count=$((count - doc))
+            echo "$file: $count (budget $budget)"
+            if [ "$count" -gt "$budget" ]; then
+              echo "::error file=$file::Panic budget exceeded: $count > $budget. See docs/PANIC_AUDIT.md."
+              fail=1
+            fi
+          }
+          check crates/rubyrs/src/vm.rs       61
+          check crates/rubyrs/src/heap.rs     10
+          check crates/rubyrs/src/ast.rs       3
+          check crates/rubyrs/src/lib.rs       1
+          check crates/rubyrs/src/compiler.rs  1
+          exit "$fail"
