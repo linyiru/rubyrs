@@ -1,0 +1,20 @@
+[package]
+name = "rubund"
+description = "A Rust implementation of Bundler — placeholder shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rubund"
+path = "src/main.rs"
+
+[dependencies]
+# Path dep, not version, until rubyrs publishes to crates.io.
+# rubund is currently the only consumer of rubyrs's embedding
+# API outside its own tests/examples — every breaking change
+# here is a tripwire for that API.
+rubyrs = { path = "../rubyrs" }

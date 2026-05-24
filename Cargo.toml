@@ -2,8 +2,7 @@
 resolver = "3"
 members = [
     "crates/rubyrs",
-    # `rubund` lands in the next commit so workspace builds today
-    # remain identical to the pre-monorepo state.
+    "crates/rubund",
 ]
 
 # Shared metadata — individual crates pick these up with
