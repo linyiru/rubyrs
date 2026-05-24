@@ -83,3 +83,4 @@ fn run_diff(name: &str) {
 #[test] fn interpolation() { run_diff("interpolation"); }
 #[test] fn rescue_basics() { run_diff("rescue_basics"); }
 #[test] fn fizzbuzz_15() { run_diff("fizzbuzz_15"); }
+#[test] fn inheritance() { run_diff("inheritance"); }

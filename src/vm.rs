@@ -86,9 +86,8 @@ impl Vm {
         }
     }
 
-    /// Look up a method on `cls`, consulting the single-slot inline cache
-    /// first. On miss, fall through to the class's `methods` HashMap and
-    /// update the cache.
+    /// Look up a method on `cls`, walking its superclass chain. Consults
+    /// the single-slot inline cache first; on miss caches the result.
     #[inline]
     pub(crate) fn lookup_method_cached(&mut self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
         let class_ptr = Rc::as_ptr(cls) as usize;
@@ -97,10 +96,37 @@ impl Vm {
                 return Some(cached_method.clone());
             }
         }
-        let m = cls.methods.borrow().get(&name_id).cloned()?;
-        self.call_cache = Some((class_ptr, name_id, m.clone()));
-        Some(m)
+        let mut current = cls.clone();
+        loop {
+            if let Some(m) = current.methods.borrow().get(&name_id).cloned() {
+                self.call_cache = Some((class_ptr, name_id, m.clone()));
+                return Some(m);
+            }
+            let parent = current.superclass.borrow().clone();
+            match parent {
+                Some(p) => current = p,
+                None => return None,
+            }
+        }
     }
+}
+
+/// `child` is-a `ancestor` if `ancestor` appears anywhere in `child`'s
+/// superclass chain (or `child == ancestor`).
+#[allow(dead_code)] // wired up in the next commit (rescue ClassName filter)
+pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
+    let mut current = child.clone();
+    loop {
+        if Rc::ptr_eq(&current, ancestor) { return true; }
+        let parent = current.superclass.borrow().clone();
+        match parent {
+            Some(p) => current = p,
+            None => return false,
+        }
+    }
+}
+
+impl Vm {
 
     pub(crate) fn run(&mut self, entry: usize) -> Result<Value, Trap> {
         let proto = &self.protos[entry];
@@ -246,7 +272,7 @@ impl Vm {
                 }));
                 let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
-                if let Some(m) = cls.methods.borrow().get(&init_id).cloned() {
+                if let Some(m) = self.lookup_method_cached(&cls, init_id) {
                     self.invoke_method(m, obj.clone(), args)?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
@@ -502,7 +528,7 @@ impl Vm {
                 }));
                 let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
-                if let Some(m) = cls.methods.borrow().get(&init_id).cloned() {
+                if let Some(m) = self.lookup_method_cached(&cls, init_id) {
                     self.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
@@ -785,10 +811,27 @@ impl Vm {
                 self.stack.push(Value::Nil);
             }
             Op::DefClass(name_id, p_idx) => {
+                // Pop superclass (Nil for "default to Object", a Class for `class Foo < Bar`).
+                let parent_val = self.stack.pop().expect("ICE: DefClass without superclass slot");
+                let parent = match parent_val {
+                    Value::Class(c) => Some(c),
+                    _ => None, // Nil -> default; treat as no explicit parent for now
+                };
                 let name_str = self.interner.resolve(name_id).to_string();
                 let cls = self.classes.entry(name_id).or_insert_with(|| Rc::new(Class {
-                    name: name_str, methods: RefCell::new(HashMap::new()),
+                    name: name_str,
+                    methods: RefCell::new(HashMap::new()),
+                    superclass: RefCell::new(parent.clone()),
                 })).clone();
+                // If the class already existed (reopened) and the user specified a parent
+                // this time, update it (only if it wasn't already set to something else).
+                if let Some(p) = &parent {
+                    let mut sc = cls.superclass.borrow_mut();
+                    if sc.is_none() {
+                        *sc = Some(p.clone());
+                    }
+                }
+                self.call_cache = None; // class structure changed
                 self.class_stack.push(cls.clone());
                 let proto = &self.protos[p_idx as usize];
                 let n_locals = proto.n_locals as usize;

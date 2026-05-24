@@ -36,6 +36,10 @@ pub struct BlockHandle {
 pub struct Class {
     pub(crate) name: String,
     pub(crate) methods: RefCell<HashMap<SymId, Rc<Method>>>,
+    /// Parent class for method lookup. `None` only for the implicit root
+    /// (Object); every user-defined class has a superclass (defaulting to
+    /// Object if not specified).
+    pub(crate) superclass: RefCell<Option<Rc<Class>>>,
 }
 
 #[derive(Debug)]

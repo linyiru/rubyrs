@@ -6,6 +6,19 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **Class inheritance** (P2-C-1). `class Foo < Bar` is now parsed
+  and a `Class` stores its superclass (`Rc<Class>`). Method lookup
+  walks the chain via the existing `lookup_method_cached` helper
+  (now generalised), and `initialize` lookup during `Class.new` also
+  uses the chain so `Dog.new("Rex")` invokes `Animal#initialize`
+  when `Dog < Animal`. A `class_is_a` predicate is added for the
+  rescue-by-class filter that lands next (kept `#[allow(dead_code)]`
+  for now).
+- New diff fixture `inheritance.rb` exercises three-level chain
+  (Animal → Dog → Puppy) with inherited initialize, inherited
+  instance methods, and class-own methods. Byte-identical to CRuby.
+
 ### Changed
 - **Statement-position avoids redundant `Dup`/`Pop`** (Tier1-5).
   `compile_body` now distinguishes the last expression of a body

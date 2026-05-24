@@ -293,8 +293,15 @@ pub(crate) fn compile_expr(
             b.emit(Op::DefMethod(name_id, proto_idx as u32));
             b.emit(Op::LoadNil);
         }
-        Expr::Class { name, body } => {
+        Expr::Class { name, superclass, body } => {
             let proto_idx = compile_proto(format!("<class:{}>", name), vec![], body, b.filename.clone(), protos, interner);
+            // Push the superclass (or Nil for "default to Object") for DefClass to pop.
+            if let Some(parent) = superclass {
+                let parent_id = interner.intern(parent);
+                b.emit(Op::LoadConst(parent_id));
+            } else {
+                b.emit(Op::LoadNil);
+            }
             let name_id = interner.intern(name);
             b.emit(Op::DefClass(name_id, proto_idx as u32));
         }

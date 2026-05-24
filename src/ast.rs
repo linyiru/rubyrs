@@ -51,6 +51,8 @@ pub(crate) enum Expr {
     },
     Class {
         name: String,
+        /// Name of the parent class, if `class Foo < Bar` syntax was used.
+        superclass: Option<String>,
         body: Vec<SExpr>,
     },
     ArrayLit(Vec<SExpr>),
@@ -234,6 +236,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let name = if let Some(cr) = n.constant_path().as_constant_read_node() {
             cid_to_string(cr.name())
         } else { "?".to_string() };
+        let superclass = n.superclass().and_then(|s| {
+            s.as_constant_read_node().map(|cr| cid_to_string(cr.name()))
+        });
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
@@ -242,7 +247,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Class { name, body });
+        return sp(node, Expr::Class { name, superclass, body });
     }
     if let Some(n) = node.as_parentheses_node() {
         // `(expr)` — just unwrap to the inner expression / statements.
