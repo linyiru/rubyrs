@@ -7,7 +7,7 @@
 //! 4. **Instant Link**: Creates a symlink to the project directory in < 1 microsecond.
 //! 5. **Hot Cache**: Runs again to show the 0ms installation when the cache is hit.
 //!
-//! Run with: `cargo run --release --example rubund_real_install`
+//! Run with: `cargo run --release -p rubund --example real_install`
 
 use std::cell::RefCell;
 use std::fs::{self, File};

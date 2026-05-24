@@ -7,7 +7,7 @@
 //! 4. Caches the compiled binary artifact (`msgpack.bundle` / `msgpack.so`).
 //! 5. Runs again to show the **0ms** Hot-Cache C-extension installation!
 //!
-//! Run with: `cargo run --release --example rubund_c_ext_poc`
+//! Run with: `cargo run --release -p rubund --example c_ext_cache`
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
