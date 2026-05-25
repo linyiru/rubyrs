@@ -1,3 +1,12 @@
+# Thin LTO. Required to recover ~7% on the fizzbuzz 1M microbench
+# after the vm.rs → vm/ split; cross-module boundaries blocked the
+# inlining the single-file version got for free. ~3s extra at
+# release-build time, no effect on dev / test builds. Verified
+# 2026-05-25 against the perf/baselines.tsv workloads (all under
+# budget, metaprog benches slightly improved).
+[profile.release]
+lto = "thin"
+
 [workspace]
 resolver = "3"
 members = [

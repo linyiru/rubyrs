@@ -105,47 +105,34 @@ Includes the vendored Prism parser. There is no separate runtime to ship.
 
 ## Reproducing
 
-The "1M fizzbuzz" benchmark:
-
-```ruby
-# /tmp/bench.rb
-def fizzbuzz(n)
-  if    n % 15 == 0 then "FizzBuzz"
-  elsif n % 3  == 0 then "Fizz"
-  elsif n % 5  == 0 then "Buzz"
-  else n.to_s end
-end
-
-i = 1; acc = 0
-while i <= 1000000
-  acc = acc + fizzbuzz(i).length
-  i = i + 1
-end
-puts acc
-```
-
-Run:
+The "1M fizzbuzz" benchmark is checked in at
+`crates/rubyrs/benches/fizzbuzz_1m.rb`. Run:
 
 ```bash
 cargo build --release
 hyperfine --warmup 2 \
-  './target/release/rubyrs /tmp/bench.rb' \
-  'ruby --disable=yjit /tmp/bench.rb' \
-  'ruby --yjit /tmp/bench.rb'
+  './target/release/rubyrs crates/rubyrs/benches/fizzbuzz_1m.rb' \
+  'ruby --disable=yjit crates/rubyrs/benches/fizzbuzz_1m.rb' \
+  'ruby --yjit crates/rubyrs/benches/fizzbuzz_1m.rb'
 ```
+
+Note: the release profile pins `lto = "thin"` (see `Cargo.toml`).
+This recovers ~7% on this microbench by re-enabling cross-module
+inlining the single-file `vm.rs` got for free before the
+CRuby-mirrored split.
 
 Memory:
 
 ```bash
-/usr/bin/time -lp ./target/release/rubyrs /tmp/bench.rb
+/usr/bin/time -lp ./target/release/rubyrs crates/rubyrs/benches/fizzbuzz_1m.rb
 ```
 
 WASM:
 
 ```bash
 # After WASI SDK setup (see DEVELOPMENT.md)
-hyperfine 'wasmtime run --dir=/tmp \
-  target/wasm32-wasip1/release/rubyrs.wasm /tmp/bench.rb'
+hyperfine 'wasmtime run --dir=. \
+  target/wasm32-wasip1/release/rubyrs.wasm crates/rubyrs/benches/fizzbuzz_1m.rb'
 ```
 
 ## Methodology notes

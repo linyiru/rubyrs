@@ -34,11 +34,27 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
       `invoke_block`, `cext_invoke_method`, `try_method_missing`)
     - `vm/step.rs` — vm_exec.c (`dispatch`, `dispatch_until`,
       the per-opcode `step` match)
-  Net effect: `vm.rs` from 6593 → ~1090 lines (Vm struct +
-  Frame/PinGuard/RescueHandler + cross-module helpers and
-  thread-local cext-reentrance machinery). No
-  perf regression; fizzbuzz 1M and Counter.inc 1M benchmarks
-  unchanged within noise.
+  Net effect: `vm.rs` from 6593 → ~440 lines after the
+  follow-up extractions of `lookup.rs`, `gc.rs`, `primitive.rs`,
+  and `util.rs` (Vm struct + Frame/PinGuard/RescueHandler +
+  cext-reentrance thread-local). Perf cost: cross-module
+  boundaries cost the inlining the single-file version was
+  getting for free (~7% on the fizzbuzz 1M microbench);
+  recovered by switching `[profile.release]` to `lto = "thin"`
+  — see the matching CHANGELOG entry below.
+
+### Changed
+- **`[profile.release] lto = "thin"`** in `Cargo.toml`. The
+  CRuby-mirrored vm.rs split moved hot dispatch / opcode /
+  lookup code into separate compilation units; without LTO,
+  cross-module calls couldn't inline, costing ~7% on
+  fizzbuzz 1M (349 ms → 372 ms, well outside the ~6 ms σ).
+  Thin LTO recovers the regression to within noise (350 ms)
+  and modestly improves the metaprog-bench workloads
+  (`perf/baselines.tsv`) too. Release-build wall time
+  increases by ~3 s; dev and test builds are unaffected.
+  Verified 2026-05-25 with hyperfine 15-run on
+  `crates/rubyrs/benches/fizzbuzz_1m.rb`.
 
 ### Added
 - **`String#sub` / `#gsub` / `#tr` (literal forms).**
