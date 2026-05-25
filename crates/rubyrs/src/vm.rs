@@ -2044,11 +2044,23 @@ impl Vm {
                             }
                         }
                         Value::Range(rid) => {
+                            // Endless / beginless: a Nil endpoint
+                            // means "from index 0" or "to len". So
+                            // (`s[6..]` / `s[..5]` / `s[..]` all
+                            // resolve via this branch.
                             let r = self.heap.range(*rid);
-                            let (bi, ei, excl) = match (&r.begin, &r.end) {
-                                (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                            let excl = r.exclusive;
+                            let bi: i64 = match &r.begin {
+                                Value::Int(a) => *a,
+                                Value::Nil => 0,
                                 _ => return Ok(None),
                             };
+                            let ei: i64 = match &r.end {
+                                Value::Int(c) => *c,
+                                Value::Nil => len, // exclusive of len-1 below
+                                _ => return Ok(None),
+                            };
+                            let endless_end = matches!(&r.end, Value::Nil);
                             let start = match str_index_char(&chars, bi) {
                                 Some(s) => s,
                                 None => return Ok(Some(Value::Nil)),
@@ -2056,8 +2068,10 @@ impl Vm {
                             // End index: positive raw; negative
                             // relative to len. Out-of-range high
                             // clamps to len; exclusive drops one.
-                            let mut end = if ei < 0 { len + ei } else { ei };
-                            if !excl { end += 1; }
+                            // Nil end is always "to len" (no
+                            // exclusive adjustment).
+                            let mut end = if endless_end { len } else if ei < 0 { len + ei } else { ei };
+                            if !excl && !endless_end { end += 1; }
                             let end = end.clamp(start as i64, len) as usize;
                             let slice: String = str_slice(&chars, start, end.saturating_sub(start));
                             Value::new_str(slice)
@@ -2249,10 +2263,56 @@ impl Vm {
                     let r = self.heap.range(id);
                     (r.begin.clone(), r.end.clone(), r.exclusive)
                 };
-                let (bi, ei) = match (&b, &e) {
-                    (Value::Int(a), Value::Int(c)) => (*a, *c),
-                    _ => return Ok(None),
-                };
+                // Endless / beginless variants — work for a handful
+                // of methods that don't actually need both endpoints
+                // to be known Ints. The strict (Int, Int) match
+                // below handles everything else and bails to
+                // NoMethodError for partial ranges.
+                let begin_int = if let Value::Int(a) = &b { Some(*a) } else { None };
+                let end_int = if let Value::Int(c) = &e { Some(*c) } else { None };
+                if begin_int.is_none() || end_int.is_none() {
+                    match (name, args) {
+                        ("begin", []) | ("first", []) | ("min", []) => return Ok(Some(b.clone())),
+                        ("end", []) | ("last", []) | ("max", []) => return Ok(Some(e.clone())),
+                        ("first", [Value::Int(n)]) => {
+                            // Endless (1..) supports first(n);
+                            // beginless (..n) doesn't (no anchor
+                            // for "first").
+                            if let Some(bi) = begin_int {
+                                let n = (*n).max(0);
+                                let mut out: Vec<Value> = Vec::with_capacity(n as usize);
+                                let mut v = bi;
+                                for _ in 0..n {
+                                    out.push(Value::Int(v));
+                                    v = v.saturating_add(1);
+                                }
+                                self.maybe_gc();
+                                let nid = self.heap.alloc(HeapObj::Array(out));
+                                return Ok(Some(Value::Array(nid)));
+                            }
+                            return Ok(None);
+                        }
+                        ("cover?", [Value::Int(v)]) => {
+                            let lo_ok = match begin_int { Some(lo) => *v >= lo, None => true };
+                            let hi_ok = match end_int {
+                                Some(hi) => if excl { *v < hi } else { *v <= hi },
+                                None => true,
+                            };
+                            return Ok(Some(Value::Bool(lo_ok && hi_ok)));
+                        }
+                        ("include?", [Value::Int(v)]) => {
+                            let lo_ok = match begin_int { Some(lo) => *v >= lo, None => true };
+                            let hi_ok = match end_int {
+                                Some(hi) => if excl { *v < hi } else { *v <= hi },
+                                None => true,
+                            };
+                            return Ok(Some(Value::Bool(lo_ok && hi_ok)));
+                        }
+                        ("exclude_end?", []) => return Ok(Some(Value::Bool(excl))),
+                        _ => return Ok(None),
+                    }
+                }
+                let (bi, ei) = (begin_int.unwrap(), end_int.unwrap());
                 let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
                 match (name, args) {
                     ("begin", []) | ("first", []) | ("min", []) => Some(b.clone()),
@@ -2273,6 +2333,26 @@ impl Vm {
                         let mut elems = Vec::with_capacity(count.max(0) as usize);
                         let end_inclusive = if excl { ei - 1 } else { ei };
                         for v in bi..=end_inclusive { elems.push(Value::Int(v)); }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(nid))
+                    }
+                    // Range#step(n) without a block returns a
+                    // step-arithmetic Array. The block form is
+                    // covered separately in collection_call_block.
+                    ("step", [Value::Int(n)]) => {
+                        if *n <= 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("step can't be {}", n),
+                            }));
+                        }
+                        let end_inc = if excl { ei - 1 } else { ei };
+                        let mut elems: Vec<Value> = Vec::new();
+                        let mut v = bi;
+                        while v <= end_inc {
+                            elems.push(Value::Int(v));
+                            v = v.saturating_add(*n);
+                        }
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(nid))

@@ -147,3 +147,4 @@ fn run_diff(name: &str) {
 #[test] fn env_hash() { run_diff("env_hash"); }
 #[test] fn match_data() { run_diff("match_data"); }
 #[test] fn file_io() { run_diff("file_io"); }
+#[test] fn range_extras() { run_diff("range_extras"); }
