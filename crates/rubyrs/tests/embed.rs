@@ -359,13 +359,11 @@ fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     let mut rt = Runtime::new();
     let err = rt.eval(
         r#"
-        x = 1
-        case x
-        when 1 then puts "one"
-        else        puts "other"
-        end
+        # Regex literal — still unsupported, used here as the
+        # canary for "AST translation cannot handle this node".
+        /\Afoo\z/ =~ "foo"
         "#,
-        "case.rb",
+        "regex.rb",
     ).unwrap_err();
     assert!(
         matches!(err.err, RubyError::SyntaxError { .. }),

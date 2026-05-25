@@ -6,11 +6,6 @@
 module Foo                       # ModuleNode (× 1)
   CONST = 42                     # ConstantWriteNode (× 1)
   def bar
-    case CONST                   # CaseNode (× 1)
-    when 0
-      "zero"
-    else
-      "non-zero"
-    end
+    /\A\d+\z/                    # RegularExpressionNode (× 1)
   end
 end

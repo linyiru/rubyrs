@@ -957,6 +957,81 @@ impl Vm {
             self.stack.push(Value::Bool(result));
             return Ok(());
         }
+        // `===` case-equality. Used by `case/when` desugaring.
+        // Per-type semantics:
+        //   Range#=== → include? (numeric containment)
+        //   Class#=== → instance-of (walks ancestor chain)
+        //   everything else → `==` value equality
+        // User classes can override `===` via class-method
+        // lookup, which fires above this fallback (no shadowing
+        // needed since the universal check is the last resort).
+        if &*name == "===" && args.len() == 1 {
+            let arg = &args[0];
+            let result = match &recv {
+                Value::Range(rid) => {
+                    // Generic numeric containment: coerce both
+                    // bounds and the arg to Float so Int/Float
+                    // mixes (5 in 1..10, 5.0 in 0..10, 5 in 0.0..10.0)
+                    // all work. Strings / Symbols compare
+                    // lexicographically — handled below.
+                    let r = self.heap.range(*rid);
+                    fn to_f64(v: &Value) -> Option<f64> {
+                        match v {
+                            Value::Int(n) => Some(*n as f64),
+                            Value::Float(f) => Some(*f),
+                            _ => None,
+                        }
+                    }
+                    let excl = r.exclusive;
+                    let in_r = match (to_f64(&r.begin), to_f64(&r.end), to_f64(arg)) {
+                        (Some(b), Some(e), Some(v)) => {
+                            if excl { v >= b && v < e }
+                            else { v >= b && v <= e }
+                        }
+                        _ => {
+                            // Non-numeric: fall back to lexicographic
+                            // compare using value_cmp_v if both bounds
+                            // and the arg are the same comparable type.
+                            let b = &r.begin; let e = &r.end;
+                            let ge_lo = value_cmp_v(arg, b, &self.interner)
+                                .map(|o| o != std::cmp::Ordering::Less)
+                                .unwrap_or(false);
+                            let cmp_hi = value_cmp_v(arg, e, &self.interner);
+                            let le_hi = match cmp_hi {
+                                Some(o) => if excl { o == std::cmp::Ordering::Less }
+                                           else { o != std::cmp::Ordering::Greater },
+                                None => false,
+                            };
+                            ge_lo && le_hi
+                        }
+                    };
+                    in_r
+                }
+                Value::Class(target) => {
+                    // Walk the argument's class chain looking for
+                    // an Rc-identical match with `target`. For
+                    // built-in receivers, look up the stub class
+                    // by interned type name.
+                    let start: Option<Rc<Class>> = match arg {
+                        Value::Object(id) => Some(self.heap.instance(*id).class.clone()),
+                        _ => {
+                            let class_val = self.class_of(arg);
+                            if let Value::Class(c) = class_val { Some(c) } else { None }
+                        }
+                    };
+                    let mut cur = start;
+                    let mut hit = false;
+                    while let Some(cls) = cur {
+                        if Rc::ptr_eq(&cls, target) { hit = true; break; }
+                        cur = cls.superclass.borrow().clone();
+                    }
+                    hit
+                }
+                _ => recv.ruby_eq(arg, &self.heap),
+            };
+            self.stack.push(Value::Bool(result));
+            return Ok(());
+        }
         // `Object#<=>` fallback for `Value::Object` receivers. The
         // per-type primitive_call arms above handle every built-in
         // lhs (Int / Float / Str / Bool / Nil — Sym lives in

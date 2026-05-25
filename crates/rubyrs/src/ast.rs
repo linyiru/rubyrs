@@ -621,6 +621,74 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         }];
         return sp(node, Expr::Begin { body, rescue, ensure: None });
     }
+    // `case x; when a, b; body1; when c; body2; else body3; end`
+    // desugars to nested if/elsif using `===`:
+    //   if a === x || b === x then body1
+    //   elsif c === x then body2
+    //   else body3
+    //   end
+    // Without a predicate (`case; when cond; ...; end`) each
+    // condition is evaluated as a plain boolean (no === call).
+    // The predicate is re-evaluated per condition, which is fine
+    // for side-effect-free predicates (the common case).
+    if let Some(n) = node.as_case_node() {
+        let predicate = n.predicate().map(|p| tr(&p));
+        let conditions: Vec<_> = n.conditions().iter().collect();
+        let else_body: Vec<SExpr> = match n.else_clause() {
+            Some(en) => en.statements()
+                .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                .unwrap_or_default(),
+            None => vec![],
+        };
+        // Build the chain from the inside out so the last `when`
+        // wraps the else, the one before it wraps that, and so on.
+        let mut acc: Vec<SExpr> = else_body;
+        for cond_node in conditions.iter().rev() {
+            let when = match cond_node.as_when_node() {
+                Some(w) => w,
+                None => continue,
+            };
+            let when_conditions: Vec<SExpr> = when.conditions()
+                .iter()
+                .map(|c| tr(&c))
+                .collect();
+            let when_body: Vec<SExpr> = when.statements()
+                .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                .unwrap_or_default();
+            // Combine multiple `when a, b, c` conditions with
+            // short-circuit `||`. Each `expr` becomes
+            // `expr === predicate` when there's a predicate.
+            let mut cond_expr: Option<SExpr> = None;
+            for wc in when_conditions {
+                let one = match &predicate {
+                    Some(pred) => sp(node, Expr::Call {
+                        receiver: Some(Box::new(wc)),
+                        name: "===".into(),
+                        args: vec![pred.clone()],
+                    }),
+                    None => wc,
+                };
+                cond_expr = Some(match cond_expr {
+                    None => one,
+                    Some(prev) => sp(node, Expr::Or(Box::new(prev), Box::new(one))),
+                });
+            }
+            let cond_expr = cond_expr.unwrap_or_else(|| sp(node, Expr::LVarRead("nil".into())));
+            let if_node = sp(node, Expr::If {
+                cond: Box::new(cond_expr),
+                then_body: when_body,
+                else_body: acc,
+            });
+            acc = vec![if_node];
+        }
+        // If the chain is empty (no when clauses at all), just
+        // produce nil. Otherwise the single accumulated If is
+        // the result.
+        if acc.is_empty() {
+            return sp(node, Expr::LVarRead("nil".into()));
+        }
+        return acc.into_iter().next().unwrap();
+    }
     if let Some(n) = node.as_unless_node() {
         let cond = Box::new(tr(&n.predicate()));
         let then_body: Vec<SExpr> = n.statements()

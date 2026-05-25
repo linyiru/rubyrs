@@ -83,7 +83,7 @@ fn classify_returns_expected_for_known_classes() {
     assert_eq!(classify("ArgumentsNode"), Classification::RidesAlong);
     assert_eq!(classify("RescueNode"), Classification::RidesAlong);
     assert_eq!(classify("ModuleNode"), Classification::Missing);
-    assert_eq!(classify("CaseNode"), Classification::Missing);
+    assert_eq!(classify("RegularExpressionNode"), Classification::Missing);
     // Sanity: a name that is not a Prism node at all also lands in
     // Missing (caller's job to validate using `unknown_classes_in`).
     assert_eq!(classify("NotARealNode"), Classification::Missing);
@@ -122,8 +122,8 @@ fn fixture_exercises_three_missing_classes() {
     // Exact set, exact counts.
     assert!(names.contains(&"ModuleNode"), "got {names:?}");
     assert!(names.contains(&"ConstantWriteNode"), "got {names:?}");
-    assert!(names.contains(&"CaseNode"), "got {names:?}");
-    for cls in ["ModuleNode", "ConstantWriteNode", "CaseNode"] {
+    assert!(names.contains(&"RegularExpressionNode"), "got {names:?}");
+    for cls in ["ModuleNode", "ConstantWriteNode", "RegularExpressionNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
@@ -182,7 +182,7 @@ fn diff_detects_closed_and_new_gaps() {
         },
     );
     after.histogram.insert(
-        "CaseNode".to_string(),
+        "RegularExpressionNode".to_string(),
         rubyrs_gapscan::NodeStat {
             count: 2,
             ..Default::default()
@@ -193,7 +193,7 @@ fn diff_detects_closed_and_new_gaps() {
     assert_eq!(d.supported_delta, 5);
     assert_eq!(d.missing_delta, -3);
     assert_eq!(d.closed_missing_classes, vec![("ModuleNode".to_string(), 5)]);
-    assert_eq!(d.new_missing_classes, vec![("CaseNode".to_string(), 2)]);
+    assert_eq!(d.new_missing_classes, vec![("RegularExpressionNode".to_string(), 2)]);
 }
 
 #[test]
