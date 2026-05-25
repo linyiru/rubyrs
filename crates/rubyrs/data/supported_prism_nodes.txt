@@ -41,6 +41,7 @@ InstanceVariableTargetNode
 InstanceVariableWriteNode
 IntegerNode
 InterpolatedStringNode
+KeywordRestParameterNode
 KeywordHashNode
 LambdaNode
 LocalVariableAndWriteNode

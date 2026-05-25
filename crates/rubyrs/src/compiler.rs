@@ -83,6 +83,7 @@ impl ProtoBuilder {
             name, params, defaults,
             rest_param: None,
             kw_param_defaults: vec![],
+            kw_rest_param: None,
             n_locals: self.n_locals,
             code: self.code,
             op_spans: self.op_spans,
@@ -571,7 +572,7 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, defaults, rest, kw_params, body, is_singleton } => {
+        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, body, is_singleton } => {
             let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
@@ -587,6 +588,13 @@ pub(crate) fn compile_expr(
             for (kname, _) in kw_params {
                 effective_params.push(kname.clone());
             }
+            // `**kwrest` slot goes at the very end of the param
+            // list so the existing kw_params block above stays
+            // contiguous (invoke_method indexes by offset).
+            if let Some(krname) = kw_rest
+                && !krname.is_empty() {
+                    effective_params.push(krname.clone());
+                }
             let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
@@ -598,6 +606,10 @@ pub(crate) fn compile_expr(
                 protos[proto_idx].rest_param = Some(rname.clone());
             }
             protos[proto_idx].kw_param_defaults = kw_lit_defaults;
+            if let Some(krname) = kw_rest
+                && !krname.is_empty() {
+                    protos[proto_idx].kw_rest_param = Some(krname.clone());
+                }
             let name_id = interner.intern(name);
             if *is_singleton {
                 b.emit(Op::DefSingletonMethod(name_id, proto_idx as u32));

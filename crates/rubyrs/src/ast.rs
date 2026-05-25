@@ -117,6 +117,14 @@ pub(crate) enum Expr {
         /// `("name", None)` and `("age", Some(IntLit(0)))`.
         /// Order is source order. None default = required.
         kw_params: Vec<(String, Option<SExpr>)>,
+        /// `Some(name)` for `def foo(a, **opts)` — the leftover
+        /// keyword args (those not bound by a named `kw_params`
+        /// entry) collect into a fresh Hash bound to `name`.
+        /// `Some("")` for the anonymous form `def foo(**)`
+        /// (currently unused but reserved). `None` means no
+        /// kw-rest capture; trailing-Hash callers with
+        /// unrecognised keys raise ArgumentError.
+        kw_rest: Option<String>,
         body: Vec<SExpr>,
         /// True for `def self.foo` singleton-method definitions
         /// inside a class body. Compiled to `Op::DefSingletonMethod`
@@ -940,10 +948,15 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let mut defaults: Vec<Option<SExpr>> = Vec::new();
         let mut rest: Option<String> = None;
         let mut kw_params: Vec<(String, Option<SExpr>)> = Vec::new();
+        let mut kw_rest: Option<String> = None;
         if let Some(p) = n.parameters() {
             if let Some(r) = p.rest()
                 && let Some(rp) = r.as_rest_parameter_node() {
                     rest = rp.name().map(|n| cid_to_string(n));
+                }
+            if let Some(r) = p.keyword_rest()
+                && let Some(kr) = r.as_keyword_rest_parameter_node() {
+                    kw_rest = Some(kr.name().map(cid_to_string).unwrap_or_default());
                 }
             for kw in p.keywords().iter() {
                 if let Some(rk) = kw.as_required_keyword_parameter_node() {
@@ -1017,7 +1030,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let is_singleton = n.receiver()
             .map(|r| r.as_self_node().is_some())
             .unwrap_or(false);
-        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, body, is_singleton });
+        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, kw_rest, body, is_singleton });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;

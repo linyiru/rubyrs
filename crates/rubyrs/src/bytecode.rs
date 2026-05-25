@@ -211,6 +211,15 @@ pub(crate) struct Proto {
     /// ArgumentError on miss); `Some(v)` = optional with literal
     /// default.
     pub(crate) kw_param_defaults: Vec<Option<Value>>,
+    /// `Some(name)` for `def foo(**opts)` — the keyword-rest
+    /// parameter name. Leftover keyword args (those whose key
+    /// isn't bound by a named entry in `kw_param_defaults`)
+    /// collect into a fresh Hash stored in the local named
+    /// here. `None` means no kw-rest; unrecognised kwarg keys
+    /// raise ArgumentError. Lives at the very end of `params`
+    /// (after every kw_param) so the existing kw-binding loop
+    /// remains contiguous.
+    pub(crate) kw_rest_param: Option<String>,
     pub(crate) n_locals: u16,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.

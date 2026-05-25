@@ -654,18 +654,20 @@ impl Vm {
         // upper bound on the arg count.
         let proto = &self.protos[m.proto_idx];
         let has_rest = proto.rest_param.is_some();
+        let has_kw_rest = proto.kw_rest_param.is_some();
         let kw_count = proto.kw_param_defaults.len();
         // Layout of `m.params` tail:
-        //   [...positional..., rest?, ...kw_params...]
+        //   [...positional..., rest?, ...kw_params..., kw_rest?]
         let positional_max = m.params.len()
             - (if has_rest { 1 } else { 0 })
-            - kw_count;
+            - kw_count
+            - (if has_kw_rest { 1 } else { 0 });
         let required = proto.defaults.iter().take_while(|d| d.is_none()).count();
         // Pop trailing Hash arg (if present and we expect kw
         // params) — those entries become keyword bindings, not
         // positional args.
         let mut args = args;
-        let kw_hash: Option<Vec<(Value, Value)>> = if kw_count > 0 {
+        let kw_hash: Option<Vec<(Value, Value)>> = if kw_count > 0 || has_kw_rest {
             if let Some(Value::Hash(hid)) = args.last().cloned() {
                 args.pop();
                 Some(self.heap.hash(hid).clone())
@@ -774,10 +776,10 @@ impl Vm {
         // m.params; for each, look up the corresponding key in
         // the kw_hash (Symbol-keyed). Missing required keyword
         // → ArgumentError. Missing optional → use literal default.
+        let kw_start = positional_max + if has_rest { 1 } else { 0 };
         if kw_count > 0 {
-            let kw_start = positional_max + if has_rest { 1 } else { 0 };
             for (i, (default, kw_name)) in kw_defaults_snapshot.iter()
-                .zip(m.params[kw_start..].iter())
+                .zip(m.params[kw_start..kw_start + kw_count].iter())
                 .enumerate()
             {
                 let key_sym = self.interner.intern(kw_name);
@@ -794,6 +796,31 @@ impl Vm {
                     })),
                 }
             }
+        }
+        // **kw_rest binding. Take the kw_hash entries whose keys
+        // weren't claimed by a named kw_param above and collect
+        // them into a fresh Hash bound to the kw_rest slot. With
+        // no kw_hash at all (caller passed no kwargs), the slot
+        // still gets a fresh empty Hash so `**opts` reliably yields
+        // a Hash to user code. The known-names set is built from
+        // the same kw_param name slice we just zipped over.
+        if has_kw_rest {
+            let kw_rest_slot = kw_start + kw_count;
+            let known_keys: Vec<Value> = m.params[kw_start..kw_start + kw_count]
+                .iter()
+                .map(|nm| Value::Sym(self.interner.intern(nm)))
+                .collect();
+            let leftover: Vec<(Value, Value)> = match &kw_hash {
+                Some(h) => h.iter()
+                    .filter(|(k, _)| !known_keys.iter().any(|kk| kk.ruby_eq(k, &self.heap)))
+                    .cloned()
+                    .collect(),
+                None => Vec::new(),
+            };
+            self.maybe_gc();
+            self.check_alloc()?;
+            let hid = self.heap.alloc(HeapObj::Hash(leftover));
+            locals[kw_rest_slot] = Value::Hash(hid);
         }
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
