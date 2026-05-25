@@ -296,7 +296,17 @@ fn ruby_spec_microrunner_all_examples_pass() {
             eprintln!("FAIL {}", fname);
             eprintln!("     {}", o.label());
             if o.passes.is_empty() && o.fails.is_empty() {
-                eprintln!("       (no assertions ran — likely an uncaught error before any matcher)");
+                // Two real causes land here: either the `it`
+                // body raised before the first matcher (and
+                // `it`'s rescue would have logged that as a
+                // fail — so if we still see zero, the body
+                // truly never reached an assertion), or the
+                // body completed without calling any matcher
+                // at all (forgot to write the assert, empty
+                // `do; end`, helper helper that doesn't
+                // forward, …). Don't pretend to diagnose
+                // which.
+                eprintln!("       (no assertions ran — empty `it` body or pre-matcher uncaught error)");
             }
             for msg in &o.fails {
                 eprintln!("       fail: {}", msg);
