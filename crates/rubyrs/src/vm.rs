@@ -4401,7 +4401,18 @@ fn cext_handle_to_value_d(
     if depth >= CEXT_TRANSLATE_MAX_DEPTH {
         // Pathological input — cycle or implausibly deep nesting.
         // Return Nil rather than overflow the host stack. A C ext
-        // that hits this almost certainly has a bug.
+        // that hits this almost certainly has a bug. Emit a stderr
+        // warning so the silent Nil substitution is at least
+        // visible (review #24): proper Trap propagation needs
+        // `cext_handle_to_value` to return `Result<Value, Trap>`,
+        // which cascades into every callsite — tracked as L2.5
+        // follow-up alongside #26 / #27 (check_alloc → Trap).
+        eprintln!(
+            "rubyrs cext: max translation depth {} exceeded \
+             (cycle or deep nesting in C-built Array/Hash); \
+             substituting Nil",
+            CEXT_TRANSLATE_MAX_DEPTH
+        );
         return Value::Nil;
     }
     match state.resolve(h) {
@@ -4429,31 +4440,37 @@ fn cext_handle_to_value_d(
         // children from being collected mid-build when a child's
         // recursive allocation triggers `maybe_gc`.
         rubyrs_cext::CValue::Array(handles) => {
-            // Snapshot the handle list — recursing borrows `state`
-            // while we mutate vm.
-            let handles = handles.clone();
+            // Iterate the handle list borrowed (review #25): `state`
+            // is `&CExtState` (shared), and the recursive
+            // `cext_handle_to_value_d` calls also take it shared, so
+            // the previous `handles.clone()` was an unnecessary O(n)
+            // copy of every C-built Array crossing into Ruby.
+            // PinGuard takes `&mut Vm` (a different object), so the
+            // shared borrow of `state` coexists with it fine.
             let mut g = PinGuard::new(vm);
             let mut elements: Vec<Value> = Vec::with_capacity(handles.len());
-            for child in &handles {
+            for child in handles {
                 let v = cext_handle_to_value_d(g.vm, state, *child, depth + 1);
                 g.pin(v.clone());
                 elements.push(v);
             }
             g.vm.maybe_gc();
-            // Heap-cap exhaustion translates to a panic (ICE-class
-            // contract violation at spike scope; proper Trap propagation
-            // is L2.5+ work tied to making `cext_handle_to_value` return
-            // Result).
+            // Heap-cap exhaustion → panic (review #26 flags this).
+            // Proper Trap propagation needs `cext_handle_to_value`
+            // to return `Result<Value, Trap>` and the change to
+            // cascade through every callsite (the cext result
+            // handler, rb_funcall*, etc.). Tracked as L2.5 follow-
+            // up alongside #24 and #27.
             g.vm.check_alloc()
-                .expect("L2-3 spike: heap cap exhausted during cext Array build");
+                .expect("L2-3 spike: heap cap exhausted during cext Array build (review #26: L2.5 → return Trap)");
             let id = g.vm.heap.alloc(HeapObj::Array(elements));
             Value::Array(id)
         }
         rubyrs_cext::CValue::Hash(pairs) => {
-            let pairs = pairs.clone();
+            // Same borrowed-iteration as Array arm (review #25).
             let mut g = PinGuard::new(vm);
             let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
-            for (kh, vh) in &pairs {
+            for (kh, vh) in pairs {
                 let k = cext_handle_to_value_d(g.vm, state, *kh, depth + 1);
                 g.pin(k.clone());
                 let v = cext_handle_to_value_d(g.vm, state, *vh, depth + 1);
@@ -4461,8 +4478,10 @@ fn cext_handle_to_value_d(
                 entries.push((k, v));
             }
             g.vm.maybe_gc();
+            // Same panic-vs-Trap tradeoff as the Array arm above
+            // (review #27).
             g.vm.check_alloc()
-                .expect("L2-3 spike: heap cap exhausted during cext Hash build");
+                .expect("L2-3 spike: heap cap exhausted during cext Hash build (review #27: L2.5 → return Trap)");
             let id = g.vm.heap.alloc(HeapObj::Hash(entries));
             Value::Hash(id)
         }
