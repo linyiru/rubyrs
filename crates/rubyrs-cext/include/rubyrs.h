@@ -72,18 +72,26 @@ VALUE rb_str_new_cstr(const char *s);
 #define rb_str_new2 rb_str_new_cstr
 
 /* Allocate a new Ruby String from arbitrary bytes (not necessarily
- * NUL-terminated). Length is in bytes. Spike scope: the bytes must
- * still be valid UTF-8 — we don't yet have a binary-string variant.
- * Real-bcrypt salt and hash output happen to be ASCII so this is
- * fine for Level 1. */
+ * NUL-terminated). Length is in bytes. Bytes are stored verbatim on
+ * the C-ABI side; the host translates the resulting CValue back to
+ * a rubyrs `Value::Str` lossily via UTF-8 conversion when the value
+ * crosses the FFI boundary back into Ruby. Binary-safe at the C
+ * layer; lossy at the Ruby layer. A binary-safe Ruby String variant
+ * is future work. */
 VALUE rb_str_new(const char *ptr, long len);
 
 /* Return a pointer to the underlying byte buffer of a Ruby String.
  *
  * The pointer is borrowed from the per-call cext STATE and is valid
- * only for the duration of the current C function. Spike scope: the
- * buffer is NOT NUL-terminated (unlike CRuby). Use `RSTRING_LEN` and
- * pass an explicit length to any consumer. */
+ * only for the duration of the current C function.
+ *
+ * Buffer guarantee: `CValue::Str` storage always ends with a
+ * sentinel `'\0'` past the `RSTRING_LEN`-reported length, matching
+ * CRuby's "one byte past the end is `\0`" invariant. Callers that
+ * pass this pointer to `strlen` / `strcmp` / `crypt_ra` etc. get a
+ * NUL-terminated view — but `RSTRING_LEN` does NOT count that
+ * sentinel, so prefer the explicit length form when the string may
+ * contain interior NULs. */
 const char *RSTRING_PTR(VALUE v);
 
 /* Length of a Ruby String in bytes (not characters). */

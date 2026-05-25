@@ -2634,10 +2634,12 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
 }
 
 /// Translate a rubyrs [`Value`] into the corresponding [`rubyrs_cext::CValue`]
-/// so it can be interned as a C-visible handle. Returns an `ArgumentError`
-/// trap on Value types the cext ABI doesn't yet model (Int, Sym, classes,
-/// heap objects) — those land in Level 2+ as we expose `INT2NUM`,
-/// `rb_sym_new`, etc.
+/// so it can be interned as a C-visible handle. Supported variants today:
+/// Nil, Bool, Str (binary-safe via Vec<u8> + sentinel NUL), Int. Types
+/// that cross only as runtime references (Sym ids, Class<Rc>, Object/
+/// Array/Hash/Range/Block heap ids) trap with `ArgumentError` until the
+/// matching ABI surface (`rb_sym_new`, `rb_class_new`, heap-handle
+/// translation) lands.
 fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext::CValue, Trap> {
     Ok(match v {
         Value::Nil => rubyrs_cext::CValue::Nil,
@@ -2648,7 +2650,7 @@ fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext
         other => {
             return Err(Trap::new(RubyError::ArgumentError {
                 msg: format!(
-                    "C ext `{}': arg {} has type {} which is not yet supported across the cext FFI (Level 1 covers String/nil/true/false only)",
+                    "C ext `{}': arg {} has type {} which is not yet supported across the cext FFI",
                     name,
                     idx,
                     other.type_name()
@@ -2792,10 +2794,20 @@ fn cext_dispatch(
     }
 }
 
-/// Run `f`, catching any Rust panic that escapes the C call. Without
-/// this, a panic across the FFI boundary (or, here, in our own
-/// argument-interning closure) would unwind through C frames and
-/// abort the process — instead we surface it as a `RuntimeError` Trap.
+/// Run `f`, catching any Rust panic that escapes from our own
+/// argument-interning / handle-management code wrapping the C call.
+///
+/// **What this catches**: panics raised in Rust code that runs around
+/// the `extern "C"` call — `state.intern`, our `Vec` building, any
+/// `expect("ICE: ...")` in `rubyrs_cext::with_state`.
+///
+/// **What this does NOT catch**: panics raised inside the C function
+/// itself. C code can't `panic!`; if one of OUR Rust-implemented
+/// `rb_*` ABI functions panics from inside the C call, the process
+/// aborts under `panic = abort` semantics (the default for `extern "C"`
+/// since Rust 2018+). The cext ABI surface is documented as
+/// abort-on-contract-violation in docs/PANIC_AUDIT.md — conversion to
+/// error sentinels is Level 3+ work tied to `rb_raise` integration.
 fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
         if let Some(s) = p.downcast_ref::<&str>() {
