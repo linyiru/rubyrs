@@ -30,6 +30,19 @@ if [[ ! -x "$RUBYRS_BIN" ]]; then
   echo "perf/check: run \`cargo build --release -p rubyrs\` first" >&2
   exit 2
 fi
+if [[ ! -r "$BASELINES" ]]; then
+  echo "perf/check: baselines file not readable at $BASELINES" >&2
+  echo "perf/check: set BASELINES=<path> or restore perf/baselines.tsv" >&2
+  exit 2
+fi
+# `RUNS` must be a positive integer. Empty / non-numeric / 0 would
+# either skip the measure loop silently or fall through to a bash
+# arithmetic error mid-run, neither of which surface as a clear
+# setup-error code (the 0/1/2 contract).
+if [[ ! "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "perf/check: RUNS must be a positive integer, got '$RUNS'" >&2
+  exit 2
+fi
 
 # `/usr/bin/time` flags differ: macOS BSD-time uses `-l`, GNU coreutils
 # uses `-v`. We branch and parse accordingly. Both paths produce the
@@ -99,6 +112,15 @@ printf "%-58s %-11s %-12s %-10s\n" "--------" "-----------" "----------" "------
 while IFS=$'\t' read -r workload budget _note; do
   # Skip comments + blank lines.
   case "$workload" in ''|\#*) continue ;; esac
+  # A malformed budget (empty, non-integer, missing column) would
+  # blow up the `(( kb > budget ))` test as a bash arithmetic
+  # error — categorise as setup_fail to keep the 0/1/2 exit-code
+  # contract honest.
+  if [[ ! "$budget" =~ ^[0-9]+$ ]]; then
+    echo "perf/check: row '$workload' has invalid budget '$budget' (expected non-negative integer)" >&2
+    setup_fail=1
+    continue
+  fi
   # Missing workload paths are a setup/config error, not a budget
   # regression. Categorise them separately so the header-comment
   # exit-code contract (0/1/2) actually matches what we emit.
