@@ -302,6 +302,7 @@ impl Vm {
             Value::Int(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" |
                 "<" | "<=" | ">" | ">=" |
+                "&" | "|" | "^" | "<<" | ">>" | "~" |
                 "to_i" | "to_f" | "abs" | "even?" | "odd?" |
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
@@ -2492,6 +2493,21 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             ">"  => Some(Value::Bool(a > b)),
             ">=" => Some(Value::Bool(a >= b)),
             "<=>" => Some(Value::Int(a.cmp(b) as i64)),
+            // Bitwise. Ruby uses arbitrary-precision Integer; we
+            // truncate to i64. `<<` on a negative shift count is
+            // CRuby's right-shift (and vice versa) — we mirror with
+            // a sign check rather than panicking on negative shifts.
+            "&" => Some(Value::Int(a & b)),
+            "|" => Some(Value::Int(a | b)),
+            "^" => Some(Value::Int(a ^ b)),
+            "<<" => Some(Value::Int(
+                if *b >= 0 { a.wrapping_shl((*b as u32).min(63)) }
+                else { a.wrapping_shr(((-b) as u32).min(63)) }
+            )),
+            ">>" => Some(Value::Int(
+                if *b >= 0 { a.wrapping_shr((*b as u32).min(63)) }
+                else { a.wrapping_shl(((-b) as u32).min(63)) }
+            )),
             _ => None,
         },
         (Value::Int(a), "to_s", []) => Some(Value::Str(Rc::from(a.to_string().as_str()))),
@@ -2499,6 +2515,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Int(a), "abs", []) => Some(Value::Int(a.wrapping_abs())),
         (Value::Int(a), "-@", []) => Some(Value::Int(a.wrapping_neg())),
         (Value::Int(a), "+@", []) => Some(Value::Int(*a)),
+        (Value::Int(a), "~", []) => Some(Value::Int(!a)),
         (Value::Int(a), "even?", []) => Some(Value::Bool(a % 2 == 0)),
         (Value::Int(a), "odd?", []) => Some(Value::Bool(a % 2 != 0)),
         (Value::Int(a), "zero?", []) => Some(Value::Bool(*a == 0)),
