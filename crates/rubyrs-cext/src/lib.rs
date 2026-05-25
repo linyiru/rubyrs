@@ -119,6 +119,15 @@ pub fn resolve_id(id: ID) -> Option<String> {
     INTERN.with(|t| t.borrow().resolve(id).map(String::from))
 }
 
+/// Inverse of [`resolve_id`]: intern a Symbol name and return
+/// its [`ID`]. Used by `rb_sym2id` and any other helper that
+/// needs to go from a Symbol's CValue name back to the
+/// canonical interner index. Idempotent — re-interning an
+/// existing name returns the same ID.
+pub fn intern_name(name: &str) -> ID {
+    INTERN.with(|t| t.borrow_mut().intern(name))
+}
+
 /// Mirror of the subset of `rubyrs::Value` that crosses the C ABI.
 /// Kept independent so this crate doesn't pull in the whole
 /// interpreter — the host translates between the two when draining
@@ -158,6 +167,15 @@ pub enum CValue {
     /// semantics since 1.9). Built via `rb_hash_new` + `rb_hash_aset`;
     /// translated to `Value::Hash` on the Vm heap on return.
     Hash(Vec<(Value, Value)>),
+    /// Symbol — carries the symbol's name as a String. Pairs
+    /// with `Value::Sym` on the Vm side. cext → Vm interns the
+    /// name into the Vm's symbol table; Vm → cext resolves the
+    /// name out of the same table and copies it (cheap — already
+    /// a String-shaped read). Needed for any cext path that
+    /// takes Symbol arguments — `Packer#write(:foo)`,
+    /// `register_type_internal`'s Symbol class arg, kwarg lookup
+    /// via ID2SYM, etc.
+    Symbol(String),
     /// Spike L3-B: an already-allocated Vm-heap Object reference.
     /// Produced by `rb_data_typed_object_wrap`'s callback (which
     /// allocates `HeapObj::TypedData` eagerly so the C ext can pass
@@ -1656,6 +1674,7 @@ pub unsafe extern "C" fn rb_basic_class(v: Value) -> Value {
         CValue::False => rb_cFalseClass,
         CValue::Nil => rb_cNilClass,
         CValue::Class(_) => rb_cClass,
+        CValue::Symbol(_) => rb_cSymbol,
         CValue::HeapRef(_) => Qnil,
     })
 }

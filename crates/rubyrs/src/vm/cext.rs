@@ -265,6 +265,7 @@ fn cext_handle_to_value_d(
         // (e.g. `.name`) needs to find the real Class. Falling
         // back to Nil here (the old L0 behaviour) made any
         // subsequent method call on the class handle segfault.
+        rubyrs_cext::CValue::Symbol(name) => Value::Sym(vm.interner.intern(&name)),
         rubyrs_cext::CValue::Class(name) => {
             let sym = vm.interner.intern(&name);
             // Class handles are produced by rb_define_class_under
@@ -394,6 +395,13 @@ fn cext_value_to_cvalue_d(
         // handle (typical pattern: `cls.name` to dispatch-by-type
         // — exactly what mini-json's generator does).
         Value::Class(c) => rubyrs_cext::CValue::Class(c.name.clone()),
+        // L3-J: Symbol crossing Vm → cext as CValue::Symbol carrying
+        // the symbol's name. msgpack's no-registration Symbol pack
+        // path (`Packer#write(:foo)`) and any cext that takes a
+        // Symbol arg (`register_type_internal`, kwarg lookups via
+        // ID2SYM) end up here. The cext side intern-table will see
+        // the name on `rb_sym2id` if it needs the canonical ID.
+        Value::Sym(id) => rubyrs_cext::CValue::Symbol(vm.interner.resolve(*id).to_string()),
         // Array/Hash crossing Ruby → C: build a CValue::Array/Hash
         // whose elements are FRESH handles interned into `st`.
         // Recurses on contained Values, interning each child into

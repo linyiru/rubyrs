@@ -17,6 +17,7 @@ const T_FLOAT: c_int = 5;
 const T_STRING: c_int = 6;
 const T_ARRAY: c_int = 7;
 const T_HASH: c_int = 8;
+const T_SYMBOL: c_int = 9;
 const T_CLASS: c_int = 11;
 const T_DATA: c_int = 13;
 
@@ -38,6 +39,7 @@ pub unsafe extern "C" fn rb_value_type(v: Value) -> c_int {
         CValue::Class(_) => T_CLASS,
         CValue::HeapRef(_) => T_DATA,
         CValue::Float(_) => T_FLOAT,
+        CValue::Symbol(_) => T_SYMBOL,
     })
 }
 
@@ -213,22 +215,46 @@ pub unsafe extern "C" fn rb_float_value(v: Value) -> c_double {
     })
 }
 
-/// rubyrs has no Symbol CValue; stub for dlopen.
+/// `ID2SYM(id)` — wrap an interner ID (from `rb_intern`) into a
+/// Symbol-typed handle. Round-trips with `rb_sym2id`. Returns
+/// Qnil if `id` wasn't issued by this process's `rb_intern`
+/// (the same failure mode `rb_id2name` documents — better to
+/// surface a Nil that fails the next type-check than to coin
+/// a fresh symbol name out of thin air).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_id2sym(_id: ID) -> Value {
-    Qnil
+pub unsafe extern "C" fn rb_id2sym(id: ID) -> Value {
+    match crate::resolve_id(id) {
+        Some(name) => with_state(|st| st.intern(CValue::Symbol(name))),
+        None => Qnil,
+    }
 }
 
-/// rubyrs has no Symbol CValue; stub for dlopen.
+/// `SYM2ID(v)` — pull the interner ID out of a Symbol handle.
+/// Returns 0 (the "unknown" ID) for non-Symbol values; the
+/// caller is expected to type-check via `SYMBOL_P` first.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_sym2id(_v: Value) -> ID {
-    0
+pub unsafe extern "C" fn rb_sym2id(v: Value) -> ID {
+    let name = with_state(|st| match st.resolve(v) {
+        CValue::Symbol(name) => Some(name.clone()),
+        _ => None,
+    });
+    match name {
+        Some(n) => crate::intern_name(&n),
+        None => 0,
+    }
 }
 
-/// rubyrs has no Symbol CValue; stub for dlopen.
+/// `rb_sym2str(sym)` — convert a Symbol to its String name.
+/// msgpack's no-registration Symbol pack path goes through this
+/// (`msgpack_packer_write_symbol_string_value`), so it has to
+/// produce a real `CValue::Str` — not Qnil — for `:foo.to_s`-
+/// style downstream work to land correctly.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_sym2str(_v: Value) -> Value {
-    Qnil
+pub unsafe extern "C" fn rb_sym2str(v: Value) -> Value {
+    with_state(|st| match st.resolve(v).clone() {
+        CValue::Symbol(name) => st.intern(CValue::str_from_bytes(name.as_bytes())),
+        _ => Qnil,
+    })
 }
 
 /// Verify v's type matches t; panic on mismatch (spike: real impl would raise TypeError).
