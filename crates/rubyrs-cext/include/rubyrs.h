@@ -16,7 +16,9 @@
 /* CRuby's ruby.h transitively pulls in the C stdlib basics that most
  * extensions assume are available (NULL, free, size_t, memcpy, etc).
  * Mirror that so unmodified CRuby C extensions compile against us
- * without needing to add their own #include lines. */
+ * without needing to add their own #include lines.
+ * `<stdarg.h>` is for the `rb_funcall` static-inline wrapper. */
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -191,14 +193,29 @@ ID rb_intern(const char *name);
  * state on each dispatch and pops on return. */
 VALUE rb_funcallv(VALUE recv, ID mid, int argc, const VALUE *argv);
 
-/* Convenience macro for the common case `rb_funcall(recv, id, n,
- * arg1, arg2, ...)`. Uses a C99 compound literal to build an
- * inline VALUE[] for the variadic args, then forwards to
- * rb_funcallv. Matches CRuby's source-level signature so most C
- * extensions compile unchanged. For zero args, prefer the
- * explicit form `rb_funcallv(recv, id, 0, NULL)`. */
-#define rb_funcall(recv, mid, n, ...) \
-    rb_funcallv((recv), (mid), (n), (VALUE[]){ __VA_ARGS__ })
+/* Convenience wrapper for the CRuby-style `rb_funcall(recv, id, n,
+ * arg1, arg2, ...)`. Implemented as a `static inline` C function
+ * (not a macro) because CRuby C extensions universally write
+ * `rb_funcall(obj, id, 0)` for no-arg dispatch — a macro built on
+ * `(VALUE[]){ __VA_ARGS__ }` produces an empty compound-literal
+ * initializer for that case, which ISO C rejects and modern
+ * gcc/clang warn on. A real variadic function handles n == 0
+ * cleanly.
+ *
+ * Spike scope: fixed 16-slot stack buffer (cext_dispatch supports
+ * arity 0..=5 today, with headroom for future widening before
+ * dispatch refuses). A real implementation would `alloca(n *
+ * sizeof(VALUE))` for unbounded n; productionising waits until a
+ * gem demands it. */
+static inline VALUE rb_funcall(VALUE recv, ID mid, int n, ...) {
+    VALUE argv_buf[16];
+    if (n > 16) n = 16;  /* will trap as wrong-arity in cext_dispatch */
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) argv_buf[i] = va_arg(ap, VALUE);
+    va_end(ap);
+    return rb_funcallv(recv, mid, n, n == 0 ? NULL : argv_buf);
+}
 
 #ifdef __cplusplus
 }
