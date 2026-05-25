@@ -43,14 +43,19 @@ spec/
     ├── method_receiver_spec.rb
     ├── method_to_proc_spec.rb
     │
-    └── unbound_method_equal_spec.rb # core/unboundmethod subset
+    ├── unbound_method_equal_spec.rb # core/unboundmethod subset
+    │
+    └── integer_digits_spec.rb     # core/integer subset
+                                   # (FIRST landed extractor
+                                   # output — see "Extractor
+                                   # workflow" section below)
 ```
 
 The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **108 examples across 19
+"Future work" below). Current total: **115 examples across 20
 files**, all passing.
 
 ## DSL the helper provides
@@ -156,6 +161,50 @@ match upstream behaviour. If rubyrs differs intentionally,
 document the divergence in
 [`docs/SUBSET.md`](../../../docs/SUBSET.md) and skip the spec
 case with a `#` comment naming the upstream source line.
+
+## Extractor workflow (extractor-assisted translation)
+
+`crates/rubyrs-spec-extract` mechanises the common
+`expr.should == val` → `assert_eq(expr, val)` pattern. Use it
+as the FIRST step when ingesting a new upstream spec, then
+hand-polish what v0.1 can't handle yet (predicate matchers,
+lambda-raise blocks, fixtures). The first file ingested this
+way is `integer_digits_spec.rb` — its top-of-file comment
+spells out which `it` blocks came from the extractor and
+which were hand-polished.
+
+End-to-end:
+
+```bash
+# 1. Fetch upstream (one-off; or use your local ruby/spec clone)
+curl -sL 'https://raw.githubusercontent.com/ruby/spec/master/core/integer/digits_spec.rb' \
+  > /tmp/upstream.rb
+
+# 2. Run the extractor (stdout = the extracted file)
+cargo run --release -p rubyrs-spec-extract -- /tmp/upstream.rb \
+  > crates/rubyrs/spec/ruby/integer_digits_spec.rb
+
+# 3. Hand-polish what v0.1 couldn't translate:
+#    - `-> { ... }.should.raise(X)` → `assert_raises("X") { ... }`
+#    - `mock_int(...)` / `should_receive` → comment block out
+#    - `it_behaves_like :shared` → comment out or inline
+#    - any documented divergence (see docs/SUBSET.md)
+#      → comment out and reference SUBSET.md section
+$EDITOR crates/rubyrs/spec/ruby/integer_digits_spec.rb
+
+# 4. Confirm it runs in the micro-runner
+cargo test -p rubyrs --test ruby_spec
+
+# 5. Note in the file's top-of-file comment which `it` blocks
+#    were from v0.1 and which were polished, so future
+#    extractor upgrades can re-run the file and diff.
+```
+
+When the upstream file is overwhelmingly `should ==` shape
+(`integer_digits_spec.rb` was 6/9), the post-extractor work
+is minutes. When it's all predicate matchers or lambdas, the
+extractor only strips `require_relative` and is a wash —
+defer until v0.2 lands.
 
 ## Adding a new spec
 
