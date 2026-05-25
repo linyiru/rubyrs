@@ -1,7 +1,9 @@
 //! Embedding example.
 //!
-//! Demonstrates the three core capabilities of the rubyrs host API:
-//! - registering host functions callable from Ruby
+//! Demonstrates the core capabilities of the rubyrs host API:
+//! - registering host functions callable from Ruby (`register_fn`,
+//!   and `register_fn_v2` when the closure needs to read Array /
+//!   Hash arguments)
 //! - capturing puts/print output into a Rust buffer
 //! - persisting class/method definitions across multiple eval calls
 //!
@@ -10,7 +12,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rubyrs::{Runtime, Value};
+use rubyrs::{HostCtx, Runtime, Value};
 
 fn main() {
     // ------------------------------------------------------------------
@@ -34,10 +36,28 @@ fn main() {
         }
     });
 
+    // v2 form: the closure also receives a `HostCtx` for reading
+    // heap-y args (Array, Hash). v1's `&[Value]`-only signature
+    // can't reach inside `Value::Array(id)` — `id` is opaque. With
+    // v2 you call `ctx.resolve_array(v)` and get a borrowed slice.
+    rt.register_fn_v2("host_sum_array", |ctx: &HostCtx, args: &[Value]| {
+        if let [v] = args
+            && let Some(elems) = ctx.resolve_array(v)
+        {
+            let mut total: i64 = 0;
+            for e in elems {
+                if let Value::Int(n) = e { total += n; }
+            }
+            return Ok(Value::Int(total));
+        }
+        Ok(Value::Nil)
+    });
+
     rt.eval(
         r#"
         puts "process id: #{host_pid}"
         puts "21 doubled is #{host_double(21)}"
+        puts "sum of [1, 2, 3, 4, 5] is #{host_sum_array([1, 2, 3, 4, 5])}"
         "#,
         "example1",
     ).unwrap();

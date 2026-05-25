@@ -27,8 +27,9 @@ use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 #[cfg(not(target_os = "wasi"))]
 use super::with_vm_ptr_set;
 use super::{
-    primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, PinGuard, Vm,
+    primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
 };
+use crate::HostCtx;
 
 impl Vm {
     /// Re-entrant dispatch entry for C extensions calling back into
@@ -114,6 +115,53 @@ impl Vm {
 
 
 
+    /// Invoke a registered host fn (either v1 or v2 slot).
+    ///
+    /// V1 stashes `*mut Vm` via `with_vm_ptr_set` so a cext-style
+    /// re-entrant `rb_funcall` can find the running VM (ADR 0013).
+    /// V1 closures hold no Rust borrow of `self` during the call, so
+    /// the raw-ptr reborrow inside cext is the only access path and
+    /// aliasing is well-defined.
+    ///
+    /// V2 deliberately does NOT call `with_vm_ptr_set`. The V2
+    /// closure holds a `HostCtx` that borrows `&self.heap` for the
+    /// duration of the call; if we *also* re-aimed CURRENT_VM_PTR at
+    /// `self` and the closure reborrowed it as `&mut Vm`, that
+    /// reborrow would alias the live `&self.heap` borrow — any heap
+    /// mutation during the inner call could realloc the backing
+    /// `Vec<HeapObj>` and dangle slices returned by
+    /// `ctx.resolve_array` / `resolve_hash`.
+    ///
+    /// Note that `CURRENT_VM_PTR` may already be non-null on entry
+    /// (an outer v1/cext frame set it), so the V2 arm is NOT
+    /// asserting "TLS is null." The actual boundary is: the TLS is
+    /// `pub(crate)`, so an external v2 closure has no language-level
+    /// path to read it — the unsafe re-entry channel is unreachable
+    /// to user code in the V2 slot. Skipping the overwrite here is
+    /// the closing brick: even an internal future v2 helper would
+    /// have to explicitly opt into touching the TLS, which is the
+    /// point at which the soundness review is expected.
+    ///
+    /// cext bridges register as V1, so nothing legitimate needs the
+    /// ptr from the V2 arm.
+    fn invoke_host_fn(&mut self, slot: HostFnSlot, args: &[Value]) -> Result<Value, Trap> {
+        match slot {
+            HostFnSlot::V1(host) => {
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    let vm_ptr: *mut Vm = self;
+                    with_vm_ptr_set(vm_ptr, || host(args))
+                }
+                #[cfg(target_os = "wasi")]
+                { host(args) }
+            }
+            HostFnSlot::V2(host) => {
+                let ctx = HostCtx::new(&self.heap);
+                host(&ctx, args)
+            }
+        }
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
@@ -130,18 +178,7 @@ impl Vm {
                 return Ok(());
             }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
-                // Stash this Vm pointer for the duration of the host
-                // call so `cext_dispatch` (if the host fn is a cext
-                // closure) can install a `rb_funcallv` callback that
-                // re-enters this Vm. See CURRENT_VM_PTR for the
-                // borrow-aliasing discussion.
-                #[cfg(not(target_os = "wasi"))]
-                let v = {
-                    let vm_ptr: *mut Vm = self;
-                    with_vm_ptr_set(vm_ptr, || host(&args))?
-                };
-                #[cfg(target_os = "wasi")]
-                let v = host(&args)?;
+                let v = self.invoke_host_fn(host, &args)?;
                 self.stack.push(v);
                 return Ok(());
             }
@@ -1323,13 +1360,7 @@ impl Vm {
             }
             if let Some(res) = self.builtin_call(&name, &args) { self.stack.push(res?); return Ok(()); }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
-                #[cfg(not(target_os = "wasi"))]
-                let v = {
-                    let vm_ptr: *mut Vm = self;
-                    with_vm_ptr_set(vm_ptr, || host(&args))?
-                };
-                #[cfg(target_os = "wasi")]
-                let v = host(&args)?;
+                let v = self.invoke_host_fn(host, &args)?;
                 self.stack.push(v);
                 return Ok(());
             }

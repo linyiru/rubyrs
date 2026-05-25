@@ -108,22 +108,25 @@ not just the unobservable example binary.
 
 ## Host-fn API takeaway (for future embed work)
 
-The current `Runtime::register_fn` API hands the closure a
-`&[Value]` and no `&Heap` / `&Runtime`. That means heap-y
-shapes — `Value::Array` from `*splat`, `Value::Hash` from
-`**kwargs` — can't be read from inside the closure (their
-inner contents live in the heap, which the closure can't
-touch).
+This example was originally built against the v1 API
+(`Runtime::register_fn`), which hands the closure only a
+`&[Value]` — no `&Heap` access. Heap-y shapes (`Value::Array`
+from `*splat`, `Value::Hash` from `**kwargs`) can't be read
+from inside a v1 closure because their contents live in the
+heap, which the closure can't reach.
 
-The pattern this example uses: **do the unpacking in the Ruby-
+The workaround this demo uses: **do the unpacking in the Ruby-
 side prelude** (one short shim per public DSL entry) and pass
 plain positional `String` / `Int` / `Bool` to the host. That
 keeps each host fn ~5 lines and avoids needing intimate `Heap`
 access. The prelude is the seam — the Gemfile is unmodified.
 
-If the project later wants to support truly-arbitrary Ruby
-DSLs without prelude shims, the natural extension is a
-`register_fn_v2` that also takes a `&Runtime` (so
-`resolve_array` / `resolve_hash` are reachable). Out of scope
-for this example, but the gap is concrete and worth noting in
-the next embed-API ADR.
+The follow-up that closed this gap is
+[`Runtime::register_fn_v2`](../../src/lib.rs): the closure
+also receives a `HostCtx` with `resolve_array` /
+`resolve_hash` borrows into the heap. A v2 rewrite of this
+demo could shrink the prelude further (`def gem(name,
+*requirements, **opts); __gemfile_gem_v2(name, requirements,
+opts); end` — host does the unpacking in typed Rust). Not
+done here yet; the prelude-flattening shape still works fine
+and keeps the demo's host-side code straight-line.

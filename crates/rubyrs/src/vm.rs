@@ -141,6 +141,32 @@ pub(crate) struct RescueHandler {
 }
 
 pub(crate) type HostFn = dyn Fn(&[Value]) -> Result<Value, Trap>;
+/// v2 host-fn closure shape. Same return/args as `HostFn`, but with
+/// a leading `&HostCtx` that exposes heap reads (`resolve_array`,
+/// `resolve_hash`). Introduced so embed hosts can consume the
+/// heap-y `Value::Array` / `Value::Hash` shapes that the v1
+/// `&[Value]`-only signature couldn't reach. See
+/// `Runtime::register_fn_v2`.
+pub(crate) type HostFnV2 = dyn Fn(&crate::HostCtx, &[Value]) -> Result<Value, Trap>;
+
+/// Storage slot for either signature. Held by `Vm::host_fns` so a
+/// single dispatch site can resolve a name without the embed host
+/// having to pick between two maps. cext stays on the v1-only
+/// type alias (`Rc<HostFn>`) — its registration path predates v2
+/// and doesn't need heap reads.
+pub(crate) enum HostFnSlot {
+    V1(Rc<HostFn>),
+    V2(Rc<HostFnV2>),
+}
+
+impl Clone for HostFnSlot {
+    fn clone(&self) -> Self {
+        match self {
+            HostFnSlot::V1(f) => HostFnSlot::V1(f.clone()),
+            HostFnSlot::V2(f) => HostFnSlot::V2(f.clone()),
+        }
+    }
+}
 
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
@@ -155,7 +181,7 @@ pub(crate) struct Vm {
     /// need to shadow a class with a constant, pick a different name.
     pub(crate) constants: HashMap<SymId, Value>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
-    pub(crate) host_fns: HashMap<SymId, Rc<HostFn>>,
+    pub(crate) host_fns: HashMap<SymId, HostFnSlot>,
     /// C-ext singleton-method dispatch table. Indexed by
     /// `(class joined name, method SymId)`. Populated by
     /// `Vm::cext_require` whenever a C ext calls

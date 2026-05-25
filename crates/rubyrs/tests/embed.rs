@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
-use rubyrs::{Config, Runtime, RubyError, Value};
+use rubyrs::{Config, HostCtx, Runtime, RubyError, Trap, Value};
 
 #[derive(Clone)]
 struct SharedBuf(Rc<RefCell<Vec<u8>>>);
@@ -73,6 +73,156 @@ fn host_fn_can_propagate_trap() {
     let formatted = rt.format_trap(&res.unwrap_err());
     assert!(formatted.contains("no good"), "got: {}", formatted);
     assert!(formatted.contains("ArgumentError"), "got: {}", formatted);
+}
+
+#[test]
+fn register_fn_v2_reads_array_arg_via_host_ctx() {
+    // v2 signature gives the closure a `HostCtx` so it can unpack
+    // `Value::Array` directly — the heap-y shape that v1's
+    // `&[Value]`-only signature couldn't reach without going back
+    // through the (cloning) `Runtime::resolve_array`. This is the
+    // gap PR #35's Gemfile demo hit and worked around with a
+    // Ruby-side prelude that flattened `*args` to a `|`-joined
+    // String.
+    let (mut rt, buf) = rt_with_buf();
+    rt.register_fn_v2("sum_array", |ctx: &HostCtx, args: &[Value]| {
+        let arr = match args {
+            [v] => ctx.resolve_array(v).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "expected Array".into() },
+                backtrace: vec![],
+            })?,
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "wrong arity".into() },
+                backtrace: vec![],
+            }),
+        };
+        let mut total: i64 = 0;
+        for v in arr {
+            if let Value::Int(n) = v { total += n; } else {
+                return Err(Trap {
+                    err: RubyError::TypeError { msg: "expected Integer element".into() },
+                    backtrace: vec![],
+                });
+            }
+        }
+        Ok(Value::Int(total))
+    });
+    rt.eval(r#"puts sum_array([1, 2, 3, 4, 5])"#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "15\n");
+}
+
+#[test]
+fn register_fn_v2_reads_hash_arg_via_host_ctx() {
+    // Two checks against the same Hash:
+    //   1. key lookup returns the right Value (exercises the
+    //      resolve_hash → (k, v) pair shape end-to-end).
+    //   2. iteration order matches insertion order. CRuby's
+    //      Hash guarantees this since 1.9; rubyrs's
+    //      `Vec<(Value, Value)>` representation preserves it
+    //      mechanically. The `hash_keys` host fn below joins
+    //      keys with `|` so a regression that switched to a
+    //      `HashMap` or any unordered shape would fail with a
+    //      different concrete output string.
+    let mut rt = Runtime::new();
+    rt.register_fn_v2("hash_lookup", |ctx: &HostCtx, args: &[Value]| {
+        let (h, want) = match args {
+            [h, Value::Str(s)] => (
+                ctx.resolve_hash(h).ok_or_else(|| Trap {
+                    err: RubyError::ArgumentError { msg: "expected Hash".into() },
+                    backtrace: vec![],
+                })?,
+                s.borrow().clone(),
+            ),
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "wrong arity / types".into() },
+                backtrace: vec![],
+            }),
+        };
+        for (k, v) in h {
+            if let Value::Str(ks) = k
+                && *ks.borrow() == want
+            {
+                return Ok(v.clone());
+            }
+        }
+        Ok(Value::Nil)
+    });
+    // Captures the iteration order Rust-side so the assertion
+    // below can read an actual String (sidesteps `Value::Str`'s
+    // non-public constructor).
+    let captured_keys: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![]));
+    let captured_for_fn = captured_keys.clone();
+    rt.register_fn_v2("hash_keys", move |ctx: &HostCtx, args: &[Value]| {
+        let h = match args {
+            [h] => ctx.resolve_hash(h).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "expected Hash".into() },
+                backtrace: vec![],
+            })?,
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "wrong arity".into() },
+                backtrace: vec![],
+            }),
+        };
+        let mut out = captured_for_fn.borrow_mut();
+        out.clear();
+        for (k, _) in h {
+            if let Value::Str(s) = k { out.push(s.borrow().clone()); }
+        }
+        Ok(Value::Nil)
+    });
+
+    // Key lookup.
+    let v = rt.eval(
+        r#"hash_lookup({ "a" => 1, "b" => 2, "c" => 3 }, "b")"#,
+        "t.rb",
+    ).unwrap();
+    assert!(matches!(v, Value::Int(2)), "expected Int(2), got {:?}", v);
+
+    // Iteration order. Insertion order is `a, b, c`; if the
+    // underlying representation ever became unordered (e.g.
+    // HashMap) this assertion would fail with a different
+    // permutation rather than passing silently.
+    rt.eval(
+        r#"hash_keys({ "a" => 1, "b" => 2, "c" => 3 })"#,
+        "t.rb",
+    ).unwrap();
+    assert_eq!(&*captured_keys.borrow(), &["a", "b", "c"],
+        "hash iteration order should match insertion");
+}
+
+#[test]
+fn register_fn_v2_replaces_prior_v1_registration() {
+    // Re-registering under the same name swaps the slot —
+    // pinning this so a future refactor that uses separate v1/v2
+    // maps would have to keep this guarantee explicit.
+    let mut rt = Runtime::new();
+    rt.register_fn("answer", |_| Ok(Value::Int(42)));
+    let v1 = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(v1, Value::Int(42)));
+
+    rt.register_fn_v2("answer", |_ctx, _args| Ok(Value::Int(99)));
+    let v2 = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(v2, Value::Int(99)));
+}
+
+#[test]
+fn register_fn_replaces_prior_v2_registration() {
+    // Symmetric direction. Both register_fn / register_fn_v2 doc
+    // strings promise replacement either way; without this test a
+    // future map-split refactor (separate v1_fns / v2_fns maps)
+    // could keep a stale v2 closure live after the embedder
+    // re-registered with v1. Existing v1→v2 test above wouldn't
+    // catch that direction.
+    let mut rt = Runtime::new();
+    rt.register_fn_v2("answer", |_ctx, _args| Ok(Value::Int(99)));
+    let first = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(first, Value::Int(99)));
+
+    rt.register_fn("answer", |_| Ok(Value::Int(42)));
+    let second = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(second, Value::Int(42)),
+        "v1 registration should have replaced the prior v2 slot, got {:?}",
+        second);
 }
 
 #[test]
