@@ -56,6 +56,37 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 - `puts`, `print`
 - `Integer#times { |i| ... }`
 
+### Metaprogramming (PoC)
+- `alias_method :new, :old` — copies the `Rc<Method>` entry in the
+  surrounding class (or toplevel) under a new SymId. Alias shares
+  the original's `defining_class`, so `super` from the aliased name
+  walks the same chain. Compile-time desugar; both args must be
+  Symbol literals (dynamic `alias_method(*syms)` falls through).
+- `method_missing(name)` — on an Object receiver whose class chain
+  defines `method_missing`, missed calls route there with the
+  missed name passed as a Symbol. Inherited through the superclass
+  chain. Primitives (Int, Str, Sym, …) skip the lookup and raise
+  NoMethodError as before. See [ADR 0009](adr/0010-metaprogramming-poc.md).
+- `define_method(:name) { |args| ... }` — installs the block as a
+  method on the surrounding class. The Method shares the block's
+  captured-locals `Rc<RefCell<Vec<Value>>>`, so closure semantics
+  hold: writes to outer-scope locals from inside the method body
+  are visible to the lexical scope (and to other invocations of
+  the same method). Compile-time desugar; arg must be a Symbol
+  literal. GC walks all installed closure-methods as roots — see
+  [ADR 0009](adr/0010-metaprogramming-poc.md).
+
+**Caveats for the PoC**
+- No `*args` splat — `method_missing(name, *args)` and arity-flexible
+  `define_method` aren't expressible yet. Tracking item on the
+  "Not supported" list.
+- `method_missing` is only invoked when the receiver is a user-class
+  instance (`Value::Object`). Adding per-primitive class chains is
+  a follow-up.
+- Per-iteration dispatch is ~3× CRuby's. See
+  [`examples/metaprog_bench/README.md`](../crates/rubyrs/examples/metaprog_bench/README.md)
+  — peak memory is still ~5× lighter than CRuby on the same workload.
+
 ### Runtime
 - Mark-sweep GC over `Instance`, `Array`, `Hash` (cycle-safe). See
   [ADR 0003](adr/0003-rc-plus-mark-sweep-hybrid-gc.md) and
@@ -165,7 +196,11 @@ end
 
 These will not be added unless the project changes direction:
 
-- `eval`, `define_method`, `method_missing`, `instance_eval`, `ObjectSpace`
+- `eval`, `instance_eval`, `class_eval`, `binding`, `ObjectSpace`,
+  singleton classes (`def obj.foo`), `define_singleton_method`
+- (`define_method` / `method_missing` / `alias_method` are now in the
+  supported set as a PoC — see above. The remaining items above stay
+  out of scope.)
 - `Fiber`, `Thread`, `Mutex`, `Ractor`
 - `require / load / autoload`, gems, Bundler
 - C extension API

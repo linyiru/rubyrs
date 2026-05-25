@@ -52,6 +52,21 @@ pub(crate) enum Op {
     /// the per-site cache).
     Super(SymId, u8),
     DefMethod(SymId, u32),         // name, proto_idx
+    /// `alias_method :new, :old`. Looks up the Method entry under
+    /// `old` in the surrounding class (or toplevel_methods at the
+    /// top level) and re-inserts the same Rc under `new`. Sharing
+    /// the Rc keeps the alias and the original semantically
+    /// identical — including any defining_class fixup for `super`.
+    /// Bumps `method_gen` so per-call-site IC entries that observed
+    /// the older table re-resolve.
+    AliasMethod(SymId, SymId),     // new, old
+    /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
+    /// off the operand stack, wraps its BlockHandle's captured
+    /// locals into a Method, and installs it under `name` in the
+    /// surrounding class (or toplevel). The Method shares the same
+    /// `Rc<RefCell<Vec<Value>>>` as the BlockHandle, so closures
+    /// over outer-scope locals stay live. Bumps `method_gen`.
+    DefMethodBlock(SymId),         // name (block on stack)
     DefClass(SymId, u32),
     NewArray(u16),
     NewHash(u16),

@@ -713,3 +713,140 @@ fn resolve_sym_roundtrips_symbol() {
         panic!("expected Value::Sym, got {:?}", val);
     }
 }
+
+// ---------- Metaprogramming PoCs ----------
+
+#[test]
+fn alias_method_copies_method_under_new_name() {
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class Greeter
+          def hello
+            "hi"
+          end
+          alias_method :greet, :hello
+        end
+        g = Greeter.new
+        puts g.hello
+        puts g.greet
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "hi\nhi\n");
+}
+
+#[test]
+fn alias_method_shares_super_lookup_chain() {
+    let (mut rt, buf) = rt_with_buf();
+    // Alias preserves defining_class — `super` from `greet`
+    // (aliased to `hello`) still resolves Parent#hello.
+    rt.eval(r#"
+        class Parent
+          def hello
+            "parent"
+          end
+        end
+        class Child < Parent
+          def hello
+            super + "+child"
+          end
+          alias_method :greet, :hello
+        end
+        puts Child.new.greet
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "parent+child\n");
+}
+
+#[test]
+fn method_missing_catches_unknown_call_on_object() {
+    let (mut rt, buf) = rt_with_buf();
+    // Splat-args isn't part of the subset; pass the missed name
+    // only and confirm the symbol survives the round-trip.
+    rt.eval(r#"
+        class Ghost
+          def method_missing(name)
+            name.to_s
+          end
+        end
+        puts Ghost.new.poof
+        puts Ghost.new.boo
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "poof\nboo\n");
+}
+
+#[test]
+fn method_missing_inherited_through_superclass() {
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class Base
+          def method_missing(name, *args)
+            name.to_s
+          end
+        end
+        class Mid < Base
+        end
+        puts Mid.new.does_not_exist
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "does_not_exist\n");
+}
+
+#[test]
+fn missing_without_method_missing_still_raises() {
+    let mut rt = Runtime::new();
+    let err = rt.eval(r#"
+        class Empty; end
+        Empty.new.missing_method
+    "#, "t.rb").unwrap_err();
+    // At the script boundary, NoMethodError surfaces as
+    // `Uncaught { class_name: "NoMethodError", .. }`.
+    match err.err {
+        RubyError::Uncaught { class_name, .. } => assert_eq!(class_name, "NoMethodError"),
+        other => panic!("expected Uncaught(NoMethodError), got {other:?}"),
+    }
+}
+
+#[test]
+fn define_method_installs_a_callable_method() {
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class Foo
+          define_method(:greet) { |name| "hello, " + name }
+        end
+        puts Foo.new.greet("world")
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "hello, world\n");
+}
+
+#[test]
+fn define_method_closes_over_outer_scope() {
+    let (mut rt, buf) = rt_with_buf();
+    // The block captures `counter` from the surrounding class-body
+    // scope; each invocation reads & writes the same slot. This is
+    // the closure semantic that distinguishes `define_method` from
+    // `def`.
+    rt.eval(r#"
+        class Counter
+          counter = 0
+          define_method(:bump) { counter = counter + 1; counter }
+        end
+        c = Counter.new
+        puts c.bump
+        puts c.bump
+        puts c.bump
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "1\n2\n3\n");
+}
+
+#[test]
+fn define_method_validates_arity() {
+    let mut rt = Runtime::new();
+    let err = rt.eval(r#"
+        class Foo
+          define_method(:two) { |a, b| a + b }
+        end
+        Foo.new.two(1)
+    "#, "t.rb").unwrap_err();
+    match err.err {
+        RubyError::ArgumentError { .. } => {}
+        RubyError::Uncaught { class_name, .. } if class_name == "ArgumentError" => {}
+        other => panic!("expected ArgumentError, got {other:?}"),
+    }
+}
