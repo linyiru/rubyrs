@@ -6,56 +6,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
-### Internal
-- **CRuby-mirrored `vm.rs` split.** The 6593-line `vm.rs` is
-  split into per-type submodules under `crates/rubyrs/src/vm/`,
-  mirroring CRuby's file layout so "where does method X live?"
-  follows the same intuition as `string.c` / `array.c` / `hash.c`.
-  Behaviour-preserving moves only; every step kept the 79
-  `diff_cruby` fixtures byte-identical to CRuby. Modules now in
-  place (with their CRuby analogue):
-    - `vm/sprintf.rs` — sprintf.c (`ruby_sprintf` + width/prec parser)
-    - `vm/numeric.rs` — numeric.c (Int/Float primitives)
-    - `vm/string.rs` — string.c (String primitives, Regex shims)
-    - `vm/array.rs` — array.c (no-block Array methods)
-    - `vm/hash.rs` + `vm/range.rs` — hash.c / range.c
-    - `vm/iter.rs` — enum.c (block-form Enumerable filter family,
-      `iter_*_filter`, `collection_call_block`)
-    - `vm/kernel.rs` — object.c Kernel arms (`puts` / `p` /
-      `Integer()` / `Float()` / …)
-    - `vm/fileops.rs` — file.c (`File.read` / `File.exist?` …)
-    - `vm/raise.rs` — eval.c / eval_error.c (`normalize_exception`,
-      `trap_to_exception`, `unwind_with_exception`)
-    - `vm/cext.rs` — internal/value.h + vm_eval.c
-      (rb_funcallv callback installation, handle ↔ Value
-      translation, `cext_dispatch`)
-    - `vm/dispatch.rs` — vm_eval.c / vm_insnhelper.c (`do_call`,
-      `do_call_block`, `invoke_method`, `invoke_method_with_block`,
-      `invoke_block`, `cext_invoke_method`, `try_method_missing`)
-    - `vm/step.rs` — vm_exec.c (`dispatch`, `dispatch_until`,
-      the per-opcode `step` match)
-  Net effect: `vm.rs` from 6593 → ~440 lines after the
-  follow-up extractions of `lookup.rs`, `gc.rs`, `primitive.rs`,
-  and `util.rs` (Vm struct + Frame/PinGuard/RescueHandler +
-  cext-reentrance thread-local). Perf cost: cross-module
-  boundaries cost the inlining the single-file version was
-  getting for free (~7% on the fizzbuzz 1M microbench);
-  recovered by switching `[profile.release]` to `lto = "thin"`
-  — see the matching CHANGELOG entry below.
-
-### Changed
-- **`[profile.release] lto = "thin"`** in `Cargo.toml`. The
-  CRuby-mirrored vm.rs split moved hot dispatch / opcode /
-  lookup code into separate compilation units; without LTO,
-  cross-module calls couldn't inline, costing ~7% on
-  fizzbuzz 1M (349 ms → 372 ms, well outside the ~6 ms σ).
-  Thin LTO recovers the regression to within noise (350 ms)
-  and modestly improves the metaprog-bench workloads
-  (`perf/baselines.tsv`) too. Release-build wall time
-  increases by ~3 s; dev and test builds are unaffected.
-  Verified 2026-05-25 with hyperfine 15-run on
-  `crates/rubyrs/benches/fizzbuzz_1m.rb`.
-
 ### Added
 - **Method / UnboundMethod / Proc reflection chain.** Full
   surface for the captured-method object family, in atomic
@@ -244,42 +194,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `gsub("", "X")` per-boundary insertion), composition with
   default arguments (a `slugify(s, sep = "-")` example), and
   `respond_to?` reachability. Byte-identical to CRuby.
-
-### Fixed
-- **Integer literals no longer truncate to i32.** `ast::tr`
-  was reading `IntegerNode::value()` through Prism's
-  `TryInto<i32>` and silently defaulting to `0` on overflow,
-  so any literal past ~2.1 billion (decimal or hex) became
-  `0`. Hex `0x0102030405060708`, decimal `72623859790382856`,
-  and similar all parsed as zero — the bug surfaced while
-  shipping `Array#pack("Q")`. Fixed by reading through
-  Prism's `to_u32_digits()` (LSB-first u32 chunks + sign)
-  and rebuilding a full i64. Values beyond i64 saturate to
-  `i64::MIN` / `i64::MAX` (the subset doesn't promote to
-  BigInt — documented in SUBSET.md). New diff fixture
-  `integer_literal_i64.rb` pins the full i64 range plus a
-  pack/unpack round-trip on the natural 8-byte demo value.
-
-- **`return` from inside a block now correctly exits the
-  enclosing method.** Previously, every `return` in the program
-  compiled to `Op::ReturnMethod` (non-local), which broke the
-  case where a helper method called from inside a block did
-  `return value` — the value escaped out through the block all
-  the way to the helper's caller, instead of just exiting the
-  helper. The compiler now distinguishes method-body `return`
-  (local; `Op::Return`) from block-body `return` (non-local;
-  `Op::ReturnMethod`) via a new `is_method_body` flag on
-  ProtoBuilder, which `compile_block` deliberately resets to
-  `false` even though it inherits the parent's `method_name`
-  for `super`'s benefit. New diff fixture
-  `nonlocal_return.rb` pins both directions: block-level
-  `return` exits the enclosing method (`find_first_even`-style
-  short-circuit) and method-local `return` from inside a
-  helper called by a block stays local (the block keeps
-  iterating). Byte-identical to CRuby. The older "Divergences"
-  entry in `docs/SUBSET.md` should be removed in a follow-up.
-
-### Added
 - **`<=>` spaceship operator.** Returns `Integer(-1/0/1)`
   ordering or `nil` when the pair isn't comparable. Per-type
   arms in `primitive_call` cover `Int <=> Int`,
@@ -299,8 +213,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   fixture `spaceship.rb` covers every type combination plus
   a user-defined `Version#<=>` for a real sort-key idiom.
   Byte-identical to CRuby.
-
-### Added
 - **`attr_accessor` / `attr_reader` / `attr_writer`.**
   Compile-time desugar: a no-receiver call to any of these
   with all-Symbol-literal args expands into `Op::DefMethod`
@@ -343,27 +255,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   magnitude range; scientific notation (≥ `1e16`, `< 1e-3`)
   diverges from CRuby's formatter and is a documented gap in
   SUBSET.md.
-
-### Fixed
-- **Cross-type `==` / `!=` no longer raises NoMethodError.**
-  `"x" == nil`, `nil == :foo`, `5 == "5"`, `[] == ""` — every
-  cross-type compare used to crash with `undefined method '==`
-  for String` because `primitive_call` only had same-type arms.
-  CRuby's `Object#==` defaults to identity (returning false
-  for any cross-type pair); we now do the same via a universal
-  fallback in `do_call`: after all the type-specific arms
-  declined, the dispatcher answers `==` / `!=` via the
-  existing `ruby_eq` helper, which returns false for any pair
-  whose types don't match. As a side-benefit, `Hash == Hash`
-  and `Range == Range` now work — `ruby_eq` gained
-  order-insensitive Hash equality (O(n*m); good enough until
-  P3-class hash-keying lands) and Range equality
-  (begin/end/exclusive triple). New diff fixture
-  `cross_type_eq.rb` covers cross-type, same-type
-  value-equality, and a `v == "ready"` guard idiom.
-  Byte-identical to CRuby.
-
-### Added
 - **`Object#class`, `Class#name` / `#to_s` / `#==` / `#!=`**.
   `obj.class` returns the Class associated with any receiver —
   for user instances it's the instance's stored class; for
@@ -423,27 +314,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `"abc".nil?` or `5.nil?` raised NoMethodError. Added a
   catch-all `(_, "nil?", [])` arm — matches CRuby's
   `Object#nil?` semantics.
-
-### Fixed
-- **Uncaught Ruby exceptions no longer kill the host process.**
-  `Vm::unwind_with_exception` called `std::process::exit(1)` when
-  no `rescue` handler matched in any frame — fine for the
-  rubyrs CLI, fatal for any embedded host that has work to do
-  after `eval` returns. Now uncaught exceptions surface as
-  `RubyError::Uncaught { class_name, message }` propagated
-  through the normal `Trap` path; embedders can pattern-match,
-  log, retry, or carry on. `format_trap` special-cases
-  `Uncaught` to print the Ruby exception class (e.g.
-  `(MyError)`) instead of the host-side tag, matching CRuby's
-  `script.rb:N:in '<main>': msg (ClassName)` format. The
-  rubyrs binary still prints + exits on `Trap` so CLI
-  behaviour is unchanged. Three new embed.rs tests lock
-  in the new contract: round-trip class_name + message, host
-  continues after Uncaught, format_trap output. Closes the
-  largest residual attack surface called out in
-  `docs/SECURITY.md`.
-
-### Added
 - **`docs/SECURITY.md`** (P2-15): trust model, configuration
   recipe for the semi-trusted profile, known attack surface
   with what each cap defends against, and an explicit
@@ -454,8 +324,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   back-pressure, HashMap order side channel, the
   `uncaught exception → process::exit(1)` gap). Cross-linked
   from the README.
-
-### Added
 - **Per-value byte cap** (P2-14c). New `Config::max_value_bytes:
   Option<usize>`. Individual `String` / `Array` / `Hash` values
   can't grow past `n` bytes of content. String size is byte
@@ -473,8 +341,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   surface the trap; the four callers (do_call, do_call_block,
   the two BinOpInt fallback paths) wrap the error via
   `Vm::trap`.
-
-### Added
 - **Interner cap** (P2-14b). New `Config::max_symbols:
   Option<usize>`. Runtime intern paths (currently `String#to_sym`)
   check the cap before adding a fresh symbol and trap with
@@ -498,53 +364,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   call re-anchors the clock so a host can reuse a `Runtime`
   across many short evaluations without inheriting a stale
   timer. CLI exposes the knob via `RUBYRS_DEADLINE_MS=N`.
-
-### Fixed
-- **`eval` no longer inherits leftover dispatch state from a
-  previous Trap.** A previous `eval` that ended in a Trap
-  (uncaught exception, fuel exhaustion, deadline hit) left its
-  frames, operand-stack residue, and pins on the `Vm`. The next
-  call would push a new entry frame on top, run, hit Return,
-  and fall back into the abandoned frame from the earlier call
-  — at best confusing, at worst running stale bytecode. Class
-  definitions and the heap legitimately persist across `eval`
-  calls (that's the embedding contract); the dispatch state
-  shouldn't. `Runtime::eval` now clears `frames`, `stack`,
-  `pinned`, and `break_signaled` at the start of every call.
-  Surfaced by the new `deadline_resets_between_eval_calls`
-  test — the existing fuel/heap/frame tests each used a single
-  eval per Runtime so the bug stayed hidden.
-
-### Changed
-- **`BlockHandle` now lives in the GC heap** (P2-13). `Value::Block`
-  changed from `Rc<BlockHandle>` to `ObjId`, and `HeapObj` gained
-  a `Block(BlockHandle)` variant. `Heap::collect` walks
-  `BlockHandle.captured` and `self_val` as children, putting
-  blocks on the same mark/sweep footing as `Array` / `Hash` /
-  `Range`. `Frame.block_arg` and every function that previously
-  took `Rc<BlockHandle>` (`invoke_block`, `invoke_method_with_block`,
-  the iterator drivers, `collection_call_block`) now take an
-  `ObjId`. Inline `block.clone()` Rc-bumps disappear — `ObjId`
-  is `Copy`. Iterator drivers (`iter_array_filter` etc.) and
-  every inline block-arm in `collection_call_block` now pin the
-  block alongside the source receiver so the GC's root walk
-  reaches it during the iteration. Without this, the existing
-  `pin_guard_balanced_when_block_raises_inside_iterator` test
-  would have caught a slot-reuse panic immediately.
-  Why this matters: with the `Rc<BlockHandle>` form, a block
-  that captured itself (e.g. callback-DSL `proc { p }` patterns
-  once `proc` / `lambda` are added — P3+) formed an Rc cycle
-  that the mark-sweep collector couldn't reach to break.
-  Eliminating that future hazard is the structural payoff.
-  Subset doesn't expose `proc` yet, so this is largely
-  preventive maintenance, but the iterator paths exercise the
-  new heap-block plumbing every test run. `heap.rs` panic
-  budget bumped from 9 to 10 (the new `heap.block(id)` accessor).
-  New regression test `blocks_are_gc_reclaimed_under_stress`
-  loops 200× over `[1,2,3].each { ... }` with stress-GC and a
-  `max_heap_objects: 50` cap, proving blocks get reclaimed.
-
-### Added
 - **`rescue ClassName => e` (class-filtered rescue)** and
   multiple `rescue` clauses per `begin/end` (P1-10). `RescueClause`
   in the AST gains `classes: Vec<String>` and `Expr::Begin.rescue`
@@ -568,18 +387,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   in `rescue`, `ResourceExhausted` un-catchability,
   single-class-only in multi-class rescue, `Foo::Bar` falling
   back to the trailing segment. Each pinned by a test.
-
-### Fixed
-- **ADR 0008 retraction**: the earlier draft promised that
-  `rescue Exception => e` would catch `ResourceExhausted`
-  after P1-10. It doesn't, and shouldn't — the resource trap
-  is a host-level `Trap`, not a Ruby-level `raise`, so it
-  bypasses `unwind_with_exception` entirely. The ADR and a
-  matching test
-  (`resource_exhausted_is_uncatchable_even_with_rescue_exception`)
-  now lock the actual contract in.
-
-### Added
 - **`docs/PANIC_AUDIT.md`** (P0-4): classification of every
   `panic!` / `.unwrap()` / `.expect(...)` in the rubyrs crate.
   Three buckets — 🟢 ICE (compiler-guaranteed invariant), 🟡
@@ -592,85 +399,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   recorded in `docs/PANIC_AUDIT.md`. Doc-comment occurrences
   (`///` / `//!` lines) are excluded. Direction is one-way:
   budgets may only ratchet down.
-
-### Fixed
-- **Unsupported AST nodes return `SyntaxError` instead of
-  panicking** (P0-4). Any Prism node outside the supported
-  subset (e.g. `case/when`, regex literals, lambdas) used to
-  hit `panic!("unsupported node: ...")` in `ast::tr`, tearing
-  down the host process. AST translation now records the
-  message on a thread-local error buffer and returns an
-  `Expr::Nil` placeholder; `Runtime::eval` checks the buffer
-  after `tr_with_errors` and returns a `Trap` with
-  `RubyError::SyntaxError` before compilation runs. With
-  rubund eventually evaluating gemspecs from rubygems.org —
-  arbitrary third-party Ruby — this was a denial-of-service
-  surface that had to close. New `embed.rs` test exercises
-  the case statement (currently unsupported) and asserts a
-  Trap, not a SIGABRT.
-
-### Changed
-- **GC mark walks children in place instead of cloning** (P0-3).
-  `Heap::collect`'s mark phase previously built a fresh
-  `Vec<Value>` per popped worklist entry by cloning the entire
-  `HeapObj::Array` / `HeapObj::Hash` / `HeapObj::Instance.ivars`
-  contents on every visit. On a heap whose largest object is one
-  big Array, that turned each full collection into quadratic
-  work and pushed stress-GC runs into wall-clock territory the
-  test suite would actually notice. Rewrote the loop to
-  split-borrow `self.slots` (read) against `self.marks` (write)
-  on disjoint fields and iterate children by reference — no
-  intermediate allocation, same mark/sweep semantics. The
-  external `visit_value` signature is unchanged so the Block
-  walk path (which still clones `BlockHandle.captured`) keeps
-  working until `BlockHandle` moves into the heap in P2-13.
-  Existing 1M-fizzbuzz benchmark is unaffected (~307ms steady)
-  because fizzbuzz isn't GC-bound; the win is on workloads with
-  many or large container objects.
-
-### Changed
-- **`Vm.pinned` is now managed by a `PinGuard` RAII type** (P0-2).
-  Native iterator drivers — Array/Hash/Range `#each` / `#map`,
-  `#each_with_index`, the Enumerable filter family
-  (`iter_array_filter` etc.), the aggregation family (`#inject`,
-  `#count`, `#sort_by`), and the `Class.new` allocator — used to
-  do `self.pinned.push(...); ...; ?; ...; self.pinned.pop();` by
-  hand. Once those bodies started using `?` for fuel traps and
-  host-fn errors, the pop could be skipped, leaving dead values
-  pinned. The GC then kept marking those values as live every
-  cycle — a slow leak that mostly only showed up under stress-GC.
-  Replaced every push/pop pair with `PinGuard::new(self)` plus
-  `g.pin(v)`; the guard's `Drop` pops exactly what was pinned, on
-  both the success and `?`-unwind paths. Added a `debug_assert!`
-  in `Runtime::eval` that the pinned-stack length is unchanged
-  across every call — release builds skip the check so a
-  regression doesn't crash production hosts. New regression test
-  `pin_guard_balanced_when_block_raises_inside_iterator` hammers
-  `[1,2,3].map { ... raise ... }` 50× under stress-GC to fire
-  the assertion on any leak.
-
-### Fixed
-- **`ResourceExhausted` can no longer be swallowed by `rescue => e`**
-  (P0-1). The preamble had `class ResourceExhausted < StandardError`,
-  which meant a bare `rescue` clause — CRuby-style shorthand for
-  `rescue StandardError => e` — could silently catch the resource
-  trap and keep burning fuel/heap. Two changes:
-  1. Preamble re-roots the kill switch directly under `Exception`,
-     alongside CRuby's `SystemExit` and `Interrupt`.
-  2. `RescueHandler` gains a `filter_class: Option<Rc<Class>>` field;
-     every `Op::PushRescue` populates it with `StandardError` (the
-     bare-rescue default), and `unwind_with_exception` now pops past
-     handlers whose filter doesn't match the raised exception's
-     class chain. `Op::PushEnsure` leaves the filter as `None`, so
-     `ensure` runs unconditionally — matching Ruby semantics.
-  Three new tests in `tests/embed.rs`: one proves a hostile
-  `begin/rescue/end` around `while true` no longer eats the trap,
-  one locks in that bare `rescue` still catches `raise "boom"` (i.e.
-  RuntimeError under StandardError), and one placeholder reserves
-  the contract that explicit `rescue Exception` will work once
-  class filtering lands (P1-10). ADR 0008 updated.
-
-### Added
 - **Hash extras + short-circuit `||` and `&&`** (P3-B-3). New
   `Hash` methods: `merge` (other's keys overwrite, ordering
   follows CRuby), `to_h` (identity), `to_a` (Array of `[k, v]`
@@ -687,20 +415,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   empty-collection edges, an invert-collision case, a chained
   `merge.each` pattern, and a `Tally` class that uses
   `(@counts[key] || 0) + 1` + `keys.sort` + method chaining.
-
-### Fixed
-- **GC root hole in `Hash#to_a`**. Each `[k, v]` pair is a fresh
-  heap Array; the loop accumulated them into a Rust-local Vec
-  while calling `maybe_gc` between iterations. Under stress-GC
-  that swept earlier pairs, the alloc allocator reused their
-  slots for later pairs, and the final outer Array could land
-  in a reused slot too — yielding a self-referential Array that
-  blew the stack inside `to_display`'s recursion. Fix: pin the
-  source Hash and every accumulated pair onto `Vm.pinned` for
-  the alloc window, pop on exit. Same pattern the iterator
-  drivers use.
-
-### Added
 - **Array combination & iteration extras** (P3-B-2). New
   no-block methods on `Array`: `reverse`, `uniq` (uses Ruby
   equality, preserves first-seen order), `compact` (drops nils),
@@ -721,8 +435,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `concat` vs `+`, a string-corpus pipeline
   (`text.split.uniq.sort`), and use inside a class. Byte-
   identical to CRuby.
-
-### Added
 - **Integer predicates + iteration + String basics** (P3-B-1).
   `Integer`: `even?`, `odd?`, `abs`, `zero?`, `positive?`,
   `negative?`, `succ` / `next`, `pred`, plus block-taking `upto`
@@ -740,8 +452,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   string interpolation, and edge cases like negative `abs`,
   `to_i` on garbage input, and `upto` with start > stop.
   Byte-identical to CRuby.
-
-### Added
 - **Enumerable aggregation: `inject` / `reduce`, `sum`, `count`,
   `min` / `max`, `sort`** (P3-A-3). `inject`/`reduce` support all
   three CRuby call shapes: block-only (first element seeds),
@@ -758,22 +468,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   (`@values.inject(0) { ... }`), Range#sum on 1..100 = 5050,
   empty-collection edges, and idioms like `select.sum` and
   `map.inject(:+)`. Byte-identical to CRuby.
-
-### Fixed
-- **GC root hole during `Class.new` arg drain**. Allocating an
-  Instance from `Class.new(args...)` first popped `args` off the
-  operand stack into a Rust local, then called `maybe_gc` before
-  allocating the instance. Under stress-GC any heap value in
-  `args` (a literal `Array`, `Hash`, etc.) was unreachable from
-  GC roots during that window and could be swept; the freshly
-  allocated Instance would then reuse the swept slot id, leaving
-  the caller's `args` pointing at the new Instance. The bug only
-  surfaced once aggregation tests exercised `Stats.new([…])
-  -> @values.inject(...)` under stress-GC. Fix: pin `args` onto
-  `Vm.pinned` around the alloc window in both `do_call` and
-  `do_call_block`. Same pattern as the existing iterator drivers.
-
-### Added
 - **Enumerable filtering: `select` / `reject` / `find` / `any?` /
   `all?` / `none?` / `include?`** across `Array`, `Hash`, and
   `Range` (P3-A-2). Block-taking variants share a single iterator
@@ -803,30 +497,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 - New diff fixture `range_basics.rb` exercises both inclusive and
   exclusive ranges, iteration, mapping, empty/inverted ranges,
   and Range usage inside a class method. Byte-identical to CRuby.
-
-### Changed
-- **Per-call-site method inline cache** (P1-B upgrade). The
-  single-slot cache from Tier1-1 is replaced with a per-site
-  cache: every `Op::Call` / `Op::CallNoRecv` / `Op::CallBlock` /
-  `Op::CallNoRecvBlock` carries a `u16` cache slot id assigned at
-  compile time, and `Vm.call_caches: Vec<CallCache>` is sized to
-  match. Lookups index directly by site, so call sites that
-  dispatch on different classes (polymorphic) no longer thrash
-  each other.
-  Invalidation: `Op::DefMethod` and `Op::DefClass` bump
-  `Vm.method_gen`; cache entries store the gen at fill time and
-  miss when it shifts. `lookup_method_uncached` is the fallback
-  for paths that shouldn't cache (e.g. `initialize` during
-  `Class.new`).
-  Microbench (vs the Tier1-1 single-slot baseline):
-    - fizzbuzz 1M:        327 ms → **322 ms** (1.76× → 1.72× of CRuby)
-    - Counter.inc × 1M:   153 ms → **148 ms** (1.43× → 1.37× of CRuby)
-  Monomorphic gains are small (single-slot was already hitting),
-  but the structural change matters for polymorphic dispatch (two
-  alternating call sites in a loop), which would have made
-  single-slot miss on every call.
-
-### Added
 - **Brewfile DSL demo + benchmark** (P2-A). New
   `examples/brewfile/` directory: a 50-line Brewfile-shaped Ruby
   script (`tap`, `brew`, `cask`, `mas`, plus a class definition
@@ -840,8 +510,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   doesn't help because most of CRuby's time goes to startup, not
   arithmetic). The product-niche benchmark.
 - README and `docs/BENCHMARKS.md` now lead with this number.
-
-### Added
 - **`return` / `break` / `next`** (P2-C-4). All three compile to
   the existing Op::Return frame-pop, with `Op::Break` adding a
   `Vm.break_signaled` flag check that iteration drivers
@@ -855,20 +523,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `break` without arg returning nil, `next` to skip an iteration
   of #each, `break` inside #map returning the break value, and
   `5.times { break i if i == 2 }`. Byte-identical to CRuby.
-
-### Fixed
-- **Block param shadows outer scope correctly**. Discovered by the
-  new control_flow fixture: when a block param's name collided
-  with a local in the enclosing scope (e.g. an outer `x` then
-  `each { |x| ... }`), `compile_block` was reusing the outer
-  scope's slot for the block param while still emitting a
-  param_start above it, leaving the block reading garbage. Block
-  params now always allocate fresh slots via a new
-  `define_local_slot` (vs the existing `local_slot` which
-  reuses), shadowing the outer binding to match modern CRuby's
-  "block local variable" semantics.
-
-### Added
 - **`ensure` clause** (P2-C-3). `begin ... ensure ... end` now runs
   the ensure body on both the normal-exit path and the exception
   path. The compiler emits a `PushEnsure(handler)` before the
@@ -890,8 +544,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   identical to CRuby.
 - `tests/fixtures/exception.rb` updated to use `e.message` since
   `raise "x"` now produces an Exception instance, not a String.
-
-### Added
 - **Built-in exception class hierarchy** (P2-C-2). `Runtime::new`
   now `eval`s a small preamble that defines `Exception`,
   `StandardError`, `RuntimeError`, `NoMethodError`,
@@ -913,8 +565,6 @@ ivar. Our preamble-based implementation reads `@message`, so a
 user override of `initialize` that sets `@message` directly is
 visible to `message` in rubyrs but not in CRuby. Documented;
 won't be fixed until we have a clear use case demanding parity.
-
-### Added
 - **Class inheritance** (P2-C-1). `class Foo < Bar` is now parsed
   and a `Class` stores its superclass (`Rc<Class>`). Method lookup
   walks the chain via the existing `lookup_method_cached` helper
@@ -926,8 +576,159 @@ won't be fixed until we have a clear use case demanding parity.
 - New diff fixture `inheritance.rb` exercises three-level chain
   (Animal → Dog → Puppy) with inherited initialize, inherited
   instance methods, and class-own methods. Byte-identical to CRuby.
+- **CRuby differential testing harness** (P2-B-1). New
+  `tests/diff_cruby.rs` runs each `tests/diff/*.rb` under both rubyrs
+  and the system `ruby` binary; stdout must match byte-for-byte. CI
+  pins Ruby 3.4 via `ruby/setup-ruby@v1` so the comparison is
+  reproducible. Seeded with 10 fixtures (integer/string/array/hash/
+  block/class/symbol/interpolation/rescue/fizzbuzz). Running the
+  fixtures immediately caught a parser gap (`ParenthesesNode` was
+  unsupported); fixed in the same commit.
+- **Resource caps for untrusted scripts** (P1-D). `Config` gains
+  three optional knobs: `fuel: Option<u64>` (per-op limit, enforced
+  inside `dispatch_until` so block bodies can't bypass it),
+  `max_heap_objects: Option<usize>` (live Instance/Array/Hash
+  count, checked after `maybe_gc`), and `max_frames: Option<usize>`
+  (frame stack depth, checked before every `frames.push`). Hitting
+  any returns `RubyError::ResourceExhausted`. Defaults are `None`
+  for backward-compat; embedders running untrusted DSLs should set
+  all three.
+- CLI env vars: `RUBYRS_FUEL`, `RUBYRS_MAX_OBJECTS`,
+  `RUBYRS_MAX_FRAMES`.
+- 5 new `tests/embed.rs` tests covering fuel exhaustion in a tight
+  loop, fuel inside a block, unlimited-fuel happy path, heap-cap
+  with retained allocations, and frame-cap with deep recursion.
+- **Host embedding API** (P1-C). New `src/lib.rs` exposes `Runtime`,
+  `Value`, `Trap`, `RubyError`, etc. as a public Rust API:
+  - `Runtime::new()` / `with_config(Config)`
+  - `rt.eval(source, filename)` and `rt.eval_file(path)` —
+    incremental: class/method defs persist across calls
+  - `rt.register_fn(name, |args| ...)` — host functions callable
+    from Ruby
+  - `rt.set_stdout(Box<dyn Write>)` — capture/redirect `puts`/`print`
+  - `rt.format_trap(&trap)` — CRuby-style backtrace formatting
+- `examples/embed.rs` demonstrating all four capabilities
+- `tests/embed.rs` locking down the API surface (7 tests)
+- ADR 0007: Host embedding API design
+- ADR 0006: Global string interner with SymId.
+- **CRuby-style error format with backtrace** (P0-B-3). Trap output
+  now prints `file:line:in 'method': msg (Class)` plus one
+  `	from file:line:in 'method'` line per frame, structurally
+  matching CRuby. File and line resolve against the source via
+  `error::line_col`.
+- New `tests/fixtures/errors/` directory + `run_error_fixture()` in
+  the integration harness. Each `.rb` has an `.expected_err` golden
+  for stderr; the test expects a non-zero exit. Seeded with
+  `nomethod`, `wrong_args`, `yield_no_block`.
+- `STRESS_GC=1` env flag forces a full collection on every potential
+  GC point. Wired into CI as a second job.
+- ADR 0005: pinned stack for native-driven loops.
+- Symbol literal (`:foo`) and shorthand hash key syntax (`{name: "x"}`)
+- String interpolation: `"hello #{name}"`, mixed with method calls and math
+- `Nil#to_s` / `inspect` / `nil?`, `Bool#to_s` to round out built-ins
+  needed by interpolation
+- GitHub Actions CI: Linux + macOS, build + test on every push and PR
+- LICENSE files: dual MIT OR Apache-2.0
+- Crate metadata in `Cargo.toml` (description, license, repository)
+- `docs/` directory with structured project documentation
+- Architecture Decision Records (`docs/adr/`)
+- `CHANGELOG.md` and `CONTRIBUTING.md`
 
 ### Changed
+- **`[profile.release] lto = "thin"`** in `Cargo.toml`. The
+  CRuby-mirrored vm.rs split moved hot dispatch / opcode /
+  lookup code into separate compilation units; without LTO,
+  cross-module calls couldn't inline, costing ~7% on
+  fizzbuzz 1M (349 ms → 372 ms, well outside the ~6 ms σ).
+  Thin LTO recovers the regression to within noise (350 ms)
+  and modestly improves the metaprog-bench workloads
+  (`perf/baselines.tsv`) too. Release-build wall time
+  increases by ~3 s; dev and test builds are unaffected.
+  Verified 2026-05-25 with hyperfine 15-run on
+  `crates/rubyrs/benches/fizzbuzz_1m.rb`.
+- **`BlockHandle` now lives in the GC heap** (P2-13). `Value::Block`
+  changed from `Rc<BlockHandle>` to `ObjId`, and `HeapObj` gained
+  a `Block(BlockHandle)` variant. `Heap::collect` walks
+  `BlockHandle.captured` and `self_val` as children, putting
+  blocks on the same mark/sweep footing as `Array` / `Hash` /
+  `Range`. `Frame.block_arg` and every function that previously
+  took `Rc<BlockHandle>` (`invoke_block`, `invoke_method_with_block`,
+  the iterator drivers, `collection_call_block`) now take an
+  `ObjId`. Inline `block.clone()` Rc-bumps disappear — `ObjId`
+  is `Copy`. Iterator drivers (`iter_array_filter` etc.) and
+  every inline block-arm in `collection_call_block` now pin the
+  block alongside the source receiver so the GC's root walk
+  reaches it during the iteration. Without this, the existing
+  `pin_guard_balanced_when_block_raises_inside_iterator` test
+  would have caught a slot-reuse panic immediately.
+  Why this matters: with the `Rc<BlockHandle>` form, a block
+  that captured itself (e.g. callback-DSL `proc { p }` patterns
+  once `proc` / `lambda` are added — P3+) formed an Rc cycle
+  that the mark-sweep collector couldn't reach to break.
+  Eliminating that future hazard is the structural payoff.
+  Subset doesn't expose `proc` yet, so this is largely
+  preventive maintenance, but the iterator paths exercise the
+  new heap-block plumbing every test run. `heap.rs` panic
+  budget bumped from 9 to 10 (the new `heap.block(id)` accessor).
+  New regression test `blocks_are_gc_reclaimed_under_stress`
+  loops 200× over `[1,2,3].each { ... }` with stress-GC and a
+  `max_heap_objects: 50` cap, proving blocks get reclaimed.
+- **GC mark walks children in place instead of cloning** (P0-3).
+  `Heap::collect`'s mark phase previously built a fresh
+  `Vec<Value>` per popped worklist entry by cloning the entire
+  `HeapObj::Array` / `HeapObj::Hash` / `HeapObj::Instance.ivars`
+  contents on every visit. On a heap whose largest object is one
+  big Array, that turned each full collection into quadratic
+  work and pushed stress-GC runs into wall-clock territory the
+  test suite would actually notice. Rewrote the loop to
+  split-borrow `self.slots` (read) against `self.marks` (write)
+  on disjoint fields and iterate children by reference — no
+  intermediate allocation, same mark/sweep semantics. The
+  external `visit_value` signature is unchanged so the Block
+  walk path (which still clones `BlockHandle.captured`) keeps
+  working until `BlockHandle` moves into the heap in P2-13.
+  Existing 1M-fizzbuzz benchmark is unaffected (~307ms steady)
+  because fizzbuzz isn't GC-bound; the win is on workloads with
+  many or large container objects.
+- **`Vm.pinned` is now managed by a `PinGuard` RAII type** (P0-2).
+  Native iterator drivers — Array/Hash/Range `#each` / `#map`,
+  `#each_with_index`, the Enumerable filter family
+  (`iter_array_filter` etc.), the aggregation family (`#inject`,
+  `#count`, `#sort_by`), and the `Class.new` allocator — used to
+  do `self.pinned.push(...); ...; ?; ...; self.pinned.pop();` by
+  hand. Once those bodies started using `?` for fuel traps and
+  host-fn errors, the pop could be skipped, leaving dead values
+  pinned. The GC then kept marking those values as live every
+  cycle — a slow leak that mostly only showed up under stress-GC.
+  Replaced every push/pop pair with `PinGuard::new(self)` plus
+  `g.pin(v)`; the guard's `Drop` pops exactly what was pinned, on
+  both the success and `?`-unwind paths. Added a `debug_assert!`
+  in `Runtime::eval` that the pinned-stack length is unchanged
+  across every call — release builds skip the check so a
+  regression doesn't crash production hosts. New regression test
+  `pin_guard_balanced_when_block_raises_inside_iterator` hammers
+  `[1,2,3].map { ... raise ... }` 50× under stress-GC to fire
+  the assertion on any leak.
+- **Per-call-site method inline cache** (P1-B upgrade). The
+  single-slot cache from Tier1-1 is replaced with a per-site
+  cache: every `Op::Call` / `Op::CallNoRecv` / `Op::CallBlock` /
+  `Op::CallNoRecvBlock` carries a `u16` cache slot id assigned at
+  compile time, and `Vm.call_caches: Vec<CallCache>` is sized to
+  match. Lookups index directly by site, so call sites that
+  dispatch on different classes (polymorphic) no longer thrash
+  each other.
+  Invalidation: `Op::DefMethod` and `Op::DefClass` bump
+  `Vm.method_gen`; cache entries store the gen at fill time and
+  miss when it shifts. `lookup_method_uncached` is the fallback
+  for paths that shouldn't cache (e.g. `initialize` during
+  `Class.new`).
+  Microbench (vs the Tier1-1 single-slot baseline):
+    - fizzbuzz 1M:        327 ms → **322 ms** (1.76× → 1.72× of CRuby)
+    - Counter.inc × 1M:   153 ms → **148 ms** (1.43× → 1.37× of CRuby)
+  Monomorphic gains are small (single-slot was already hitting),
+  but the structural change matters for polymorphic dispatch (two
+  alternating call sites in a loop), which would have made
+  single-slot miss on every call.
 - **Statement-position avoids redundant `Dup`/`Pop`** (Tier1-5).
   `compile_body` now distinguishes the last expression of a body
   (whose value is the body's value) from intermediate ones (whose
@@ -975,52 +776,8 @@ won't be fixed until we have a clear use case demanding parity.
   (method-dispatch-dominated): 203 ms vs CRuby's 108 ms — we
   are now within **1.87×** of CRuby's interpreter on this shape
   of workload.
-
-### Added
-- **CRuby differential testing harness** (P2-B-1). New
-  `tests/diff_cruby.rs` runs each `tests/diff/*.rb` under both rubyrs
-  and the system `ruby` binary; stdout must match byte-for-byte. CI
-  pins Ruby 3.4 via `ruby/setup-ruby@v1` so the comparison is
-  reproducible. Seeded with 10 fixtures (integer/string/array/hash/
-  block/class/symbol/interpolation/rescue/fizzbuzz). Running the
-  fixtures immediately caught a parser gap (`ParenthesesNode` was
-  unsupported); fixed in the same commit.
-
-### Added
-- **Resource caps for untrusted scripts** (P1-D). `Config` gains
-  three optional knobs: `fuel: Option<u64>` (per-op limit, enforced
-  inside `dispatch_until` so block bodies can't bypass it),
-  `max_heap_objects: Option<usize>` (live Instance/Array/Hash
-  count, checked after `maybe_gc`), and `max_frames: Option<usize>`
-  (frame stack depth, checked before every `frames.push`). Hitting
-  any returns `RubyError::ResourceExhausted`. Defaults are `None`
-  for backward-compat; embedders running untrusted DSLs should set
-  all three.
-- CLI env vars: `RUBYRS_FUEL`, `RUBYRS_MAX_OBJECTS`,
-  `RUBYRS_MAX_FRAMES`.
-- 5 new `tests/embed.rs` tests covering fuel exhaustion in a tight
-  loop, fuel inside a block, unlimited-fuel happy path, heap-cap
-  with retained allocations, and frame-cap with deep recursion.
-
-### Added
-- **Host embedding API** (P1-C). New `src/lib.rs` exposes `Runtime`,
-  `Value`, `Trap`, `RubyError`, etc. as a public Rust API:
-  - `Runtime::new()` / `with_config(Config)`
-  - `rt.eval(source, filename)` and `rt.eval_file(path)` —
-    incremental: class/method defs persist across calls
-  - `rt.register_fn(name, |args| ...)` — host functions callable
-    from Ruby
-  - `rt.set_stdout(Box<dyn Write>)` — capture/redirect `puts`/`print`
-  - `rt.format_trap(&trap)` — CRuby-style backtrace formatting
-- `examples/embed.rs` demonstrating all four capabilities
-- `tests/embed.rs` locking down the API surface (7 tests)
-- ADR 0007: Host embedding API design
-
-### Changed
 - `src/main.rs` shrinks to a 20-line CLI wrapper around `Runtime`.
   Behaviour is identical to before.
-
-### Changed
 - **Global string interner** (P1-B). Method names, ivar names, class
   names, and string literals all live in a single Vm-owned `Interner`
   and are referenced by `SymId(u32)`. `Proto.strings` is gone;
@@ -1030,22 +787,6 @@ won't be fixed until we have a clear use case demanding parity.
   single u32 compare; method dispatch hashes on a tight key.
   Microbench: 1M fizzbuzz 484 ms → **408 ms (1.18× faster)**;
   distance to CRuby + YJIT 3.44× → 2.82×.
-
-### Added
-- ADR 0006: Global string interner with SymId.
-
-### Added
-- **CRuby-style error format with backtrace** (P0-B-3). Trap output
-  now prints `file:line:in 'method': msg (Class)` plus one
-  `\tfrom file:line:in 'method'` line per frame, structurally
-  matching CRuby. File and line resolve against the source via
-  `error::line_col`.
-- New `tests/fixtures/errors/` directory + `run_error_fixture()` in
-  the integration harness. Each `.rb` has an `.expected_err` golden
-  for stderr; the test expects a non-zero exit. Seeded with
-  `nomethod`, `wrong_args`, `yield_no_block`.
-
-### Changed
 - **User errors no longer panic the host process** (P0-B-2). Undefined
   method, wrong arity, and `yield` outside a block now build a `Trap`
   that bubbles up through every dispatch path (`Result<_, Trap>`
@@ -1054,7 +795,202 @@ won't be fixed until we have a clear use case demanding parity.
   dispatching, stack underflow) remain `panic!` but are now marked
   `"ICE: ..."` to make the distinction explicit when one fires.
 
+### Fixed
+- **Integer literals no longer truncate to i32.** `ast::tr`
+  was reading `IntegerNode::value()` through Prism's
+  `TryInto<i32>` and silently defaulting to `0` on overflow,
+  so any literal past ~2.1 billion (decimal or hex) became
+  `0`. Hex `0x0102030405060708`, decimal `72623859790382856`,
+  and similar all parsed as zero — the bug surfaced while
+  shipping `Array#pack("Q")`. Fixed by reading through
+  Prism's `to_u32_digits()` (LSB-first u32 chunks + sign)
+  and rebuilding a full i64. Values beyond i64 saturate to
+  `i64::MIN` / `i64::MAX` (the subset doesn't promote to
+  BigInt — documented in SUBSET.md). New diff fixture
+  `integer_literal_i64.rb` pins the full i64 range plus a
+  pack/unpack round-trip on the natural 8-byte demo value.
+
+- **`return` from inside a block now correctly exits the
+  enclosing method.** Previously, every `return` in the program
+  compiled to `Op::ReturnMethod` (non-local), which broke the
+  case where a helper method called from inside a block did
+  `return value` — the value escaped out through the block all
+  the way to the helper's caller, instead of just exiting the
+  helper. The compiler now distinguishes method-body `return`
+  (local; `Op::Return`) from block-body `return` (non-local;
+  `Op::ReturnMethod`) via a new `is_method_body` flag on
+  ProtoBuilder, which `compile_block` deliberately resets to
+  `false` even though it inherits the parent's `method_name`
+  for `super`'s benefit. New diff fixture
+  `nonlocal_return.rb` pins both directions: block-level
+  `return` exits the enclosing method (`find_first_even`-style
+  short-circuit) and method-local `return` from inside a
+  helper called by a block stays local (the block keeps
+  iterating). Byte-identical to CRuby. The older "Divergences"
+  entry in `docs/SUBSET.md` should be removed in a follow-up.
+- **Cross-type `==` / `!=` no longer raises NoMethodError.**
+  `"x" == nil`, `nil == :foo`, `5 == "5"`, `[] == ""` — every
+  cross-type compare used to crash with `undefined method '==`
+  for String` because `primitive_call` only had same-type arms.
+  CRuby's `Object#==` defaults to identity (returning false
+  for any cross-type pair); we now do the same via a universal
+  fallback in `do_call`: after all the type-specific arms
+  declined, the dispatcher answers `==` / `!=` via the
+  existing `ruby_eq` helper, which returns false for any pair
+  whose types don't match. As a side-benefit, `Hash == Hash`
+  and `Range == Range` now work — `ruby_eq` gained
+  order-insensitive Hash equality (O(n*m); good enough until
+  P3-class hash-keying lands) and Range equality
+  (begin/end/exclusive triple). New diff fixture
+  `cross_type_eq.rb` covers cross-type, same-type
+  value-equality, and a `v == "ready"` guard idiom.
+  Byte-identical to CRuby.
+- **Uncaught Ruby exceptions no longer kill the host process.**
+  `Vm::unwind_with_exception` called `std::process::exit(1)` when
+  no `rescue` handler matched in any frame — fine for the
+  rubyrs CLI, fatal for any embedded host that has work to do
+  after `eval` returns. Now uncaught exceptions surface as
+  `RubyError::Uncaught { class_name, message }` propagated
+  through the normal `Trap` path; embedders can pattern-match,
+  log, retry, or carry on. `format_trap` special-cases
+  `Uncaught` to print the Ruby exception class (e.g.
+  `(MyError)`) instead of the host-side tag, matching CRuby's
+  `script.rb:N:in '<main>': msg (ClassName)` format. The
+  rubyrs binary still prints + exits on `Trap` so CLI
+  behaviour is unchanged. Three new embed.rs tests lock
+  in the new contract: round-trip class_name + message, host
+  continues after Uncaught, format_trap output. Closes the
+  largest residual attack surface called out in
+  `docs/SECURITY.md`.
+- **`eval` no longer inherits leftover dispatch state from a
+  previous Trap.** A previous `eval` that ended in a Trap
+  (uncaught exception, fuel exhaustion, deadline hit) left its
+  frames, operand-stack residue, and pins on the `Vm`. The next
+  call would push a new entry frame on top, run, hit Return,
+  and fall back into the abandoned frame from the earlier call
+  — at best confusing, at worst running stale bytecode. Class
+  definitions and the heap legitimately persist across `eval`
+  calls (that's the embedding contract); the dispatch state
+  shouldn't. `Runtime::eval` now clears `frames`, `stack`,
+  `pinned`, and `break_signaled` at the start of every call.
+  Surfaced by the new `deadline_resets_between_eval_calls`
+  test — the existing fuel/heap/frame tests each used a single
+  eval per Runtime so the bug stayed hidden.
+- **ADR 0008 retraction**: the earlier draft promised that
+  `rescue Exception => e` would catch `ResourceExhausted`
+  after P1-10. It doesn't, and shouldn't — the resource trap
+  is a host-level `Trap`, not a Ruby-level `raise`, so it
+  bypasses `unwind_with_exception` entirely. The ADR and a
+  matching test
+  (`resource_exhausted_is_uncatchable_even_with_rescue_exception`)
+  now lock the actual contract in.
+- **Unsupported AST nodes return `SyntaxError` instead of
+  panicking** (P0-4). Any Prism node outside the supported
+  subset (e.g. `case/when`, regex literals, lambdas) used to
+  hit `panic!("unsupported node: ...")` in `ast::tr`, tearing
+  down the host process. AST translation now records the
+  message on a thread-local error buffer and returns an
+  `Expr::Nil` placeholder; `Runtime::eval` checks the buffer
+  after `tr_with_errors` and returns a `Trap` with
+  `RubyError::SyntaxError` before compilation runs. With
+  rubund eventually evaluating gemspecs from rubygems.org —
+  arbitrary third-party Ruby — this was a denial-of-service
+  surface that had to close. New `embed.rs` test exercises
+  the case statement (currently unsupported) and asserts a
+  Trap, not a SIGABRT.
+- **`ResourceExhausted` can no longer be swallowed by `rescue => e`**
+  (P0-1). The preamble had `class ResourceExhausted < StandardError`,
+  which meant a bare `rescue` clause — CRuby-style shorthand for
+  `rescue StandardError => e` — could silently catch the resource
+  trap and keep burning fuel/heap. Two changes:
+  1. Preamble re-roots the kill switch directly under `Exception`,
+     alongside CRuby's `SystemExit` and `Interrupt`.
+  2. `RescueHandler` gains a `filter_class: Option<Rc<Class>>` field;
+     every `Op::PushRescue` populates it with `StandardError` (the
+     bare-rescue default), and `unwind_with_exception` now pops past
+     handlers whose filter doesn't match the raised exception's
+     class chain. `Op::PushEnsure` leaves the filter as `None`, so
+     `ensure` runs unconditionally — matching Ruby semantics.
+  Three new tests in `tests/embed.rs`: one proves a hostile
+  `begin/rescue/end` around `while true` no longer eats the trap,
+  one locks in that bare `rescue` still catches `raise "boom"` (i.e.
+  RuntimeError under StandardError), and one placeholder reserves
+  the contract that explicit `rescue Exception` will work once
+  class filtering lands (P1-10). ADR 0008 updated.
+- **GC root hole in `Hash#to_a`**. Each `[k, v]` pair is a fresh
+  heap Array; the loop accumulated them into a Rust-local Vec
+  while calling `maybe_gc` between iterations. Under stress-GC
+  that swept earlier pairs, the alloc allocator reused their
+  slots for later pairs, and the final outer Array could land
+  in a reused slot too — yielding a self-referential Array that
+  blew the stack inside `to_display`'s recursion. Fix: pin the
+  source Hash and every accumulated pair onto `Vm.pinned` for
+  the alloc window, pop on exit. Same pattern the iterator
+  drivers use.
+- **GC root hole during `Class.new` arg drain**. Allocating an
+  Instance from `Class.new(args...)` first popped `args` off the
+  operand stack into a Rust local, then called `maybe_gc` before
+  allocating the instance. Under stress-GC any heap value in
+  `args` (a literal `Array`, `Hash`, etc.) was unreachable from
+  GC roots during that window and could be swept; the freshly
+  allocated Instance would then reuse the swept slot id, leaving
+  the caller's `args` pointing at the new Instance. The bug only
+  surfaced once aggregation tests exercised `Stats.new([…])
+  -> @values.inject(...)` under stress-GC. Fix: pin `args` onto
+  `Vm.pinned` around the alloc window in both `do_call` and
+  `do_call_block`. Same pattern as the existing iterator drivers.
+- **Block param shadows outer scope correctly**. Discovered by the
+  new control_flow fixture: when a block param's name collided
+  with a local in the enclosing scope (e.g. an outer `x` then
+  `each { |x| ... }`), `compile_block` was reusing the outer
+  scope's slot for the block param while still emitting a
+  param_start above it, leaving the block reading garbage. Block
+  params now always allocate fresh slots via a new
+  `define_local_slot` (vs the existing `local_slot` which
+  reuses), shadowing the outer binding to match modern CRuby's
+  "block local variable" semantics.
+- **GC root hole in native-driven iterators** (P0-A). `Array#map`,
+  `Array#each`, and `Hash#each` accumulated state in Rust-local `Vec`s
+  that weren't visible to the mark phase; a sufficiently large `map`
+  could read use-after-free objects. Now uses an explicit `Vm.pinned`
+  root list. `STRESS_GC=1 cargo test` exercises this in CI.
+
 ### Internal
+- **CRuby-mirrored `vm.rs` split.** The 6593-line `vm.rs` is
+  split into per-type submodules under `crates/rubyrs/src/vm/`,
+  mirroring CRuby's file layout so "where does method X live?"
+  follows the same intuition as `string.c` / `array.c` / `hash.c`.
+  Behaviour-preserving moves only; every step kept the 79
+  `diff_cruby` fixtures byte-identical to CRuby. Modules now in
+  place (with their CRuby analogue):
+    - `vm/sprintf.rs` — sprintf.c (`ruby_sprintf` + width/prec parser)
+    - `vm/numeric.rs` — numeric.c (Int/Float primitives)
+    - `vm/string.rs` — string.c (String primitives, Regex shims)
+    - `vm/array.rs` — array.c (no-block Array methods)
+    - `vm/hash.rs` + `vm/range.rs` — hash.c / range.c
+    - `vm/iter.rs` — enum.c (block-form Enumerable filter family,
+      `iter_*_filter`, `collection_call_block`)
+    - `vm/kernel.rs` — object.c Kernel arms (`puts` / `p` /
+      `Integer()` / `Float()` / …)
+    - `vm/fileops.rs` — file.c (`File.read` / `File.exist?` …)
+    - `vm/raise.rs` — eval.c / eval_error.c (`normalize_exception`,
+      `trap_to_exception`, `unwind_with_exception`)
+    - `vm/cext.rs` — internal/value.h + vm_eval.c
+      (rb_funcallv callback installation, handle ↔ Value
+      translation, `cext_dispatch`)
+    - `vm/dispatch.rs` — vm_eval.c / vm_insnhelper.c (`do_call`,
+      `do_call_block`, `invoke_method`, `invoke_method_with_block`,
+      `invoke_block`, `cext_invoke_method`, `try_method_missing`)
+    - `vm/step.rs` — vm_exec.c (`dispatch`, `dispatch_until`,
+      the per-opcode `step` match)
+  Net effect: `vm.rs` from 6593 → ~440 lines after the
+  follow-up extractions of `lookup.rs`, `gc.rs`, `primitive.rs`,
+  and `util.rs` (Vm struct + Frame/PinGuard/RescueHandler +
+  cext-reentrance thread-local). Perf cost: cross-module
+  boundaries cost the inlining the single-file version was
+  getting for free (~7% on the fizzbuzz 1M microbench);
+  recovered by switching `[profile.release]` to `lto = "thin"`
+  — see the matching CHANGELOG entry below.
 - **Error / Span infrastructure** (P0-B-1): new `src/error.rs` with
   `Span` (byte offset into source), `RubyError` (closed set covering
   SyntaxError / NoMethodError / ArgumentError / TypeError / RuntimeError
@@ -1075,34 +1011,9 @@ won't be fixed until we have a clear use case demanding parity.
   this is a structural correctness change rather than a measurable
   speedup. Future Op variants must remain POD or carry a `SymId` /
   similar index instead of an `Rc<str>`.
-
-### Fixed
-- **GC root hole in native-driven iterators** (P0-A). `Array#map`,
-  `Array#each`, and `Hash#each` accumulated state in Rust-local `Vec`s
-  that weren't visible to the mark phase; a sufficiently large `map`
-  could read use-after-free objects. Now uses an explicit `Vm.pinned`
-  root list. `STRESS_GC=1 cargo test` exercises this in CI.
-
-### Added
-- `STRESS_GC=1` env flag forces a full collection on every potential
-  GC point. Wired into CI as a second job.
-- ADR 0005: pinned stack for native-driven loops.
-- Symbol literal (`:foo`) and shorthand hash key syntax (`{name: "x"}`)
-- String interpolation: `"hello #{name}"`, mixed with method calls and math
-- `Nil#to_s` / `inspect` / `nil?`, `Bool#to_s` to round out built-ins
-  needed by interpolation
-- GitHub Actions CI: Linux + macOS, build + test on every push and PR
-- LICENSE files: dual MIT OR Apache-2.0
-- Crate metadata in `Cargo.toml` (description, license, repository)
-- `docs/` directory with structured project documentation
-- Architecture Decision Records (`docs/adr/`)
-- `CHANGELOG.md` and `CONTRIBUTING.md`
-
-### Internal
 - Specialised `Op::BinOp(BinOpKind)` for `+ - * / % == != < <= > >=` —
   Int+Int fast path avoids generic method dispatch
 - 1M-fizzbuzz: 0.67 s → 0.44 s (2.3× of CRuby's interpreter)
-
 ## [0.0.x — development]
 
 Initial PoC and milestones leading up to this point. All work pre-tag is
