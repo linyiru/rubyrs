@@ -82,6 +82,17 @@ begin
 rescue ArgumentError => e
   puts "rescued: #{{e.message}}"
 end
+
+# 5. Regressions from PR #27 code-review findings — these inputs
+#    used to silently round-trip to wrong values; now they raise.
+%w[+1 99999999999999999999 nullable].each do |bad|
+  begin
+    MiniJson.parse(bad)
+    puts "fail: #{{bad.inspect}} should have raised"
+  rescue ArgumentError
+    puts "rescued strict: #{{bad.inspect}}"
+  end
+end
 "#,
             bundle_no_ext.display()
         ),
@@ -109,6 +120,9 @@ end
 [1,2,\"x\"]
 {\"k\":42}
 rescued: unexpected end of input
+rescued strict: \"+1\"
+rescued strict: \"99999999999999999999\"
+rescued strict: \"nullable\"
 ";
 
     assert_eq!(

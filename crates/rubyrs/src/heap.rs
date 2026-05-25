@@ -222,10 +222,17 @@ impl Heap {
     /// `#[allow(dead_code)]` silenced the warning on every
     /// target, defeating the panic-budget-style discipline of
     /// catching dead host code).
+    /// Non-panicking TypedData accessor for the rb_check_typeddata
+    /// callback path. CRuby's rb_check_typeddata raises TypeError
+    /// when the slot isn't TypedData OR the descriptor doesn't
+    /// match; this fn lets the cext bridge inspect the slot and
+    /// rb_raise without going through the panicking accessor —
+    /// closes PR #27 review finding #1 (Counter.new.bump aborting
+    /// the process when the C ext expects a TypedData but the
+    /// generic `.new` path produced a plain Instance).
     #[cfg_attr(target_os = "wasi", allow(dead_code))]
-    pub(crate) fn typed_data(&self, id: ObjId) -> &TypedDataObj {
-        if let HeapObj::TypedData(d) = self.get(id) { d }
-        else { panic!("ICE: heap slot is not a TypedData") }
+    pub(crate) fn try_typed_data(&self, id: ObjId) -> Option<&TypedDataObj> {
+        if let HeapObj::TypedData(d) = self.get(id) { Some(d) } else { None }
     }
     pub(crate) fn should_gc(&self) -> bool { self.live_count >= self.next_gc }
 

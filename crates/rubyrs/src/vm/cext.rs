@@ -30,6 +30,16 @@ use crate::value::{Class, Value};
 
 use super::{PinGuard, Vm};
 
+// `rubyrs_jmp_raise` from c/setjmp_shim.c. Used by the
+// rb_check_typeddata callback to convert a slot-type mismatch
+// (review finding #1 on PR #27) into a Ruby-catchable
+// rb_eTypeError instead of panicking the process. The
+// `noreturn` lifetime contract matches the C side: it longjmps
+// to the topmost setjmp installed by `rubyrs_jmp_invoke`.
+unsafe extern "C" {
+    fn rubyrs_jmp_raise(class_id: u64, msg: *const std::ffi::c_char) -> !;
+}
+
 fn current_vm_ptr() -> *mut Vm {
     CURRENT_VM_PTR.with(|c| c.get())
 }
@@ -579,25 +589,54 @@ pub(crate) fn cext_dispatch(
                     st.intern(rubyrs_cext::CValue::HeapRef(id.0))
                 })
             }),
-            Box::new(move |obj_h, expected_type| {
+            std::rc::Rc::new(move |obj_h, expected_type| {
                 // SAFETY: same vm_ptr as above; immutable read here.
                 let vm: &Vm = &*vm_ptr;
-                // Resolve handle → HeapRef ObjId → typed_data slot.
-                // Pointer-identity check on type descriptor; mismatch
-                // is a programmer error in the cext (wrong descriptor
-                // passed to TypedData_Get_Struct). Spike collapses to
-                // panic; converting to a rb_eTypeError raise is
-                // straightforward L3-B.1 follow-up once we wire it.
+                //
+                // Three failure shapes, all surfaced as a Ruby-catchable
+                // TypeError via rb_raise → longjmp (closes review #1
+                // on PR #27 — the previous panicking shape aborted the
+                // process when user Ruby did `Counter.new.bump`, i.e.
+                // got a non-TypedData receiver to a method that
+                // expected one):
+                //
+                //   1. Handle doesn't refer to an Object at all (e.g.
+                //      a Nil / Int / Str crossed the boundary as the
+                //      receiver — should be impossible from dispatch.rs
+                //      but the FFI surface accepts arbitrary u64s).
+                //   2. ObjId resolves to a non-TypedData slot — this is
+                //      the `Counter.new.bump` case: generic .new
+                //      allocates HeapObj::Instance; user expected
+                //      HeapObj::TypedData.
+                //   3. ObjId resolves to TypedData but the descriptor
+                //      pointer doesn't match — wrong cext type passed
+                //      to TypedData_Get_Struct.
                 let cvalue = rubyrs_cext::with_state(|st| st.resolve(obj_h).clone());
                 let id = match cvalue {
                     rubyrs_cext::CValue::HeapRef(n) => crate::value::ObjId(n),
-                    other => panic!(
-                        "ICE: rb_check_typeddata: handle does not refer \
-                         to a TypedData (got {:?})",
-                        other
-                    ),
+                    _ => {
+                        // Static C string (no allocation needed); raise
+                        // via the longjmp shim. The msg matches CRuby's
+                        // wording for the same condition. The enclosing
+                        // closure is defined inside cext_dispatch's
+                        // outer `unsafe` block, so the deref doesn't
+                        // need its own (Rust rule for closure-local
+                        // unsafe inheritance).
+                        rubyrs_jmp_raise(
+                            rubyrs_cext::raise::rb_eTypeError,
+                            b"wrong argument type (expected wrapped object)\0".as_ptr() as *const std::ffi::c_char,
+                        );
+                    }
                 };
-                let td = vm.heap.typed_data(id);
+                let td = match vm.heap.try_typed_data(id) {
+                    Some(td) => td,
+                    None => {
+                        rubyrs_jmp_raise(
+                            rubyrs_cext::raise::rb_eTypeError,
+                            b"wrong argument type (object is not wrapped TypedData)\0".as_ptr() as *const std::ffi::c_char,
+                        );
+                    }
+                };
                 if td.type_ptr != expected_type {
                     panic!(
                         "ICE: rb_check_typeddata: type descriptor mismatch \

@@ -404,7 +404,7 @@ pub type TypedDataWrapCallback = Box<dyn Fn(
 /// pointer (CRuby semantics: pointer-identity check; mismatch
 /// raises TypeError, but the spike collapses to a panic — TypeError
 /// raise wiring is L3-B.1 follow-up).
-pub type TypedDataCheckCallback = Box<dyn Fn(Value, *const std::ffi::c_void) -> *mut std::ffi::c_void>;
+pub type TypedDataCheckCallback = std::rc::Rc<dyn Fn(Value, *const std::ffi::c_void) -> *mut std::ffi::c_void>;
 
 thread_local! {
     static TYPED_DATA_WRAP_CB: RefCell<Vec<TypedDataWrapCallback>> = const { RefCell::new(Vec::new()) };
@@ -1371,11 +1371,17 @@ pub unsafe extern "C" fn rb_check_typeddata(
     obj: Value,
     type_ptr: *const rb_data_type_t,
 ) -> *mut std::ffi::c_void {
-    TYPED_DATA_CHECK_CB.with(|c| {
-        let cb = c.borrow();
-        let cb = cb.last().expect(
-            "ICE: rb_check_typeddata called outside an active cext dispatch",
-        );
-        cb(obj, type_ptr as *const std::ffi::c_void)
-    })
+    // Clone the Rc out and DROP the RefCell borrow before invoking
+    // the callback. The callback may longjmp via rb_raise on a
+    // type mismatch (PR #27 finding #1 — Counter.new.bump), and
+    // a longjmp through a still-active RefCell borrow leaves the
+    // refcount permanently incremented, panicking the next pop on
+    // the same cell with "RefCell already borrowed".
+    let cb = TYPED_DATA_CHECK_CB.with(|c| {
+        c.borrow()
+            .last()
+            .cloned()
+            .expect("ICE: rb_check_typeddata called outside an active cext dispatch")
+    });
+    cb(obj, type_ptr as *const std::ffi::c_void)
 }

@@ -154,3 +154,57 @@ fn cext_instance_method_round_trip_under_stress_gc() {
         expected, stdout, stderr,
     );
 }
+
+/// Regression from PR #27 code-review finding #1:
+/// `Counter.new` (the generic `.new` path) allocates a plain
+/// `HeapObj::Instance`, NOT a TypedData. Before the fix,
+/// `Counter.new.bump` panicked the entire VM with "ICE: heap
+/// slot is not a TypedData" from `rb_check_typeddata`. The fix
+/// routes the type-check failure through `rb_raise(rb_eTypeError,
+/// ...)` so script-level `rescue TypeError => e` catches it.
+///
+/// This test asserts the new behaviour: a clean Ruby-side
+/// TypeError, no process abort, error message matches CRuby's
+/// "wrong argument type" wording.
+#[test]
+fn cext_typeddata_mismatch_raises_typeerror() {
+    let bundle = ensure_counter_bundle_built();
+    let bundle_no_ext = bundle.with_extension("");
+    let driver_dir = env!("CARGO_TARGET_TMPDIR");
+    let driver = std::path::PathBuf::from(driver_dir)
+        .join("cext_typeddata_mismatch_driver.rb");
+    std::fs::write(
+        &driver,
+        format!(
+            r#"require "{}"
+begin
+  Counter.new.bump
+  puts "fail: no raise"
+rescue TypeError => e
+  puts "rescued: #{{e.message}}"
+end
+"#,
+            bundle_no_ext.display()
+        ),
+    )
+    .expect("failed to write driver.rb");
+    let rubyrs_bin = env!("CARGO_BIN_EXE_rubyrs");
+    let run = std::process::Command::new(rubyrs_bin)
+        .arg(&driver)
+        .output()
+        .expect("failed to spawn rubyrs binary");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(
+        run.status.success(),
+        "Counter.new.bump should rescue cleanly, not abort.\n\
+         stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+    assert!(
+        stdout.starts_with("rescued: wrong argument type"),
+        "expected TypeError rescue with 'wrong argument type' message.\n\
+         stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}

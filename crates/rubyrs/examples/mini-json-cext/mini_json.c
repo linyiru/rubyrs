@@ -29,6 +29,7 @@
  */
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,12 +73,14 @@ static VALUE parse_string(Parser *ps) {
 
 static VALUE parse_number(Parser *ps) {
     const char *start = ps->p;
-    if (ps->p < ps->end && (*ps->p == '-' || *ps->p == '+')) ps->p++;
+    /* RFC 8259 forbids a leading '+'; only '-' is a valid sign
+     * (PR #27 code-review finding: parse_number had been accepting
+     * '+1' as 1 silently). Match the spec: skip optional '-' only. */
+    if (ps->p < ps->end && *ps->p == '-') ps->p++;
     /* Track digits-only start AFTER consuming optional sign so a
-     * bare "+" or "-" isn't accepted as a number (review #9 on PR
-     * #27 — without this guard the `ps->p == start` check below
-     * only catches the empty-input case, and strtol("+")/strtol("-")
-     * silently return 0). */
+     * bare '-' isn't accepted as a number (without this guard the
+     * `ps->p == start` check below would only catch empty input,
+     * and strtol("-") silently returns 0). */
     const char *digits_start = ps->p;
     while (ps->p < ps->end && isdigit((unsigned char)*ps->p)) ps->p++;
     if (ps->p == digits_start) {
@@ -92,7 +95,19 @@ static VALUE parse_number(Parser *ps) {
     }
     memcpy(buf, start, n);
     buf[n] = 0;
-    return rb_long2num(strtol(buf, NULL, 10));
+    /* strtol clamps to LONG_MAX/LONG_MIN on range error and sets
+     * errno=ERANGE (PR #27 code-review finding: clamps were
+     * silently passed through as if successful). Surface as
+     * ArgumentError matching CRuby's JSON.parse behaviour on
+     * out-of-range Integers. */
+    errno = 0;
+    long result = strtol(buf, NULL, 10);
+    if (errno == ERANGE) {
+        rb_raise(rb_eArgumentError,
+                 "integer out of long range at offset %ld: %s",
+                 (long)(start - ps->src), buf);
+    }
+    return rb_long2num(result);
 }
 
 static VALUE parse_array(Parser *ps) {
@@ -149,19 +164,48 @@ static int starts_with(Parser *ps, const char *lit) {
     return memcmp(ps->p, lit, n) == 0;
 }
 
+/* Like `starts_with`, but ALSO checks that the literal isn't a
+ * prefix of an identifier (e.g. "nullable" must not match
+ * "null"). Without this guard the keyword arms in `parse_value`
+ * silently advance past the literal length and surface garbage
+ * trailing chars as a downstream error (`"trailing junk at offset
+ * 4"`) rather than the accurate `"unexpected identifier"`.
+ *
+ * RFC 8259 doesn't define identifier boundaries explicitly for
+ * keywords, but mirroring how real parsers tokenize: only allow a
+ * match when the byte immediately after the literal is EOF or
+ * one of the JSON structural / whitespace characters. */
+static int starts_with_keyword(Parser *ps, const char *lit) {
+    long n = (long)strlen(lit);
+    if (ps->end - ps->p < n) return 0;
+    if (memcmp(ps->p, lit, n) != 0) return 0;
+    if (ps->p + n >= ps->end) return 1;
+    char next = ps->p[n];
+    /* Acceptable boundary: end-of-string, whitespace, or a
+     * structural char (`,` `]` `}` `:`). Anything else (letter,
+     * digit, underscore, `_`, `-`) is part of an identifier-shape
+     * token and should fail the keyword match. */
+    if (isspace((unsigned char)next)) return 1;
+    if (next == ',' || next == ']' || next == '}' || next == ':') return 1;
+    return 0;
+}
+
 static VALUE parse_value(Parser *ps) {
     skip_ws(ps);
     if (ps->p >= ps->end) {
         rb_raise(rb_eArgumentError, "unexpected end of input");
     }
-    if (starts_with(ps, "true"))  { ps->p += 4; return Qtrue; }
-    if (starts_with(ps, "false")) { ps->p += 5; return Qfalse; }
-    if (starts_with(ps, "null"))  { ps->p += 4; return Qnil; }
+    if (starts_with_keyword(ps, "true"))  { ps->p += 4; return Qtrue; }
+    if (starts_with_keyword(ps, "false")) { ps->p += 5; return Qfalse; }
+    if (starts_with_keyword(ps, "null"))  { ps->p += 4; return Qnil; }
     char c = *ps->p;
     if (c == '"')                 return parse_string(ps);
     if (c == '[')                 return parse_array(ps);
     if (c == '{')                 return parse_object(ps);
-    if (c == '-' || c == '+' || isdigit((unsigned char)c)) return parse_number(ps);
+    /* Only '-' is a valid leading sign in JSON (RFC 8259). The
+     * dispatch arm refuses '+' so parse_number doesn't even see it,
+     * matching the spec. */
+    if (c == '-' || isdigit((unsigned char)c)) return parse_number(ps);
     rb_raise(rb_eArgumentError, "unexpected character '%c' at offset %ld",
              c, (long)(ps->p - ps->src));
 }
