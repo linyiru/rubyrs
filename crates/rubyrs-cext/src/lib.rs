@@ -238,17 +238,13 @@ pub struct CExtState {
 
 impl CExtState {
     pub fn new() -> Self {
-        Self {
-            // Sentinel handle 3 = rb_cObject. We don't actually register
-            // an Object class on the rubyrs side; this exists purely so
-            // `rb_define_class_under(parent, name, rb_cObject)` accepts
-            // its third argument. Superclass is ignored at the spike
-            // level — flat namespace only.
-            // Sentinel handles 0-19 are reserved for the static
-            // singletons exported as `pub static rb_*: Value = N`
-            // — see the block of `#[used] #[no_mangle] pub static`
-            // declarations further down. Must be kept in sync.
-            values: vec![
+        // 64 = headroom for typical JSON-parse-style cext calls
+        // (~50 handles allocated during build). Avoids 2-3
+        // Vec::grow reallocations per cext_dispatch. The
+        // 20 sentinels seeded below already consume 31% of the
+        // initial capacity; `intern` grows from there if needed.
+        let mut values = Vec::with_capacity(64);
+        values.extend([
                 CValue::Nil,                                 // 0  Qnil
                 CValue::True,                                // 1  Qtrue
                 CValue::False,                               // 2  Qfalse
@@ -269,7 +265,9 @@ impl CExtState {
                 CValue::Class(String::from("Kernel")),       // 17 rb_mKernel
                 CValue::Class(String::from("Comparable")),   // 18 rb_mComparable
                 CValue::Class(String::from("Enumerable")),   // 19 rb_mEnumerable
-            ],
+            ]);
+        Self {
+            values,
             registered_fns: Vec::new(),
             registered_classes: Vec::new(),
             registered_singletons: Vec::new(),
