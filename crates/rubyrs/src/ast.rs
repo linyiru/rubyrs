@@ -565,6 +565,80 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         });
         return sp(node, Expr::Break(val));
     }
+    // `defined?(expr)` — returns a string describing the kind
+    // of `expr`, or nil if it's not defined. Resolved at AST
+    // translation: literals collapse to a static string ("expr",
+    // "true", "false", "nil"); local-variable references are
+    // "local-variable" by parse-time guarantee (Prism only emits
+    // LocalVariableReadNode when a local is in scope); ivars,
+    // methods (zero-arg, no-receiver Calls), and constants
+    // resolve through Kernel `__defined_ivar?` / `__defined_method?`
+    // / `__defined_const?` builtins so the check happens at
+    // runtime against `self` / class table / methods.
+    if let Some(n) = node.as_defined_node() {
+        let inner = n.value();
+        let span = node_span(node);
+        let s = |label: &str| -> SExpr { sp(node, Expr::StrLit(label.into())) };
+        let to_nil = sp(node, Expr::Nil);
+        let _ = to_nil; // suppress unused; kept for shape symmetry
+        if inner.as_integer_node().is_some()
+            || inner.as_float_node().is_some()
+            || inner.as_string_node().is_some()
+            || inner.as_symbol_node().is_some()
+            || inner.as_interpolated_string_node().is_some()
+            || inner.as_array_node().is_some()
+            || inner.as_hash_node().is_some()
+            || inner.as_range_node().is_some()
+            || inner.as_regular_expression_node().is_some()
+            || inner.as_lambda_node().is_some()
+        {
+            return s("expression");
+        }
+        if inner.as_true_node().is_some() { return s("true"); }
+        if inner.as_false_node().is_some() { return s("false"); }
+        if inner.as_nil_node().is_some() { return s("nil"); }
+        if inner.as_self_node().is_some() { return s("self"); }
+        if inner.as_local_variable_read_node().is_some() {
+            return s("local-variable");
+        }
+        if let Some(iv) = inner.as_instance_variable_read_node() {
+            let name = cid_to_string(iv.name());
+            return Spanned::new(span, Expr::Call {
+                receiver: None,
+                name: "__defined_ivar?".into(),
+                args: vec![sp(node, Expr::SymbolLit(name))],
+            });
+        }
+        if let Some(cr) = inner.as_constant_read_node() {
+            let name = cid_to_string(cr.name());
+            return Spanned::new(span, Expr::Call {
+                receiver: None,
+                name: "__defined_const?".into(),
+                args: vec![sp(node, Expr::SymbolLit(name))],
+            });
+        }
+        if let Some(cn) = inner.as_call_node() {
+            // No-receiver, no-args call → runtime method check on
+            // self / toplevel / builtin. With a receiver, CRuby
+            // would dispatch on the receiver's class; we can't
+            // do that without evaluating the receiver (which has
+            // its own side-effect concerns). Pragmatic
+            // approximation: literal-arithmetic shapes (`1 + 2`)
+            // and any explicit-receiver call return "method"
+            // optimistically. Documented divergence from CRuby
+            // for receivers that genuinely lack the method.
+            if cn.receiver().is_none() {
+                let name = cid_to_string(cn.name());
+                return Spanned::new(span, Expr::Call {
+                    receiver: None,
+                    name: "__defined_method?".into(),
+                    args: vec![sp(node, Expr::SymbolLit(name))],
+                });
+            }
+            return s("method");
+        }
+        return s("expression");
+    }
     if let Some(n) = node.as_lambda_node() {
         // `->(x, y) { body }` — same param/body extraction as
         // block literals attached to call nodes.

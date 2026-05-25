@@ -4391,6 +4391,57 @@ impl Vm {
                 };
                 Some(Ok(result))
             }
+            // `defined?` plumbing: three runtime checks that
+            // resolve against `self` (ivars), the class chain
+            // (methods), and the constant table. AST translation
+            // routes here for IVarRead / Call / ConstRead inner
+            // expressions. The label-only-on-hit pattern matches
+            // CRuby: hit returns a String, miss returns nil.
+            "__defined_ivar?" => {
+                if let Some(Value::Sym(sid)) = args.first() {
+                    let self_val = self.frames.last()
+                        .map(|f| f.self_val.clone())
+                        .unwrap_or(Value::Nil);
+                    let hit = if let Value::Object(oid) = self_val {
+                        self.heap.instance(oid).ivars.contains_key(sid)
+                    } else { false };
+                    return Some(Ok(if hit { Value::new_str("instance-variable") } else { Value::Nil }));
+                }
+                Some(Ok(Value::Nil))
+            }
+            "__defined_method?" => {
+                if let Some(Value::Sym(sid)) = args.first() {
+                    // Resolution order mirrors `do_call`'s no-recv
+                    // path: builtin → host fn → self.class methods
+                    // → toplevel.
+                    let name = self.interner.resolve(*sid).clone();
+                    let is_builtin = matches!(
+                        &*name,
+                        "puts" | "p" | "pp" | "print" | "require" |
+                        "Integer" | "Float" | "String" |
+                        "__defined_ivar?" | "__defined_method?" | "__defined_const?"
+                    );
+                    let host_hit = self.host_fns.contains_key(sid);
+                    let self_val = self.frames.last()
+                        .map(|f| f.self_val.clone())
+                        .unwrap_or(Value::Nil);
+                    let class_hit = if let Value::Object(oid) = &self_val {
+                        let cls = self.heap.instance(*oid).class.clone();
+                        self.lookup_method_uncached(&cls, *sid).is_some()
+                    } else { false };
+                    let toplevel_hit = self.toplevel_methods.contains_key(sid);
+                    let hit = is_builtin || host_hit || class_hit || toplevel_hit;
+                    return Some(Ok(if hit { Value::new_str("method") } else { Value::Nil }));
+                }
+                Some(Ok(Value::Nil))
+            }
+            "__defined_const?" => {
+                if let Some(Value::Sym(sid)) = args.first() {
+                    let hit = self.classes.contains_key(sid);
+                    return Some(Ok(if hit { Value::new_str("constant") } else { Value::Nil }));
+                }
+                Some(Ok(Value::Nil))
+            }
             "p" | "pp" => {
                 for a in args {
                     let s = a.to_inspect(&self.heap, &self.interner);
