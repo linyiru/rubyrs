@@ -216,6 +216,16 @@ pub(crate) struct Vm {
     /// source at runtime can advance the counter without
     /// round-tripping through Runtime.
     pub(crate) cache_counter: u32,
+    /// User-defined global variables (`$foo = 1; puts $foo`).
+    /// Keyed by SymId of the name including the leading `$`.
+    /// Reads of unknown globals return Nil (matches CRuby's
+    /// lenient "uninitialized global variable" silent default).
+    /// Special globals — `$$` (process pid), `$0` (script name),
+    /// regex backrefs `$~` / `$1`–`$9`, separators `$,` / `$;` —
+    /// are not stored here; `Op::LoadGlobal` intercepts a known
+    /// set and returns the computed value. Plain user globals
+    /// fall through to this table.
+    pub(crate) globals: HashMap<SymId, Value>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, HostFnSlot>,
     /// C-ext singleton-method dispatch table. Indexed by
@@ -347,6 +357,7 @@ impl Vm {
             constants: HashMap::new(),
             loaded_features: std::collections::HashSet::new(),
             cache_counter: 0,
+            globals: HashMap::new(),
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
             #[cfg(feature = "cext")]

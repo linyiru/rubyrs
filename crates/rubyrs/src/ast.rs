@@ -62,6 +62,19 @@ pub(crate) enum Expr {
     LVarWrite(String, Box<SExpr>),
     IVarRead(String),
     IVarWrite(String, Box<SExpr>),
+    /// `$foo` global-variable read. Name includes the leading `$`.
+    /// Unknown user globals resolve to Nil at runtime (CRuby
+    /// semantics — uninitialized global is silently nil); a small
+    /// set of "special globals" (`$$` for pid, `$0` for script
+    /// name) is intercepted by `Op::LoadGlobal`.
+    GVarRead(String),
+    /// `$foo = expr` global-variable write. Stores into
+    /// `Vm.globals` keyed by the interned name (including `$`).
+    /// Spike scope: only the plain-name form; the special
+    /// globals' writes (`$~ = nil`, `$, = "|"`) are out of scope
+    /// and silently store into the same table — observable as
+    /// "set" but not honoured by any builtin's behaviour.
+    GVarWrite(String, Box<SExpr>),
     /// Multi-write destructuring: `a, b = arr`, `@x, @y = pt`,
     /// `a, b = 1, 2`. The RHS is always an Array — multiple
     /// right-side expressions get packed into an Array literal
@@ -459,6 +472,16 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_instance_variable_write_node() {
         return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+    }
+    // `$foo` read / `$foo = expr` write — global variables.
+    // Spike subset: plain user globals go through `Vm.globals`;
+    // a small set of special globals (`$$`, `$0`) is intercepted
+    // by `Op::LoadGlobal`. Unknown globals read as Nil.
+    if let Some(n) = node.as_global_variable_read_node() {
+        return sp(node, Expr::GVarRead(cid_to_string(n.name())));
+    }
+    if let Some(n) = node.as_global_variable_write_node() {
+        return sp(node, Expr::GVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
     // Bare constant assignment: `FOO = expr` (top level or inside a
     // class/module body). Storage is a separate `Vm.constants` map

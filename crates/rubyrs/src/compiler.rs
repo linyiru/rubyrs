@@ -204,6 +204,15 @@ fn compile_stmt(
             let id = interner.intern(name);
             b.emit(Op::StoreConst(id));
         }
+        Expr::GVarWrite(name, val) => {
+            // Statement-position global write: same `no Dup` fast
+            // path as the other Write arms. The expression form
+            // (in compile_expr) Dups for the assignment-as-
+            // expression value.
+            compile_expr(b, val, protos, interner, cc);
+            let id = interner.intern(name);
+            b.emit(Op::StoreGlobal(id));
+        }
         _ => {
             compile_expr(b, e, protos, interner, cc);
             b.emit(Op::Pop);
@@ -307,6 +316,17 @@ pub(crate) fn compile_expr(
             let id = interner.intern(name);
             b.emit(Op::Dup);
             b.emit(Op::StoreConst(id));
+        }
+        Expr::GVarRead(name) => {
+            let id = interner.intern(name);
+            b.emit(Op::LoadGlobal(id));
+        }
+        Expr::GVarWrite(name, val) => {
+            // Expression-form: Dup so `x = ($foo = 42)` binds both.
+            compile_expr(b, val, protos, interner, cc);
+            let id = interner.intern(name);
+            b.emit(Op::Dup);
+            b.emit(Op::StoreGlobal(id));
         }
         Expr::MultiWrite { targets, value } => {
             // Compile the RHS once, leave it on the stack. Without a

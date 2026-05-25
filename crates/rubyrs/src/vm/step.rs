@@ -353,6 +353,42 @@ impl Vm {
                 };
                 self.stack.push(v);
             }
+            Op::LoadGlobal(name_id) => {
+                // Special-globals intercept. `$$` is the canonical
+                // case from tilt/template.rb (`"...-#{$$}"`); add
+                // others here as real codebases need them. `$0`
+                // returns the script's filename (we use the top
+                // frame's proto filename, which Runtime::eval set
+                // to whatever the host passed).
+                let name = self.interner.resolve(name_id).clone();
+                let v = match &*name {
+                    "$$" => Value::Int(std::process::id() as i64),
+                    "$0" => {
+                        // Bottommost frame = script entry; its
+                        // proto's filename is the script's top-level
+                        // filename (or "<inline>" for eval calls).
+                        let name = self.frames.first()
+                            .map(|f| self.protos[f.proto_idx].filename.to_string())
+                            .unwrap_or_else(|| "-".to_string());
+                        Value::new_str(name)
+                    }
+                    _ => self.globals.get(&name_id).cloned().unwrap_or(Value::Nil),
+                };
+                self.stack.push(v);
+            }
+            Op::StoreGlobal(name_id) => {
+                // `$foo = expr` — pop the value and store. In
+                // statement position the compiler does NOT emit a
+                // preceding Dup (mirrors ConstWrite/IVarWrite); in
+                // expression position it emits Dup first, so the
+                // value remains on the stack as the assignment's
+                // result. Special-global writes (`$$ = 42`) are
+                // silently accepted into `Vm.globals` but the next
+                // read still intercepts and returns the computed
+                // value — a documented spike divergence.
+                let v = self.stack.pop().expect("ICE: StoreGlobal stack underflow");
+                self.globals.insert(name_id, v);
+            }
             Op::Jump(off) => {
                 let f = self.frames.last_mut().expect("ICE: Jump no frame");
                 f.ip = (f.ip as i32 + off) as usize;
