@@ -199,3 +199,4 @@ fn run_diff(name: &str) {
 #[test] fn float_precision() { run_diff("float_precision"); }
 #[test] fn compact_filter_map() { run_diff("compact_filter_map"); }
 #[test] fn array_combinatorics() { run_diff("array_combinatorics"); }
+#[test] fn array_assoc_rassoc() { run_diff("array_assoc_rassoc"); }

@@ -137,6 +137,40 @@ impl Vm {
                         let hit = a.iter().any(|x| x.ruby_eq(needle, &self.heap));
                         Some(Value::Bool(hit))
                     }
+                    // `arr.assoc(needle)` — first sub-Array whose
+                    // `[0]` equals `needle`; nil if none. Sub-Array
+                    // is returned by reference (CRuby returns the
+                    // same Array; we clone the Value but its inner
+                    // ObjId points at the same heap slot).
+                    ("assoc", [needle]) => {
+                        let snapshot: Vec<Value> = self.heap.array(id).clone();
+                        for v in snapshot {
+                            if let Value::Array(sub_id) = v {
+                                let sub = self.heap.array(sub_id);
+                                if let Some(first) = sub.first()
+                                    && first.ruby_eq(needle, &self.heap) {
+                                        return Ok(Some(Value::Array(sub_id)));
+                                }
+                            }
+                        }
+                        Some(Value::Nil)
+                    }
+                    // `arr.rassoc(needle)` — first sub-Array whose
+                    // `[1]` equals `needle`. Same shape as assoc;
+                    // skips non-Array elements.
+                    ("rassoc", [needle]) => {
+                        let snapshot: Vec<Value> = self.heap.array(id).clone();
+                        for v in snapshot {
+                            if let Value::Array(sub_id) = v {
+                                let sub = self.heap.array(sub_id);
+                                if sub.len() >= 2
+                                    && sub[1].ruby_eq(needle, &self.heap) {
+                                        return Ok(Some(Value::Array(sub_id)));
+                                }
+                            }
+                        }
+                        Some(Value::Nil)
+                    }
                     // `arr.combination(n)` — every n-element subset
                     // in lexicographic order. `n == 0` → `[[]]`;
                     // `n > len` → `[]`. Non-block form returns the

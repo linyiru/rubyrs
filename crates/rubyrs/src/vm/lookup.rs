@@ -169,7 +169,7 @@ impl Vm {
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "first" | "last" | "empty?" | "include?" |
                 "count" | "sum" | "min" | "max" | "sort" | "tally" |
-                "combination" | "permutation" |
+                "combination" | "permutation" | "assoc" | "rassoc" |
                 "inject" | "reduce" |
                 "to_a" | "reverse" | "uniq" | "compact" |
                 "flatten" | "join" |
