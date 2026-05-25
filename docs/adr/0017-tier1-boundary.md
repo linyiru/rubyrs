@@ -41,13 +41,22 @@ all four is in. Anything that fails any one is outside.
    iteration order. Anything non-deterministic enters through a
    host-registered fn or sits in an outer tier.
 
-2. **No syscall, no I/O, no process control.**
+2. **No script-accessible OS capabilities by default.**
    File, Dir, IO, Net::HTTP, Socket, Kernel#system, backtick,
-   exec, spawn — all of these belong outside Tier 1. They reach
-   the script through capability-gated host fns or through Tier
-   3's `stdlib` feature, which embedders explicitly opt into. The
-   default `cargo install rubyrs` shape never gives a script the
-   ability to touch the OS without the embedder saying so.
+   exec, spawn — none of these belong in Tier 1. They reach the
+   script through capability-gated host fns or through Tier 3's
+   `stdlib` feature, which embedders explicitly opt into.
+
+   *Permitted*: an output sink the host controls. Tier 1 exposes
+   `Runtime::set_stdout(Box<dyn Write>)` so `puts` / `print` /
+   `p` go to a host-chosen writer (which the host may pipe to
+   `/dev/null`, a buffer, or process stdout). The script chooses
+   *what* to write, never *where*; the where is the host's
+   capability decision.
+
+   See "Current deviations" below — Tier 1 is the target state
+   and a small number of code paths (notably `ENV` reading the
+   host process via `std::env::vars()`) still need gating.
 
 3. **No regex.**
    `/pattern/` literals and the Regexp class move to Tier 2 (a
@@ -59,13 +68,22 @@ all four is in. Anything that fails any one is outside.
    same way, for the same reasons. Embedders who need regex
    either enable the feature or register a host fn.
 
-4. **No OS threads, no shared mutable globals across executions.**
-   `Thread`, `Mutex`, `Queue` belong outside Tier 1. `Fiber` is
-   on the boundary — every embeddable scripting language (Lua
-   coroutines, mruby Fiber, Wren fiber, rhai single-threaded,
-   rune single-threaded core) treats cooperative concurrency as
-   the only primitive a script gets. We follow that default:
-   Tier 1 ships single-threaded with Fiber TBD per PR.
+4. **No OS threads; cooperative concurrency only.**
+   `Thread`, `Mutex`, `Queue`, `ConditionVariable` belong
+   outside Tier 1. `Fiber` is on the boundary — every embeddable
+   scripting language (Lua coroutines, mruby Fiber, Wren fiber,
+   rhai single-threaded, rune single-threaded core) treats
+   cooperative concurrency as the only primitive a script gets.
+   We follow that default: Tier 1 ships single-threaded with
+   Fiber TBD per PR.
+
+   *Permitted*: a single `Runtime` accumulating script state
+   (class definitions, method tables, constants, host-registered
+   fns) across successive `eval` calls. This is the *intended*
+   embedding shape — DSL setup eval'd first, script body eval'd
+   second, both seeing the same world. The rule forbids
+   cross-thread sharing of that state, not within-thread
+   persistence of it.
 
 ### What's in Tier 1
 
@@ -104,6 +122,25 @@ scope for rubyrs."
 | C extension ABI (`require 'foo.so'`) | 4 (`mri-compat`, **already gated** per PR #73) | Whole-tier-4 surface. |
 | Bundler / RubyGems / Gemfile resolution | 4 (out-of-tree; this is `rubund`'s job) | Not interpreter scope. |
 | Rails, ActiveRecord, ActionPack | 4 (multi-year bet) | Roadmap-level; not a tier-1 commitment. |
+
+## Current deviations (target vs reality)
+
+This ADR specifies the *target* Tier-1 shape. As of merging, a
+small number of code paths violate it and need follow-up gating
+PRs before the spec is fully enforced. Listing them explicitly
+so future contributors don't read the rules and assume the code
+already matches.
+
+| Deviation | Rule violated | Planned remediation |
+|-----------|---------------|---------------------|
+| `Kernel#puts` / `p` / `pp` / `print` write to `std::io::stdout()` by default when `Runtime::set_stdout` is not called | Rule 2 (host should control the sink) | Default stdout sink switches to a guarded one that requires `set_stdout` to be called; or document the default as part of the supported tier-1 capability surface. PR-shaped. |
+| `ENV` reading populates from `std::env::vars()` of the host process | Rules 1 + 2 (non-deterministic + capability leak) | New `Config::env: Option<HashMap<String, String>>` field; default `None` means script sees empty `ENV`; host explicitly injects the map. PR-shaped. |
+| `Regexp` / `/pattern/` literals + `String#match` / `String#=~` are in Tier 1 today | Rule 3 | Future `regex` Cargo feature (see PoC #2 — to be opened after this ADR merges). |
+| `Time.now` reads wall clock (verify in code; suspected) | Rule 1 | Move to capability-injected host fn; `Config::clock` or analogous. TBD API. |
+| `Random.new` (no seed) uses system entropy (verify) | Rule 1 | Keep seeded `Random.new(seed)` in Tier 1; system-entropy form moves out. TBD per language-level audit. |
+
+Each deviation is its own small PR — none block this ADR from
+landing, but they are the work this spec lines up.
 
 ## Consequences
 
