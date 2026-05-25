@@ -580,6 +580,21 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // form has no else clause; the swap leaves an empty
     // else (CRuby's behaviour: result is `nil` when the
     // unless block doesn't run).
+    // `X rescue Y` modifier — semantically `begin; X; rescue
+    // StandardError; Y; end`. CRuby's bare-rescue-modifier
+    // contract: only StandardError (and its subclasses) is caught,
+    // not Exception. Translate to a Begin with one anonymous
+    // RescueClause (empty `classes` list, which our Begin compiler
+    // already treats as "filter on StandardError").
+    if let Some(n) = node.as_rescue_modifier_node() {
+        let body = vec![tr(&n.expression())];
+        let rescue = vec![RescueClause {
+            classes: vec![],
+            body: vec![tr(&n.rescue_expression())],
+            var: None,
+        }];
+        return sp(node, Expr::Begin { body, rescue, ensure: None });
+    }
     if let Some(n) = node.as_unless_node() {
         let cond = Box::new(tr(&n.predicate()));
         let then_body: Vec<SExpr> = n.statements()

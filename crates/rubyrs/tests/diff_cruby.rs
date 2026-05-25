@@ -127,3 +127,4 @@ fn run_diff(name: &str) {
 #[test] fn block_autosplat() { run_diff("block_autosplat"); }
 #[test] fn unless_until() { run_diff("unless_until"); }
 #[test] fn string_assign() { run_diff("string_assign"); }
+#[test] fn inline_rescue() { run_diff("inline_rescue"); }

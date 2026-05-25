@@ -52,6 +52,7 @@ ParenthesesNode
 ProgramNode
 RangeNode
 RequiredParameterNode
+RescueModifierNode
 ReturnNode
 SelfNode
 SplatNode
