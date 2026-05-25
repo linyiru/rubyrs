@@ -39,11 +39,15 @@ def it(name)
   __spec_it(name)
   begin
     yield
-  rescue Exception => e
-    # An exception bubbling out of an `it` block means the
-    # example failed unless it was the expected raise (matchers
-    # like `assert_raises` catch their own and re-mark). Bare
-    # exception here is always a failure.
+  rescue => e
+    # Bare `rescue` (matches StandardError-rooted exceptions
+    # only, per rubyrs's documented rescue semantics — see
+    # SUBSET.md). Truly-fatal classes like SystemExit /
+    # NoMemoryError / SignalException stay uncaught and abort
+    # the whole run; that's the right escape hatch and matches
+    # CRuby's convention for `rescue =>` without an explicit
+    # `Exception` filter. `ResourceExhausted` is host-level
+    # and also propagates past this — see ADR 0008.
     __spec_fail("uncaught #{e.class}: #{e.message}")
   end
 end
@@ -74,7 +78,13 @@ def assert_raises(class_name)
   begin
     yield
     __spec_fail("expected #{class_name}, no exception raised")
-  rescue Exception => e
+  rescue => e
+    # Bare `rescue` — see the comment on `it` for why we don't
+    # use `rescue Exception`. If a spec author actually expects
+    # the user to be testing a non-StandardError class (e.g.
+    # ScriptError descendants), we can add a wider variant
+    # then; nothing in the current spec set needs that.
+    #
     # `e.class.name` would be ideal but requires Class#name; fall
     # back to `e.class.to_s`. Class#to_s currently produces the
     # bare class name for user-defined classes, which is what
