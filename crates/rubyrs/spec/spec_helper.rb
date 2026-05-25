@@ -23,8 +23,16 @@
 #   - `before` / `after` hooks. Each `it` is self-contained.
 
 def describe(name)
-  __spec_describe(name)
-  yield
+  # Push/pop so nested `describe` blocks restore the outer
+  # scope on exit. `ensure` guarantees the pop runs even if
+  # the block body raises, so a failing inner `it` doesn't
+  # leave the tracker stuck with a stale describe.
+  __spec_describe_push(name)
+  begin
+    yield
+  ensure
+    __spec_describe_pop
+  end
 end
 
 def it(name)

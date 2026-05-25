@@ -60,17 +60,38 @@ impl ExampleOutcome {
 
 #[derive(Default, Debug)]
 struct ExampleTracker {
-    current_describe: Option<String>,
+    /// Stack so nested `describe` blocks restore the outer scope
+    /// on exit. ruby/spec uses nested describes routinely
+    /// (`describe Module#foo do ... describe "when X" do ...`);
+    /// a flat single-value field would orphan every outer-level
+    /// `it` after the inner describe closes.
+    describe_stack: Vec<String>,
     examples_in_order: Vec<ExampleOutcome>,
 }
 
 impl ExampleTracker {
-    fn start_describe(&mut self, name: String) {
-        self.current_describe = Some(name);
+    fn push_describe(&mut self, name: String) {
+        self.describe_stack.push(name);
+    }
+    fn pop_describe(&mut self) {
+        // If pop fires with an empty stack, spec_helper.rb is
+        // out of sync with the tracker — surface as a synthetic
+        // failure rather than panic.
+        if self.describe_stack.pop().is_none() {
+            self.record_orphan_fail("describe-pop with empty stack (spec_helper bug)".into());
+        }
+    }
+    /// "outer / inner" — joined by " / " for readable failure
+    /// labels when nested describes are in play.
+    fn describe_label(&self) -> String {
+        if self.describe_stack.is_empty() {
+            "<no describe>".to_string()
+        } else {
+            self.describe_stack.join(" / ")
+        }
     }
     fn start_example(&mut self, name: String) {
-        let describe = self.current_describe.clone()
-            .unwrap_or_else(|| "<no describe>".to_string());
+        let describe = self.describe_label();
         self.examples_in_order.push(ExampleOutcome {
             describe, name,
             passes: vec![], fails: vec![],
@@ -79,12 +100,39 @@ impl ExampleTracker {
     fn record_pass(&mut self, label: String) {
         if let Some(last) = self.examples_in_order.last_mut() {
             last.passes.push(label);
+        } else {
+            // Pass reported outside any `it` — e.g., somebody
+            // called `assert_eq` in a describe body or at file
+            // scope. Silently dropping it (the previous behaviour)
+            // hides the misuse; surface as a synthetic failure
+            // so CI sees it.
+            self.record_orphan_fail(format!(
+                "pass `{}` reported outside any it block", label
+            ));
         }
     }
     fn record_fail(&mut self, message: String) {
         if let Some(last) = self.examples_in_order.last_mut() {
             last.fails.push(message);
+        } else {
+            // Same as `record_pass`'s out-of-scope arm, but the
+            // payload was already a failure — surface verbatim
+            // rather than dropping it on the floor.
+            self.record_orphan_fail(format!(
+                "fail outside any it block: {}", message
+            ));
         }
+    }
+    /// Push a synthetic file-level example carrying a single
+    /// failure. Reused for any state-machine misuse that
+    /// shouldn't pollute a real example's outcome.
+    fn record_orphan_fail(&mut self, message: String) {
+        self.examples_in_order.push(ExampleOutcome {
+            describe: self.describe_label(),
+            name: "<orphan>".into(),
+            passes: vec![],
+            fails: vec![message],
+        });
     }
 }
 
@@ -98,9 +146,16 @@ fn make_runtime() -> (Runtime, Rc<RefCell<ExampleTracker>>) {
 
     {
         let t = tracker.clone();
-        rt.register_fn("__spec_describe", move |args| {
+        rt.register_fn("__spec_describe_push", move |args| {
             let name = string_arg(args, 0).unwrap_or_else(|| "?".into());
-            t.borrow_mut().start_describe(name);
+            t.borrow_mut().push_describe(name);
+            Ok(Value::Nil)
+        });
+    }
+    {
+        let t = tracker.clone();
+        rt.register_fn("__spec_describe_pop", move |_args| {
+            t.borrow_mut().pop_describe();
             Ok(Value::Nil)
         });
     }
@@ -163,7 +218,7 @@ fn run_spec_file(path: &Path) -> Vec<ExampleOutcome> {
         // produce zero examples and look like the file was
         // empty.
         let mut t = tracker.borrow_mut();
-        t.start_describe("<file-level>".into());
+        t.push_describe("<file-level>".into());
         t.start_example(label.clone());
         t.record_fail(format!("file-level trap: {}", rt.format_trap(&trap)));
     }
