@@ -29,6 +29,12 @@ Snapshots of `rubyrs-gapscan` against canonical Ruby projects —
 these drive which "Near term" items below to attack first. Full
 reports: [`docs/gap-reports/`](gap-reports/README.md).
 
+The table below is the **Tier 1** subset (framework / template
+engine / DSL). The combined n=10 table — adding Tier 2 (Bundler,
+Tilt, stdlib slice) — lives in [the gap-reports README](gap-reports/README.md);
+this section only quotes the user-facing-framework slice because
+those are the codebases most directly mapped to ROADMAP priorities.
+
 | Codebase | Shape | % Supported (AST) | #1 missing |
 |---|---|---:|---|
 | Jekyll `lib/` | static-site framework | **84.03%** | `ConstantWriteNode` (×70) |
@@ -36,10 +42,6 @@ reports: [`docs/gap-reports/`](gap-reports/README.md).
 | Sinatra `lib/` | web DSL | **82.46%** | `BlockParameterNode` (×58) |
 | dry-struct `lib/` | modern data DSL | **82.38%** | `BlockParameterNode` (×11) |
 | Rake `lib/` | task DSL | **83.30%** | `RegularExpressionNode` (×42) |
-
-Tier 2 (Bundler / Tilt / stdlib slice) has now been scanned too —
-see [gap-reports/README.md](gap-reports/README.md) for the
-combined n=10 table.
 
 **Headline:** all ten scans sit at 80.7–85.3% Supported regardless
 of codebase shape. Bundler tops the list at **85.25%** despite

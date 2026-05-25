@@ -695,7 +695,7 @@ pub fn render_markdown(report: &Report, top: usize) -> String {
     let _ = writeln!(s, "\n### Top bareword calls\n");
     let _ = writeln!(
         s,
-        "Bareword (no-receiver) calls mix genuine built-ins (`raise`, `puts` — implemented) with hidden gaps (`require`, `attr_*`, `include`, `private` — parse as CallNode so look Supported, but aren't). Scan the list for known-unsupported names; the count column alone won't tell you which is which.\n"
+        "Bareword (no-receiver) calls mix genuine built-ins with hidden gaps — both parse as CallNode so the AST view classifies the lot as Supported. Reliably-implemented examples: `raise`, `puts`, `include`, `extend`, `attr_accessor`, `private`. Stable hidden gaps (explicitly out of scope per SUBSET.md): `require`, `autoload`, `eval`, `define_method`. The count column alone won't tell you which is which — scan the list for known-unsupported names.\n"
     );
     let _ = writeln!(s, "| Method | Count |");
     let _ = writeln!(s, "|---|---:|");
