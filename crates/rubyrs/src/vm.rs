@@ -505,7 +505,40 @@ impl Vm {
             };
             let op = self.protos[proto_idx].code[ip];
             self.frames.last_mut().expect("ICE: frame disappeared").ip += 1;
-            if !self.step(op, proto_idx)? { return Ok(()); }
+            match self.step(op, proto_idx) {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(trap) => {
+                    // Try routing the trap through the Ruby
+                    // rescue machinery so scripts can `rescue`
+                    // primitive errors (NoMethodError, KeyError,
+                    // ArgumentError, ...). ResourceExhausted /
+                    // Uncaught / SyntaxError pass through
+                    // unchanged.
+                    if let Some(exc) = self.trap_to_exception(&trap) {
+                        // Capture the original trap's site before
+                        // unwind drains the frame stack — when
+                        // unwind synthesises an Uncaught Trap on
+                        // miss, its backtrace is empty (frames
+                        // already gone). Preserve the call-site
+                        // info from the trap that actually fired.
+                        let original_bt = trap.backtrace.clone();
+                        let original_class = trap.err.class_name().to_string();
+                        let original_msg = trap.err.message();
+                        match self.unwind_with_exception(exc) {
+                            Ok(()) => continue, // handler set up, resume dispatch
+                            Err(_) => return Err(Trap {
+                                err: RubyError::Uncaught {
+                                    class_name: original_class,
+                                    message: original_msg,
+                                },
+                                backtrace: original_bt,
+                            }),
+                        }
+                    }
+                    return Err(trap);
+                }
+            }
         }
         Ok(())
     }
@@ -1038,11 +1071,10 @@ impl Vm {
                     ("empty?", []) => Some(Value::Bool(self.heap.hash(id).is_empty())),
                     ("fetch", [k]) => {
                         // 1-arg fetch: return value or raise KeyError.
-                        // Currently surfaced as a host-level Trap
-                        // (not script-catchable until the
-                        // Trap-→-rescue conversion lands — see
-                        // SUBSET.md). Use the 2-arg or block form
-                        // for now.
+                        // The Trap is routed through the rescue
+                        // machinery by `dispatch`, so a script
+                        // `begin ... rescue KeyError => e; ... end`
+                        // catches it like CRuby.
                         let pos = self.heap.hash(id).iter()
                             .position(|(key, _)| key.ruby_eq(k, &self.heap));
                         match pos {
@@ -1050,7 +1082,7 @@ impl Vm {
                             None => {
                                 return Err(self.trap(RubyError::KeyError {
                                     msg: format!("key not found: {}",
-                                        k.to_display(&self.heap, &self.interner)),
+                                        k.to_inspect(&self.heap, &self.interner)),
                                 }));
                             }
                         }
@@ -1321,6 +1353,48 @@ impl Vm {
             }
             _ => v,
         }
+    }
+
+    /// Convert a host-side `Trap` into a Ruby-level exception
+    /// `Value::Object` whose class matches the preamble's
+    /// exception hierarchy. Used by `dispatch` / `dispatch_until`
+    /// to route primitive errors (NoMethodError, KeyError,
+    /// ArgumentError, …) through `unwind_with_exception` so
+    /// scripts can `rescue` them like CRuby does.
+    ///
+    /// Returns `None` for traps that intentionally bypass the
+    /// Ruby exception machinery:
+    ///
+    /// - `ResourceExhausted` — the fuel/heap/deadline kill switch
+    ///   must remain unreachable from inside scripts (see
+    ///   ADR 0008 / docs/SECURITY.md).
+    /// - `Uncaught` — we already failed to find a handler once;
+    ///   re-running unwind would be a busy-loop.
+    /// - `SyntaxError` — emitted by `ast::tr_with_errors` before
+    ///   dispatch ever runs, so it shouldn't reach this code path,
+    ///   but treat as uncatchable defensively.
+    /// - Cases where the matching class isn't registered (e.g. a
+    ///   stripped runtime missing the preamble) — propagate
+    ///   instead of silently swallowing.
+    pub(crate) fn trap_to_exception(&mut self, trap: &Trap) -> Option<Value> {
+        match &trap.err {
+            RubyError::ResourceExhausted { .. }
+            | RubyError::Uncaught { .. }
+            | RubyError::SyntaxError { .. } => return None,
+            _ => {}
+        }
+        let class_name = trap.err.class_name();
+        let cls_id = self.interner.intern(class_name);
+        let cls = self.classes.get(&cls_id).cloned()?;
+        let message = trap.err.message();
+        self.maybe_gc();
+        let id = self.heap.alloc(HeapObj::Instance(Instance {
+            class: cls,
+            ivars: HashMap::new(),
+        }));
+        let msg_sym = self.interner.intern("@message");
+        self.heap.instance_mut(id).ivars.insert(msg_sym, Value::Str(Rc::from(message.as_str())));
+        Some(Value::Object(id))
     }
 
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) -> Result<(), Trap> {
@@ -2453,7 +2527,33 @@ impl Vm {
             };
             let op = self.protos[proto_idx].code[ip];
             self.frames.last_mut().expect("ICE: frames empty").ip += 1;
-            if !self.step(op, proto_idx)? { return Ok(()); }
+            match self.step(op, proto_idx) {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(trap) => {
+                    // Same convert-to-rescue dance as `dispatch`.
+                    // Without this, a primitive error inside a
+                    // block (`arr.each { nil.foo }`) would
+                    // bypass every rescue handler all the way
+                    // up the call chain.
+                    if let Some(exc) = self.trap_to_exception(&trap) {
+                        let original_bt = trap.backtrace.clone();
+                        let original_class = trap.err.class_name().to_string();
+                        let original_msg = trap.err.message();
+                        match self.unwind_with_exception(exc) {
+                            Ok(()) => continue,
+                            Err(_) => return Err(Trap {
+                                err: RubyError::Uncaught {
+                                    class_name: original_class,
+                                    message: original_msg,
+                                },
+                                backtrace: original_bt,
+                            }),
+                        }
+                    }
+                    return Err(trap);
+                }
+            }
         }
         Ok(())
     }

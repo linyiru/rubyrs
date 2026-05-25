@@ -107,3 +107,4 @@ fn run_diff(name: &str) {
 #[test] fn super_call() { run_diff("super_call"); }
 #[test] fn return_nonlocal() { run_diff("return_nonlocal"); }
 #[test] fn methods_batch() { run_diff("methods_batch"); }
+#[test] fn rescue_primitive() { run_diff("rescue_primitive"); }
