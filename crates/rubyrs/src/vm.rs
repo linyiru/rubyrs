@@ -399,7 +399,10 @@ impl Vm {
                 "sum" | "inject" | "reduce" |
                 "each" | "map" | "select" | "filter" |
                 "reject" | "find" | "detect" |
-                "any?" | "all?" | "none?"
+                "any?" | "all?" | "none?" |
+                "each_with_index" | "each_with_object" |
+                "partition" | "min_by" | "max_by" |
+                "group_by" | "sort_by" | "sort"
             ),
             Value::Bool(_) | Value::Nil => false,
             Value::Class(_) => matches!(name, "new" | "name"),
@@ -1536,7 +1539,12 @@ impl Vm {
                         let in_r = if excl { *v >= bi && *v < ei } else { *v >= bi && *v <= ei };
                         Some(Value::Bool(in_r))
                     }
-                    ("to_a", []) => {
+                    ("to_a", []) | ("sort", []) => {
+                        // `sort` with no block on a Range is just
+                        // `to_a` — the underlying sequence is
+                        // already non-decreasing for Int bounds.
+                        // Descending (bi > ei) is an empty range
+                        // in CRuby; we render it as `[]` to match.
                         let mut elems = Vec::with_capacity(count.max(0) as usize);
                         let end_inclusive = if excl { ei - 1 } else { ei };
                         for v in bi..=end_inclusive { elems.push(Value::Int(v)); }
@@ -2782,6 +2790,44 @@ impl Vm {
                     i += 1;
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
+            }
+
+            // Range Enumerable fallback: materialize as an Array
+            // and re-dispatch through the Array arms above. This
+            // gets each_with_index / each_with_object / partition
+            // / min_by / max_by / group_by / sort_by "for free"
+            // and keeps a single source of truth for the
+            // iteration semantics. Cost: one Vec<Value::Int>
+            // allocation. Only Int-bounded ranges (the common
+            // case) qualify — heterogeneous ranges would need
+            // their own dispatch.
+            (Value::Range(id), name, args) if matches!(name,
+                "each_with_index" | "each_with_object" |
+                "partition" | "min_by" | "max_by" |
+                "group_by" | "sort_by"
+            ) => {
+                let (bi, ei, excl) = {
+                    let r = self.heap.range(*id);
+                    match (&r.begin, &r.end) {
+                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                        _ => return Ok(None),
+                    }
+                };
+                let end_inc = if excl { ei - 1 } else { ei };
+                let mut elems: Vec<Value> = Vec::new();
+                let mut v = bi;
+                while v <= end_inc {
+                    elems.push(Value::Int(v));
+                    v += 1;
+                }
+                self.maybe_gc();
+                self.check_alloc()?;
+                let arr_id = self.heap.alloc(HeapObj::Array(elems));
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(arr_id));
+                g.pin(Value::Block(block));
+                let arr_val = Value::Array(arr_id);
+                return g.vm.collection_call_block(&arr_val, name, args, block);
             }
             _ => None,
         })

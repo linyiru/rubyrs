@@ -216,7 +216,17 @@ impl Value {
             Value::Hash(id) => {
                 let h = heap.hash(*id);
                 let parts: Vec<String> = h.iter()
-                    .map(|(k, v)| format!("{}=>{}", k.to_inspect(heap, interner), v.to_inspect(heap, interner)))
+                    .map(|(k, v)| {
+                        // CRuby 3.4+: Symbol keys render as `name: value`
+                        // shorthand instead of `:name => value`. Every
+                        // other key type uses the explicit hash-rocket
+                        // form with spaces around `=>`.
+                        if let Value::Sym(sid) = k {
+                            format!("{}: {}", interner.resolve(*sid), v.to_inspect(heap, interner))
+                        } else {
+                            format!("{} => {}", k.to_inspect(heap, interner), v.to_inspect(heap, interner))
+                        }
+                    })
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }

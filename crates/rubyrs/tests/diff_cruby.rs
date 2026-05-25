@@ -115,3 +115,4 @@ fn run_diff(name: &str) {
 #[test] fn array_zip() { run_diff("array_zip"); }
 #[test] fn comparable() { run_diff("comparable"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
+#[test] fn range_enumerable() { run_diff("range_enumerable"); }
