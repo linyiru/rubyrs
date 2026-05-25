@@ -215,8 +215,8 @@ impl Vm {
             }
             Value::Block(_) => matches!(name, "call" | "[]" | "()" | "curry" | ">>" | "<<"),
             Value::Regex(_) => matches!(name, "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"),
-            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry" | "to_proc"),
-            Value::UnboundMethod(_) => matches!(name, "bind" | "arity" | "parameters" | "=="),
+            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver"),
+            Value::UnboundMethod(_) => matches!(name, "bind" | "arity" | "parameters" | "==" | "owner"),
             Value::CurriedProc(_) => matches!(name, "call" | "[]" | "()"),
         }
     }

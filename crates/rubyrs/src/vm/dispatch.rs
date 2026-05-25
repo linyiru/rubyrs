@@ -879,6 +879,58 @@ impl Vm {
                 self.stack.push(Value::Block(id));
                 return Ok(());
             }
+        // `m.owner` — the class that defined the resolved Method
+        // (CRuby's `Method#owner` / `UnboundMethod#owner`). Walks
+        // the ancestor chain to find where the method actually
+        // lives; falls back to the captured class for builtins
+        // (whose primitive_call backing has no Method record).
+        //
+        // `m.receiver` — the captured recv on a BoundMethod.
+        // UnboundMethod#receiver raises NoMethodError, matching
+        // CRuby (it has no receiver to give).
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && matches!(&*name, "owner" | "receiver") && args.is_empty() {
+                if &*name == "receiver" {
+                    return match &recv {
+                        Value::BoundMethod(bid) => {
+                            let (r, _) = self.heap.bound_method(*bid);
+                            let r = r.clone();
+                            self.stack.push(r);
+                            Ok(())
+                        }
+                        Value::UnboundMethod(_) => Err(self.trap(RubyError::NoMethodError {
+                            method: "receiver".into(),
+                            recv_type: "UnboundMethod",
+                        })),
+                        _ => unreachable!(),
+                    };
+                }
+                // owner: resolve Method through lookup; prefer its
+                // defining_class.upgrade() over the captured class.
+                let (cap_class, m_name_id) = match &recv {
+                    Value::BoundMethod(bid) => {
+                        let (r, n) = self.heap.bound_method(*bid);
+                        let r = r.clone();
+                        let cls = match self.class_of(&r) {
+                            Value::Class(c) => c,
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            })),
+                        };
+                        (cls, n)
+                    }
+                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    _ => unreachable!(),
+                };
+                let owner = match self.lookup_method_uncached(&cap_class, m_name_id) {
+                    Some(m) => m.defining_class.as_ref()
+                        .and_then(|w| w.upgrade())
+                        .unwrap_or_else(|| cap_class.clone()),
+                    None => cap_class.clone(),
+                };
+                self.stack.push(Value::Class(owner));
+                return Ok(());
+            }
         // `m.arity` / `m.parameters` — Method introspection. Walks
         // the captured class chain to find the user-defined Method;
         // if absent (builtin / primitive_call backed), returns

@@ -182,3 +182,4 @@ fn run_diff(name: &str) {
 #[test] fn class_instance_method() { run_diff("class_instance_method"); }
 #[test] fn proc_curry_compose() { run_diff("proc_curry_compose"); }
 #[test] fn method_to_proc_explicit() { run_diff("method_to_proc_explicit"); }
+#[test] fn method_owner_receiver() { run_diff("method_owner_receiver"); }
