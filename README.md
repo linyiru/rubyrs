@@ -53,7 +53,13 @@ to WebAssembly.
 
 → **rubyrs is 42× faster end-to-end** on this shape of workload — the
 actual product-niche benchmark. See
-[`examples/brewfile/`](examples/brewfile/).
+[`examples/brewfile/`](crates/rubyrs/examples/brewfile/) for the
+simpler tap/brew/cask DSL, or
+[`examples/gemfile/`](crates/rubyrs/examples/gemfile/) for an
+unmodified Rails-style Gemfile (`*splat`, `**kwargs`, multi-symbol
+`group … do … end` blocks, file-scope conditionals — all the
+real-world shapes a Bundler Gemfile uses, running in ~0.4 ms
+end-to-end).
 
 | Cold start | rubyrs (native) | rubyrs.wasm | CRuby 3.4 |
 |------------|----------------|-------------|-----------|
