@@ -142,6 +142,29 @@ as a separate engine upgrade. The upstream ruby/spec `it`
 block covering aliased equality is skipped in
 [`crates/rubyrs/spec/ruby/method_equal_spec.rb`](../crates/rubyrs/spec/ruby/method_equal_spec.rb).
 
+### Integer built-in methods
+
+Covered: arithmetic (`+ - * / %`), comparisons (`== != < <= > >=`),
+predicates (`zero?` / `positive?` / `negative?` / `odd?` /
+`even?`), `abs`, `to_s` / `to_s(base)`, `times { |i| ... }`,
+`digits` / `digits(base)`, `bit_length`, `succ` / `pred`,
+`Comparable#clamp` (including Range form).
+
+Divergence from CRuby on `Integer#digits` for negative receivers:
+
+```ruby
+-12345.digits(7)  # CRuby: raises Math::DomainError
+                  # rubyrs: raises ArgumentError
+```
+
+CRuby distinguishes "the radix is bad" (`ArgumentError`) from
+"the input violates the math domain" (`Math::DomainError`);
+rubyrs collapses both to `ArgumentError`. The
+`Math::DomainError` class isn't yet exposed in the subset, so
+the distinction has no place to land. The upstream ruby/spec
+`it` block covering this is skipped in
+[`crates/rubyrs/spec/ruby/integer_digits_spec.rb`](../crates/rubyrs/spec/ruby/integer_digits_spec.rb).
+
 ### Metaprogramming (PoC)
 - `alias_method :new, :old` — resolves the source method by walking
   the surrounding class's ancestor chain (so inherited methods can
