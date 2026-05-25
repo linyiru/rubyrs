@@ -67,7 +67,12 @@ measure_once() {
   # "$ms $kb" line, and let the caller treat that as a measurement
   # error worth surfacing.
   if [[ "$PLATFORM" == "Darwin" ]]; then
-    out=$(/usr/bin/time -l "$RUBYRS_BIN" "$script" 2>&1 >/dev/null) || rc=$?
+    # Force `C` locale so the label strings + decimal separator
+    # stay English/`.`-formatted; otherwise a non-English LC_ALL
+    # would translate "maximum resident set size" / "real" and
+    # also produce `0,46` instead of `0.46`, breaking the awk
+    # patterns and the `s*1000` arithmetic below.
+    out=$(LC_ALL=C /usr/bin/time -l "$RUBYRS_BIN" "$script" 2>&1 >/dev/null) || rc=$?
     if (( rc != 0 )); then
       echo "perf/check: workload \`$script\` exited with status $rc" >&2
       [[ -n "$out" ]] && echo "$out" | sed 's/^/  | /' >&2
@@ -96,7 +101,12 @@ measure_once() {
       printf "%d %d\n", s*1000, kb;
     }'
   else
-    out=$(/usr/bin/time -v "$RUBYRS_BIN" "$script" 2>&1 >/dev/null) || rc=$?
+    # Force `C` locale — see the macOS arm for rationale. GNU
+    # `time -v` translates its labels (e.g. `Temps écoulé` on a
+    # `fr_FR` system) and the wall-time string uses `,` as the
+    # decimal separator, both of which would defeat the awk
+    # patterns below.
+    out=$(LC_ALL=C /usr/bin/time -v "$RUBYRS_BIN" "$script" 2>&1 >/dev/null) || rc=$?
     if (( rc != 0 )); then
       echo "perf/check: workload \`$script\` exited with status $rc" >&2
       [[ -n "$out" ]] && echo "$out" | sed 's/^/  | /' >&2
