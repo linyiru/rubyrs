@@ -5,7 +5,8 @@
 #   - MethodSpecs::Methods fixture file methods (`zero`,
 #     `one_req`, `one_req_one_opt`, `zero_with_splat`,
 #     `two_req_with_splat`, `two_req_one_opt_with_block` —
-#     covered loosely here via inline def's where applicable)
+#     covered loosely here via inline method definitions
+#     where applicable)
 #   - ArgumentError on excess curry-arity (rubyrs's `Method#curry`
 #     accepts an int arity arg; bound/error behaviour pending
 #     dedicated spec)
