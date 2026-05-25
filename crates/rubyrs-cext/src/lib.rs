@@ -353,41 +353,81 @@ impl Default for CExtState {
 }
 
 thread_local! {
-    // Stack of nested cext states. Level 0/1/1.5 only ever had one
-    // active call at a time (no callbacks back into Ruby from C), so
-    // `Option` was enough. Level 2's `rb_funcallv` can cause a C ext
-    // call to re-enter the Vm, which can in turn dispatch another C
-    // ext call — that needs a fresh state on top while the outer
-    // state stays preserved underneath. Hence Vec.
-    static STATE: RefCell<Vec<CExtState>> = const { RefCell::new(Vec::new()) };
+    // L3-H: persistent per-Vm CExtState (was: stack of per-call
+    // states). The `values` table now lives across cext calls so
+    // VALUE handles a cext stores internally (e.g., msgpack's
+    // `Unpacker.feed(bytes)` saving a string reference into its
+    // TypedData buffer) still resolve when a later cext call
+    // (`Unpacker.read`) dereferences them. Pre-L3-H each enter
+    // pushed a fresh state and leave dropped it — stored handles
+    // dangled across the boundary.
+    //
+    // Nested cext calls (rb_funcallv → host method → another cext
+    // call) share the same state. Both `registered_*` lists and
+    // `values` are shared; this is correct because:
+    //   - `registered_*` are only populated during `Init_<name>`
+    //     (the outermost call); subsequent calls don't register
+    //     anything, so nested calls see them already drained.
+    //   - `values` IS meant to be shared — that's the whole point.
+    static STATE: RefCell<Option<CExtState>> = const { RefCell::new(None) };
 }
 
-/// Run `f` with mutable access to the topmost (innermost) active
-/// [`CExtState`]. Panics if called from a thread that has no active
-/// state — that always indicates a host-side bug.
+/// Run `f` with mutable access to the per-Vm [`CExtState`]. Panics
+/// if called from a thread that has no active state — that always
+/// indicates a host-side bug.
 pub fn with_state<R>(f: impl FnOnce(&mut CExtState) -> R) -> R {
     STATE.with(|s| {
         let mut b = s.borrow_mut();
         let st = b
-            .last_mut()
+            .as_mut()
             .expect("ICE: rubyrs-cext STATE empty; host must call enter() first");
         f(st)
     })
 }
 
-/// Push a fresh [`CExtState`] onto the active stack. Pair with
-/// [`leave`]. Nests cleanly: each `enter` adds a new state; the
-/// matching `leave` pops it and reveals whatever was underneath.
+/// Initialize the per-Vm state on first call; on subsequent calls,
+/// clear the `registered_*` lists so a new Init pass starts clean.
+/// `values` is NOT cleared — handles persist across calls (L3-H).
 pub fn enter() {
-    STATE.with(|s| s.borrow_mut().push(CExtState::new()));
+    STATE.with(|s| {
+        let mut b = s.borrow_mut();
+        if b.is_none() {
+            *b = Some(CExtState::new());
+        }
+        let st = b.as_mut().unwrap();
+        st.registered_fns.clear();
+        st.registered_classes.clear();
+        st.registered_singletons.clear();
+        st.registered_methods.clear();
+        st.registered_alloc_funcs.clear();
+    });
 }
 
-/// Pop the topmost [`CExtState`] and return ownership to the host.
+/// Return a snapshot of the current state for the host to drain
+/// `registered_*` from and to resolve the return-value handle
+/// against. The persistent state KEEPS its `values` so future cext
+/// calls can still resolve handles a cext stored internally; the
+/// returned struct gets a CLONE of `values` for the host's result-
+/// translation phase (which uses `state.resolve(handle)` on its
+/// owned copy).
+///
+/// `registered_*` are moved out of the persistent state (consumed
+/// exactly once per `enter`/`leave` pair) — the host iterates them
+/// to install classes / methods / alloc_funcs into the Vm.
 pub fn leave() -> CExtState {
     STATE.with(|s| {
-        s.borrow_mut()
-            .pop()
-            .expect("ICE: rubyrs-cext leave() without matching enter()")
+        let mut b = s.borrow_mut();
+        let st = b
+            .as_mut()
+            .expect("ICE: rubyrs-cext leave() without matching enter()");
+        CExtState {
+            values: st.values.clone(),
+            registered_fns: std::mem::take(&mut st.registered_fns),
+            registered_classes: std::mem::take(&mut st.registered_classes),
+            registered_singletons: std::mem::take(&mut st.registered_singletons),
+            registered_methods: std::mem::take(&mut st.registered_methods),
+            registered_alloc_funcs: std::mem::take(&mut st.registered_alloc_funcs),
+        }
     })
 }
 
