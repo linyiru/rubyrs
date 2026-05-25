@@ -1373,17 +1373,26 @@ impl Vm {
                         Some(Value::Array(id))
                     }
                     ("take", [Value::Int(n)]) => {
+                        // Pin the receiver across maybe_gc: by the
+                        // time we get here the receiver Array has
+                        // been popped from the operand stack, so its
+                        // children (the cloned ObjIds in `out`) have
+                        // no GC root and STRESS_GC sweeps them.
                         let n = (*n).max(0) as usize;
-                        let out: Vec<Value> = self.heap.array(id).iter().take(n).cloned().collect();
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let out: Vec<Value> = g.vm.heap.array(id).iter().take(n).cloned().collect();
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
                     ("drop", [Value::Int(n)]) => {
                         let n = (*n).max(0) as usize;
-                        let out: Vec<Value> = self.heap.array(id).iter().skip(n).cloned().collect();
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let out: Vec<Value> = g.vm.heap.array(id).iter().skip(n).cloned().collect();
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
                     // `zip` — pairs each element of `self` with the
@@ -3227,8 +3236,16 @@ impl Vm {
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
                 if let Some((k, v, _)) = best {
-                    self.maybe_gc();
-                    let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
+                    // PinGuard the winning pair across the explicit
+                    // `maybe_gc`: previously k/v were Rust locals
+                    // with no root, so STRESS_GC could sweep them
+                    // before the new Array was alloc'd → dangling
+                    // ObjIds inside the result.
+                    let mut g = PinGuard::new(self);
+                    g.pin(k.clone());
+                    g.pin(v.clone());
+                    g.vm.maybe_gc();
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     Some(Value::Array(pid))
                 } else {
                     Some(Value::Nil)
@@ -3239,26 +3256,37 @@ impl Vm {
             // sort key, return an Array of [k, v] pairs in key
             // order. Stability preserved via insertion sort.
             (Value::Hash(id), "sort_by", []) => {
+                // PinGuard wraps the *entire* impl, not just the
+                // block-invocation phase. Previously the guard
+                // dropped before the post-loop `maybe_gc`, leaving
+                // `keyed` (a Rust local) holding ObjId-bearing
+                // Values with no GC root → STRESS_GC swept them and
+                // the resulting Array<[k,v]> had dangling slots
+                // that exploded inside `to_display`.
                 let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).clone();
                 let mut keyed: Vec<(Value, Value, Value)> = Vec::with_capacity(pairs_in.len());
                 let mut early: Option<Value> = None;
-                {
-                    let mut g = PinGuard::new(self);
-                    g.pin(Value::Hash(*id));
-                    g.pin(Value::Block(block));
-                    let pre_frames = g.vm.frames.len();
-                    for (k, v) in pairs_in {
-                        g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        if g.vm.method_return.is_some() { break; }
-                        let key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        if g.vm.break_signaled {
-                            g.vm.break_signaled = false;
-                            early = Some(key);
-                            break;
-                        }
-                        keyed.push((key, k, v));
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(*id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                for (k, v) in pairs_in {
+                    g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
                     }
+                    // Pin each accumulated triple component so the
+                    // next iter's invoke_block (which may GC) can't
+                    // sweep them.
+                    g.pin(key.clone());
+                    g.pin(k.clone());
+                    g.pin(v.clone());
+                    keyed.push((key, k, v));
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
                 let n = keyed.len();
@@ -3268,7 +3296,7 @@ impl Vm {
                         let ord = {
                             let a = keyed[j - 1].0.clone();
                             let b = keyed[j].0.clone();
-                            self.user_cmp(&a, &b)?
+                            g.vm.user_cmp(&a, &b)?
                         };
                         match ord {
                             None => return Ok(None),
@@ -3280,13 +3308,15 @@ impl Vm {
                         }
                     }
                 }
-                self.maybe_gc();
+                g.vm.maybe_gc();
                 let mut out: Vec<Value> = Vec::with_capacity(keyed.len());
                 for (_, k, v) in keyed {
-                    let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
-                    out.push(Value::Array(pid));
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pv = Value::Array(pid);
+                    g.pin(pv.clone());
+                    out.push(pv);
                 }
-                let oid = self.heap.alloc(HeapObj::Array(out));
+                let oid = g.vm.heap.alloc(HeapObj::Array(out));
                 Some(Value::Array(oid))
             }
 
@@ -3294,41 +3324,49 @@ impl Vm {
             // Each bucket is an Array of [k, v] pairs; the result
             // is a Hash from group-key → Array.
             (Value::Hash(id), "group_by", []) => {
+                // Same GC root-hole pattern as sort_by above: the
+                // previous impl scoped PinGuard only across the
+                // block invocation, then dropped it and ran more
+                // alloc work (with `maybe_gc`) over `buckets` and
+                // each freshly-built pair Array. Extend the guard
+                // and pin each new ObjId as it's created.
                 let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).clone();
                 let mut buckets: Vec<(Value, Vec<Value>)> = Vec::new();
                 let mut early: Option<Value> = None;
-                {
-                    let mut g = PinGuard::new(self);
-                    g.pin(Value::Hash(*id));
-                    g.pin(Value::Block(block));
-                    let pre_frames = g.vm.frames.len();
-                    for (k, v) in pairs_in {
-                        g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        if g.vm.method_return.is_some() { break; }
-                        let group = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        if g.vm.break_signaled {
-                            g.vm.break_signaled = false;
-                            early = Some(group);
-                            break;
-                        }
-                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                        let pair = Value::Array(pid);
-                        let pos = buckets.iter().position(|(gk, _)| gk.ruby_eq(&group, &g.vm.heap));
-                        match pos {
-                            Some(p) => buckets[p].1.push(pair),
-                            None => buckets.push((group, vec![pair])),
-                        }
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(*id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                for (k, v) in pairs_in {
+                    g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let group = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(group);
+                        break;
+                    }
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair = Value::Array(pid);
+                    g.pin(pair.clone());
+                    g.pin(group.clone());
+                    let pos = buckets.iter().position(|(gk, _)| gk.ruby_eq(&group, &g.vm.heap));
+                    match pos {
+                        Some(p) => buckets[p].1.push(pair),
+                        None => buckets.push((group, vec![pair])),
                     }
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
-                self.maybe_gc();
+                g.vm.maybe_gc();
                 let mut hash_pairs: Vec<(Value, Value)> = Vec::with_capacity(buckets.len());
                 for (gk, vs) in buckets {
-                    let aid = self.heap.alloc(HeapObj::Array(vs));
-                    hash_pairs.push((gk, Value::Array(aid)));
+                    let aid = g.vm.heap.alloc(HeapObj::Array(vs));
+                    let av = Value::Array(aid);
+                    g.pin(av.clone());
+                    hash_pairs.push((gk, av));
                 }
-                let hid = self.heap.alloc(HeapObj::Hash(hash_pairs));
+                let hid = g.vm.heap.alloc(HeapObj::Hash(hash_pairs));
                 Some(Value::Hash(hid))
             }
 
@@ -3410,12 +3448,23 @@ impl Vm {
                     elems.push(Value::Int(v));
                     v += 1;
                 }
-                self.maybe_gc();
-                self.check_alloc()?;
-                let arr_id = self.heap.alloc(HeapObj::Array(elems));
+                // Pin the block AND every incoming arg FIRST: a
+                // STRESS_GC pass triggered by `maybe_gc` below could
+                // otherwise sweep the block-handle slot or an arg
+                // value (e.g. the memo Hash passed to
+                // `each_with_object({})`) — neither is necessarily
+                // on the operand stack at this point, only borrowed
+                // through `&[Value]` from the dispatch caller, which
+                // doesn't count as a GC root. Symptoms were the
+                // "ICE: heap slot is not a Block" and "is not a Hash"
+                // panics in `range_enumerable`.
                 let mut g = PinGuard::new(self);
-                g.pin(Value::Array(arr_id));
                 g.pin(Value::Block(block));
+                for a in args { g.pin(a.clone()); }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let arr_id = g.vm.heap.alloc(HeapObj::Array(elems));
+                g.pin(Value::Array(arr_id));
                 let arr_val = Value::Array(arr_id);
                 return g.vm.collection_call_block(&arr_val, name, args, block);
             }
