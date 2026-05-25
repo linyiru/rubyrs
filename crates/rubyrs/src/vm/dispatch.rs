@@ -978,9 +978,38 @@ impl Vm {
                     .collect(),
                 None => Vec::new(),
             };
-            self.maybe_gc();
-            self.check_alloc()?;
-            let hid = self.heap.alloc(HeapObj::Hash(leftover));
+            // Same GC root-hole pattern as the rest-arg path above
+            // (and the master Array#zip / Hash#sort_by chain fixed
+            // in earlier PRs): `locals` / `self_val` / `block` /
+            // `kw_hash` / `leftover` are Rust locals, NOT on
+            // vm.stack / pinned, so the explicit `maybe_gc()` here
+            // sweeps any heap-backed values they reference. Pin
+            // everything participating in the new Hash alloc + the
+            // already-bound locals through the alloc point.
+            //
+            // Master shipped the kw_rest code without this guard
+            // (commits 680dbef "Module include chain + is_a?" /
+            // ed0b872 "nested block destructure"); STRESS_GC tests
+            // `anon_kwrest` and `kwrest_args` were the canary.
+            let hid = {
+                let mut g = PinGuard::new(self);
+                for v in &locals { g.pin(v.clone()); }
+                g.pin(self_val.clone());
+                if let Some(id) = block { g.pin(Value::Block(id)); }
+                if let Some(kw) = &kw_hash {
+                    for (k, v) in kw {
+                        g.pin(k.clone());
+                        g.pin(v.clone());
+                    }
+                }
+                for (k, v) in &leftover {
+                    g.pin(k.clone());
+                    g.pin(v.clone());
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                g.vm.heap.alloc(HeapObj::Hash(leftover))
+            };
             locals[kw_rest_slot] = Value::Hash(hid);
         }
         self.frames.push(Frame {
