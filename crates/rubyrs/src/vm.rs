@@ -686,10 +686,11 @@ impl Vm {
     }
 
     /// Look up `method_missing` on `recv`'s class chain. If found,
-    /// prepend the missed `name_id` as a Symbol arg and invoke it.
-    /// Returns `Ok(true)` when method_missing was found and a frame
-    /// was pushed (caller must `return Ok(())`); `Ok(false)` when
-    /// the caller should proceed to raise NoMethodError as before.
+    /// prepend the missed `name_id` as a Symbol arg and invoke it
+    /// (pushing a frame); returns `Ok(true)` so the caller can
+    /// `return Ok(())` instead of raising. Returns `Ok(false)` when
+    /// the receiver doesn't carry a `method_missing` (or isn't a
+    /// `Value::Object`) — caller proceeds to raise NoMethodError.
     ///
     /// Scope of this PoC: only Object receivers (user instances).
     /// Primitive receivers (Int, Str, …) skip the lookup — adding
@@ -700,21 +701,21 @@ impl Vm {
         name_id: SymId,
         args: Vec<Value>,
         block: Option<ObjId>,
-    ) -> Result<Option<Vec<Value>>, Trap> {
+    ) -> Result<bool, Trap> {
         let cls = match recv {
             Value::Object(id) => self.heap.instance(*id).class.clone(),
-            _ => return Ok(Some(args)),
+            _ => return Ok(false),
         };
         let mm_id = self.interner.intern("method_missing");
         let m = match self.lookup_method_uncached(&cls, mm_id) {
             Some(m) => m,
-            None => return Ok(Some(args)),
+            None => return Ok(false),
         };
         let mut new_args = Vec::with_capacity(args.len() + 1);
         new_args.push(Value::Sym(name_id));
         new_args.extend(args);
         self.invoke_method_with_block(m, recv.clone(), new_args, block)?;
-        Ok(None)
+        Ok(true)
     }
 
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
@@ -831,11 +832,9 @@ impl Vm {
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
             // as a Symbol arg. Primitives skip this and raise directly.
-            let args = match self.try_method_missing(&self_val, name_id, args, None)? {
-                Some(args) => args,
-                None => return Ok(()),
-            };
-            let _ = args;
+            if self.try_method_missing(&self_val, name_id, args, None)? {
+                return Ok(());
+            }
             return Err(self.trap(RubyError::NoMethodError {
                 method: name.to_string(), recv_type: self_val.type_name(),
             }));
@@ -1116,11 +1115,9 @@ impl Vm {
                 return Ok(());
             }
         }
-        let args = match self.try_method_missing(&recv, name_id, args, None)? {
-            Some(args) => args,
-            None => return Ok(()),
-        };
-        let _ = args;
+        if self.try_method_missing(&recv, name_id, args, None)? {
+            return Ok(());
+        }
         Err(self.trap(RubyError::NoMethodError {
             method: name.to_string(), recv_type: recv.type_name(),
         }))
@@ -2459,11 +2456,9 @@ impl Vm {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
                 return Ok(());
             }
-            let args = match self.try_method_missing(&self_val, name_id, args, Some(block))? {
-                Some(args) => args,
-                None => return Ok(()),
-            };
-            let _ = args;
+            if self.try_method_missing(&self_val, name_id, args, Some(block))? {
+                return Ok(());
+            }
             return Err(self.trap(RubyError::NoMethodError {
                 method: name.to_string(), recv_type: self_val.type_name(),
             }));
@@ -2503,11 +2498,9 @@ impl Vm {
                 return Ok(());
             }
         }
-        let args = match self.try_method_missing(&recv, name_id, args, Some(block))? {
-            Some(args) => args,
-            None => return Ok(()),
-        };
-        let _ = args;
+        if self.try_method_missing(&recv, name_id, args, Some(block))? {
+            return Ok(());
+        }
         Err(self.trap(RubyError::NoMethodError {
             method: name.to_string(), recv_type: recv.type_name(),
         }))
