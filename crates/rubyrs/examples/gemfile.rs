@@ -16,8 +16,14 @@
 //! function. `__gemfile_gem_v2` uses the v2 API
 //! (`register_fn_v2` paired with `HostCtx`) and reads the splat
 //! as a real Array, kwargs as a real Hash, and the Symbol keys
-//! inside that Hash via `ctx.resolve_sym` — all borrows into the
-//! VM heap / interner, no clone, no Ruby-side stringification.
+//! inside that Hash via `ctx.resolve_sym`. The HostCtx accessors
+//! return **borrows** into the VM heap / interner — zero-copy
+//! while the v2 closure runs, no Ruby-side stringification on the
+//! input path. (The demo then clones these borrows into
+//! `String`s for the `GemDecl` storage that outlives the
+//! closure; the host has no other choice unless we want to chain
+//! lifetimes through to the global state, which isn't the point
+//! of the example.)
 //! The scope-stack helpers (`group` / `platforms` / `git` / `path`
 //! push/pop) stay on the v1 API — they take a single pre-joined
 //! String, which is what the prelude's `ensure`-balanced shims
@@ -86,7 +92,15 @@ fn value_to_kwarg_string(ctx: &HostCtx, v: &Value) -> Option<String> {
     match v {
         Value::Bool(b) => Some(if *b { "true".into() } else { "false".into() }),
         Value::Str(rs) => Some(rs.borrow().clone()),
-        Value::Sym(_) => ctx.resolve_sym(v).map(String::from),
+        // The arm already matched `Value::Sym`, so `resolve_sym` is
+        // guaranteed to return Some. `expect` rather than `.map` so a
+        // future interner-contract regression panics loudly instead
+        // of mis-routing through this fn's caller as an ArgumentError
+        // ("must be a Bool, Symbol, or String") — which would be a
+        // misleading message for a value that IS a Symbol.
+        Value::Sym(_) => Some(ctx.resolve_sym(v)
+            .expect("resolve_sym on Value::Sym arm must return Some")
+            .to_string()),
         _ => None,
     }
 }

@@ -1439,7 +1439,13 @@ fn gemfile_dsl_real_hosting_end_to_end() {
                 let vs = match v {
                     Value::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
                     Value::Str(rs) => rs.borrow().clone(),
-                    Value::Sym(_) => ctx.resolve_sym(v).unwrap_or("").to_string(),
+                    // The outer match already filtered on `Value::Sym`,
+                    // so `resolve_sym` is guaranteed to return Some.
+                    // `expect` rather than `unwrap_or("")` so a future
+                    // interner-contract regression surfaces loudly.
+                    Value::Sym(_) => ctx.resolve_sym(v)
+                        .expect("resolve_sym on Value::Sym arm must return Some")
+                        .to_string(),
                     _ => return Err(Trap {
                         err: RubyError::ArgumentError {
                             msg: format!("opts[{key}] must be a Bool, Symbol, or String"),
