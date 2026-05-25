@@ -309,30 +309,113 @@ impl Vm {
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {
-                // `args` and `recv` were popped off the operand stack by
-                // do_call's setup; while we're about to trigger GC via
-                // `maybe_gc`, they exist only as Rust locals. Pin any
-                // heap values inside `args` (Class is `Rc`-managed and
-                // doesn't need pinning) so the GC's root walk sees them.
-                // The `check_alloc()?` inside the guard is now safe — the
-                // guard's Drop pops on the early-return path.
-                let id = {
-                    let mut g = PinGuard::new(self);
-                    for a in &args { g.pin(a.clone()); }
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    g.vm.heap.alloc(HeapObj::Instance(Instance {
-                        class: cls.clone(),
-                        ivars: HashMap::new(),
-                        singleton_class: None,
-                    }))
+                // L3-F: cext-registered allocator path. When the class
+                // came from rb_define_class_under AND the cext called
+                // rb_define_alloc_func on it, route the allocation
+                // through that callback (typically wraps a malloc'd C
+                // struct in TypedData) instead of producing a bare
+                // Instance. Without this, every TypedData_Get_Struct in
+                // the cext's instance methods fails because `self` is a
+                // plain Instance, not a TypedData slot.
+                let obj = if let Some(alloc_func) = cls.cext_alloc_func.get() {
+                    #[cfg(not(target_os = "wasi"))]
+                    {
+                        let class_name = cls.name.clone();
+                        // arity=0 (self-only) is the alloc_func ABI:
+                        // VALUE allocate(VALUE klass). cext_dispatch
+                        // builds [self_handle] internally and
+                        // invoke_with_raise's case 0 calls func(self).
+                        // CURRENT_VM_PTR must be set before the cext
+                        // can rb_funcall back into the Vm (and so
+                        // rb_data_typed_object_wrap can find the Vm
+                        // to allocate on its heap).
+                        let qualified = format!("{}::allocate", class_name);
+                        let vm_ptr: *mut Vm = self;
+                        super::cext::with_vm_ptr_set(vm_ptr, || {
+                            super::cext::cext_dispatch(
+                                &qualified,
+                                alloc_func,
+                                0,
+                                &[],
+                                super::cext::CextSelfHandle::Class(&class_name),
+                            )
+                        })?
+                    }
+                    #[cfg(target_os = "wasi")]
+                    {
+                        // wasi: cext path is stubbed; fall back to
+                        // plain Instance allocation.
+                        let mut g = PinGuard::new(self);
+                        for a in &args { g.pin(a.clone()); }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
+                            class: cls.clone(),
+                            ivars: HashMap::new(),
+                            singleton_class: None,
+                        }));
+                        Value::Object(id)
+                    }
+                } else {
+                    // `args` and `recv` were popped off the operand
+                    // stack by do_call's setup; while we're about to
+                    // trigger GC via `maybe_gc`, they exist only as
+                    // Rust locals. Pin any heap values inside `args`
+                    // (Class is `Rc`-managed and doesn't need pinning)
+                    // so the GC's root walk sees them. The
+                    // `check_alloc()?` inside the guard is now safe —
+                    // the guard's Drop pops on the early-return path.
+                    let id = {
+                        let mut g = PinGuard::new(self);
+                        for a in &args { g.pin(a.clone()); }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        g.vm.heap.alloc(HeapObj::Instance(Instance {
+                            class: cls.clone(),
+                            ivars: HashMap::new(),
+                            singleton_class: None,
+                        }))
+                    };
+                    Value::Object(id)
                 };
-                let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
                 if let Some(m) = self.lookup_method_uncached(cls, init_id) {
+                    // Ruby-defined initialize takes precedence.
                     self.invoke_method(m, obj.clone(), args)?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
+                    // L3-F: cext-defined initialize (registered via
+                    // rb_define_method) lives in cext_instance_methods.
+                    // Dispatch through the existing instance-method
+                    // path if present — this picks up arity validation
+                    // and rb_raise handling for free. Skip on
+                    // arity-mismatch (variadic / -1 isn't supported by
+                    // the setjmp shim yet) so allocation still
+                    // succeeds; common case where Packer.new / Parser
+                    // .new is called with no args still works because
+                    // the cext-side state was already zero-init'd in
+                    // the alloc_func.
+                    #[cfg(not(target_os = "wasi"))]
+                    {
+                        let cext_init_reg = self.cext_instance_methods
+                            .get(&cls.name)
+                            .and_then(|t| t.get(&init_id).cloned())
+                            .filter(|reg| (0..=5).contains(&reg.arity) && reg.arity as usize == args.len());
+                        if let Some(reg) = cext_init_reg {
+                            let qualified = reg.qualified_name.clone();
+                            let func = reg.func;
+                            let arity = reg.arity;
+                            let obj_clone = obj.clone();
+                            let args_ref = args.clone();
+                            let vm_ptr: *mut Vm = self;
+                            super::cext::with_vm_ptr_set(vm_ptr, || {
+                                super::cext::cext_dispatch(
+                                    &qualified, func, arity, &args_ref,
+                                    super::cext::CextSelfHandle::Object(obj_clone),
+                                )
+                            })?;
+                        }
+                    }
                     self.stack.push(obj);
                 }
                 return Ok(());
