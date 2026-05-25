@@ -191,16 +191,12 @@ pub struct Class {
     /// returned handle. Set only via cext-side `rb_define_alloc_func`
     /// drained by `Vm::cext_require`.
     ///
-    /// With the `cext` feature off this field disappears — there is
-    /// no path that could set it. The dispatcher's cext-allocator
-    /// `if let Some(alloc_func) = cext_alloc { … }` shape stays
-    /// structurally in `do_call`, but `cext_alloc` is forced to
-    /// `None` under `#[cfg(not(feature = "cext"))]` so the branch
-    /// is unreachable (the cext-only block inside it is itself
-    /// cfg-gated, so without the feature it contains only
-    /// `unreachable!()`). A followup PR can collapse the whole
-    /// `if/else` to a single allocator call when the feature is
-    /// off; not done here to keep the PoC diff small.
+    /// With the `cext` feature off this field disappears entirely
+    /// and the dispatcher's `do_call` Klass.new path is split by
+    /// `#[cfg(feature = "cext")]` into a cext arm (this if/else)
+    /// and a non-cext arm (default Instance allocation only). No
+    /// `Option<()>` sentinel and no `unreachable!()` site in the
+    /// non-cext build.
     #[cfg(feature = "cext")]
     pub(crate) cext_alloc_func: Cell<Option<rubyrs_cext::OpaqueFn>>,
 }

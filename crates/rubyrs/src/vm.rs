@@ -7,8 +7,11 @@ use crate::bytecode::Proto;
 use crate::error::Trap;
 // `RubyError` is only referenced from the wasi-only `cext_require`
 // alt below; the import is gated so the non-wasi build doesn't
-// trip an unused-import lint under `-D warnings`.
-#[cfg(target_os = "wasi")]
+// trip an unused-import lint under `-D warnings`. The wasi alt is
+// only reachable through the cext feature's kernel-side `require`
+// arm (see vm/kernel.rs), so we gate on both — `--no-default-features`
+// on wasi would otherwise see the import as unused.
+#[cfg(all(feature = "cext", target_os = "wasi"))]
 use crate::error::RubyError;
 use crate::heap::Heap;
 use crate::intern::{Interner, SymId};
@@ -472,13 +475,16 @@ impl Vm {
 }
 
 
-#[cfg(target_os = "wasi")]
+#[cfg(all(feature = "cext", target_os = "wasi"))]
 impl Vm {
     /// wasm32-wasi alt for [`Vm::cext_require`]. WASI has no dynamic
     /// loader, so any `require "path/to/some.so"` from Ruby on wasi
     /// has no way to succeed; we trap with a precise message instead
     /// of silently returning Nil. Native targets get the dlopen-based
-    /// implementation in `vm/cext.rs`.
+    /// implementation in `vm/cext.rs`. Only reachable through the
+    /// cext feature's kernel-side `require` arm; with the feature
+    /// off, kernel.rs emits its own no-cext error and never calls
+    /// into here.
     pub(crate) fn cext_require(&mut self, path_str: &str) -> Result<Value, Trap> {
         Err(self.trap(RubyError::RuntimeError {
             msg: format!(

@@ -53,7 +53,7 @@ impl Vm {
     /// whatever class/method the C ext last invoked. Future work:
     /// allocate a per-`(recv-class, method)` cache for cext calls
     /// if profiling shows the uncached path matters.
-    #[cfg(not(target_os = "wasi"))]
+    #[cfg(all(feature = "cext", not(target_os = "wasi")))]
     pub(crate) fn cext_invoke_method(
         &mut self,
         recv: Value,
@@ -147,6 +147,18 @@ impl Vm {
     fn invoke_host_fn(&mut self, slot: HostFnSlot, args: &[Value]) -> Result<Value, Trap> {
         match slot {
             HostFnSlot::V1(host) => {
+                // V1 contract under the `cext` feature gate:
+                // `with_vm_ptr_set` parks the Vm pointer in TLS so a
+                // cext-bridge V1 host can re-enter the VM through
+                // rb_funcallv. With cext off there is no rb_funcall
+                // path to need it and `with_vm_ptr_set` itself lives
+                // inside `mod cext`, so we just call the host body
+                // directly. Today every legitimate V1 caller IS a
+                // cext bridge (see the V1/V2 doc above), so the
+                // contract change is invisible at runtime; if a
+                // future non-cext V1 host needs TLS-Vm access, this
+                // is the site to move `with_vm_ptr_set` out of
+                // `mod cext` and lift the cfg gate.
                 #[cfg(all(feature = "cext", not(target_os = "wasi")))]
                 {
                     let vm_ptr: *mut Vm = self;
@@ -358,14 +370,19 @@ impl Vm {
                 // PinGuard fix in L3-D).
                 let mut g = PinGuard::new(self);
                 for a in &args { g.pin(a.clone()); }
+                // Allocator selection. With `cext`, the class may carry
+                // an `rb_define_alloc_func`-registered allocator that
+                // must run instead of the default Instance allocation.
+                // Without `cext`, there is no path that could set such
+                // a function, so we collapse to the default allocator
+                // unconditionally. Splitting the whole expression by
+                // cfg (instead of the previous `Option<()>` sentinel
+                // trick) keeps both arms well-typed and removes a
+                // brittle `unreachable!()` site that any future
+                // refactor inside the cfg arm could turn into a real
+                // panic.
                 #[cfg(feature = "cext")]
-                let cext_alloc = cls.cext_alloc_func.get();
-                #[cfg(not(feature = "cext"))]
-                let cext_alloc: Option<()> = None;
-                let obj = if let Some(alloc_func) = cext_alloc {
-                    #[cfg(not(feature = "cext"))] { unreachable!("cext_alloc is always None without `cext` feature: {:?}", alloc_func) }
-                    #[cfg(feature = "cext")]
-                    {
+                let obj = if let Some(alloc_func) = cls.cext_alloc_func.get() {
                     #[cfg(not(target_os = "wasi"))]
                     {
                         // arity=0 (self-only) is the alloc_func ABI:
@@ -424,8 +441,22 @@ impl Vm {
                         }));
                         Value::Object(id)
                     }
-                    } // close cfg(feature = "cext")
                 } else {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
+                        class: cls.clone(),
+                        ivars: HashMap::new(),
+                        singleton_class: None,
+                    }));
+                    Value::Object(id)
+                };
+                #[cfg(not(feature = "cext"))]
+                let obj = {
+                    // No cext_alloc_func field exists in this build; the
+                    // class always allocates a plain Instance. Mirror of
+                    // the `else` arm above so the two cfg paths produce
+                    // identically-typed `Value`.
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
                     let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
