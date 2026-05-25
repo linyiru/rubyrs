@@ -151,3 +151,4 @@ fn run_diff(name: &str) {
 #[test] fn tap_then() { run_diff("tap_then"); }
 #[test] fn enumerable_advanced() { run_diff("enumerable_advanced"); }
 #[test] fn dig() { run_diff("dig"); }
+#[test] fn ternary() { run_diff("ternary"); }
