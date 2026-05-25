@@ -70,9 +70,16 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Fetch base branch
+      - name: Fetch base SHA
+        # Fetch the exact SHA from the event payload (not the
+        # moving `base.ref`). Otherwise the cache key (keyed on
+        # `pull_request.base.sha`) and the actually-resolved base
+        # commit could diverge if the base branch advances between
+        # the webhook firing and this job running. The script reads
+        # GAPSCAN_BASE_REF below — passing the same SHA there keeps
+        # everything aligned.
         run: |
-          git fetch origin ${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}
+          git fetch origin ${{ github.event.pull_request.base.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -125,7 +132,11 @@ jobs:
 
       - name: Run gapscan diff
         env:
-          GAPSCAN_BASE_REF: origin/${{ github.event.pull_request.base.ref }}
+          # Pin to the exact base SHA (matches the cache key and
+          # the `Fetch base SHA` step above) so the script doesn't
+          # see a different base commit than the cache was built
+          # against if the base branch advanced mid-job.
+          GAPSCAN_BASE_REF: ${{ github.event.pull_request.base.sha }}
           GAPSCAN_WORK: /tmp/gapscan-work
           # Pass the actual PR head SHA explicitly. On pull_request
           # events GITHUB_SHA is the synthetic merge ref; using it
