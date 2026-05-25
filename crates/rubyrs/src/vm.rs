@@ -903,6 +903,62 @@ impl Vm {
                         let idx = if *i < 0 { a.len() as i64 + *i } else { *i };
                         Some(a.get(idx as usize).cloned().unwrap_or(Value::Nil))
                     }
+                    // Internal helpers for multi-write splat
+                    // destructuring (`a, *r, b = arr`).
+                    //
+                    // `__mw_splat(start, post)` returns the
+                    // middle slice as a fresh Array; underflow
+                    // (`len < start + post`) yields `[]`.
+                    //
+                    // `__mw_get(i, post)` returns `self[i]` if a
+                    // pre-splat position truly has an element to
+                    // claim once the post-splat slots reserve
+                    // theirs (`i < len - post`); otherwise nil.
+                    // Without this guard, `a, *m, b = [1]` would
+                    // wrongly bind `a = 1` instead of `nil`.
+                    ("__mw_splat", [Value::Int(start), Value::Int(post)]) => {
+                        let a = self.heap.array(id);
+                        let len = a.len() as i64;
+                        let s = (*start).max(0).min(len);
+                        let p = (*post).max(0).min((len - s).max(0));
+                        let slice_len = (len - s - p).max(0) as usize;
+                        let s = s as usize;
+                        let slice: Vec<Value> = a[s..s + slice_len].to_vec();
+                        if let Some(max) = self.max_value_bytes {
+                            if slice.len().saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("multi-write splat would exceed {max} bytes"),
+                                }));
+                            }
+                        }
+                        self.maybe_gc();
+                        let new_id = self.heap.alloc(HeapObj::Array(slice));
+                        Some(Value::Array(new_id))
+                    }
+                    // `__mw_post(j, pre_count, post_count)` —
+                    // returns the value for the `j`th post-splat
+                    // target (0-indexed from the left of the
+                    // post group). CRuby's rule:
+                    // `post_start = max(pre_count, len - post_count)`,
+                    // then `post[j] = arr[post_start + j]` (OOB → nil).
+                    // This pins post-targets to indices >= pre_count
+                    // (so pre never gets overwritten) while
+                    // sliding them rightward when the array is
+                    // long enough to give all post slots their
+                    // natural "from the end" positions.
+                    ("__mw_post", [Value::Int(j), Value::Int(pre_n), Value::Int(post_n)]) => {
+                        let a = self.heap.array(id);
+                        let len = a.len() as i64;
+                        let pre = (*pre_n).max(0);
+                        let post = (*post_n).max(0);
+                        let post_start = pre.max(len - post);
+                        let idx = post_start + *j;
+                        if idx < 0 {
+                            Some(Value::Nil)
+                        } else {
+                            Some(a.get(idx as usize).cloned().unwrap_or(Value::Nil))
+                        }
+                    }
                     ("[]=", [Value::Int(i), v]) => {
                         let a = self.heap.array_mut(id);
                         let idx = if *i < 0 { a.len() as i64 + *i } else { *i } as usize;

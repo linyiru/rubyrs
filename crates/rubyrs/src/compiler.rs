@@ -252,33 +252,99 @@ pub(crate) fn compile_expr(
             b.emit(Op::LoadConst(id));
         }
         Expr::MultiWrite { targets, value } => {
-            // Compile the RHS once, leave it on the stack. For each
-            // target, Dup the source, index it via the Array#[]
-            // method (`source[i]`), and store. The source remains
-            // on top after every iteration via the Dup; we pop
-            // nothing here — the expression's result is the
-            // source Array, matching CRuby.
+            // Compile the RHS once, leave it on the stack. Without a
+            // splat: dup-and-index each target by positive index;
+            // missing indices fall through Array#[] -> nil, matching
+            // CRuby's "extra targets get nil" rule.
             //
-            // Out-of-bounds indices on Array#[] return nil (our
-            // existing behaviour), which matches CRuby's
-            // "extra targets get nil" rule. So `a, b = [1]`
-            // leaves `b` as nil naturally — no extra logic
-            // needed here.
+            // With a splat `a, *r, b = arr`: pre-targets index from
+            // the front, post-targets index from the back (negative
+            // indices already supported by Array#[]), and the splat
+            // slice is computed via the internal `Array#__mw_splat`
+            // primitive which always returns a fresh Array (never
+            // nil), correctly handling underflow when there are
+            // fewer source elements than pre+post.
+            //
+            // The source Array remains on stack as the expression's
+            // result, matching CRuby.
+            use crate::ast::MultiWriteTarget as MWT;
             compile_expr(b, value, protos, interner, cc);
             let bracket_id = interner.intern("[]");
-            for (i, target) in targets.iter().enumerate() {
-                b.emit(Op::Dup);
-                b.emit(Op::LoadConstInt(i as i64));
-                let cid = *cc as u16; *cc += 1;
-                b.emit(Op::Call(bracket_id, 1, cid));
-                match target {
-                    crate::ast::MultiWriteTarget::Local(name) => {
+            let splat_id = interner.intern("__mw_splat");
+
+            let splat_pos = targets.iter().position(|t| matches!(
+                t, MWT::SplatLocal(_) | MWT::SplatIvar(_)
+            ));
+
+            let emit_store = |b: &mut ProtoBuilder, interner: &mut Interner, t: &MWT| {
+                match t {
+                    MWT::Local(name) => {
                         let slot = b.local_slot(name);
                         b.emit(Op::StoreLocal(slot));
                     }
-                    crate::ast::MultiWriteTarget::Ivar(name) => {
+                    MWT::Ivar(name) => {
                         let id = interner.intern(name);
                         b.emit(Op::StoreIvar(id));
+                    }
+                    MWT::SplatLocal(Some(name)) => {
+                        let slot = b.local_slot(name);
+                        b.emit(Op::StoreLocal(slot));
+                    }
+                    MWT::SplatLocal(None) => {
+                        b.emit(Op::Pop);
+                    }
+                    MWT::SplatIvar(name) => {
+                        let id = interner.intern(name);
+                        b.emit(Op::StoreIvar(id));
+                    }
+                }
+            };
+
+            match splat_pos {
+                None => {
+                    for (i, target) in targets.iter().enumerate() {
+                        b.emit(Op::Dup);
+                        b.emit(Op::LoadConstInt(i as i64));
+                        let cid = *cc as u16; *cc += 1;
+                        b.emit(Op::Call(bracket_id, 1, cid));
+                        emit_store(b, interner, target);
+                    }
+                }
+                Some(s) => {
+                    let post = targets.len() - s - 1;
+                    let post_id = interner.intern("__mw_post");
+                    // Pre-splat: plain `arr[i]`. Pre claims from
+                    // the front first; out-of-bounds returns nil
+                    // via Array#[]'s existing semantics, which is
+                    // exactly what CRuby does for pre-targets
+                    // (only the post group can be "starved" by a
+                    // greedy pre — never the other way around).
+                    for i in 0..s {
+                        b.emit(Op::Dup);
+                        b.emit(Op::LoadConstInt(i as i64));
+                        let cid = *cc as u16; *cc += 1;
+                        b.emit(Op::Call(bracket_id, 1, cid));
+                        emit_store(b, interner, &targets[i]);
+                    }
+                    // splat slice: `arr.__mw_splat(pre, post)`
+                    b.emit(Op::Dup);
+                    b.emit(Op::LoadConstInt(s as i64));
+                    b.emit(Op::LoadConstInt(post as i64));
+                    let cid = *cc as u16; *cc += 1;
+                    b.emit(Op::Call(splat_id, 2, cid));
+                    emit_store(b, interner, &targets[s]);
+                    // Post-splat: need pre+post counts at runtime
+                    // so __mw_post can implement CRuby's "pre
+                    // wins" rule (post slots beyond what's left
+                    // become nil, not a wrap-around to the start).
+                    for j in 0..post {
+                        b.emit(Op::Dup);
+                        b.emit(Op::LoadConstInt(j as i64));
+                        b.emit(Op::LoadConstInt(s as i64));
+                        b.emit(Op::LoadConstInt(post as i64));
+                        let cid = *cc as u16; *cc += 1;
+                        b.emit(Op::Call(post_id, 3, cid));
+                        emit_store(b, interner, &targets[s + 1 + j]);
                     }
                 }
             }

@@ -148,6 +148,12 @@ pub(crate) enum Expr {
 pub(crate) enum MultiWriteTarget {
     Local(String),
     Ivar(String),
+    /// `*rest` — receives a fresh Array of the middle slice.
+    /// `None` is the anonymous form `*` which discards the slice
+    /// but still anchors the post-splat counting.
+    SplatLocal(Option<String>),
+    /// `*@rest` — splat into an ivar. Same slicing as SplatLocal.
+    SplatIvar(String),
 }
 
 #[derive(Debug, Clone)]
@@ -281,26 +287,59 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
     if let Some(n) = node.as_multi_write_node() {
-        // `a, b = expr` / `@x, @y = expr` / `a, b = 1, 2`.
-        // Targets come from `lefts`; ignore `rest` (splat) and
-        // `rights` (post-splat) for now — both are out of scope.
-        // If Prism gave us multiple right-side values (no array
-        // literal in source), they're already packed into an
-        // ArrayNode at the `value` slot.
+        // `a, b = expr`, `a, *r, b = expr`, `@x, @y = expr`,
+        // `a, b = 1, 2`. Targets come from `lefts` (pre-splat),
+        // `rest` (the splat slot itself), and `rights`
+        // (post-splat). If Prism got multiple right-side values
+        // with no array literal in source, they're packed into
+        // an ArrayNode at the `value` slot.
         let mut targets: Vec<MultiWriteTarget> = Vec::new();
-        for tgt in n.lefts().iter() {
+        let push_positional = |targets: &mut Vec<MultiWriteTarget>, tgt: &Node<'_>| {
             if let Some(lvt) = tgt.as_local_variable_target_node() {
                 targets.push(MultiWriteTarget::Local(cid_to_string(lvt.name())));
             } else if let Some(ivt) = tgt.as_instance_variable_target_node() {
                 targets.push(MultiWriteTarget::Ivar(cid_to_string(ivt.name())));
             } else {
-                // Other target shapes (constant, call, index, splat)
-                // aren't implemented; record an unsupported-node
-                // marker so eval surfaces a SyntaxError.
                 AST_ERRORS.with(|cell| cell.borrow_mut().push(
                     format!("unsupported multi-write target: {:?}", tgt)
                 ));
             }
+        };
+        for tgt in n.lefts().iter() {
+            push_positional(&mut targets, &tgt);
+        }
+        if let Some(rest) = n.rest() {
+            if let Some(splat) = rest.as_splat_node() {
+                match splat.expression() {
+                    None => targets.push(MultiWriteTarget::SplatLocal(None)),
+                    Some(expr) => {
+                        if let Some(lvt) = expr.as_local_variable_target_node() {
+                            targets.push(MultiWriteTarget::SplatLocal(
+                                Some(cid_to_string(lvt.name())),
+                            ));
+                        } else if let Some(ivt) = expr.as_instance_variable_target_node() {
+                            targets.push(MultiWriteTarget::SplatIvar(
+                                cid_to_string(ivt.name()),
+                            ));
+                        } else {
+                            AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                                format!("unsupported splat target: {:?}", expr)
+                            ));
+                        }
+                    }
+                }
+            } else if rest.as_implicit_rest_node().is_some() {
+                // `a, = arr` form — Prism uses ImplicitRestNode to
+                // mark the trailing comma. Treat as anonymous splat.
+                targets.push(MultiWriteTarget::SplatLocal(None));
+            } else {
+                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                    format!("unsupported multi-write rest: {:?}", rest)
+                ));
+            }
+        }
+        for tgt in n.rights().iter() {
+            push_positional(&mut targets, &tgt);
         }
         let value = tr(&n.value());
         return sp(node, Expr::MultiWrite {
