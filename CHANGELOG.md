@@ -6,6 +6,98 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **`String#sub` / `#gsub` / `#tr` (literal forms).**
+  Three commonly-needed string transformations. `sub` replaces
+  the first occurrence of the literal pattern; `gsub` replaces
+  every occurrence; `tr` does character-by-character
+  translation with CRuby's "stretch" rule (chars past the end
+  of `to` map to its last char; empty `to` deletes). All three
+  honour `Config::max_value_bytes` on the result. Regex forms
+  (`gsub(/pat/, ...)`) are explicitly out of scope until a
+  regex engine lands. Character ranges in `tr` (`"a-z"`) also
+  deferred — both gaps flagged in `SUBSET.md`. New diff
+  fixture `string_transform.rb` covers happy paths,
+  no-match passthrough, empty-pattern edge cases (CRuby's
+  `gsub("", "X")` per-boundary insertion), composition with
+  default arguments (a `slugify(s, sep = "-")` example), and
+  `respond_to?` reachability. Byte-identical to CRuby.
+
+### Documented
+- **`return` from inside a block does not exit the enclosing
+  method.** CRuby's non-local-return semantics for `return`
+  inside a `do…end` / `{ }` block needs a Result-style
+  signal that propagates through `dispatch_until` and every
+  native iterator driver — non-trivial and deferred.
+  Workaround: `find` / `detect` / a guard flag, or
+  restructure the method so the `return` is at top-level.
+  Added a "Divergences" entry in `docs/SUBSET.md`.
+
+### Added
+- **`<=>` spaceship operator.** Returns `Integer(-1/0/1)`
+  ordering or `nil` when the pair isn't comparable. Per-type
+  arms in `primitive_call` cover `Int <=> Int`,
+  `Float <=> Float`, `Int <=> Float` / `Float <=> Int`
+  (numeric coercion), `String <=> String`; `sym_primitive`
+  handles `Symbol <=> Symbol` (lexicographic on interned
+  name). `Bool <=> Bool` returns `0` for the same singleton
+  and `nil` otherwise — matching CRuby's default
+  `Object#<=>` because TrueClass/FalseClass don't override
+  it. `nil <=> nil` is `0`. NaN-involved Float comparisons
+  return `nil`. Cross-type returns `nil` via per-built-in-lhs
+  catch-alls. For `Value::Object` receivers, user-defined
+  `<=>` wins via the normal class-method-lookup path; an
+  unhandled `Object` lhs falls through to a `do_call`
+  universal that returns `0` for identical `ObjId` and
+  `nil` otherwise (CRuby's default `Object#<=>`). New diff
+  fixture `spaceship.rb` covers every type combination plus
+  a user-defined `Version#<=>` for a real sort-key idiom.
+  Byte-identical to CRuby.
+
+### Added
+- **`attr_accessor` / `attr_reader` / `attr_writer`.**
+  Compile-time desugar: a no-receiver call to any of these
+  with all-Symbol-literal args expands into `Op::DefMethod`
+  pairs in place — `attr_accessor :name, :age` becomes
+  `def name; @name; end; def name=(val); @name = val; end;
+  def age; @age; end; def age=(val); @age = val; end`. Used
+  inside a class body, the methods land on the surrounding
+  class via the normal `DefMethod` path; the generated
+  setter returns the assigned value (`x = (c.v = 99)`
+  yields 99) because our `IVarWrite` lowers as `<val>; Dup;
+  StoreIvar`. Synthesised getters/setters interact normally
+  with inheritance, default-arg methods, and method
+  chaining — all covered in the new `attr_accessor.rb` diff
+  fixture. Byte-identical to CRuby.
+- **Universal `!` (unary not) and `!@`.** `Bool#!`,
+  `Nil#!`, and `Foo#!` all needed to work for `!@secret.nil?`-
+  shaped predicates to dispatch. Added as a catch-all
+  primitive arm — `!recv` returns `true` iff `recv` is `nil`
+  or `false`. `!@` is the alternate spelling some metaprogramming
+  uses; both names route to the same arm.
+- **`Float` type (MVP).** `Value::Float(f64)`, literal parsing
+  via Prism's `FloatNode`, new `Op::LoadConstFloat(f64)`. Pure
+  Float arithmetic (`+ - * / %` and comparisons), mixed
+  Int/Float coercion ("Float wins" — `5 + 0.5 == 5.5`),
+  cross-numeric equality (`5 == 5.0` is `true`). Methods:
+  `to_i` / `to_f` / `to_s` / `abs` / `-@` / `+@`, predicates
+  (`zero?`, `positive?`, `negative?`, `nan?`, `finite?`),
+  `infinite?` returning `1` / `-1` / `nil`,
+  `floor` / `ceil` / `round` (all Integer-returning).
+  Companion conversions: `Integer#to_f`, `String#to_f` (CRuby-
+  lenient parse: leading whitespace, optional sign, optional
+  exponent, junk-tail → 0.0). `ruby_eq` extended for
+  Float-Float and Int-Float coercion. Preamble adds
+  `class Float; end` so `1.5.class.name == "Float"`. `class_of`
+  and `responds_to` extended.
+  Diff fixture `float_basics.rb` (~60 lines) covers literals,
+  arithmetic, coercion, comparisons, conversions, predicates,
+  rounding, Infinity/NaN sentinels, class identity,
+  `respond_to?`. Byte-identical to CRuby in the everyday
+  magnitude range; scientific notation (≥ `1e16`, `< 1e-3`)
+  diverges from CRuby's formatter and is a documented gap in
+  SUBSET.md.
+
 ### Fixed
 - **Cross-type `==` / `!=` no longer raises NoMethodError.**
   `"x" == nil`, `nil == :foo`, `5 == "5"`, `[] == ""` — every

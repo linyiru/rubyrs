@@ -9,6 +9,11 @@ use crate::value::Value;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
     LoadConstInt(i64),
+    /// Float literal — `5.0`, `3.14`, etc. f64 is Copy so the Op
+    /// stays Copy. Float arithmetic dispatches through
+    /// `primitive_call`'s Float arms; the BinOp fast path
+    /// (Int + Int) doesn't fire on Float receivers.
+    LoadConstFloat(f64),
     LoadConstStr(SymId),
     LoadSymbol(SymId),
     LoadNil,

@@ -244,6 +244,8 @@ end
 ## see docs/SUBSET.md.
 class Integer
 end
+class Float
+end
 class String
 end
 class Symbol

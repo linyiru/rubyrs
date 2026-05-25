@@ -301,7 +301,7 @@ impl Vm {
         let name: &str = &self.interner.resolve(name_id).clone();
         // Universal — every receiver responds to these.
         if matches!(name,
-            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!="
+            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>"
         ) {
             return true;
         }
@@ -309,10 +309,20 @@ impl Vm {
             Value::Int(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" |
                 "<" | "<=" | ">" | ">=" |
-                "to_i" | "abs" | "even?" | "odd?" |
+                "&" | "|" | "^" | "<<" | ">>" | "~" |
+                "to_i" | "to_f" | "abs" | "even?" | "odd?" |
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
                 "times" | "upto" | "downto"
+            ),
+            Value::Float(_) => matches!(name,
+                "+" | "-" | "*" | "/" | "%" |
+                "<" | "<=" | ">" | ">=" |
+                "to_i" | "to_f" | "abs" |
+                "zero?" | "positive?" | "negative?" |
+                "nan?" | "infinite?" | "finite?" |
+                "floor" | "ceil" | "round" |
+                "-@" | "+@"
             ),
             Value::Str(_) => matches!(name,
                 "+" | "*" | "<" | "<=" | ">" | ">=" |
@@ -320,7 +330,8 @@ impl Vm {
                 "upcase" | "downcase" | "reverse" |
                 "strip" | "lstrip" | "rstrip" |
                 "include?" | "start_with?" | "end_with?" |
-                "to_i" | "chars" | "split" | "to_sym"
+                "to_i" | "to_f" | "chars" | "split" | "to_sym" |
+                "sub" | "gsub" | "tr"
             ),
             Value::Sym(_) => matches!(name, "to_sym"),
             Value::Array(_) => matches!(name,
@@ -334,7 +345,8 @@ impl Vm {
                 "each" | "map" | "select" | "filter" |
                 "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
-                "each_with_index" | "sort_by"
+                "each_with_index" | "sort_by" |
+                "min_by" | "max_by" | "group_by"
             ),
             Value::Hash(_) => matches!(name,
                 "length" | "size" | "[]" | "[]=" | "empty?" |
@@ -374,6 +386,7 @@ impl Vm {
     pub(crate) fn class_of(&mut self, recv: &Value) -> Value {
         let name: &'static str = match recv {
             Value::Int(_) => "Integer",
+            Value::Float(_) => "Float",
             Value::Str(_) => "String",
             Value::Sym(_) => "Symbol",
             Value::Array(_) => "Array",
@@ -631,6 +644,24 @@ impl Vm {
             let eq = recv.ruby_eq(&args[0], &self.heap);
             let result = if &*name == "==" { eq } else { !eq };
             self.stack.push(Value::Bool(result));
+            return Ok(());
+        }
+        // `Object#<=>` fallback for `Value::Object` receivers. The
+        // per-type primitive_call arms above handle every built-in
+        // lhs (Int / Float / Str / Bool / Nil — Sym lives in
+        // sym_primitive). When we reach here on `<=>`, the only
+        // remaining lhs shape is `Value::Object` whose class
+        // didn't define `<=>`. CRuby's default `Object#<=>`
+        // returns `0` if the two values are identical (in our
+        // model: same `ObjId`) and `nil` otherwise. User-defined
+        // `<=>` on a class already fired via class-method-lookup
+        // earlier, so we don't shadow.
+        if &*name == "<=>" && args.len() == 1 {
+            let result = match (&recv, &args[0]) {
+                (Value::Object(a), Value::Object(b)) if a == b => Value::Int(0),
+                _ => Value::Nil,
+            };
+            self.stack.push(result);
             return Ok(());
         }
         // `Object#class` — universal, no args. Returns the Class
@@ -1790,6 +1821,87 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
             }
+            (Value::Array(id), "min_by", []) | (Value::Array(id), "max_by", []) => {
+                // For each element, call the block once to produce a
+                // key. Track the running winner. Returns nil for an
+                // empty array (matching CRuby). Block-keys that
+                // aren't mutually comparable surface as NoMethodError
+                // via `value_cmp_v` returning None for one of them —
+                // same shape as sort_by.
+                let want_min = name == "min_by";
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut best: Option<(Value, Value)> = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
+                    }
+                    best = Some(match best {
+                        None => (key, v),
+                        Some((bk, bv)) => match value_cmp_v(&key, &bk, &g.vm.interner) {
+                            Some(std::cmp::Ordering::Less) if want_min => (key, v),
+                            Some(std::cmp::Ordering::Greater) if !want_min => (key, v),
+                            // Equal or wrong direction — keep prior.
+                            Some(_) => (bk, bv),
+                            // Incomparable keys — fall through to None below.
+                            None => return Ok(None),
+                        },
+                    });
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                Some(best.map(|(_, v)| v).unwrap_or(Value::Nil))
+            }
+            (Value::Array(id), "group_by", []) => {
+                // Group elements into a Hash keyed by the block's
+                // return value. Insertion order matches first
+                // appearance of each key — CRuby semantics. Values
+                // collect into a fresh Array per key.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::new()));
+                g.pin(Value::Hash(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
+                    }
+                    // Find or create the bucket array for this key.
+                    let pos = g.vm.heap.hash(result_id).iter()
+                        .position(|(k, _)| k.ruby_eq(&key, &g.vm.heap));
+                    if let Some(p) = pos {
+                        if let Value::Array(arr_id) = g.vm.heap.hash(result_id)[p].1 {
+                            g.vm.heap.array_mut(arr_id).push(v);
+                        }
+                    } else {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let arr_id = g.vm.heap.alloc(HeapObj::Array(vec![v]));
+                        g.vm.heap.hash_mut(result_id).push((key, Value::Array(arr_id)));
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                Some(Value::Hash(result_id))
+            }
             (Value::Array(id), "sort_by", []) => {
                 // Compute the sort key for every element by calling the
                 // block once, then sort element/key pairs by key. The
@@ -2062,6 +2174,7 @@ impl Vm {
         self.check_fuel()?;
         match op {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
+            Op::LoadConstFloat(f) => self.stack.push(Value::Float(f)),
             Op::LoadConstStr(id) => {
                 let s = self.interner.resolve(id).clone();
                 self.stack.push(Value::Str(s));
@@ -2901,6 +3014,22 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             "<=" => Some(Value::Bool(a <= b)),
             ">"  => Some(Value::Bool(a > b)),
             ">=" => Some(Value::Bool(a >= b)),
+            "<=>" => Some(Value::Int(a.cmp(b) as i64)),
+            // Bitwise. Ruby uses arbitrary-precision Integer; we
+            // truncate to i64. `<<` on a negative shift count is
+            // CRuby's right-shift (and vice versa) — we mirror with
+            // a sign check rather than panicking on negative shifts.
+            "&" => Some(Value::Int(a & b)),
+            "|" => Some(Value::Int(a | b)),
+            "^" => Some(Value::Int(a ^ b)),
+            "<<" => Some(Value::Int(
+                if *b >= 0 { a.wrapping_shl((*b as u32).min(63)) }
+                else { a.wrapping_shr(((-b) as u32).min(63)) }
+            )),
+            ">>" => Some(Value::Int(
+                if *b >= 0 { a.wrapping_shr((*b as u32).min(63)) }
+                else { a.wrapping_shl(((-b) as u32).min(63)) }
+            )),
             _ => None,
         },
         (Value::Int(a), "to_s", []) => Some(Value::Str(Rc::from(a.to_string().as_str()))),
@@ -2908,6 +3037,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Int(a), "abs", []) => Some(Value::Int(a.wrapping_abs())),
         (Value::Int(a), "-@", []) => Some(Value::Int(a.wrapping_neg())),
         (Value::Int(a), "+@", []) => Some(Value::Int(*a)),
+        (Value::Int(a), "~", []) => Some(Value::Int(!a)),
         (Value::Int(a), "even?", []) => Some(Value::Bool(a % 2 == 0)),
         (Value::Int(a), "odd?", []) => Some(Value::Bool(a % 2 != 0)),
         (Value::Int(a), "zero?", []) => Some(Value::Bool(*a == 0)),
@@ -2915,6 +3045,99 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Int(a), "negative?", []) => Some(Value::Bool(*a < 0)),
         (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => Some(Value::Int(a.wrapping_add(1))),
         (Value::Int(a), "pred", []) => Some(Value::Int(a.wrapping_sub(1))),
+        (Value::Int(a), "to_f", []) => Some(Value::Float(*a as f64)),
+
+        // Float × Float
+        (Value::Float(a), op, [Value::Float(b)]) => match op {
+            "+" => Some(Value::Float(a + b)),
+            "-" => Some(Value::Float(a - b)),
+            "*" => Some(Value::Float(a * b)),
+            // Float / 0.0 == ±Infinity (or NaN), not an exception —
+            // matches IEEE 754 and CRuby.
+            "/" => Some(Value::Float(a / b)),
+            "%" => Some(Value::Float(a % b)),
+            "==" => Some(Value::Bool(a == b)),
+            "!=" => Some(Value::Bool(a != b)),
+            "<"  => Some(Value::Bool(a < b)),
+            "<=" => Some(Value::Bool(a <= b)),
+            ">"  => Some(Value::Bool(a > b)),
+            ">=" => Some(Value::Bool(a >= b)),
+            // `partial_cmp` returns None on NaN-involved
+            // comparisons; CRuby's spec is the same: `(0.0/0.0)
+            // <=> 1.0 == nil`.
+            "<=>" => Some(match a.partial_cmp(b) {
+                Some(o) => Value::Int(o as i64),
+                None => Value::Nil,
+            }),
+            _ => None,
+        },
+        // Mixed Int/Float — CRuby's "Float wins" coercion.
+        (Value::Float(a), op, [Value::Int(b)]) => {
+            let b = *b as f64;
+            match op {
+                "+" => Some(Value::Float(a + b)),
+                "-" => Some(Value::Float(a - b)),
+                "*" => Some(Value::Float(a * b)),
+                "/" => Some(Value::Float(a / b)),
+                "%" => Some(Value::Float(a % b)),
+                "==" => Some(Value::Bool(*a == b)),
+                "!=" => Some(Value::Bool(*a != b)),
+                "<"  => Some(Value::Bool(*a < b)),
+                "<=" => Some(Value::Bool(*a <= b)),
+                ">"  => Some(Value::Bool(*a > b)),
+                ">=" => Some(Value::Bool(*a >= b)),
+                "<=>" => Some(match a.partial_cmp(&b) {
+                    Some(o) => Value::Int(o as i64),
+                    None => Value::Nil,
+                }),
+                _ => None,
+            }
+        }
+        (Value::Int(a), op, [Value::Float(b)]) => {
+            let a = *a as f64;
+            match op {
+                "+" => Some(Value::Float(a + b)),
+                "-" => Some(Value::Float(a - b)),
+                "*" => Some(Value::Float(a * b)),
+                "/" => Some(Value::Float(a / b)),
+                "%" => Some(Value::Float(a % b)),
+                "==" => Some(Value::Bool(a == *b)),
+                "!=" => Some(Value::Bool(a != *b)),
+                "<"  => Some(Value::Bool(a < *b)),
+                "<=" => Some(Value::Bool(a <= *b)),
+                ">"  => Some(Value::Bool(a > *b)),
+                ">=" => Some(Value::Bool(a >= *b)),
+                "<=>" => Some(match a.partial_cmp(b) {
+                    Some(o) => Value::Int(o as i64),
+                    None => Value::Nil,
+                }),
+                _ => None,
+            }
+        }
+        // Float predicates and conversions.
+        (Value::Float(a), "to_s", []) => Some(Value::Str(Rc::from(crate::heap::format_float(*a).as_str()))),
+        (Value::Float(a), "to_f", []) => Some(Value::Float(*a)),
+        (Value::Float(a), "to_i", []) => Some(Value::Int(*a as i64)),
+        (Value::Float(a), "abs", []) => Some(Value::Float(a.abs())),
+        (Value::Float(a), "-@", []) => Some(Value::Float(-*a)),
+        (Value::Float(a), "+@", []) => Some(Value::Float(*a)),
+        (Value::Float(a), "zero?", []) => Some(Value::Bool(*a == 0.0)),
+        (Value::Float(a), "positive?", []) => Some(Value::Bool(*a > 0.0)),
+        (Value::Float(a), "negative?", []) => Some(Value::Bool(*a < 0.0)),
+        (Value::Float(a), "nan?", []) => Some(Value::Bool(a.is_nan())),
+        (Value::Float(a), "infinite?", []) => {
+            // CRuby's `Float#infinite?` returns 1 / -1 / nil, not bool.
+            if a.is_infinite() {
+                Some(Value::Int(if *a > 0.0 { 1 } else { -1 }))
+            } else {
+                Some(Value::Nil)
+            }
+        }
+        (Value::Float(a), "finite?", []) => Some(Value::Bool(a.is_finite())),
+        (Value::Float(a), "floor", []) => Some(Value::Int(a.floor() as i64)),
+        (Value::Float(a), "ceil", []) => Some(Value::Int(a.ceil() as i64)),
+        (Value::Float(a), "round", []) => Some(Value::Int(a.round() as i64)),
+
         (Value::Str(a), "+", [Value::Str(b)]) => {
             check(a.len().saturating_add(b.len()))?;
             let mut s = a.to_string();
@@ -2933,6 +3156,73 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Str(a), "lstrip", []) => Some(Value::Str(Rc::from(a.trim_start()))),
         (Value::Str(a), "rstrip", []) => Some(Value::Str(Rc::from(a.trim_end()))),
         (Value::Str(a), "include?", [Value::Str(b)]) => Some(Value::Bool(a.contains(&**b))),
+        // Literal-substring sub/gsub. Regex forms (`gsub(/pat/, ...)`)
+        // are out of scope until we add a regex engine — documented
+        // in SUBSET.md. CRuby's `gsub("", "x")` on a non-empty
+        // string inserts at every character boundary; we replicate
+        // that via `Rust`'s `str::replace` for non-empty patterns
+        // and a hand-rolled walk for the empty-pattern case.
+        (Value::Str(a), "sub", [Value::Str(pat), Value::Str(repl)]) => {
+            let out = if pat.is_empty() {
+                // CRuby: sub("", repl) inserts `repl` at index 0.
+                let mut s = repl.to_string();
+                s.push_str(a);
+                s
+            } else if let Some(idx) = a.find(&**pat) {
+                let mut s = String::with_capacity(a.len() + repl.len());
+                s.push_str(&a[..idx]);
+                s.push_str(repl);
+                s.push_str(&a[idx + pat.len()..]);
+                s
+            } else {
+                a.to_string()
+            };
+            check(out.len())?;
+            Some(Value::Str(Rc::from(out.as_str())))
+        }
+        (Value::Str(a), "gsub", [Value::Str(pat), Value::Str(repl)]) => {
+            let out = if pat.is_empty() {
+                // CRuby: gsub("", repl) wraps `repl` around every
+                // character — `"abc".gsub("", "X") == "XaXbXcX"`.
+                let mut s = repl.to_string();
+                for c in a.chars() {
+                    s.push(c);
+                    s.push_str(repl);
+                }
+                s
+            } else {
+                a.replace(&**pat, repl)
+            };
+            check(out.len())?;
+            Some(Value::Str(Rc::from(out.as_str())))
+        }
+        // String#tr — character-by-character translation. Each
+        // char in `from` maps to the same-index char in `to`; if
+        // `to` is shorter, characters past its length map to its
+        // LAST char (CRuby's "stretch" behaviour). If `to` is
+        // empty, those chars are deleted. Character-range syntax
+        // (`"a-z"`) is intentionally NOT expanded — flagged in
+        // SUBSET.md.
+        (Value::Str(a), "tr", [Value::Str(from), Value::Str(to)]) => {
+            let from_chars: Vec<char> = from.chars().collect();
+            let to_chars: Vec<char> = to.chars().collect();
+            let mut out = String::with_capacity(a.len());
+            for ch in a.chars() {
+                if let Some(idx) = from_chars.iter().position(|c| *c == ch) {
+                    if to_chars.is_empty() {
+                        // Delete: skip this character entirely.
+                    } else if idx < to_chars.len() {
+                        out.push(to_chars[idx]);
+                    } else {
+                        out.push(*to_chars.last().unwrap());
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            check(out.len())?;
+            Some(Value::Str(Rc::from(out.as_str())))
+        }
         (Value::Str(a), "start_with?", [Value::Str(b)]) => Some(Value::Bool(a.starts_with(&**b))),
         (Value::Str(a), "end_with?", [Value::Str(b)]) => Some(Value::Bool(a.ends_with(&**b))),
         (Value::Str(a), "to_i", []) => {
@@ -2955,6 +3245,42 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             }
             Some(Value::Int(if saw_digit { sign.wrapping_mul(n) } else { 0 }))
         }
+        (Value::Str(a), "to_f", []) => {
+            // CRuby's leniency: trim leading whitespace, parse what
+            // we can, return 0.0 for "garbage". Rust's stdlib
+            // `f64::from_str` is stricter (rejects trailing junk),
+            // so we scan a Ruby-shaped prefix ourselves.
+            let s = a.trim_start();
+            let bytes = s.as_bytes();
+            let mut end = 0usize;
+            if bytes.first() == Some(&b'-') || bytes.first() == Some(&b'+') {
+                end += 1;
+            }
+            let mut saw_digit = false;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                saw_digit = true;
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'.' {
+                end += 1;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    saw_digit = true;
+                    end += 1;
+                }
+            }
+            // Optional exponent
+            if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+                let mut e = end + 1;
+                if e < bytes.len() && (bytes[e] == b'+' || bytes[e] == b'-') { e += 1; }
+                let exp_start = e;
+                while e < bytes.len() && bytes[e].is_ascii_digit() { e += 1; }
+                if e > exp_start { end = e; }
+            }
+            let parsed = if saw_digit {
+                s[..end].parse::<f64>().unwrap_or(0.0)
+            } else { 0.0 };
+            Some(Value::Float(parsed))
+        }
         (Value::Str(a), "*", [Value::Int(n)]) => {
             let n = (*n).max(0) as usize;
             check(a.len().saturating_mul(n))?;
@@ -2963,6 +3289,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(**a < **b)),
         (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(**a <= **b)),
         (Value::Str(a), ">", [Value::Str(b)]) => Some(Value::Bool(**a > **b)),
+        (Value::Str(a), "<=>", [Value::Str(b)]) => Some(Value::Int((**a).cmp(&**b) as i64)),
         (Value::Str(a), ">=", [Value::Str(b)]) => Some(Value::Bool(**a >= **b)),
         (Value::Sym(a), "==", [Value::Sym(b)]) => Some(Value::Bool(a == b)),
         (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(a != b)),
@@ -2973,7 +3300,34 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // implement it here as a generic fallback so e.g.
         // `"abc".nil?` and `5.nil?` work without per-type arms.
         (_, "nil?", []) => Some(Value::Bool(false)),
+        // Unary `!`. CRuby defines `Kernel#!` on every Object —
+        // `!foo` returns `true` iff `foo` is `nil` or `false`,
+        // `false` otherwise. Prism lowers a unary `!` expression
+        // as a call to the `!` method, so this universal arm
+        // covers every receiver. `!@` (the alternate spelling
+        // used by `attr_*` / `define_method`) is the same op.
+        (_, "!", []) | (_, "!@", []) => Some(Value::Bool(!recv.is_truthy())),
         (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::from(if *b { "true" } else { "false" }))),
+        // CRuby's TrueClass / FalseClass don't define `<=>`;
+        // `Object#<=>` falls back to "0 if identical instance
+        // else nil". Booleans are singletons (every `true` is
+        // the same instance) so `true <=> true == 0` and
+        // `true <=> false == nil`. Same shape for Nil.
+        (Value::Bool(a), "<=>", [Value::Bool(b)]) => {
+            Some(if a == b { Value::Int(0) } else { Value::Nil })
+        }
+        (Value::Nil, "<=>", [Value::Nil]) => Some(Value::Int(0)),
+        // Per-built-in-lhs catch-alls: when the rhs type doesn't
+        // match any specific arm above, `<=>` is `nil`, not
+        // NoMethodError. We have to enumerate per-lhs (rather
+        // than a universal `(_, "<=>", _)`) so that user-defined
+        // `<=>` on `Value::Object` still wins via the normal
+        // class-method-lookup path in `do_call`.
+        (Value::Int(_), "<=>", [_]) => Some(Value::Nil),
+        (Value::Float(_), "<=>", [_]) => Some(Value::Nil),
+        (Value::Str(_), "<=>", [_]) => Some(Value::Nil),
+        (Value::Bool(_), "<=>", [_]) => Some(Value::Nil),
+        (Value::Nil, "<=>", [_]) => Some(Value::Nil),
         (Value::Class(c), "name", []) | (Value::Class(c), "to_s", []) => {
             Some(Value::Str(Rc::from(c.name.as_str())))
         }
@@ -2995,6 +3349,15 @@ impl Vm {
         match (recv, name, args) {
             (Value::Sym(id), "to_s", []) => Some(Value::Str(self.interner.resolve(*id).clone())),
             (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
+            // Symbol <=> Symbol compares the interned names
+            // lexicographically — matches `value_cmp_v`.
+            (Value::Sym(a), "<=>", [Value::Sym(b)]) => {
+                let sa = self.interner.resolve(*a);
+                let sb = self.interner.resolve(*b);
+                Some(Value::Int((**sa).cmp(&**sb) as i64))
+            }
+            // Cross-type with Symbol lhs: nil, not NoMethodError.
+            (Value::Sym(_), "<=>", [_]) => Some(Value::Nil),
             _ => None,
         }
     }

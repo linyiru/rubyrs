@@ -9,8 +9,17 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 ## Supported today
 
 ### Values
-- `Integer` (i64); `Float` is not yet supported (no `Float` literals or
-  arithmetic)
+- `Integer` (i64) and `Float` (f64). Float literals (`3.14`,
+  `1e6`), Float arithmetic, mixed Int/Float coercion (CRuby's
+  "Float wins on mix" rule), `5 == 5.0` cross-numeric equality.
+  Float methods: `to_i` / `to_f` / `to_s` / `abs`, predicates
+  (`zero?` / `positive?` / `negative?` / `nan?` / `finite?`),
+  `infinite?` (returns `1` / `-1` / `nil`), and
+  `floor` / `ceil` / `round` (Integer results). Scientific
+  notation diverges from CRuby for very large or very small
+  magnitudes (Rust prints `1e16`, CRuby prints `1.0e+16`) —
+  documented divergence; restrict diff fixtures to the
+  everyday range.
 - `String` (`Rc<str>`, UTF-8 view) with `+`, `==`, `length`, `to_s`.
   String literals share storage via the global interner.
 - `Symbol` (`u32` index into the interner) with `to_s`, `to_sym`, `==`,
@@ -114,6 +123,30 @@ end
 - Tests: `resource_exhausted_cannot_be_swallowed_by_bare_rescue`
   and `resource_exhausted_is_uncatchable_even_with_rescue_exception`.
 
+### `return` from inside a block doesn't unwind the enclosing method
+
+```ruby
+def first_positive(arr)
+  arr.each do |n|
+    return n if n > 0     # CRuby: returns n from first_positive
+  end                     # rubyrs: returns n from the block, loop continues
+  nil
+end
+```
+
+- CRuby's `return` is a non-local jump: from inside a block,
+  it unwinds past the block invocation and pops the enclosing
+  method frame.
+- rubyrs's `Op::Return` pops a single frame. From a block
+  that's the block frame, not the method, so the iterator
+  driver keeps running.
+- Workaround: use `find` / `detect` / a flag, or restructure
+  the method so the `return` is at the top level of the
+  method body.
+- Why deferred: the fix needs a Result-style "method return"
+  signal that propagates through `dispatch_until` and every
+  iterator driver — non-trivial. Tracked.
+
 ### Multi-class `rescue A, B => e`
 
 ```ruby
@@ -145,7 +178,7 @@ end
 | String methods: `split`, `gsub`, `sub`, `chomp`, `strip`, `upcase`, `downcase`, `chars` | high |
 | `Module`, `include`, `extend` | high |
 | Class inheritance (`class Foo < Bar`), `super` | high |
-| `Float`, `Rational`, mixed-numeric arithmetic | medium |
+| `Rational`, `Complex`, big-Integer overflow promotion | low |
 | Exception class hierarchy (`raise SomeError`), `ensure` | medium |
 | `attr_reader / attr_writer / attr_accessor` | medium |
 | Default args, keyword args, splat, block-arg `&blk` | medium |
