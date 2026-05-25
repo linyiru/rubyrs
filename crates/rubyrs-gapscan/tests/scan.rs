@@ -202,6 +202,51 @@ fn diff_detects_closed_and_new_gaps() {
 }
 
 #[test]
+fn diff_honours_scan_time_classification_for_cross_version_runs() {
+    // The UnlessNode-landing PR exposed this bug: diff() used to
+    // re-classify both sides with today's classify(), so a feature
+    // that moved a class from Missing → Supported between scans
+    // looked like a no-op. Now NodeStat carries a frozen
+    // `scan_time_classification`; this test pins the cross-version
+    // semantics by constructing reports as if scanned by two
+    // different gapscan binaries.
+    use rubyrs_gapscan::NodeStat;
+    let mut before = Report::default();
+    before.total_nodes = 10;
+    // FooNode existed and counted as Missing at the time of the
+    // "before" scan, even though today's live classify() would call
+    // it Supported (we simulate that by overriding the scan-time
+    // classification to Missing).
+    before.histogram.insert(
+        "CallNode".to_string(),
+        NodeStat {
+            count: 4,
+            scan_time_classification: Some(Classification::Missing),
+            ..Default::default()
+        },
+    );
+    // The "after" scan is on the same source but a newer rubyrs:
+    // same CallNode count, but now classified Supported.
+    let mut after = Report::default();
+    after.total_nodes = 10;
+    after.histogram.insert(
+        "CallNode".to_string(),
+        NodeStat {
+            count: 4,
+            scan_time_classification: Some(Classification::Supported),
+            ..Default::default()
+        },
+    );
+
+    let d = diff(&before, &after);
+    // Before: 4 missing, 0 supported.  After: 0 missing, 4 supported.
+    assert_eq!(d.missing_delta, -4);
+    assert_eq!(d.supported_delta, 4);
+    assert_eq!(d.closed_missing_classes, vec![("CallNode".to_string(), 4)]);
+    assert!(d.new_missing_classes.is_empty());
+}
+
+#[test]
 fn scan_propagates_missing_root_path() {
     // PR #3 review #9: a missing root path used to silently produce
     // an empty report (exit 0) — both CLI and library callers had no
