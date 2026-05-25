@@ -186,7 +186,15 @@ jobs:
           # Result. Documented at the expect site.
           check crates/rubyrs/src/vm.rs       68
           check crates/rubyrs/src/heap.rs     10
-          check crates/rubyrs/src/ast.rs       3
+          # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
+          # (multi-write assignment, splat receive, op-assignment forms)
+          # which added new ICE-class panics in ast::tr for partially-
+          # supported assignment shapes. Master never bumped the budget
+          # itself; PR #6 picks the increase up because it merges those
+          # commits. All three sites are user-reachable
+          # "unsupported AST" paths that ideally become Trap, tracked
+          # in docs/PANIC_AUDIT.md.
+          check crates/rubyrs/src/ast.rs       6
           check crates/rubyrs/src/lib.rs       1
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
