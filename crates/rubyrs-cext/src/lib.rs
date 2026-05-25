@@ -127,6 +127,14 @@ pub enum CValue {
     /// from `rb_define_module` / `rb_define_class_under`; consumed
     /// by `rb_define_singleton_method`.
     Class(String),
+    /// An Array of handles. C extensions build these via `rb_ary_new`
+    /// + `rb_ary_push`; the host's `cext_handle_to_value` translates
+    /// recursively into a `Value::Array` on the Vm heap on return.
+    Array(Vec<Value>),
+    /// A Hash of (key handle, value handle) pairs, ordered (Ruby
+    /// semantics since 1.9). Built via `rb_hash_new` + `rb_hash_aset`;
+    /// translated to `Value::Hash` on the Vm heap on return.
+    Hash(Vec<(Value, Value)>),
 }
 
 impl CValue {
@@ -226,6 +234,14 @@ impl CExtState {
     pub fn resolve(&self, h: Value) -> &CValue {
         self.values
             .get(h as usize)
+            .expect("ICE: cext handle out of range; C ext leaked a stale VALUE")
+    }
+
+    /// Mutable resolve, for in-place mutation of `CValue::Array` /
+    /// `CValue::Hash` via `rb_ary_push` / `rb_hash_aset`.
+    pub fn resolve_mut(&mut self, h: Value) -> &mut CValue {
+        self.values
+            .get_mut(h as usize)
             .expect("ICE: cext handle out of range; C ext leaked a stale VALUE")
     }
 }
@@ -610,6 +626,208 @@ pub unsafe extern "C" fn rb_define_singleton_method(
             arity: arity as i32,
         });
     });
+}
+
+// ===== Array C ABI (Level 2-3) =====
+
+/// Allocate an empty Array and return its handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_new() -> Value {
+    with_state(|st| st.intern(CValue::Array(Vec::new())))
+}
+
+/// Allocate an empty Array, ignoring the capacity hint. CRuby's
+/// `rb_ary_new_capa` pre-reserves storage; we don't — `Vec` grows
+/// on its own and a wrong hint hurts more than it helps. In
+/// particular, the previous `Vec::with_capacity(capa.max(0) as
+/// usize)` would attempt a giant allocation (or panic on overflow,
+/// which in an `extern "C"` boundary translates to a process
+/// abort) when given `c_long::MAX` or any large positive hint
+/// from a buggy C extension. Honestly ignoring the value matches
+/// the existing doc-comment intent and is forward-compatible with
+/// a future productionising pass that DOES pre-reserve.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_new_capa(_capa: c_long) -> Value {
+    with_state(|st| st.intern(CValue::Array(Vec::new())))
+}
+
+/// Append `v` to the Array `ary`. Returns `ary` for chaining,
+/// matching CRuby.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_push(ary: Value, v: Value) -> Value {
+    with_state(|st| match st.resolve_mut(ary) {
+        CValue::Array(elems) => {
+            elems.push(v);
+            ary
+        }
+        other => panic!(
+            "ICE: rb_ary_push on non-Array CValue: {:?}",
+            std::mem::discriminant(other)
+        ),
+    })
+}
+
+/// Read element at index `idx`. Negative indices count from the end
+/// (CRuby semantics). Returns [`Qnil`] for out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_entry(ary: Value, idx: c_long) -> Value {
+    with_state(|st| match st.resolve(ary) {
+        CValue::Array(elems) => {
+            let len = elems.len() as c_long;
+            // Use checked addition for the negative-index case:
+            // `LONG_MIN + len` overflows c_long and would abort in
+            // debug builds — fatal across the extern "C" boundary
+            // (no unwinding). On overflow, treat as out-of-range.
+            let resolved = if idx < 0 {
+                match idx.checked_add(len) {
+                    Some(r) => r,
+                    None => return Qnil,
+                }
+            } else {
+                idx
+            };
+            if resolved < 0 || resolved >= len {
+                Qnil
+            } else {
+                elems[resolved as usize]
+            }
+        }
+        _ => Qnil,
+    })
+}
+
+/// Length of the Array in elements.
+#[unsafe(no_mangle)]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn RARRAY_LEN(ary: Value) -> c_long {
+    with_state(|st| match st.resolve(ary) {
+        CValue::Array(elems) => elems.len() as c_long,
+        _ => 0,
+    })
+}
+
+// ===== Hash C ABI (Level 2-3) =====
+
+/// Allocate an empty Hash and return its handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_new() -> Value {
+    with_state(|st| st.intern(CValue::Hash(Vec::new())))
+}
+
+/// Set `h[key] = value`. If `key` is already present, replace its
+/// value (matching CRuby Hash semantics). Returns `value`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_aset(h: Value, key: Value, value: Value) -> Value {
+    with_state(|st| {
+        // Lift the existing-key check out of the borrow so we can mutate.
+        let existing_idx = if let CValue::Hash(pairs) = st.resolve(h) {
+            pairs
+                .iter()
+                .position(|(k, _)| cvalue_eq(st, *k, key))
+        } else {
+            None
+        };
+        match st.resolve_mut(h) {
+            CValue::Hash(pairs) => {
+                if let Some(i) = existing_idx {
+                    pairs[i].1 = value;
+                } else {
+                    pairs.push((key, value));
+                }
+            }
+            other => panic!(
+                "ICE: rb_hash_aset on non-Hash CValue: {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        value
+    })
+}
+
+/// Get `h[key]`. Returns [`Qnil`] for missing keys (CRuby returns
+/// the Hash's default; spike just uses Nil).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_aref(h: Value, key: Value) -> Value {
+    with_state(|st| {
+        if let CValue::Hash(pairs) = st.resolve(h) {
+            for (k, v) in pairs {
+                if cvalue_eq(st, *k, key) {
+                    return *v;
+                }
+            }
+        }
+        Qnil
+    })
+}
+
+/// Bounded recursion depth for [`cvalue_eq`]. C extensions can build
+/// self-referential `CValue::Array` / `CValue::Hash` (`a.push(a)`
+/// from C); without a depth limit, comparing such a value against
+/// any equal-shape peer stack-overflows. 256 is generous for
+/// realistic key shapes and well below the host stack limit.
+const CVALUE_EQ_MAX_DEPTH: usize = 256;
+
+/// CValue equality for Hash key lookup. Compares by handle identity
+/// first, then falls back to content equality:
+///
+///   - Nil / True / False / Str / Int : per-variant value compare
+///   - Array : same length AND pairwise-equal elements (recursive)
+///   - Hash  : same length AND every (k, v) in self has a matching
+///             pair somewhere in other (recursive, order-independent)
+///   - Class : handle-identity only (CRuby's Module / Class compare
+///             by identity by default; spike doesn't model singleton
+///             classes that might override)
+///
+/// Matches Ruby's `eql?` semantics for the variants we model. Recursive
+/// equality matters because L2-3 lets a C ext build a Hash key as
+/// `rb_ary_new()`-based or `rb_hash_new()`-based, and a lookup with
+/// content-equal but distinct-handle key would otherwise miss.
+///
+/// Recursion is depth-limited (see [`CVALUE_EQ_MAX_DEPTH`]) so a
+/// C-built self-referential Array/Hash bottoms out as `false` instead
+/// of stack-overflowing.
+fn cvalue_eq(st: &CExtState, a: Value, b: Value) -> bool {
+    cvalue_eq_d(st, a, b, 0)
+}
+
+fn cvalue_eq_d(st: &CExtState, a: Value, b: Value, depth: usize) -> bool {
+    if a == b {
+        return true;
+    }
+    if depth >= CVALUE_EQ_MAX_DEPTH {
+        // Pathological input (cycle or implausible depth). Bottom
+        // out as not-equal rather than overflow the stack; the
+        // identity check at the top already handled the trivial
+        // same-handle case.
+        return false;
+    }
+    match (st.resolve(a), st.resolve(b)) {
+        (CValue::Nil, CValue::Nil) => true,
+        (CValue::True, CValue::True) => true,
+        (CValue::False, CValue::False) => true,
+        (CValue::Str(x), CValue::Str(y)) => x == y,
+        (CValue::Int(x), CValue::Int(y)) => x == y,
+        (CValue::Array(x), CValue::Array(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(ah, bh)| cvalue_eq_d(st, *ah, *bh, depth + 1))
+        }
+        (CValue::Hash(x), CValue::Hash(y)) => {
+            // Order-independent: every (k, v) in x must have a
+            // matching (k', v') in y where k eql k' AND v eql v'.
+            // O(n²) lookup — spike scope; CRuby uses an indexed
+            // table for the same compare.
+            x.len() == y.len()
+                && x.iter().all(|(ak, av)| {
+                    y.iter().any(|(bk, bv)| {
+                        cvalue_eq_d(st, *ak, *bk, depth + 1)
+                            && cvalue_eq_d(st, *av, *bv, depth + 1)
+                    })
+                })
+        }
+        _ => false,
+    }
 }
 
 // ===== Intern table for ID (thread-local; see `pub type ID` docs) =====

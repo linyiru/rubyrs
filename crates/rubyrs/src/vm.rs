@@ -1373,17 +1373,26 @@ impl Vm {
                         Some(Value::Array(id))
                     }
                     ("take", [Value::Int(n)]) => {
+                        // Pin the receiver across maybe_gc: by the
+                        // time we get here the receiver Array has
+                        // been popped from the operand stack, so its
+                        // children (the cloned ObjIds in `out`) have
+                        // no GC root and STRESS_GC sweeps them.
                         let n = (*n).max(0) as usize;
-                        let out: Vec<Value> = self.heap.array(id).iter().take(n).cloned().collect();
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let out: Vec<Value> = g.vm.heap.array(id).iter().take(n).cloned().collect();
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
                     ("drop", [Value::Int(n)]) => {
                         let n = (*n).max(0) as usize;
-                        let out: Vec<Value> = self.heap.array(id).iter().skip(n).cloned().collect();
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let out: Vec<Value> = g.vm.heap.array(id).iter().skip(n).cloned().collect();
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
                     // `zip` — pairs each element of `self` with the
@@ -1418,18 +1427,30 @@ impl Vm {
                                 }));
                             }
                         }
-                        let mut out: Vec<Value> = Vec::with_capacity(base.len());
-                        for (i, v) in base.iter().enumerate() {
-                            let mut row: Vec<Value> = Vec::with_capacity(row_width);
-                            row.push(v.clone());
-                            for o in &others {
-                                row.push(o.get(i).cloned().unwrap_or(Value::Nil));
+                        // PinGuard the freshly-alloc'd row Arrays: their
+                        // ObjIds live in a Rust local `out` Vec, NOT on
+                        // `vm.stack` / `vm.pinned`, so the explicit
+                        // `maybe_gc()` after the loop (or a STRESS_GC
+                        // gc on every alloc) would sweep them and the
+                        // outer `heap.alloc(out)` would then panic with
+                        // `ICE: use-after-free`. Same shape as L1.5 P0-A.
+                        let nid = {
+                            let mut g = PinGuard::new(self);
+                            let mut out: Vec<Value> = Vec::with_capacity(base.len());
+                            for (i, v) in base.iter().enumerate() {
+                                let mut row: Vec<Value> = Vec::with_capacity(row_width);
+                                row.push(v.clone());
+                                for o in &others {
+                                    row.push(o.get(i).cloned().unwrap_or(Value::Nil));
+                                }
+                                let rid = g.vm.heap.alloc(HeapObj::Array(row));
+                                let rv = Value::Array(rid);
+                                g.pin(rv.clone());
+                                out.push(rv);
                             }
-                            let rid = self.heap.alloc(HeapObj::Array(row));
-                            out.push(Value::Array(rid));
-                        }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                            g.vm.maybe_gc();
+                            g.vm.heap.alloc(HeapObj::Array(out))
+                        };
                         Some(Value::Array(nid))
                     }
                     _ => None,
@@ -2942,40 +2963,36 @@ impl Vm {
                 Some(Value::Hash(result_id))
             }
             (Value::Array(id), "sort_by", []) => {
-                // Compute the sort key for every element by calling
-                // the block once, then insertion-sort the (key, val)
-                // pairs by key using `user_cmp`. The block is run
-                // exactly N times (one key per element); the sort
-                // itself does O(n²) comparisons but each is a host-
-                // side dispatch into the user `<=>` (or value_cmp_v
-                // for built-ins), not another block call.
-                let snapshot: Vec<(Value, Value)> = {
-                    let mut g = PinGuard::new(self);
-                    g.pin(Value::Array(*id));
-                    g.pin(Value::Block(block));
-                    let arr = g.vm.heap.array(*id).clone();
-                    let pre_frames = g.vm.frames.len();
-                    let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
-                    let mut early: Option<Value> = None;
-                    for v in arr {
-                        g.vm.invoke_block(block, vec![v.clone()])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        if g.vm.method_return.is_some() { break; }
-                        let key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        if g.vm.break_signaled {
-                            g.vm.break_signaled = false;
-                            early = Some(key);
-                            break;
-                        }
-                        pairs.push((key, v));
+                // PinGuard wraps the entire impl — the previous code
+                // dropped the guard after the key-collection loop,
+                // leaving `pairs` (a Rust local) to carry ObjId-
+                // bearing element Values through `user_cmp` insertion
+                // sort and the trailing `maybe_gc()` with no GC root.
+                // Symptom: `.to_a.sort_by` chains where the receiver
+                // Array of pairs has no other anchor → pair Arrays
+                // swept → dangling slots in the result.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let arr = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+                let mut early: Option<Value> = None;
+                for v in arr {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
                     }
-                    if let Some(e) = early {
-                        drop(g);
-                        return Ok(Some(e));
-                    }
-                    pairs
-                };
-                let mut pairs = snapshot;
+                    g.pin(key.clone());
+                    g.pin(v.clone());
+                    pairs.push((key, v));
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
                 let n = pairs.len();
                 for i in 1..n {
                     let mut j = i;
@@ -2984,7 +3001,7 @@ impl Vm {
                             let (a, b) = pairs.split_at(j);
                             (a[j - 1].0.clone(), b[0].0.clone())
                         };
-                        let ord = self.user_cmp(&k_prev, &k_curr)?;
+                        let ord = g.vm.user_cmp(&k_prev, &k_curr)?;
                         match ord {
                             None => return Ok(None),
                             Some(std::cmp::Ordering::Greater) => {
@@ -2996,9 +3013,9 @@ impl Vm {
                     }
                 }
                 let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
-                self.maybe_gc();
-                self.check_alloc()?;
-                let nid = self.heap.alloc(HeapObj::Array(sorted));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let nid = g.vm.heap.alloc(HeapObj::Array(sorted));
                 Some(Value::Array(nid))
             }
             (Value::Array(id), "inject", []) | (Value::Array(id), "reduce", []) => {
@@ -3215,8 +3232,16 @@ impl Vm {
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
                 if let Some((k, v, _)) = best {
-                    self.maybe_gc();
-                    let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
+                    // PinGuard the winning pair across the explicit
+                    // `maybe_gc`: previously k/v were Rust locals
+                    // with no root, so STRESS_GC could sweep them
+                    // before the new Array was alloc'd → dangling
+                    // ObjIds inside the result.
+                    let mut g = PinGuard::new(self);
+                    g.pin(k.clone());
+                    g.pin(v.clone());
+                    g.vm.maybe_gc();
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     Some(Value::Array(pid))
                 } else {
                     Some(Value::Nil)
@@ -3227,26 +3252,37 @@ impl Vm {
             // sort key, return an Array of [k, v] pairs in key
             // order. Stability preserved via insertion sort.
             (Value::Hash(id), "sort_by", []) => {
+                // PinGuard wraps the *entire* impl, not just the
+                // block-invocation phase. Previously the guard
+                // dropped before the post-loop `maybe_gc`, leaving
+                // `keyed` (a Rust local) holding ObjId-bearing
+                // Values with no GC root → STRESS_GC swept them and
+                // the resulting Array<[k,v]> had dangling slots
+                // that exploded inside `to_display`.
                 let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).clone();
                 let mut keyed: Vec<(Value, Value, Value)> = Vec::with_capacity(pairs_in.len());
                 let mut early: Option<Value> = None;
-                {
-                    let mut g = PinGuard::new(self);
-                    g.pin(Value::Hash(*id));
-                    g.pin(Value::Block(block));
-                    let pre_frames = g.vm.frames.len();
-                    for (k, v) in pairs_in {
-                        g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        if g.vm.method_return.is_some() { break; }
-                        let key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        if g.vm.break_signaled {
-                            g.vm.break_signaled = false;
-                            early = Some(key);
-                            break;
-                        }
-                        keyed.push((key, k, v));
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(*id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                for (k, v) in pairs_in {
+                    g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
                     }
+                    // Pin each accumulated triple component so the
+                    // next iter's invoke_block (which may GC) can't
+                    // sweep them.
+                    g.pin(key.clone());
+                    g.pin(k.clone());
+                    g.pin(v.clone());
+                    keyed.push((key, k, v));
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
                 let n = keyed.len();
@@ -3256,7 +3292,7 @@ impl Vm {
                         let ord = {
                             let a = keyed[j - 1].0.clone();
                             let b = keyed[j].0.clone();
-                            self.user_cmp(&a, &b)?
+                            g.vm.user_cmp(&a, &b)?
                         };
                         match ord {
                             None => return Ok(None),
@@ -3268,13 +3304,15 @@ impl Vm {
                         }
                     }
                 }
-                self.maybe_gc();
+                g.vm.maybe_gc();
                 let mut out: Vec<Value> = Vec::with_capacity(keyed.len());
                 for (_, k, v) in keyed {
-                    let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
-                    out.push(Value::Array(pid));
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pv = Value::Array(pid);
+                    g.pin(pv.clone());
+                    out.push(pv);
                 }
-                let oid = self.heap.alloc(HeapObj::Array(out));
+                let oid = g.vm.heap.alloc(HeapObj::Array(out));
                 Some(Value::Array(oid))
             }
 
@@ -3282,41 +3320,49 @@ impl Vm {
             // Each bucket is an Array of [k, v] pairs; the result
             // is a Hash from group-key → Array.
             (Value::Hash(id), "group_by", []) => {
+                // Same GC root-hole pattern as sort_by above: the
+                // previous impl scoped PinGuard only across the
+                // block invocation, then dropped it and ran more
+                // alloc work (with `maybe_gc`) over `buckets` and
+                // each freshly-built pair Array. Extend the guard
+                // and pin each new ObjId as it's created.
                 let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).clone();
                 let mut buckets: Vec<(Value, Vec<Value>)> = Vec::new();
                 let mut early: Option<Value> = None;
-                {
-                    let mut g = PinGuard::new(self);
-                    g.pin(Value::Hash(*id));
-                    g.pin(Value::Block(block));
-                    let pre_frames = g.vm.frames.len();
-                    for (k, v) in pairs_in {
-                        g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        if g.vm.method_return.is_some() { break; }
-                        let group = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        if g.vm.break_signaled {
-                            g.vm.break_signaled = false;
-                            early = Some(group);
-                            break;
-                        }
-                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                        let pair = Value::Array(pid);
-                        let pos = buckets.iter().position(|(gk, _)| gk.ruby_eq(&group, &g.vm.heap));
-                        match pos {
-                            Some(p) => buckets[p].1.push(pair),
-                            None => buckets.push((group, vec![pair])),
-                        }
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(*id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                for (k, v) in pairs_in {
+                    g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let group = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(group);
+                        break;
+                    }
+                    let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let pair = Value::Array(pid);
+                    g.pin(pair.clone());
+                    g.pin(group.clone());
+                    let pos = buckets.iter().position(|(gk, _)| gk.ruby_eq(&group, &g.vm.heap));
+                    match pos {
+                        Some(p) => buckets[p].1.push(pair),
+                        None => buckets.push((group, vec![pair])),
                     }
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
-                self.maybe_gc();
+                g.vm.maybe_gc();
                 let mut hash_pairs: Vec<(Value, Value)> = Vec::with_capacity(buckets.len());
                 for (gk, vs) in buckets {
-                    let aid = self.heap.alloc(HeapObj::Array(vs));
-                    hash_pairs.push((gk, Value::Array(aid)));
+                    let aid = g.vm.heap.alloc(HeapObj::Array(vs));
+                    let av = Value::Array(aid);
+                    g.pin(av.clone());
+                    hash_pairs.push((gk, av));
                 }
-                let hid = self.heap.alloc(HeapObj::Hash(hash_pairs));
+                let hid = g.vm.heap.alloc(HeapObj::Hash(hash_pairs));
                 Some(Value::Hash(hid))
             }
 
@@ -3398,12 +3444,23 @@ impl Vm {
                     elems.push(Value::Int(v));
                     v += 1;
                 }
-                self.maybe_gc();
-                self.check_alloc()?;
-                let arr_id = self.heap.alloc(HeapObj::Array(elems));
+                // Pin the block AND every incoming arg FIRST: a
+                // STRESS_GC pass triggered by `maybe_gc` below could
+                // otherwise sweep the block-handle slot or an arg
+                // value (e.g. the memo Hash passed to
+                // `each_with_object({})`) — neither is necessarily
+                // on the operand stack at this point, only borrowed
+                // through `&[Value]` from the dispatch caller, which
+                // doesn't count as a GC root. Symptoms were the
+                // "ICE: heap slot is not a Block" and "is not a Hash"
+                // panics in `range_enumerable`.
                 let mut g = PinGuard::new(self);
-                g.pin(Value::Array(arr_id));
                 g.pin(Value::Block(block));
+                for a in args { g.pin(a.clone()); }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let arr_id = g.vm.heap.alloc(HeapObj::Array(elems));
+                g.pin(Value::Array(arr_id));
                 let arr_val = Value::Array(arr_id);
                 return g.vm.collection_call_block(&arr_val, name, args, block);
             }
@@ -4316,8 +4373,48 @@ impl Drop for FuncallCallbackGuard {
 /// (`cext_dispatch` invoked from closures registered in
 /// `Vm::cext_require`) is itself wasi-stubbed. Without the gate the
 /// `-D dead-code` warning fires on the wasi build.
+/// Bounded recursion depth for translating C-built Array/Hash
+/// structures back into rubyrs `Value`. A C extension can construct
+/// a self-referential `CValue::Array(_)` (e.g. `a.push(a)` from C);
+/// without a depth limit the recursion would stack-overflow during
+/// `cext_handle_to_value`. 256 is generous for realistic
+/// JSON-shape inputs and well below the host stack limit.
 #[cfg(not(target_os = "wasi"))]
-fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -> Value {
+const CEXT_TRANSLATE_MAX_DEPTH: usize = 256;
+
+#[cfg(not(target_os = "wasi"))]
+fn cext_handle_to_value(
+    vm: &mut Vm,
+    state: &rubyrs_cext::CExtState,
+    h: rubyrs_cext::Value,
+) -> Value {
+    cext_handle_to_value_d(vm, state, h, 0)
+}
+
+#[cfg(not(target_os = "wasi"))]
+fn cext_handle_to_value_d(
+    vm: &mut Vm,
+    state: &rubyrs_cext::CExtState,
+    h: rubyrs_cext::Value,
+    depth: usize,
+) -> Value {
+    if depth >= CEXT_TRANSLATE_MAX_DEPTH {
+        // Pathological input — cycle or implausibly deep nesting.
+        // Return Nil rather than overflow the host stack. A C ext
+        // that hits this almost certainly has a bug. Emit a stderr
+        // warning so the silent Nil substitution is at least
+        // visible (review #24): proper Trap propagation needs
+        // `cext_handle_to_value` to return `Result<Value, Trap>`,
+        // which cascades into every callsite — tracked as L2.5
+        // follow-up alongside #26 / #27 (check_alloc → Trap).
+        eprintln!(
+            "rubyrs cext: max translation depth {} exceeded \
+             (cycle or deep nesting in C-built Array/Hash); \
+             substituting Nil",
+            CEXT_TRANSLATE_MAX_DEPTH
+        );
+        return Value::Nil;
+    }
     match state.resolve(h) {
         rubyrs_cext::CValue::Nil => Value::Nil,
         rubyrs_cext::CValue::True => Value::Bool(true),
@@ -4337,6 +4434,57 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
         // surface as Nil for now (no Class lookup from raw name
         // outside the rubyrs::classes registry yet).
         rubyrs_cext::CValue::Class(_) => Value::Nil,
+        // Recursive translation: an Array/Hash CValue is a vector of
+        // C-side handles; build a Vec<Value> by recursing on each,
+        // then allocate on the Vm heap. PinGuard protects the
+        // children from being collected mid-build when a child's
+        // recursive allocation triggers `maybe_gc`.
+        rubyrs_cext::CValue::Array(handles) => {
+            // Iterate the handle list borrowed (review #25): `state`
+            // is `&CExtState` (shared), and the recursive
+            // `cext_handle_to_value_d` calls also take it shared, so
+            // the previous `handles.clone()` was an unnecessary O(n)
+            // copy of every C-built Array crossing into Ruby.
+            // PinGuard takes `&mut Vm` (a different object), so the
+            // shared borrow of `state` coexists with it fine.
+            let mut g = PinGuard::new(vm);
+            let mut elements: Vec<Value> = Vec::with_capacity(handles.len());
+            for child in handles {
+                let v = cext_handle_to_value_d(g.vm, state, *child, depth + 1);
+                g.pin(v.clone());
+                elements.push(v);
+            }
+            g.vm.maybe_gc();
+            // Heap-cap exhaustion → panic (review #26 flags this).
+            // Proper Trap propagation needs `cext_handle_to_value`
+            // to return `Result<Value, Trap>` and the change to
+            // cascade through every callsite (the cext result
+            // handler, rb_funcall*, etc.). Tracked as L2.5 follow-
+            // up alongside #24 and #27.
+            g.vm.check_alloc()
+                .expect("L2-3 spike: heap cap exhausted during cext Array build (review #26: L2.5 → return Trap)");
+            let id = g.vm.heap.alloc(HeapObj::Array(elements));
+            Value::Array(id)
+        }
+        rubyrs_cext::CValue::Hash(pairs) => {
+            // Same borrowed-iteration as Array arm (review #25).
+            let mut g = PinGuard::new(vm);
+            let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+            for (kh, vh) in pairs {
+                let k = cext_handle_to_value_d(g.vm, state, *kh, depth + 1);
+                g.pin(k.clone());
+                let v = cext_handle_to_value_d(g.vm, state, *vh, depth + 1);
+                g.pin(v.clone());
+                entries.push((k, v));
+            }
+            g.vm.maybe_gc();
+            // Same panic-vs-Trap tradeoff as the Array arm above
+            // (review #27).
+            g.vm.check_alloc()
+                .expect("L2-3 spike: heap cap exhausted during cext Hash build (review #27: L2.5 → return Trap)");
+            let id = g.vm.heap.alloc(HeapObj::Hash(entries));
+            Value::Hash(id)
+        }
     }
 }
 
@@ -4348,13 +4496,87 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
 /// matching ABI surface (`rb_sym_new`, `rb_class_new`, heap-handle
 /// translation) lands.
 #[cfg(not(target_os = "wasi"))]
-fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext::CValue, Trap> {
+fn cext_value_to_cvalue(
+    vm: &Vm,
+    st: &mut rubyrs_cext::CExtState,
+    name: &str,
+    idx: usize,
+    v: &Value,
+) -> Result<rubyrs_cext::CValue, Trap> {
+    cext_value_to_cvalue_d(vm, st, name, idx, v, 0)
+}
+
+/// Bounded-depth helper for [`cext_value_to_cvalue`]. Mirrors the
+/// `CEXT_TRANSLATE_MAX_DEPTH` discipline applied on the C → Ruby
+/// direction (see [`cext_handle_to_value_d`]). A Ruby-side Array
+/// or Hash can also be self-referential (`a = []; a << a`) and
+/// without this guard the recursion would stack-overflow when
+/// crossing into a C ext via `rb_funcall`'s arg translation or
+/// when returning a result. Trap with ArgumentError instead so
+/// the caller sees a clean Ruby-level error.
+#[cfg(not(target_os = "wasi"))]
+fn cext_value_to_cvalue_d(
+    vm: &Vm,
+    st: &mut rubyrs_cext::CExtState,
+    name: &str,
+    idx: usize,
+    v: &Value,
+    depth: usize,
+) -> Result<rubyrs_cext::CValue, Trap> {
+    if depth >= CEXT_TRANSLATE_MAX_DEPTH {
+        return Err(Trap::new(RubyError::ArgumentError {
+            msg: format!(
+                "C ext `{}': arg {} exceeds max nesting depth {} (cycle or pathological input)",
+                name, idx, CEXT_TRANSLATE_MAX_DEPTH
+            ),
+        }));
+    }
     Ok(match v {
         Value::Nil => rubyrs_cext::CValue::Nil,
         Value::Bool(true) => rubyrs_cext::CValue::True,
         Value::Bool(false) => rubyrs_cext::CValue::False,
         Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.borrow().as_bytes()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
+        // Array/Hash crossing Ruby → C: build a CValue::Array/Hash
+        // whose elements are FRESH handles interned into `st`.
+        // Recurses on contained Values, interning each child into
+        // the SAME state the caller will hand the result to. This
+        // is the L2-3-review-fix #10: the previous impl used the
+        // thread-local `with_state` accessor, which interned children
+        // into whatever state was topmost at the time — wrong if the
+        // outer caller had a state pushed but the inner caller hadn't
+        // pushed yet (top-level cext call), and corrupting on
+        // nesting.
+        Value::Array(id) => {
+            // Borrow the backing Vec<Value> directly — no clone.
+            // The recursive `cext_value_to_cvalue` takes `&Vm` (the
+            // function's `vm` param), so the heap borrow + each
+            // recursive call are both immutable borrows of `vm`;
+            // multiple immutable borrows are allowed. Drops the
+            // O(n) memcpy the previous `.clone()` paid on every
+            // collection crossing.
+            let elements = vm.heap.array(*id);
+            let mut handles: Vec<rubyrs_cext::Value> = Vec::with_capacity(elements.len());
+            for elem in elements {
+                let cv = cext_value_to_cvalue_d(vm, st, name, idx, elem, depth + 1)?;
+                handles.push(st.intern(cv));
+            }
+            rubyrs_cext::CValue::Array(handles)
+        }
+        Value::Hash(id) => {
+            // Same borrow-no-clone treatment for Hash.
+            let pairs = vm.heap.hash(*id);
+            let mut pairs_out: Vec<(rubyrs_cext::Value, rubyrs_cext::Value)> =
+                Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                let kc = cext_value_to_cvalue_d(vm, st, name, idx, k, depth + 1)?;
+                let kh = st.intern(kc);
+                let vc = cext_value_to_cvalue_d(vm, st, name, idx, v, depth + 1)?;
+                let vh = st.intern(vc);
+                pairs_out.push((kh, vh));
+            }
+            rubyrs_cext::CValue::Hash(pairs_out)
+        }
         other => {
             return Err(Trap::new(RubyError::ArgumentError {
                 msg: format!(
@@ -4409,35 +4631,29 @@ fn cext_dispatch(
         }));
     }
 
-    // Translate args while the *previous* state (if any) is still
-    // torn down. Errors must abort before we `enter()` a new state.
-    let cargs: Vec<rubyrs_cext::CValue> = args
-        .iter()
-        .enumerate()
-        .map(|(i, v)| cext_value_to_cvalue(name, i, v))
-        .collect::<Result<_, _>>()?;
+    // SAFETY: `current_vm_ptr()` returns the same Vm pointer that
+    // `do_call` stashed before invoking us; it stays valid until
+    // `do_call` returns. The closure captures the pointer by value
+    // so subsequent host_fn invocations don't have to re-stash it
+    // (they will anyway, with the same value).
+    //
+    // Check the invariant BEFORE pushing any cext state on the
+    // thread-local stacks — if this assert ever fires, no STATE or
+    // callback gets leaked to corrupt the next cext call. Moved out
+    // of the unsafe block so it sequences before arg translation
+    // (which now needs `&Vm` for Array/Hash heap reads).
+    let vm_ptr = current_vm_ptr();
+    assert!(
+        !vm_ptr.is_null(),
+        "ICE: cext_dispatch reached with null CURRENT_VM_PTR; \
+         host did not set it before calling host fn"
+    );
 
     // SAFETY: we transmute `OpaqueFn` (zero-arg) to an arity-specific
     // signature with VALUE-shaped args. The original function was
     // registered with that exact signature by the C ext; we just
     // recovered it through the `ANYARGS` convention.
     unsafe {
-        // SAFETY: `current_vm_ptr()` returns the same Vm pointer that
-        // `do_call` stashed before invoking us; it stays valid until
-        // `do_call` returns. The closure captures the pointer by
-        // value so subsequent host_fn invocations don't have to
-        // re-stash it (they will anyway, with the same value).
-        //
-        // Check the invariant BEFORE pushing any cext state on the
-        // thread-local stacks — if this assert ever fires, no STATE
-        // or callback gets leaked to corrupt the next cext call.
-        let vm_ptr = current_vm_ptr();
-        assert!(
-            !vm_ptr.is_null(),
-            "ICE: cext_dispatch reached with null CURRENT_VM_PTR; \
-             host did not set it before calling host fn"
-        );
-
         // From here on, every push has a matching RAII guard. A panic
         // (or any future early-return) will unwind through these and
         // pop both stacks in LIFO order, leaving thread-local state
@@ -4448,6 +4664,28 @@ fn cext_dispatch(
                 cext_funcall_to_vm(vm_ptr, recv_h, method_name, arg_hs)
             },
         ));
+
+        // Translate args INTO the now-active state, interning each
+        // (and each child for Array/Hash) directly via the same `st`
+        // we're about to hand to the C ext. Trap-propagating via `?`;
+        // RAII guards above drop on the early-return path.
+        //
+        // Previously the translation ran BEFORE `enter()` and used
+        // `with_state` for child interning, which silently interned
+        // Array/Hash children into the OUTER state (or panicked on
+        // empty STATE for top-level calls). Fix for PR #6 review #10.
+        let arg_handles: Vec<rubyrs_cext::Value> = {
+            let vm_ref: &Vm = &*vm_ptr;
+            rubyrs_cext::with_state(|st| {
+                args.iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let cv = cext_value_to_cvalue(vm_ref, st, name, i, v)?;
+                        Ok::<_, Trap>(st.intern(cv))
+                    })
+                    .collect::<Result<Vec<_>, Trap>>()
+            })?
+        };
 
         let ret_handle = with_caught_unwind(|| {
             // Build the `self` handle:
@@ -4466,12 +4704,6 @@ fn cext_dispatch(
                 }),
                 None => rubyrs_cext::Qnil,
             };
-
-            // Intern args into the now-active state so the C side
-            // sees them as valid handles.
-            let arg_handles: Vec<rubyrs_cext::Value> = rubyrs_cext::with_state(|st| {
-                cargs.into_iter().map(|cv| st.intern(cv)).collect()
-            });
             match arity {
                 0 => {
                     type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
@@ -4548,7 +4780,11 @@ fn cext_dispatch(
                 msg: format!("C ext `{}' panicked: {}", name, panic_msg),
             })
         })?;
-        Ok(cext_handle_to_value(&st, ret_handle))
+        // Re-deref vm_ptr for the result translation (Array/Hash
+        // returns need `&mut Vm` to allocate on the heap). Time-
+        // disjoint from any earlier &Vm uses in this function.
+        let vm: &mut Vm = &mut *vm_ptr;
+        Ok(cext_handle_to_value(vm, &st, ret_handle))
     }
 }
 
@@ -4570,20 +4806,48 @@ fn cext_funcall_to_vm(
     method: &str,
     arg_handles: &[rubyrs_cext::Value],
 ) -> rubyrs_cext::Value {
-    // Translate handles → Values via the topmost CExtState.
-    let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(st, recv));
-    let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
-        arg_handles
-            .iter()
-            .map(|h| cext_handle_to_value(st, *h))
-            .collect()
-    });
-
     // SAFETY: see CURRENT_VM_PTR doc — vm_ptr is valid for the life
-    // of the surrounding cext_dispatch call.
+    // of the surrounding cext_dispatch call. We deref the same
+    // pointer twice in this function: first as `&mut Vm` (inner
+    // block) for the recv/arg handle → Value translation and the
+    // cext_invoke_method call; then, AFTER the inner block exits
+    // and the &mut goes out of scope, as `&Vm` for the result
+    // Value → handle translation. The two derefs are split into
+    // separate scopes so no &mut + & alias exists at any moment —
+    // the previous `let (result, vm_for_result) = unsafe { ... }`
+    // pattern returned `&*vm_ptr` while `&mut *vm_ptr` was still
+    // alive in the same block, which Stacked Borrows flags as UB.
     let result = unsafe {
         let vm = &mut *vm_ptr;
-        match vm.cext_invoke_method(recv_v, method, arg_vs) {
+        // PinGuard the translated `recv_v` and each arg Value as
+        // they are produced: `cext_handle_to_value` recursively
+        // allocates Vm-heap Arrays/Hashes for nested C-built
+        // structures, and each alloc can trigger `maybe_gc`. A
+        // previously-translated recv or earlier arg sitting only
+        // in a Rust local has no GC root, so STRESS_GC would sweep
+        // it before `cext_invoke_method` saw it (slot-reuse → ICE
+        // "use-after-free" inside dispatch). The guard is alive
+        // across `cext_invoke_method` itself — which is intentional:
+        // dispatch may also `maybe_gc` (e.g. compiling a string→sym,
+        // alloc'ing intermediate Arrays), and we want recv/args
+        // protected the whole way until they're consumed onto the
+        // operand stack. The guard drops at the end of the unsafe
+        // block, after the call has returned and the result Value
+        // is bound.
+        let mut g = PinGuard::new(vm);
+        let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(g.vm, st, recv));
+        g.pin(recv_v.clone());
+        let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
+            arg_handles
+                .iter()
+                .map(|h| {
+                    let v = cext_handle_to_value(g.vm, st, *h);
+                    g.pin(v.clone());
+                    v
+                })
+                .collect()
+        });
+        match g.vm.cext_invoke_method(recv_v, method, arg_vs) {
             Ok(v) => v,
             // Spike: propagating Trap back through the C-ABI boundary
             // needs `rb_raise` / longjmp coordination (Level 3+).
@@ -4591,11 +4855,19 @@ fn cext_funcall_to_vm(
             // return without aborting.
             Err(_trap) => Value::Nil,
         }
+        // `vm: &mut Vm` drops here.
     };
 
+    // Now safe to take a fresh `&Vm` from the same pointer — the
+    // previous `&mut` is out of scope.
+    let vm_for_result: &Vm = unsafe { &*vm_ptr };
+
     // Translate result back to a handle in the topmost CExtState.
+    // `cext_value_to_cvalue` now takes the same `st` it'll be interned
+    // into, so Array/Hash result children land in the correct state
+    // — the topmost, which is the C ext's current state.
     rubyrs_cext::with_state(|st| {
-        match cext_value_to_cvalue("rb_funcallv:result", 0, &result) {
+        match cext_value_to_cvalue(vm_for_result, st, "rb_funcallv:result", 0, &result) {
             Ok(cv) => st.intern(cv),
             Err(_) => rubyrs_cext::Qnil,
         }

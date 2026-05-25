@@ -26,39 +26,63 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
+
+/// Build the callback-cext bundle exactly once per test process.
+///
+/// `cargo test` runs integration tests in parallel by default. The
+/// two tests in this file both invoke `examples/callback-cext/build.sh`,
+/// which writes the same `callback_ext.{bundle,so,dll}` artifact.
+/// Without serialisation the two `cc -o` invocations can race on
+/// the output file → flaky CI.
+///
+/// `OnceLock::get_or_init` guarantees the closure runs at most once
+/// across all threads in the process; concurrent callers block until
+/// it returns. Each test calls `ensure_callback_bundle_built()` and
+/// gets a no-op after the first build completes.
+fn ensure_callback_bundle_built() -> PathBuf {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let example_dir = crate_dir.join("examples/callback-cext");
+            let build_sh = example_dir.join("build.sh");
+            assert!(
+                build_sh.exists(),
+                "missing build.sh at {}",
+                build_sh.display()
+            );
+            let build = Command::new("bash")
+                .arg(&build_sh)
+                .output()
+                .expect("failed to spawn build.sh");
+            assert!(
+                build.status.success(),
+                "build.sh failed.\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&build.stdout),
+                String::from_utf8_lossy(&build.stderr),
+            );
+            let ext = if cfg!(target_os = "macos") {
+                "bundle"
+            } else if cfg!(windows) {
+                "dll"
+            } else {
+                "so"
+            };
+            let bundle = example_dir.join(format!("callback_ext.{}", ext));
+            assert!(
+                bundle.exists(),
+                "build.sh did not produce {}",
+                bundle.display()
+            );
+            bundle
+        })
+        .clone()
+}
 
 #[test]
 fn cext_rb_funcall_round_trip() {
-    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let example_dir = crate_dir.join("examples/callback-cext");
-    let build_sh = example_dir.join("build.sh");
-    assert!(build_sh.exists(), "missing build.sh at {}", build_sh.display());
-
-    let build = Command::new("bash")
-        .arg(&build_sh)
-        .output()
-        .expect("failed to spawn build.sh");
-    assert!(
-        build.status.success(),
-        "build.sh failed.\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&build.stdout),
-        String::from_utf8_lossy(&build.stderr),
-    );
-
-    let ext = if cfg!(target_os = "macos") {
-        "bundle"
-    } else if cfg!(windows) {
-        "dll"
-    } else {
-        "so"
-    };
-    let bundle = example_dir.join(format!("callback_ext.{}", ext));
-    assert!(
-        bundle.exists(),
-        "build.sh did not produce {}",
-        bundle.display()
-    );
-
+    let bundle = ensure_callback_bundle_built();
     let bundle_no_ext = bundle.with_extension("");
     let driver_dir = env!("CARGO_TARGET_TMPDIR");
     let driver = PathBuf::from(driver_dir).join("cext_callback_driver.rb");
@@ -101,6 +125,93 @@ false
     assert_eq!(
         stdout, expected,
         "rb_funcall round trip mismatch.\n\
+         expected:\n{}\n\
+         got:\n{}\n\
+         stderr:\n{}",
+        expected, stdout, stderr,
+    );
+}
+
+/// L2-3 acceptance: C-side Array + Hash builders round-trip
+/// through the recursive translator into Ruby Value::Array /
+/// Value::Hash on the heap.
+///
+/// Three exercises, increasing nesting:
+///
+///   1. `build_list` — flat Array of Int handles → Ruby Array of
+///      Integers. Verifies `rb_ary_new` + `rb_ary_push` + Int
+///      translation.
+///   2. `build_pair("rubyrs")` — Hash with mixed Str + Int values,
+///      where the Int comes from a nested `rb_funcall("rubyrs",
+///      "length")`. Verifies rb_funcall callback nested inside a
+///      Hash builder still finds the correct CExtState (the L2-2
+///      nesting fix).
+///   3. `build_records` — Array of Hashes (JSON-shape document).
+///      Verifies the recursive translator handles Array-of-Hashes
+///      with PinGuard correctness.
+#[test]
+fn cext_array_hash_round_trip() {
+    let bundle = ensure_callback_bundle_built();
+    let bundle_no_ext = bundle.with_extension("");
+    let driver_dir = env!("CARGO_TARGET_TMPDIR");
+    let driver = PathBuf::from(driver_dir).join("cext_collections_driver.rb");
+    fs::write(
+        &driver,
+        format!(
+            r#"require "{}"
+
+# 1. Flat Array of Int.
+a = build_list
+puts a.length
+puts a[0]
+puts a[4]
+
+# 2. Hash with String + Int values (Int via rb_funcall nested
+#    inside a builder — exercises CExtState nesting).
+h = build_pair("rubyrs")
+puts h["name"]
+puts h["len"]
+
+# 3. Array of Hashes (JSON-shape document).
+records = build_records
+puts records.length
+puts records[0]["lang"]
+puts records[1]["lang"]
+"#,
+            bundle_no_ext.display()
+        ),
+    )
+    .expect("failed to write driver.rb");
+
+    let rubyrs_bin = env!("CARGO_BIN_EXE_rubyrs");
+    let run = Command::new(rubyrs_bin)
+        .arg(&driver)
+        .output()
+        .expect("failed to spawn rubyrs binary");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(
+        run.status.success(),
+        "rubyrs exited non-zero ({:?}).\nstdout:\n{}\nstderr:\n{}",
+        run.status.code(),
+        stdout,
+        stderr,
+    );
+
+    let expected = "\
+5
+1
+5
+rubyrs
+6
+2
+ruby
+rust
+";
+
+    assert_eq!(
+        stdout, expected,
+        "Array/Hash round trip mismatch.\n\
          expected:\n{}\n\
          got:\n{}\n\
          stderr:\n{}",

@@ -154,7 +154,7 @@ fn json_roundtrip_preserves_essentials() {
 #[test]
 fn diff_detects_closed_and_new_gaps() {
     // Synthetic before/after: before has ModuleNode missing, after
-    // does not — closed gap. After introduces UnlessNode — new gap.
+    // does not — closed gap. After introduces CaseNode — new gap.
     let mut before = Report::default();
     before.total_nodes = 10;
     before.histogram.insert(

@@ -42,6 +42,50 @@ static VALUE nil_check(VALUE self, VALUE v) {
     return rb_funcallv(v, id_nil_q, 0, NULL);
 }
 
+/* === L2-3 (Array + Hash builders from C) === */
+
+/* Build [1, 2, 3, 4, 5] from C and return to Ruby. Exercises
+ * rb_ary_new + rb_ary_push + Int interning across the FFI. */
+static VALUE build_list(VALUE self) {
+    (void)self;
+    VALUE a = rb_ary_new();
+    for (int i = 1; i <= 5; i++) {
+        rb_ary_push(a, rb_int2num(i));
+    }
+    return a;
+}
+
+/* Build {"name"=>name, "len"=>name.length} from C. Demonstrates
+ * Hash construction with mixed key/value types (Str/Int) AND
+ * rb_funcall reentrance inside a Hash builder (length comes from
+ * Ruby-side String#length). This mirrors how flori/json's
+ * generator computes nested object structure. */
+static VALUE build_pair(VALUE self, VALUE name) {
+    (void)self;
+    VALUE h = rb_hash_new();
+    rb_hash_aset(h, rb_str_new_cstr("name"), name);
+    VALUE len = rb_funcallv(name, id_length, 0, NULL);
+    rb_hash_aset(h, rb_str_new_cstr("len"), len);
+    return h;
+}
+
+/* Build [{"lang"=>"ruby"}, {"lang"=>"rust"}] — a nested
+ * Array-of-Hashes shaped exactly like a JSON document fragment.
+ * Verifies the recursive translator (CValue::Array containing
+ * CValue::Hash handles) round-trips into a Vm Value::Array of
+ * Value::Hash objects on the heap. */
+static VALUE build_records(VALUE self) {
+    (void)self;
+    VALUE outer = rb_ary_new();
+    const char *langs[] = { "ruby", "rust" };
+    for (int i = 0; i < 2; i++) {
+        VALUE h = rb_hash_new();
+        rb_hash_aset(h, rb_str_new_cstr("lang"), rb_str_new_cstr(langs[i]));
+        rb_ary_push(outer, h);
+    }
+    return outer;
+}
+
 void Init_callback_ext(void) {
     id_upcase = rb_intern("upcase");
     id_length = rb_intern("length");
@@ -50,4 +94,7 @@ void Init_callback_ext(void) {
     rb_define_global_function("apply_upcase",  RUBY_METHOD_FUNC(apply_upcase),  1);
     rb_define_global_function("string_length", RUBY_METHOD_FUNC(string_length), 1);
     rb_define_global_function("nil_check",     RUBY_METHOD_FUNC(nil_check),     1);
+    rb_define_global_function("build_list",    RUBY_METHOD_FUNC(build_list),    0);
+    rb_define_global_function("build_pair",    RUBY_METHOD_FUNC(build_pair),    1);
+    rb_define_global_function("build_records", RUBY_METHOD_FUNC(build_records), 0);
 }
