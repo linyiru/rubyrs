@@ -29,6 +29,12 @@ Snapshots of `rubyrs-gapscan` against canonical Ruby projects —
 these drive which "Near term" items below to attack first. Full
 reports: [`docs/gap-reports/`](gap-reports/README.md).
 
+The table below is the **Tier 1** subset (framework / template
+engine / DSL). The combined n=10 table — adding Tier 2 (Bundler,
+Tilt, stdlib slice) — lives in [the gap-reports README](gap-reports/README.md);
+this section only quotes the user-facing-framework slice because
+those are the codebases most directly mapped to ROADMAP priorities.
+
 | Codebase | Shape | % Supported (AST) | #1 missing |
 |---|---|---:|---|
 | Jekyll `lib/` | static-site framework | **84.03%** | `ConstantWriteNode` (×70) |
@@ -37,17 +43,21 @@ reports: [`docs/gap-reports/`](gap-reports/README.md).
 | dry-struct `lib/` | modern data DSL | **82.38%** | `BlockParameterNode` (×11) |
 | Rake `lib/` | task DSL | **83.30%** | `RegularExpressionNode` (×42) |
 
-**Headline (n=5):** all five sit at 82–84% Supported regardless of
-codebase shape — the remaining gap is the actual subset edge, not
-project-specific noise. The previous #1 blocker `ModuleNode`
-(which dominated 3/5 scans at PR #7 baseline) is now Supported on
-master — biggest single feature impact gapscan has measured.
-Today's top blockers are diverse: `ConstantWriteNode` (Jekyll,
-Liquid — top-level `FOO = ...`), `BlockParameterNode` (Sinatra,
-dry-struct — `&block` params), `RegularExpressionNode` (Rake).
-The **block-parameter family** (`BlockParameterNode`,
-`RestParameterNode`, `SplatNode`) is now the most distinct
-remaining theme on DSL-shaped codebases.
+**Headline:** all ten scans sit at 80.7–85.3% Supported regardless
+of codebase shape. Bundler tops the list at **85.25%** despite
+being by far the largest target (225 files, 106k AST nodes).
+The previous #1 blocker `ModuleNode` (which dominated 3/5 scans
+at PR #7 baseline) is now Supported on master — biggest single
+feature impact gapscan has measured. Today's #1 missing class is
+diverse: `ConstantWriteNode` ×3 (Jekyll, Liquid, stdlib URI),
+`BlockParameterNode` ×3 (Sinatra, dry-struct, Tilt),
+`KeywordHashNode` ×1 (Bundler — but ×430 occurrences),
+`RegularExpressionNode` ×1 (Rake), `AliasMethodNode` ×1
+(stdlib set), `RestParameterNode` ×1 (stdlib optparse). The
+**block-parameter family** (`BlockParameterNode`,
+`RestParameterNode`, `SplatNode`) is the broadest remaining
+theme on DSL-shaped codebases; `KeywordHashNode` is the new
+surprise top contender (Bundler — direct relevance to `rubund`).
 
 Master moved the band up 1.9–2.6 pp from the PR #7 baseline
 (79–82%) by landing a feature batch (`unless`/`until`, `**`, more
