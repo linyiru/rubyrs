@@ -131,16 +131,25 @@ PRs before the spec is fully enforced. Listing them explicitly
 so future contributors don't read the rules and assume the code
 already matches.
 
-| Deviation | Rule violated | Planned remediation |
-|-----------|---------------|---------------------|
-| `Kernel#puts` / `p` / `pp` / `print` write to `std::io::stdout()` by default when `Runtime::set_stdout` is not called | Rule 2 (host should control the sink) | Default stdout sink switches to a guarded one that requires `set_stdout` to be called; or document the default as part of the supported tier-1 capability surface. PR-shaped. |
-| `ENV` reading populates from `std::env::vars()` of the host process | Rules 1 + 2 (non-deterministic + capability leak) | New `Config::env: Option<HashMap<String, String>>` field; default `None` means script sees empty `ENV`; host explicitly injects the map. PR-shaped. |
-| `Regexp` / `/pattern/` literals + `String#match` / `String#=~` are in Tier 1 today | Rule 3 | Future `regex` Cargo feature (see PoC #2 — to be opened after this ADR merges). |
-| `Time.now` reads wall clock (verify in code; suspected) | Rule 1 | Move to capability-injected host fn; `Config::clock` or analogous. TBD API. |
-| `Random.new` (no seed) uses system entropy (verify) | Rule 1 | Keep seeded `Random.new(seed)` in Tier 1; system-entropy form moves out. TBD per language-level audit. |
+| Deviation | Verified at | Rule violated | Planned remediation |
+|-----------|-------------|---------------|---------------------|
+| `Kernel#puts` / `p` / `pp` / `print` write to `std::io::stdout()` by default when `Runtime::set_stdout` is not called | `crates/rubyrs/src/vm/kernel.rs` (`vm.stdout` defaulted in `Runtime::new`) | Rule 2 (host should control the sink) | Default stdout sink switches to a guarded one that requires `set_stdout` to be called; or document the default as part of the supported tier-1 capability surface. PR-shaped. |
+| `ENV` reading populates from `std::env::vars()` of the host process | `crates/rubyrs/src/vm/step.rs:342` (the `LoadConst("ENV")` arm) | Rules 1 + 2 (non-deterministic + capability leak) | New `Config::env: Option<HashMap<String, String>>` field; default `None` means script sees empty `ENV`; host explicitly injects the map. PR-shaped. |
+| `Regexp` / `/pattern/` literals + `String#match` / `String#=~` are in Tier 1 today | `crates/rubyrs/src/value.rs` (`Value::Regex`), `crates/rubyrs/src/ast.rs` (`Expr::RegexLit`) | Rule 3 | Future `regex` Cargo feature (see PoC #2 — to be opened after this ADR merges). |
 
 Each deviation is its own small PR — none block this ADR from
 landing, but they are the work this spec lines up.
+
+### Future risks (when implemented)
+
+`Time` and `Random` do not yet exist in `crates/rubyrs/src` —
+no `class Time`, no `Value::Time`, no `rand` dep. They are
+already listed in "What's explicitly OUT of Tier 1" above with
+their target tier and rationale. Flagged here just so a future
+PR that adds them remembers to satisfy rule 1 (capability-
+injected host fn for `Time.now`, seeded-only form for
+`Random.new` in Tier 1) rather than the CRuby defaults that
+would import the rule violation along with the feature.
 
 ## Consequences
 
