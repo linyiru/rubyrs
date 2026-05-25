@@ -202,19 +202,19 @@ VALUE rb_funcallv(VALUE recv, ID mid, int argc, const VALUE *argv);
  * gcc/clang warn on. A real variadic function handles n == 0
  * cleanly.
  *
- * Spike scope: fixed 16-slot stack buffer (cext_dispatch supports
- * arity 0..=5 today, with headroom for future widening before
- * dispatch refuses). A real implementation would `alloca(n *
- * sizeof(VALUE))` for unbounded n; productionising waits until a
- * gem demands it. */
+ * Variable-length stack allocation via `__builtin_alloca`
+ * (available on gcc + clang, no header needed). The buffer lives
+ * until the enclosing C-ext function returns, freed automatically
+ * — `rb_funcallv` reads the bytes synchronously so the lifetime
+ * is plenty. No fixed cap, no silent truncation. */
 static inline VALUE rb_funcall(VALUE recv, ID mid, int n, ...) {
-    VALUE argv_buf[16];
-    if (n > 16) n = 16;  /* will trap as wrong-arity in cext_dispatch */
+    VALUE *argv = NULL;
+    if (n > 0) argv = (VALUE *)__builtin_alloca((size_t)n * sizeof(VALUE));
     va_list ap;
     va_start(ap, n);
-    for (int i = 0; i < n; i++) argv_buf[i] = va_arg(ap, VALUE);
+    for (int i = 0; i < n; i++) argv[i] = va_arg(ap, VALUE);
     va_end(ap);
-    return rb_funcallv(recv, mid, n, n == 0 ? NULL : argv_buf);
+    return rb_funcallv(recv, mid, n, argv);
 }
 
 #ifdef __cplusplus
