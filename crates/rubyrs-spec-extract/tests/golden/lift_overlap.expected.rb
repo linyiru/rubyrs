@@ -16,7 +16,7 @@
 describe "overlap edges" do
 
   it "first stmt is should ==" do
-    @hash = { a: 1 }.length.should == 1
+    @hash = assert_eq({ a: 1 }.length, 1)
     assert_eq([1].length, 1)   # ← recogniser bait at it body start;
                               #   lifter inserts before it
   end

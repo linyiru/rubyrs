@@ -53,13 +53,30 @@ human polish step.
 | `-> { BODY }.should.raise(M::Cls)` | `assert_raises("M::Cls") do BODY end` | v0.2 |
 | `before :each do BODY end` inside describe | BODY lifted into each sibling `it`; `before` call deleted | **v0.3** |
 | `mock_int(LITERAL_INT)` | `LITERAL_INT` | **v0.3** |
-| (any unrewritten matcher / hook) | passthrough + listed in **skip-log header** comment at top of file | **v0.3** |
+| Patterns the extractor recognises but doesn't rewrite (curated allow-list — see below) | passthrough + listed in **skip-log header** comment at top of file | **v0.3** |
 | `require_relative '...'` | (stripped — line filter) | v0.1 |
-| *`after :each / :all`* | *passthrough + skip-log entry (full rewrite v0.4)* | logged v0.3, rewritten v0.4 |
-| *`before :all`* | *passthrough + skip-log entry (full rewrite v0.4)* | logged v0.3, rewritten v0.4 |
-| *`context "..." do ... end`* | *passthrough + skip-log entry (full rewrite v0.4)* | logged v0.3, rewritten v0.4 |
-| *`it_behaves_like :shared, ...`* | *passthrough + skip-log entry (full rewrite v0.4)* | logged v0.3, rewritten v0.4 |
+| *`after :each / :all`* | *passthrough + skip-log entry* | logged v0.3; full rewrite is future work, not yet scheduled |
+| *`before :all`* | *passthrough + skip-log entry* | logged v0.3; full rewrite is future work, not yet scheduled |
+| *`context "..." do ... end`* | *passthrough + skip-log entry* | logged v0.3; rewriting depends on `before :all` semantics inside, future work |
+| *`it_behaves_like :shared, ...`* | *passthrough + skip-log entry* | logged v0.3; **shared-example inlining is v0.4 scope** per `docs/TESTING.md` |
 | *`should_receive` / `mock(...)` / `mock_int(dynamic)`* | *passthrough + skip-log entry* | logged v0.3; no mock lib in micro-runner — always hand-translate |
+
+The skip-log header lists a **curated allow-list** of names —
+not every unrewritten call. Current entries:
+
+- `before` (when not v0.3-liftable: `before :all`, multi-arg
+  `before :each, :foo`, before inside a non-flat context)
+- `after`
+- `context`
+- `it_behaves_like`
+- `mock` / `mock_int` (when not v0.3-substitutable) /
+  `should_receive`
+
+Adding a new entry is a one-line match arm in
+`UnhandledCollector::visit_call_node`'s `detail` switch. The
+allow-list approach keeps the header focused on patterns we
+can actually advise on, instead of a wall of every Ruby call
+the extractor saw.
 
 For the `should ==` / `should_not ==` / predicate-matcher
 rewrites, `expr`, `val`, and `args` come from the original

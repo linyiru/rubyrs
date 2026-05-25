@@ -157,6 +157,23 @@ fn is_magic_comment(trimmed: &str) -> bool {
         || body.contains("-*- coding")
 }
 
+/// Apply just the matcher recognisers (no lifter, no
+/// require_relative strip, no skip-log header) to a source
+/// slice. Used by `BeforeEachLifter` to pre-rewrite a
+/// `before :each` body's `should ==` / predicate / lambda-raise
+/// calls before lifting the body into each `it`. Returns the
+/// rewritten slice verbatim if no recogniser fires.
+fn rewrite_recognisers(source: &str) -> String {
+    let parsed = ruby_prism::parse(source.as_bytes());
+    let root = parsed.node();
+    let mut collector = SubstitutionCollector {
+        source,
+        substitutions: Vec::new(),
+    };
+    collector.visit(&root);
+    apply_substitutions(source, collector.substitutions)
+}
+
 /// Returns the parse-error messages reported by `ruby_prism` for
 /// `source`. Empty Vec means the source parsed cleanly. The
 /// extractor itself runs to completion regardless (best-effort
@@ -568,12 +585,27 @@ impl BeforeEachLifter<'_> {
             let Some(b_block_node) = call.block() else { continue };
             let Some(b_block) = b_block_node.as_block_node() else { continue };
             let Some(b_body) = b_block.body() else { continue };
-            lifted_body_text = Some(slice(self.source, &b_body));
+            // Run the recognisers on the body slice itself so any
+            // `should ==` / predicate / lambda-raise patterns
+            // inside `@hash = …` lines get rewritten BEFORE we
+            // copy the body into each it block. Without this the
+            // lifted copies inherit un-rewritten upstream calls
+            // and the micro-runner trips on them at runtime.
+            // (Plain `before :each do @x = expr.should == val end`
+            // isn't idiomatic mspec, but defensive — bodies do
+            // sometimes call helper methods that contain matchers.)
+            let body_text_raw = slice(self.source, &b_body);
+            lifted_body_text = Some(rewrite_recognisers(&body_text_raw));
             // Expand the delete range to include leading
             // whitespace on the `before`'s line and one trailing
-            // newline. Without this, deletion leaves a
-            // whitespace-only blank line that looks like an
-            // editing artefact in the output.
+            // newline. The expansion removes the WHOLE line
+            // (indent + call + trailing `\n`) so the output
+            // doesn't carry a whitespace-only blank line as an
+            // editing artefact. A blank visual gap can still
+            // appear if there was a blank line BEFORE the
+            // `before` call — we don't try to swallow that, on
+            // the theory that intentional spacing should
+            // survive.
             let raw_start = call.location().start_offset();
             let raw_end = call.location().end_offset();
             let bytes = self.source.as_bytes();
@@ -669,12 +701,16 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let loc = node.location();
         let start = loc.start_offset();
-        // "Inside any consumed range" rather than "start matches
-        // exactly" — the lifter expands its consumed range to
-        // swallow leading whitespace + trailing newline, so the
-        // call's raw start is now strictly INSIDE that range,
-        // not equal to its start.
-        let was_consumed = self.consumed.iter().any(|(s, e)| start >= *s && start < *e);
+        // Suppress ONLY when this is the `before` call the lifter
+        // handled — its raw start sits inside the expanded delete
+        // range. For any OTHER call whose start is inside that
+        // range (a nested `it_behaves_like` / `mock` etc inside
+        // the before body), don't suppress: those patterns end
+        // up in the lifted copies that go into each `it`, so the
+        // human still needs them flagged in the skip log.
+        let name_bytes_for_consumed = node.name().as_slice();
+        let was_consumed = name_bytes_for_consumed == b"before"
+            && self.consumed.iter().any(|(s, e)| start >= *s && start < *e);
         if !was_consumed {
             let name_bytes = node.name().as_slice();
             // For mock_int, mirror try_mock_int's gate so the skip
