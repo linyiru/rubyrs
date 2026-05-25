@@ -378,7 +378,8 @@ impl Vm {
                 "to_s" | "inspect" |
                 "sub" | "gsub" | "tr" |
                 "match?" | "scan" | "index" | "rindex" |
-                "[]" | "slice"
+                "[]" | "slice" |
+                "<<" | "concat" | "prepend" | "replace"
             ),
             Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect"),
             Value::Array(_) => matches!(name,
@@ -1754,6 +1755,82 @@ impl Vm {
             }
             Value::Str(s) => {
                 let s = s.clone();
+                // In-place mutation methods. All return the
+                // receiver (same Rc, so aliases observe the
+                // change). The variadic shape (`concat`, `prepend`
+                // take *args) doesn't fit the inner-match
+                // `[Value::Str(b)]` pattern; we dispatch by name
+                // first, then validate the args.
+                if name == "<<" && args.len() == 1 {
+                    match &args[0] {
+                        Value::Str(other) => {
+                            let to_push = other.borrow().clone();
+                            s.borrow_mut().push_str(&to_push);
+                        }
+                        // CRuby's String#<< also accepts Integer
+                        // (treated as a codepoint). Support it
+                        // since Rake / Sinatra builders rely on it
+                        // for fast char-by-char concatenation.
+                        Value::Int(n) => {
+                            if let Some(c) = char::from_u32(*n as u32) {
+                                s.borrow_mut().push(c);
+                            } else {
+                                return Err(self.trap(RubyError::ArgumentError {
+                                    msg: format!("{} out of char range", n),
+                                }));
+                            }
+                        }
+                        other => return Err(self.trap(RubyError::TypeError {
+                            msg: format!("no implicit conversion of {} into String", other.type_name()),
+                        })),
+                    }
+                    return Ok(Some(Value::Str(s)));
+                }
+                if name == "concat" {
+                    for a in args {
+                        match a {
+                            Value::Str(o) => {
+                                let to_push = o.borrow().clone();
+                                s.borrow_mut().push_str(&to_push);
+                            }
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: format!("no implicit conversion of {} into String", a.type_name()),
+                            })),
+                        }
+                    }
+                    return Ok(Some(Value::Str(s)));
+                }
+                if name == "prepend" {
+                    // Concatenate args in order, then prepend to
+                    // existing content. CRuby's `prepend("a","b")`
+                    // results in `"a" + "b" + self`, not the
+                    // reverse — verified against MRI.
+                    let mut prefix = String::new();
+                    for a in args {
+                        match a {
+                            Value::Str(o) => prefix.push_str(&o.borrow()),
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: format!("no implicit conversion of {} into String", a.type_name()),
+                            })),
+                        }
+                    }
+                    let mut buf = prefix;
+                    buf.push_str(&s.borrow());
+                    *s.borrow_mut() = buf;
+                    return Ok(Some(Value::Str(s)));
+                }
+                if name == "replace" && args.len() == 1 {
+                    match &args[0] {
+                        Value::Str(o) => {
+                            let new_content = o.borrow().clone();
+                            *s.borrow_mut() = new_content;
+                        }
+                        other => return Err(self.trap(RubyError::TypeError {
+                            msg: format!("no implicit conversion of {} into String", other.type_name()),
+                        })),
+                    }
+                    return Ok(Some(Value::Str(s)));
+                }
                 // String#[] / #slice — char-indexed slicing.
                 // CRuby's semantics:
                 //   s[i]           -> single-char String, or nil
@@ -4258,7 +4335,17 @@ impl Vm {
                         }
                         _ => {
                             let s = v.to_display(&vm.heap, &vm.interner);
-                            let _ = writeln!(vm.stdout, "{}", s);
+                            // CRuby: `puts` skips the trailing
+                            // newline if the value already ends in
+                            // one. Avoids the double-blank-line
+                            // surprise on `puts result` where
+                            // `result` is a `"...\n"` builder
+                            // string.
+                            if s.ends_with('\n') {
+                                let _ = write!(vm.stdout, "{}", s);
+                            } else {
+                                let _ = writeln!(vm.stdout, "{}", s);
+                            }
                         }
                     }
                 }
