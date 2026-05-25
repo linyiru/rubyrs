@@ -59,6 +59,7 @@ RangeNode
 RegularExpressionNode
 RequiredParameterNode
 RescueModifierNode
+RestParameterNode
 ReturnNode
 SelfNode
 SplatNode

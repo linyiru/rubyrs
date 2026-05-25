@@ -81,6 +81,7 @@ impl ProtoBuilder {
     pub(crate) fn build(self, name: String, params: Vec<String>, defaults: Vec<Option<Value>>) -> Proto {
         Proto {
             name, params, defaults,
+            rest_param: None,
             n_locals: self.n_locals,
             code: self.code,
             op_spans: self.op_spans,
@@ -562,14 +563,27 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, defaults, body } => {
+        Expr::Def { name, params, defaults, rest, body } => {
             let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node))
             }).collect();
+            // If the method has a `*rest` param, ensure the rest
+            // name has a local slot too. ProtoBuilder allocates
+            // positional params in order; rest gets the slot
+            // right after them.
+            let mut effective_params = params.clone();
+            if let Some(rname) = rest {
+                effective_params.push(rname.clone());
+            }
             let proto_idx = compile_proto_kind(
-                name.clone(), params.clone(), lit_defaults, body,
+                name.clone(), effective_params, lit_defaults, body,
                 b.filename.clone(), protos, interner, cc, /*is_method=*/true,
             );
+            // Stash the rest-name on the Proto so invoke_method
+            // can find the slot when binding args.
+            if let Some(rname) = rest {
+                protos[proto_idx].rest_param = Some(rname.clone());
+            }
             let name_id = interner.intern(name);
             b.emit(Op::DefMethod(name_id, proto_idx as u32));
             b.emit(Op::LoadNil);
@@ -712,6 +726,21 @@ pub(crate) fn compile_expr(
         Expr::Yield(args) => {
             for a in args { compile_expr(b, a, protos, interner, cc); }
             b.emit(Op::Yield(args.len() as u8));
+        }
+        Expr::Apply { receiver, name, splat } => {
+            // `foo(*arr)` — compile receiver (if any) then the
+            // splat expression. The VM op `ApplyCall(NoRecv)`
+            // pops the Array and uses its elements as args.
+            let has_recv = receiver.is_some();
+            if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
+            compile_expr(b, splat, protos, interner, cc);
+            let name_id = interner.intern(name);
+            let cid = *cc as u16; *cc += 1;
+            if has_recv {
+                b.emit(Op::ApplyCall(name_id, cid));
+            } else {
+                b.emit(Op::ApplyCallNoRecv(name_id, cid));
+            }
         }
         Expr::Lambda { params, body } => {
             // `->(p) { body }` — compile the body as a block proto

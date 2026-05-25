@@ -98,6 +98,10 @@ pub(crate) enum Expr {
         /// params and need a per-callsite prologue, which is more
         /// invasive than what this minimal pass handles.
         defaults: Vec<Option<SExpr>>,
+        /// `Some(name)` for `def foo(a, b, *rest)`. Args past
+        /// the last positional slot collapse into a fresh Array
+        /// bound to this name. `None` means no rest param.
+        rest: Option<String>,
         body: Vec<SExpr>,
     },
     Class {
@@ -119,6 +123,16 @@ pub(crate) enum Expr {
         block_body: Vec<SExpr>,
     },
     Yield(Vec<SExpr>),
+    /// `foo(*arr)` — single-splat call. The compiler emits an
+    /// `Op::ApplyCall` / `Op::ApplyCallNoRecv` that takes one
+    /// Array on top of the stack and uses its elements as
+    /// positional args. Mixed forms like `foo(a, *b, c)` are
+    /// not yet supported.
+    Apply {
+        receiver: Option<Box<SExpr>>,
+        name: String,
+        splat: Box<SExpr>,
+    },
     /// `->(params) { body }` — lambda literal. Compiles to the
     /// same `CreateBlock` opcode as a regular `{ |x| ... }` block,
     /// but stays on the stack as a Value::Block instead of being
@@ -499,10 +513,27 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_call_node() {
         let receiver = n.receiver().map(|r| Box::new(tr(&r)));
         let name = cid_to_string(n.name());
-        let args: Vec<SExpr> = n
+        // Detect single-splat call `foo(*arr)` — args is a
+        // single SplatNode wrapping an Array-shaped expression.
+        // Mixed splats (`foo(a, *b, c)`) aren't supported here;
+        // they fall through to normal Call and a SplatNode in
+        // the arg list will be flagged as unsupported.
+        let arg_nodes: Vec<_> = n
             .arguments()
-            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .map(|a| a.arguments().iter().collect::<Vec<_>>())
             .unwrap_or_default();
+        if arg_nodes.len() == 1 {
+            if let Some(sn) = arg_nodes[0].as_splat_node() {
+                if let Some(splat_expr) = sn.expression() {
+                    return sp(node, Expr::Apply {
+                        receiver,
+                        name,
+                        splat: Box::new(tr(&splat_expr)),
+                    });
+                }
+            }
+        }
+        let args: Vec<SExpr> = arg_nodes.iter().map(|c| tr(c)).collect();
         if let Some(bnode) = n.block() {
             if let Some(bn) = bnode.as_block_node() {
                 let block_params: Vec<String> = bn.parameters().and_then(|pn| pn.as_block_parameters_node()).and_then(|bp| bp.parameters())
@@ -831,7 +862,13 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let name = cid_to_string(n.name());
         let mut params: Vec<String> = Vec::new();
         let mut defaults: Vec<Option<SExpr>> = Vec::new();
+        let mut rest: Option<String> = None;
         if let Some(p) = n.parameters() {
+            if let Some(r) = p.rest() {
+                if let Some(rp) = r.as_rest_parameter_node() {
+                    rest = rp.name().map(|n| cid_to_string(n));
+                }
+            }
             for r in p.requireds().iter() {
                 if let Some(rp) = r.as_required_parameter_node() {
                     params.push(cid_to_string(rp.name()));
@@ -871,7 +908,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Def { name, params, defaults, body });
+        return sp(node, Expr::Def { name, params, defaults, rest, body });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;

@@ -49,6 +49,14 @@ pub(crate) enum Op {
     /// Args: name SymId, argc, per-call-site inline-cache slot id.
     Call(SymId, u8, u16),
     CallNoRecv(SymId, u8, u16),
+    /// `foo(*args)` — single-splat call. Pops the args Array
+    /// (which must be `Value::Array`) and uses its elements as
+    /// the positional args. Argc is dynamic. Receiver above
+    /// the array on stack for `ApplyCall`; absent for the
+    /// `NoRecv` variant. Used by the compiler when call args
+    /// contain a SplatNode at the only position.
+    ApplyCall(SymId, u16),
+    ApplyCallNoRecv(SymId, u16),
     /// `super(args...)`. Receiver stays `self` (popped from the
     /// current frame, not the operand stack). Method name and
     /// argc are baked in at compile time. Lookup starts at the
@@ -175,6 +183,11 @@ pub(crate) struct Proto {
     /// needed. Required params always come before optionals in
     /// source order, so `defaults` has the shape `[None…, Some…]`.
     pub(crate) defaults: Vec<Option<Value>>,
+    /// `Some(name)` for `def foo(*args)` — the rest-parameter
+    /// name. At call time, args past the last positional slot
+    /// gather into a fresh Array stored in the local named here.
+    /// `None` means no rest param.
+    pub(crate) rest_param: Option<String>,
     pub(crate) n_locals: u16,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.

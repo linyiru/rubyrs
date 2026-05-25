@@ -2558,15 +2558,32 @@ impl Vm {
         // invocation time. Required params always come before
         // optionals in source order, so the legal arg-count range
         // is `[required, params.len()]`.
+        //
+        // Rest-param (`*args`) — m.params holds the positional
+        // names; the rest-name (if any) is in proto.rest_param.
+        // Excess args past `params.len()` collect into an Array
+        // bound to the rest slot. With a rest param there's no
+        // upper bound on the arg count.
         let proto = &self.protos[m.proto_idx];
+        let has_rest = proto.rest_param.is_some();
+        // `m.params` now includes the rest slot name at the tail
+        // (the compiler appends it). For arity, treat only the
+        // positional ones as fillable params.
+        let positional_max = if has_rest { m.params.len() - 1 } else { m.params.len() };
         let required = proto.defaults.iter().take_while(|d| d.is_none()).count();
-        let max_args = m.params.len();
         let given = args.len();
-        if given < required || given > max_args {
-            let expected = if required == max_args {
+        let arity_ok = if has_rest {
+            given >= required
+        } else {
+            given >= required && given <= positional_max
+        };
+        if !arity_ok {
+            let expected = if has_rest {
+                format!("{}+", required)
+            } else if required == positional_max {
                 format!("{}", required)
             } else {
-                format!("{}..{}", required, max_args)
+                format!("{}..{}", required, positional_max)
             };
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected {})", given, expected),
@@ -2576,18 +2593,31 @@ impl Vm {
         let n_locals = proto.n_locals as usize;
         // Snapshot defaults for the omitted-slot fill, since we're
         // about to take `&mut self` to push the frame.
-        let default_fill: Vec<Value> = (given..max_args).map(|i| {
-            // `i < required` is impossible: `given >= required`
-            // already, so any `i in given..max_args` lands in the
-            // optional range, which has Some(v).
+        // Defaults fill any positional slot the caller didn't
+        // provide (given..positional_max). Required slots are
+        // already guaranteed populated by the arity check above.
+        let default_fill: Vec<Value> = (given..positional_max).map(|i| {
             proto.defaults[i].clone().unwrap_or(Value::Nil)
         }).collect();
         let mut locals = vec_nil(n_locals);
-        for (i, a) in args.into_iter().enumerate() {
-            locals[i] = a;
+        // Bind up to positional_max args into positional slots; any
+        // overflow flows into the rest slot as a fresh Array.
+        let positional_take = given.min(positional_max);
+        let mut args_iter = args.into_iter();
+        for i in 0..positional_take {
+            locals[i] = args_iter.next().unwrap();
         }
         for (offset, v) in default_fill.into_iter().enumerate() {
-            locals[given + offset] = v;
+            locals[positional_take + offset] = v;
+        }
+        if has_rest {
+            // Remaining args (possibly empty) → fresh Array in the
+            // rest slot, which is `m.params.len() - 1`.
+            let rest_vec: Vec<Value> = args_iter.collect();
+            self.maybe_gc();
+            let arr_id = self.heap.alloc(HeapObj::Array(rest_vec));
+            let rest_slot = m.params.len() - 1;
+            locals[rest_slot] = Value::Array(arr_id);
         }
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
@@ -4049,6 +4079,25 @@ impl Vm {
             }
             Op::CallNoRecv(name_id, argc, cache_id) => {
                 self.do_call(name_id, argc as usize, true, cache_id)?;
+            }
+            Op::ApplyCall(name_id, cache_id) | Op::ApplyCallNoRecv(name_id, cache_id) => {
+                // Splat-call: pop the args Array, push its
+                // elements back onto the stack as positional args,
+                // then dispatch with that dynamic argc. Receiver
+                // (when present) sits below the array on the
+                // stack — same layout `do_call` expects.
+                let no_recv = matches!(op, Op::ApplyCallNoRecv(_, _));
+                let arr_val = self.stack.pop().expect("ICE: ApplyCall without arg array");
+                let arr_id = match arr_val {
+                    Value::Array(id) => id,
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
+                    })),
+                };
+                let elems: Vec<Value> = self.heap.array(arr_id).clone();
+                let argc = elems.len();
+                for v in elems { self.stack.push(v); }
+                self.do_call(name_id, argc, no_recv, cache_id)?;
             }
             Op::CallBlock(name_id, argc, cache_id) => {
                 self.do_call_block(name_id, argc as usize, false, cache_id)?;

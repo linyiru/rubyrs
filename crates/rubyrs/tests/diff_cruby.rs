@@ -142,3 +142,4 @@ fn run_diff(name: &str) {
 #[test] fn array_bang() { run_diff("array_bang"); }
 #[test] fn percent_literals() { run_diff("percent_literals"); }
 #[test] fn frozen_strings() { run_diff("frozen_strings"); }
+#[test] fn splat_calls() { run_diff("splat_calls"); }
