@@ -43,6 +43,15 @@ if [[ ! "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
   echo "perf/check: RUNS must be a positive integer, got '$RUNS'" >&2
   exit 2
 fi
+# `/usr/bin/time` is what we use to measure peak RSS — its absence
+# is a setup error, not a perf regression. Pre-flight check avoids
+# `set -e` killing the script mid-loop with a confusing exit code
+# (often 127 from command-not-found).
+if [[ ! -x /usr/bin/time ]]; then
+  echo "perf/check: /usr/bin/time not executable at /usr/bin/time" >&2
+  echo "perf/check: on Linux install \`time\` (GNU); on macOS this is preinstalled" >&2
+  exit 2
+fi
 
 # `/usr/bin/time` flags differ: macOS BSD-time uses `-l`, GNU coreutils
 # uses `-v`. We branch and parse accordingly. Both paths produce the
@@ -50,15 +59,32 @@ fi
 PLATFORM="$(uname -s)"
 measure_once() {
   local script="$1"
-  local out
+  local out rc=0
+  # `set -e` would normally let any failure inside `/usr/bin/time`
+  # (workload exiting non-zero, parse mismatch downstream) kill the
+  # whole script with that command's exit code — violating the
+  # 0/1/2 contract. Catch the failure here, return an empty
+  # "$ms $kb" line, and let the caller treat that as a measurement
+  # error worth surfacing.
   if [[ "$PLATFORM" == "Darwin" ]]; then
-    # `time -l` prints to stderr; capture all of it.
-    out=$(/usr/bin/time -l "$RUBYRS_BIN" "$script" 2>&1 >/dev/null)
+    out=$(/usr/bin/time -l "$RUBYRS_BIN" "$script" 2>&1 >/dev/null) || rc=$?
+    if (( rc != 0 )); then
+      echo "perf/check: workload \`$script\` exited with status $rc" >&2
+      [[ -n "$out" ]] && echo "$out" | sed 's/^/  | /' >&2
+      echo "ERR ERR"
+      return
+    fi
     # `real` line: `        0.46 real         0.45 user         0.00 sys`
     # `maximum resident set size` in BYTES on macOS.
     local secs rss_b
     secs=$(awk '/real/ {print $1; exit}' <<<"$out")
     rss_b=$(awk '/maximum resident set size/ {print $1; exit}' <<<"$out")
+    if [[ -z "$secs" || -z "$rss_b" ]]; then
+      echo "perf/check: could not parse \`/usr/bin/time -l\` output for $script" >&2
+      echo "$out" | sed 's/^/  | /' >&2
+      echo "ERR ERR"
+      return
+    fi
     # Round UP on the bytes-to-KB conversion so the budget check is
     # conservative — a script using 4 MB + 1 byte should report as
     # 4097 KB rather than be rounded down to 4096 and slip past a
@@ -70,13 +96,24 @@ measure_once() {
       printf "%d %d\n", s*1000, kb;
     }'
   else
-    # GNU /usr/bin/time -v on Linux. RSS is already in KB.
-    out=$(/usr/bin/time -v "$RUBYRS_BIN" "$script" 2>&1 >/dev/null)
+    out=$(/usr/bin/time -v "$RUBYRS_BIN" "$script" 2>&1 >/dev/null) || rc=$?
+    if (( rc != 0 )); then
+      echo "perf/check: workload \`$script\` exited with status $rc" >&2
+      [[ -n "$out" ]] && echo "$out" | sed 's/^/  | /' >&2
+      echo "ERR ERR"
+      return
+    fi
     # `Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.46`
     # `Maximum resident set size (kbytes): 12345`
     local wall rss_kb
     wall=$(awk -F': ' '/Elapsed \(wall clock\)/ {print $2; exit}' <<<"$out")
     rss_kb=$(awk -F': ' '/Maximum resident set size/ {print $2; exit}' <<<"$out")
+    if [[ -z "$wall" || -z "$rss_kb" ]]; then
+      echo "perf/check: could not parse \`/usr/bin/time -v\` output for $script" >&2
+      echo "$out" | sed 's/^/  | /' >&2
+      echo "ERR ERR"
+      return
+    fi
     # Parse `m:ss.ss` (or `h:mm:ss.ss`) into ms.
     local ms
     ms=$(awk -v w="$wall" 'BEGIN {
@@ -97,6 +134,12 @@ measure_min() {
   local best_ms=999999999 best_kb=999999999
   for ((i = 0; i < RUNS; i++)); do
     read -r ms kb <<<"$(measure_once "$script")"
+    # Sentinel from measure_once when /usr/bin/time failed or
+    # output didn't parse. Caller treats that as setup_fail.
+    if [[ "$ms" == "ERR" || "$kb" == "ERR" ]]; then
+      echo "ERR ERR"
+      return
+    fi
     (( ms < best_ms )) && best_ms=$ms
     (( kb < best_kb )) && best_kb=$kb
   done
@@ -131,6 +174,15 @@ while IFS=$'\t' read -r workload budget _note; do
   fi
   total=$((total + 1))
   read -r ms kb <<<"$(measure_min "$workload")"
+  # measure_min emits "ERR ERR" when /usr/bin/time itself failed
+  # or the output didn't parse. Already logged a workload-specific
+  # message inside measure_once; route to setup_fail and skip the
+  # arithmetic comparison (which would die on non-numeric input).
+  if [[ "$ms" == "ERR" || "$kb" == "ERR" ]]; then
+    printf "%-58s %-11s %-12s %-10s %s\n" "$workload" "ERR" "ERR" "$budget" "SETUP"
+    setup_fail=1
+    continue
+  fi
   status="ok"
   if (( kb > budget )); then
     status="OVER"
@@ -141,9 +193,10 @@ done < "$BASELINES"
 
 if (( setup_fail != 0 )); then
   echo ""
-  echo "perf/check: one or more workload paths in $BASELINES don't exist." >&2
+  echo "perf/check: one or more baseline rows are invalid (see errors above)." >&2
   echo "perf/check: this is a setup/config error, not a perf regression." >&2
-  echo "perf/check: fix the path or remove the row." >&2
+  echo "perf/check: possible causes: missing workload path, non-integer budget," >&2
+  echo "perf/check: workload exited non-zero, /usr/bin/time output unparseable." >&2
   exit 2
 fi
 if (( budget_fail != 0 )); then
