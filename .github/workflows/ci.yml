@@ -156,7 +156,11 @@ jobs:
               fail=1
             fi
           }
-          check crates/rubyrs/src/vm.rs       61
+          # Bumped 61 → 62 in commit 2c67052 ("Add String#sub/#gsub/#tr"),
+          # which inherits `to_chars.last().unwrap()` in the String#tr
+          # implementation. Counts merge-result on PR builds, so the
+          # +1 lands here on any branch crossing that master commit.
+          check crates/rubyrs/src/vm.rs       62
           check crates/rubyrs/src/heap.rs     10
           check crates/rubyrs/src/ast.rs       3
           check crates/rubyrs/src/lib.rs       1
