@@ -16,6 +16,10 @@ use crate::heap::{Heap, HeapObj};
 use crate::intern::{Interner, SymId};
 use crate::value::{BlockHandle, Class, Instance, Method, ObjId, Value, Visibility};
 
+mod fileops;
+mod sprintf;
+pub(crate) use sprintf::ruby_sprintf;
+
 // ---------- VM ----------
 
 /// Ordering for built-in aggregation methods (`min` / `max` /
@@ -5763,100 +5767,38 @@ fn cext_funcall_to_vm(
     })
 }
 
-impl Vm {
-    /// File class-method shims. Implements the half-dozen path-
-    /// based File operations idiomatic Ruby scripts reach for
-    /// (read / write / exist? / size / basename / dirname /
-    /// extname / open-with-block). Returns `Ok(Some(v))` on a
-    /// handled call, `Ok(None)` if the method name isn't in
-    /// our subset so dispatch can keep walking.
-    pub(crate) fn file_class_dispatch(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
-        use std::path::Path;
-        let path_arg = |a: &Value| -> Result<String, Trap> {
-            match a {
-                Value::Str(s) => Ok(s.content.borrow().clone()),
-                _ => Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", a.type_name()),
-                })),
-            }
-        };
-        Ok(Some(match (name, args) {
-            ("read", [p]) => {
-                let path = path_arg(p)?;
-                match std::fs::read_to_string(&path) {
-                    Ok(s) => Value::new_str(s),
-                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                        msg: format!("File.read({}): {}", path, e),
-                    })),
-                }
-            }
-            ("write", [p, body]) => {
-                let path = path_arg(p)?;
-                let contents = match body {
-                    Value::Str(s) => s.content.borrow().clone(),
-                    _ => body.to_display(&self.heap, &self.interner),
-                };
-                match std::fs::write(&path, &contents) {
-                    Ok(()) => Value::Int(contents.len() as i64),
-                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                        msg: format!("File.write({}): {}", path, e),
-                    })),
-                }
-            }
-            ("exist?", [p]) | ("exists?", [p]) | ("file?", [p]) => {
-                let path = path_arg(p)?;
-                let exists = std::fs::metadata(&path)
-                    .map(|m| if name == "file?" { m.is_file() } else { true })
-                    .unwrap_or(false);
-                Value::Bool(exists)
-            }
-            ("directory?", [p]) => {
-                let path = path_arg(p)?;
-                let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
-                Value::Bool(is_dir)
-            }
-            ("size", [p]) => {
-                let path = path_arg(p)?;
-                match std::fs::metadata(&path) {
-                    Ok(m) => Value::Int(m.len() as i64),
-                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                        msg: format!("File.size({}): {}", path, e),
-                    })),
-                }
-            }
-            ("basename", [p]) => {
-                let path = path_arg(p)?;
-                let name = Path::new(&path).file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                Value::new_str(name)
-            }
-            ("dirname", [p]) => {
-                let path = path_arg(p)?;
-                let dir = Path::new(&path).parent()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| ".".to_string());
-                Value::new_str(dir)
-            }
-            ("extname", [p]) => {
-                let path = path_arg(p)?;
-                let p = Path::new(&path);
-                let ext = p.extension()
-                    .map(|s| format!(".{}", s.to_string_lossy()))
-                    .unwrap_or_default();
-                Value::new_str(ext)
-            }
-            ("expand_path", [p]) => {
-                let path = path_arg(p)?;
-                let abs = std::fs::canonicalize(&path)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or(path);
-                Value::new_str(abs)
-            }
-            _ => return Ok(None),
-        }))
-    }
+// `file_class_dispatch` moved to `vm/fileops.rs`. The
+// `with_caught_unwind` helper below stays here because it's
+// part of the cext-bridge plumbing wired into the same compile
+// unit as `cext_*` callbacks.
+
+/// Run `f`, catching any Rust panic that escapes from our own
+/// argument-interning / handle-management code wrapping the C call.
+///
+/// **What this catches**: panics raised in Rust code that runs around
+/// the `extern "C"` call — `state.intern`, our `Vec` building, any
+/// `expect("ICE: ...")` in `rubyrs_cext::with_state`.
+///
+/// **What this does NOT catch**: panics raised inside the C function
+/// itself. The C side cannot raise a Rust panic; if one of OUR
+/// `rb_*` ABI functions panics from inside the C call, the process
+/// aborts under `panic = abort` semantics (the default for `extern "C"`
+/// since Rust 2018+). The cext ABI surface is documented as
+/// abort-on-contract-violation in docs/PANIC_AUDIT.md — conversion to
+/// error sentinels is Level 3+ work tied to `rb_raise` integration.
+#[cfg(not(target_os = "wasi"))]
+fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
+        if let Some(s) = p.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = p.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        }
+    })
 }
+
 
 fn visibility_from_name(name: &str) -> Option<Visibility> {
     match name {
@@ -5867,237 +5809,6 @@ fn visibility_from_name(name: &str) -> Option<Visibility> {
     }
 }
 
-/// Minimal printf-style formatter used by `String#%`. Supports the
-/// flag set [- + 0 space #], optional width and precision (decimal
-/// integers only — `*` for argument-driven width is not yet
-/// supported), and conversion specifiers d/i, f, s, x, X, o, b, B,
-/// c, p, plus the literal `%%`. Positional (`%1$d`) and named
-/// (`%<name>s`) directives are out of scope; encountering them
-/// raises ArgumentError so the caller can `rescue`.
-pub(crate) fn ruby_sprintf(
-    fmt: &str,
-    args: &[Value],
-    heap: &Heap,
-    interner: &Interner,
-) -> Result<String, RubyError> {
-    let mut out = String::new();
-    let mut idx: usize = 0;
-    let mut chars = fmt.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        let mut flag_minus = false;
-        let mut flag_plus = false;
-        let mut flag_zero = false;
-        let mut flag_space = false;
-        let mut flag_hash = false;
-        loop {
-            match chars.peek() {
-                Some('-') => { flag_minus = true; chars.next(); }
-                Some('+') => { flag_plus = true; chars.next(); }
-                Some('0') => { flag_zero = true; chars.next(); }
-                Some(' ') => { flag_space = true; chars.next(); }
-                Some('#') => { flag_hash = true; chars.next(); }
-                _ => break,
-            }
-        }
-        let mut width: Option<usize> = None;
-        while let Some(&d) = chars.peek() {
-            if d.is_ascii_digit() {
-                width = Some(width.unwrap_or(0) * 10 + (d as usize - '0' as usize));
-                chars.next();
-            } else { break; }
-        }
-        let mut precision: Option<usize> = None;
-        if chars.peek() == Some(&'.') {
-            chars.next();
-            let mut p: usize = 0;
-            while let Some(&d) = chars.peek() {
-                if d.is_ascii_digit() {
-                    p = p * 10 + (d as usize - '0' as usize);
-                    chars.next();
-                } else { break; }
-            }
-            precision = Some(p);
-        }
-        let spec = chars.next().ok_or_else(|| RubyError::ArgumentError {
-            msg: "malformed format string - %".into(),
-        })?;
-        if spec == '%' {
-            out.push('%');
-            continue;
-        }
-        let arg = args.get(idx).ok_or_else(|| RubyError::ArgumentError {
-            msg: "too few arguments".into(),
-        })?;
-        idx += 1;
-        let mut body = match spec {
-            'd' | 'i' => {
-                let n = coerce_int(arg)?;
-                let mut body = if n < 0 {
-                    format!("-{}", n.unsigned_abs())
-                } else if flag_plus {
-                    format!("+{n}")
-                } else if flag_space {
-                    format!(" {n}")
-                } else {
-                    n.to_string()
-                };
-                if let Some(p) = precision {
-                    // Precision on an integer pads with zeros to
-                    // that many digit positions, ignoring any sign.
-                    let (sign, digits) = match body.chars().next() {
-                        Some(c @ ('-' | '+' | ' ')) => (c, &body[1..]),
-                        _ => (' ', body.as_str()),
-                    };
-                    if digits.len() < p {
-                        let pad = "0".repeat(p - digits.len());
-                        body = if sign == ' ' && matches!(body.chars().next(), Some('-' | '+' | ' ')) {
-                            format!("{sign}{pad}{digits}")
-                        } else if sign == ' ' {
-                            format!("{pad}{digits}")
-                        } else {
-                            format!("{sign}{pad}{digits}")
-                        };
-                    }
-                }
-                body
-            }
-            'x' => format_radix_int(coerce_int(arg)?, 16, false, flag_hash),
-            'X' => format_radix_int(coerce_int(arg)?, 16, true, flag_hash),
-            'o' => format_radix_int(coerce_int(arg)?, 8, false, flag_hash),
-            'b' => format_radix_int(coerce_int(arg)?, 2, false, flag_hash),
-            'B' => format_radix_int(coerce_int(arg)?, 2, true, flag_hash),
-            'f' => {
-                let f = coerce_float(arg)?;
-                let prec = precision.unwrap_or(6);
-                let mut body = format!("{f:.*}", prec);
-                if !body.starts_with('-') {
-                    if flag_plus { body.insert(0, '+'); }
-                    else if flag_space { body.insert(0, ' '); }
-                }
-                body
-            }
-            's' => {
-                let mut body = arg.to_display(heap, interner);
-                if let Some(p) = precision {
-                    let truncated: String = body.chars().take(p).collect();
-                    body = truncated;
-                }
-                body
-            }
-            'p' => arg.to_inspect(heap, interner),
-            'c' => match arg {
-                Value::Int(n) => {
-                    char::from_u32(*n as u32).map(|c| c.to_string()).ok_or_else(|| {
-                        RubyError::ArgumentError {
-                            msg: format!("invalid character code {n} for %c"),
-                        }
-                    })?
-                }
-                Value::Str(s) => s.borrow().chars().next().map(|c| c.to_string()).unwrap_or_default(),
-                _ => return Err(RubyError::TypeError {
-                    msg: format!("no implicit conversion to %c from {}", arg.type_name()),
-                }),
-            },
-            other => return Err(RubyError::ArgumentError {
-                msg: format!("malformed format string - %{other}"),
-            }),
-        };
-        // Apply width / padding. Precision was already applied
-        // per-spec (d uses leading zeros to `precision`; s truncates).
-        if let Some(w) = width {
-            if body.chars().count() < w {
-                let pad_n = w - body.chars().count();
-                let pad_char = if flag_zero && !flag_minus && precision.is_none()
-                    && matches!(spec, 'd' | 'i' | 'x' | 'X' | 'o' | 'b' | 'B' | 'f') {
-                    '0'
-                } else {
-                    ' '
-                };
-                let pad: String = std::iter::repeat(pad_char).take(pad_n).collect();
-                if flag_minus {
-                    body.push_str(&pad);
-                } else if pad_char == '0' {
-                    // Zero-pad goes inside the sign for numbers.
-                    if let Some(first) = body.chars().next() {
-                        if matches!(first, '-' | '+' | ' ') {
-                            let rest: String = body.chars().skip(1).collect();
-                            body = format!("{first}{pad}{rest}");
-                        } else {
-                            body = format!("{pad}{body}");
-                        }
-                    }
-                } else {
-                    body = format!("{pad}{body}");
-                }
-            }
-        }
-        out.push_str(&body);
-    }
-    Ok(out)
-}
-
-fn coerce_int(v: &Value) -> Result<i64, RubyError> {
-    match v {
-        Value::Int(n) => Ok(*n),
-        Value::Float(f) => Ok(*f as i64),
-        Value::Str(s) => Ok(s.borrow().trim().parse::<i64>().unwrap_or(0)),
-        Value::Nil => Err(RubyError::TypeError {
-            msg: "no implicit conversion from nil to Integer".into(),
-        }),
-        _ => Err(RubyError::TypeError {
-            msg: format!("no implicit conversion of {} to Integer", v.type_name()),
-        }),
-    }
-}
-
-fn coerce_float(v: &Value) -> Result<f64, RubyError> {
-    match v {
-        Value::Float(f) => Ok(*f),
-        Value::Int(n) => Ok(*n as f64),
-        Value::Str(s) => Ok(s.borrow().trim().parse::<f64>().unwrap_or(0.0)),
-        Value::Nil => Err(RubyError::TypeError {
-            msg: "no implicit conversion from nil to Float".into(),
-        }),
-        _ => Err(RubyError::TypeError {
-            msg: format!("no implicit conversion of {} to Float", v.type_name()),
-        }),
-    }
-}
-
-fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {
-    let prefix: &str = if !alt { "" } else {
-        match radix { 16 => if upper { "0X" } else { "0x" }, 8 => "0", 2 => if upper { "0B" } else { "0b" }, _ => "" }
-    };
-    let body = if n < 0 {
-        // CRuby: %x on a negative int produces a two's-complement
-        // representation prefixed with "..f" (an infinite ones).
-        // We render just `-<unsigned digits>` which is close
-        // enough for the common test cases and avoids dragging
-        // in BigNum-style "..f" notation. Documented divergence.
-        let mag = match radix {
-            16 => format!("{:x}", (-n) as u64),
-            8 => format!("{:o}", (-n) as u64),
-            2 => format!("{:b}", (-n) as u64),
-            _ => unreachable!(),
-        };
-        let mag = if upper { mag.to_uppercase() } else { mag };
-        format!("-{prefix}{mag}")
-    } else {
-        let mag = match radix {
-            16 => format!("{:x}", n as u64),
-            8 => format!("{:o}", n as u64),
-            2 => format!("{:b}", n as u64),
-            _ => unreachable!(),
-        };
-        let mag = if upper { mag.to_uppercase() } else { mag };
-        format!("{prefix}{mag}")
-    };
-    body
-}
 
 pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value_bytes: Option<usize>) -> Result<Option<Value>, RubyError> {
     // Helper: enforce the per-value byte cap (P2-14c) at every
