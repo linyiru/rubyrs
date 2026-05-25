@@ -106,6 +106,30 @@ impl Vm {
                             };
                             return Ok(Some(Value::Bool(lo_ok && hi_ok)));
                         }
+                        // `r.cover?(other_range)` — true iff the
+                        // other range is fully contained. CRuby
+                        // checks both endpoints; we mirror that
+                        // for the closed-Int case (the only Range
+                        // shape we model).
+                        ("cover?", [Value::Range(other_id)]) => {
+                            let other = self.heap.range(*other_id);
+                            let other_excl = other.exclusive;
+                            let (ob, oe) = match (&other.begin, &other.end) {
+                                (Value::Int(b), Value::Int(e)) => (*b, *e),
+                                _ => return Ok(None),
+                            };
+                            // CRuby: empty sub-ranges do NOT cover.
+                            let empty = if other_excl { ob >= oe } else { ob > oe };
+                            if empty { return Ok(Some(Value::Bool(false))); }
+                            let other_min = ob;
+                            let other_max = if other_excl { oe - 1 } else { oe };
+                            let lo_ok = match begin_int { Some(lo) => other_min >= lo, None => true };
+                            let hi_ok = match end_int {
+                                Some(hi) => if excl { other_max < hi } else { other_max <= hi },
+                                None => true,
+                            };
+                            return Ok(Some(Value::Bool(lo_ok && hi_ok)));
+                        }
                         ("include?", [Value::Int(v)]) => {
                             let lo_ok = match begin_int { Some(lo) => *v >= lo, None => true };
                             let hi_ok = match end_int {
@@ -129,6 +153,33 @@ impl Vm {
                     ("include?", [Value::Int(v)]) => {
                         let in_r = if excl { *v >= bi && *v < ei } else { *v >= bi && *v <= ei };
                         Some(Value::Bool(in_r))
+                    }
+                    ("cover?", [Value::Int(v)]) => {
+                        let in_r = if excl { *v >= bi && *v < ei } else { *v >= bi && *v <= ei };
+                        Some(Value::Bool(in_r))
+                    }
+                    // `r.cover?(other_range)` — true iff the
+                    // other range is fully within self. For Int
+                    // bounds both sides; mismatched-type endpoints
+                    // fall through (None → NoMethodError).
+                    ("cover?", [Value::Range(other_id)]) => {
+                        let other = self.heap.range(*other_id);
+                        let other_excl = other.exclusive;
+                        let (ob, oe) = match (&other.begin, &other.end) {
+                            (Value::Int(b), Value::Int(e)) => (*b, *e),
+                            _ => return Ok(None),
+                        };
+                        // CRuby: empty sub-ranges do NOT cover —
+                        // `(1..10).cover?(8...8)` is false. Empty
+                        // means begin >= end (excl) or begin > end
+                        // (inclusive).
+                        let empty = if other_excl { ob >= oe } else { ob > oe };
+                        if empty { return Ok(Some(Value::Bool(false))); }
+                        let other_min = ob;
+                        let other_max = if other_excl { oe - 1 } else { oe };
+                        let lo_ok = other_min >= bi;
+                        let hi_ok = if excl { other_max < ei } else { other_max <= ei };
+                        Some(Value::Bool(lo_ok && hi_ok))
                     }
                     ("to_a", []) | ("sort", []) => {
                         // `sort` with no block on a Range is just

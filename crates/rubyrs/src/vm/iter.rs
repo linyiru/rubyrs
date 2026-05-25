@@ -782,6 +782,44 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Int(n_val)))
             }
+            // `(b..e).step(n) { |i| ... }` — yields each step value.
+            // Returns the receiver Range, matching CRuby.
+            (Value::Range(id), "step", [Value::Int(n)]) => {
+                if *n <= 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("step can't be {}", n),
+                    }));
+                }
+                let (b, e, excl) = {
+                    let r = self.heap.range(*id);
+                    (r.begin.clone(), r.end.clone(), r.exclusive)
+                };
+                let (bi, ei) = match (&b, &e) {
+                    (Value::Int(a), Value::Int(c)) => (*a, *c),
+                    _ => return Ok(None),
+                };
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Range(*id));
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let end_inc = if excl { ei - 1 } else { ei };
+                let mut i = bi;
+                let step = *n;
+                let mut early = None;
+                while i <= end_inc {
+                    g.vm.invoke_block(block, vec![Value::Int(i)])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    i = i.saturating_add(step);
+                }
+                Some(early.unwrap_or(Value::Range(*id)))
+            }
             (Value::Range(id), "each", []) => {
                 // Two endpoint shapes drive iteration: Int+Int (the
                 // common case, integer counting) and Str+Str (the

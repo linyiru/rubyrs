@@ -200,3 +200,4 @@ fn run_diff(name: &str) {
 #[test] fn compact_filter_map() { run_diff("compact_filter_map"); }
 #[test] fn array_combinatorics() { run_diff("array_combinatorics"); }
 #[test] fn array_assoc_rassoc() { run_diff("array_assoc_rassoc"); }
+#[test] fn range_cover_step() { run_diff("range_cover_step"); }
