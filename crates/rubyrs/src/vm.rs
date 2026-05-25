@@ -4671,13 +4671,16 @@ fn cext_funcall_to_vm(
 ) -> rubyrs_cext::Value {
     // SAFETY: see CURRENT_VM_PTR doc — vm_ptr is valid for the life
     // of the surrounding cext_dispatch call. We deref the same
-    // pointer twice in this function: first as `&mut Vm` for the
-    // recv/arg handle → Value translation (Array/Hash recursion
-    // allocates on the Vm heap) AND the cext_invoke_method call;
-    // then later (after the inner dispatch returns) for the result
-    // Value → handle translation needing `&Vm` for heap reads. The
-    // two are time-disjoint within this function body.
-    let (result, vm_for_result) = unsafe {
+    // pointer twice in this function: first as `&mut Vm` (inner
+    // block) for the recv/arg handle → Value translation and the
+    // cext_invoke_method call; then, AFTER the inner block exits
+    // and the &mut goes out of scope, as `&Vm` for the result
+    // Value → handle translation. The two derefs are split into
+    // separate scopes so no &mut + & alias exists at any moment —
+    // the previous `let (result, vm_for_result) = unsafe { ... }`
+    // pattern returned `&*vm_ptr` while `&mut *vm_ptr` was still
+    // alive in the same block, which Stacked Borrows flags as UB.
+    let result = unsafe {
         let vm = &mut *vm_ptr;
         let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(vm, st, recv));
         let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
@@ -4686,16 +4689,20 @@ fn cext_funcall_to_vm(
                 .map(|h| cext_handle_to_value(vm, st, *h))
                 .collect()
         });
-        let result = match vm.cext_invoke_method(recv_v, method, arg_vs) {
+        match vm.cext_invoke_method(recv_v, method, arg_vs) {
             Ok(v) => v,
             // Spike: propagating Trap back through the C-ABI boundary
             // needs `rb_raise` / longjmp coordination (Level 3+).
             // For now collapse to Nil so the C side gets a defined
             // return without aborting.
             Err(_trap) => Value::Nil,
-        };
-        (result, &*vm_ptr)
+        }
+        // `vm: &mut Vm` drops here.
     };
+
+    // Now safe to take a fresh `&Vm` from the same pointer — the
+    // previous `&mut` is out of scope.
+    let vm_for_result: &Vm = unsafe { &*vm_ptr };
 
     // Translate result back to a handle in the topmost CExtState.
     // `cext_value_to_cvalue` now takes the same `st` it'll be interned
