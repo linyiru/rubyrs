@@ -295,13 +295,26 @@ fn try_predicate_matcher(source: &str, node: &ruby_prism::CallNode<'_>) -> Optio
     if recv_call.arguments().is_some() {
         return None;
     }
+    // Bail when the predicate call has an attached block.
+    // Wrapping `lhs.PRED? do ... end` in `assert(...)` would
+    // (under Ruby's lower-precedence `do/end` binding) risk
+    // attaching the block to `assert` rather than the
+    // predicate. Mspec's predicate matchers don't normally
+    // take blocks, so passing through is the safe move —
+    // a human can finish if they really meant
+    // `should.all? { ... }`.
+    if node.block().is_some() {
+        return None;
+    }
     let lhs = recv_call.receiver()?;
 
     let lhs_text = slice(source, &lhs);
     // Build `.NAME(args)` from the outer call: take the source
     // from the start of the message (the method name) through
-    // the end of the outer call. This preserves any args
-    // syntax (parens, no parens, block) verbatim.
+    // the end of the outer call. This preserves any positional
+    // args syntax (parens or no parens) verbatim. We've
+    // already excluded the block case above so the suffix
+    // never contains a `{ ... }` or `do ... end` tail.
     let outer_loc = node.location();
     let message_loc = node.message_loc()?;
     let suffix_start = message_loc.start_offset();
@@ -324,11 +337,16 @@ fn try_predicate_matcher(source: &str, node: &ruby_prism::CallNode<'_>) -> Optio
 /// Alloc-free name comparison: each recogniser compares the
 /// call's `name()` against fixed byte literals (b"==",
 /// b"should", etc), avoiding the per-`CallNode` String alloc
-/// the previous `cid_to_string`-based approach made. Method
-/// names in Ruby are ASCII-only in practice so byte equality
-/// against UTF-8 literals is sound; a non-ASCII identifier
-/// (e.g. a Japanese-named method) simply won't match and the
-/// recogniser falls through, which is the right behaviour.
+/// the previous `cid_to_string`-based approach made.
+///
+/// The recognised matcher names (`should`, `should_not`,
+/// `raise`, `==`, plus any `?`-suffixed predicate) are all
+/// pure ASCII; the comparison just checks the call's name
+/// bytes against an ASCII byte literal. Ruby itself allows
+/// non-ASCII identifiers in user code, but no upstream
+/// matcher we care about uses one — non-matching identifiers
+/// simply fall through to passthrough, which is the right
+/// behaviour.
 fn name_is(id: ruby_prism::ConstantId<'_>, expected: &[u8]) -> bool {
     id.as_slice() == expected
 }

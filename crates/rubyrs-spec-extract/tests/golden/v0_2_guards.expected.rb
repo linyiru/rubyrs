@@ -37,6 +37,23 @@ describe "guards" do
     foo.should.first
   end
 
+  # Block-form predicate (Copilot review on the v0.2 guards
+  # commit). `.should.all? { ... }` would, under naive
+  # rewrite, become `assert(arr.all? { |x| x > 0 })` — the
+  # `{ }` block is inside `assert`'s parens so binds to
+  # `all?`, which is correct. But the `do/end` form has
+  # lower precedence and could bind to `assert` instead.
+  # Safer: passthrough any predicate call that has a block.
+  it "predicate with brace block" do
+    arr.should.all? { |x| x > 0 }
+  end
+
+  it "predicate with do/end block" do
+    arr.should.all? do |x|
+      x > 0
+    end
+  end
+
   # Cluster D — parenthesised low-precedence receiver. If
   # prism's `receiver()` preserves the ParenthesesNode, the
   # slice keeps the parens and the rewrite is correct. If it
