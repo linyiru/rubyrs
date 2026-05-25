@@ -384,21 +384,42 @@ impl Vm {
                         Some(Value::new_str(parts.join(&*sep.borrow())))
                     }
                     ("+", [Value::Array(other)]) => {
-                        let mut out: Vec<Value> = self.heap.array(id).clone();
-                        let extra: Vec<Value> = self.heap.array(*other).clone();
+                        // Pin both source Arrays across maybe_gc — by the
+                        // time we get here the receiver has been popped
+                        // from the operand stack (by `do_call`'s drain
+                        // path), and the rhs is held only in `do_call`'s
+                        // local `args: Vec<Value>` which is handed through
+                        // `collection_call` → here as the `args: &[Value]`
+                        // slice. Heap-typed elements
+                        // inside either Array (e.g. a trailing kwargs
+                        // Hash in a mixed-splat call expansion like
+                        // `f(*arr, c: 100)`) would otherwise have no
+                        // GC root and STRESS_GC sweeps them — the new
+                        // alloc reuses their slots, and dispatch later
+                        // panics with "heap slot is not a Hash".
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.pin(Value::Array(*other));
+                        let mut out: Vec<Value> = g.vm.heap.array(id).clone();
+                        let extra: Vec<Value> = g.vm.heap.array(*other).clone();
                         out.extend(extra);
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
                     ("-", [Value::Array(other)]) => {
-                        let src = self.heap.array(id).clone();
-                        let exclude = self.heap.array(*other).clone();
+                        // Same root-hole pattern as `+` above —
+                        // pin both source Arrays before maybe_gc.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.pin(Value::Array(*other));
+                        let src = g.vm.heap.array(id).clone();
+                        let exclude = g.vm.heap.array(*other).clone();
                         let out: Vec<Value> = src.into_iter()
-                            .filter(|v| !exclude.iter().any(|x| x.ruby_eq(v, &self.heap)))
+                            .filter(|v| !exclude.iter().any(|x| x.ruby_eq(v, &g.vm.heap)))
                             .collect();
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
                     ("concat", [Value::Array(other)]) => {
