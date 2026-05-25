@@ -268,3 +268,170 @@ impl Vm {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use crate::bytecode::Proto;
+    use crate::intern::Interner;
+    use crate::value::Visibility;
+
+    /// Minimal Method for tests — no params, no closure, proto_idx 0.
+    /// Tests below only compare by Rc identity, so the field contents
+    /// don't matter.
+    fn mk_method() -> Rc<Method> {
+        Rc::new(Method {
+            params: Vec::new(),
+            proto_idx: 0,
+            defining_class: None,
+            visibility: Cell::new(Visibility::Public),
+            closure: None,
+        })
+    }
+
+    fn mk_class(name: &str, superclass: Option<Rc<Class>>) -> Rc<Class> {
+        Rc::new(Class {
+            name: name.to_string(),
+            methods: RefCell::new(HashMap::new()),
+            superclass: RefCell::new(superclass),
+        })
+    }
+
+    /// Single-arg `Vm` constructor wrapped for tests. Uses an empty
+    /// protos vec and a fresh interner — every test below only
+    /// touches the class/method tables, never executes bytecode.
+    fn mk_vm() -> (Vm, Interner) {
+        // Vm consumes the interner; we keep a clone-free shadow by
+        // building a second Interner for places that need to read
+        // SymIds back. Both are deterministic since intern is order-
+        // dependent on insertion; we only intern strings via vm.interner
+        // in the tests below, so the shadow is unused.
+        let interner = Interner::new();
+        let vm = Vm::new(Vec::<Proto>::new(), interner);
+        (vm, Interner::new())
+    }
+
+    #[test]
+    fn call_cache_default_is_empty() {
+        let c = CallCache::default();
+        assert_eq!(c.class_ptr, 0);
+        assert_eq!(c.generation, 0);
+        assert!(c.method.is_none());
+    }
+
+    #[test]
+    fn class_is_a_self_match() {
+        let a = mk_class("A", None);
+        assert!(class_is_a(&a, &a));
+    }
+
+    #[test]
+    fn class_is_a_walks_superclass_chain() {
+        let grandparent = mk_class("Animal", None);
+        let parent = mk_class("Dog", Some(grandparent.clone()));
+        let child = mk_class("Puppy", Some(parent.clone()));
+
+        // Each is-a relation along the chain holds.
+        assert!(class_is_a(&child, &parent));
+        assert!(class_is_a(&child, &grandparent));
+        assert!(class_is_a(&parent, &grandparent));
+
+        // The reverse direction does not.
+        assert!(!class_is_a(&parent, &child));
+        assert!(!class_is_a(&grandparent, &child));
+    }
+
+    #[test]
+    fn class_is_a_unrelated_returns_false() {
+        let a = mk_class("A", None);
+        let b = mk_class("B", None);
+        assert!(!class_is_a(&a, &b));
+        assert!(!class_is_a(&b, &a));
+    }
+
+    #[test]
+    fn lookup_method_uncached_hits_own_class() {
+        let (mut vm, _) = mk_vm();
+        let name = vm.interner.intern("greet");
+        let cls = mk_class("Greeter", None);
+        let method = mk_method();
+        cls.methods.borrow_mut().insert(name, method.clone());
+
+        let found = vm.lookup_method_uncached(&cls, name);
+        assert!(found.is_some());
+        // Same Rc — method storage is identity-cloned.
+        assert!(Rc::ptr_eq(&found.unwrap(), &method));
+    }
+
+    #[test]
+    fn lookup_method_uncached_walks_superclass_chain() {
+        let (mut vm, _) = mk_vm();
+        let name = vm.interner.intern("bark");
+
+        let animal = mk_class("Animal", None);
+        let method = mk_method();
+        animal.methods.borrow_mut().insert(name, method.clone());
+
+        let dog = mk_class("Dog", Some(animal.clone()));
+        // dog has no own method — lookup must walk to animal.
+
+        let found = vm.lookup_method_uncached(&dog, name);
+        assert!(found.is_some());
+        assert!(Rc::ptr_eq(&found.unwrap(), &method));
+    }
+
+    #[test]
+    fn lookup_method_uncached_returns_none_for_missing() {
+        let (mut vm, _) = mk_vm();
+        let name = vm.interner.intern("nonexistent");
+        let cls = mk_class("Empty", None);
+
+        assert!(vm.lookup_method_uncached(&cls, name).is_none());
+    }
+
+    #[test]
+    fn lookup_method_cached_fills_then_serves_from_cache() {
+        let (mut vm, _) = mk_vm();
+        vm.ensure_call_caches(1);
+        let name = vm.interner.intern("ping");
+        let cls = mk_class("Pinger", None);
+        let method = mk_method();
+        cls.methods.borrow_mut().insert(name, method.clone());
+
+        // First call: miss, walks the chain, fills slot 0.
+        let first = vm.lookup_method_cached(&cls, name, 0).unwrap();
+        assert!(Rc::ptr_eq(&first, &method));
+        assert_eq!(vm.call_caches[0].class_ptr, Rc::as_ptr(&cls) as usize);
+        assert_eq!(vm.call_caches[0].generation, vm.method_gen);
+
+        // Remove the method from the class so an uncached walk would
+        // return None. The cache should still serve the stale entry
+        // (invalidation happens on method_gen bump, not class mutation).
+        cls.methods.borrow_mut().remove(&name);
+        let second = vm.lookup_method_cached(&cls, name, 0);
+        assert!(second.is_some(), "cached entry should serve until method_gen bump");
+    }
+
+    #[test]
+    fn lookup_method_cached_misses_after_method_gen_bump() {
+        let (mut vm, _) = mk_vm();
+        vm.ensure_call_caches(1);
+        let name = vm.interner.intern("ping");
+        let cls = mk_class("Pinger", None);
+        let method = mk_method();
+        cls.methods.borrow_mut().insert(name, method.clone());
+
+        // Prime the cache.
+        let _ = vm.lookup_method_cached(&cls, name, 0);
+
+        // Bump method_gen (simulating a new Op::DefMethod elsewhere).
+        vm.method_gen += 1;
+        cls.methods.borrow_mut().remove(&name);
+
+        // Cache now stale, walks the chain, finds nothing.
+        let after = vm.lookup_method_cached(&cls, name, 0);
+        assert!(after.is_none());
+    }
+}
