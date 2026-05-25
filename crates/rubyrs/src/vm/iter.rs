@@ -350,6 +350,14 @@ impl Vm {
                 Some(Value::Array(oid))
             }
             (Value::Hash(id), "each", []) | (Value::Hash(id), "each_pair", []) => {
+                // CRuby yields each pair as a single 2-elem Array
+                // `[k, v]`. Two-param blocks (`|k, v|`) auto-splat
+                // it into k / v; single-destructure blocks
+                // (`|(k, v)|`) receive the pair and unpack via the
+                // F4 compile-time prologue. Yielding two separate
+                // args would defeat the destructure path because
+                // the block's anonymous slot would get just `k`,
+                // not the pair Array.
                 let id = *id;
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
@@ -358,7 +366,8 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    g.vm.invoke_block(block,vec![k, v])?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.invoke_block(block, vec![Value::Array(pair_id)])?;
                     g.vm.dispatch_until(pre_frames)?;
                     if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);

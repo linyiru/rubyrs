@@ -152,7 +152,7 @@ pub(crate) enum Expr {
         receiver: Option<Box<SExpr>>,
         name: String,
         args: Vec<SExpr>,
-        block_params: Vec<String>,
+        block_params: Vec<BlockParam>,
         block_body: Vec<SExpr>,
     },
     Yield(Vec<SExpr>),
@@ -200,6 +200,17 @@ pub(crate) enum Expr {
         rescue: Vec<RescueClause>,
         ensure: Option<Vec<SExpr>>,
     },
+}
+
+/// One top-level block parameter as seen at the block-call ABI.
+/// `|a, (b, c)|` produces two `BlockParam`s: `Single("a")` and
+/// `Destructure(["b", "c"])`. The destructure stores its inner
+/// names alongside an anonymous receiving slot the compile path
+/// reads from to populate the named inner slots via a prologue.
+#[derive(Debug, Clone)]
+pub(crate) enum BlockParam {
+    Single(String),
+    Destructure(Vec<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -596,32 +607,30 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         }).collect();
         if let Some(bnode) = n.block() {
             if let Some(bn) = bnode.as_block_node() {
-                // Block params. Two shapes are accepted:
-                //   - `|a, b|` — each required parameter is a
-                //     `RequiredParameterNode`; the name maps directly to
-                //     a block-local slot.
-                //   - `|(a, b)|` — destructuring via `MultiTargetNode`.
-                //     For the common one-array-arg-per-iteration case the
-                //     observable semantics match `|a, b|` (auto-splat
-                //     of the single Array argument), so we flatten the
-                //     destructure into the same Vec<String>. This covers
-                //     `[[1,2],[3,4]].each { |(a,b)| ... }` and Hash#each
-                //     blocks. Nested destructures (`|((a, b), c)|`) and
-                //     mixed forms (`|head, (a, b)|`) are deferred.
-                let block_params: Vec<String> = bn.parameters()
+                // Block params. Each top-level param becomes a
+                // `BlockParam`:
+                //   - `RequiredParameterNode` → `Single(name)`.
+                //   - `MultiTargetNode` → `Destructure(inner names)`.
+                //     Block call binds the Array arg to a synthetic
+                //     anonymous slot, then a compile-time prologue
+                //     copies elements into the named inner locals.
+                //     Nested destructure (`|((a, b), c)|`) currently
+                //     flattens via `.lefts()` one level deep; deeper
+                //     nesting is a follow-up.
+                let block_params: Vec<BlockParam> = bn.parameters()
                     .and_then(|pn| pn.as_block_parameters_node())
                     .and_then(|bp| bp.parameters())
                     .map(|p| {
-                        let mut out: Vec<String> = Vec::new();
+                        let mut out: Vec<BlockParam> = Vec::new();
                         for r in p.requireds().iter() {
                             if let Some(rp) = r.as_required_parameter_node() {
-                                out.push(cid_to_string(rp.name()));
+                                out.push(BlockParam::Single(cid_to_string(rp.name())));
                             } else if let Some(mt) = r.as_multi_target_node() {
-                                for inner in mt.lefts().iter() {
-                                    if let Some(ip) = inner.as_required_parameter_node() {
-                                        out.push(cid_to_string(ip.name()));
-                                    }
-                                }
+                                let inners: Vec<String> = mt.lefts().iter()
+                                    .filter_map(|inner| inner.as_required_parameter_node()
+                                        .map(|ip| cid_to_string(ip.name())))
+                                    .collect();
+                                out.push(BlockParam::Destructure(inners));
                             }
                         }
                         out
@@ -657,7 +666,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                         });
                         return sp(node, Expr::CallWithBlock {
                             receiver, name, args,
-                            block_params: vec![param_name],
+                            block_params: vec![BlockParam::Single(param_name)],
                             block_body: vec![body_call],
                         });
                     }
@@ -904,7 +913,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                                 receiver: Some(Box::new(arr)),
                                 name: "any?".into(),
                                 args: vec![],
-                                block_params: vec![sp_name],
+                                block_params: vec![BlockParam::Single(sp_name)],
                                 block_body: vec![body_expr],
                             }), true);
                         }

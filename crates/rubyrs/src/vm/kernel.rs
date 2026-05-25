@@ -115,7 +115,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
-                        "Integer" | "Float" | "String" |
+                        "Integer" | "Float" | "String" | "Array" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
                     );
                     let host_hit = self.host_fns.contains_key(sid);
@@ -235,6 +235,34 @@ impl Vm {
                 }
                 let s = args[0].to_display(&self.heap, &self.interner);
                 Some(Ok(Value::new_str(s)))
+            }
+            // `Array(x)` — coerce to Array. CRuby rules:
+            //   - `nil` → `[]`
+            //   - Array → unchanged
+            //   - any other → `[x]`
+            // Used by block destructure prologues to handle the
+            // common case of "block declared `|head, (a, b)|` but
+            // the caller passed nil or a scalar for the second
+            // arg" without raising NoMethodError.
+            "Array" => {
+                if args.len() != 1 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                    })));
+                }
+                match &args[0] {
+                    Value::Nil => {
+                        self.maybe_gc();
+                        let id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::new()));
+                        Some(Ok(Value::Array(id)))
+                    }
+                    Value::Array(_) => Some(Ok(args[0].clone())),
+                    other => {
+                        self.maybe_gc();
+                        let id = self.heap.alloc(crate::heap::HeapObj::Array(vec![other.clone()]));
+                        Some(Ok(Value::Array(id)))
+                    }
+                }
             }
             "print" => {
                 for a in args {

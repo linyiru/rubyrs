@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::{Expr, SExpr};
+use crate::ast::{BlockParam, Expr, SExpr};
 use crate::bytecode::{BinOpKind, Op, Proto};
 use crate::error::Span;
 use crate::intern::Interner;
@@ -841,8 +841,12 @@ pub(crate) fn compile_expr(
             // `->(p) { body }` — compile the body as a block proto
             // and emit CreateBlock. Result stays on the stack as a
             // Value::Block (which supports `.call(args)` already).
+            // Lambda params are always plain names (no destructure
+            // in Prism's LambdaNode parameters), so wrap each as
+            // `BlockParam::Single` to match compile_block's API.
+            let bps: Vec<BlockParam> = params.iter().cloned().map(BlockParam::Single).collect();
             let (block_proto_idx, param_start, n_params) =
-                compile_block(b, params, body, protos, interner, cc);
+                compile_block(b, &bps, body, protos, interner, cc);
             b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
         }
         Expr::Begin { body, rescue, ensure } => {
@@ -991,7 +995,7 @@ fn literal_to_value(e: &Expr, interner: &mut Interner) -> Value {
 }
 
 pub(crate) fn compile_block(
-    parent: &ProtoBuilder, block_params: &[String], body: &[SExpr],
+    parent: &ProtoBuilder, block_params: &[BlockParam], body: &[SExpr],
     protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> (usize, u16, u16) {
     let mut b = ProtoBuilder {
@@ -1015,13 +1019,79 @@ pub(crate) fn compile_block(
         is_method_body: false,
     };
     let param_start = b.n_locals;
-    // Block params get fresh slots and shadow any outer binding of the
-    // same name; matching CRuby's "block local variable" semantics.
-    for p in block_params { b.define_local_slot(p); }
+    // Slot layout in two phases:
+    //   1. Reserve ONE call-interface slot per top-level
+    //      BlockParam — contiguous from param_start, so the
+    //      invoke_block arg-binding loop fills them in order.
+    //   2. After every call-interface slot is reserved, allocate
+    //      the destructure inner names. They sit AFTER the call
+    //      interface so a Single param following a Destructure
+    //      doesn't land at an inner-name index (which was the
+    //      bug pre-fix: `|(a, b), i|` had `i` claiming the
+    //      `a` slot).
+    // The prologue (below) reads from each Destructure's anon
+    // slot and copies into its inner slots.
+    let mut destructure_jobs: Vec<(u16, Vec<String>)> = Vec::new();
+    for (i, p) in block_params.iter().enumerate() {
+        match p {
+            BlockParam::Single(name) => {
+                b.define_local_slot(name);
+            }
+            BlockParam::Destructure(names) => {
+                let anon = format!("__destruct_{i}");
+                let anon_slot = b.define_local_slot(&anon);
+                destructure_jobs.push((anon_slot, names.clone()));
+            }
+        }
+    }
     let n_params = block_params.len() as u16;
+    // Now reserve inner-name slots for every destructure job.
+    let destructure_jobs: Vec<(u16, Vec<u16>)> = destructure_jobs.into_iter()
+        .map(|(anon_slot, names)| {
+            let inner_slots: Vec<u16> = names.iter()
+                .map(|n| b.define_local_slot(n))
+                .collect();
+            (anon_slot, inner_slots)
+        })
+        .collect();
+
+    // Prologue: for each destructure param, read element i from
+    // its anonymous slot's Array and store into the named slot.
+    // Coerce the source value to an Array via Kernel#Array — that
+    // mirrors CRuby's `*` expansion (`Array(nil) == []`,
+    // `Array([1,2]) == [1,2]`, `Array(5) == [5]`). Without
+    // coercion a non-Array arg would NoMethodError on `[]`.
+    if !destructure_jobs.is_empty() {
+        let bracket_id = interner.intern("[]");
+        for (anon_slot, inner_slots) in &destructure_jobs {
+            // Coerce: locals[anon] = Array(locals[anon])
+            b.emit(Op::LoadLocal(*anon_slot));
+            let cid = *cc as u16; *cc += 1;
+            b.emit(Op::CallNoRecv(interner.intern("Array"), 1, cid));
+            b.emit(Op::StoreLocal(*anon_slot));
+            // Unpack: locals[inner_i] = locals[anon][i]
+            for (i, slot) in inner_slots.iter().enumerate() {
+                b.emit(Op::LoadLocal(*anon_slot));
+                b.emit(Op::LoadConstInt(i as i64));
+                let cid = *cc as u16; *cc += 1;
+                b.emit(Op::Call(bracket_id, 1, cid));
+                b.emit(Op::StoreLocal(*slot));
+            }
+        }
+    }
+
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
+    // Proto's `params` vec carries the source-visible names. For
+    // destructure block params we use the synthesised anonymous
+    // name in the call-interface slot; the named inner locals
+    // are not part of params (they aren't fed by the caller).
+    let proto_params: Vec<String> = block_params.iter().enumerate().map(|(i, p)| match p {
+        BlockParam::Single(n) => n.clone(),
+        BlockParam::Destructure(_) => format!("__destruct_{i}"),
+    }).collect();
+    let proto_param_count = proto_params.len();
     let idx = protos.len();
-    protos.push(b.build("<block>".into(), block_params.to_vec(), vec![None; block_params.len()]));
+    protos.push(b.build("<block>".into(), proto_params, vec![None; proto_param_count]));
     (idx, param_start, n_params)
 }
