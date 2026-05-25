@@ -178,7 +178,7 @@ impl Vm {
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "sort_by" |
                 "min_by" | "max_by" | "group_by" |
-                "each_with_object" | "partition" | "chunk_while" |
+                "each_with_object" | "partition" | "chunk_while" | "bsearch" |
                 "zip" |
                 "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
                 "flat_map" | "collect_concat" | "chunk" |

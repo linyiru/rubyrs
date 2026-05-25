@@ -189,3 +189,4 @@ fn run_diff(name: &str) {
 #[test] fn array_chunk_while() { run_diff("array_chunk_while"); }
 #[test] fn min_max_by_n() { run_diff("min_max_by_n"); }
 #[test] fn string_pad() { run_diff("string_pad"); }
+#[test] fn array_bsearch() { run_diff("array_bsearch"); }

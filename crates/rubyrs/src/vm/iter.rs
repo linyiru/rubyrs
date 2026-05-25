@@ -809,6 +809,61 @@ impl Vm {
                 ]));
                 Some(Value::Array(pair_id))
             }
+            // `arr.bsearch { |x| ... }` — binary search a sorted
+            // Array. Two modes, distinguished by the block's return
+            // type at runtime:
+            //   find-minimum (block returns Bool / nil): returns the
+            //     smallest element for which the block is truthy,
+            //     nil if none. Array must be partitioned false...true.
+            //   find-any (block returns Int): 0 = match, <0 means
+            //     "x too large" (search left), >0 means "x too
+            //     small" (search right). Returns the matching
+            //     element or nil. Array must be sorted in the
+            //     comparison direction.
+            // Other block-return types raise TypeError, matching
+            // CRuby.
+            (Value::Array(id), "bsearch", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut low = 0usize;
+                let mut high = snapshot.len();
+                let mut saw_int = false;
+                let mut int_match: Option<Value> = None;
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    let elem = snapshot[mid].clone();
+                    g.vm.invoke_block(block, vec![elem.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        return Ok(Some(r));
+                    }
+                    match r {
+                        Value::Bool(true) => high = mid,
+                        Value::Bool(false) | Value::Nil => low = mid + 1,
+                        Value::Int(n) => {
+                            saw_int = true;
+                            if n == 0 { int_match = Some(elem); break; }
+                            else if n < 0 { high = mid; }
+                            else { low = mid + 1; }
+                        }
+                        other => return Err(g.vm.trap(crate::error::RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (must be numeric, true, false or nil)",
+                                other.type_name(),
+                            ),
+                        })),
+                    }
+                }
+                if let Some(m) = int_match { return Ok(Some(m)); }
+                if saw_int { return Ok(Some(Value::Nil)); }
+                Some(if low < snapshot.len() { snapshot[low].clone() } else { Value::Nil })
+            }
             // `arr.chunk_while { |a, b| pred(a, b) }` — partition
             // into runs of consecutive elements where the block
             // returns truthy for the pair (a=prev, b=current).
