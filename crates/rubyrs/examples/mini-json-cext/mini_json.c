@@ -73,8 +73,14 @@ static VALUE parse_string(Parser *ps) {
 static VALUE parse_number(Parser *ps) {
     const char *start = ps->p;
     if (ps->p < ps->end && (*ps->p == '-' || *ps->p == '+')) ps->p++;
+    /* Track digits-only start AFTER consuming optional sign so a
+     * bare "+" or "-" isn't accepted as a number (review #9 on PR
+     * #27 — without this guard the `ps->p == start` check below
+     * only catches the empty-input case, and strtol("+")/strtol("-")
+     * silently return 0). */
+    const char *digits_start = ps->p;
     while (ps->p < ps->end && isdigit((unsigned char)*ps->p)) ps->p++;
-    if (ps->p == start) {
+    if (ps->p == digits_start) {
         rb_raise(rb_eArgumentError, "expected digit at offset %ld",
                  (long)(start - ps->src));
     }
@@ -224,10 +230,23 @@ static VALUE mj_gen(VALUE v) {
     if (strcmp(cname, "String") == 0) {
         /* Naive escaping: just wrap in quotes. Acceptance test
          * uses non-special chars; full escape handling is L3-D
-         * vendoring of real flori/json. */
+         * vendoring of real flori/json.
+         *
+         * Bounds + OOM guard (review #10 on PR #27): refuse if
+         * `n` is negative (RSTRING_LEN contract violation) or so
+         * large that `n + 2` would overflow `size_t`. malloc
+         * failure raises NoMemError-shape via rb_eRuntimeError
+         * (we don't have rb_eNoMemError as a separate sentinel
+         * yet — L3-A.1 follow-up). */
         long n = RSTRING_LEN(v);
+        if (n < 0 || (size_t)n > SIZE_MAX - 3) {
+            rb_raise(rb_eArgumentError, "string too large to JSON-encode (len=%ld)", n);
+        }
         const char *p = RSTRING_PTR(v);
         char *buf = malloc((size_t)n + 3);
+        if (!buf) {
+            rb_raise(rb_eRuntimeError, "malloc failed for %ld-byte string", n + 3);
+        }
         buf[0] = '"';
         memcpy(buf + 1, p, (size_t)n);
         buf[n + 1] = '"';
@@ -282,11 +301,19 @@ static VALUE mj_gen(VALUE v) {
     }
 
     /* Fallback: call .to_s on the unknown type, wrap in quotes.
-     * Matches CRuby JSON's "stringify if unknown" default. */
+     * Matches CRuby JSON's "stringify if unknown" default.
+     * Same OOM + overflow guards as the String arm above
+     * (review #11 on PR #27). */
     VALUE s = rb_funcallv(v, id_to_s, 0, NULL);
     long n = RSTRING_LEN(s);
+    if (n < 0 || (size_t)n > SIZE_MAX - 3) {
+        rb_raise(rb_eArgumentError, "to_s result too large to JSON-encode (len=%ld)", n);
+    }
     const char *p = RSTRING_PTR(s);
     char *buf = malloc((size_t)n + 3);
+    if (!buf) {
+        rb_raise(rb_eRuntimeError, "malloc failed for %ld-byte fallback string", n + 3);
+    }
     buf[0] = '"';
     memcpy(buf + 1, p, (size_t)n);
     buf[n + 1] = '"';
