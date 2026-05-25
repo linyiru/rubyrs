@@ -409,6 +409,8 @@ impl Vm {
                 "each_with_object" | "partition" |
                 "zip" |
                 "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
+                "flat_map" | "collect_concat" | "chunk" |
+                "each_slice" | "each_cons" |
                 "inspect"
             ),
             Value::Hash(_) => matches!(name,
@@ -1599,6 +1601,56 @@ impl Vm {
                         g.vm.maybe_gc();
                         let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
+                    }
+                    // No-block `each_slice(n)` / `each_cons(n)` —
+                    // CRuby returns an Enumerator we don't model;
+                    // instead, return the Array of slices/windows
+                    // directly. Calling `.to_a` on the result is
+                    // a no-op, so the canonical
+                    // `arr.each_slice(2).to_a` idiom still works.
+                    ("each_slice", [Value::Int(n)]) => {
+                        if *n <= 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid slice size: {}", n),
+                            }));
+                        }
+                        let n = *n as usize;
+                        let src: Vec<Value> = self.heap.array(id).clone();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let mut chunks: Vec<Value> = Vec::new();
+                        for chunk in src.chunks(n) {
+                            g.vm.maybe_gc();
+                            let cid = g.vm.heap.alloc(HeapObj::Array(chunk.to_vec()));
+                            g.pin(Value::Array(cid));
+                            chunks.push(Value::Array(cid));
+                        }
+                        g.vm.maybe_gc();
+                        let oid = g.vm.heap.alloc(HeapObj::Array(chunks));
+                        Some(Value::Array(oid))
+                    }
+                    ("each_cons", [Value::Int(n)]) => {
+                        if *n <= 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid size: {}", n),
+                            }));
+                        }
+                        let n = *n as usize;
+                        let src: Vec<Value> = self.heap.array(id).clone();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let mut windows: Vec<Value> = Vec::new();
+                        if src.len() >= n {
+                            for win in src.windows(n) {
+                                g.vm.maybe_gc();
+                                let wid = g.vm.heap.alloc(HeapObj::Array(win.to_vec()));
+                                g.pin(Value::Array(wid));
+                                windows.push(Value::Array(wid));
+                            }
+                        }
+                        g.vm.maybe_gc();
+                        let oid = g.vm.heap.alloc(HeapObj::Array(windows));
+                        Some(Value::Array(oid))
                     }
                     // `zip` — pairs each element of `self` with the
                     // same-index element of each Array argument.
@@ -3250,6 +3302,93 @@ impl Vm {
                     g.vm.heap.array_mut(result_id).push(r);
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
+            }
+            // `flat_map { ... }` = map then flatten(1). Same
+            // driver as map, but each block result that's an
+            // Array gets spread into the result.
+            (Value::Array(id), "flat_map", []) | (Value::Array(id), "collect_concat", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    match r {
+                        Value::Array(rid) => {
+                            let items: Vec<Value> = g.vm.heap.array(rid).clone();
+                            for it in items { g.vm.heap.array_mut(result_id).push(it); }
+                        }
+                        other => g.vm.heap.array_mut(result_id).push(other),
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
+            // `chunk { |x| key }` groups consecutive elements
+            // sharing the same key. Returns
+            // `[[key, [vals...]], ...]`. nil/false key drops the
+            // run from the output (matching CRuby's "skip" rule).
+            (Value::Array(id), "chunk", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+                let mut early = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
+                    }
+                    // CRuby's chunk treats `nil` (and `:_separator`)
+                    // as a drop-and-break sentinel. `false` is a
+                    // normal key — its run shows up in the output.
+                    // `:_alone` would also be special but is rare;
+                    // we don't model it (documented divergence).
+                    if matches!(key, Value::Nil) {
+                        continue;
+                    }
+                    let same_as_last = groups.last()
+                        .map(|(k, _)| k.ruby_eq(&key, &g.vm.heap))
+                        .unwrap_or(false);
+                    if same_as_last {
+                        groups.last_mut().unwrap().1.push(v);
+                    } else {
+                        groups.push((key, vec![v]));
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let mut out: Vec<Value> = Vec::with_capacity(groups.len());
+                for (key, items) in groups {
+                    let items_id = g.vm.heap.alloc(HeapObj::Array(items));
+                    g.pin(Value::Array(items_id));
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![key, Value::Array(items_id)]));
+                    g.pin(Value::Array(pair_id));
+                    out.push(Value::Array(pair_id));
+                }
+                let oid = g.vm.heap.alloc(HeapObj::Array(out));
+                Some(Value::Array(oid))
             }
             (Value::Hash(id), "each", []) | (Value::Hash(id), "each_pair", []) => {
                 let id = *id;
