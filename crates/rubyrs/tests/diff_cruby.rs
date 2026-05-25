@@ -116,3 +116,4 @@ fn run_diff(name: &str) {
 #[test] fn comparable() { run_diff("comparable"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
+#[test] fn string_search() { run_diff("string_search"); }

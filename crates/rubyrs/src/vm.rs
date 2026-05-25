@@ -340,6 +340,7 @@ impl Vm {
                 "+" | "-" | "*" | "/" | "%" |
                 "<" | "<=" | ">" | ">=" |
                 "&" | "|" | "^" | "<<" | ">>" | "~" |
+                "to_s" | "inspect" |
                 "to_i" | "to_f" | "abs" | "even?" | "odd?" |
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
@@ -361,7 +362,8 @@ impl Vm {
                 "strip" | "lstrip" | "rstrip" |
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
-                "sub" | "gsub" | "tr"
+                "sub" | "gsub" | "tr" |
+                "match?" | "scan" | "index" | "rindex"
             ),
             Value::Sym(_) => matches!(name, "to_sym"),
             Value::Array(_) => matches!(name,
@@ -1498,6 +1500,40 @@ impl Vm {
                             }
                         }
                         Some(Value::Str(Rc::from(out.as_str())))
+                    }
+                    // Literal-substring `scan` — returns a fresh
+                    // Array containing one copy of the pattern for
+                    // every non-overlapping occurrence in the
+                    // receiver. CRuby's full `scan` accepts a
+                    // Regexp and yields capture groups; literal
+                    // patterns are the degenerate case where every
+                    // match is the pattern itself, exactly what we
+                    // implement. An empty pattern returns
+                    // `[""] * (chars + 1)` to match CRuby; this is
+                    // unusual but well-defined and cheap.
+                    ("scan", [Value::Str(pat)]) => {
+                        let parts: Vec<Value> = if pat.is_empty() {
+                            std::iter::repeat_with(|| Value::Str(Rc::from("")))
+                                .take(s.chars().count() + 1)
+                                .collect()
+                        } else {
+                            let mut out: Vec<Value> = Vec::new();
+                            let mut i = 0;
+                            let bytes = s.as_bytes();
+                            let plen = pat.len();
+                            while i + plen <= bytes.len() {
+                                if &bytes[i..i + plen] == pat.as_bytes() {
+                                    out.push(Value::Str(pat.clone()));
+                                    i += plen;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            out
+                        };
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(parts));
+                        Some(Value::Array(id))
                     }
                     ("to_sym", []) => {
                         // P2-14b: cap the interner before a hot loop
@@ -4290,7 +4326,9 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             )),
             _ => None,
         },
-        (Value::Int(a), "to_s", []) => Some(Value::Str(Rc::from(a.to_string().as_str()))),
+        (Value::Int(a), "to_s", []) | (Value::Int(a), "inspect", []) => {
+            Some(Value::Str(Rc::from(a.to_string().as_str())))
+        }
         (Value::Int(a), "to_i", []) => Some(Value::Int(*a)),
         (Value::Int(a), "abs", []) => Some(Value::Int(a.wrapping_abs())),
         (Value::Int(a), "-@", []) => Some(Value::Int(a.wrapping_neg())),
@@ -4414,6 +4452,31 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Str(a), "lstrip", []) => Some(Value::Str(Rc::from(a.trim_start()))),
         (Value::Str(a), "rstrip", []) => Some(Value::Str(Rc::from(a.trim_end()))),
         (Value::Str(a), "include?", [Value::Str(b)]) => Some(Value::Bool(a.contains(&**b))),
+        // Literal-substring `match?` — true iff the receiver
+        // contains the argument as a substring. CRuby additionally
+        // accepts a Regexp here; we only handle String, in line
+        // with the rest of our regex-free subset. Calls with a
+        // non-String argument fall through to NoMethodError.
+        (Value::Str(a), "match?", [Value::Str(b)]) => Some(Value::Bool(a.contains(&**b))),
+        // `index(substr)` / `rindex(substr)` — return the byte
+        // offset where the substring first / last appears, or
+        // nil if it's absent. CRuby reports a *character* index
+        // for non-ASCII receivers; we report `String::find`'s
+        // byte index, which matches for ASCII (the common case
+        // for our test fixtures) and diverges for multibyte —
+        // documented in SUBSET.md.
+        (Value::Str(a), "index", [Value::Str(b)]) => {
+            Some(match a.find(&**b) {
+                Some(i) => Value::Int(i as i64),
+                None => Value::Nil,
+            })
+        }
+        (Value::Str(a), "rindex", [Value::Str(b)]) => {
+            Some(match a.rfind(&**b) {
+                Some(i) => Value::Int(i as i64),
+                None => Value::Nil,
+            })
+        }
         // Literal-substring sub/gsub. Regex forms (`gsub(/pat/, ...)`)
         // are out of scope until we add a regex engine — documented
         // in SUBSET.md. CRuby's `gsub("", "x")` on a non-empty
