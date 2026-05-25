@@ -759,6 +759,25 @@ fn alias_method_multiple_per_class_body_stays_stack_balanced() {
 }
 
 #[test]
+fn alias_method_raises_name_error_when_source_missing() {
+    // Per PR #8 review (vm.rs:3637): CRuby raises NameError
+    // ("undefined method ...") when alias_method's source name
+    // doesn't resolve. Previously we raised NoMethodError with a
+    // misleading `recv_type: "Class"`.
+    let mut rt = Runtime::new();
+    let err = rt.eval(r#"
+        class Foo
+          alias_method :a, :nonexistent
+        end
+    "#, "t.rb").unwrap_err();
+    match err.err {
+        RubyError::NameError { .. } => {}
+        RubyError::Uncaught { class_name, .. } if class_name == "NameError" => {}
+        other => panic!("expected NameError, got {other:?}"),
+    }
+}
+
+#[test]
 fn alias_method_can_alias_inherited_method() {
     // Regression for PR #8 review (vm.rs:3621): Op::AliasMethod
     // used to look up `old_id` only in the immediate class's

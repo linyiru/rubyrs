@@ -3905,10 +3905,20 @@ impl Vm {
                 let m = match existing {
                     Some(m) => m,
                     None => {
+                        // CRuby raises NameError ("undefined method ...")
+                        // when `alias_method`'s source name isn't found
+                        // on the receiver's ancestor chain — not
+                        // NoMethodError. NameError is the right shape:
+                        // there's no value to call yet (alias is a
+                        // class-body operation, not a dispatch site),
+                        // so the previous `NoMethodError { recv_type:
+                        // "Class" }` was misleading.
                         let name = self.interner.resolve(old_id).to_string();
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: name,
-                            recv_type: "Class",
+                        let ctx = self.class_stack.last()
+                            .map(|c| format!("class `{}'", c.name))
+                            .unwrap_or_else(|| "main".to_string());
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("undefined method `{}' for {}", name, ctx),
                         }));
                     }
                 };
