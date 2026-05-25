@@ -685,6 +685,39 @@ impl Vm {
             .expect("ICE: cext_invoke_method: do_call produced no result"))
     }
 
+    /// Look up `method_missing` on `recv`'s class chain. If found,
+    /// prepend the missed `name_id` as a Symbol arg and invoke it
+    /// (pushing a frame); returns `Ok(true)` so the caller can
+    /// `return Ok(())` instead of raising. Returns `Ok(false)` when
+    /// the receiver doesn't carry a `method_missing` (or isn't a
+    /// `Value::Object`) — caller proceeds to raise NoMethodError.
+    ///
+    /// Scope of this PoC: only Object receivers (user instances).
+    /// Primitive receivers (Int, Str, …) skip the lookup — adding
+    /// per-primitive class chains is a follow-up.
+    pub(crate) fn try_method_missing(
+        &mut self,
+        recv: &Value,
+        name_id: SymId,
+        args: Vec<Value>,
+        block: Option<ObjId>,
+    ) -> Result<bool, Trap> {
+        let cls = match recv {
+            Value::Object(id) => self.heap.instance(*id).class.clone(),
+            _ => return Ok(false),
+        };
+        let mm_id = self.interner.intern("method_missing");
+        let m = match self.lookup_method_uncached(&cls, mm_id) {
+            Some(m) => m,
+            None => return Ok(false),
+        };
+        let mut new_args = Vec::with_capacity(args.len() + 1);
+        new_args.push(Value::Sym(name_id));
+        new_args.extend(args);
+        self.invoke_method_with_block(m, recv.clone(), new_args, block)?;
+        Ok(true)
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
@@ -794,6 +827,12 @@ impl Vm {
                 // common preamble patterns (`private; def helper;`
                 // at the toplevel) parseable.
                 self.stack.push(Value::Nil);
+                return Ok(());
+            }
+            // method_missing fallback (PoC #2). For Object self, look
+            // up the class chain — if found, hand it the missed name
+            // as a Symbol arg. Primitives skip this and raise directly.
+            if self.try_method_missing(&self_val, name_id, args, None)? {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
@@ -1075,6 +1114,9 @@ impl Vm {
                 self.stack.push(Value::Bool(yes));
                 return Ok(());
             }
+        }
+        if self.try_method_missing(&recv, name_id, args, None)? {
+            return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
             method: name.to_string(), recv_type: recv.type_name(),
@@ -2147,6 +2189,29 @@ impl Vm {
                 roots.push(Value::Block(id));
             }
         }
+        // `define_method`-installed methods carry captured-locals
+        // Rcs that aren't reachable from any Frame once the lexical
+        // scope has popped. Walk every class's method table (plus
+        // the toplevel table) and root the captured slots so heap
+        // values held only via a closure survive GC.
+        //
+        // Cost is O(total installed methods). For programs that
+        // never use `define_method`, the inner `if let Some` short-
+        // circuits — this is a single field-check per Method. ADR-
+        // worthy optimisation if we ever care: track a counter of
+        // closure-methods on the Vm and skip this entirely when 0.
+        for cls in self.classes.values() {
+            for m in cls.methods.borrow().values() {
+                if let Some(cl) = &m.closure {
+                    for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                }
+            }
+        }
+        for m in self.toplevel_methods.values() {
+            if let Some(cl) = &m.closure {
+                for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+            }
+        }
         self.heap.collect(&roots);
     }
 
@@ -2193,6 +2258,47 @@ impl Vm {
     }
 
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
+        // `define_method`-installed methods carry a captured Rc and
+        // diverge from the normal fresh-locals path: their frame
+        // *shares* `captured` with the lexical scope that created
+        // the block. Writes to outer-scope locals from inside the
+        // method body propagate back, matching CRuby semantics.
+        if let Some(cl) = &m.closure {
+            let given = args.len();
+            let n_params = cl.n_params as usize;
+            if given != n_params {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected {})", given, n_params),
+                }));
+            }
+            self.check_frames()?;
+            let proto_idx = m.proto_idx;
+            let proto_n_locals = self.protos[proto_idx].n_locals as usize;
+            let param_start = cl.param_start as usize;
+            // Block params live *after* the captured frame's n_locals
+            // (block locals layout inherits the parent — see ADR 0004).
+            // Resize the shared Vec if a previous invocation hasn't
+            // already grown it.
+            {
+                let mut caps = cl.captured.borrow_mut();
+                let need = param_start.max(proto_n_locals);
+                if caps.len() < need {
+                    caps.resize(need, Value::Nil);
+                }
+                for (i, a) in args.into_iter().enumerate() {
+                    caps[param_start + i] = a;
+                }
+            }
+            self.frames.push(Frame {
+                proto_idx,
+                ip: 0,
+                locals: cl.captured.clone(),
+                self_val,
+                base_sp: self.stack.len(),
+                is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.clone(), is_block: false, rescues: vec![],
+            });
+            return Ok(());
+        }
         // Default-argument support (literal defaults only): a Proto
         // carries a `defaults` vec parallel to `params`. `None`
         // entries are required; `Some(v)` entries can be omitted by
@@ -2350,6 +2456,9 @@ impl Vm {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
                 return Ok(());
             }
+            if self.try_method_missing(&self_val, name_id, args, Some(block))? {
+                return Ok(());
+            }
             return Err(self.trap(RubyError::NoMethodError {
                 method: name.to_string(), recv_type: self_val.type_name(),
             }));
@@ -2388,6 +2497,9 @@ impl Vm {
                 self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
                 return Ok(());
             }
+        }
+        if self.try_method_missing(&recv, name_id, args, Some(block))? {
+            return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
             method: name.to_string(), recv_type: recv.type_name(),
@@ -3763,11 +3875,97 @@ impl Vm {
                     proto_idx: p_idx as usize,
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
+                    closure: None,
                 });
                 if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 // Conservatively invalidate the inline cache — any previous
                 // cache entry could in theory be made stale by this definition.
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Nil);
+            }
+            Op::AliasMethod(new_id, old_id) => {
+                // Resolve `old` along the surrounding class's ancestor
+                // chain (or toplevel) and re-insert the same Rc<Method>
+                // under `new` in the *current* class. We share the Rc
+                // — alias is intentionally semantically identical to
+                // the original, including its `defining_class` (so
+                // `super` from inside the aliased call walks from the
+                // original's super, matching CRuby's "module of
+                // definition" rule for aliases).
+                //
+                // The walk lets `class Child < Parent; alias_method :x,
+                // :parent_method; end` work: the source method lives
+                // on Parent, the alias name `x` lands on Child.
+                let existing = if let Some(cls) = self.class_stack.last() {
+                    self.lookup_method_uncached(cls, old_id)
+                } else {
+                    self.toplevel_methods.get(&old_id).cloned()
+                };
+                let m = match existing {
+                    Some(m) => m,
+                    None => {
+                        // CRuby raises NameError ("undefined method ...")
+                        // when `alias_method`'s source name isn't found
+                        // on the receiver's ancestor chain — not
+                        // NoMethodError. NameError is the right shape:
+                        // there's no value to call yet (alias is a
+                        // class-body operation, not a dispatch site),
+                        // so the previous `NoMethodError { recv_type:
+                        // "Class" }` was misleading.
+                        let name = self.interner.resolve(old_id).to_string();
+                        let ctx = self.class_stack.last()
+                            .map(|c| format!("class `{}'", c.name))
+                            .unwrap_or_else(|| "main".to_string());
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("undefined method `{}' for {}", name, ctx),
+                        }));
+                    }
+                };
+                if let Some(cls) = self.class_stack.last() {
+                    cls.methods.borrow_mut().insert(new_id, m);
+                } else {
+                    self.toplevel_methods.insert(new_id, m);
+                }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Nil);
+            }
+            Op::DefMethodBlock(name_id) => {
+                // Pop the BlockHandle the preceding `CreateBlock`
+                // pushed, then wrap it as a closure-method. We
+                // *share* the BlockHandle's `captured` Rc — the
+                // method body and the original lexical scope point
+                // at the same locals Vec, so the method can read &
+                // write outer-scope variables (CRuby semantics).
+                //
+                // GC: the captured Rc keeps its slots alive via the
+                // Method, which lives in Class.methods (rooted via
+                // Vm.classes) or toplevel_methods. `maybe_gc`'s
+                // root-gathering loops walk every installed method
+                // table and add closure-captured slots to the root
+                // set, so Objects/Arrays reachable through the
+                // closure survive collections.
+                let bv = self.stack.pop().expect("ICE: DefMethodBlock no block on stack");
+                let id = if let Value::Block(id) = bv { id } else {
+                    panic!("ICE: DefMethodBlock without Block on stack");
+                };
+                let (proto_idx, captured, param_start, n_params) = {
+                    let bh = self.heap.block(id);
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                };
+                let proto = &self.protos[proto_idx];
+                let params = proto.params.clone();
+                let defining_class = self.class_stack.last().cloned();
+                let vis = self.class_visibility_stack.last().copied().unwrap_or(crate::value::Visibility::Public);
+                let m = Rc::new(Method {
+                    params,
+                    proto_idx,
+                    defining_class,
+                    visibility: std::cell::Cell::new(vis),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                });
+                if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
+                else { self.toplevel_methods.insert(name_id, m); }
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }

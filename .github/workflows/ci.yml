@@ -184,7 +184,15 @@ jobs:
           # Trap propagation through the recursive translator is L2.5
           # work tied to widening `cext_handle_to_value` to return
           # Result. Documented at the expect site.
-          check crates/rubyrs/src/vm.rs       68
+          #
+          # Bumped 68 → 70 by PR #8 (metaprogramming PoC): two new
+          # ICE-class sites in `Op::DefMethodBlock`'s handler — an
+          # `.expect("ICE: ... no block on stack")` on stack-pop and a
+          # `panic!("ICE: ... without Block on stack")` on the type
+          # check of the popped Value. Both are bytecode-invariant
+          # asserts (the preceding `Op::CreateBlock` always pushes a
+          # `Value::Block`); not user-reachable.
+          check crates/rubyrs/src/vm.rs       70
           check crates/rubyrs/src/heap.rs     10
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)

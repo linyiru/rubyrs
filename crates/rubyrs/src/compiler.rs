@@ -466,6 +466,34 @@ pub(crate) fn compile_expr(
                 b.current_span = prev;
                 return;
             }
+            // `alias_method :new, :old` — compile-time intercept when
+            // both args are Symbol literals. Emits a single
+            // `Op::AliasMethod`, which copies the Rc<Method> entry
+            // inside the surrounding class (or toplevel) at runtime.
+            // Dynamic-symbol forms fall through to a normal Call and
+            // currently fail at dispatch.
+            if receiver.is_none()
+                && name == "alias_method"
+                && args.len() == 2
+                && matches!(args[0].node, Expr::SymbolLit(_))
+                && matches!(args[1].node, Expr::SymbolLit(_))
+            {
+                let new_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
+                let old_name = if let Expr::SymbolLit(s) = &args[1].node { s.clone() } else { unreachable!() };
+                let nid = interner.intern(&new_name);
+                let oid = interner.intern(&old_name);
+                // `Op::AliasMethod`'s VM handler pushes Nil itself
+                // (matching `Op::DefMethod`'s shape), so the
+                // compiler must NOT emit a trailing `LoadNil` — that
+                // would leave a stray Nil on the operand stack each
+                // alias, which the class-body Return only happens
+                // to swallow because it truncates to `base_sp`.
+                // Inside a loop or with multiple aliases per body
+                // the imbalance accumulates.
+                b.emit(Op::AliasMethod(nid, oid));
+                b.current_span = prev_span;
+                return;
+            }
             if receiver.is_none() && name == "raise" {
                 match args.len() {
                     0 => { b.emit(Op::LoadNil); }
@@ -595,6 +623,26 @@ pub(crate) fn compile_expr(
             b.emit(Op::NewHash(pairs.len() as u16));
         }
         Expr::CallWithBlock { receiver, name, args, block_params, block_body } => {
+            // `define_method(:foo) { |args| ... }` — compile-time
+            // intercept. The block becomes the method body; its
+            // captured locals Rc stays shared with the surrounding
+            // frame so closures work. Only the literal-Symbol form
+            // is intercepted; dynamic `define_method(sym, &p)`
+            // falls through.
+            if receiver.is_none()
+                && name == "define_method"
+                && args.len() == 1
+                && matches!(args[0].node, Expr::SymbolLit(_))
+            {
+                let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
+                let (block_proto_idx, param_start, n_params) =
+                    compile_block(b, block_params, block_body, protos, interner, cc);
+                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
+                let nid = interner.intern(&sym_name);
+                b.emit(Op::DefMethodBlock(nid));
+                b.current_span = prev_span;
+                return;
+            }
             let (block_proto_idx, param_start, n_params) =
                 compile_block(b, block_params, block_body, protos, interner, cc);
             let name_id = interner.intern(name);

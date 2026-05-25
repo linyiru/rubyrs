@@ -104,4 +104,22 @@ pub struct Method {
     /// class body's current visibility mode, but mutable post-hoc
     /// via `private :sym` / `public :sym` / `protected :sym`.
     pub(crate) visibility: Cell<Visibility>,
+    /// `Some` for `define_method(:name) { ... }`-installed methods.
+    /// The captured Rc is shared with the BlockHandle that the
+    /// block-literal created, so closures over outer-scope locals
+    /// stay live — writes by the method-call body are visible to
+    /// the enclosing scope (matching CRuby's `define_method`
+    /// closure semantics). `param_start` / `n_params` carry over
+    /// from the BlockHandle and tell `invoke_method` where in the
+    /// shared locals Vec to write the args. Methods coming from
+    /// `def name ... end` have `None` here and follow the normal
+    /// fresh-locals path.
+    pub(crate) closure: Option<MethodClosure>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MethodClosure {
+    pub(crate) captured: Rc<RefCell<Vec<Value>>>,
+    pub(crate) param_start: u16,
+    pub(crate) n_params: u16,
 }
