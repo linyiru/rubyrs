@@ -162,7 +162,7 @@ impl Vm {
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
                 "times" | "upto" | "downto" |
-                "digits" | "bit_length"
+                "digits" | "bit_length" | "[]"
             ),
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |

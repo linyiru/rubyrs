@@ -20,6 +20,62 @@ pub(crate) fn numeric_call(
     _max_value_bytes: Option<usize>,
 ) -> Result<Option<Value>, RubyError> {
     Ok(match (recv, name, args) {
+        // `Integer#[](i)` / `Integer#[](offset, length)` — bit
+        // access. Lives BEFORE the broad `(Int, op, [Int])`
+        // coercion arm below; otherwise that arm's inner-match
+        // None-fallthrough would shadow these (same lesson as the
+        // `Float#round(n)` shadow note earlier in this file).
+        //
+        // `i`-form: returns 0 / 1 for the bit at position `i`
+        // (0 = LSB). Negative `i` returns 0. `i >= 64` returns
+        // 0 for non-neg receiver, 1 for negative (two's-complement
+        // sign extension).
+        (Value::Int(a), "[]", [Value::Int(i)]) => {
+            let n = *a;
+            let i = *i;
+            let bit: i64 = if i < 0 {
+                0
+            } else if i >= 64 {
+                if n < 0 { 1 } else { 0 }
+            } else {
+                // Signed shift preserves the sign bit; arithmetic
+                // shift fills high bits with the sign, matching
+                // CRuby's two's-complement view of negatives.
+                (n >> (i as u32)) & 1
+            };
+            Some(Value::Int(bit))
+        }
+        // `Integer#[](offset, length)` — bitfield of width `length`
+        // starting at bit `offset`. `length` up to 63 fits safely
+        // in i64; `length == 64` with a negative receiver returns
+        // -1 (the signed bit pattern of all-ones) where CRuby
+        // returns `2**64 - 1` — documented saturation, doesn't
+        // block the bigint.rb `bigint[off, 32]` path that motivates
+        // this commit.
+        //
+        // Negative offset / length both return 0.
+        (Value::Int(a), "[]", [Value::Int(offset), Value::Int(length)]) => {
+            let n = *a;
+            let off = *offset;
+            let len = *length;
+            if len <= 0 || off < 0 {
+                return Ok(Some(Value::Int(0)));
+            }
+            let result: i64 = if off >= 64 {
+                if n < 0 {
+                    if len >= 64 { -1 } else { (1i64 << len) - 1 }
+                } else { 0 }
+            } else {
+                let actual_len = len.min(64 - off);
+                let shifted = n >> (off as u32);
+                if actual_len >= 64 {
+                    shifted
+                } else {
+                    shifted & ((1i64 << actual_len) - 1)
+                }
+            };
+            Some(Value::Int(result))
+        }
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
