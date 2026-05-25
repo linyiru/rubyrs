@@ -103,3 +103,4 @@ fn run_diff(name: &str) {
 #[test] fn spaceship() { run_diff("spaceship"); }
 #[test] fn string_transform() { run_diff("string_transform"); }
 #[test] fn int_bits() { run_diff("int_bits"); }
+#[test] fn enumerable_by() { run_diff("enumerable_by"); }

@@ -338,7 +338,8 @@ impl Vm {
                 "each" | "map" | "select" | "filter" |
                 "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
-                "each_with_index" | "sort_by"
+                "each_with_index" | "sort_by" |
+                "min_by" | "max_by" | "group_by"
             ),
             Value::Hash(_) => matches!(name,
                 "length" | "size" | "[]" | "[]=" | "empty?" |
@@ -1799,6 +1800,87 @@ impl Vm {
                     }
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
+            }
+            (Value::Array(id), "min_by", []) | (Value::Array(id), "max_by", []) => {
+                // For each element, call the block once to produce a
+                // key. Track the running winner. Returns nil for an
+                // empty array (matching CRuby). Block-keys that
+                // aren't mutually comparable surface as NoMethodError
+                // via `value_cmp_v` returning None for one of them —
+                // same shape as sort_by.
+                let want_min = name == "min_by";
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut best: Option<(Value, Value)> = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
+                    }
+                    best = Some(match best {
+                        None => (key, v),
+                        Some((bk, bv)) => match value_cmp_v(&key, &bk, &g.vm.interner) {
+                            Some(std::cmp::Ordering::Less) if want_min => (key, v),
+                            Some(std::cmp::Ordering::Greater) if !want_min => (key, v),
+                            // Equal or wrong direction — keep prior.
+                            Some(_) => (bk, bv),
+                            // Incomparable keys — fall through to None below.
+                            None => return Ok(None),
+                        },
+                    });
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                Some(best.map(|(_, v)| v).unwrap_or(Value::Nil))
+            }
+            (Value::Array(id), "group_by", []) => {
+                // Group elements into a Hash keyed by the block's
+                // return value. Insertion order matches first
+                // appearance of each key — CRuby semantics. Values
+                // collect into a fresh Array per key.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::new()));
+                g.pin(Value::Hash(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
+                    }
+                    // Find or create the bucket array for this key.
+                    let pos = g.vm.heap.hash(result_id).iter()
+                        .position(|(k, _)| k.ruby_eq(&key, &g.vm.heap));
+                    if let Some(p) = pos {
+                        if let Value::Array(arr_id) = g.vm.heap.hash(result_id)[p].1 {
+                            g.vm.heap.array_mut(arr_id).push(v);
+                        }
+                    } else {
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let arr_id = g.vm.heap.alloc(HeapObj::Array(vec![v]));
+                        g.vm.heap.hash_mut(result_id).push((key, Value::Array(arr_id)));
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                Some(Value::Hash(result_id))
             }
             (Value::Array(id), "sort_by", []) => {
                 // Compute the sort key for every element by calling the
