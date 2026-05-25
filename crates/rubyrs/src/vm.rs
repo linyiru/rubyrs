@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use std::io::Write;
 
-use crate::bytecode::{Op, Proto};
+use crate::bytecode::{BinOpKind, Op, Proto};
 use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::heap::{Heap, HeapObj};
 use crate::intern::{Interner, SymId};
@@ -922,7 +922,14 @@ impl Vm {
                         let mut acc = a[0].clone();
                         for v in &a[1..] {
                             match (&acc, v) {
-                                (Value::Int(x), Value::Int(y)) => acc = kind.apply_int(*x, *y),
+                                (Value::Int(x), Value::Int(y)) => {
+                                    if matches!(kind, crate::bytecode::BinOpKind::Div | crate::bytecode::BinOpKind::Mod) && *y == 0 {
+                                        return Err(self.trap(RubyError::ZeroDivisionError {
+                                            msg: "divided by 0".to_string(),
+                                        }));
+                                    }
+                                    acc = kind.apply_int(*x, *y);
+                                }
                                 _ => return Ok(None),
                             }
                         }
@@ -1299,7 +1306,14 @@ impl Vm {
                         let mut i = bi + 1;
                         while i <= end_inc {
                             match &acc {
-                                Value::Int(x) => acc = kind.apply_int(*x, i),
+                                Value::Int(x) => {
+                                    if matches!(kind, crate::bytecode::BinOpKind::Div | crate::bytecode::BinOpKind::Mod) && i == 0 {
+                                        return Err(self.trap(RubyError::ZeroDivisionError {
+                                            msg: "divided by 0".to_string(),
+                                        }));
+                                    }
+                                    acc = kind.apply_int(*x, i);
+                                }
                                 _ => return Ok(None),
                             }
                             i += 1;
@@ -2926,6 +2940,15 @@ impl Vm {
             Op::BinOpInt(kind, rhs) => {
                 let a = self.stack.pop().expect("ICE: BinOpInt lhs underflow");
                 if let Value::Int(x) = a {
+                    // Int / 0 and Int % 0 raise ZeroDivisionError;
+                    // Rust's `wrapping_div` / `wrapping_rem` panic
+                    // on rhs=0, so guard before delegating to
+                    // `apply_int`.
+                    if matches!(kind, BinOpKind::Div | BinOpKind::Mod) && rhs == 0 {
+                        return Err(self.trap(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        }));
+                    }
                     self.stack.push(kind.apply_int(x, rhs));
                 } else {
                     // Cold path: behave as if a generic `<op>` was dispatched
@@ -2947,6 +2970,15 @@ impl Vm {
                 let b = self.stack.pop().expect("ICE: BinOp rhs underflow");
                 let a = self.stack.pop().expect("ICE: BinOp lhs underflow");
                 if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+                    // Same guard as `Op::BinOpInt` — divide / mod
+                    // by literal 0 in the Int×Int fast path. Without
+                    // this, `n / m` where m happens to be 0 at
+                    // runtime would panic the host process.
+                    if matches!(kind, BinOpKind::Div | BinOpKind::Mod) && *y == 0 {
+                        return Err(self.trap(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        }));
+                    }
                     self.stack.push(kind.apply_int(*x, *y));
                 } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b), self.max_value_bytes).map_err(|e| self.trap(e))? {
                     self.stack.push(v);
@@ -3474,8 +3506,22 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
             "*" => Some(Value::Int(a * b)),
-            "/" => Some(Value::Int(a / b)),
-            "%" => Some(Value::Int(a % b)),
+            "/" => {
+                if *b == 0 {
+                    return Err(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    });
+                }
+                Some(Value::Int(a / b))
+            }
+            "%" => {
+                if *b == 0 {
+                    return Err(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    });
+                }
+                Some(Value::Int(a % b))
+            }
             "==" => Some(Value::Bool(a == b)),
             "!=" => Some(Value::Bool(a != b)),
             "<"  => Some(Value::Bool(a < b)),

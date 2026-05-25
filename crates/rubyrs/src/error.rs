@@ -43,10 +43,16 @@ pub enum RubyError {
     RuntimeError { msg: String },
     NameError { msg: String },
     /// `Hash#fetch(key)` with no default and no block, when the
-    /// key isn't present. Surfaced as a host-level Trap today
-    /// (not script-catchable until the Trap-→-rescue plumbing
-    /// lands as a separate refactor).
+    /// key isn't present. Routed through `unwind_with_exception`
+    /// by `dispatch`, so a script `rescue KeyError => e` catches
+    /// it like CRuby.
     KeyError { msg: String },
+    /// Integer `/` or `%` with a zero divisor. CRuby raises
+    /// `ZeroDivisionError`; without this variant the Rust
+    /// `i64::div` would panic the host process. Float `/ 0.0`
+    /// is NOT an error in CRuby (returns `±Infinity` or `NaN`)
+    /// and remains so here — only the Int×Int path traps.
+    ZeroDivisionError { msg: String },
     /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
     /// when a Runtime was configured with caps for untrusted scripts.
     ResourceExhausted { msg: String },
@@ -70,6 +76,7 @@ impl RubyError {
             RubyError::RuntimeError { .. } => "RuntimeError",
             RubyError::NameError { .. } => "NameError",
             RubyError::KeyError { .. } => "KeyError",
+            RubyError::ZeroDivisionError { .. } => "ZeroDivisionError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
             // Uncaught carries the actual class name from the script's
             // exception object; static-class machinery doesn't apply.
@@ -86,6 +93,7 @@ impl RubyError {
             | RubyError::RuntimeError { msg }
             | RubyError::NameError { msg }
             | RubyError::KeyError { msg }
+            | RubyError::ZeroDivisionError { msg }
             | RubyError::ResourceExhausted { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),
             RubyError::NoMethodError { method, recv_type } => {
