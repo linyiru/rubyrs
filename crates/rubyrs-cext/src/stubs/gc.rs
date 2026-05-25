@@ -113,10 +113,16 @@ pub unsafe extern "C" fn rb_bug(fmt: *const c_char) -> ! {
 pub unsafe extern "C" fn rb_errinfo() -> Value { Qnil }
 
 // Re-raise the tag set by a prior rb_protect. Spike has no protect
-// state to re-raise; abort with a clear message.
+// state to re-raise.
+//
+// PR #46 review #1: must NOT use panic!() — unwinding across an
+// extern "C" boundary is undefined behavior under the default
+// panic=unwind strategy. Route to stderr + std::process::abort()
+// for deterministic behavior across panic strategies.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_jump_tag(_tag: c_int) -> ! {
-    panic!("rb_jump_tag: not implemented at spike scope")
+pub unsafe extern "C" fn rb_jump_tag(tag: c_int) -> ! {
+    eprintln!("[rb_jump_tag] called with tag={} — not implemented at spike scope; aborting", tag);
+    std::process::abort()
 }
 
 // rb_protect(body, arg, &state): invoke body; set *state = 0 on
@@ -153,9 +159,16 @@ pub unsafe extern "C" fn rb_rescue2(
 pub unsafe extern "C" fn rb_yield(_arg: Value) -> Value { Qnil }
 
 // Intern with explicit length + encoding. Spike: encoding ignored.
+//
+// PR #46 review #2: previously returned 0 (Qnil-as-ID) when
+// len == 0. CRuby allows interning the empty string and msgpack
+// calls `rb_intern3("", 0, ...)`; returning 0 made downstream
+// "is this a valid ID?" checks fail. Only short-circuit on null
+// pointer or negative length; len == 0 delegates to a normal
+// empty-string intern.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_intern3(name: *const c_char, len: c_long, _enc: *mut c_void) -> u64 {
-    if name.is_null() || len <= 0 { return 0; }
+    if name.is_null() || len < 0 { return 0; }
     let slice = unsafe { std::slice::from_raw_parts(name as *const u8, len as usize) };
     let s = String::from_utf8_lossy(slice);
     let cs = std::ffi::CString::new(s.as_ref()).unwrap_or_default();

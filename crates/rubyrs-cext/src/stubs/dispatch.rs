@@ -198,20 +198,46 @@ pub unsafe extern "C" fn rb_hash_new_capa(_capa: c_long) -> Value {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_define_const(_klass: Value, _name: *const c_char, _val: Value) {}
 
-// Class name as C string. Returns "" for non-Class. Memory leaks
-// (returning a static-lifetime const char* from owned String is not
-// possible without a stable interner — spike scope; if this is called
-// in a hot loop it'll grow.)
+// Class name as C string. CRuby's contract: returned pointer is
+// stable for the program's lifetime (cexts cache it in static
+// globals). PR #46 review #3: original impl leaked a fresh CString
+// per call via `into_raw()`. Now cache CStrings in a thread-local
+// table keyed by class name — each distinct name allocates once
+// and the pointer stays stable. Bounded by the number of distinct
+// class names ever seen across the process.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_obj_classname(v: Value) -> *const c_char {
-    with_state(|st| match st.resolve(v) {
-        CValue::Class(name) => {
-            // Leak: caller treats it as static. Acceptable per call;
-            // not hot-path.
-            let cs = std::ffi::CString::new(name.clone()).unwrap_or_default();
-            cs.into_raw() as *const c_char
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::ffi::CString;
+
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, &'static CString>> =
+            RefCell::new(HashMap::new());
+    }
+
+    let name = with_state(|st| match st.resolve(v) {
+        CValue::Class(n) => n.clone(),
+        _ => String::new(),
+    });
+    if name.is_empty() {
+        return b"\0".as_ptr() as *const c_char;
+    }
+    CACHE.with(|c| {
+        let mut m = c.borrow_mut();
+        if let Some(cs) = m.get(&name) {
+            return cs.as_ptr();
         }
-        _ => b"\0".as_ptr() as *const c_char,
+        // Box::leak gives a 'static reference, exactly what the
+        // CRuby contract promises. Bounded by distinct class
+        // names — the same names appear repeatedly in real
+        // workloads so the cache hits immediately after first use.
+        let cs: &'static CString = Box::leak(Box::new(
+            CString::new(name.clone()).unwrap_or_default(),
+        ));
+        let ptr = cs.as_ptr();
+        m.insert(name, cs);
+        ptr
     })
 }
 
