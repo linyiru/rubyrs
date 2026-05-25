@@ -2637,6 +2637,12 @@ impl Vm {
 
 /// Translate a C-side opaque handle back into a `Value`. Currently
 /// covers exactly the `CValue` variants the spike supports.
+///
+/// Gated off `target_os = "wasi"` because the only caller chain
+/// (`cext_dispatch` invoked from closures registered in
+/// `Vm::cext_require`) is itself wasi-stubbed. Without the gate the
+/// `-D dead-code` warning fires on the wasi build.
+#[cfg(not(target_os = "wasi"))]
 fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -> Value {
     match state.resolve(h) {
         rubyrs_cext::CValue::Nil => Value::Nil,
@@ -2667,6 +2673,7 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
 /// Array/Hash/Range/Block heap ids) trap with `ArgumentError` until the
 /// matching ABI surface (`rb_sym_new`, `rb_class_new`, heap-handle
 /// translation) lands.
+#[cfg(not(target_os = "wasi"))]
 fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext::CValue, Trap> {
     Ok(match v {
         Value::Nil => rubyrs_cext::CValue::Nil,
@@ -2698,6 +2705,7 @@ fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext
 /// register args are simply ignored by the callee. Other arities trap
 /// loudly at invocation rather than at register-time so the failure is
 /// clearly attributable to the call site, not Init.
+#[cfg(not(target_os = "wasi"))]
 fn cext_dispatch(
     name: &str,
     func: rubyrs_cext::OpaqueFn,
@@ -2847,12 +2855,13 @@ fn cext_dispatch(
 /// `expect("ICE: ...")` in `rubyrs_cext::with_state`.
 ///
 /// **What this does NOT catch**: panics raised inside the C function
-/// itself. C code can't `panic!`; if one of OUR Rust-implemented
+/// itself. The C side cannot raise a Rust panic; if one of OUR
 /// `rb_*` ABI functions panics from inside the C call, the process
 /// aborts under `panic = abort` semantics (the default for `extern "C"`
 /// since Rust 2018+). The cext ABI surface is documented as
 /// abort-on-contract-violation in docs/PANIC_AUDIT.md — conversion to
 /// error sentinels is Level 3+ work tied to `rb_raise` integration.
+#[cfg(not(target_os = "wasi"))]
 fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
         if let Some(s) = p.downcast_ref::<&str>() {
