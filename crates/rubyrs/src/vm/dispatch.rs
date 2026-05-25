@@ -222,17 +222,20 @@ impl Vm {
             // body (`def self.foo; bar; end` or `class << self; def
             // foo; bar; end; end`), a bare call to `bar` should
             // resolve against THIS class's own `singleton_methods`
-            // table. Without this arm the lookup fell through to
+            // table AND its superclass chain (so `Sub.foo` defined
+            // via `def self.foo` is reachable from inside `Sub`'s
+            // class methods even when foo lives on `Super`).
+            // Without this arm the lookup fell through to
             // toplevel_methods only and produced
             // "undefined method ... for Class" — even though
             // `bar` was sitting right there on `self`.
             //
-            // Note: only checks `c.singleton_methods` directly, not
-            // the ancestor chain's singleton tables. That's enough
-            // for the within-class case; cross-class singleton
-            // inheritance (rare) is a follow-up.
+            // Uses the same `lookup_class_singleton_method` helper
+            // as the explicit `cls.foo` dispatch (vm/dispatch.rs
+            // ~660), so `self.bar` and bare `bar` resolve
+            // identically.
             if let Value::Class(c) = &self_val
-                && let Some(m) = c.singleton_methods.borrow().get(&name_id).cloned() {
+                && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
                 self.invoke_method(m, self_val.clone(), args)?;
                 return Ok(());
             }
@@ -657,25 +660,15 @@ impl Vm {
         // surface OS errors as a generic RuntimeError so scripts
         // can `rescue` them.
         if let Value::Class(cls) = &recv {
-            // User-Ruby `def self.foo` singletons: check the per-class
-            // table populated by `Op::DefSingletonMethod`. Walks the
-            // superclass chain — CRuby's metaclass model has the
+            // User-Ruby `def self.foo` singletons: walk the
+            // per-class `singleton_methods` table chain via the
+            // shared helper. CRuby's metaclass model has the
             // singleton class of `Dog < Animal` inherit from the
             // singleton class of `Animal`, so `Dog.kingdom` finds
-            // `Animal`'s `def self.kingdom`. We approximate the same
-            // shape with a straight superclass walk over the
-            // `singleton_methods` tables.
-            let mut current = cls.clone();
-            let user_singleton = loop {
-                if let Some(m) = current.singleton_methods.borrow().get(&name_id).cloned() {
-                    break Some(m);
-                }
-                let parent = current.superclass.borrow().clone();
-                match parent {
-                    Some(p) => current = p,
-                    None => break None,
-                }
-            };
+            // `Animal`'s `def self.kingdom`. The same helper is
+            // used by the bare-call path (no_recv when self is a
+            // Class) so `self.bar` and bare `bar` stay in sync.
+            let user_singleton = self.lookup_class_singleton_method(cls, name_id);
             if let Some(m) = user_singleton {
                 let target_self = recv.clone();
                 return self.invoke_method(m, target_self, args);

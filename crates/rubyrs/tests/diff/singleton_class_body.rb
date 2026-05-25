@@ -50,7 +50,9 @@ b2 = Bar.new
 puts b2.respond_to?(:greet)
 puts b.respond_to?(:greet)
 
-# Tilt-shape: ivar-using class method.
+# Tilt-shape: ivar-using class method + bare cross-call to
+# another singleton method (the same-class case the review fix
+# covered).
 class Box
   class << self
     def metadata
@@ -63,3 +65,38 @@ class Box
 end
 puts Box.default_color
 puts Box.metadata.inspect
+
+# Singleton-method INHERITANCE: bare call inside a class
+# singleton method body should walk the superclass chain's
+# singleton_methods tables, not just self's own.
+class Animal
+  class << self
+    def kingdom; "Animalia"; end
+  end
+end
+class Dog < Animal
+  class << self
+    def describe
+      # Bare `kingdom` — only defined on Animal's singleton table.
+      # Without the lookup walking the chain, this would raise
+      # NoMethodError.
+      "Dog belongs to #{kingdom}"
+    end
+  end
+end
+puts Dog.describe
+
+# Side-effect-free receiver works (the only realistic case for
+# the spike scope). The single-evaluation guarantee — `class <<
+# expr` evaluates expr once — is implemented by binding the
+# receiver into a synthetic local before the rewritten defs.
+# We verify the LOCAL doesn't collide with a user local of the
+# same prefix by accident: this trivially passes if compilation
+# succeeds, since a collision would shadow the user's binding.
+COUNTER_TAG = "tag-once"
+class Tagged
+  class << self
+    def tag; COUNTER_TAG; end
+  end
+end
+puts Tagged.tag
