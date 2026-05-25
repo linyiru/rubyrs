@@ -364,10 +364,9 @@ impl Vm {
                 let v = match &*name {
                     "$$" => Value::Int(std::process::id() as i64),
                     "$0" => {
-                        // Walk frames from the top; the bottommost
-                        // proto's filename is the script's
-                        // top-level filename (or "<inline>" for
-                        // eval calls).
+                        // Bottommost frame = script entry; its
+                        // proto's filename is the script's top-level
+                        // filename (or "<inline>" for eval calls).
                         let name = self.frames.first()
                             .map(|f| self.protos[f.proto_idx].filename.to_string())
                             .unwrap_or_else(|| "-".to_string());
@@ -378,13 +377,15 @@ impl Vm {
                 self.stack.push(v);
             }
             Op::StoreGlobal(name_id) => {
-                // `$foo = expr` — compiler emitted Dup before this
-                // so the value also remains on the stack as the
-                // assignment's result. Special-global writes
-                // (`$$ = 42`) are silently accepted into
-                // `Vm.globals` but the next read still intercepts
-                // and returns the computed value — a documented
-                // spike divergence.
+                // `$foo = expr` — pop the value and store. In
+                // statement position the compiler does NOT emit a
+                // preceding Dup (mirrors ConstWrite/IVarWrite); in
+                // expression position it emits Dup first, so the
+                // value remains on the stack as the assignment's
+                // result. Special-global writes (`$$ = 42`) are
+                // silently accepted into `Vm.globals` but the next
+                // read still intercepts and returns the computed
+                // value — a documented spike divergence.
                 let v = self.stack.pop().expect("ICE: StoreGlobal stack underflow");
                 self.globals.insert(name_id, v);
             }

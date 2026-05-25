@@ -121,6 +121,11 @@ impl Vm {
         // future LoadConst — root every value so Array/Hash/Object
         // constants don't get swept between assignment and read.
         for v in self.constants.values() { roots.push(v.clone()); }
+        // Global variables (`$foo = []`) hold arbitrary Values
+        // (including heap-backed Array/Hash/String/Object). Without
+        // rooting, any global pointing at a heap object can be swept
+        // between assignment and read.
+        for v in self.globals.values() { roots.push(v.clone()); }
         for f in &self.frames {
             roots.push(f.self_val.clone());
             for v in f.locals.borrow().iter() { roots.push(v.clone()); }
@@ -260,6 +265,21 @@ mod tests {
         let before_live = vm.heap.live_count;
         vm.maybe_gc();
         assert_eq!(vm.heap.live_count, before_live);
+    }
+
+    #[test]
+    fn maybe_gc_keeps_values_reachable_via_globals() {
+        // Regression: `$g = []` followed by GC must not sweep the
+        // array. Globals must be in the root set.
+        let mut vm = mk_vm();
+        vm.stress_gc = true;
+        let arr_id = vm.heap.alloc(crate::heap::HeapObj::Array(Vec::new()));
+        let name_id = vm.interner.intern("$g");
+        vm.globals.insert(name_id, Value::Array(arr_id));
+        let before = vm.heap.live_count;
+        vm.maybe_gc();
+        assert_eq!(vm.heap.live_count, before, "global-rooted array was swept");
+        assert!(vm.heap.array(arr_id).is_empty());
     }
 
     #[test]
