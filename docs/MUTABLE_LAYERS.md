@@ -120,10 +120,20 @@ hazard is overlapping borrows. The discipline:
 If you write a method that holds `cls.methods.borrow()` and then
 calls something that might mutate the same class's methods table
 (e.g. ANY recursive VM dispatch), you'll panic. The codebase has
-exactly one cross-layer reader (`maybe_gc`'s root walk) and it
-takes care to release one borrow before taking the next. Future
-additions must do the same — see the comment block in
-[`vm/gc.rs::maybe_gc`](../crates/rubyrs/src/vm/gc.rs).
+**two** cross-layer readers and each takes care to release one
+borrow before taking the next:
+
+- [`vm/gc.rs::maybe_gc`](../crates/rubyrs/src/vm/gc.rs) — the
+  root-gathering pass that walks `Vm.classes` + `Vm.toplevel_methods`
+  for closure-captured slots (layer 2 reachable through layer 1).
+- [`heap.rs::Heap::collect`](../crates/rubyrs/src/heap.rs)'s
+  mark-phase Instance arm — walks `Instance.singleton_class.methods`
+  for closure-captured slots (layer 2 reachable through layer 3).
+  Eigenclasses aren't in `Vm.classes`, so the root-gathering pass
+  can't reach them; the per-slot mark walk picks them up instead.
+
+Future additions to either layer must follow the same
+release-borrow-then-recurse rule.
 
 ## GC roots through each layer
 
@@ -142,9 +152,21 @@ captures and singleton-method state would get swept:
 If a future change introduces a fourth mutable layer (e.g.
 per-Module constants table that holds Values, or anonymous
 `Class.new { ... }`), **the GC root walk must add a corresponding
-arm**. The check is mechanical: any heap-y Value held only via that
-new layer needs an explicit `Heap::visit_value` in
-[`heap.rs::Heap::collect`](../crates/rubyrs/src/heap.rs).
+arm** — and the right file depends on where the layer is anchored:
+
+- **Reachable through `Vm.*`** (e.g., a new Vm-wide table): add
+  the arm to [`vm/gc.rs::maybe_gc`](../crates/rubyrs/src/vm/gc.rs)'s
+  root-gathering loops, next to the existing `Vm.classes` /
+  `Vm.toplevel_methods` walks.
+- **Reachable through a heap-managed slot** (e.g., a new
+  per-Instance / per-Block field): add the arm to the matching
+  `Slot::Live(HeapObj::*)` mark phase in
+  [`heap.rs::Heap::collect`](../crates/rubyrs/src/heap.rs),
+  next to the existing `Instance.singleton_class` walk.
+
+The check is mechanical: any heap-y Value held only via that
+new layer needs an explicit `Heap::visit_value` somewhere on
+the marker's path.
 
 ## Why this design, not something cleaner
 

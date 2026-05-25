@@ -132,6 +132,9 @@ What gets harder:
   is interior-mutable. When singleton classes arrive and introduce a
   *third* RefCell layer (per-Instance method table), the borrow-rules
   picture needs a doc — currently each layer is fine on its own.
+  *(Update: both have shipped — singleton class in PR #31, the
+  doc as [`docs/MUTABLE_LAYERS.md`](../MUTABLE_LAYERS.md). The
+  paragraph stays as the original PoC-era hazard analysis.)*
 - GC root walking is no longer O(stack + frames). For programs that
   install many `define_method`s, it's O(stack + frames + total
   installed closure-methods). A counter on `Vm` of how many
@@ -148,6 +151,9 @@ Explicitly accepted trade-offs:
 - **No spec coverage from `ruby/spec` yet.** Eight ad-hoc tests in
   `tests/embed.rs` lock the PoC behaviour in; a `ruby/spec` runner
   is its own RFC.
+  *(Update: superseded by PR #23 — `crates/rubyrs/spec/` now
+  runs 30 examples across 6 files. Left as-is to preserve the
+  PoC-era reasoning.)*
 - **`alias_method` / `define_method` outside a class body silently
   install into `toplevel_methods`** instead of raising. The
   compile-time intercept doesn't track class-body context, matching
@@ -189,8 +195,11 @@ All concrete metaprog follow-ups have shipped:
     of the `is_class_body` Return arm's value semantics);
     locked by `class_eval_spec::returns_the_class_for_now`.
   * `instance_eval { def name; … }` lands on
-    `toplevel_methods` (singleton class wasn't in yet).
-    See below.
+    `toplevel_methods` rather than the receiver's eigenclass.
+    Still observable on master — singleton class shipped in
+    PR #31 but the `instance_eval` block-frame doesn't push
+    the eigenclass onto `class_stack`. Tracked as a soft
+    item below.
 - ✅ **Singleton class — `def obj.foo` +
   `define_singleton_method`** — PR #31. Lazy
   `Instance.singleton_class: Option<Rc<Class>>` whose
@@ -234,15 +243,15 @@ Soft items remaining (not blocking):
 Worth recording for the next architectural-PoC sequence:
 
 1. **The prerequisites were paid by unrelated work.** PR #8
-   shipped in 250 lines because reopenable classes (PR #N)
-   had already moved `Class.methods` to `RefCell<HashMap>`,
-   `method_gen` was already the IC invalidation counter,
-   block was already heap-resident (P2-13), and
-   `defining_class` was already on Method (for `super`,
-   ADR 0004). Future ADRs should write a "what does this
-   incidentally unlock" coda — three quarters of metaprog's
-   landing cost was already paid by features that didn't
-   advertise it.
+   shipped in 250 lines because the architecture had already
+   accumulated the pieces it needed: reopenable classes had
+   moved `Class.methods` to `RefCell<HashMap>`, `method_gen`
+   was already the IC invalidation counter, block was already
+   heap-resident (P2-13), and `defining_class` was already on
+   Method (for `super`, ADR 0004). Future ADRs should write
+   a "what does this incidentally unlock" coda — three
+   quarters of metaprog's landing cost was already paid by
+   features that didn't advertise it.
 
 2. **Bench numbers were inversed from intuition.** ADR 0010
    started thinking "metaprog would be slow." Reality
@@ -267,7 +276,7 @@ Worth recording for the next architectural-PoC sequence:
    ownership-graph pass, not just a code review.
 
 4. **Review reviewers as carefully as you review code.**
-   The 5-round perf-CI review on PR #17, the 4-round
+   The 5-round perf-CI review on PR #17, the 5-round
    ruby-spec-runner review on PR #23, and the singleton-
    class cycle review on PR #31 each surfaced material
    improvements. The cost of running a thorough review pass
