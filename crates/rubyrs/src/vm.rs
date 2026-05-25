@@ -3207,16 +3207,35 @@ thread_local! {
     static CURRENT_VM_PTR: Cell<*mut Vm> = const { Cell::new(std::ptr::null_mut()) };
 }
 
+/// RAII guard that restores [`CURRENT_VM_PTR`] to its previous value
+/// when dropped — runs the restore on **every** scope exit, including
+/// panic unwinding. Without this guard, a panic inside the host fn
+/// (e.g. from arg interning before `cext_dispatch` installs its
+/// `with_caught_unwind` boundary) would leave a stale Vm pointer in
+/// `CURRENT_VM_PTR`; a subsequent host-fn call would then dereference
+/// it as a fresh `*mut Vm`, hitting use-after-free or worse.
+#[cfg(not(target_os = "wasi"))]
+struct VmPtrGuard {
+    prev: *mut Vm,
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl Drop for VmPtrGuard {
+    fn drop(&mut self) {
+        CURRENT_VM_PTR.with(|c| c.set(self.prev));
+    }
+}
+
 /// Run `f` with [`CURRENT_VM_PTR`] set to `vm_ptr`, restoring the
-/// previous value (likely null) on the way out. Save/restore lets
-/// nested cext calls (rb_funcallv → another host fn) work without
-/// the inner call clobbering the outer's pointer.
+/// previous value (likely null) on **all** exit paths — normal return
+/// or panic unwinding — via [`VmPtrGuard`]. Save/restore lets nested
+/// cext calls (rb_funcallv → another host fn) work without the inner
+/// call clobbering the outer's pointer.
 #[cfg(not(target_os = "wasi"))]
 fn with_vm_ptr_set<R>(vm_ptr: *mut Vm, f: impl FnOnce() -> R) -> R {
     let prev = CURRENT_VM_PTR.with(|c| c.replace(vm_ptr));
-    let result = f();
-    CURRENT_VM_PTR.with(|c| c.set(prev));
-    result
+    let _guard = VmPtrGuard { prev };
+    f()
 }
 
 /// Read the currently-active Vm pointer. Returns null if not inside
@@ -3348,7 +3367,12 @@ fn cext_dispatch(
         // value so subsequent host_fn invocations don't have to
         // re-stash it (they will anyway, with the same value).
         let vm_ptr = current_vm_ptr();
-        debug_assert!(
+        // Hard `assert!` (not `debug_assert!`): a null `vm_ptr` here
+        // would mean we install a funcall callback that captures
+        // null, and the next `rb_funcallv` deref turns into UB.
+        // Worth the one branch on every cext call to refuse to enter
+        // an unsafe state in release builds too.
+        assert!(
             !vm_ptr.is_null(),
             "ICE: cext_dispatch reached with null CURRENT_VM_PTR; \
              host did not set it before calling host fn"
