@@ -31,10 +31,13 @@ OUT="$SCRIPT_DIR/counter_ext.$EXT"
 # Cross-process safety against parallel cargo test binaries —
 # `cext_typeddata.rs` and `cext_instance_method.rs` both call
 # this script, each from its own test process. Same defense as
-# msgpack-cext/build.sh: optional flock dedup + always atomic
+# msgpack-cext/build.sh: optional flock-based MUTUAL EXCLUSION
+# (the cc invocations still run sequentially when both callers
+# arrive — this is serialization, not deduplication; the work
+# is duplicated but the output stays correct) + always atomic
 # tmpfile + mv so a parallel dlopen sees the OLD bundle or the
 # COMPLETE new one, never a partial. Reviewer Copilot caught
-# the gap on PR #82.
+# the original race on PR #82.
 if command -v flock >/dev/null 2>&1; then
     exec 9>"$OUT.lock"
     flock 9

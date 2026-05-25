@@ -29,14 +29,18 @@ OUT="$SCRIPT_DIR/msgpack.$EXT"
 # ("file too short" / "invalid mach-o").
 #
 # Two layers of defense:
-#   1. Optional flock-based dedup: if `flock(1)` is installed
-#      (default on Linux util-linux, absent on macOS unless
-#      brewed), serialize concurrent runs so only one cc fires.
+#   1. Optional flock-based MUTUAL EXCLUSION: if `flock(1)` is
+#      installed (default on Linux util-linux, absent on macOS
+#      unless brewed), serialise concurrent runs. Both callers
+#      still compile (so this is serialisation, not deduplication
+#      — the work is duplicated but each cc finishes safely
+#      under its own lock-section).
 #   2. Always: link to `$TMP` then `mv -f` into `$OUT`. POSIX
 #      rename(2) is atomic on the same filesystem, so a reader
 #      either dlopens the OLD bundle or the COMPLETE new one,
-#      never a partial. Without flock the cc work is duplicated
-#      but the output stays correct — only CPU is wasted.
+#      never a partial. Without flock a parallel dlopen could
+#      see the writer's truncate-and-write window; with flock
+#      that window is also gone.
 if command -v flock >/dev/null 2>&1; then
     exec 9>"$OUT.lock"
     flock 9
