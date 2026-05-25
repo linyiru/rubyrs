@@ -645,6 +645,32 @@ impl Vm {
             self.stack.push(Value::BoundMethod(id));
             return Ok(());
         }
+        // `m >> other` / `m << other` — function composition.
+        // `(m >> g).(x) == g.(m.(x))`; `(m << g).(x) == m.(g.(x))`.
+        // Both sides must be callable — BoundMethod or Block. The
+        // result is a Block (Proc) that splats `*args` through the
+        // chain in the right order.
+        if matches!(&recv, Value::BoundMethod(_) | Value::Block(_))
+            && matches!(&*name, ">>" | "<<") && args.len() == 1 {
+                let mut args = args;
+                let other = args.swap_remove(0);
+                if !matches!(&other, Value::BoundMethod(_) | Value::Block(_)) {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "compose argument must be a Method or Proc (got {})",
+                            other.type_name(),
+                        ),
+                    }));
+                }
+                let (outer, inner) = if &*name == ">>" {
+                    (other, recv)
+                } else {
+                    (recv, other)
+                };
+                let id = self.coerce_compose_to_block(outer, inner)?;
+                self.stack.push(Value::Block(id));
+                return Ok(());
+            }
         // `m.arity` / `m.parameters` — Method introspection. Walks
         // the captured class chain to find the user-defined Method;
         // if absent (builtin / primitive_call backed), returns
@@ -1550,6 +1576,70 @@ impl Vm {
             param_start: 0,
             n_params: 0,
             rest_slot: Some(1),
+        }));
+        Ok(id)
+    }
+
+    /// Build a `Value::Block` that, when called with `*args`,
+    /// invokes `outer.call(inner.(*args))`. Used by Method#`>>` /
+    /// `<<` to express function composition. Both sides must be
+    /// callable (BoundMethod or Block); validated by the caller.
+    /// Proto is lazy-built and shared across all composition sites.
+    pub(crate) fn coerce_compose_to_block(
+        &mut self,
+        outer: Value,
+        inner: Value,
+    ) -> Result<crate::value::ObjId, Trap> {
+        use crate::bytecode::{Op, Proto};
+        use crate::error::Span;
+        use crate::heap::HeapObj;
+        use std::cell::RefCell;
+
+        // Locals layout:
+        //   slot 0: outer callable (runs second)
+        //   slot 1: inner callable (runs first)
+        //   slot 2: args Array (filled via rest_slot)
+        let proto_idx = if let Some(idx) = self.method_compose_forwarder_proto {
+            idx
+        } else {
+            let call_id = self.interner.intern("call");
+            let proto = Proto {
+                name: "<method-compose-forwarder>".to_string(),
+                params: Vec::new(),
+                n_required_positional: 0,
+                rest_param: None,
+                kw_param_defaults: Vec::new(),
+                kw_rest_param: None,
+                n_locals: 3,
+                code: vec![
+                    Op::LoadLocal(0),                   // [outer]
+                    Op::LoadLocal(1),                   // [outer, inner]
+                    Op::LoadLocal(2),                   // [outer, inner, args]
+                    Op::ApplyCall(call_id, u16::MAX),   // [outer, inner_result]
+                    Op::Call(call_id, 1, u16::MAX),     // [outer_result]
+                    Op::Return,
+                ],
+                op_spans: vec![Span::ZERO; 6],
+                filename: "<synthetic>".into(),
+            };
+            let idx = self.protos.len();
+            self.protos.push(proto);
+            self.method_compose_forwarder_proto = Some(idx);
+            idx
+        };
+        let captured = Rc::new(RefCell::new(vec![outer.clone(), inner.clone(), Value::Nil]));
+        let mut g = crate::vm::PinGuard::new(self);
+        g.pin(outer);
+        g.pin(inner);
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let id = g.vm.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
+            proto_idx,
+            captured,
+            self_val: Value::Nil,
+            param_start: 0,
+            n_params: 0,
+            rest_slot: Some(2),
         }));
         Ok(id)
     }

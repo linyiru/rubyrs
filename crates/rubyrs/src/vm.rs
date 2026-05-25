@@ -275,6 +275,12 @@ pub(crate) struct Vm {
     /// instance is shared across every `&m` call site so the
     /// allocation cost amortises to zero.
     pub(crate) bound_method_forwarder_proto: Option<usize>,
+    /// Cached proto for `Method#>>` / `Method#<<`. Body does
+    /// `outer.call(inner.(*args))`; three-locals layout
+    /// (outer / inner / rest-args). Shared across all composition
+    /// sites — same amortisation rationale as the bound-method
+    /// forwarder above.
+    pub(crate) method_compose_forwarder_proto: Option<usize>,
 }
 
 
@@ -310,6 +316,7 @@ impl Vm {
             method_gen: 0,
             break_signaled: false,
             bound_method_forwarder_proto: None,
+            method_compose_forwarder_proto: None,
             method_return: None,
         }
     }

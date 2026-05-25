@@ -177,3 +177,4 @@ fn run_diff(name: &str) {
 #[test] fn unbound_method() { run_diff("unbound_method"); }
 #[test] fn method_introspect() { run_diff("method_introspect"); }
 #[test] fn method_equality() { run_diff("method_equality"); }
+#[test] fn method_compose() { run_diff("method_compose"); }
