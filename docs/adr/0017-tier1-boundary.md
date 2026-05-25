@@ -36,10 +36,20 @@ all four is in. Anything that fails any one is outside.
 
 1. **Deterministic from script inputs alone.**
    Same script text + same `Config` + same host-registered fns →
-   identical output, byte-for-byte. No wall-clock time, no
-   process ID, no environment variable reads, no randomised hash
-   iteration order. Anything non-deterministic enters through a
-   host-registered fn or sits in an outer tier.
+   identical *script-visible* output, byte-for-byte. No
+   script-readable wall-clock time, no script-readable process
+   ID, no script-readable env var reads, no randomised hash
+   iteration order. Anything non-deterministic that a script
+   could observe enters through a host-registered fn or sits
+   in an outer tier.
+
+   *Permitted (host-side, not script-visible)*: the runtime may
+   internally consult `Instant::now()` for `Config::deadline`
+   enforcement or call `std::process::id()` for log lines the
+   embedder writes — those affect only the trap-or-not decision
+   the host sees, not the bytes a script's `puts` produces. The
+   rule constrains what the script can read, not what the Rust
+   runtime can use to enforce caps.
 
 2. **No script-accessible OS capabilities by default.**
    File, Dir, IO, Net::HTTP, Socket, Kernel#system, backtick,
@@ -133,8 +143,9 @@ already matches.
 
 | Deviation | Verified at | Rule violated | Planned remediation |
 |-----------|-------------|---------------|---------------------|
-| `Kernel#puts` / `p` / `pp` / `print` write to `std::io::stdout()` by default when `Runtime::set_stdout` is not called | `crates/rubyrs/src/vm/kernel.rs` (`vm.stdout` defaulted in `Runtime::new`) | Rule 2 (host should control the sink) | Default stdout sink switches to a guarded one that requires `set_stdout` to be called; or document the default as part of the supported tier-1 capability surface. PR-shaped. |
+| `Kernel#puts` / `p` / `pp` / `print` write to `std::io::stdout()` by default when `Runtime::set_stdout` is not called | `crates/rubyrs/src/vm.rs:375` (`Vm::new` initialises `stdout: Box::new(std::io::stdout())`; consumed at the `write!`/`writeln!` sites in `crates/rubyrs/src/vm/kernel.rs`) | Rule 2 (host should control the sink) | Default stdout sink switches to a guarded one that requires `set_stdout` to be called; or document the default as part of the supported tier-1 capability surface. PR-shaped. |
 | `ENV` reading populates from `std::env::vars()` of the host process | `crates/rubyrs/src/vm/step.rs:342` (the `LoadConst("ENV")` arm) | Rules 1 + 2 (non-deterministic + capability leak) | New `Config::env: Option<HashMap<String, String>>` field; default `None` means script sees empty `ENV`; host explicitly injects the map. PR-shaped. |
+| `$$` global reads the host process's PID via `std::process::id()` | `crates/rubyrs/src/vm/step.rs:365` (the `LoadGlobal("$$")` arm) | Rule 1 (script-visible non-deterministic value) | Same shape as `ENV`: gate behind a `Config::pid` (host-injected) or simply make `$$` return a fixed sentinel in Tier 1 builds. PR-shaped. |
 | `Regexp` / `/pattern/` literals + `String#match` / `String#=~` are in Tier 1 today | `crates/rubyrs/src/value.rs` (`Value::Regex`), `crates/rubyrs/src/ast.rs` (`Expr::RegexLit`) | Rule 3 | Future `regex` Cargo feature (see PoC #2 — to be opened after this ADR merges). |
 
 Each deviation is its own small PR — none block this ADR from
