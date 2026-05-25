@@ -40,7 +40,61 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
-## Results — 2026-05-25 (third pass), rubyrs at `402917e`
+## Results — 2026-05-25 (fourth pass), rubyrs at `d151c27`
+
+Fourth pass after PR #66 (`require_relative`) landed plus the
+subsequent feature wave (Method-* additions, cext L3 Symbol /
+Float, ruby-spec extraction v0.2). Same 12 standalone files,
+same pinned target commits. Diff vs the third pass:
+
+| File | Was (third pass) | Now | Change |
+|---|---|---|---|
+| tilt/string.rb | C | **D** | PR #66's `require_relative` makes line 12 reachable; now hits `SingletonClassNode` (`class << self`) + `GlobalVariableReadNode` — the AST-level next layer down |
+| (all 11 other files) | — | — | unchanged — same failure category as the third pass |
+
+Pass count: **5 → 5** (out of 12, unchanged for the third time
+in a row).
+
+### What the C → D shift means
+
+The third pass concluded "AST-frontier saturated" — adding more
+AST nodes wouldn't move the pass count because each unblocked
+file has stacked blockers waiting. PR #66 (`require_relative`)
+was the **non-AST counter-example**: a runtime/load-path
+capability, not a parse node. Its landing here is observable
+in the data — Cat C dropped to 0, the file it gated shifted
+into Cat D (next blocker is back to AST).
+
+Confirms: **the AST-frontier wins now require multi-step
+investment**. Each "stacked" file needs (in this case) at
+least three independent capabilities — bare ConstantWrite
+(#30), default args (#34), `require_relative` (#66) — before
+its NEXT (AST) blocker surfaces. tilt/string.rb is now at the
+fourth tier (`class << self`).
+
+### Cumulative category histogram
+
+After 4 passes:
+
+| Category | First pass | Now | Notes |
+|---|---:|---:|---|
+| A (runs clean) | 3 | 5 | rake/scope + bundler/version unblocked by #30 |
+| B (C-ext require) | 2 | 3 | sinatra/middleware/logger moved here from E after #34 |
+| C (require_relative / load path) | 1 | 0 | PR #66 took the last one to D |
+| D (unsupported AST node at runtime) | 3 | 1 | tilt/string.rb is the survivor, now at `class << self` |
+| E (literal-default-arg) | 2 | 0 | PR #34 closed the whole category |
+| F (project helper / undefined module) | 2 | 3 | rake/linked_list moved here from D+E after #30 and #34 |
+| G (host DSL — Brewfile, excluded) | 1 | 1 | host-wrapper-only; AST-irrelevant |
+
+Net direction: the language has absorbed every blocker that
+was AST-shaped at the start of the session AND `require_relative`,
+but the **C-ext require wall (Cat B)** and the **
+"project-internal helper / undefined module" issues (Cat F)**
+are now load-bearing. Both are non-AST and need infrastructure
+(Logger built-in / Enumerable register-as-Module / C-ext
+require chain) to fix.
+
+### Results — 2026-05-25 (third pass), rubyrs at `402917e`
 
 Third pass after PR #34 (`default args = any expression`) landed
 plus the subsequent Method-* / cext / GC-root-hole cleanup wave
@@ -150,12 +204,15 @@ that the gap reports were generated against):
 > us**, **What "Phase 3" would look like** — were written
 > against the first-pass data and are kept as the historical
 > record (body unchanged; the legend heading was labelled
-> "(first pass)" for clarity). After the **third pass** above:
-> Category D = 0 (PR #30 ConstantWriteNode), Category E = 0
-> (PR #34 default-args-any-expression). The `ConstantWriteNode`
-> half of "Phase 3 step 1" is done; the `ConstantPathWriteNode`
-> half is still outstanding. Pass count flat at 5/12 because the
-> E-blocked files had latent B/F blockers behind them.
+> "(first pass)" for clarity). After the **fourth pass** above:
+> Category D = 1 (was 3 — tilt/string.rb came back to D from C
+> after PR #66 landed `require_relative` and exposed its next
+> AST blocker, `class << self`). Category E = 0
+> (PR #34 default-args-any-expression). Category C = 0
+> (PR #66 require_relative). "Phase 3 step 1"
+> ConstantPathWriteNode landed in PR #59. Pass count flat at
+> 5/12 across four passes — the stacked-blockers pattern means
+> each unlock just exposes the next layer.
 
 ### Category legend (first pass)
 
