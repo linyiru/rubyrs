@@ -124,3 +124,4 @@ fn run_diff(name: &str) {
 #[test] fn kernel_p() { run_diff("kernel_p"); }
 #[test] fn string_slice() { run_diff("string_slice"); }
 #[test] fn power() { run_diff("power"); }
+#[test] fn block_autosplat() { run_diff("block_autosplat"); }

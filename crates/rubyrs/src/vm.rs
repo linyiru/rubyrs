@@ -2101,6 +2101,24 @@ impl Vm {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(), bh.param_start, bh.n_params)
         };
+        // CRuby auto-splat: when a block declared with >1 parameter
+        // is called with a single Array argument, the Array's
+        // elements are spread into the parameter slots. The most
+        // common ergonomic surfaces this enables:
+        //   arr_of_pairs.each { |a, b| ... }       # arr = [[1,2], [3,4]]
+        //   hash.each_with_index { |(k, v), i| }   # pair + index
+        //   hash.to_a.sort_by { |k, v| v }         # pair after Hash#to_a
+        // Hash#each / #map already yield two args directly, so this
+        // path doesn't change their behaviour. Single-param blocks
+        // also unaffected — they bind the whole Array.
+        let args: Vec<Value> = if n_params > 1 && args.len() == 1 {
+            match &args[0] {
+                Value::Array(aid) => self.heap.array(*aid).clone(),
+                _ => args,
+            }
+        } else {
+            args
+        };
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         {
