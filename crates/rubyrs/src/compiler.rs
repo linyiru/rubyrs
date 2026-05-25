@@ -773,6 +773,29 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecvBlock(name_id, argc, cid));
             }
         }
+        Expr::CallWithBlockArg { receiver, name, args, block_arg } => {
+            // `foo(&proc_value)`. Same stack shape as CallWithBlock
+            // (recv, block, args...), but the block slot comes from
+            // evaluating `block_arg` instead of constructing a
+            // fresh proto via CreateBlock. The runtime arm in
+            // do_call_block already pops a Value::Block from below
+            // the args; if `block_arg` evaluates to anything else
+            // (Nil / Int / etc.), the do_call_block ICE-panic
+            // fires — should ideally become a Trap, tracked in
+            // SUBSET.md.
+            let name_id = interner.intern(name);
+            let has_recv = receiver.is_some();
+            if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
+            compile_expr(b, block_arg, protos, interner, cc);
+            for a in args { compile_expr(b, a, protos, interner, cc); }
+            let argc = args.len() as u8;
+            let cid = *cc as u16; *cc += 1;
+            if has_recv {
+                b.emit(Op::CallBlock(name_id, argc, cid));
+            } else {
+                b.emit(Op::CallNoRecvBlock(name_id, argc, cid));
+            }
+        }
         Expr::Return(val) => {
             // CRuby `return` has two scoping rules depending on the
             // enclosing context:

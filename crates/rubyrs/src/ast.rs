@@ -155,6 +155,20 @@ pub(crate) enum Expr {
         block_params: Vec<BlockParam>,
         block_body: Vec<SExpr>,
     },
+    /// `foo(&proc_value)` — block argument forwarding. The
+    /// `block_arg` expression must evaluate to a `Value::Block`
+    /// at runtime; that block is passed to the call as if it
+    /// were a literal `do…end`. Synthesised from
+    /// `BlockArgumentNode { expression: <non-symbol> }`.
+    /// Symbol-to-proc (`&:foo`) takes the regular CallWithBlock
+    /// path with a synthesised one-arg block — see the AST
+    /// translator for the two branches.
+    CallWithBlockArg {
+        receiver: Option<Box<SExpr>>,
+        name: String,
+        args: Vec<SExpr>,
+        block_arg: Box<SExpr>,
+    },
     Yield(Vec<SExpr>),
     /// `foo(*arr)` — single-splat call. The compiler emits an
     /// `Op::ApplyCall` / `Op::ApplyCallNoRecv` that takes one
@@ -647,17 +661,15 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 };
                 return sp(node, Expr::CallWithBlock { receiver, name, args, block_params, block_body });
             }
-            // `&:method` — symbol-to-proc. Synthesize a one-arg
-            // block `{ |__sp_x| __sp_x.method_name }`. The
-            // canonical CRuby idiom drives `arr.map(&:to_s)`,
-            // `arr.sort_by(&:length)`, etc. Block param name is
-            // namespaced to avoid clashing with any user local.
-            //
-            // `&proc_var` (binding an existing Proc) is a separate
-            // form and not yet supported — only `&:sym` here.
+            // `&...` block argument. Two sub-cases:
+            //   - `&:method` — symbol-to-proc. Synthesize a one-
+            //     arg block `{ |__sp_x| __sp_x.method_name }`.
+            //   - `&proc_value` — block-argument forwarding.
+            //     Evaluate the expression to a Value::Block at
+            //     runtime and pass it as the block.
             if let Some(ba) = bnode.as_block_argument_node()
-                && let Some(expr) = ba.expression()
-                    && let Some(sn) = expr.as_symbol_node() {
+                && let Some(expr) = ba.expression() {
+                    if let Some(sn) = expr.as_symbol_node() {
                         let method_name: String = String::from_utf8_lossy(sn.unescaped()).into_owned();
                         let param_name = "__sp_x".to_string();
                         let body_call = sp(node, Expr::Call {
@@ -671,6 +683,16 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                             block_body: vec![body_call],
                         });
                     }
+                    // Fall-through: any other expression becomes
+                    // the block arg via CallWithBlockArg. CRuby
+                    // requires the value to respond to `to_proc` —
+                    // for our subset we only accept Value::Block
+                    // directly (no implicit coercion).
+                    let block_arg = tr(&expr);
+                    return sp(node, Expr::CallWithBlockArg {
+                        receiver, name, args, block_arg: Box::new(block_arg),
+                    });
+                }
         }
         return sp(node, Expr::Call { receiver, name, args });
     }
