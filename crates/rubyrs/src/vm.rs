@@ -399,6 +399,7 @@ impl Vm {
                 "select" | "filter" | "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "map" | "collect" | "fetch" |
+                "sort" | "sort_by" | "min_by" | "max_by" | "group_by" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,
@@ -1446,7 +1447,7 @@ impl Vm {
                         let s = Value::Hash(id).to_inspect(&self.heap, &self.interner);
                         Some(Value::Str(Rc::from(s.as_str())))
                     }
-                    ("to_a", []) => {
+                    ("to_a", []) | ("sort", []) => {
                         // Hash#to_a returns an Array of two-element Arrays.
                         // Each inner [k, v] is freshly heap-allocated; we
                         // need every inner Array kept alive as we
@@ -1455,7 +1456,34 @@ impl Vm {
                         // only live via the Rust-local Vec, not via any
                         // GC root). Failing to pin produces slot-reuse
                         // cycles that explode `to_display`'s recursion.
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        //
+                        // Hash#sort (no block) is just to_a sorted by
+                        // key using <=> — handled below with an
+                        // insertion sort over the pair list. We share
+                        // the build path because both produce an
+                        // Array<[k, v]>.
+                        let mut pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        if name == "sort" {
+                            let n = pairs.len();
+                            for i in 1..n {
+                                let mut j = i;
+                                while j > 0 {
+                                    let ord = {
+                                        let a = pairs[j - 1].0.clone();
+                                        let b = pairs[j].0.clone();
+                                        self.user_cmp(&a, &b)?
+                                    };
+                                    match ord {
+                                        None => return Ok(None),
+                                        Some(std::cmp::Ordering::Greater) => {
+                                            pairs.swap(j - 1, j);
+                                            j -= 1;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            }
+                        }
                         let nid = {
                             let mut g = PinGuard::new(self);
                             g.pin(Value::Hash(id)); // source Hash
@@ -2924,6 +2952,156 @@ impl Vm {
             (Value::Array(id), "any?", []) => Some(self.iter_array_filter(*id, IterMode::Any, block)?),
             (Value::Array(id), "all?", []) => Some(self.iter_array_filter(*id, IterMode::All, block)?),
             (Value::Array(id), "none?", []) => Some(self.iter_array_filter(*id, IterMode::NoneM, block)?),
+
+            // Hash#min_by / #max_by — yield (k, v) to the block,
+            // pick the pair whose block-returned key is the
+            // extremum. Result is the winning [k, v] as a fresh
+            // 2-element Array, matching CRuby. Empty hash → nil.
+            (Value::Hash(id), op @ ("min_by" | "max_by"), []) => {
+                let want_max = op == "max_by";
+                let pairs: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                if pairs.is_empty() { return Ok(Some(Value::Nil)); }
+                let mut best: Option<(Value, Value, Value)> = None;
+                let mut early: Option<Value> = None;
+                {
+                    let mut g = PinGuard::new(self);
+                    g.pin(Value::Hash(*id));
+                    g.pin(Value::Block(block));
+                    let pre_frames = g.vm.frames.len();
+                    for (k, v) in pairs {
+                        g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
+                        g.vm.dispatch_until(pre_frames)?;
+                        if g.vm.method_return.is_some() { break; }
+                        let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                        if g.vm.break_signaled {
+                            g.vm.break_signaled = false;
+                            early = Some(key);
+                            break;
+                        }
+                        best = match best {
+                            None => Some((k, v, key)),
+                            Some((bk, bv, bkey)) => {
+                                let ord = match value_cmp_v(&key, &bkey, &g.vm.interner) {
+                                    Some(o) => o,
+                                    None => return Ok(None),
+                                };
+                                let want_replace = if want_max {
+                                    ord == std::cmp::Ordering::Greater
+                                } else {
+                                    ord == std::cmp::Ordering::Less
+                                };
+                                if want_replace { Some((k, v, key)) }
+                                else { Some((bk, bv, bkey)) }
+                            }
+                        };
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                if let Some((k, v, _)) = best {
+                    self.maybe_gc();
+                    let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
+                    Some(Value::Array(pid))
+                } else {
+                    Some(Value::Nil)
+                }
+            }
+
+            // Hash#sort_by — yield (k, v), use returned key as the
+            // sort key, return an Array of [k, v] pairs in key
+            // order. Stability preserved via insertion sort.
+            (Value::Hash(id), "sort_by", []) => {
+                let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                let mut keyed: Vec<(Value, Value, Value)> = Vec::with_capacity(pairs_in.len());
+                let mut early: Option<Value> = None;
+                {
+                    let mut g = PinGuard::new(self);
+                    g.pin(Value::Hash(*id));
+                    g.pin(Value::Block(block));
+                    let pre_frames = g.vm.frames.len();
+                    for (k, v) in pairs_in {
+                        g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
+                        g.vm.dispatch_until(pre_frames)?;
+                        if g.vm.method_return.is_some() { break; }
+                        let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                        if g.vm.break_signaled {
+                            g.vm.break_signaled = false;
+                            early = Some(key);
+                            break;
+                        }
+                        keyed.push((key, k, v));
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                let n = keyed.len();
+                for i in 1..n {
+                    let mut j = i;
+                    while j > 0 {
+                        let ord = {
+                            let a = keyed[j - 1].0.clone();
+                            let b = keyed[j].0.clone();
+                            self.user_cmp(&a, &b)?
+                        };
+                        match ord {
+                            None => return Ok(None),
+                            Some(std::cmp::Ordering::Greater) => {
+                                keyed.swap(j - 1, j);
+                                j -= 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                self.maybe_gc();
+                let mut out: Vec<Value> = Vec::with_capacity(keyed.len());
+                for (_, k, v) in keyed {
+                    let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
+                    out.push(Value::Array(pid));
+                }
+                let oid = self.heap.alloc(HeapObj::Array(out));
+                Some(Value::Array(oid))
+            }
+
+            // Hash#group_by — bucket pairs by the block's return.
+            // Each bucket is an Array of [k, v] pairs; the result
+            // is a Hash from group-key → Array.
+            (Value::Hash(id), "group_by", []) => {
+                let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                let mut buckets: Vec<(Value, Vec<Value>)> = Vec::new();
+                let mut early: Option<Value> = None;
+                {
+                    let mut g = PinGuard::new(self);
+                    g.pin(Value::Hash(*id));
+                    g.pin(Value::Block(block));
+                    let pre_frames = g.vm.frames.len();
+                    for (k, v) in pairs_in {
+                        g.vm.invoke_block(block, vec![k.clone(), v.clone()])?;
+                        g.vm.dispatch_until(pre_frames)?;
+                        if g.vm.method_return.is_some() { break; }
+                        let group = g.vm.stack.pop().unwrap_or(Value::Nil);
+                        if g.vm.break_signaled {
+                            g.vm.break_signaled = false;
+                            early = Some(group);
+                            break;
+                        }
+                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                        let pair = Value::Array(pid);
+                        let pos = buckets.iter().position(|(gk, _)| gk.ruby_eq(&group, &g.vm.heap));
+                        match pos {
+                            Some(p) => buckets[p].1.push(pair),
+                            None => buckets.push((group, vec![pair])),
+                        }
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                self.maybe_gc();
+                let mut hash_pairs: Vec<(Value, Value)> = Vec::with_capacity(buckets.len());
+                for (gk, vs) in buckets {
+                    let aid = self.heap.alloc(HeapObj::Array(vs));
+                    hash_pairs.push((gk, Value::Array(aid)));
+                }
+                let hid = self.heap.alloc(HeapObj::Hash(hash_pairs));
+                Some(Value::Hash(hid))
+            }
 
             (Value::Hash(id), "select", []) | (Value::Hash(id), "filter", []) => Some(self.iter_hash_filter(*id, IterMode::Select, block)?),
             (Value::Hash(id), "reject", []) => Some(self.iter_hash_filter(*id, IterMode::Reject, block)?),
