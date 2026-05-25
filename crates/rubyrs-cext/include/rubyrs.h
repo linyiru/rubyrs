@@ -170,8 +170,11 @@ void rb_define_singleton_method(VALUE klass,
 typedef uint64_t ID;
 
 /* Intern `name` to an [`ID`]. Idempotent: repeated calls with the
- * same name return the same `ID`. Process-wide stable; survives
- * the per-call cext state being reset. */
+ * same name return the same `ID`. Stable across the per-call cext
+ * state being reset. Backed by a thread-local table inside rubyrs
+ * — effectively process-wide given rubyrs's current single-thread
+ * cext model. See `pub type ID` in rubyrs-cext for the threading
+ * scope rationale. */
 ID rb_intern(const char *name);
 
 /* Dispatch a Ruby method from C. Calls `recv.<id>(argv[..argc])`

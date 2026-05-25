@@ -38,20 +38,30 @@ pub type Value = u64;
 /// CRuby's `ID` type — opaque identifier for an interned name
 /// (method, symbol, class name, etc.). Returned by `rb_intern`;
 /// consumed by `rb_funcall`, `rb_funcallv`, `rb_define_method`'s
-/// future variants, etc. Process-wide stable across per-call
-/// `CExtState` lifecycles — that's why it lives in its own
-/// thread-local table, separate from `CExtState`'s ephemeral
-/// handle table.
+/// future variants, etc. Stable across per-call `CExtState`
+/// lifecycles — that's why it lives in its own intern table,
+/// separate from `CExtState`'s ephemeral handle table.
+///
+/// **Threading scope**: the table is `thread_local!`, not a true
+/// process-wide global. Given rubyrs's current single-threaded
+/// cext execution model (no Ractor parallelism reaches the C
+/// boundary; embedders run one [`crate::Runtime`] per thread), a
+/// thread-local table is effectively process-wide. If a future
+/// level adds true threaded cext dispatch, this becomes a
+/// `OnceLock<Mutex<InternTable>>` — at that point the locking
+/// overhead is justified by the actual sharing requirement, and
+/// not before.
 ///
 /// `0` is reserved as "no ID" / `Qundef`-ish.
 pub type ID = u64;
 
-/// Process-wide intern table for [`ID`]s. C extensions call
-/// `rb_intern("name")` and stash the result in static globals
-/// (`static ID id_foo;`); those IDs must remain valid across every
-/// subsequent C ext call regardless of which per-call `CExtState`
-/// is active. This table is the only piece of cext state that
-/// outlives a single `enter`/`leave` cycle.
+/// Intern table for [`ID`]s. C extensions call `rb_intern("name")`
+/// and stash the result in static globals (`static ID id_foo;`);
+/// those IDs must remain valid across every subsequent C ext call
+/// regardless of which per-call `CExtState` is active. This table
+/// is the only piece of cext state that outlives a single
+/// `enter`/`leave` cycle — see [`ID`]'s threading-scope note for
+/// why "thread-local" is the right shape here.
 struct InternTable {
     /// 0-based; ID is index + 1 so we can reserve 0 as "no such ID".
     names: Vec<String>,
@@ -602,7 +612,7 @@ pub unsafe extern "C" fn rb_define_singleton_method(
     });
 }
 
-// ===== Process-wide intern table for ID =====
+// ===== Intern table for ID (thread-local; see `pub type ID` docs) =====
 
 /// Look up or create the [`ID`] for `name`. CRuby C extensions cache
 /// the returned `ID` in static globals at `Init_` time:
