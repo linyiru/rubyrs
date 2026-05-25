@@ -24,19 +24,36 @@ preloaded environment. Concrete, not theoretical.
 
 ## Methodology
 
-For each scanned codebase, pick the file with the highest
-translatable ratio (per gapscan's `--format json` per-file
-output, restricted to ≥50 nodes so we avoid trivial
-constants-only files). Run it under the rubyrs CLI with a
-generous fuel cap and capture the first failure (if any) plus
-its category.
+For each scanned codebase, pick up to three files at or near
+the top of the translatable ratio (per gapscan's `--format json`
+per-file output, restricted to ≥50 nodes so we avoid trivial
+constants-only files). The variety per codebase is on purpose:
+the first 100%-AST-Supported file might happen to run, the
+second might trip on a real blocker, the third might surface a
+different blocker still — getting a few per codebase exposes
+patterns that a single representative would hide. Run each under
+the rubyrs CLI with a generous fuel cap and capture the first
+failure (if any) plus its category.
 
 ```bash
 cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
-## Results — 2026-05-25, rubyrs at master `6063af8`
+## Results — 2026-05-25, rubyrs at `6063af8`
+
+Target-codebase commits scanned (matching the source-tree commits
+that the gap reports were generated against):
+
+| Codebase | Commit | Date |
+|---|---|---|
+| Jekyll | `202df57` | 2026-04-22 |
+| Liquid | `742ac3d` | 2026-05-20 |
+| Sinatra | `5236d34` | 2026-04-29 |
+| dry-struct | `26eb60f` | 2026-05-04 |
+| Rake | `5cea175` | 2026-05-25 |
+| Bundler (in rubygems) | `5c535b0` | 2026-05-20 |
+| Tilt | `6a0dae1` | 2026-03-14 |
 
 | File | AST % Supported | Result | Category |
 |---|---:|---|---|
@@ -60,7 +77,7 @@ RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 |---:|---|---:|
 | A | Runs clean | 3 |
 | B | Requires a C extension (`require "time"`, `require "pp"`, etc.) | 2 |
-| C | `require` / `require_relative` itself isn't implemented in rubyrs | 1 |
+| C | Ruby-source `require_relative` (and `require` with load-path resolution) isn't implemented in rubyrs. `require "literal_path"` for C extensions *does* work — see Category B for what fails next when the .so isn't there | 1 |
 | D | Hits a still-Missing AST node at execution time (`ConstantWriteNode`) | 3 |
 | E | Default-arg-must-be-literal — documented SUBSET divergence bites | 2 |
 | F | Project-internal helper assumed (delegate_method_as, include of undefined module) | 2 |
@@ -74,12 +91,12 @@ Things gapscan's AST view *already* knew (now confirmed in
 practice):
 
 - **`ConstantWriteNode` is real-world blocking, not just a count
-  on the chart** — it crashed 3 of the 11 highest-translatable
-  files we tried, including the literal first line of
-  `bundler/version.rb`. Implementing top-level `FOO = ...` would
-  immediately unblock files that are 98%+ AST-supported, not just
-  shift a number on a chart. **This is the cheapest "ship more
-  files that actually run" move available.**
+  on the chart** — it crashed 3 of the 13 try-run files,
+  including the literal first line of `bundler/version.rb`.
+  Implementing top-level `FOO = ...` would immediately unblock
+  files that are 98%+ AST-supported, not just shift a number on
+  a chart. **This is the cheapest "ship more files that
+  actually run" move available.**
 - **The block / kwarg parameter family is the next concrete pain
   point** — same story: 98%+ AST-supported files crash on what
   the histograms have been calling out for weeks.
@@ -87,19 +104,19 @@ practice):
 Things gapscan's AST view *couldn't* see (this is the value of
 running anything):
 
-- **C-extension `require` is a hard wall** (B, 2/11). `require
+- **C-extension `require` is a hard wall** (B, 2/13). `require
   "time"` or `require "pp"` immediately fails — rubyrs doesn't
   have a require chain to traverse, let alone the C extensions
   to find. This is documented as out-of-scope in SUBSET.md, but
   the practical implication is sharper now: any file with a
   C-ext require at the top crashes immediately, regardless of
   what comes after.
-- **`require_relative` itself isn't implemented** (C, 1/11). Even
+- **`require_relative` itself isn't implemented** (C, 1/13). Even
   pure-Ruby internal requires fail. This means almost any file
   that's part of a multi-file project (i.e. most real Ruby) needs
   manual cat-ing or pre-loading via the embedding API.
 - **Project-internal helpers are an invisible blocker** (F,
-  2/11). `Jekyll::Drops::Drop.delegate_method_as` and
+  2/13). `Jekyll::Drops::Drop.delegate_method_as` and
   `Bundler::MatchRemoteMetadata`'s include of an undefined
   constant are both project-private extensions that the host
   framework defines elsewhere — they look fine in the AST, but
@@ -108,12 +125,16 @@ running anything):
   for pure Ruby; it'll be solved automatically once `require_relative`
   works and the dependent files get loaded.
 - **Host-DSL scripts need the host wrapper** (G, 1/1). Brewfile
-  at 100% AST-supported still crashes on `tap` because that's
-  not a Ruby builtin — it's host-side. This is by design
-  (`Runtime::register_fn` is the embedding API), but it's worth
-  spelling out that "100% Supported on the chart" doesn't mean
-  "you can run it standalone with the CLI".
-- **Default args must be literals** (E, 2/11). The divergence
+  at 100% AST-supported still crashes on `tap`. The Brewfile
+  `tap` is a Homebrew DSL keyword (a bareword call meaning "add
+  this Homebrew tap"), not Ruby's `Object#tap` method — its
+  vocabulary lives in `examples/brewfile.rs` and is wired in via
+  `Runtime::register_fn`. The CLI doesn't load that wrapper, so
+  `tap` resolves against nothing and trips a NoMethodError. This
+  is by design — `Runtime::register_fn` is the embedding API —
+  but it's worth spelling out that "100% Supported on the chart"
+  doesn't mean "you can run it standalone with the CLI".
+- **Default args must be literals** (E, 2/13). The divergence
   documented in SUBSET.md (default values restricted to
   `Int/Str/Sym/true/false/nil`) hits real Ruby in the wild — any
   `def initialize(level: Logger::INFO)` rejects compile-time.
@@ -131,7 +152,7 @@ matches the original three-phase plan from session start:
 2. **Implement a minimal `require_relative`** that resolves to
    the host's file-system (Embedding API extension), gated by
    a `Runtime::Config` flag for hosts that want to forbid I/O.
-   This converts the "1/11 standalone-runnable" rate into
+   This converts the "3/13 standalone-runnable" rate into
    something much higher.
 3. **Standardise a `delegate_method_as`-equivalent** as a
    built-in macro (similar to how `attr_*` are already built-in
