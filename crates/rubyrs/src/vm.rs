@@ -168,6 +168,10 @@ pub(crate) struct Vm {
     /// with the current visibility, and mutated by the no-arg
     /// `private` / `protected` / `public` calls.
     pub(crate) class_visibility_stack: Vec<Visibility>,
+    /// Compiled-regex cache. Keyed by the interned source-string
+    /// SymId; first `LoadRegex` for a given pattern compiles and
+    /// caches, subsequent loads return the same Rc.
+    pub(crate) regex_cache: HashMap<SymId, Rc<regex::Regex>>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -248,6 +252,7 @@ impl Vm {
             cext_class_methods: HashMap::new(),
             class_stack: vec![],
             class_visibility_stack: vec![],
+            regex_cache: HashMap::new(),
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),
@@ -424,6 +429,7 @@ impl Vm {
                 self.lookup_method_uncached(&cls, name_id).is_some()
             }
             Value::Block(_) => matches!(name, "call"),
+            Value::Regex(_) => matches!(name, "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"),
         }
     }
 
@@ -448,6 +454,7 @@ impl Vm {
             Value::Nil => "NilClass",
             Value::Block(_) => "Proc",
             Value::Class(_) => "Class",
+            Value::Regex(_) => "Regexp",
             Value::Object(id) => return Value::Class(self.heap.instance(*id).class.clone()),
         };
         let sym = self.interner.intern(name);
@@ -1066,9 +1073,31 @@ impl Vm {
                     }
                     hit
                 }
+                Value::Regex(re) => match arg {
+                    Value::Str(s) => re.is_match(&s.borrow()),
+                    _ => false,
+                },
                 _ => recv.ruby_eq(arg, &self.heap),
             };
             self.stack.push(Value::Bool(result));
+            return Ok(());
+        }
+        // `=~` — Regex/String matching. Returns the byte offset of
+        // the first match, or nil. CRuby additionally sets `$~`
+        // / `$1` etc. capture variables; we don't model `$~`, so
+        // captures are accessed via `#match` only.
+        if &*name == "=~" && args.len() == 1 {
+            let result = match (&recv, &args[0]) {
+                (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
+                    let bound = s.borrow();
+                    match re.find(&bound) {
+                        Some(m) => Value::Int(m.start() as i64),
+                        None => Value::Nil,
+                    }
+                }
+                _ => Value::Nil,
+            };
+            self.stack.push(result);
             return Ok(());
         }
         // `Object#<=>` fallback for `Value::Object` receivers. The
@@ -3650,6 +3679,22 @@ impl Vm {
                 let s = self.interner.resolve(id).clone();
                 self.stack.push(Value::new_str(s.to_string()));
             }
+            Op::LoadRegex(id) => {
+                let regex_rc = if let Some(r) = self.regex_cache.get(&id) {
+                    r.clone()
+                } else {
+                    let src = self.interner.resolve(id).clone();
+                    let compiled = regex::Regex::new(&src).map_err(|e| {
+                        self.trap(RubyError::SyntaxError {
+                            msg: format!("invalid regex /{}/: {}", src, e),
+                        })
+                    })?;
+                    let rc = Rc::new(compiled);
+                    self.regex_cache.insert(id, rc.clone());
+                    rc
+                };
+                self.stack.push(Value::Regex(regex_rc));
+            }
             Op::LoadSymbol(id) => {
                 self.stack.push(Value::Sym(id));
             }
@@ -5631,6 +5676,19 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // with the rest of our regex-free subset. Calls with a
         // non-String argument fall through to NoMethodError.
         (Value::Str(a), "match?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().contains(&*b.borrow()))),
+        // String#match? with a Regex — proper regex match. Returns
+        // bool without populating any match-data side state.
+        (Value::Str(a), "match?", [Value::Regex(re)]) => {
+            Some(Value::Bool(re.is_match(&a.borrow())))
+        }
+        // Regex#match? mirror — same semantics either side.
+        (Value::Regex(re), "match?", [Value::Str(s)]) => {
+            Some(Value::Bool(re.is_match(&s.borrow())))
+        }
+        // Regex#source — the raw pattern string.
+        (Value::Regex(re), "source", []) => Some(Value::new_str(re.as_str().to_string())),
+        (Value::Regex(re), "to_s", []) => Some(Value::new_str(format!("(?-mix:{})", re.as_str()))),
+        (Value::Regex(re), "inspect", []) => Some(Value::new_str(format!("/{}/", re.as_str()))),
         // `index(substr)` / `rindex(substr)` — return the byte
         // offset where the substring first / last appears, or
         // nil if it's absent. CRuby reports a *character* index

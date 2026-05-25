@@ -87,7 +87,7 @@ fn classify_returns_expected_for_known_classes() {
     assert_eq!(classify("ArgumentsNode"), Classification::RidesAlong);
     assert_eq!(classify("RescueNode"), Classification::RidesAlong);
     assert_eq!(classify("LambdaNode"), Classification::Missing);
-    assert_eq!(classify("RegularExpressionNode"), Classification::Missing);
+    assert_eq!(classify("ConstantPathWriteNode"), Classification::Missing);
     // Sanity: a name that is not a Prism node at all also lands in
     // Missing (caller's job to validate using `unknown_classes_in`).
     assert_eq!(classify("NotARealNode"), Classification::Missing);
@@ -123,17 +123,18 @@ fn fixture_exercises_exact_missing_class_set() {
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    // Exact set, exact counts. With Module + extend now Supported
-    // on master, the Missing exemplars shifted: LambdaNode (`->`
-    // lambdas) and RegularExpressionNode (bare `/.../`). Both have
-    // no Missing children — clean tripwires (unlike `case/when`
-    // which used to pull WhenNode along with it).
+    // Exact set, exact counts. With Module + extend + Regex now
+    // Supported on master, the Missing exemplars shifted again:
+    // LambdaNode (`->` lambdas) and ConstantPathWriteNode
+    // (`Foo::Bar = ...`). Both have no Missing children — clean
+    // tripwires (unlike `case/when` which used to pull WhenNode
+    // along with it).
     let expected: std::collections::BTreeSet<&str> =
-        ["LambdaNode", "ConstantWriteNode", "RegularExpressionNode"]
+        ["LambdaNode", "ConstantWriteNode", "ConstantPathWriteNode"]
             .into_iter()
             .collect();
     assert_eq!(names, expected, "Missing-class set drifted");
-    for cls in ["LambdaNode", "ConstantWriteNode", "RegularExpressionNode"] {
+    for cls in ["LambdaNode", "ConstantWriteNode", "ConstantPathWriteNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
@@ -164,7 +165,7 @@ fn json_roundtrip_preserves_essentials() {
 #[test]
 fn diff_detects_closed_and_new_gaps() {
     // Synthetic before/after: before has LambdaNode missing, after
-    // does not — closed gap. After introduces RegularExpressionNode
+    // does not — closed gap. After introduces ConstantPathWriteNode
     // — new gap.
     let mut before = Report::default();
     before.total_nodes = 10;
@@ -193,7 +194,7 @@ fn diff_detects_closed_and_new_gaps() {
         },
     );
     after.histogram.insert(
-        "RegularExpressionNode".to_string(),
+        "ConstantPathWriteNode".to_string(),
         rubyrs_gapscan::NodeStat {
             count: 2,
             ..Default::default()
@@ -204,7 +205,7 @@ fn diff_detects_closed_and_new_gaps() {
     assert_eq!(d.supported_delta, 5);
     assert_eq!(d.missing_delta, -3);
     assert_eq!(d.closed_missing_classes, vec![("LambdaNode".to_string(), 5)]);
-    assert_eq!(d.new_missing_classes, vec![("RegularExpressionNode".to_string(), 2)]);
+    assert_eq!(d.new_missing_classes, vec![("ConstantPathWriteNode".to_string(), 2)]);
 }
 
 #[test]

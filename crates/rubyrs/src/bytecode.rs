@@ -15,6 +15,12 @@ pub(crate) enum Op {
     /// (Int + Int) doesn't fire on Float receivers.
     LoadConstFloat(f64),
     LoadConstStr(SymId),
+    /// `/pattern/` literal — looks up an Rc<Regex> in the Vm's
+    /// `regex_cache`, compiling it from the interned source the
+    /// first time. A compile-time bad pattern surfaces as a
+    /// SyntaxError trap at run-time (not at parse-time, since
+    /// we lazy-compile).
+    LoadRegex(SymId),
     LoadSymbol(SymId),
     LoadNil,
     LoadTrue,

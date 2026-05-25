@@ -202,6 +202,7 @@ impl Value {
             Value::Hash(_) => "Hash",
             Value::Range(_) => "Range",
             Value::Block(_) => "Proc", // block lives in heap now (P2-13); type name unchanged
+            Value::Regex(_) => "Regexp",
         }
     }
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
@@ -243,6 +244,7 @@ impl Value {
                 format!("{}{}{}", r.begin.to_display(heap, interner), sep, r.end.to_display(heap, interner))
             }
             Value::Block(_) => "#<Proc>".into(),
+            Value::Regex(r) => format!("(?-mix:{})", r.as_str()),
         }
     }
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {

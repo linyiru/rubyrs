@@ -54,6 +54,13 @@ pub enum Value {
     /// callback DSLs). Now the BlockHandle lives in a heap slot
     /// and is mark-swept like Array/Hash/Range.
     Block(ObjId),
+    /// `/pattern/` literal. The compiled `regex::Regex` is shared
+    /// via Rc — Regex is immutable so there's no aliasing risk.
+    /// Rust's regex crate uses a different dialect from Onigmo
+    /// (CRuby's engine); the gaps (possessive quantifiers,
+    /// `\k<name>` backrefs, look-around in some forms) are
+    /// documented in SUBSET.md.
+    Regex(std::rc::Rc<regex::Regex>),
 }
 
 #[derive(Debug)]

@@ -5,9 +5,9 @@
 
 class Foo                        # ClassNode (supported)
   CONST = 42                     # ConstantWriteNode (× 1)
+  Foo::Other = 1                 # ConstantPathWriteNode (× 1)
   def bar
     fn = ->(x) { x + 1 }         # LambdaNode (× 1)
-    pat = /\A\d+\z/              # RegularExpressionNode (× 1)
-    [fn, pat]
+    [fn]
   end
 end

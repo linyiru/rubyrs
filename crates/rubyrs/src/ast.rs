@@ -45,6 +45,10 @@ pub(crate) enum Expr {
     IntLit(i64),
     FloatLit(f64),
     StrLit(String),
+    /// `/pattern/` literal — Ruby regular expression. Source is
+    /// kept as a String for interning; compilation happens at the
+    /// VM layer (with caching).
+    RegexLit(String),
     SymbolLit(String),
     InterpolatedStr(Vec<SExpr>),
     BoolLit(bool),
@@ -233,6 +237,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_symbol_node() {
         return sp(node, Expr::SymbolLit(String::from_utf8_lossy(n.unescaped()).into_owned()));
+    }
+    if let Some(n) = node.as_regular_expression_node() {
+        return sp(node, Expr::RegexLit(String::from_utf8_lossy(n.unescaped()).into_owned()));
     }
     if let Some(n) = node.as_interpolated_string_node() {
         let parts: Vec<SExpr> = n.parts().iter().map(|p| {

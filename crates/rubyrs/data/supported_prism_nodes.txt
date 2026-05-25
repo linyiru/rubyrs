@@ -54,6 +54,7 @@ OrNode
 ParenthesesNode
 ProgramNode
 RangeNode
+RegularExpressionNode
 RequiredParameterNode
 RescueModifierNode
 ReturnNode

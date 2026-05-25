@@ -359,11 +359,11 @@ fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     let mut rt = Runtime::new();
     let err = rt.eval(
         r#"
-        # Regex literal — still unsupported, used here as the
+        # Lambda literal — still unsupported, used here as the
         # canary for "AST translation cannot handle this node".
-        /\Afoo\z/ =~ "foo"
+        ->(x) { x + 1 }
         "#,
-        "regex.rb",
+        "lambda.rb",
     ).unwrap_err();
     assert!(
         matches!(err.err, RubyError::SyntaxError { .. }),

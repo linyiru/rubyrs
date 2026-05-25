@@ -10,6 +10,12 @@ rust-version.workspace = true
 
 [dependencies]
 ruby-prism.workspace = true
+# `regex` powers `/pattern/` literal support. Ruby uses Onigmo
+# (a different dialect); Rust's regex crate covers most patterns
+# idiomatic Ruby uses. Divergences (possessive quantifiers,
+# named backrefs `\k<name>`, Onigmo-specific shorthand) are
+# documented in SUBSET.md.
+regex = "1"
 # `rubyrs-cext` is pure Rust + std; no target restriction. The cext
 # symbols stay in the binary on wasi too (the `#[used]` exports in
 # `src/lib.rs` are valid on every target) — they're just unreachable
