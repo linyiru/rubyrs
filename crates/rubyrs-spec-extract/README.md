@@ -5,13 +5,14 @@ files into the `assert_eq` / `assert_raises` shape that rubyrs's
 micro-runner consumes (`crates/rubyrs/spec/`).
 
 This is the v0.1 implementation of Layer 4 of the testing
-strategy ([`docs/TESTING.md`](../../docs/TESTING.md)). v0.1
-recognises a single pattern — `expr.should == val` — which is
+strategy
+([`docs/TESTING.md`](https://github.com/linyiru/rubyrs/blob/master/docs/TESTING.md)).
+v0.1 recognises a single pattern — `expr.should == val` — which is
 the bulk of the equality-style `it` blocks in upstream
 `core/string`, `core/method`, and similar simple files. The
 hand-translated specs in
-[`crates/rubyrs/spec/ruby/`](../rubyrs/spec/ruby/) (from PRs
-#48 / #52 / #55) are the reference shape — running the
+[`crates/rubyrs/spec/ruby/`](https://github.com/linyiru/rubyrs/tree/master/crates/rubyrs/spec/ruby)
+(from PRs #48 / #52 / #55) are the reference shape — running the
 extractor on the same upstream sources should produce
 similar output, with the leftover patterns (negation,
 predicate matchers, `raise` matchers) showing up unchanged
