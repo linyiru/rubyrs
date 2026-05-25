@@ -1133,3 +1133,124 @@ fn define_method_validates_arity() {
     "#, "t.rb").unwrap_err();
     assert!(err.err.is("ArgumentError"), "expected ArgumentError, got {:?}", err.err);
 }
+
+#[test]
+fn gemfile_dsl_real_hosting_end_to_end() {
+    // Locks in the `examples/gemfile/` demo at integration-test
+    // shape: prelude + unmodified Gemfile + the same Rust host
+    // surface, all driven through the public Runtime API.
+    // Asserts the gem-count + group bucketing the demo produces
+    // so any regression in (kwargs / splat receive / group block
+    // yielding / `if RUBY_VERSION` conditional / `**opts` Hash
+    // unpacking in the prelude) shows up here, not just when
+    // someone happens to re-run the example binary.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    // Mirror the example's GemfileState shape — small enough to
+    // dup here and keeps the test self-contained.
+    #[derive(Default)]
+    struct State {
+        source: Option<String>,
+        ruby_version: Option<String>,
+        gems: Vec<(String, Vec<String>, Vec<String>)>, // name, reqs, groups
+        group_stack: Vec<String>,
+    }
+    let state = Rc::new(RefCell::new(State::default()));
+    let mut rt = Runtime::new();
+
+    fn s(v: &Value) -> String {
+        if let Value::Str(rs) = v { rs.borrow().clone() } else { String::new() }
+    }
+
+    {
+        let st = state.clone();
+        rt.register_fn("__gemfile_source", move |args| {
+            if let [u] = args { st.borrow_mut().source = Some(s(u)); }
+            Ok(Value::Nil)
+        });
+    }
+    {
+        let st = state.clone();
+        rt.register_fn("__gemfile_ruby", move |args| {
+            if let [v] = args { st.borrow_mut().ruby_version = Some(s(v)); }
+            Ok(Value::Nil)
+        });
+    }
+    {
+        let st = state.clone();
+        rt.register_fn("__gemfile_gem", move |args| {
+            if let [name, reqs, _req_kw, _plat_kw] = args {
+                let mut sm = st.borrow_mut();
+                let groups: Vec<String> = sm.group_stack.last()
+                    .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+                    .unwrap_or_default();
+                let req_str = s(reqs);
+                let reqs_vec = if req_str.is_empty() {
+                    vec![]
+                } else {
+                    req_str.split('|').map(String::from).collect()
+                };
+                sm.gems.push((s(name), reqs_vec, groups));
+            }
+            Ok(Value::Nil)
+        });
+    }
+    {
+        let st = state.clone();
+        rt.register_fn("__gemfile_push_groups", move |args| {
+            if let [v] = args { st.borrow_mut().group_stack.push(s(v)); }
+            Ok(Value::Nil)
+        });
+    }
+    {
+        let st = state.clone();
+        rt.register_fn("__gemfile_pop_groups", move |_args| {
+            st.borrow_mut().group_stack.pop();
+            Ok(Value::Nil)
+        });
+    }
+    // The other shims (platforms / git / path) aren't exercised
+    // by the test Gemfile — register no-ops so the prelude's
+    // `def` doesn't crash if a future Gemfile edit adds them.
+    for name in ["__gemfile_push_platforms", "__gemfile_pop_platforms",
+                 "__gemfile_push_git", "__gemfile_pop_git",
+                 "__gemfile_push_path", "__gemfile_pop_path"] {
+        rt.register_fn(name, |_args| Ok(Value::Nil));
+    }
+
+    // Read the actual prelude + Gemfile from the repo. That's
+    // the point: the demo and the test exercise the same files.
+    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/gemfile");
+    let prelude_src = std::fs::read_to_string(base.join("dsl_prelude.rb"))
+        .expect("dsl_prelude.rb missing — examples/gemfile/ removed?");
+    let gemfile_src = std::fs::read_to_string(base.join("Gemfile"))
+        .expect("Gemfile missing — examples/gemfile/ removed?");
+
+    rt.eval(&prelude_src, "dsl_prelude.rb").expect("prelude eval");
+    rt.eval(&gemfile_src, "Gemfile").expect("Gemfile eval");
+
+    let st = state.borrow();
+    assert_eq!(st.source.as_deref(), Some("https://rubygems.org"));
+    assert_eq!(st.ruby_version.as_deref(), Some("3.4.0"));
+    assert_eq!(st.gems.len(), 15,
+        "expected 15 gems from examples/gemfile/Gemfile, got {}",
+        st.gems.len());
+
+    // Spot-check the splat-receive case: rack should have 2
+    // version constraints, not 1.
+    let rack = st.gems.iter().find(|(n, _, _)| n == "rack").expect("rack missing");
+    assert_eq!(rack.1, vec![">= 3.0", "< 4.0"]);
+
+    // Spot-check the multi-group block: rspec-rails should be
+    // tagged with BOTH `:development` and `:test`.
+    let rspec = st.gems.iter().find(|(n, _, _)| n == "rspec-rails").expect("rspec missing");
+    assert_eq!(rspec.2, vec!["development", "test"]);
+
+    // Spot-check the conditional: `csv` lives behind
+    // `if RUBY_VERSION >= "3.4.0"`. With prelude setting
+    // RUBY_VERSION = "3.4.0" it should be present.
+    assert!(st.gems.iter().any(|(n, _, _)| n == "csv"),
+        "csv should be present when RUBY_VERSION >= 3.4.0");
+}
