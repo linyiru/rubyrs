@@ -79,8 +79,14 @@ CI prints one of:
 - `WALL-OVER` — wall-time exceeded `max_wall_ms` (and the wall gate
   wasn't disabled)
 - `RSS-OVER+WALL` — both exceeded
-- `SETUP` — measurement failed (workload crashed, `/usr/bin/time`
-  missing or unparseable). Routes to exit 2, not exit 1.
+- `SETUP` — per-workload measurement failed (workload exited
+  non-zero, `/usr/bin/time` output didn't parse, malformed
+  `baselines.tsv` row, or workload path missing). Routes to
+  exit 2, not exit 1. Note: a missing `/usr/bin/time` binary
+  itself is a *global* setup error caught in `perf/check.sh`'s
+  pre-flight before any per-workload row prints — it exits
+  with the same code (2) but you'll see only the binary error
+  message, no `SETUP` row.
 
 ## Calibration history
 
