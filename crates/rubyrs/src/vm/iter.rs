@@ -510,33 +510,76 @@ impl Vm {
                 Some(early.unwrap_or(Value::Int(*n)))
             }
             (Value::Range(id), "each", []) => {
-                let (bi, ei, excl) = {
+                // Two endpoint shapes drive iteration: Int+Int (the
+                // common case, integer counting) and Str+Str (the
+                // alphabetic `('a'..'z').each` case, driven by
+                // String#succ). Other shapes fall through to
+                // NoMethodError.
+                let (b, e, excl) = {
                     let r = self.heap.range(*id);
-                    match (&r.begin, &r.end) {
-                        (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
-                        _ => return Ok(None),
-                    }
+                    (r.begin.clone(), r.end.clone(), r.exclusive)
                 };
-                let mut g = PinGuard::new(self);
-                g.pin(Value::Range(*id));
-                g.pin(Value::Block(block));
-                let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                let end_inc = if excl { ei - 1 } else { ei };
-                let mut i = bi;
-                while i <= end_inc {
-                    g.vm.invoke_block(block,vec![Value::Int(i)])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
+                match (&b, &e) {
+                    (Value::Int(a), Value::Int(c)) => {
+                        let bi = *a; let ei = *c;
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Range(*id));
+                        g.pin(Value::Block(block));
+                        let pre_frames = g.vm.frames.len();
+                        let mut early = None;
+                        let end_inc = if excl { ei - 1 } else { ei };
+                        let mut i = bi;
+                        while i <= end_inc {
+                            g.vm.invoke_block(block,vec![Value::Int(i)])?;
+                            g.vm.dispatch_until(pre_frames)?;
+                            if g.vm.method_return.is_some() { break; }
+                            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                            if g.vm.break_signaled {
+                                g.vm.break_signaled = false;
+                                early = Some(r);
+                                break;
+                            }
+                            i += 1;
+                        }
+                        Some(early.unwrap_or(Value::Range(*id)))
                     }
-                    i += 1;
+                    (Value::Str(_), Value::Str(_)) => {
+                        // Walk via String#succ, comparing
+                        // lexicographically — matches CRuby's
+                        // ('a'..'z').each iteration model.
+                        let start = if let Value::Str(s) = &b { s.borrow().clone() } else { unreachable!() };
+                        let stop = if let Value::Str(s) = &e { s.borrow().clone() } else { unreachable!() };
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Range(*id));
+                        g.pin(Value::Block(block));
+                        let pre_frames = g.vm.frames.len();
+                        let mut early = None;
+                        let mut cur = start;
+                        loop {
+                            // Inclusive: stop when cur > stop. Exclusive: stop when cur >= stop.
+                            let done = if excl { cur >= stop } else { cur > stop };
+                            if done { break; }
+                            g.vm.invoke_block(block, vec![Value::new_str(cur.clone())])?;
+                            g.vm.dispatch_until(pre_frames)?;
+                            if g.vm.method_return.is_some() { break; }
+                            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                            if g.vm.break_signaled {
+                                g.vm.break_signaled = false;
+                                early = Some(r);
+                                break;
+                            }
+                            // succ; if the result is longer than `stop`, no further
+                            // String less-than-or-equal can be true with our lex
+                            // ordering — bail to avoid an unbounded loop for cases
+                            // like ('a'..'9') where succ rolls into a longer string.
+                            let next = super::string::str_succ(&cur);
+                            if next.len() > stop.len() { break; }
+                            cur = next;
+                        }
+                        Some(early.unwrap_or(Value::Range(*id)))
+                    }
+                    _ => return Ok(None),
                 }
-                Some(early.unwrap_or(Value::Range(*id)))
             }
             (Value::Array(id), "each_with_index", []) => {
                 let mut g = PinGuard::new(self);

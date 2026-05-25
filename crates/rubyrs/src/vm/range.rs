@@ -28,6 +28,55 @@ impl Vm {
                 let begin_int = if let Value::Int(a) = &b { Some(*a) } else { None };
                 let end_int = if let Value::Int(c) = &e { Some(*c) } else { None };
                 if begin_int.is_none() || end_int.is_none() {
+                    // String-endpoint Range support: `('a'..'z').to_a`,
+                    // `.size`, `.include?("c")`, etc. driven by
+                    // String#succ. Iteration bounded by `len(end)`
+                    // to avoid running away when succ produces a
+                    // longer string than the upper endpoint.
+                    if let (Value::Str(sb), Value::Str(se)) = (&b, &e) {
+                        let start = sb.borrow().clone();
+                        let stop = se.borrow().clone();
+                        match (name, args) {
+                            ("to_a", []) | ("sort", []) => {
+                                let mut out: Vec<Value> = Vec::new();
+                                let mut cur = start;
+                                loop {
+                                    let done = if excl { cur >= stop } else { cur > stop };
+                                    if done { break; }
+                                    out.push(Value::new_str(cur.clone()));
+                                    let next = super::string::str_succ(&cur);
+                                    if next.len() > stop.len() { break; }
+                                    cur = next;
+                                }
+                                self.maybe_gc();
+                                let nid = self.heap.alloc(HeapObj::Array(out));
+                                return Ok(Some(Value::Array(nid)));
+                            }
+                            // CRuby Range#size is nil for non-numeric
+                            // endpoints; use `count` for an actual count.
+                            ("size", []) => return Ok(Some(Value::Nil)),
+                            ("count", []) => {
+                                let mut n: i64 = 0;
+                                let mut cur = start;
+                                loop {
+                                    let done = if excl { cur >= stop } else { cur > stop };
+                                    if done { break; }
+                                    n += 1;
+                                    let next = super::string::str_succ(&cur);
+                                    if next.len() > stop.len() { break; }
+                                    cur = next;
+                                }
+                                return Ok(Some(Value::Int(n)));
+                            }
+                            ("include?", [Value::Str(needle)]) | ("cover?", [Value::Str(needle)]) => {
+                                let n = needle.borrow().clone();
+                                let lo_ok = n >= start;
+                                let hi_ok = if excl { n < stop } else { n <= stop };
+                                return Ok(Some(Value::Bool(lo_ok && hi_ok)));
+                            }
+                            _ => {}
+                        }
+                    }
                     match (name, args) {
                         ("begin", []) | ("first", []) | ("min", []) => return Ok(Some(b.clone())),
                         ("end", []) | ("last", []) | ("max", []) => return Ok(Some(e.clone())),

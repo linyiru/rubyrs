@@ -53,6 +53,16 @@ pub(crate) fn string_call(
         (Value::Str(a), "upcase", []) => Some(Value::new_str(a.borrow().to_uppercase())),
         (Value::Str(a), "downcase", []) => Some(Value::new_str(a.borrow().to_lowercase())),
         (Value::Str(a), "reverse", []) => Some(Value::new_str(a.borrow().chars().rev().collect::<String>())),
+        // `String#succ` / `#next` — Ruby's "alphanumeric successor".
+        // We support the common single-letter case (`'a'.succ == 'b'`,
+        // `'Z'.succ == 'AA'`) plus the general "rightmost alnum
+        // rolls over with carry" rule via `str_succ`. The pure-
+        // digit / non-alnum and bracketed-string edge cases are
+        // documented gaps; CRuby diff fixtures pin the supported
+        // shape.
+        (Value::Str(a), "succ", []) | (Value::Str(a), "next", []) => {
+            Some(Value::new_str(str_succ(&a.borrow())))
+        }
         (Value::Str(a), "strip", []) => Some(Value::new_str(a.borrow().trim().to_string())),
         (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.borrow().trim_start().to_string())),
         (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.borrow().trim_end().to_string())),
@@ -682,3 +692,63 @@ impl Vm {
         })
     }
 }
+
+/// Ruby's `String#succ` / `#next` — the "alphanumeric successor".
+/// Walks right-to-left looking for the first alnum char, increments
+/// it; on rollover ('z'→'a', 'Z'→'A', '9'→'0') carries into the
+/// next char left. If the leftmost alnum rolls over, a new char of
+/// the same class is prepended ('z' → 'aa', '9' → '10', 'Az' → 'Ba'
+/// — wait actually 'Az' → 'Ba'? Yes: carry pushes 'A'→'B').
+///
+/// Used both directly (`String#succ` primitive) and by Range#each
+/// over String endpoints for the canonical `('a'..'z').to_a`
+/// iteration. CRuby's full spec covers a few more edge cases
+/// (bracketed-string forms, all-non-alnum) which we don't reach
+/// in the subset; those return the input unchanged.
+pub(crate) fn str_succ(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = chars.clone();
+    let mut carry_kind: Option<char> = None; // 'a' / 'A' / '0' if we ran off the front
+
+    let mut i = out.len();
+    loop {
+        if i == 0 {
+            // Walked past the leftmost char with the carry still pending —
+            // prepend a fresh char of the same class.
+            if let Some(k) = carry_kind {
+                out.insert(0, k);
+            }
+            return out.into_iter().collect();
+        }
+        i -= 1;
+        let c = out[i];
+        match c {
+            'a'..='y' | 'A'..='Y' | '0'..='8' => {
+                out[i] = (c as u8 + 1) as char;
+                return out.into_iter().collect();
+            }
+            'z' => { out[i] = 'a'; carry_kind = Some('a'); /* continue carry */ }
+            'Z' => { out[i] = 'A'; carry_kind = Some('A'); }
+            '9' => { out[i] = '0'; carry_kind = Some('1'); }
+            _ => {
+                // Non-alnum: no increment here; if we were in a carry,
+                // CRuby pushes a fresh char of the carry class in front
+                // of the current position. We just continue scanning
+                // — eventually we run off the front and insert. For
+                // pure-non-alnum inputs this returns the input unchanged,
+                // matching CRuby for the common subset.
+                if carry_kind.is_some() { continue; }
+                // No alnum found yet — just bump this char's byte.
+                // CRuby's behaviour here is "use the rightmost char's
+                // succ", which for non-alnum bytes is byte+1. Good
+                // enough for the niche.
+                out[i] = (c as u32 + 1) as u8 as char;
+                return out.into_iter().collect();
+            }
+        }
+    }
+}
+
