@@ -18,8 +18,8 @@ fn print_help() {
     println!("    rubund [--version | --help]");
     println!();
     println!("This binary is a placeholder. It currently understands:");
-    println!("    --version    Print version and exit");
-    println!("    --help       Print this help and exit");
+    println!("    -V, --version    Print version and exit");
+    println!("    -h, --help       Print this help and exit");
     println!();
     println!("None of the actual Bundler commands (install, update, exec, lock)");
     println!("are implemented yet. The real value today is the library API —");

@@ -4,12 +4,19 @@
 > Rust implementation of [Bundler](https://bundler.io/).**
 
 Today rubund ships a real, tested `Gemfile.lock` parser as a library
-crate, plus a few runnable examples (single-gem installer, 16-worker
-parallel installer, C-extension caching). The CLI binary is
-intentionally a placeholder — none of the user-facing Bundler
-commands (`install`, `update`, `exec`, `lock`, `check`) are
+crate, plus two runnable Cargo examples (`lockfile_parser` for
+timing/pretty-print, `c_ext_cache` for C-extension caching). The CLI
+binary is intentionally a placeholder — none of the user-facing
+Bundler commands (`install`, `update`, `exec`, `lock`, `check`) are
 implemented yet. `rubund --help` is currently the most useful thing
 it does.
+
+Two further proof-of-concept installers (`real_install`,
+`manekineko_install`) bridge into an embedded Ruby interpreter
+(`rubyrs`) to evaluate real Gemfiles end-to-end. They live in
+[`examples-rubyrs-deferred/`](examples-rubyrs-deferred/) for this
+release because their dep (`rubyrs`) is not yet on crates.io; they
+return as first-class Cargo examples once that dep ships.
 
 The library half is what to use today. The CLI half is what's
 under construction.
@@ -21,7 +28,7 @@ under construction.
 | What | Why it matters |
 | :--- | :--- |
 | **Zero-copy lockfile parser** | Parses `Gemfile.lock` by borrowing directly into the input buffer — zero heap allocations for string tokens. A 1,379-line production lockfile is parsed in **~147 µs**. |
-| **Bounded parallel installer (example)** | The `manekineko_install` example drives a 16-worker thread pool over `std::sync::mpsc` to saturate network I/O without tripping macOS file-descriptor limits. Not yet a CLI command. |
+| **Bounded parallel installer (PoC)** | The deferred [`manekineko_install`](examples-rubyrs-deferred/manekineko_install.rs) proof-of-concept drives a 16-worker thread pool over `std::sync::mpsc` to saturate network I/O without tripping macOS file-descriptor limits. Lives in `examples-rubyrs-deferred/` until `rubyrs` ships; not yet a CLI command. |
 | **Single static binary** | No Ruby runtime required at the target machine. Ship one binary. |
 
 ---
@@ -38,8 +45,11 @@ Measured against the real-world **manekineko** project (196 gems, 1,379-line loc
 
 The lockfile parse number is from the `lockfile_parser` integration
 test on a 1,379-line production lockfile. The install numbers come
-from the `manekineko_install` example fetching the same project's
-196 gems; they are not yet driven by a `rubund install` command.
+from the deferred
+[`manekineko_install`](examples-rubyrs-deferred/manekineko_install.rs)
+PoC fetching the same project's 196 gems; it depends on `rubyrs`
+and is not currently runnable via `cargo run --example`, nor is it
+yet driven by a `rubund install` command.
 
 ---
 
@@ -148,12 +158,13 @@ crates/rubund/
 │   ├── lib.rs        # Library root — re-exports parser module
 │   └── parser.rs     # Zero-copy state-machine Gemfile.lock parser
 ├── tests/
-│   └── lockfile_parser.rs   # Integration tests
-└── examples/
-    ├── lockfile_parser.rs   # Timing & pretty-print demo
-    ├── manekineko_install.rs # 16-worker parallel installer
-    ├── real_install.rs       # Single-gem installer
-    └── c_ext_cache.rs        # C extension compilation & caching
+│   └── lockfile_parser.rs       # Integration tests
+├── examples/                    # Cargo-discovered, build without extra deps
+│   ├── lockfile_parser.rs       # Timing & pretty-print demo
+│   └── c_ext_cache.rs           # C extension compilation & caching
+└── examples-rubyrs-deferred/    # Not discovered by Cargo; need `rubyrs`
+    ├── real_install.rs          # Single-gem fetch + extract via rubyrs
+    └── manekineko_install.rs    # 16-worker parallel installer via rubyrs
 ```
 
 ### Parser Design
