@@ -42,9 +42,11 @@ RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 
 ## Results — 2026-05-25 (re-run), rubyrs at `a35348b`
 
-Second pass after PR #30 (`ConstantWriteNode`) landed. Same 13
-files, same pinned target commits, same fuel cap. Diff vs the
-first pass:
+Second pass after PR #30 (`ConstantWriteNode`) landed. Same
+pinned target commits and fuel cap as the first pass, re-running
+the 12 standalone files (the host-DSL `Brewfile.rb` is excluded
+— it needs the embedding wrapper, not a rubyrs change). Diff
+vs the first pass:
 
 | File | Was | Now | Change |
 |---|---|---|---|
