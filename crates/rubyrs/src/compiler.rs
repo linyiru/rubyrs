@@ -50,6 +50,14 @@ pub(crate) struct ProtoBuilder {
     /// naturally sees an empty stack and breaks the BLOCK, matching
     /// Ruby's lexical break-target rule.
     pub(crate) loop_break_jumps: Vec<Vec<usize>>,
+    /// Parallel stack for `next` placeholders. Patched to the loop's
+    /// per-iteration check label (the cond expression's position),
+    /// so `next` re-evaluates the loop guard and either iterates
+    /// again or falls through to the natural exit. Same lexical
+    /// scoping as `loop_break_jumps` — a block proto starts with
+    /// an empty stack so `next` in a block reaches the iteration
+    /// driver, not an enclosing `while` in the parent proto.
+    pub(crate) loop_next_jumps: Vec<Vec<usize>>,
 }
 
 impl ProtoBuilder {
@@ -65,6 +73,7 @@ impl ProtoBuilder {
             method_param_count: 0,
             is_method_body: false,
             loop_break_jumps: vec![],
+            loop_next_jumps: vec![],
         };
         for p in params { b.local_slot(p); }
         b
@@ -101,6 +110,7 @@ impl ProtoBuilder {
             Op::JumpIfFalse(o) => *o = off,
             Op::JumpIfArgGiven(_, o) => *o = off,
             Op::BreakLoop(o) => *o = off,
+            Op::NextLoop(o) => *o = off,
             _ => panic!("ICE: patch_jump on non-jump op at {}", at),
         }
     }
@@ -444,14 +454,22 @@ pub(crate) fn compile_expr(
             b.patch_jump(je, end);
         }
         Expr::While { cond, body, post } => {
-            // EnterLoop / ExitLoop bracket the loop so `break` inside
-            // the body can pop dynamic rescue/ensure handlers down to
-            // the depth at loop entry. The break-jumps stack on the
-            // builder collects every `Op::BreakLoop(0)` placeholder
-            // emitted by `Expr::Break` while THIS loop is the
-            // innermost; we patch them to the join label below.
+            // EnterLoop / ExitLoop bracket the loop so `break` and
+            // `next` inside the body can pop dynamic rescue/ensure
+            // handlers down to the depth at loop entry. Two parallel
+            // placeholder stacks on the builder: break jumps land at
+            // the join (loop end), next jumps land at the iter-check
+            // (cond expression's position) so the loop re-evaluates
+            // the guard and continues or falls through.
             b.emit(Op::EnterLoop);
             b.loop_break_jumps.push(vec![]);
+            b.loop_next_jumps.push(vec![]);
+            // iter_check is captured per arm — it points at the cond
+            // evaluation that decides whether to loop again. For the
+            // pre-form this coincides with the loop's start label.
+            // For the post-form it sits AFTER the body's terminal Pop,
+            // so `next` skips the partial body but still re-checks.
+            let iter_check;
             if *post {
                 // `begin … end while cond` — body runs first, cond
                 // is checked after. JumpIfFalse-to-end, jump-back-
@@ -460,6 +478,7 @@ pub(crate) fn compile_expr(
                 let body_start = b.pos();
                 compile_body(b, body, protos, interner, cc);
                 b.emit(Op::Pop);
+                iter_check = b.pos();
                 compile_expr(b, cond, protos, interner, cc);
                 let jf = b.emit(Op::JumpIfFalse(0));
                 let j = b.emit(Op::Jump(0));
@@ -471,6 +490,7 @@ pub(crate) fn compile_expr(
                 // Pre-condition `while cond; …; end` — cond first,
                 // body only runs when truthy.
                 let start = b.pos();
+                iter_check = start;
                 compile_expr(b, cond, protos, interner, cc);
                 let jf = b.emit(Op::JumpIfFalse(0));
                 compile_body(b, body, protos, interner, cc);
@@ -480,6 +500,13 @@ pub(crate) fn compile_expr(
                 let exit_normal = b.pos();
                 b.patch_jump(jf, exit_normal);
                 b.emit(Op::LoadNil);
+            }
+            // Patch `next` placeholders to the iter-check label
+            // BEFORE the join, because next must re-evaluate cond
+            // (the loop's natural-exit LoadNil branch handles the
+            // false case).
+            for j in b.loop_next_jumps.pop().expect("ICE: while popped loop_next_jumps without push") {
+                b.patch_jump(j, iter_check);
             }
             // Join label: both normal exit (after LoadNil) and every
             // `break` converge here. `BreakLoop` jumps with the
@@ -884,14 +911,34 @@ pub(crate) fn compile_expr(
             return;
         }
         Expr::Next(val) => {
-            // `next [val]` — exits the current block iteration only.
-            // Op::Return pops a single frame, which from inside a
-            // block is exactly the block's frame.
-            match val {
-                Some(e) => compile_expr(b, e, protos, interner, cc),
-                None => { b.emit(Op::LoadNil); }
+            // Two-target codegen mirroring `Expr::Break`:
+            //   - Inside a `while` (innermost lexical enclosing
+            //     structured loop in this proto): emit `NextLoop`
+            //     so the VM pops handlers + jumps to the loop's
+            //     iter-check label. The value attached to `next val`
+            //     is discarded — `while` doesn't have an iteration
+            //     value to update, matching CRuby.
+            //   - Otherwise: keep the block / iteration-driver
+            //     semantics (Op::Return from the block frame; the
+            //     driver reads the value off the stack).
+            if !b.loop_next_jumps.is_empty() {
+                // `next` in a while loop ignores the optional value
+                // expression — but Ruby still evaluates it for side
+                // effects. Emit and Pop to preserve evaluation order
+                // without polluting the stack at the jump target.
+                if let Some(e) = val {
+                    compile_expr(b, e, protos, interner, cc);
+                    b.emit(Op::Pop);
+                }
+                let placeholder = b.emit(Op::NextLoop(0));
+                b.loop_next_jumps.last_mut().expect("ICE: just checked").push(placeholder);
+            } else {
+                match val {
+                    Some(e) => compile_expr(b, e, protos, interner, cc),
+                    None => { b.emit(Op::LoadNil); }
+                }
+                b.emit(Op::Return);
             }
-            b.emit(Op::Return);
             // Sentinel value for stack-balance (unreachable in well-formed code).
             b.emit(Op::LoadNil);
             b.current_span = prev_span;
@@ -1158,6 +1205,10 @@ pub(crate) fn compile_block(
         // iteration driver via the existing `Op::Break` path,
         // NOT jump to an enclosing `while` in the parent proto.
         loop_break_jumps: vec![],
+        // Symmetric: `next` inside a block hits the iteration
+        // driver (`Op::Return` from the block frame), not an
+        // enclosing `while` in the parent.
+        loop_next_jumps: vec![],
     };
     let param_start = b.n_locals;
     // Slot layout in two phases:
