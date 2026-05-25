@@ -1267,3 +1267,129 @@ impl Vm {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Block-iteration short-circuit semantics — `break` /
+    //! `next` / non-local `return` inside iter_array_filter
+    //! and friends. These are integration-shape tests (drive
+    //! `Runtime::eval` with small scripts and assert stdout)
+    //! because the per-driver short-circuit machinery is
+    //! deeply tied to dispatch / step, and unit-testing it in
+    //! isolation would mean reconstructing most of the
+    //! evaluator.
+    //!
+    //! The diff_cruby `enumerable_filter.rb` /
+    //! `control_flow.rb` fixtures cover the end-to-end CRuby
+    //! match; these tests pin the contract module-locally so a
+    //! regression surfaces here first.
+    use crate::{Config, Runtime};
+
+    /// Configure a Runtime with stdout pointing at a shared
+    /// in-memory buffer, run `src`, return the captured stdout.
+    fn capture(src: &str) -> String {
+        use std::sync::{Arc, Mutex};
+        // Box<dyn Write> doesn't expose the inner buffer, so wrap
+        // an Arc<Mutex<Vec<u8>>> behind a small adapter that
+        // implements `io::Write` and clones the Arc.
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut rt = Runtime::with_config(Config::default());
+        rt.set_stdout(Box::new(Sink(buf.clone())));
+        let _ = rt.eval(src, "test.rb").expect("eval succeeded");
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn array_each_break_returns_break_value() {
+        // `break` from inside Array#each makes the call return the
+        // break-arg.
+        let out = capture(r#"
+            r = [1, 2, 3, 4].each { |x| break "stop at #{x}" if x == 2 }
+            puts r
+        "#);
+        assert_eq!(out, "stop at 2\n");
+    }
+
+    #[test]
+    fn array_each_break_no_value_returns_nil() {
+        let out = capture(r#"
+            r = [1, 2, 3].each { |x| break if x == 2 }
+            puts r.nil?
+        "#);
+        assert_eq!(out, "true\n");
+    }
+
+    #[test]
+    fn array_map_next_replaces_iteration_value() {
+        // `next val` makes the current iteration's contribution be
+        // `val` (Array#map collects what each block call returns).
+        let out = capture(r#"
+            r = [1, 2, 3].map { |x| next 0 if x == 2; x }
+            p r
+        "#);
+        assert_eq!(out, "[1, 0, 3]\n");
+    }
+
+    #[test]
+    fn array_select_break_truncates() {
+        let out = capture(r#"
+            r = [1, 2, 3, 4, 5].select { |x| break [-1] if x == 3; x.even? }
+            p r
+        "#);
+        // Break short-circuits the select entirely, returning the
+        // break value (not the partial selection).
+        assert_eq!(out, "[-1]\n");
+    }
+
+    #[test]
+    fn array_each_with_index_break_value() {
+        let out = capture(r#"
+            r = ["a", "b", "c"].each_with_index { |v, i| break i if v == "b" }
+            puts r
+        "#);
+        assert_eq!(out, "1\n");
+    }
+
+    #[test]
+    fn hash_each_next_continues() {
+        // `next` (no value) just skips to the next iteration.
+        let out = capture(r#"
+            sum = 0
+            { a: 1, b: 2, c: 3 }.each { |(_k, v)| next if v == 2; sum = sum + v }
+            puts sum
+        "#);
+        assert_eq!(out, "4\n");
+    }
+
+    #[test]
+    fn range_each_break_returns_value() {
+        let out = capture(r#"
+            r = (1..10).each { |i| break "early at #{i}" if i > 3 }
+            puts r
+        "#);
+        assert_eq!(out, "early at 4\n");
+    }
+
+    #[test]
+    fn nonlocal_return_from_block_exits_enclosing_method() {
+        // `return` from inside a driver block escapes the entire
+        // method, not just the block. Different from `break`,
+        // which only exits the driver and returns to the method.
+        let out = capture(r#"
+            def find
+              [1, 2, 3].each { |x| return "got #{x}" if x == 2 }
+              "not found"
+            end
+            puts find
+        "#);
+        assert_eq!(out, "got 2\n");
+    }
+}
