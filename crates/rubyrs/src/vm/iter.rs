@@ -809,6 +809,57 @@ impl Vm {
                 ]));
                 Some(Value::Array(pair_id))
             }
+            // `arr.chunk_while { |a, b| pred(a, b) }` — partition
+            // into runs of consecutive elements where the block
+            // returns truthy for the pair (a=prev, b=current).
+            // Falsy starts a new chunk. Empty input → `[]`;
+            // single-element → `[[elem]]`.
+            (Value::Array(id), "chunk_while", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                if snapshot.is_empty() {
+                    return Ok(Some(Value::Array(result_id)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut current_chunk: Vec<Value> = vec![snapshot[0].clone()];
+                let mut early: Option<Value> = None;
+                for pair in snapshot.windows(2) {
+                    g.vm.invoke_block(block, vec![pair[0].clone(), pair[1].clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() {
+                        current_chunk.push(pair[1].clone());
+                    } else {
+                        // Flush current chunk and start a fresh one.
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk)));
+                        g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                        current_chunk.push(pair[1].clone());
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                // Flush the trailing chunk.
+                if !current_chunk.is_empty() {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk));
+                    g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                }
+                Some(Value::Array(result_id))
+            }
             (Value::Array(id), "min_by", []) | (Value::Array(id), "max_by", []) => {
                 // For each element, call the block once to produce a
                 // key. Track the running winner. Returns nil for an
