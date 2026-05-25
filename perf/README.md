@@ -54,10 +54,11 @@ Same etiquette as the panic budget:
    grew* and *whether it's an explicit design choice*. "Bumped because
    the new feature X allocates Y" is fine. "Bumped to make CI green"
    is not — investigate first.
-2. **Never lower an existing budget by editing in place** — that
-   silently erases the historical ceiling. If a workload is now lighter
-   than its budget, lowering the row is the right move, but say so in
-   the comment.
+2. **Don't lower a budget silently.** Lowering *with a comment*
+   ("workload X now consistently runs at Y KB after Z's optimisation,
+   tightening from N → M") is the right move when a workload genuinely
+   got lighter. Lowering in a drive-by edit without a comment erases
+   the historical ceiling that documents how we got here.
 3. **Don't bump a budget to absorb a regression you didn't intend**.
    If the regression isn't part of the PR's stated change, treat it as
    a separate bug.
