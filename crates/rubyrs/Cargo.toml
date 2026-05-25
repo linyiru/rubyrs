@@ -11,6 +11,37 @@ readme = "README.md"
 keywords = ["ruby", "interpreter", "prism", "dsl", "embedded"]
 categories = ["compilers", "wasm", "command-line-utilities"]
 
+# Feature flags (PoC for ADR 0015 concentric architecture).
+#
+# `cext` is the first tier-boundary made opt-in: the CRuby-shape C
+# ABI for hosting `require`'d C extensions. Pulling it out:
+#   - drops the `rubyrs-cext` + `libloading` dependencies
+#   - drops the 162 `#[used]` static cext function pointers from
+#     the binary's dynamic symbol table
+#   - drops the `mod cext;` and `cext_*` code paths in the VM
+#
+# Not yet gated by the feature (deliberate PoC scope — followup
+# PRs):
+#   - `--export-dynamic` linker arg on ELF targets (still emitted
+#     by build.rs unconditionally; harmless when cext is off
+#     because there are no `rb_*` symbols left to export, but
+#     pedantically still drag).
+#   - A handful of `try_typed_data` / `cext_invoke_method` dead-
+#     code warnings under `--no-default-features` (they reference
+#     only `Value`, not cext types, so they still compile).
+#
+# Default features keep cext on so embedders and the CLI binary
+# behave identically to pre-PoC. Build without:
+#     cargo build -p rubyrs --no-default-features
+# to get the size-minimised, sandbox-friendlier core.
+#
+# (This is one tier boundary. ADR 0015 envisions language /
+# stdlib / mri-compat tiers as well — they require larger surgery
+# and are explicitly out of scope for this PoC.)
+[features]
+default = ["cext"]
+cext = ["dep:rubyrs-cext", "dep:libloading"]
+
 [dependencies]
 ruby-prism.workspace = true
 # `regex` powers `/pattern/` literal support. Ruby uses Onigmo
@@ -19,19 +50,16 @@ ruby-prism.workspace = true
 # named backrefs `\k<name>`, Onigmo-specific shorthand) are
 # documented in SUBSET.md.
 regex = "1"
-# `rubyrs-cext` is pure Rust + std; no target restriction. The cext
-# symbols stay in the binary on wasi too (the `#[used]` exports in
-# `src/lib.rs` are valid on every target) — they're just unreachable
-# without a working `require`-cext path.
-rubyrs-cext = { path = "../rubyrs-cext", version = "0.1.0" }
+# Optional via the `cext` feature. With cext off, neither dep is
+# pulled into the build.
+rubyrs-cext = { path = "../rubyrs-cext", version = "0.1.0", optional = true }
 
 # `libloading` is only meaningful where there's a dynamic loader.
-# wasm32-wasip1 has no `dlopen`; gating the dep here lets the WASI
-# build go through with the cext path stubbed out (see `Vm::cext_require`
-# in `vm.rs`, which has a wasi-flavoured alt that returns a clear Trap
-# instead of trying to dlopen).
+# wasm32-wasip1 has no `dlopen` (build.rs and the wasi-only
+# `cext_require` alt in vm.rs handle that). With the cext feature
+# off, we don't need libloading on any target.
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
-libloading.workspace = true
+libloading = { workspace = true, optional = true }
 
 [build-dependencies]
 cc.workspace = true

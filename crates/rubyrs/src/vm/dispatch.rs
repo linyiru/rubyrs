@@ -24,7 +24,7 @@ use crate::heap::HeapObj;
 use crate::intern::SymId;
 use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 
-#[cfg(not(target_os = "wasi"))]
+#[cfg(all(feature = "cext", not(target_os = "wasi")))]
 use super::with_vm_ptr_set;
 use super::{
     primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
@@ -147,12 +147,12 @@ impl Vm {
     fn invoke_host_fn(&mut self, slot: HostFnSlot, args: &[Value]) -> Result<Value, Trap> {
         match slot {
             HostFnSlot::V1(host) => {
-                #[cfg(not(target_os = "wasi"))]
+                #[cfg(all(feature = "cext", not(target_os = "wasi")))]
                 {
                     let vm_ptr: *mut Vm = self;
                     with_vm_ptr_set(vm_ptr, || host(args))
                 }
-                #[cfg(target_os = "wasi")]
+                #[cfg(any(not(feature = "cext"), target_os = "wasi"))]
                 { host(args) }
             }
             HostFnSlot::V2(host) => {
@@ -337,7 +337,14 @@ impl Vm {
                 // PinGuard fix in L3-D).
                 let mut g = PinGuard::new(self);
                 for a in &args { g.pin(a.clone()); }
-                let obj = if let Some(alloc_func) = cls.cext_alloc_func.get() {
+                #[cfg(feature = "cext")]
+                let cext_alloc = cls.cext_alloc_func.get();
+                #[cfg(not(feature = "cext"))]
+                let cext_alloc: Option<()> = None;
+                let obj = if let Some(alloc_func) = cext_alloc {
+                    #[cfg(not(feature = "cext"))] { unreachable!("cext_alloc is always None without `cext` feature: {:?}", alloc_func) }
+                    #[cfg(feature = "cext")]
+                    {
                     #[cfg(not(target_os = "wasi"))]
                     {
                         // arity=0 (self-only) is the alloc_func ABI:
@@ -396,6 +403,7 @@ impl Vm {
                         }));
                         Value::Object(id)
                     }
+                    } // close cfg(feature = "cext")
                 } else {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
@@ -432,7 +440,7 @@ impl Vm {
                     // arity -1 are now dispatchable (L3-H setjmp shim
                     // supports case -1); the filter below mirrors
                     // cext_dispatch's accepted-arities rule.
-                    #[cfg(not(target_os = "wasi"))]
+                    #[cfg(all(feature = "cext", not(target_os = "wasi")))]
                     {
                         // PR #60 review #10: don't silently skip
                         // initialize on arity mismatch — that
@@ -546,7 +554,7 @@ impl Vm {
             // scope. Real-world impact is small: the common pattern
             // is `class Foo; end` + `rb_define_method(Foo, ...)`
             // on the same class, which works correctly.
-            #[cfg(not(target_os = "wasi"))]
+            #[cfg(all(feature = "cext", not(target_os = "wasi")))]
             {
                 if let Some(table) = self.cext_instance_methods.get(&cls.name)
                     && let Some(reg) = table.get(&name_id).cloned() {
@@ -659,6 +667,7 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
+            #[cfg(feature = "cext")]
             if let Some(table) = self.cext_class_methods.get(&cls.name)
                 && let Some(host) = table.get(&name_id).cloned() {
                     // Stash Vm pointer for the singleton-method's

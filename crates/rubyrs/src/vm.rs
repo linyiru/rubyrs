@@ -15,6 +15,7 @@ use crate::intern::{Interner, SymId};
 use crate::value::{Class, Method, ObjId, Value, Visibility};
 
 mod array;
+#[cfg(feature = "cext")]
 mod cext;
 mod dispatch;
 mod fileops;
@@ -31,7 +32,7 @@ mod sprintf;
 mod step;
 mod string;
 mod util;
-#[cfg(not(target_os = "wasi"))]
+#[cfg(all(feature = "cext", not(target_os = "wasi")))]
 pub(crate) use cext::with_vm_ptr_set;
 pub(crate) use lookup::{class_is_a, CallCache};
 pub(crate) use primitive::primitive_call;
@@ -201,6 +202,7 @@ pub(crate) struct Vm {
     /// `Vm::cext_require` whenever a C ext calls
     /// `rb_define_singleton_method`; consulted by `do_call` when
     /// the receiver is `Value::Class(c)`.
+    #[cfg(feature = "cext")]
     pub(crate) cext_class_methods: HashMap<String, HashMap<SymId, Rc<HostFn>>>,
     /// L3-C: instance-method dispatch table for cext-registered
     /// methods (`rb_define_method`). Mirrors `cext_class_methods`'s
@@ -209,7 +211,7 @@ pub(crate) struct Vm {
     /// data instead of a HostFn closure because the receiver isn't
     /// known at registration time; the dispatch site assembles
     /// `cext_dispatch(..., CextSelfHandle::Object(recv))` inline.
-    #[cfg(not(target_os = "wasi"))]
+    #[cfg(all(feature = "cext", not(target_os = "wasi")))]
     pub(crate) cext_instance_methods: HashMap<String, HashMap<SymId, crate::vm::cext::CextMethodReg>>,
     pub(crate) class_stack: Vec<Rc<Class>>,
     /// Per-class-body visibility mode, parallel to `class_stack`.
@@ -326,8 +328,9 @@ impl Vm {
             cache_counter: 0,
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
+            #[cfg(feature = "cext")]
             cext_class_methods: HashMap::new(),
-            #[cfg(not(target_os = "wasi"))]
+            #[cfg(all(feature = "cext", not(target_os = "wasi")))]
             cext_instance_methods: HashMap::new(),
             class_stack: vec![],
             class_visibility_stack: vec![],

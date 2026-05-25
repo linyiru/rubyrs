@@ -299,8 +299,19 @@ impl Vm {
             // gem/load-path resolution is deferred.
             "require" => match args {
                 [Value::Str(path)] => {
-                    let path = path.to_string_lossy();
-                    Some(self.cext_require(&path))
+                    #[cfg(feature = "cext")]
+                    {
+                        let path = path.to_string_lossy();
+                        Some(self.cext_require(&path))
+                    }
+                    #[cfg(not(feature = "cext"))]
+                    {
+                        let _ = path;
+                        Some(Err(self.trap(RubyError::RuntimeError {
+                            msg: "require: built without `cext` feature; \
+                                 C extension loading is unavailable".to_string(),
+                        })))
+                    }
                 }
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
                     msg: format!(

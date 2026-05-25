@@ -231,6 +231,7 @@ mod tests {
             singleton_methods: RefCell::new(HashMap::new()),
             includes: RefCell::new(Vec::new()),
             superclass: RefCell::new(superclass),
+            #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         })
     }
