@@ -186,7 +186,17 @@ fn ruby_spec_microrunner_all_examples_pass() {
             panic!("read_dir entry in {} failed: {}", dir.display(), e)
         });
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("rb") {
+        // README + module docstring promise `*_spec.rb` only.
+        // Accepting any `.rb` would silently execute future
+        // sibling files (shared helpers, fixtures, work-in-
+        // progress drafts) as specs the first time someone
+        // adds one. Match the documented suffix exactly.
+        let is_spec = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with("_spec.rb"))
+            .unwrap_or(false);
+        if is_spec {
             entries.push(path);
         }
     }
