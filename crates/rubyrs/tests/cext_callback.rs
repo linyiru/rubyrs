@@ -218,3 +218,68 @@ rust
         expected, stdout, stderr,
     );
 }
+
+/// L2.5 acceptance: a cyclic C-built Array surfaces as an
+/// ArgumentError exception in Ruby.
+///
+/// Before L2.5 the recursive translator hit its
+/// `CEXT_TRANSLATE_MAX_DEPTH` guard and silently substituted
+/// `Value::Nil` (+ a stderr warning). After L2.5 the guard
+/// returns `Err(Trap::ArgumentError { ... })`, which cascades up
+/// through `cext_dispatch` and lands as a Ruby-catchable
+/// `ArgumentError` exception.
+///
+/// This test is the *end-to-end* proof that the Result-threaded
+/// translator actually surfaces the error to Ruby — not just
+/// "the Rust types now line up." The C ext writes
+/// `a = rb_ary_new(); rb_ary_push(a, a);` (a self-referential
+/// Array), and the Ruby driver wraps the call in
+/// `begin/rescue ArgumentError` + asserts the message.
+#[test]
+fn cext_cycle_surfaces_argument_error() {
+    let bundle = ensure_callback_bundle_built();
+    let bundle_no_ext = bundle.with_extension("");
+    let driver_dir = env!("CARGO_TARGET_TMPDIR");
+    let driver = PathBuf::from(driver_dir).join("cext_cycle_driver.rb");
+    fs::write(
+        &driver,
+        format!(
+            r#"require "{}"
+begin
+  a = build_cycle
+  puts "fail: got #{{a.inspect}}"
+rescue ArgumentError => e
+  puts "rescued: #{{e.message}}"
+end
+"#,
+            bundle_no_ext.display()
+        ),
+    )
+    .expect("failed to write driver.rb");
+
+    let rubyrs_bin = env!("CARGO_BIN_EXE_rubyrs");
+    let run = Command::new(rubyrs_bin)
+        .arg(&driver)
+        .output()
+        .expect("failed to spawn rubyrs binary");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(
+        run.status.success(),
+        "rubyrs exited non-zero ({:?}).\nstdout:\n{}\nstderr:\n{}",
+        run.status.code(),
+        stdout,
+        stderr,
+    );
+    assert!(
+        stdout.starts_with("rescued: "),
+        "expected ArgumentError to be rescued.\nstdout:\n{}\nstderr:\n{}",
+        stdout,
+        stderr,
+    );
+    assert!(
+        stdout.contains("max translation depth"),
+        "expected depth-limit message in rescued ArgumentError.\nstdout:\n{}",
+        stdout,
+    );
+}

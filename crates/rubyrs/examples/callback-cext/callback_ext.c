@@ -86,6 +86,26 @@ static VALUE build_records(VALUE self) {
     return outer;
 }
 
+/* === L2.5 acceptance: cycle in a C-built Array ===
+ *
+ * Constructs a self-referential Array (`a = []; a << a`) and
+ * returns it. The host's `cext_handle_to_value` recursive
+ * translator hits its `CEXT_TRANSLATE_MAX_DEPTH` guard while
+ * walking the cycle and now propagates an `ArgumentError` Trap
+ * up to Ruby (was: silent `Value::Nil` + stderr warning before
+ * Spike L2.5).
+ *
+ * The Ruby driver wraps this in `begin/rescue ArgumentError` and
+ * asserts the message — which is the end-to-end proof that the
+ * Trap actually surfaces as a Ruby-catchable exception rather
+ * than aborting / silently corrupting data. */
+static VALUE build_cycle(VALUE self) {
+    (void)self;
+    VALUE a = rb_ary_new();
+    rb_ary_push(a, a);
+    return a;
+}
+
 void Init_callback_ext(void) {
     id_upcase = rb_intern("upcase");
     id_length = rb_intern("length");
@@ -97,4 +117,5 @@ void Init_callback_ext(void) {
     rb_define_global_function("build_list",    RUBY_METHOD_FUNC(build_list),    0);
     rb_define_global_function("build_pair",    RUBY_METHOD_FUNC(build_pair),    1);
     rb_define_global_function("build_records", RUBY_METHOD_FUNC(build_records), 0);
+    rb_define_global_function("build_cycle",   RUBY_METHOD_FUNC(build_cycle),   0);
 }
