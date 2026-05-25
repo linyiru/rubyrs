@@ -240,7 +240,12 @@ impl Vm {
                             fn rec(
                                 indices: &[usize], used: &mut [bool],
                                 current: &mut Vec<usize>, k: usize,
-                                snapshot: &[Value], out: &mut Vec<Vec<usize>>,
+                                // `_snapshot` is only forwarded through
+                                // recursion — kept to preserve the
+                                // call-site shape; clippy needs the
+                                // underscore prefix to skip its
+                                // only-used-in-recursion lint.
+                                _snapshot: &[Value], out: &mut Vec<Vec<usize>>,
                             ) {
                                 if current.len() == k {
                                     out.push(current.clone());
@@ -250,7 +255,7 @@ impl Vm {
                                     if used[i] { continue; }
                                     used[i] = true;
                                     current.push(i);
-                                    rec(indices, used, current, k, snapshot, out);
+                                    rec(indices, used, current, k, _snapshot, out);
                                     current.pop();
                                     used[i] = false;
                                 }
