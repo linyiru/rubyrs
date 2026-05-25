@@ -370,7 +370,8 @@ impl Vm {
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "sub" | "gsub" | "tr" |
-                "match?" | "scan" | "index" | "rindex"
+                "match?" | "scan" | "index" | "rindex" |
+                "[]" | "slice"
             ),
             Value::Sym(_) => matches!(name, "to_sym"),
             Value::Array(_) => matches!(name,
@@ -1556,6 +1557,75 @@ impl Vm {
             }
             Value::Str(s) => {
                 let s = s.clone();
+                // String#[] / #slice — char-indexed slicing.
+                // CRuby's semantics:
+                //   s[i]           -> single-char String, or nil
+                //   s[i, n]        -> substring of n chars from i,
+                //                     or nil if i out of bounds
+                //                     (i == len is OK and gives "")
+                //   s[Range]       -> substring; nil for invalid start
+                // Negative indices count from the end; out-of-bounds
+                // returns nil. Multibyte strings are sliced by char,
+                // not by byte.
+                fn str_index_char(chars: &[char], i: i64) -> Option<usize> {
+                    let len = chars.len() as i64;
+                    let idx = if i < 0 { len + i } else { i };
+                    if idx < 0 || idx > len { None }
+                    else { Some(idx as usize) }
+                }
+                fn str_slice(chars: &[char], start: usize, n: usize) -> String {
+                    chars.iter().skip(start).take(n).collect()
+                }
+                if (name == "[]" || name == "slice") && args.len() == 1 {
+                    let chars: Vec<char> = s.chars().collect();
+                    let len = chars.len() as i64;
+                    return Ok(Some(match &args[0] {
+                        Value::Int(i) => {
+                            let idx = if *i < 0 { len + *i } else { *i };
+                            if idx < 0 || idx >= len {
+                                Value::Nil
+                            } else {
+                                let ch = chars[idx as usize].to_string();
+                                Value::Str(Rc::from(ch.as_str()))
+                            }
+                        }
+                        Value::Range(rid) => {
+                            let r = self.heap.range(*rid);
+                            let (bi, ei, excl) = match (&r.begin, &r.end) {
+                                (Value::Int(a), Value::Int(c)) => (*a, *c, r.exclusive),
+                                _ => return Ok(None),
+                            };
+                            let start = match str_index_char(&chars, bi) {
+                                Some(s) => s,
+                                None => return Ok(Some(Value::Nil)),
+                            };
+                            // End index: positive raw; negative
+                            // relative to len. Out-of-range high
+                            // clamps to len; exclusive drops one.
+                            let mut end = if ei < 0 { len + ei } else { ei };
+                            if !excl { end += 1; }
+                            let end = end.clamp(start as i64, len) as usize;
+                            let slice: String = str_slice(&chars, start, end.saturating_sub(start));
+                            Value::Str(Rc::from(slice.as_str()))
+                        }
+                        _ => return Ok(None),
+                    }));
+                }
+                if (name == "[]" || name == "slice") && args.len() == 2 {
+                    if let (Value::Int(i), Value::Int(n)) = (&args[0], &args[1]) {
+                        let chars: Vec<char> = s.chars().collect();
+                        let len = chars.len() as i64;
+                        let start_raw = if *i < 0 { len + *i } else { *i };
+                        if start_raw < 0 || start_raw > len || *n < 0 {
+                            return Ok(Some(Value::Nil));
+                        }
+                        let start = start_raw as usize;
+                        let n = (*n as usize).min(chars.len() - start);
+                        let slice = str_slice(&chars, start, n);
+                        return Ok(Some(Value::Str(Rc::from(slice.as_str()))));
+                    }
+                    return Ok(None);
+                }
                 match (name, args) {
                     ("chars", []) => {
                         let elems: Vec<Value> = s.chars()
