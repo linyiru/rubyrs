@@ -905,6 +905,49 @@ fn splat_rest_param_survives_stress_gc() {
 }
 
 #[test]
+fn splat_rest_inline_receiver_survives_stress_gc() {
+    // Companion regression for the second half of the same
+    // PinGuard window — beyond locals/rest_vec, the *receiver*
+    // (`self_val`) is also unrooted during the rest-Array alloc.
+    // Inline-allocated receivers like `Container.new.collect(...)`
+    // hold the Object only as a Rust local; without pinning it,
+    // STRESS_GC would sweep the instance mid-call and the method
+    // body would see a dangling self.
+    let mut rt = Runtime::with_config(Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r##"
+        class Container
+          def initialize
+            @label = "live"
+          end
+          def collect(*items)
+            tmp = []
+            i = 0
+            while i < 20
+              tmp << [i, i + 1]
+              i = i + 1
+            end
+            "#{@label}: #{items.length}"
+          end
+        end
+        # Inline `.new` — the Container Object is held only as a
+        # Rust local in do_call's recv slot, never bound to a Ruby
+        # variable. Without `self_val` in the rest-alloc PinGuard,
+        # STRESS_GC would sweep the instance during the rest-Array
+        # alloc and `@label` would land on a dangling ObjId.
+        puts Container.new.collect([1, 2], [3, 4], [5, 6])
+    "##, "t.rb").unwrap();
+    let out = buf.snapshot();
+    // The body interpolates `@label` (= "live") and items.length
+    // (= 3); both rely on self surviving the alloc window.
+    assert_eq!(out, "live: 3\n");
+}
+
+#[test]
 fn method_missing_inherited_through_superclass() {
     let (mut rt, buf) = rt_with_buf();
     rt.eval(r#"
