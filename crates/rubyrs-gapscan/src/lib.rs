@@ -236,7 +236,7 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
 
     for file in files {
         report.files_scanned += 1;
-        let rel = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
+        let rel = rel_path(&file, root);
         let src = match std::fs::read(&file) {
             Ok(b) => b,
             Err(_) => {
@@ -378,6 +378,21 @@ impl<'a> Histogrammer<'a> {
 // rationale (the standard `visit_branch_node_enter` hook silently
 // skips wrapper nodes like ArgumentsNode/RescueNode).
 impl_full_visit_for!(Histogrammer<'_>);
+
+/// File path as it should appear inside a [`Report`]: relative to
+/// `root` when scanning a directory, or the bare filename when
+/// scanning a single-file root (where `strip_prefix` would otherwise
+/// return an empty path and leave every entry blank).
+fn rel_path(file: &Path, root: &Path) -> PathBuf {
+    let stripped = file.strip_prefix(root).unwrap_or(file);
+    if stripped.as_os_str().is_empty() {
+        file.file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| file.to_path_buf())
+    } else {
+        stripped.to_path_buf()
+    }
+}
 
 fn collect_ruby_files(
     dir: &Path,

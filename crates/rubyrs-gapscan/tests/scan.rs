@@ -256,6 +256,24 @@ fn scan_skips_spec_and_test_dirs_by_default() {
 }
 
 #[test]
+fn single_file_root_reports_filename_not_empty_path() {
+    // PR #3 round 4 review #20: scanning a single .rb file as root
+    // used to record an empty path in FileStat (because
+    // strip_prefix(root, root) yields ""). Now falls back to the
+    // bare filename so JSON / Markdown / diff output stays readable.
+    let td = TempDir::new("single-file");
+    let file = td.write("hello.rb", "puts 1\n");
+    let report = scan(&file, &ScanOptions::default()).unwrap();
+    assert_eq!(report.files.len(), 1);
+    let path = &report.files[0].path;
+    assert!(
+        !path.as_os_str().is_empty(),
+        "expected non-empty path, got {path:?}"
+    );
+    assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("hello.rb"));
+}
+
+#[test]
 fn files_with_errors_uses_root_relative_paths() {
     // PR #3 round 3 review #18: previously stored absolute paths
     // while every other path field is root-relative. Mismatched
