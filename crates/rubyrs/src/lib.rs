@@ -288,6 +288,56 @@ class Proc
 end
 class Class
 end
+## Comparable — a stub class (we don't have Modules in this subset)
+## that holds the six derived comparison methods plus `between?`
+## and `clamp`, each defined in terms of `<=>`. `include Comparable`
+## copies these into the target class's method table (see
+## `do_call`'s include-intercept). User-defined methods on the
+## including class take precedence — the copy is non-destructive.
+##
+## Divergence from CRuby: a non-comparable pair (`<=>` returns
+## nil) yields `nil`/`false` here, not the ArgumentError CRuby
+## raises. Keeping this dependency-free avoids needing the
+## two-arg `raise Klass, "msg"` form across the preamble.
+class Comparable
+  def <(other)
+    c = self <=> other
+    return nil if c.nil?
+    c < 0
+  end
+  def <=(other)
+    c = self <=> other
+    return nil if c.nil?
+    c <= 0
+  end
+  def >(other)
+    c = self <=> other
+    return nil if c.nil?
+    c > 0
+  end
+  def >=(other)
+    c = self <=> other
+    return nil if c.nil?
+    c >= 0
+  end
+  def ==(other)
+    c = self <=> other
+    return false if c.nil?
+    c == 0
+  end
+  def between?(lo, hi)
+    self >= lo && self <= hi
+  end
+  def clamp(lo, hi)
+    if self < lo
+      lo
+    elsif self > hi
+      hi
+    else
+      self
+    end
+  end
+end
 "#;
         self.eval(PREAMBLE, "<rubyrs:preamble>")
             .expect("ICE: failed to load built-in exception preamble");

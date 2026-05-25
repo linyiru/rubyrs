@@ -711,6 +711,32 @@ impl Vm {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());
             }
+            // `include Mod` inside a class body — `self` is the
+            // class, name resolves with no receiver. Mirrors the
+            // explicit-receiver branch below; see the comment
+            // there for the copy semantics.
+            if &*name == "include" && !args.is_empty() {
+                if let Value::Class(target) = &self_val {
+                    for a in &args {
+                        let src = match a {
+                            Value::Class(c) => c.clone(),
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "wrong argument type {} (expected Module)",
+                                    a.type_name(),
+                                ),
+                            })),
+                        };
+                        let src_methods = src.methods.borrow();
+                        let mut tgt_methods = target.methods.borrow_mut();
+                        for (mid, m) in src_methods.iter() {
+                            tgt_methods.entry(*mid).or_insert_with(|| m.clone());
+                        }
+                    }
+                    self.stack.push(self_val.clone());
+                    return Ok(());
+                }
+            }
             return Err(self.trap(RubyError::NoMethodError {
                 method: name.to_string(), recv_type: self_val.type_name(),
             }));
@@ -787,6 +813,36 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
+            }
+        }
+        // `include Mod` — without real Modules in the subset, we
+        // approximate by copying the source class's method table
+        // into the target class. Only fills methods the target
+        // doesn't already define, so user overrides win (matching
+        // CRuby's ancestor-chain semantics where own methods
+        // shadow included ones). Defines `include` ad-hoc on
+        // Class receivers; the call is a no-op for any other
+        // receiver and falls through to NoMethodError.
+        if let Value::Class(target) = &recv {
+            if &*name == "include" && !args.is_empty() {
+                for a in &args {
+                    let src = match a {
+                        Value::Class(c) => c.clone(),
+                        _ => return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Module)",
+                                a.type_name(),
+                            ),
+                        })),
+                    };
+                    let src_methods = src.methods.borrow();
+                    let mut tgt_methods = target.methods.borrow_mut();
+                    for (mid, m) in src_methods.iter() {
+                        tgt_methods.entry(*mid).or_insert_with(|| m.clone());
+                    }
+                }
+                self.stack.push(recv.clone());
+                return Ok(());
             }
         }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {

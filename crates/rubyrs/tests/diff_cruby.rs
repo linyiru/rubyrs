@@ -113,3 +113,4 @@ fn run_diff(name: &str) {
 #[test] fn splat_multi_write() { run_diff("splat_multi_write"); }
 #[test] fn string_format() { run_diff("string_format"); }
 #[test] fn array_zip() { run_diff("array_zip"); }
+#[test] fn comparable() { run_diff("comparable"); }
