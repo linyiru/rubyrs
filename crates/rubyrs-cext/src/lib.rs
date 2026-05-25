@@ -243,21 +243,35 @@ impl CExtState {
         h
     }
 
-    /// Resolve a handle back to its value. Panics on out-of-range
-    /// handles — those represent a C ext bug or a stale handle that
-    /// outlived its [`CExtState`].
+    /// Resolve a handle back to its value. Out-of-range handles
+    /// (forged values, stale handles that outlived their
+    /// `CExtState`) resolve to `&CValue::Nil` — the read path is
+    /// total. Callers like `RSTRING_LEN` / `rb_num2long` /
+    /// `rb_ary_entry` already type-check the resolved CValue and
+    /// fall through to a defined default (0 / Qnil / null pointer)
+    /// for non-matching variants, so a forged handle yields a
+    /// wrong-but-defined result instead of a host-process abort.
+    ///
+    /// This is the trusted-loader contract documented in
+    /// `docs/CEXT_SAFETY.md`: handle integrity is the C ext's
+    /// responsibility; forgery doesn't get UB.
     pub fn resolve(&self, h: Value) -> &CValue {
-        self.values
-            .get(h as usize)
-            .expect("ICE: cext handle out of range; C ext leaked a stale VALUE")
+        // Static fallback shared across calls — `CValue::Nil` is a
+        // unit variant, so `&NIL` is a stable read-only reference.
+        static NIL: CValue = CValue::Nil;
+        self.values.get(h as usize).unwrap_or(&NIL)
     }
 
     /// Mutable resolve, for in-place mutation of `CValue::Array` /
-    /// `CValue::Hash` via `rb_ary_push` / `rb_hash_aset`.
+    /// `CValue::Hash` via `rb_ary_push` / `rb_hash_aset`. Unlike
+    /// the read-path `resolve`, mutation through a forged handle
+    /// can't be silently absorbed (where would the write land?) so
+    /// the function still aborts on out-of-range. C ext authors
+    /// hitting this should fix their handle plumbing.
     pub fn resolve_mut(&mut self, h: Value) -> &mut CValue {
         self.values
             .get_mut(h as usize)
-            .expect("ICE: cext handle out of range; C ext leaked a stale VALUE")
+            .expect("ICE: cext handle out of range on write path; C ext leaked a stale VALUE")
     }
 }
 
