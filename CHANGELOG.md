@@ -204,9 +204,26 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
     per-Kernel-method enumeration in the subset — documented
     divergence). instance_variables returns `@`-prefixed
     Symbols for Object instances, `[]` for everything else.
+  - **`String#encode` / `#force_encoding` (stubs).** The
+    subset has no per-string encoding tag (raw `Vec<u8>`
+    backing since PR #53), so both methods are no-ops that
+    return the receiver (Rc-shared, no copy). Useful for
+    compatibility with library code that defensively calls
+    `.force_encoding("UTF-8")` at boundaries. Cross-encoding
+    transliteration is explicitly out of scope.
+  - **`String#unpack` + `Array#pack` (subset).** Binary
+    packing/unpacking for the directives the niche actually
+    exercises: `C / c` (8-bit), `n / N` (BE 16/32), `v / V`
+    (LE 16/32), `q / Q` (64-bit native LE), `a / A / Z`
+    (raw / space-null-trimmed / null-terminated strings).
+    Counts (digits or `*`) honoured; whitespace in the format
+    silently ignored. Unsupported directives (m, U, w, f/d/e/E,
+    etc.) raise ArgumentError. `String#bytes` shipped alongside
+    for inspecting packed output without a `unpack("C*")`
+    round-trip.
 
   Net effect of this batch (Method-reflection wave + SUBSET
-  fill-ins): ~30 atomic commits, 131 byte-identical fixtures
+  fill-ins): ~33 atomic commits, 134 byte-identical fixtures
   in `tests/diff/*.rb`. Each addition shipped as a single
   commit; per-file panic budgets re-verified after each;
   full Miri sweep (Stacked + Tree Borrows) and perf baseline
@@ -229,6 +246,20 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `respond_to?` reachability. Byte-identical to CRuby.
 
 ### Fixed
+- **Integer literals no longer truncate to i32.** `ast::tr`
+  was reading `IntegerNode::value()` through Prism's
+  `TryInto<i32>` and silently defaulting to `0` on overflow,
+  so any literal past ~2.1 billion (decimal or hex) became
+  `0`. Hex `0x0102030405060708`, decimal `72623859790382856`,
+  and similar all parsed as zero — the bug surfaced while
+  shipping `Array#pack("Q")`. Fixed by reading through
+  Prism's `to_u32_digits()` (LSB-first u32 chunks + sign)
+  and rebuilding a full i64. Values beyond i64 saturate to
+  `i64::MIN` / `i64::MAX` (the subset doesn't promote to
+  BigInt — documented in SUBSET.md). New diff fixture
+  `integer_literal_i64.rb` pins the full i64 range plus a
+  pack/unpack round-trip on the natural 8-byte demo value.
+
 - **`return` from inside a block now correctly exits the
   enclosing method.** Previously, every `return` in the program
   compiled to `Op::ReturnMethod` (non-local), which broke the
