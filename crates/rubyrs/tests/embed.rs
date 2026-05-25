@@ -802,7 +802,7 @@ fn method_missing_inherited_through_superclass() {
     let (mut rt, buf) = rt_with_buf();
     rt.eval(r#"
         class Base
-          def method_missing(name, *args)
+          def method_missing(name)
             name.to_s
           end
         end
