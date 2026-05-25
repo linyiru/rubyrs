@@ -107,7 +107,7 @@ all four is in. Anything that fails any one is outside.
 | Exception (`raise` / `rescue` / `ensure` / `retry`) | Pure control flow. |
 | String operations **without regex** (`split` literal, `slice`, `sub` literal, `gsub` literal, etc.) | Rule 3. |
 | Numeric ops + basic Math (`abs`, `sqrt`, `pow`, integer arithmetic) | Pure. |
-| Resource caps via `Config` (`fuel`, `max_heap_objects`, `max_frames`, future: `max_string_size`, `max_array_size`, `max_expr_depths`) | Rule 4 enforcement + per-script bound. The full list is informed by rhai's safety API matrix (see "Related: prior art" below). |
+| Resource caps via `Config` (`fuel`, `max_heap_objects`, `max_frames`, `max_symbols`, `max_value_bytes`, `deadline`; future additions discussed in "Related: prior art" below) | Rule 4 enforcement + per-script bound. The future additions list is informed by rhai's safety API matrix. |
 | Embed API (`Runtime`, `Config`, `register_fn`, `register_fn_v2`, `HostCtx`, `set_stdout`) | Capability injection point — the only way OS-flavored capability reaches a script. |
 
 ### What's explicitly OUT of Tier 1 (non-goals)
@@ -123,7 +123,7 @@ scope for rubyrs."
 | `Thread`, `Mutex`, `Queue`, `ConditionVariable` | 3 or never | Rule 4. OS threads under a single VM violate the model every embed scripting language has adopted. |
 | `File`, `Dir`, `IO`, `Pathname`, `Tempfile` | 3 (`stdlib` feature) | Rule 2. |
 | `Net::HTTP`, `Socket`, `OpenSSL`, `URI` | 3 | Rule 2. |
-| `Kernel#system`, `` ` ``, `exec`, `spawn`, `Process.*` | 3 or never | Rule 2; capability-gated even when present. |
+| `Kernel#system`, `` Kernel#` ``, `exec`, `spawn`, `Process.*` | 3 or never | Rule 2; capability-gated even when present. (`` Kernel#` `` is Ruby's backtick command-execution operator.) |
 | `Marshal`, `Psych` (YAML), serialization with state | 3 | Mostly rule 1 (non-deterministic on object id), partly rule 2. |
 | `ObjectSpace`, `GC.start`-style reflection | 4 (`mri-compat`) | Violates rule 4 (introspects shared global state); needed only for CRuby-shape parity. |
 | `Time` (wall-clock) | 2 with capability injection from host | Rule 1; a `Time.now` host fn is the supported way. |
@@ -173,10 +173,14 @@ would import the rule violation along with the feature.
   tomorrow: Rails-capable bet" framing has architectural backing:
   Tier 1 is the today-shippable surface, the outer tiers stay
   honest about their bet-vs-promise status.
-- **Sandbox story is consistent.** Hosts running untrusted
-  scripts get the documented guarantee: build with
-  `--no-default-features` (or with only the `core` tier), and
-  every OS-touching capability is in their hands.
+- **Sandbox story is consistent (after the deviations land).**
+  Hosts running untrusted scripts get the documented guarantee:
+  build with `--no-default-features` (or with only the `core`
+  tier), and every OS-touching capability is in their hands.
+  See the "Current deviations" table — until those PRs ship,
+  Tier 1 builds still default-leak `stdout`, `ENV`, and `$$`
+  to the host process. The spec is the contract the deviations
+  PRs are closing toward.
 - **Reviewer + contributor checklist.** "Is this PR adding a
   syscall to Tier 1?" becomes a literal text-search check on the
   cfg gates.
@@ -276,11 +280,15 @@ Two takeaways shape rubyrs's spec above:
 
 - **rhai's safety API matrix is more complete than rubyrs's
   `Config` today.** The current `Config` exposes `fuel`,
-  `max_heap_objects`, `max_frames`. rhai adds
-  `max_string_size`, `max_array_size`, `max_map_size`,
-  `max_expr_depths` — each a real sandbox attack surface we
-  haven't covered. Listed as roadmap items above; not blocking
-  this ADR.
+  `max_heap_objects`, `max_frames`, `max_symbols`,
+  `max_value_bytes`, and `deadline` — already a six-knob
+  matrix. rhai adds finer-grained per-collection-type caps:
+  `max_string_size`, `max_array_size`, `max_map_size`, and
+  parser-level `max_expr_depths`. Our `max_value_bytes` is a
+  catch-all that fires on any String/Array/Hash exceeding the
+  byte budget; the per-type split would let embedders allow
+  bigger strings while keeping arrays small (or vice versa).
+  Listed as roadmap items above; not blocking this ADR.
 
 **Notably absent**: none of these four projects document an
 explicit *non-goals* list. mruby has `doc/limitations.md` which
