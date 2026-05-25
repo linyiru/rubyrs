@@ -645,6 +645,112 @@ impl Vm {
             self.stack.push(Value::BoundMethod(id));
             return Ok(());
         }
+        // `m.arity` / `m.parameters` — Method introspection. Walks
+        // the captured class chain to find the user-defined Method;
+        // if absent (builtin / primitive_call backed), returns
+        // CRuby's "fully varadic" signature: arity = -1,
+        // parameters = `[[:rest]]`. Same shape for BoundMethod and
+        // UnboundMethod.
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && matches!(&*name, "arity" | "parameters") && args.is_empty() {
+                let (class, m_name_id) = match &recv {
+                    Value::BoundMethod(bid) => {
+                        let (bm_recv, nid) = {
+                            let (r, n) = self.heap.bound_method(*bid);
+                            (r.clone(), n)
+                        };
+                        let cls = match self.class_of(&bm_recv) {
+                            Value::Class(c) => c,
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            })),
+                        };
+                        (cls, nid)
+                    }
+                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    _ => unreachable!(),
+                };
+                let m_opt = self.lookup_method_uncached(&class, m_name_id);
+                let (arity, params_info) = match m_opt {
+                    Some(m) => {
+                        let proto = &self.protos[m.proto_idx];
+                        let n_req_pos = proto.n_required_positional as usize;
+                        let rest_count = proto.rest_param.is_some() as usize;
+                        let kw_count = proto.kw_param_defaults.len();
+                        let kw_rest_count = proto.kw_rest_param.is_some() as usize;
+                        let positional_total = proto.params.len()
+                            .saturating_sub(rest_count + kw_count + kw_rest_count);
+                        let n_opt_pos = positional_total.saturating_sub(n_req_pos);
+                        let n_req_kw = proto.kw_param_defaults.iter().filter(|d| d.is_none()).count();
+                        let n_opt_kw = proto.kw_param_defaults.iter().filter(|d| d.is_some()).count();
+                        // CRuby's arity rule: any *required* keyword
+                        // adds 1 to the mandatory count; the kwargs
+                        // bundle is then treated as a single
+                        // mandatory arg (so the signature is "fully
+                        // specified" if there's no opt-pos / rest).
+                        // If there are no required kwargs but some
+                        // optional/kw_rest are present, the bundle
+                        // is treated as a single OPTIONAL arg —
+                        // arity goes negative.
+                        let req_kw_present = n_req_kw > 0;
+                        let effective_req = n_req_pos + req_kw_present as usize;
+                        let has_pos_optional = n_opt_pos > 0 || rest_count > 0;
+                        let has_kw_optional = !req_kw_present && (n_opt_kw > 0 || kw_rest_count > 0);
+                        let arity: i64 = if has_pos_optional || has_kw_optional {
+                            -((effective_req + 1) as i64)
+                        } else {
+                            effective_req as i64
+                        };
+                        let mut params: Vec<(&'static str, Option<String>)> = Vec::new();
+                        for i in 0..n_req_pos {
+                            params.push(("req", Some(proto.params[i].clone())));
+                        }
+                        for i in n_req_pos..positional_total {
+                            params.push(("opt", Some(proto.params[i].clone())));
+                        }
+                        if let Some(rname) = &proto.rest_param {
+                            let n = if rname.is_empty() { None } else { Some(rname.clone()) };
+                            params.push(("rest", n));
+                        }
+                        let kw_name_start = positional_total + rest_count;
+                        for (i, default) in proto.kw_param_defaults.iter().enumerate() {
+                            let kind = if default.is_none() { "keyreq" } else { "key" };
+                            params.push((kind, Some(proto.params[kw_name_start + i].clone())));
+                        }
+                        if let Some(krname) = &proto.kw_rest_param {
+                            let n = if krname == "__kw_rest_anon" { None } else { Some(krname.clone()) };
+                            params.push(("keyrest", n));
+                        }
+                        (arity, params)
+                    }
+                    None => (-1i64, vec![("rest", None)]),
+                };
+                if &*name == "arity" {
+                    self.stack.push(Value::Int(arity));
+                    return Ok(());
+                }
+                // Build [[kind_sym, name_sym?], ...] array. Anonymous
+                // rest / kw_rest yields a single-element pair, matching
+                // CRuby's `[[:rest]]` / `[[:keyrest]]`.
+                let mut outer: Vec<Value> = Vec::with_capacity(params_info.len());
+                for (kind, name_opt) in params_info {
+                    let kind_sym = self.interner.intern(kind);
+                    let mut pair = vec![Value::Sym(kind_sym)];
+                    if let Some(n) = name_opt {
+                        let nsym = self.interner.intern(&n);
+                        pair.push(Value::Sym(nsym));
+                    }
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let pid = self.heap.alloc(HeapObj::Array(pair));
+                    outer.push(Value::Array(pid));
+                }
+                self.maybe_gc();
+                self.check_alloc()?;
+                let aid = self.heap.alloc(HeapObj::Array(outer));
+                self.stack.push(Value::Array(aid));
+                return Ok(());
+            }
         if let Value::BoundMethod(bid) = &recv
             && matches!(&*name, "call" | "[]" | "()") {
                 let (bm_recv, bm_name_id) = match self.heap.get(*bid) {

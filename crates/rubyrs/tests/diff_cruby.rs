@@ -175,3 +175,4 @@ fn run_diff(name: &str) {
 #[test] fn vararg_lambda() { run_diff("vararg_lambda"); }
 #[test] fn method_to_proc() { run_diff("method_to_proc"); }
 #[test] fn unbound_method() { run_diff("unbound_method"); }
+#[test] fn method_introspect() { run_diff("method_introspect"); }

@@ -217,6 +217,14 @@ impl Heap {
     pub(crate) fn block(&self, id: ObjId) -> &BlockHandle {
         if let HeapObj::Block(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a Block") }
     }
+    pub(crate) fn bound_method(&self, id: ObjId) -> (&Value, crate::intern::SymId) {
+        if let HeapObj::BoundMethod { recv, name_id } = self.get(id) { (recv, *name_id) }
+        else { panic!("ICE: heap slot is not a BoundMethod") }
+    }
+    pub(crate) fn unbound_method(&self, id: ObjId) -> (std::rc::Rc<crate::value::Class>, crate::intern::SymId) {
+        if let HeapObj::UnboundMethod { class, name_id } = self.get(id) { (class.clone(), *name_id) }
+        else { panic!("ICE: heap slot is not an UnboundMethod") }
+    }
     /// Read a TypedData slot. Panics if the slot holds a different
     /// HeapObj variant — the caller must have proven the type
     /// via `rb_check_typeddata` (or equivalent) at the cext boundary

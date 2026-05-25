@@ -215,8 +215,8 @@ impl Vm {
             }
             Value::Block(_) => matches!(name, "call"),
             Value::Regex(_) => matches!(name, "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"),
-            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind"),
-            Value::UnboundMethod(_) => matches!(name, "bind"),
+            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "arity" | "parameters"),
+            Value::UnboundMethod(_) => matches!(name, "bind" | "arity" | "parameters"),
         }
     }
 
