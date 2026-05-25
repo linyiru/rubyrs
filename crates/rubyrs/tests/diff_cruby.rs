@@ -195,3 +195,4 @@ fn run_diff(name: &str) {
 #[test] fn hash_slice_except() { run_diff("hash_slice_except"); }
 #[test] fn array_take_drop_while() { run_diff("array_take_drop_while"); }
 #[test] fn array_tally() { run_diff("array_tally"); }
+#[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }

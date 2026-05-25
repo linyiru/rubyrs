@@ -695,13 +695,32 @@ class Comparable
   def between?(lo, hi)
     self >= lo && self <= hi
   end
-  def clamp(lo, hi)
-    if self < lo
-      lo
-    elsif self > hi
-      hi
+  def clamp(*args)
+    ## Range form (one arg): `clamp(lo..hi)`. Endpoints may be
+    ## nil for one-sided ranges (`(..max)` / `(min..)`); a nil
+    ## bound is treated as "no limit on that side", matching
+    ## CRuby.
+    if args.length == 1 && args[0].is_a?(Range)
+      r = args[0]
+      lo, hi = r.begin, r.end
+      if !lo.nil? && self < lo
+        lo
+      elsif !hi.nil? && self > hi
+        hi
+      else
+        self
+      end
+    elsif args.length == 2
+      lo, hi = args[0], args[1]
+      if !lo.nil? && self < lo
+        lo
+      elsif !hi.nil? && self > hi
+        hi
+      else
+        self
+      end
     else
-      self
+      raise ArgumentError, "wrong number of arguments (given #{args.length}, expected 1..2)"
     end
   end
 end
