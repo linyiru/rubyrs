@@ -874,6 +874,49 @@ impl Vm {
             self.stack.push(Value::Bool(same));
             return Ok(());
         }
+        // `Method#==` / `UnboundMethod#==` — intercept before the
+        // universal `==` fallback (which has no arm for these and
+        // would return `false`).
+        //
+        // BoundMethod: same name_id AND receiver identity. Heap-
+        // backed recvs compare by ObjId / Rc-pointer; primitives
+        // (Int / Sym / Bool / ...) compare by value. This matches
+        // CRuby, where `s1.method(:length) == s2.method(:length)`
+        // is `false` for distinct String instances but `true` for
+        // the same Integer literal.
+        //
+        // UnboundMethod: lookup both classes' Method records via
+        // `lookup_method_uncached` (walks ancestor chain) and
+        // compare by Rc-pointer. Two UnboundMethods that resolve
+        // to the same underlying definition — e.g., a parent's
+        // method inherited by a subclass — are equal, matching
+        // CRuby's `C.instance_method(:foo) == D.instance_method(:foo)`.
+        if args.len() == 1 && &*name == "=="
+            && matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_)) {
+                let other = &args[0];
+                let result = match (&recv, other) {
+                    (Value::BoundMethod(a), Value::BoundMethod(b)) => {
+                        let (ra, na) = self.heap.bound_method(*a);
+                        let ra = ra.clone();
+                        let (rb, nb) = self.heap.bound_method(*b);
+                        let rb = rb.clone();
+                        na == nb && method_recv_identity(&ra, &rb)
+                    }
+                    (Value::UnboundMethod(a), Value::UnboundMethod(b)) => {
+                        let (ca, na) = self.heap.unbound_method(*a);
+                        let (cb, nb) = self.heap.unbound_method(*b);
+                        let ma = self.lookup_method_uncached(&ca, na);
+                        let mb = self.lookup_method_uncached(&cb, nb);
+                        match (ma, mb) {
+                            (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
+                            _ => na == nb && Rc::ptr_eq(&ca, &cb),
+                        }
+                    }
+                    _ => false,
+                };
+                self.stack.push(Value::Bool(result));
+                return Ok(());
+            }
         // `Object#==` / `Object#!=` cross-type fallback. The
         // per-type primitive arms (`String == String`,
         // `Sym == Sym`, `Class == Class`, etc.) all fired earlier
@@ -1742,4 +1785,28 @@ impl Vm {
     }
 
 
+}
+
+/// Identity comparison for Method receivers — heap-managed
+/// recvs compare by ObjId / Rc-pointer; primitives compare by
+/// value. Matches CRuby's `equal?`-style semantics, narrowed to
+/// the cases that can appear in a BoundMethod recv slot.
+fn method_recv_identity(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => x == y,
+        (Value::Array(x), Value::Array(y)) => x == y,
+        (Value::Hash(x), Value::Hash(y)) => x == y,
+        (Value::Range(x), Value::Range(y)) => x == y,
+        (Value::Block(x), Value::Block(y)) => x == y,
+        (Value::BoundMethod(x), Value::BoundMethod(y)) => x == y,
+        (Value::UnboundMethod(x), Value::UnboundMethod(y)) => x == y,
+        (Value::Class(x), Value::Class(y)) => Rc::ptr_eq(x, y),
+        (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y),
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Sym(x), Value::Sym(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Nil, Value::Nil) => true,
+        _ => false,
+    }
 }
