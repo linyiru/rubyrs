@@ -154,3 +154,82 @@ pub unsafe extern "C" fn RHASH_SIZE(v: Value) -> c_long {
         _ => 0,
     })
 }
+
+// ===== msgpack-ruby additions =====
+
+/// long long -> Integer. rubyrs's Number is i64; identical to rb_ll2num.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ll2inum(n: c_longlong) -> Value {
+    with_state(|st| st.intern(CValue::Int(n as i64)))
+}
+
+/// unsigned long long -> Integer. Truncates to i64 (rubyrs has no
+/// arbitrary precision); >i64::MAX values overflow into negatives.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ull2inum(n: u64) -> Value {
+    with_state(|st| st.intern(CValue::Int(n as i64)))
+}
+
+/// VALUE -> double. CValue::Int converts; everything else -> 0.0
+/// (rubyrs has no Float CValue variant).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_num2dbl(v: Value) -> c_double {
+    with_state(|st| match st.resolve(v) {
+        CValue::Int(n) => *n as c_double,
+        _ => 0.0,
+    })
+}
+
+/// double -> VALUE Float. rubyrs has no Float CValue; stub returns Qnil.
+/// msgpack uses rb_float_new during unpack of msgpack float frames —
+/// callers will see Qnil where MRI would see a Float.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_float_new(_d: c_double) -> Value {
+    Qnil
+}
+
+/// Bignum byte size. rubyrs's Int is fixed i64 so the absolute value
+/// fits in 8 bytes; report ceil-of-bytes for the magnitude.
+/// `nlz_bits_ret` (number of leading zero bits in the top byte)
+/// gets a conservative 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_absint_size(v: Value, nlz_bits_ret: *mut c_int) -> usize {
+    if !nlz_bits_ret.is_null() {
+        unsafe { *nlz_bits_ret = 0; }
+    }
+    with_state(|st| match st.resolve(v) {
+        CValue::Int(n) => {
+            let abs = n.unsigned_abs();
+            // bytes needed to represent abs.
+            if abs == 0 { 1 } else { (8 - abs.leading_zeros() / 8) as usize }
+        }
+        _ => 0,
+    })
+}
+
+/// Bignum -> u64. rubyrs's Int is always i64; reinterpret.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_big2ull(v: Value) -> u64 {
+    with_state(|st| match st.resolve(v) {
+        CValue::Int(n) => *n as u64,
+        _ => 0,
+    })
+}
+
+/// Bignum -> i64. Same shape as rb_big2ull.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_big2ll(v: Value) -> c_longlong {
+    with_state(|st| match st.resolve(v) {
+        CValue::Int(n) => *n as c_longlong,
+        _ => 0,
+    })
+}
+
+/// Bignum positive? rubyrs Int treated as signed i64.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_bignum_positive_p(v: Value) -> c_int {
+    with_state(|st| match st.resolve(v) {
+        CValue::Int(n) => if *n >= 0 { 1 } else { 0 },
+        _ => 1,
+    })
+}

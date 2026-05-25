@@ -190,3 +190,123 @@ pub unsafe extern "C" fn rb_hash_foreach(
 pub unsafe extern "C" fn rb_hash_new_capa(_capa: c_long) -> Value {
     unsafe { crate::rb_hash_new() }
 }
+
+// ===== msgpack-ruby additions =====
+
+// Define a constant on a class — spike doesn't model class constants,
+// so no-op (subsequent rb_const_get returns Qnil regardless).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_define_const(_klass: Value, _name: *const c_char, _val: Value) {}
+
+// Class name as C string. CRuby's contract: returned pointer is
+// stable for the program's lifetime (cexts cache it in static
+// globals). PR #46 review #3: original impl leaked a fresh CString
+// per call via `into_raw()`. Now cache CStrings in a thread-local
+// table keyed by class name — each distinct name allocates once
+// and the pointer stays stable. Bounded by the number of distinct
+// class names ever seen across the process.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_obj_classname(v: Value) -> *const c_char {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::ffi::CString;
+
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, &'static CString>> =
+            RefCell::new(HashMap::new());
+    }
+
+    let name = with_state(|st| match st.resolve(v) {
+        CValue::Class(n) => n.clone(),
+        _ => String::new(),
+    });
+    if name.is_empty() {
+        return b"\0".as_ptr() as *const c_char;
+    }
+    CACHE.with(|c| {
+        let mut m = c.borrow_mut();
+        if let Some(cs) = m.get(&name) {
+            return cs.as_ptr();
+        }
+        // Box::leak gives a 'static reference, exactly what the
+        // CRuby contract promises. Bounded by distinct class
+        // names — the same names appear repeatedly in real
+        // workloads so the cache hits immediately after first use.
+        let cs: &'static CString = Box::leak(Box::new(
+            CString::new(name.clone()).unwrap_or_default(),
+        ));
+        let ptr = cs.as_ptr();
+        m.insert(name, cs);
+        ptr
+    })
+}
+
+// Freeze / frozen?: spike doesn't track frozenness.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_obj_freeze(v: Value) -> Value { v }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_obj_frozen_p(_v: Value) -> c_int { 0 }
+
+// Array from variadic args. Variadic forwarding requires nightly
+// c_variadic; spike returns an empty array and drops the args
+// (cdecl ABI cleans up). msgpack uses rb_ary_new3 in non-hot paths
+// (error msgs, registry init); empty array is wrong-but-defined.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_new3(_n: c_long) -> Value {
+    unsafe { crate::rb_ary_new() }
+}
+
+// Class ancestry — rubyrs has no inheritance modeling. Return Qtrue
+// conservatively (caller treats any non-Qfalse as "yes").
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_class_inherited_p(_child: Value, _parent: Value) -> Value {
+    unsafe { crate::Qtrue }
+}
+
+// Hash mutators.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_clear(h: Value) -> Value {
+    with_state(|st| {
+        if let CValue::Hash(pairs) = st.resolve_mut(h) {
+            pairs.clear();
+        }
+    });
+    h
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_dup(h: Value) -> Value {
+    let pairs: Vec<(Value, Value)> = with_state(|st| match st.resolve(h) {
+        CValue::Hash(p) => p.clone(),
+        _ => Vec::new(),
+    });
+    with_state(|st| st.intern(CValue::Hash(pairs)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_freeze(h: Value) -> Value { h }
+
+// Mixin: spike doesn't model module composition.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_include_module(_klass: Value, _mod: Value) {}
+
+// Opposite of rb_define_alloc_func: spike has no allocator table to undo.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_undef_alloc_func(_klass: Value) {}
+
+// Struct: rubyrs has no Struct. Return the class handle directly;
+// the (variadic) member-name args are dropped by the ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_struct_define(name: *const c_char) -> Value {
+    if name.is_null() {
+        return Qnil;
+    }
+    let n = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    with_state(|st| st.intern(CValue::Class(n)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_struct_new(_klass: Value) -> Value { Qnil }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_struct_aref(_s: Value, _i: c_long) -> Value { Qnil }

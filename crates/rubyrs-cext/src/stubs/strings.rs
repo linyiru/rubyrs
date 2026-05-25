@@ -201,3 +201,102 @@ pub unsafe extern "C-unwind" fn rb_enc_raise(
 ) -> ! {
     unsafe { rb_raise(exc, c"%s".as_ptr(), fmt) }
 }
+
+// ===== msgpack-ruby additions =====
+
+// Append bytes to a String. Returns the (possibly relocated) string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_str_buf_cat(str: Value, ptr: *const c_char, len: c_long) -> Value {
+    if ptr.is_null() || len <= 0 { return str; }
+    let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    with_state(|st| {
+        if let CValue::Str(b) = st.resolve_mut(str) {
+            // Strip trailing NUL sentinel before extending, re-append.
+            if b.last() == Some(&0) { b.pop(); }
+            b.extend_from_slice(slice);
+            b.push(0);
+        }
+    });
+    str
+}
+
+// Copy contents from src into dst. Returns dst.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_str_replace(dst: Value, src: Value) -> Value {
+    let bytes: Vec<u8> = with_state(|st| match st.resolve(src) {
+        CValue::Str(b) => b.clone(),
+        _ => Vec::new(),
+    });
+    with_state(|st| {
+        if let CValue::Str(b) = st.resolve_mut(dst) {
+            *b = bytes;
+            if b.last() != Some(&0) { b.push(0); }
+        }
+    });
+    dst
+}
+
+// Resize a String's content buffer to `len` bytes. Truncate or
+// extend with zeros; keep the sentinel NUL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_str_resize(str: Value, len: c_long) -> Value {
+    let target = if len < 0 { 0 } else { len as usize };
+    with_state(|st| {
+        if let CValue::Str(b) = st.resolve_mut(str) {
+            // Drop sentinel before resize so it doesn't count.
+            if b.last() == Some(&0) { b.pop(); }
+            b.resize(target, 0);
+            b.push(0);
+        }
+    });
+    str
+}
+
+// Encode str into target encoding. rubyrs is UTF-8 only; return str
+// unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_str_encode(str: Value, _to: Value, _ecflags: c_int, _ecopts: Value) -> Value {
+    str
+}
+
+// Try-coerce to String via to_str. Returns Qnil if not stringy.
+// rubyrs spike: only direct CValue::Str works.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_check_string_type(v: Value) -> Value {
+    with_state(|st| match st.resolve(v) {
+        CValue::Str(_) => v,
+        _ => Qnil,
+    })
+}
+
+// rb_String(v): coerce to String. Equivalent to Kernel#String, calls
+// .to_s. Spike: if already String, return; else return Qnil (lossy).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_String(v: Value) -> Value {
+    with_state(|st| match st.resolve(v) {
+        CValue::Str(_) => v,
+        _ => Qnil,
+    })
+}
+
+// Encoding accessors. Same singletons returned by rb_*_encoding().
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_enc_asciicompat(_enc: *mut c_void) -> c_int { 1 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_enc_from_index(idx: c_int) -> *mut c_void {
+    // Match the singletons in rb_utf8_encoding / rb_ascii8bit_encoding
+    // / rb_usascii_encoding.
+    match idx {
+        0 => 3 as *mut c_void, // usascii
+        2 => 2 as *mut c_void, // ascii8bit
+        _ => 1 as *mut c_void, // utf8 default
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_enc_from_encoding(_enc: *mut c_void) -> Value {
+    // CRuby returns the per-encoding Encoding instance VALUE; rubyrs
+    // has no Encoding object — return Qnil.
+    Qnil
+}

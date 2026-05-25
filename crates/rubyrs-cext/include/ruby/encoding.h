@@ -98,6 +98,40 @@ void rb_enc_raise(rb_encoding *enc, VALUE exc, const char *fmt, ...);
  * encoding, so all strings report as UTF-8 (index 1). */
 #define RB_ENCODING_GET(v) (rb_utf8_encindex())
 
+/* msgpack-ruby additions (L3-E). All collapse to UTF-8-only or
+ * identity-style operations since rubyrs has no real encoding
+ * machinery. Same theme as the rest of this header. */
+
+/* ASCII-compatible check: every encoding rubyrs handles (UTF-8 +
+ * synonyms) IS ASCII-compatible, so always 1. msgpack uses this
+ * as a fast-path predicate before deciding to re-encode. */
+int rb_enc_asciicompat(rb_encoding *enc);
+
+/* ENC_CODERANGE_ASCIIONLY(v): is `v`'s coderange 7BIT-only? CRuby
+ * uses it as a fast-path predicate — if true, skip re-encoding.
+ * rubyrs reports VALID (not 7BIT) uniformly, so this returns 0
+ * and the caller falls through to the encoding path. Acceptable
+ * spike loss; means msgpack always takes the "encode to UTF-8"
+ * branch for strings, which is functionally correct. */
+#define ENC_CODERANGE_ASCIIONLY(v) (rb_enc_str_coderange(v) == ENC_CODERANGE_7BIT)
+
+/* encindex -> rb_encoding*. We have three named encodings (UTF-8
+ * idx 1, US-ASCII idx 0, ASCII-8BIT idx 2). Any other index
+ * falls back to UTF-8. */
+rb_encoding *rb_enc_from_index(int idx);
+
+/* rb_encoding* -> something. CRuby returns a per-encoding VALUE
+ * (the `Encoding` instance). rubyrs has no Encoding object;
+ * return Qnil. Used by msgpack to set per-string encoding via
+ * rb_enc_associate, which is itself a no-op for us. */
+VALUE rb_enc_from_encoding(rb_encoding *enc);
+
+/* rb_str_encode(str, enc, ecopts): encode str to the target
+ * encoding with options. rubyrs is UTF-8-everywhere — assume the
+ * input is already in target encoding and return str unchanged.
+ * Lossy on inputs that aren't valid UTF-8 (preserved as bytes). */
+VALUE rb_str_encode(VALUE str, VALUE to, int ecflags, VALUE ecopts);
+
 #ifdef __cplusplus
 }
 #endif
