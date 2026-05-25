@@ -142,6 +142,12 @@ pub(crate) struct Vm {
     pub(crate) classes: HashMap<SymId, Rc<Class>>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, Rc<HostFn>>,
+    /// C-ext singleton-method dispatch table. Indexed by
+    /// `(class joined name, method SymId)`. Populated by
+    /// `Vm::cext_require` whenever a C ext calls
+    /// `rb_define_singleton_method`; consulted by `do_call` when
+    /// the receiver is `Value::Class(c)`.
+    pub(crate) cext_class_methods: HashMap<String, HashMap<SymId, Rc<HostFn>>>,
     pub(crate) class_stack: Vec<Rc<Class>>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
@@ -212,6 +218,7 @@ impl Vm {
             classes: HashMap::new(),
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
+            cext_class_methods: HashMap::new(),
             class_stack: vec![],
             stack: Vec::with_capacity(1024),
             frames: vec![],
@@ -612,6 +619,19 @@ impl Vm {
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
+            }
+        }
+        // C-ext singleton dispatch: `BCrypt::Engine.__bc_crypt(args)`
+        // arrives here with recv = Value::Class(c). Look up the
+        // method in the per-class cext table populated by
+        // `Vm::cext_require` (rb_define_singleton_method).
+        if let Value::Class(cls) = &recv {
+            if let Some(table) = self.cext_class_methods.get(&cls.name) {
+                if let Some(host) = table.get(&name_id).cloned() {
+                    let v = host(&args)?;
+                    self.stack.push(v);
+                    return Ok(());
+                }
             }
         }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
@@ -2600,9 +2620,429 @@ impl Vm {
                 }
                 Some(Ok(Value::Nil))
             }
+            // C-ext compat spike (Level 0). Only supports the literal-path
+            // form (`require "/abs/path/to/hello"` with auto-extension);
+            // gem/load-path resolution is deferred.
+            "require" => match args {
+                [Value::Str(path)] => {
+                    let path = path.to_string();
+                    Some(self.cext_require(&path))
+                }
+                _ => Some(Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "require: expected 1 String arg, got {}",
+                        args.len()
+                    ),
+                }))),
+            },
             _ => None,
         }
     }
+
+    /// Load a C extension shared library, run its `Init_<stem>` symbol,
+    /// and register every function it declared via
+    /// `rb_define_global_function` into `self.host_fns`.
+    ///
+    /// Level 0 caveats:
+    /// - Only literal paths (with optional auto-extension) are resolved;
+    ///   `$LOAD_PATH` and gem lookup are deferred.
+    /// - Loaded libraries are leaked (never unloaded). A real impl
+    ///   tracks them on the Vm and unloads on drop.
+    /// - Only arity 0 callbacks dispatch correctly; other arities
+    ///   register, then trap on invocation with an ArgumentError.
+    ///
+    /// wasm32-wasi has no `dlopen` — a separate
+    /// `#[cfg(target_os = "wasi")]` stub below returns a clear Trap
+    /// instead of the dlopen path.
+    #[cfg(not(target_os = "wasi"))]
+    fn cext_require(&mut self, path_str: &str) -> Result<Value, Trap> {
+        use libloading::{Library, Symbol};
+        use std::path::Path;
+
+        // Auto-extension: `require "foo"` resolves "foo.dylib" / "foo.so"
+        // / "foo.bundle" depending on host. Matches CRuby's behaviour for
+        // the literal-path case.
+        let exts: &[&str] = if cfg!(target_os = "macos") {
+            &["dylib", "bundle"]
+        } else if cfg!(windows) {
+            &["dll"]
+        } else {
+            &["so"]
+        };
+        let p = Path::new(path_str);
+        let so_path = if p.exists() {
+            p.to_path_buf()
+        } else {
+            let mut found = None;
+            for ext in exts {
+                let with = p.with_extension(ext);
+                if with.exists() {
+                    found = Some(with);
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                self.trap(RubyError::RuntimeError {
+                    msg: format!("cannot find C ext: {}", path_str),
+                })
+            })?
+        };
+
+        let stem = so_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                self.trap(RubyError::RuntimeError {
+                    msg: format!("invalid C ext filename: {}", so_path.display()),
+                })
+            })?
+            .to_string();
+        let init_sym = format!("Init_{}", stem);
+
+        // SAFETY: dlopen is intrinsically unsafe; the C ext can do
+        // anything. We trust extensions we explicitly load — sandboxing
+        // is for the Ruby-language layer, not the FFI layer.
+        unsafe {
+            rubyrs_cext::enter();
+            let lib = match Library::new(&so_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = rubyrs_cext::leave();
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!("dlopen {}: {}", so_path.display(), e),
+                    }));
+                }
+            };
+            let init: Symbol<unsafe extern "C" fn()> = match lib.get(init_sym.as_bytes()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = rubyrs_cext::leave();
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!(
+                            "symbol {} not found in {}: {}",
+                            init_sym,
+                            so_path.display(),
+                            e
+                        ),
+                    }));
+                }
+            };
+            init();
+            let state = rubyrs_cext::leave();
+
+            for cfn in state.registered_fns {
+                let sym = self.interner.intern(&cfn.name);
+                let func = cfn.func;
+                let arity = cfn.arity;
+                let cfn_name = cfn.name.clone();
+                self.host_fns.insert(
+                    sym,
+                    Rc::new(move |args: &[Value]| {
+                        // Top-level functions get Qnil as `self`,
+                        // matching CRuby's `rb_define_global_function`
+                        // convention.
+                        cext_dispatch(&cfn_name, func, arity, args, None)
+                    }),
+                );
+            }
+
+            // Materialise every class/module the C ext declared, so
+            // `LoadConst("BCrypt::Engine")` finds them.
+            for cls in state.registered_classes {
+                let name_sym = self.interner.intern(&cls.joined_name);
+                let new_class = Rc::new(Class {
+                    name: cls.joined_name.clone(),
+                    methods: RefCell::new(HashMap::new()),
+                    superclass: RefCell::new(None),
+                });
+                self.classes.insert(name_sym, new_class);
+            }
+
+            // Register every singleton method into the per-class
+            // dispatch table consulted by `do_call`.
+            for sm in state.registered_singletons {
+                let method_sym = self.interner.intern(&sm.method_name);
+                let func = sm.func;
+                let arity = sm.arity;
+                let class_name = sm.class_joined_name.clone();
+                let qualified = format!("{}.{}", class_name, sm.method_name);
+                self.cext_class_methods
+                    .entry(sm.class_joined_name)
+                    .or_default()
+                    .insert(
+                        method_sym,
+                        Rc::new(move |args: &[Value]| {
+                            // Singleton methods get the class itself
+                            // as `self`, matching CRuby's
+                            // `rb_define_singleton_method` contract.
+                            cext_dispatch(&qualified, func, arity, args, Some(&class_name))
+                        }),
+                    );
+            }
+
+            // Level 0: keep the library mapped for the lifetime of the
+            // process. Registered function pointers point into its
+            // text segment; unmapping would dangle them. A real impl
+            // stores `lib` on the Vm so it drops with the Vm.
+            std::mem::forget(lib);
+        }
+
+        Ok(Value::Nil)
+    }
+
+    /// wasm32-wasi alt for [`Vm::cext_require`]. WASI has no dynamic
+    /// loader, so any `require "path/to/some.so"` from Ruby on wasi
+    /// has no way to succeed; we trap with a precise message instead
+    /// of silently returning Nil. Native targets get the dlopen-based
+    /// implementation above.
+    #[cfg(target_os = "wasi")]
+    fn cext_require(&mut self, path_str: &str) -> Result<Value, Trap> {
+        Err(self.trap(RubyError::RuntimeError {
+            msg: format!(
+                "require: C-ext loading is not supported on wasm32-wasi (attempted to load {})",
+                path_str
+            ),
+        }))
+    }
+}
+
+/// Translate a C-side opaque handle back into a `Value`. Currently
+/// covers exactly the `CValue` variants the spike supports.
+///
+/// Gated off `target_os = "wasi"` because the only caller chain
+/// (`cext_dispatch` invoked from closures registered in
+/// `Vm::cext_require`) is itself wasi-stubbed. Without the gate the
+/// `-D dead-code` warning fires on the wasi build.
+#[cfg(not(target_os = "wasi"))]
+fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -> Value {
+    match state.resolve(h) {
+        rubyrs_cext::CValue::Nil => Value::Nil,
+        rubyrs_cext::CValue::True => Value::Bool(true),
+        rubyrs_cext::CValue::False => Value::Bool(false),
+        // CValue::Str stores bytes + sentinel NUL; the logical
+        // string is `.len() - 1` bytes. Decode lossily into UTF-8
+        // since rubyrs's Value::Str is `Rc<str>` (UTF-8). Binary-
+        // safe storage on the rubyrs side lands in a later level.
+        rubyrs_cext::CValue::Str(bytes) => {
+            let logical = &bytes[..bytes.len().saturating_sub(1)];
+            Value::Str(Rc::from(String::from_utf8_lossy(logical).as_ref()))
+        }
+        rubyrs_cext::CValue::Int(n) => Value::Int(*n),
+        // Class handles are returned from `rb_define_module` /
+        // `rb_define_class_under`; bcrypt's wrappers don't return
+        // them as plain values to Ruby, but if a future ext does,
+        // surface as Nil for now (no Class lookup from raw name
+        // outside the rubyrs::classes registry yet).
+        rubyrs_cext::CValue::Class(_) => Value::Nil,
+    }
+}
+
+/// Translate a rubyrs [`Value`] into the corresponding [`rubyrs_cext::CValue`]
+/// so it can be interned as a C-visible handle. Supported variants today:
+/// Nil, Bool, Str (binary-safe via Vec<u8> + sentinel NUL), Int. Types
+/// that cross only as runtime references (Sym ids, Class<Rc>, Object/
+/// Array/Hash/Range/Block heap ids) trap with `ArgumentError` until the
+/// matching ABI surface (`rb_sym_new`, `rb_class_new`, heap-handle
+/// translation) lands.
+#[cfg(not(target_os = "wasi"))]
+fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext::CValue, Trap> {
+    Ok(match v {
+        Value::Nil => rubyrs_cext::CValue::Nil,
+        Value::Bool(true) => rubyrs_cext::CValue::True,
+        Value::Bool(false) => rubyrs_cext::CValue::False,
+        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.as_bytes()),
+        Value::Int(n) => rubyrs_cext::CValue::Int(*n),
+        other => {
+            return Err(Trap::new(RubyError::ArgumentError {
+                msg: format!(
+                    "C ext `{}': arg {} has type {} which is not yet supported across the cext FFI",
+                    name,
+                    idx,
+                    other.type_name()
+                ),
+            }));
+        }
+    })
+}
+
+/// Invoke a registered C extension function: intern args into a fresh
+/// per-call [`CExtState`], dispatch through the correct arity-specific
+/// signature, translate the returned handle back into a rubyrs [`Value`].
+///
+/// Spike scope (Level 1): arities 0, 1, 2 are dispatched. The
+/// `unsafe extern "C" fn()` stored in `CFn::func` is transmuted to the
+/// arity-specific type — safe on x86_64 SysV and ARM64 AAPCS, where
+/// `VALUE = u64` arg/return passes through scalar registers and unused
+/// register args are simply ignored by the callee. Other arities trap
+/// loudly at invocation rather than at register-time so the failure is
+/// clearly attributable to the call site, not Init.
+#[cfg(not(target_os = "wasi"))]
+fn cext_dispatch(
+    name: &str,
+    func: rubyrs_cext::OpaqueFn,
+    arity: i32,
+    args: &[Value],
+    self_class: Option<&str>,
+) -> Result<Value, Trap> {
+    let expected_argc = match arity {
+        0..=5 => arity as usize,
+        _ => {
+            return Err(Trap::new(RubyError::ArgumentError {
+                msg: format!(
+                    "C ext `{}': spike dispatches arity 0..=5 (got arity {})",
+                    name, arity
+                ),
+            }));
+        }
+    };
+    if args.len() != expected_argc {
+        return Err(Trap::new(RubyError::ArgumentError {
+            msg: format!(
+                "C ext `{}': expected {} args, got {}",
+                name,
+                expected_argc,
+                args.len()
+            ),
+        }));
+    }
+
+    // Translate args while the *previous* state (if any) is still
+    // torn down. Errors must abort before we `enter()` a new state.
+    let cargs: Vec<rubyrs_cext::CValue> = args
+        .iter()
+        .enumerate()
+        .map(|(i, v)| cext_value_to_cvalue(name, i, v))
+        .collect::<Result<_, _>>()?;
+
+    // SAFETY: we transmute `OpaqueFn` (zero-arg) to an arity-specific
+    // signature with VALUE-shaped args. The original function was
+    // registered with that exact signature by the C ext; we just
+    // recovered it through the `ANYARGS` convention.
+    unsafe {
+        rubyrs_cext::enter();
+        let ret_handle = with_caught_unwind(|| {
+            // Build the `self` handle:
+            // - For singleton methods (`rb_define_singleton_method`),
+            //   `self_class` is `Some(class_joined_name)`; intern a
+            //   `CValue::Class` handle so the C ext sees its own
+            //   class object as `self`, matching CRuby.
+            // - For top-level functions (`rb_define_global_function`),
+            //   `self_class` is `None`; pass `Qnil`, matching CRuby
+            //   (top-level functions are conceptually attached to
+            //   the main object, but extensions universally treat
+            //   their `self` as opaque-and-unused there).
+            let self_handle = match self_class {
+                Some(cname) => rubyrs_cext::with_state(|st| {
+                    st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
+                }),
+                None => rubyrs_cext::Qnil,
+            };
+
+            // Intern args into the now-active state so the C side
+            // sees them as valid handles.
+            let arg_handles: Vec<rubyrs_cext::Value> = rubyrs_cext::with_state(|st| {
+                cargs.into_iter().map(|cv| st.intern(cv)).collect()
+            });
+            match arity {
+                0 => {
+                    type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(self_handle)
+                }
+                1 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(self_handle, arg_handles[0])
+                }
+                2 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(self_handle, arg_handles[0], arg_handles[1])
+                }
+                3 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(self_handle, arg_handles[0], arg_handles[1], arg_handles[2])
+                }
+                4 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(
+                        self_handle,
+                        arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3],
+                    )
+                }
+                5 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(
+                        self_handle,
+                        arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3], arg_handles[4],
+                    )
+                }
+                _ => unreachable!("arity validated above"),
+            }
+        });
+        let st = rubyrs_cext::leave();
+        let ret_handle = ret_handle.map_err(|panic_msg| {
+            Trap::new(RubyError::RuntimeError {
+                msg: format!("C ext `{}' panicked: {}", name, panic_msg),
+            })
+        })?;
+        Ok(cext_handle_to_value(&st, ret_handle))
+    }
+}
+
+/// Run `f`, catching any Rust panic that escapes from our own
+/// argument-interning / handle-management code wrapping the C call.
+///
+/// **What this catches**: panics raised in Rust code that runs around
+/// the `extern "C"` call — `state.intern`, our `Vec` building, any
+/// `expect("ICE: ...")` in `rubyrs_cext::with_state`.
+///
+/// **What this does NOT catch**: panics raised inside the C function
+/// itself. The C side cannot raise a Rust panic; if one of OUR
+/// `rb_*` ABI functions panics from inside the C call, the process
+/// aborts under `panic = abort` semantics (the default for `extern "C"`
+/// since Rust 2018+). The cext ABI surface is documented as
+/// abort-on-contract-violation in docs/PANIC_AUDIT.md — conversion to
+/// error sentinels is Level 3+ work tied to `rb_raise` integration.
+#[cfg(not(target_os = "wasi"))]
+fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
+        if let Some(s) = p.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = p.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        }
+    })
 }
 
 pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value_bytes: Option<usize>) -> Result<Option<Value>, RubyError> {

@@ -154,6 +154,28 @@ pub(crate) fn cid_to_string(id: ruby_prism::ConstantId<'_>) -> String {
     String::from_utf8_lossy(id.as_slice()).into_owned()
 }
 
+/// Flatten a Prism `ConstantPathNode` into a single `"A::B::C"`
+/// string. Returns `None` if any segment is dynamic (e.g. a
+/// method-call result in const position) — callers should fall
+/// back to last-segment-only behaviour in that case.
+fn flatten_constant_path(node: &Node<'_>) -> Option<String> {
+    let cp = node.as_constant_path_node()?;
+    let name = cid_to_string(cp.name()?);
+    match cp.parent() {
+        None => Some(name), // leading `::Bar` — treat as top-level `Bar`
+        Some(parent) => {
+            let head = if let Some(cr) = parent.as_constant_read_node() {
+                cid_to_string(cr.name())
+            } else if parent.as_constant_path_node().is_some() {
+                flatten_constant_path(&parent)?
+            } else {
+                return None; // dynamic head
+            };
+            Some(format!("{}::{}", head, name))
+        }
+    }
+}
+
 fn node_span(node: &Node<'_>) -> Span {
     Span::at(node.location().start_offset())
 }
@@ -211,6 +233,23 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if node.as_self_node().is_some() { return sp(node, Expr::SelfExpr); }
     if let Some(n) = node.as_constant_read_node() {
         return sp(node, Expr::ConstRead(cid_to_string(n.name())));
+    }
+    if let Some(n) = node.as_constant_path_node() {
+        // Spike scope: a `Foo::Bar::Baz` ConstantPath translates to
+        // a single ConstRead with the joined name. No real
+        // module nesting; C extensions and `class` definitions that
+        // wire up "BCrypt::Engine"-style classes must register them
+        // under the joined name for this lookup to find them.
+        // Real module scope resolution lands when we add the
+        // `module` keyword to the language.
+        if let Some(joined) = flatten_constant_path(&node) {
+            return sp(node, Expr::ConstRead(joined));
+        }
+        // Dynamic path (rare): trailing-name fallback, matches the
+        // existing rescue-clause behaviour at line ~378.
+        if let Some(name_id) = n.name() {
+            return sp(node, Expr::ConstRead(cid_to_string(name_id)));
+        }
     }
     if let Some(n) = node.as_local_variable_read_node() {
         return sp(node, Expr::LVarRead(cid_to_string(n.name())));

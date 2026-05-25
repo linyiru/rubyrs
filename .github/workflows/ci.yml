@@ -20,7 +20,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -31,7 +31,7 @@ jobs:
           ruby-version: "3.4"
 
       - name: Cache cargo registry + build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -44,6 +44,16 @@ jobs:
         run: cargo build --release --verbose
 
       - name: Run tests
+        # Includes integration tests cext_hello + cext_bcrypt, which
+        # build native C extensions through `bash build.sh`. Those
+        # invocations need the host's C toolchain (gcc on ubuntu,
+        # apple clang on macos) — both preinstalled on the runner —
+        # plus the vendored crypt_blowfish source (tracked in
+        # examples/bcrypt-cext/vendor/). The bcrypt test then runs
+        # three Openwall-published bcrypt reference vectors end to
+        # end through rubyrs and asserts byte-identical output.
+        # Failure here means a regression in the cext FFI, not just
+        # the language.
         run: cargo test --release --verbose
 
       - name: Run tests (STRESS_GC=1)
@@ -51,11 +61,75 @@ jobs:
         env:
           STRESS_GC: "1"
 
+      - name: Verify cext example bundles build
+        # Belt-and-suspenders: even if the integration tests changed
+        # paths or were skipped, this step independently runs both
+        # cext build scripts and asserts the .bundle/.so artifact
+        # got produced. Without this a partial regression in build.sh
+        # (e.g. a missing -D flag) could ship as "tests passed".
+        run: |
+          set -euo pipefail
+          bash crates/rubyrs/examples/hello-cext/build.sh
+          bash crates/rubyrs/examples/bcrypt-cext/build.sh
+          ext=$([ "$(uname -s)" = "Darwin" ] && echo bundle || echo so)
+          test -f "crates/rubyrs/examples/hello-cext/hello.$ext"
+          test -f "crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.$ext"
+
+  wasm:
+    name: Build (wasm32-wasip1)
+    # docs/DEVELOPMENT.md advertises wasm32-wasip1 as a supported
+    # target. This job proves we don't quietly break that with cext
+    # changes — particularly that `libloading` stays target-gated
+    # and `Vm::cext_require` keeps its wasi-flavoured alt.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (wasm32-wasip1 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo + wasi-sdk
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            /opt/wasi-sdk-24.0-x86_64-linux
+          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-wasm-
+
+      - name: Install wasi-sdk 24
+        # crates/rubyrs/build.rs compiles a tiny `__wasi_init_tp`
+        # stub via the `cc` crate on the wasm32-wasi target. That
+        # needs a wasi-aware C compiler. wasi-sdk 24 matches the
+        # version documented in docs/DEVELOPMENT.md.
+        run: |
+          set -euo pipefail
+          if [ ! -d /opt/wasi-sdk-24.0-x86_64-linux ]; then
+            curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz \
+              | sudo tar -xz -C /opt
+          fi
+          echo "WASI_SDK_PATH=/opt/wasi-sdk-24.0-x86_64-linux" >> $GITHUB_ENV
+
+      - name: Build (wasm32-wasip1)
+        # Builds the rubyrs binary as a wasi reactor. Verifies:
+        # 1. `libloading` is properly target-gated (was missing
+        #    before review #3 from PR #2).
+        # 2. `Vm::cext_require` keeps its `#[cfg(target_os = "wasi")]`
+        #    alt that returns a trap instead of dlopening.
+        # 3. The rest of the crate stays wasi-portable.
+        # We don't run the resulting wasm here (would need wasmtime
+        # + a script). A separate smoke job can land later.
+        run: cargo build --release --target wasm32-wasip1 -p rubyrs
+
   panic-budget:
     name: Panic budget (per-file ratchet)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Count panics
         # Counts `panic!`, `.unwrap()`, `.expect(` in each rubyrs
         # source file (doc-comment lines starting with `///` or `//!`
@@ -82,9 +156,16 @@ jobs:
               fail=1
             fi
           }
-          check crates/rubyrs/src/vm.rs       61
+          # Bumped 61 → 62 in commit 2c67052 ("Add String#sub/#gsub/#tr"),
+          # which inherits `to_chars.last().unwrap()` in the String#tr
+          # implementation. Counts merge-result on PR builds, so the
+          # +1 lands here on any branch crossing that master commit.
+          check crates/rubyrs/src/vm.rs       62
           check crates/rubyrs/src/heap.rs     10
           check crates/rubyrs/src/ast.rs       3
           check crates/rubyrs/src/lib.rs       1
-          check crates/rubyrs/src/compiler.rs  1
+          # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
+          # which introduced literal_to_value's ICE panic. The ratchet
+          # never went down, just up here. See docs/PANIC_AUDIT.md.
+          check crates/rubyrs/src/compiler.rs  2
           exit "$fail"

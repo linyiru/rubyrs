@@ -58,3 +58,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0006 — Global string interner with SymId](0006-global-string-intern.md)
 - [0007 — Host embedding API](0007-host-embedding-api.md)
 - [0008 — Resource caps for untrusted scripts](0008-resource-caps-for-untrusted-scripts.md)
+- [0009 — C-ext crate panic policy](0009-cext-panic-policy.md)

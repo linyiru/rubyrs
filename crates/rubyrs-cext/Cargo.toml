@@ -1,0 +1,26 @@
+[package]
+name = "rubyrs-cext"
+description = "CRuby-shape C ABI for hosting C extensions inside rubyrs (spike: Level 0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "rubyrs_cext"
+# rlib only. We deliberately do NOT produce a cdylib: that would
+# give us two physically distinct copies of `STATE` (one inside
+# the rubyrs binary's statically-linked image, one inside the
+# .dylib that C extensions also linked against), and they'd never
+# see each other's `enter`/`leave`.
+#
+# Instead, the rubyrs binary exports the `rb_*` symbols from its
+# own image (see crates/rubyrs/build.rs), and C extensions link
+# with `-undefined dynamic_lookup` (macOS) / `--unresolved-
+# symbols=ignore-all` (Linux), resolving against the host process
+# at dlopen time. Single image, single `STATE`.
+crate-type = ["rlib"]
+
+[dependencies]

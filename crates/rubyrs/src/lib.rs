@@ -34,6 +34,76 @@ pub use error::{RubyError, Span, Trap, TrapFrame};
 pub use value::Value;
 pub use intern::SymId;
 
+// C-ext compat (spike Level 0): the `rb_*` functions from `rubyrs-cext`
+// are only ever called from dlopen'd C extensions — there is no Rust
+// call site for the linker to see. Without this `#[used]` static
+// holding raw function pointers, dead-code elimination drops them from
+// the rubyrs binary and `dlsym` from the bundle returns NULL.
+//
+// `Qnil` / `Qtrue` / `Qfalse` get their own `#[used]` on the statics
+// themselves over in `rubyrs-cext`; functions need this indirection
+// because `#[used]` only applies to statics, not function definitions.
+// Function pointers are `Sync`; using strongly-typed statics avoids
+// the `fn as usize` cast which isn't allowed in const context.
+#[used]
+static _RB_STR_NEW_CSTR: unsafe extern "C" fn(*const std::ffi::c_char) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_str_new_cstr;
+#[used]
+static _RB_STR_NEW: unsafe extern "C" fn(*const std::ffi::c_char, std::ffi::c_long) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_str_new;
+#[used]
+static _RSTRING_PTR: unsafe extern "C" fn(rubyrs_cext::Value) -> *const std::ffi::c_char =
+    rubyrs_cext::RSTRING_PTR;
+#[used]
+static _RSTRING_LEN: unsafe extern "C" fn(rubyrs_cext::Value) -> std::ffi::c_long =
+    rubyrs_cext::RSTRING_LEN;
+#[used]
+static _RB_DEFINE_GLOBAL_FUNCTION: unsafe extern "C" fn(
+    *const std::ffi::c_char,
+    rubyrs_cext::OpaqueFn,
+    std::ffi::c_int,
+) = rubyrs_cext::rb_define_global_function;
+#[used]
+static _RB_STR_NEW_FROZEN: unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_str_new_frozen;
+#[used]
+static _RB_STRING_VALUE_CSTR: unsafe extern "C" fn(*mut rubyrs_cext::Value) -> *const std::ffi::c_char =
+    rubyrs_cext::rb_string_value_cstr;
+#[used]
+static _RB_STRING_VALUE_PTR: unsafe extern "C" fn(*mut rubyrs_cext::Value) -> *const std::ffi::c_char =
+    rubyrs_cext::rb_string_value_ptr;
+#[used]
+static _RB_INT2NUM: unsafe extern "C" fn(std::ffi::c_int) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_int2num;
+#[used]
+static _RB_LONG2NUM: unsafe extern "C" fn(std::ffi::c_long) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_long2num;
+#[used]
+static _RB_NUM2INT: unsafe extern "C" fn(rubyrs_cext::Value) -> std::ffi::c_int =
+    rubyrs_cext::rb_num2int;
+#[used]
+static _RB_NUM2LONG: unsafe extern "C" fn(rubyrs_cext::Value) -> std::ffi::c_long =
+    rubyrs_cext::rb_num2long;
+#[used]
+static _RB_NUM2ULONG: unsafe extern "C" fn(rubyrs_cext::Value) -> std::ffi::c_ulong =
+    rubyrs_cext::rb_num2ulong;
+#[used]
+static _RB_DEFINE_MODULE: unsafe extern "C" fn(*const std::ffi::c_char) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_define_module;
+#[used]
+static _RB_DEFINE_CLASS_UNDER: unsafe extern "C" fn(
+    rubyrs_cext::Value,
+    *const std::ffi::c_char,
+    rubyrs_cext::Value,
+) -> rubyrs_cext::Value = rubyrs_cext::rb_define_class_under;
+#[used]
+static _RB_DEFINE_SINGLETON_METHOD: unsafe extern "C" fn(
+    rubyrs_cext::Value,
+    *const std::ffi::c_char,
+    rubyrs_cext::OpaqueFn,
+    std::ffi::c_int,
+) = rubyrs_cext::rb_define_singleton_method;
+
 /// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
 /// untrusted scripts.
 #[derive(Default)]

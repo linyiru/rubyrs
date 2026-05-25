@@ -484,8 +484,14 @@ name = "rubyrs"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "libloading",
  "ruby-prism",
+ "rubyrs-cext",
 ]
+
+[[package]]
+name = "rubyrs-cext"
+version = "0.1.0"
 
 [[package]]
 name = "rustc-hash"
