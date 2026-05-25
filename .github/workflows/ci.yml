@@ -164,7 +164,20 @@ jobs:
           # which inherits `to_chars.last().unwrap()` in the String#tr
           # implementation. Counts merge-result on PR builds, so the
           # +1 lands here on any branch crossing that master commit.
-          check crates/rubyrs/src/vm.rs       62
+          #
+          # Bumped 62 → 64 in master commit 715ecb5 ("Add non-local
+          # return + puts-array flatten + bit ops + Enumerable-by +
+          # super") which inherits two new sites in vm.rs's super /
+          # non-local return paths.
+          #
+          # Bumped 64 → 66 by Spike L2-2 (this PR): `cext_invoke_method`
+          # uses `.expect("ICE: ...")` on stack-pop (assumed invariant
+          # after do_call), and `cext_funcall_to_vm` derefs the
+          # documented unsafe vm_ptr via `&mut *vm_ptr` which counts as
+          # an `.unwrap()` via the surrounding expectation pattern. Both
+          # are ICE-class (programmer-error invariants), not user-
+          # reachable; documented in CURRENT_VM_PTR's source comment.
+          check crates/rubyrs/src/vm.rs       66
           check crates/rubyrs/src/heap.rs     10
           check crates/rubyrs/src/ast.rs       3
           check crates/rubyrs/src/lib.rs       1

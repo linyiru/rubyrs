@@ -1,4 +1,9 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+// `Cell` is only used by the cext-reentrance machinery (CURRENT_VM_PTR),
+// itself wasi-stubbed; gate the import so the wasi build doesn't see
+// it as unused under `-D warnings`.
+#[cfg(not(target_os = "wasi"))]
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::env;
 use std::rc::Rc;
