@@ -95,18 +95,42 @@ diagnostic surface for callers that care.
 
 ## Golden tests
 
-`tests/golden/*.input.rb` paired with `*.expected.rb`. Run:
+Two complementary test sets, both run by
+`cargo test -p rubyrs-spec-extract`:
 
-```bash
-cargo test -p rubyrs-spec-extract
-```
+- `tests/golden/` — small hand-built fixtures that exercise
+  specific code paths in isolation
+  (`simple_eq`, `skipped_patterns`, `strip_require_relative`).
+- `tests/upstream/` — verbatim ruby/spec snapshots
+  (`core/string/empty_spec.rb`, `length_spec.rb`,
+  `reverse_spec.rb` as of 2026-05). The matching
+  `.expected.rb` is what the extractor produces. A separate
+  `upstream_outputs_parse_as_valid_ruby` test parses every
+  extracted file through prism and asserts no syntax errors,
+  even when matchers v0.1 doesn't handle remain in the output.
 
-When you intentionally change extractor output, regenerate
-the expected files:
+Regenerate `.expected.rb` files after an intentional change:
 
 ```bash
 UPDATE_EXPECTED=1 cargo test -p rubyrs-spec-extract
 ```
+
+## v0.1 real-world result
+
+Run against the three vendored fixtures:
+
+| Upstream file | What v0.1 produces |
+|---|---|
+| `core/string/reverse_spec.rb` | 6 of ~10 `it` blocks lower cleanly to `assert_eq` calls; predicate / lambda / `should.equal?` blocks pass through unchanged |
+| `core/string/empty_spec.rb` | only `require_relative` lines stripped — file body is all predicate matchers, nothing to rewrite yet |
+| `core/string/length_spec.rb` | only `require_relative` lines stripped — the single `it_behaves_like` redirect is untouched |
+
+In other words, v0.1 is a STARTER that mechanises the most
+common pattern. Files that mix matchers still need a human
+finish; the extracted file is the right starting point for
+that finish. v0.2 (`should_not`, predicate matchers,
+`should.raise`) will close the gap for the predicate-heavy
+files; v0.4 (shared examples) for the `it_behaves_like` ones.
 
 ## Approach (for future contributors)
 
