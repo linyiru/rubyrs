@@ -840,10 +840,13 @@ pub unsafe extern "C" fn rb_define_singleton_method(
 ///
 /// # Safety
 ///
-/// `klass` must be a class handle returned by `rb_define_class_under`
-/// in the same CExtState. `name` must be a NUL-terminated C string.
-/// `func` must be callable with the registered arity (the host
-/// transmutes per-call based on `arity`).
+/// `klass` must be a class/module handle returned by
+/// `rb_define_class_under` OR `rb_define_module` in the same
+/// CExtState — both produce a `CValue::Class` handle and the
+/// dispatch path doesn't distinguish (matches CRuby's
+/// "methods on modules" support). `name` must be a NUL-terminated
+/// C string. `func` must be callable with the registered arity
+/// (the host transmutes per-call based on `arity`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_define_method(
     klass: Value,

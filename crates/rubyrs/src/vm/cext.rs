@@ -667,7 +667,7 @@ pub(crate) fn cext_dispatch(
             CextSelfHandle::Object(other) => {
                 return Err(Trap::new(RubyError::TypeError {
                     msg: format!(
-                        "C ext `{}': instance method dispatch with non-Object receiver {:?}",
+                        "C ext `{}': instance method dispatch with non-Object receiver {}",
                         name,
                         other.type_name()
                     ),
