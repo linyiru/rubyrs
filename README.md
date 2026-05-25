@@ -141,6 +141,34 @@ and [docs/ROADMAP.md](docs/ROADMAP.md) for what's next. The testing
 strategy — including our plan to ingest `ruby/spec` as the quality bar —
 is described in [docs/TESTING.md](docs/TESTING.md).
 
+### Subset coverage (gapscan)
+
+A second binary in this workspace, `rubyrs-gapscan`, scans a Ruby
+codebase and classifies every AST node as supported, supported-via-
+rides-along, or missing. Used as a quantitative quality bar against
+real Ruby corpora. Running it against the in-tree Brewfile demo
+(`crates/rubyrs/examples/brewfile/`) gives the canonical
+"is the niche we claim to serve actually served?" number:
+
+```
+$ cargo run --release --bin rubyrs-gapscan -- scan crates/rubyrs/examples/brewfile
+Files scanned: 2
+Total AST nodes: 277
+  Supported:        195 (70.40%)
+  RidesAlong:        68 (24.55%)
+  Missing:           14 (5.05%)
+
+Missing node classes:
+  GlobalVariableReadNode    10  ($taps)
+  GlobalVariableWriteNode    4  ($taps = [])
+```
+
+The "missing" 5% is two related nodes — global variables, used only
+by the DSL host code (the Brewfile script body itself is 100%
+supported). The CI workflow `gapscan-pr.yml` runs this against
+representative corpora on every PR and posts a diff comment so
+regressions land visibly.
+
 ## Docs
 
 - [docs/SUBSET.md](docs/SUBSET.md) — supported and unsupported semantics
