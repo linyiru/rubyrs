@@ -148,6 +148,14 @@ Explicitly accepted trade-offs:
 - **No spec coverage from `ruby/spec` yet.** Eight ad-hoc tests in
   `tests/embed.rs` lock the PoC behaviour in; a `ruby/spec` runner
   is its own RFC.
+- **`alias_method` / `define_method` outside a class body silently
+  install into `toplevel_methods`** instead of raising. The
+  compile-time intercept doesn't track class-body context, matching
+  the divergence already documented for `attr_*` in
+  `compiler.rs:319-326`. Treated as a single shared follow-up: add
+  class-body context tracking once, apply to all four intercepts at
+  the same time, rather than diverging behaviour across the
+  intercept set.
 
 ## Follow-ups
 

@@ -87,6 +87,16 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 - `method_missing` is only invoked when the receiver is a user-class
   instance (`Value::Object`). Adding per-primitive class chains is
   a follow-up.
+- `alias_method` / `define_method` outside a class body (called at
+  the toplevel or, more surprisingly, inside an instance method
+  with implicit self) install into `toplevel_methods` instead of
+  raising — the compile-time intercept doesn't track class-body
+  context. Same divergence already in effect for
+  `attr_accessor` / `attr_reader` / `attr_writer`
+  (see [`compiler.rs:319-326`](../crates/rubyrs/src/compiler.rs)
+  for the rationale). Fix is a single shared piece of context
+  tracking for all four; treated as a follow-up so the existing
+  `attr_*` semantics aren't changed in isolation.
 - Per-iteration dispatch is ~3× CRuby's. See
   [`examples/metaprog_bench/README.md`](../crates/rubyrs/examples/metaprog_bench/README.md)
   — peak memory is still ~5× lighter than CRuby on the same workload.
