@@ -674,7 +674,18 @@ pub unsafe extern "C" fn rb_ary_entry(ary: Value, idx: c_long) -> Value {
     with_state(|st| match st.resolve(ary) {
         CValue::Array(elems) => {
             let len = elems.len() as c_long;
-            let resolved = if idx < 0 { idx + len } else { idx };
+            // Use checked addition for the negative-index case:
+            // `LONG_MIN + len` overflows c_long and would abort in
+            // debug builds — fatal across the extern "C" boundary
+            // (no unwinding). On overflow, treat as out-of-range.
+            let resolved = if idx < 0 {
+                match idx.checked_add(len) {
+                    Some(r) => r,
+                    None => return Qnil,
+                }
+            } else {
+                idx
+            };
             if resolved < 0 || resolved >= len {
                 Qnil
             } else {
