@@ -157,3 +157,4 @@ fn run_diff(name: &str) {
 #[test] fn block_destructure() { run_diff("block_destructure"); }
 #[test] fn range_strings() { run_diff("range_strings"); }
 #[test] fn kwrest_args() { run_diff("kwrest_args"); }
+#[test] fn case_splat() { run_diff("case_splat"); }

@@ -871,9 +871,43 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 Some(w) => w,
                 None => continue,
             };
-            let when_conditions: Vec<SExpr> = when.conditions()
+            // Per-condition, with a flag noting whether the
+            // condition is a splat. Splats `when *arr` translate
+            // to `arr.any? { |__sp_v| __sp_v === predicate }` —
+            // already a boolean against the predicate, so the
+            // === wrap below must be skipped for them. Non-
+            // splat conditions follow the standard
+            // `<wc> === predicate` path.
+            //
+            // No-predicate case forms (`case; when *arr ...`)
+            // collapse the body to a bare `arr.any?` truthy
+            // check on elements.
+            let when_conditions: Vec<(SExpr, bool /* is_splat */)> = when.conditions()
                 .iter()
-                .map(|c| tr(&c))
+                .map(|c| {
+                    let cn: &Node<'_> = &c;
+                    if let Some(sn) = cn.as_splat_node()
+                        && let Some(inner) = sn.expression() {
+                            let arr = tr(&inner);
+                            let sp_name = "__sp_v".to_string();
+                            let body_expr = match &predicate {
+                                Some(pred) => sp(cn, Expr::Call {
+                                    receiver: Some(Box::new(sp(cn, Expr::LVarRead(sp_name.clone())))),
+                                    name: "===".into(),
+                                    args: vec![pred.clone()],
+                                }),
+                                None => sp(cn, Expr::LVarRead(sp_name.clone())),
+                            };
+                            return (sp(cn, Expr::CallWithBlock {
+                                receiver: Some(Box::new(arr)),
+                                name: "any?".into(),
+                                args: vec![],
+                                block_params: vec![sp_name],
+                                block_body: vec![body_expr],
+                            }), true);
+                        }
+                    (tr(cn), false)
+                })
                 .collect();
             let when_body: Vec<SExpr> = when.statements()
                 .map(|s| s.body().iter().map(|c| tr(&c)).collect())
@@ -882,14 +916,23 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             // short-circuit `||`. Each `expr` becomes
             // `expr === predicate` when there's a predicate.
             let mut cond_expr: Option<SExpr> = None;
-            for wc in when_conditions {
-                let one = match &predicate {
-                    Some(pred) => sp(node, Expr::Call {
-                        receiver: Some(Box::new(wc)),
-                        name: "===".into(),
-                        args: vec![pred.clone()],
-                    }),
-                    None => wc,
+            for (wc, is_splat) in when_conditions {
+                let one = if is_splat {
+                    // Splat-derived `any?` block already
+                    // encodes the predicate-check internally;
+                    // wrapping it in `=== predicate` would
+                    // double-apply (the outer call would
+                    // compare a Bool against predicate).
+                    wc
+                } else {
+                    match &predicate {
+                        Some(pred) => sp(node, Expr::Call {
+                            receiver: Some(Box::new(wc)),
+                            name: "===".into(),
+                            args: vec![pred.clone()],
+                        }),
+                        None => wc,
+                    }
                 };
                 cond_expr = Some(match cond_expr {
                     None => one,
