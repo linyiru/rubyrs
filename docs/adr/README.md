@@ -61,3 +61,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0009 — C-ext crate panic policy](0009-cext-panic-policy.md)
 - [0010 — Metaprogramming PoC: alias_method, method_missing, define_method](0010-metaprogramming-poc.md)
 - [0011 — CRuby-mirrored vm.rs split](0011-cruby-mirrored-vm-split.md)
+- [0012 — Thin LTO in release profile](0012-thin-lto-release-profile.md)
