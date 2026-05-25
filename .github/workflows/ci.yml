@@ -98,8 +98,16 @@ jobs:
     name: Build (wasm32-wasip1)
     # docs/DEVELOPMENT.md advertises wasm32-wasip1 as a supported
     # target. This job proves we don't quietly break that with cext
-    # changes — particularly that `libloading` stays target-gated
-    # and `Vm::cext_require` keeps its wasi-flavoured alt.
+    # changes — particularly that the crate stays wasi-portable
+    # with the `cext` feature off.
+    #
+    # We deliberately build with `--no-default-features` because
+    # `cext` requires a dynamic loader (libloading + dlopen) that
+    # wasm32-wasi does not have. PR #75 made that combination a
+    # `build.rs` panic so users get a clear diagnostic instead of
+    # a silently stub-only binary; this job therefore exercises the
+    # `--no-default-features` path, which is the only meaningful
+    # wasm32-wasi shape (see ADR 0015).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -148,15 +156,16 @@ jobs:
           echo "WASI_SDK_PATH=/opt/wasi-sdk-24.0-x86_64-linux" >> $GITHUB_ENV
 
       - name: Build (wasm32-wasip1)
-        # Builds the rubyrs binary as a wasi reactor. Verifies:
-        # 1. `libloading` is properly target-gated (was missing
-        #    before review #3 from PR #2).
-        # 2. `Vm::cext_require` keeps its `#[cfg(target_os = "wasi")]`
-        #    alt that returns a trap instead of dlopening.
-        # 3. The rest of the crate stays wasi-portable.
+        # Builds the rubyrs binary as a wasi reactor with `cext` off.
+        # Verifies:
+        # 1. The non-cext core stays wasi-portable.
+        # 2. `libloading` and `rubyrs-cext` are correctly opt-in
+        #    via the `cext` Cargo feature (no leakage onto wasm).
+        # 3. `Kernel#require` returns a clear non-cext trap on this
+        #    build shape rather than panicking.
         # We don't run the resulting wasm here (would need wasmtime
         # + a script). A separate smoke job can land later.
-        run: cargo build --release --target wasm32-wasip1 -p rubyrs
+        run: cargo build --release --target wasm32-wasip1 -p rubyrs --no-default-features
 
   panic-budget:
     name: Panic budget (per-file ratchet)
