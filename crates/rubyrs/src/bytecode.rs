@@ -185,6 +185,7 @@ pub(crate) enum Op {
     ///     discarded along with the handler entries above them.
     ///   - Non-local `return` (`Op::ReturnMethod`) pops the frame
     ///     entirely, taking `loop_rescue_depths` with it.
+    ///
     /// Without those two compensating paths the entry would stay
     /// installed on the frame and a later `BreakLoop` would read it
     /// as the innermost loop.

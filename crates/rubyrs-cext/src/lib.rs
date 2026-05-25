@@ -374,11 +374,10 @@ impl CExtState {
     pub fn intern(&mut self, v: CValue) -> Value {
         if let CValue::Class(name) = &v {
             for (h, existing) in self.values.iter().enumerate().take(SENTINEL_COUNT) {
-                if let CValue::Class(existing_name) = existing {
-                    if existing_name == name {
+                if let CValue::Class(existing_name) = existing
+                    && existing_name == name {
                         return h as u64;
                     }
-                }
             }
         }
         let h = self.values.len() as u64;
