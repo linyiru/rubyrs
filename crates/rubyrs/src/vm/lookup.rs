@@ -195,6 +195,7 @@ impl Vm {
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "map" | "collect" | "fetch" |
                 "sort" | "sort_by" | "min_by" | "max_by" | "group_by" |
+                "transform_keys" | "transform_values" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,

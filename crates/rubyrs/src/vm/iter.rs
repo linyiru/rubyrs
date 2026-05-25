@@ -560,6 +560,75 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
+            // `h.transform_keys { |k| ... }` — new Hash with keys
+            // mapped through the block. Values preserved. On
+            // collision (block maps two distinct keys to the same
+            // new key), later wins, matching CRuby.
+            (Value::Hash(id), "transform_keys", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::new()));
+                g.pin(Value::Hash(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.invoke_block(block, vec![k])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let new_key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(new_key);
+                        break;
+                    }
+                    // Last-wins collision: overwrite existing slot
+                    // if the new_key equals one already present;
+                    // otherwise append. Matches CRuby's iteration-
+                    // order semantics.
+                    let existing = g.vm.heap.hash(result_id).iter()
+                        .position(|(k2, _)| k2.ruby_eq(&new_key, &g.vm.heap));
+                    if let Some(p) = existing {
+                        g.vm.heap.hash_mut(result_id)[p] = (new_key, v);
+                    } else {
+                        g.vm.heap.hash_mut(result_id).push((new_key, v));
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(result_id)))
+            }
+            // `h.transform_values { |v| ... }` — new Hash with the
+            // same keys but values mapped through the block. No
+            // collision possible (keys unchanged); order preserved.
+            (Value::Hash(id), "transform_values", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::with_capacity(snapshot.len())));
+                g.pin(Value::Hash(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.invoke_block(block, vec![v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let new_v = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(new_v);
+                        break;
+                    }
+                    g.vm.heap.hash_mut(result_id).push((k, new_v));
+                }
+                Some(early.unwrap_or(Value::Hash(result_id)))
+            }
             (Value::Hash(id), "fetch", [k]) => {
                 // Block form: `h.fetch(k) { |k| default_expr }`.
                 // Block is invoked only on miss; CRuby ignores the
