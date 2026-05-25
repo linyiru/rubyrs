@@ -147,6 +147,19 @@ void rb_define_global_function(const char *name,
  * `rb_define_class_under(parent, name, rb_cObject)` accepts its
  * third arg unchanged. Superclass is ignored at spike scope. */
 extern VALUE rb_cObject;
+extern VALUE rb_cString;
+extern VALUE rb_cArray;
+extern VALUE rb_cHash;
+extern VALUE rb_cFloat;
+extern VALUE rb_cInteger;
+extern VALUE rb_cNumeric;
+extern VALUE rb_cSymbol;
+extern VALUE rb_cTrueClass;
+extern VALUE rb_cFalseClass;
+extern VALUE rb_cNilClass;
+extern VALUE rb_cBasicObject;
+extern VALUE rb_cModule;
+extern VALUE rb_cClass;
 
 /* Declare a top-level module. Returns a class/module handle that
  * can be passed to `rb_define_class_under` or
@@ -337,7 +350,12 @@ typedef struct {
     void (*dmark)(void *);
     void (*dfree)(void *);
     size_t (*dsize)(const void *);
-    void *reserved[2];
+    /* dcompact: invoked by CRuby's compaction GC to update embedded
+     * VALUE references after objects move. rubyrs has no compaction
+     * GC, so this slot is parsed for ABI compat but never called.
+     * Cexts initialize it; we ignore it. */
+    void (*dcompact)(void *);
+    void *reserved[1];
 } rb_data_type_function_t;
 
 typedef struct rb_data_type_struct {
@@ -407,6 +425,15 @@ typedef int rb_value_type_t;
 #define T_CLASS   11
 #define T_MODULE  12
 #define T_DATA    13
+/* T_BIGNUM: CRuby's arbitrary-precision integer. rubyrs only has
+ * fixed-width i64 inside Number, so no value ever returns T_BIGNUM
+ * from rb_type — but the constant must exist so cext type switches
+ * compile. */
+#define T_BIGNUM  14
+#define T_REGEXP  15
+#define T_STRUCT  16
+#define T_RATIONAL 17
+#define T_COMPLEX 18
 
 int rb_value_type(VALUE v);
 #define rb_type(v) ((int)rb_value_type(v))
@@ -651,6 +678,37 @@ VALUE rb_string_value(VALUE *v);
 /* Additional encoding indices used by flori/json's binary-vs-utf8
  * dispatch. */
 int rb_ascii8bit_encindex(void);
+
+/* RBASIC_CLASS: returns the class VALUE of any object. Generator
+ * uses it for fast dispatch (compare against rb_cString / rb_cHash
+ * before falling through to method-call dispatch). */
+VALUE rb_basic_class(VALUE obj);
+#define RBASIC_CLASS(obj) rb_basic_class(obj)
+
+/* RFLOAT_VALUE: extract the C double from a Float VALUE. CRuby
+ * provides this as a struct field accessor; we expose as a host
+ * function call. */
+double rb_float_value(VALUE v);
+#define RFLOAT_VALUE(v) rb_float_value(v)
+
+/* rb_utf8_str_new_lit: CRuby variant that takes a string literal
+ * and uses sizeof - 1 for length. We collapse to rb_utf8_str_new
+ * via __builtin_strlen so a constant arg gets folded. */
+#define rb_utf8_str_new_lit(s) rb_utf8_str_new((s), (long)(sizeof(s) - 1))
+#define rb_str_new_lit(s)      rb_str_new((s), (long)(sizeof(s) - 1))
+
+/* PRIsVALUE: CRuby's printf conversion specifier that prints a
+ * VALUE via rb_obj_as_string (object → its inspect representation).
+ * rubyrs has no printf hook to intercept this, so we fall back to
+ * printing the raw u64 handle in hex. Output isn't pretty (cext
+ * uses this in error messages), but it compiles and the message
+ * is still distinguishable. A proper fix would route rb_raise's
+ * fmt through a custom formatter — beyond wedge scope. */
+#define PRIsVALUE "llx"
+
+/* CLASS_OF: returns the class VALUE of any object. Same surface
+ * as RBASIC_CLASS — distinct CRuby names that we collapse. */
+#define CLASS_OF(obj) rb_obj_class(obj)
 
 /* Cluster 10 — String helpers. */
 VALUE rb_str_buf_new(long capa);
