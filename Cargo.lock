@@ -499,6 +499,7 @@ version = "0.1.0"
 dependencies = [
  "ruby-prism",
  "rubyrs",
+ "serde_json",
 ]
 
 [[package]]

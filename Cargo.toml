@@ -26,3 +26,5 @@ tar = "0.4"
 flate2 = "1.0"
 cc = "1"
 libloading = "0.8"
+# Value-based API only — no derive macros, no proc-macro compile cost.
+serde_json = { version = "1", default-features = false, features = ["std"] }

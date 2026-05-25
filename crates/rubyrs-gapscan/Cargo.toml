@@ -18,3 +18,4 @@ path = "src/lib.rs"
 [dependencies]
 ruby-prism.workspace = true
 rubyrs = { path = "../rubyrs" }
+serde_json.workspace = true

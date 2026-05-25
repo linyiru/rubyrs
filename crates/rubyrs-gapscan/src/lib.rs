@@ -487,6 +487,265 @@ pub fn render_text(report: &Report, top_missing: usize) -> String {
     s
 }
 
+// ---- JSON I/O ----
+
+/// Serialise a [`Report`] to JSON. Hand-built with `serde_json::Value`
+/// to keep the schema explicit and avoid serde_derive's compile cost.
+/// Schema is stable; bump `schema_version` on breaking changes.
+pub fn render_json(report: &Report) -> String {
+    use serde_json::{json, Value};
+    let totals = json!({
+        "supported": report.supported_total(),
+        "rides_along": report.rides_along_total(),
+        "missing": report.missing_total(),
+    });
+    let histogram: Vec<Value> = report
+        .histogram
+        .iter()
+        .map(|(cls, stat)| {
+            json!({
+                "class": cls,
+                "count": stat.count,
+                "classification": classification_str(classify(cls)),
+                "first_example": stat.first_example,
+                "first_file": stat.first_file.as_ref().map(|p| p.display().to_string()),
+            })
+        })
+        .collect();
+    let calls: Vec<Value> = report
+        .calls
+        .iter()
+        .map(|(name, stat)| {
+            json!({
+                "name": name,
+                "bareword": stat.bareword,
+                "receiver": stat.receiver,
+                "operator": stat.operator,
+            })
+        })
+        .collect();
+    let files: Vec<Value> = report
+        .files
+        .iter()
+        .map(|f| {
+            json!({
+                "path": f.path.display().to_string(),
+                "total": f.total,
+                "supported": f.supported,
+                "rides_along": f.rides_along,
+                "missing": f.missing,
+                "missing_classes": f.missing_classes.iter().collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let parse_errors: Vec<String> = report
+        .files_parse_errors
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let doc = json!({
+        "schema_version": 1,
+        "tool": "rubyrs-gapscan",
+        "root": report.root.display().to_string(),
+        "files_scanned": report.files_scanned,
+        "files_with_parse_errors": parse_errors,
+        "total_nodes": report.total_nodes,
+        "totals": totals,
+        "histogram": histogram,
+        "calls": calls,
+        "files": files,
+    });
+    serde_json::to_string_pretty(&doc).expect("json serialise")
+}
+
+fn classification_str(c: Classification) -> &'static str {
+    match c {
+        Classification::Supported => "Supported",
+        Classification::RidesAlong => "RidesAlong",
+        Classification::Missing => "Missing",
+    }
+}
+
+/// Parse a JSON report previously produced by [`render_json`].
+///
+/// Tolerant: missing optional fields default; we don't validate
+/// histogram classifications since `classify()` rederives them.
+pub fn parse_json(text: &str) -> Result<Report, String> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let mut report = Report::default();
+    report.root = PathBuf::from(v["root"].as_str().unwrap_or(""));
+    report.files_scanned = v["files_scanned"].as_u64().unwrap_or(0);
+    report.total_nodes = v["total_nodes"].as_u64().unwrap_or(0);
+    if let Some(arr) = v["files_with_parse_errors"].as_array() {
+        for p in arr {
+            if let Some(s) = p.as_str() {
+                report.files_parse_errors.push(PathBuf::from(s));
+            }
+        }
+    }
+    if let Some(arr) = v["histogram"].as_array() {
+        for item in arr {
+            let class = item["class"].as_str().unwrap_or("").to_string();
+            if class.is_empty() {
+                continue;
+            }
+            let stat = NodeStat {
+                count: item["count"].as_u64().unwrap_or(0),
+                first_example: item["first_example"].as_str().map(|s| s.to_string()),
+                first_file: item["first_file"].as_str().map(PathBuf::from),
+            };
+            report.histogram.insert(class, stat);
+        }
+    }
+    if let Some(arr) = v["calls"].as_array() {
+        for item in arr {
+            let name = item["name"].as_str().unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let stat = CallStat {
+                bareword: item["bareword"].as_u64().unwrap_or(0),
+                receiver: item["receiver"].as_u64().unwrap_or(0),
+                operator: item["operator"].as_u64().unwrap_or(0),
+            };
+            report.calls.insert(name, stat);
+        }
+    }
+    if let Some(arr) = v["files"].as_array() {
+        for item in arr {
+            let path = PathBuf::from(item["path"].as_str().unwrap_or(""));
+            let mut fs = FileStat {
+                path,
+                total: item["total"].as_u64().unwrap_or(0),
+                supported: item["supported"].as_u64().unwrap_or(0),
+                rides_along: item["rides_along"].as_u64().unwrap_or(0),
+                missing: item["missing"].as_u64().unwrap_or(0),
+                ..Default::default()
+            };
+            if let Some(mc) = item["missing_classes"].as_array() {
+                for c in mc {
+                    if let Some(s) = c.as_str() {
+                        fs.missing_classes.insert(s.to_string());
+                    }
+                }
+            }
+            report.files.push(fs);
+        }
+    }
+    Ok(report)
+}
+
+// ---- diff ----
+
+/// Difference between two [`Report`]s. All numeric fields are
+/// `after - before` (positive = "got worse" for missing/nodes,
+/// "got better" for supported).
+#[derive(Debug, Clone, Default)]
+pub struct ReportDiff {
+    pub before_root: PathBuf,
+    pub after_root: PathBuf,
+    pub total_nodes_delta: i64,
+    pub supported_delta: i64,
+    pub rides_along_delta: i64,
+    pub missing_delta: i64,
+    /// Classes that appear with count > 0 in `after` but were absent
+    /// (or zero) in `before`. New gaps surfaced.
+    pub new_missing_classes: Vec<(String, u64)>,
+    /// Classes that were Missing in `before` and have count 0 in
+    /// `after`. Closed gaps.
+    pub closed_missing_classes: Vec<(String, u64)>,
+    /// Bareword call deltas: (name, before, after, delta), sorted
+    /// by absolute delta descending.
+    pub bareword_call_changes: Vec<(String, u64, u64, i64)>,
+}
+
+pub fn diff(before: &Report, after: &Report) -> ReportDiff {
+    let mut d = ReportDiff {
+        before_root: before.root.clone(),
+        after_root: after.root.clone(),
+        total_nodes_delta: after.total_nodes as i64 - before.total_nodes as i64,
+        supported_delta: after.supported_total() as i64 - before.supported_total() as i64,
+        rides_along_delta: after.rides_along_total() as i64 - before.rides_along_total() as i64,
+        missing_delta: after.missing_total() as i64 - before.missing_total() as i64,
+        ..Default::default()
+    };
+    // Missing-class movements.
+    let before_missing: BTreeMap<&String, u64> = before
+        .histogram
+        .iter()
+        .filter(|(k, _)| classify(k) == Classification::Missing)
+        .map(|(k, v)| (k, v.count))
+        .collect();
+    let after_missing: BTreeMap<&String, u64> = after
+        .histogram
+        .iter()
+        .filter(|(k, _)| classify(k) == Classification::Missing)
+        .map(|(k, v)| (k, v.count))
+        .collect();
+    for (k, &v) in &after_missing {
+        if before_missing.get(k).copied().unwrap_or(0) == 0 {
+            d.new_missing_classes.push((k.to_string(), v));
+        }
+    }
+    for (k, &v) in &before_missing {
+        if after_missing.get(k).copied().unwrap_or(0) == 0 {
+            d.closed_missing_classes.push((k.to_string(), v));
+        }
+    }
+    d.new_missing_classes.sort_by(|a, b| b.1.cmp(&a.1));
+    d.closed_missing_classes.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Bareword call deltas.
+    let mut names: BTreeSet<&String> = BTreeSet::new();
+    names.extend(before.calls.keys());
+    names.extend(after.calls.keys());
+    for name in names {
+        let b = before.calls.get(name).map(|s| s.bareword).unwrap_or(0);
+        let a = after.calls.get(name).map(|s| s.bareword).unwrap_or(0);
+        if a != b {
+            d.bareword_call_changes
+                .push((name.clone(), b, a, a as i64 - b as i64));
+        }
+    }
+    d.bareword_call_changes
+        .sort_by(|x, y| y.3.abs().cmp(&x.3.abs()));
+    d
+}
+
+/// Render a [`ReportDiff`] as text.
+pub fn render_text_diff(d: &ReportDiff, top: usize) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "## Diff");
+    let _ = writeln!(s, "before: {}", d.before_root.display());
+    let _ = writeln!(s, "after:  {}", d.after_root.display());
+    let _ = writeln!(s, "\nTotals (after − before):");
+    let _ = writeln!(s, "  total_nodes:   {:+}", d.total_nodes_delta);
+    let _ = writeln!(s, "  supported:     {:+}", d.supported_delta);
+    let _ = writeln!(s, "  rides_along:   {:+}", d.rides_along_delta);
+    let _ = writeln!(s, "  missing:       {:+}", d.missing_delta);
+    if !d.closed_missing_classes.is_empty() {
+        let _ = writeln!(s, "\n### Closed gaps (now zero in after)");
+        for (cls, was) in d.closed_missing_classes.iter().take(top) {
+            let _ = writeln!(s, "  -{was:>6}  {cls}");
+        }
+    }
+    if !d.new_missing_classes.is_empty() {
+        let _ = writeln!(s, "\n### Newly-appearing missing classes");
+        for (cls, is) in d.new_missing_classes.iter().take(top) {
+            let _ = writeln!(s, "  +{is:>6}  {cls}");
+        }
+    }
+    if !d.bareword_call_changes.is_empty() {
+        let _ = writeln!(s, "\n### Bareword-call changes (top {top} by |delta|)");
+        let _ = writeln!(s, "  {:<40} {:>8} {:>8} {:>8}", "method", "before", "after", "delta");
+        for (n, b, a, dl) in d.bareword_call_changes.iter().take(top) {
+            let _ = writeln!(s, "  {n:<40} {b:>8} {a:>8} {dl:>+8}");
+        }
+    }
+    s
+}
+
 // ---- self-check exposed for tests / CLI --strict ----
 
 /// Sanity: every class name we ever emit must be in `ALL_PRISM_NODES`.
