@@ -160,12 +160,17 @@ Explicitly accepted trade-offs:
 ## Follow-ups
 
 Tracked separately so they don't bloat this PR:
-- Performance regression CI (`hyperfine` + `/usr/bin/time -l` against
-  a baseline) so the 3×-CRuby / 5×-lighter ratios don't drift.
-- `ruby/spec` micro-runner: vendored subset of metaprog specs, tagged
-  pass/divergence/blocked-by.
-- `*args` splat — unblocks `method_missing` as a proxy and
-  `define_method` with flexible arity.
-- "Mutable layers" doc when singleton classes land.
-- `RubyError::is(class_name)` helper so embed tests don't have to
-  pattern-match both `RubyError::NoMethodError` and `Uncaught { class_name }`.
+- ✅ Performance regression CI (PR #11 + PR #17 — per-workload
+  RSS + wall-time ratchet under `perf/`).
+- ✅ `ruby/spec` micro-runner — landed in `crates/rubyrs/spec/`,
+  see `crates/rubyrs/spec/README.md`. 13 examples across
+  `alias_method`, `define_method`, `method_missing` specs.
+  Tag-file mechanism deferred (current shape is "every example
+  must pass"); adopt when we start vendoring upstream files
+  unmodified.
+- ✅ `*args` splat (master `a24d7cb`; rest-param GC root hole
+  widened in PR #15).
+- ✅ `RubyError::is(class_name)` helper (PR #20).
+- "Mutable layers" doc — still pending; needs singleton class
+  to land first to draw a useful picture.
+- `def obj.foo` / `define_singleton_method` / singleton class.
