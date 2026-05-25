@@ -2542,29 +2542,7 @@ impl Vm {
                 self.host_fns.insert(
                     sym,
                     Rc::new(move |args: &[Value]| {
-                        if arity != 0 {
-                            return Err(Trap::new(RubyError::ArgumentError {
-                                msg: format!(
-                                    "C ext `{}': Level 0 spike only supports arity 0 (got arity {})",
-                                    cfn_name, arity
-                                ),
-                            }));
-                        }
-                        if !args.is_empty() {
-                            return Err(Trap::new(RubyError::ArgumentError {
-                                msg: format!(
-                                    "C ext `{}': expected 0 args, got {}",
-                                    cfn_name,
-                                    args.len()
-                                ),
-                            }));
-                        }
-                        // Fresh per-call state so the C ext can intern
-                        // VALUEs without leaking handles across calls.
-                        rubyrs_cext::enter();
-                        let ret = func(rubyrs_cext::Qnil);
-                        let st = rubyrs_cext::leave();
-                        Ok(cext_handle_to_value(&st, ret))
+                        cext_dispatch(&cfn_name, func, arity, args)
                     }),
                 );
             }
@@ -2589,6 +2567,141 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
         rubyrs_cext::CValue::False => Value::Bool(false),
         rubyrs_cext::CValue::Str(s) => Value::Str(Rc::from(s.as_str())),
     }
+}
+
+/// Translate a rubyrs [`Value`] into the corresponding [`rubyrs_cext::CValue`]
+/// so it can be interned as a C-visible handle. Returns an `ArgumentError`
+/// trap on Value types the cext ABI doesn't yet model (Int, Sym, classes,
+/// heap objects) — those land in Level 2+ as we expose `INT2NUM`,
+/// `rb_sym_new`, etc.
+fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext::CValue, Trap> {
+    Ok(match v {
+        Value::Nil => rubyrs_cext::CValue::Nil,
+        Value::Bool(true) => rubyrs_cext::CValue::True,
+        Value::Bool(false) => rubyrs_cext::CValue::False,
+        Value::Str(s) => rubyrs_cext::CValue::Str(s.to_string()),
+        other => {
+            return Err(Trap::new(RubyError::ArgumentError {
+                msg: format!(
+                    "C ext `{}': arg {} has type {} which is not yet supported across the cext FFI (Level 1 covers String/nil/true/false only)",
+                    name,
+                    idx,
+                    other.type_name()
+                ),
+            }));
+        }
+    })
+}
+
+/// Invoke a registered C extension function: intern args into a fresh
+/// per-call [`CExtState`], dispatch through the correct arity-specific
+/// signature, translate the returned handle back into a rubyrs [`Value`].
+///
+/// Spike scope (Level 1): arities 0, 1, 2 are dispatched. The
+/// `unsafe extern "C" fn()` stored in `CFn::func` is transmuted to the
+/// arity-specific type — safe on x86_64 SysV and ARM64 AAPCS, where
+/// `VALUE = u64` arg/return passes through scalar registers and unused
+/// register args are simply ignored by the callee. Other arities trap
+/// loudly at invocation rather than at register-time so the failure is
+/// clearly attributable to the call site, not Init.
+fn cext_dispatch(
+    name: &str,
+    func: rubyrs_cext::OpaqueFn,
+    arity: i32,
+    args: &[Value],
+) -> Result<Value, Trap> {
+    let expected_argc = match arity {
+        0 | 1 | 2 => arity as usize,
+        _ => {
+            return Err(Trap::new(RubyError::ArgumentError {
+                msg: format!(
+                    "C ext `{}': spike Level 1 only dispatches arity 0/1/2 (got arity {})",
+                    name, arity
+                ),
+            }));
+        }
+    };
+    if args.len() != expected_argc {
+        return Err(Trap::new(RubyError::ArgumentError {
+            msg: format!(
+                "C ext `{}': expected {} args, got {}",
+                name,
+                expected_argc,
+                args.len()
+            ),
+        }));
+    }
+
+    // Translate args while the *previous* state (if any) is still
+    // torn down. Errors must abort before we `enter()` a new state.
+    let cargs: Vec<rubyrs_cext::CValue> = args
+        .iter()
+        .enumerate()
+        .map(|(i, v)| cext_value_to_cvalue(name, i, v))
+        .collect::<Result<_, _>>()?;
+
+    // SAFETY: we transmute `OpaqueFn` (zero-arg) to an arity-specific
+    // signature with VALUE-shaped args. The original function was
+    // registered with that exact signature by the C ext; we just
+    // recovered it through the `ANYARGS` convention.
+    unsafe {
+        rubyrs_cext::enter();
+        let ret_handle = with_caught_unwind(|| {
+            // Intern args into the now-active state so the C side
+            // sees them as valid handles.
+            let arg_handles: Vec<rubyrs_cext::Value> = rubyrs_cext::with_state(|st| {
+                cargs.into_iter().map(|cv| st.intern(cv)).collect()
+            });
+            match arity {
+                0 => {
+                    type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(rubyrs_cext::Qnil)
+                }
+                1 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(rubyrs_cext::Qnil, arg_handles[0])
+                }
+                2 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(rubyrs_cext::Qnil, arg_handles[0], arg_handles[1])
+                }
+                _ => unreachable!("arity validated above"),
+            }
+        });
+        let st = rubyrs_cext::leave();
+        let ret_handle = ret_handle.map_err(|panic_msg| {
+            Trap::new(RubyError::RuntimeError {
+                msg: format!("C ext `{}' panicked: {}", name, panic_msg),
+            })
+        })?;
+        Ok(cext_handle_to_value(&st, ret_handle))
+    }
+}
+
+/// Run `f`, catching any Rust panic that escapes the C call. Without
+/// this, a panic across the FFI boundary (or, here, in our own
+/// argument-interning closure) would unwind through C frames and
+/// abort the process — instead we surface it as a `RuntimeError` Trap.
+fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
+        if let Some(s) = p.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = p.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        }
+    })
 }
 
 pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value_bytes: Option<usize>) -> Result<Option<Value>, RubyError> {

@@ -28,7 +28,7 @@
 //! critical path for the Level 0 hypothesis we're testing.
 
 use std::cell::RefCell;
-use std::ffi::{CStr, c_char, c_int};
+use std::ffi::{CStr, c_char, c_int, c_long};
 
 /// Opaque token the C side sees as `VALUE`. Numerically an index
 /// into [`CExtState::values`]; semantically meaningless to C code.
@@ -46,12 +46,21 @@ pub enum CValue {
     Str(String),
 }
 
+/// Opaque function-pointer storage. C extensions register pointers
+/// with any signature (CRuby's `ANYARGS` convention); the host
+/// transmutes to the correct arity-specific type at dispatch time
+/// using the recorded [`CFn::arity`]. We deliberately do NOT call
+/// through this type — it exists purely to carry the address across
+/// the FFI boundary in a way that's `Send` + `Sync`.
+pub type OpaqueFn = unsafe extern "C" fn();
+
 /// One callback registered by a C ext during `Init_<name>` (or, in
 /// later levels, by `rb_define_method` from inside a running method).
 pub struct CFn {
     pub name: String,
-    pub func: unsafe extern "C" fn(Value) -> Value,
-    /// CRuby-style arity. Level 0 only honours `0`.
+    pub func: OpaqueFn,
+    /// CRuby-style arity. Level 1 dispatches 0, 1, and 2; other
+    /// values register but trap at invocation.
     pub arity: i32,
 }
 
@@ -174,14 +183,65 @@ pub unsafe extern "C" fn rb_str_new_cstr(s: *const c_char) -> Value {
 
 /// # Safety
 ///
+/// `ptr` must be valid for reads of `len` bytes (or null when
+/// `len == 0`). The bytes are copied into an owned `String` via
+/// lossy UTF-8 — spike scope; a real impl would store `Vec<u8>` to
+/// preserve binary input verbatim.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_str_new(ptr: *const c_char, len: c_long) -> Value {
+    let owned = if len == 0 {
+        String::new()
+    } else {
+        assert!(!ptr.is_null(), "rb_str_new: null pointer with len > 0");
+        // SAFETY: caller guarantees `ptr..ptr+len` is readable.
+        let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        String::from_utf8_lossy(slice).into_owned()
+    };
+    with_state(|st| st.intern(CValue::Str(owned)))
+}
+
+/// Return a pointer to the underlying bytes of a String VALUE.
+///
+/// Spike scope: pointer is borrowed from the per-call `STATE`, so
+/// it's only valid for the rest of the current C function. NOT
+/// NUL-terminated; callers must use [`RSTRING_LEN`].
+#[unsafe(no_mangle)]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn RSTRING_PTR(v: Value) -> *const c_char {
+    // Pulling a borrow out of with_state would fight the borrow
+    // checker — instead we read the raw address while the borrow
+    // is live and return it. Safe because the underlying String
+    // is pinned by being owned inside CExtState until `leave()`.
+    with_state(|st| match st.resolve(v) {
+        CValue::Str(s) => s.as_ptr() as *const c_char,
+        _ => std::ptr::null(),
+    })
+}
+
+/// Length of a String VALUE, in bytes.
+#[unsafe(no_mangle)]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn RSTRING_LEN(v: Value) -> c_long {
+    with_state(|st| match st.resolve(v) {
+        CValue::Str(s) => s.len() as c_long,
+        _ => 0,
+    })
+}
+
+/// # Safety
+///
 /// `name` must be a valid NUL-terminated C string. `func` must
 /// remain callable for the lifetime of the host runtime (the
 /// usual contract: it lives in the loaded shared library, and
 /// the library is never unloaded).
+///
+/// `func` may have any arity-compatible signature (CRuby `ANYARGS`
+/// convention); we type it as zero-arg here purely as opaque
+/// storage and transmute to the correct shape at dispatch.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_define_global_function(
     name: *const c_char,
-    func: unsafe extern "C" fn(Value) -> Value,
+    func: OpaqueFn,
     arity: c_int,
 ) {
     assert!(!name.is_null(), "rb_define_global_function: null name");

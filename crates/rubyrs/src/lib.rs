@@ -49,9 +49,18 @@ pub use intern::SymId;
 static _RB_STR_NEW_CSTR: unsafe extern "C" fn(*const std::ffi::c_char) -> rubyrs_cext::Value =
     rubyrs_cext::rb_str_new_cstr;
 #[used]
+static _RB_STR_NEW: unsafe extern "C" fn(*const std::ffi::c_char, std::ffi::c_long) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_str_new;
+#[used]
+static _RSTRING_PTR: unsafe extern "C" fn(rubyrs_cext::Value) -> *const std::ffi::c_char =
+    rubyrs_cext::RSTRING_PTR;
+#[used]
+static _RSTRING_LEN: unsafe extern "C" fn(rubyrs_cext::Value) -> std::ffi::c_long =
+    rubyrs_cext::RSTRING_LEN;
+#[used]
 static _RB_DEFINE_GLOBAL_FUNCTION: unsafe extern "C" fn(
     *const std::ffi::c_char,
-    unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value,
+    rubyrs_cext::OpaqueFn,
     std::ffi::c_int,
 ) = rubyrs_cext::rb_define_global_function;
 

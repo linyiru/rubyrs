@@ -17,5 +17,5 @@ static VALUE hello(VALUE self) {
 }
 
 void Init_hello(void) {
-    rb_define_global_function("hello", hello, 0);
+    rb_define_global_function("hello", RUBY_METHOD_FUNC(hello), 0);
 }
