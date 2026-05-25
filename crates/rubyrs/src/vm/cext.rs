@@ -266,6 +266,7 @@ fn cext_handle_to_value_d(
         // back to Nil here (the old L0 behaviour) made any
         // subsequent method call on the class handle segfault.
         rubyrs_cext::CValue::Symbol(name) => Value::Sym(vm.interner.intern(&name)),
+        rubyrs_cext::CValue::BlockRef(n) => Value::Block(crate::value::ObjId(n)),
         rubyrs_cext::CValue::Class(name) => {
             let sym = vm.interner.intern(&name);
             // Class handles are produced by rb_define_class_under
@@ -402,6 +403,13 @@ fn cext_value_to_cvalue_d(
         // ID2SYM) end up here. The cext side intern-table will see
         // the name on `rb_sym2id` if it needs the canonical ID.
         Value::Sym(id) => rubyrs_cext::CValue::Symbol(vm.interner.resolve(*id).to_string()),
+        // L3-K: Proc / Block crossing Vm → cext. The cext only ever
+        // stashes the handle (in registries, callback fields, etc.)
+        // and later round-trips it back via `rb_funcall(h, :call, …)`,
+        // at which point the symmetric translator on this file's
+        // other side rebuilds `Value::Block(ObjId)` and the dispatch's
+        // Block.call arm runs the underlying proto.
+        Value::Block(id) => rubyrs_cext::CValue::BlockRef(id.0),
         // Array/Hash crossing Ruby → C: build a CValue::Array/Hash
         // whose elements are FRESH handles interned into `st`.
         // Recurses on contained Values, interning each child into

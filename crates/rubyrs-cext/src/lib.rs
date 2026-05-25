@@ -167,6 +167,15 @@ pub enum CValue {
     /// semantics since 1.9). Built via `rb_hash_new` + `rb_hash_aset`;
     /// translated to `Value::Hash` on the Vm heap on return.
     Hash(Vec<(Value, Value)>),
+    /// L3-K: Proc / Block handle, opaque to the cext. Carries the
+    /// raw ObjId of a `HeapObj::Block` slot on the Vm heap. Distinct
+    /// from `HeapRef` so the cext → Vm translator can rebuild
+    /// `Value::Block` (not `Value::Object`) on the way back; the
+    /// only operation a cext is expected to do with this handle is
+    /// stash it (in a Hash / Array / cext-local field) and later
+    /// invoke it via `rb_funcall(handle, intern("call"), …)`, which
+    /// routes back through dispatch → the Block.call arm.
+    BlockRef(u32),
     /// Symbol — carries the symbol's name as a String. Pairs
     /// with `Value::Sym` on the Vm side. cext → Vm interns the
     /// name into the Vm's symbol table; Vm → cext resolves the
@@ -321,6 +330,7 @@ impl CExtState {
                 CValue::Class(String::from("Kernel")),       // 17 rb_mKernel
                 CValue::Class(String::from("Comparable")),   // 18 rb_mComparable
                 CValue::Class(String::from("Enumerable")),   // 19 rb_mEnumerable
+                CValue::Class(String::from("Proc")),         // 20 rb_cProc
             ]);
         Self {
             values,
@@ -652,6 +662,7 @@ pub static rb_cObject: Value = 3;
 #[used] #[unsafe(no_mangle)] pub static rb_mKernel: Value = 17;
 #[used] #[unsafe(no_mangle)] pub static rb_mComparable: Value = 18;
 #[used] #[unsafe(no_mangle)] pub static rb_mEnumerable: Value = 19;
+#[used] #[unsafe(no_mangle)] pub static rb_cProc: Value = 20;
 
 /// # Safety
 ///
@@ -1675,6 +1686,7 @@ pub unsafe extern "C" fn rb_basic_class(v: Value) -> Value {
         CValue::Nil => rb_cNilClass,
         CValue::Class(_) => rb_cClass,
         CValue::Symbol(_) => rb_cSymbol,
+        CValue::BlockRef(_) => rb_cProc,
         CValue::HeapRef(_) => Qnil,
     })
 }

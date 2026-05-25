@@ -354,6 +354,14 @@ mod _cext_l3d_exports {
     #[used] static D23: unsafe extern "C" fn(Value) -> Value = rb_obj_freeze;
     #[used] static D24: unsafe extern "C" fn(Value) -> c_int = rb_obj_frozen_p;
     #[used] static D25: unsafe extern "C" fn(c_long) -> Value = rb_ary_new3;
+    // Arity-specialised rb_ary_new3 dispatch targets (the header
+    // macro routes call sites to these by counting __VA_ARGS__).
+    #[used] static D25A: unsafe extern "C" fn(Value) -> Value = rubyrs_ary_new3_1;
+    #[used] static D25B: unsafe extern "C" fn(Value, Value) -> Value = rubyrs_ary_new3_2;
+    #[used] static D25C: unsafe extern "C" fn(Value, Value, Value) -> Value = rubyrs_ary_new3_3;
+    // L3-K: Proc dispatch (msgpack's protected_proc_call_safe).
+    #[used] static D25D: unsafe extern "C" fn(Value, c_int, *const Value, Value) -> Value =
+        rb_proc_call_with_block;
     #[used] static D26: unsafe extern "C" fn(Value, Value) -> Value = rb_class_inherited_p;
     #[used] static D27: unsafe extern "C" fn(Value) -> Value = rb_hash_clear;
     #[used] static D28: unsafe extern "C" fn(Value) -> Value = rb_hash_dup;

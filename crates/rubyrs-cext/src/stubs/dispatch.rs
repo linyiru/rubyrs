@@ -242,13 +242,75 @@ pub unsafe extern "C" fn rb_obj_freeze(v: Value) -> Value { v }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_obj_frozen_p(_v: Value) -> c_int { 0 }
 
-// Array from variadic args. Variadic forwarding requires nightly
-// c_variadic; spike returns an empty array and drops the args
-// (cdecl ABI cleans up). msgpack uses rb_ary_new3 in non-hot paths
-// (error msgs, registry init); empty array is wrong-but-defined.
+// `rb_ary_new3(n, ...)` — variadic Array constructor. Real
+// variadic forwarding from extern "C" needs nightly (`c_variadic`),
+// so the public CRuby symbol stays as an empty-Array fallback
+// and the header (`rubyrs.h`) redefines it as a macro that
+// dispatches to one of the arity-specialised helpers below.
+// Vendored cexts call `rb_ary_new3(1, x)` (buffer.c, unpacker_class.c)
+// and `rb_ary_new3(3, a, b, c)` (registries in packer / unpacker /
+// factory), so those two arities are what we ship. Other arities
+// fall through to the empty-array symbol — same observable
+// behaviour as before, no regression.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_ary_new3(_n: c_long) -> Value {
     unsafe { crate::rb_ary_new() }
+}
+
+/// `rb_proc_call_with_block(proc, argc, argv, block)` — invoke a
+/// Proc with a positional arg vector and an optional block.
+/// Routes through `rb_funcallv(proc, intern("call"), argc,
+/// argv)` so the host's dispatch finds the Block.call arm. The
+/// `block` arg is currently ignored — msgpack passes Qnil in
+/// every call site we exercise, and adding block forwarding
+/// here would require a parallel `rb_funcall_with_block`
+/// callback path on the host side.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_proc_call_with_block(
+    proc_handle: Value,
+    argc: c_int,
+    argv: *const Value,
+    _block: Value,
+) -> Value {
+    let call_id = crate::intern_name("call");
+    unsafe { crate::rb_funcallv(proc_handle, call_id, argc, argv) }
+}
+
+/// Arity-1 specialisation of `rb_ary_new3` (`[a]`). Used by
+/// `buffer.c`'s string-into-Array wrap and the unpacker's
+/// one-element wrap path.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rubyrs_ary_new3_1(a: Value) -> Value {
+    let arr = unsafe { crate::rb_ary_new() };
+    unsafe { crate::rb_ary_push(arr, a) };
+    arr
+}
+
+/// Arity-2 specialisation of `rb_ary_new3` (`[a, b]`). Used by
+/// `factory_class.c`'s `dup_registries` (returns
+/// `[packer_registry_dup, unpacker_registry_dup]`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rubyrs_ary_new3_2(a: Value, b: Value) -> Value {
+    let arr = unsafe { crate::rb_ary_new() };
+    unsafe { crate::rb_ary_push(arr, a) };
+    unsafe { crate::rb_ary_push(arr, b) };
+    arr
+}
+
+/// Arity-3 specialisation of `rb_ary_new3` (`[a, b, c]`). Load-
+/// bearing for `packer_ext_registry` and `unpacker_ext_registry`,
+/// which store `[ext_type_or_module, proc, flags]` triples;
+/// previously the empty-Array fallback caused the registry
+/// lookup at unpack/pack time to read past the end and return
+/// `Qnil` for the proc — exactly the bug that broke Symbol
+/// ext-type round-trips.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rubyrs_ary_new3_3(a: Value, b: Value, c: Value) -> Value {
+    let arr = unsafe { crate::rb_ary_new() };
+    unsafe { crate::rb_ary_push(arr, a) };
+    unsafe { crate::rb_ary_push(arr, b) };
+    unsafe { crate::rb_ary_push(arr, c) };
+    arr
 }
 
 // Class ancestry — rubyrs has no inheritance modeling. Return Qtrue

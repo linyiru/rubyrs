@@ -38,6 +38,7 @@ pub unsafe extern "C" fn rb_value_type(v: Value) -> c_int {
         CValue::Hash(_) => T_HASH,
         CValue::Class(_) => T_CLASS,
         CValue::HeapRef(_) => T_DATA,
+        CValue::BlockRef(_) => T_DATA,
         CValue::Float(_) => T_FLOAT,
         CValue::Symbol(_) => T_SYMBOL,
     })

@@ -222,6 +222,15 @@ ID rb_intern(const char *name);
  * state on each dispatch and pops on return. */
 VALUE rb_funcallv(VALUE recv, ID mid, int argc, const VALUE *argv);
 
+/* `rb_proc_call_with_block(proc, argc, argv, block)` — invoke a
+ * Proc with a positional arg vector and an optional block. Used
+ * by msgpack's `protected_proc_call_safe` to dispatch
+ * registered ext-type unpack procs. The `block` arg is
+ * currently ignored — the stub forwards through `rb_funcallv`
+ * with method `call`, which routes via the host's dispatch to
+ * the Block.call arm. */
+VALUE rb_proc_call_with_block(VALUE proc, int argc, const VALUE *argv, VALUE block);
+
 /* Convenience wrapper for the CRuby-style `rb_funcall(recv, id, n,
  * arg1, arg2, ...)`. Implemented as a `static inline` C function
  * (not a macro) because CRuby C extensions universally write
@@ -566,7 +575,16 @@ void **rb_typeddata_data_slot(VALUE obj);
  * variant); no-op for now. flori/json freezes lookup tables which
  * are read-only by construction. */
 #define OBJ_FREEZE(v) ((void)(v))
-#define OBJ_FROZEN(v) (1)  /* conservative: always-frozen */
+/* L3-K change (was `(1)`): cext-allocated objects (msgpack
+ * Packer/Unpacker/Factory, flori/json lookup tables) need to
+ * accept mutation through the `register_type_internal` /
+ * `feed` / `clear` style methods that gate on
+ * `if (OBJ_FROZEN(self)) rb_raise(rb_eFrozenError, ...)`.
+ * Returning 1 here blocked every such call with a spurious
+ * FrozenError. The conservative-but-wrong choice; switch to
+ * 0 to match `rb_obj_frozen_p`'s actual return (we don't
+ * model freezing on cext-side opaque handles). */
+#define OBJ_FROZEN(v) (0)
 
 /* Module / global sentinels. rb_mKernel is the Kernel module
  * handle returned by `rb_define_module("Kernel")` at bootstrap;
@@ -824,13 +842,31 @@ VALUE rb_ull2inum(unsigned long long n);
 #define ULL2NUM(n) rb_ull2inum(n)
 VALUE rb_float_new(double d);
 
-/* Array varargs ctor: rb_ary_new3(n, v1, v2, ...). CRuby exposes
- * this as a variadic alias for rb_ary_new_from_args. rubyrs's
- * variadic surface is limited; emulate via the existing
- * rb_ary_new_from_values + caller staging the args into a stack
- * array. msgpack uses small Ns (typically 2-3); macro form
- * dispatches up to N=5. */
+/* Array varargs ctor: rb_ary_new3(n, v1, v2, ...). Stable Rust
+ * can't take extern "C" variadics, so we ship arity-specialised
+ * non-variadic helpers and override the variadic name via a
+ * dispatch macro. Currently arities 1 and 3 are wired (the only
+ * counts used by the vendored cexts — buffer / unpacker /
+ * factory / registries). The Rust `rb_ary_new3` symbol is kept
+ * as an empty-Array fallback for any other call site that
+ * predates the macro definition (dlsym resolution would still
+ * find the symbol; the macro just redirects compile-time
+ * source-level callers). */
 VALUE rb_ary_new3(long n, ...);
+VALUE rubyrs_ary_new3_1(VALUE a);
+VALUE rubyrs_ary_new3_2(VALUE a, VALUE b);
+VALUE rubyrs_ary_new3_3(VALUE a, VALUE b, VALUE c);
+
+/* Variadic-macro arity dispatch. `RUBYRS_NEW3_PICK4(__VA_ARGS__,
+ * fn3, fn2, fn1)` selects the 4th element: 3 user-args lands
+ * `fn3`, 2 lands `fn2`, 1 lands `fn1`. The `n` count parameter
+ * is intentionally dropped (arity is encoded in the variadic
+ * count). Arities >= 4 fall through to the symbol form
+ * (`rb_ary_new3` plain, which returns an empty Array) — fine
+ * for the vendored cexts we ship, which only use 1, 2, 3. */
+#define RUBYRS_NEW3_PICK4(_1, _2, _3, NAME, ...) NAME
+#define rb_ary_new3(n, ...) \
+    RUBYRS_NEW3_PICK4(__VA_ARGS__, rubyrs_ary_new3_3, rubyrs_ary_new3_2, rubyrs_ary_new3_1)(__VA_ARGS__)
 
 /* Hash mutation */
 VALUE rb_hash_clear(VALUE h);
