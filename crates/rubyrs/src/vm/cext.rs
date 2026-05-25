@@ -257,6 +257,7 @@ fn cext_handle_to_value_d(
             Value::new_str_bytes(v)
         }
         rubyrs_cext::CValue::Int(n) => Value::Int(n),
+        rubyrs_cext::CValue::Float(f) => Value::Float(f),
         // L3-C: a CValue::Class handle resolves to the actual Vm
         // Class object via vm.classes lookup. Used when a cext does
         // `obj.class` mid-call via rb_funcall — the returned handle
@@ -377,6 +378,7 @@ fn cext_value_to_cvalue_d(
         Value::Bool(false) => rubyrs_cext::CValue::False,
         Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(&s.borrow()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
+        Value::Float(f) => rubyrs_cext::CValue::Float(*f),
         // L3-B: a Value::Object handle crossing Ruby → C is
         // represented as a CValue::HeapRef carrying the raw ObjId.
         // The cext sees an opaque VALUE handle; rb_check_typeddata

@@ -13,6 +13,7 @@ const T_NIL: c_int = 1;
 const T_TRUE: c_int = 2;
 const T_FALSE: c_int = 3;
 const T_FIXNUM: c_int = 4;
+const T_FLOAT: c_int = 5;
 const T_STRING: c_int = 6;
 const T_ARRAY: c_int = 7;
 const T_HASH: c_int = 8;
@@ -21,6 +22,7 @@ const T_DATA: c_int = 13;
 
 unsafe extern "C" {
     fn strtoll(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_longlong;
+    fn strtod(s: *const c_char, end: *mut *mut c_char) -> c_double;
 }
 
 /// Map a CValue variant to the matching CRuby T_* tag.
@@ -36,6 +38,7 @@ pub unsafe extern "C" fn rb_value_type(v: Value) -> c_int {
         CValue::Hash(_) => T_HASH,
         CValue::Class(_) => T_CLASS,
         CValue::HeapRef(_) => T_DATA,
+        CValue::Float(_) => T_FLOAT,
     })
 }
 
@@ -71,8 +74,8 @@ pub unsafe extern "C" fn rb_ll2num(n: c_longlong) -> Value {
 
 /// rubyrs has no Float CValue; return Qnil.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_dbl2num(_d: c_double) -> Value {
-    Qnil
+pub unsafe extern "C" fn rb_dbl2num(d: c_double) -> Value {
+    with_state(|st| st.intern(CValue::Float(d)))
 }
 
 /// Parse a C string to an integer via strtoll; base==0 treated as 10.
@@ -86,16 +89,27 @@ pub unsafe extern "C" fn rb_cstr2inum(str: *const c_char, base: c_int) -> Value 
     with_state(|st| st.intern(CValue::Int(n as i64)))
 }
 
-/// rubyrs has no Float; always 0.0.
+/// Parse a C string to double via libc `strtod`. flori-json calls
+/// this for every float literal it parses (parser.rl:1734). Pre-
+/// L3-I returned 0.0 unconditionally, collapsing all JSON floats.
+/// `badcheck` is CRuby's strict-parse flag (raise on trailing
+/// garbage); we ignore it at spike scope.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_cstr_to_dbl(_str: *const c_char, _badcheck: c_int) -> c_double {
-    0.0
+pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) -> c_double {
+    if str.is_null() {
+        return 0.0;
+    }
+    unsafe { strtod(str, std::ptr::null_mut()) }
 }
 
-/// rubyrs has no Float CValue; always 0.0.
+/// RFLOAT_VALUE — extract the f64 from a Float VALUE. L3-I: now
+/// reads through CValue::Float; non-Float resolves to 0.0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_float_value(_v: Value) -> c_double {
-    0.0
+pub unsafe extern "C" fn rb_float_value(v: Value) -> c_double {
+    with_state(|st| match st.resolve(v) {
+        CValue::Float(f) => *f,
+        _ => 0.0,
+    })
 }
 
 /// rubyrs has no Symbol CValue; stub for dlopen.
@@ -173,22 +187,22 @@ pub unsafe extern "C" fn rb_ull2inum(n: u64) -> Value {
     with_state(|st| st.intern(CValue::Int(n as i64)))
 }
 
-/// VALUE -> double. CValue::Int converts; everything else -> 0.0
-/// (rubyrs has no Float CValue variant).
+/// VALUE -> double. CValue::Float reads through; CValue::Int
+/// promotes (matches CRuby's Integer-to-Float coercion). Other
+/// variants return 0.0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_num2dbl(v: Value) -> c_double {
     with_state(|st| match st.resolve(v) {
+        CValue::Float(f) => *f,
         CValue::Int(n) => *n as c_double,
         _ => 0.0,
     })
 }
 
-/// double -> VALUE Float. rubyrs has no Float CValue; stub returns Qnil.
-/// msgpack uses rb_float_new during unpack of msgpack float frames —
-/// callers will see Qnil where MRI would see a Float.
+/// double -> VALUE Float. L3-I: real `CValue::Float` slot now.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_float_new(_d: c_double) -> Value {
-    Qnil
+pub unsafe extern "C" fn rb_float_new(d: c_double) -> Value {
+    with_state(|st| st.intern(CValue::Float(d)))
 }
 
 /// Bignum byte size. rubyrs's Int is fixed i64 so the absolute value

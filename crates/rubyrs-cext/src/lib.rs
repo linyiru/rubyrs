@@ -138,6 +138,13 @@ pub enum CValue {
     /// CRuby's "Fixnum" range — for the spike all integers are i64
     /// regardless of which `NUMxxx` macro the C ext used.
     Int(i64),
+    /// IEEE 754 64-bit float. Pairs with `Value::Float` on the
+    /// Vm side. msgpack's float frames (0xCA / 0xCB) round-trip
+    /// through this variant. Pre-L3-I `rb_float_new` returned
+    /// Qnil and every float-decoding cext lost precision; with
+    /// this variant in place rb_float_new / rb_num2dbl /
+    /// RFLOAT_VALUE all operate on a real `f64` slot.
+    Float(f64),
     /// A handle to a class or module by its (joined) name. Returned
     /// from `rb_define_module` / `rb_define_class_under`; consumed
     /// by `rb_define_singleton_method`.
@@ -1623,6 +1630,7 @@ pub unsafe extern "C" fn rb_basic_class(v: Value) -> Value {
     with_state(|st| match st.resolve(v) {
         CValue::Str(_) => rb_cString,
         CValue::Int(_) => rb_cInteger,
+        CValue::Float(_) => rb_cFloat,
         CValue::Array(_) => rb_cArray,
         CValue::Hash(_) => rb_cHash,
         CValue::True => rb_cTrueClass,
