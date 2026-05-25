@@ -170,3 +170,4 @@ fn run_diff(name: &str) {
 #[test] fn do_while() { run_diff("do_while"); }
 #[test] fn mixed_splat_call() { run_diff("mixed_splat_call"); }
 #[test] fn protected_method() { run_diff("protected_method"); }
+#[test] fn regex_sub() { run_diff("regex_sub"); }

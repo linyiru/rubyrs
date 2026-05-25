@@ -124,6 +124,28 @@ pub(crate) fn string_call(
             check(out.len())?;
             Some(Value::new_str(out))
         }
+        // Regex form: `s.sub(/pat/, "repl")`. Replacement string
+        // supports Ruby backrefs `\0` / `\1` / ... — translate to
+        // the `regex` crate's `$0` / `$1` syntax. `\\` escapes a
+        // literal backslash. Block form
+        // (`s.sub(/pat/) { |m| ... }`) is the higher-value but
+        // separately-dispatched path; not handled here.
+        (Value::Str(a), "sub", [Value::Regex(re), Value::Str(repl)]) => {
+            let a_ref = a.borrow();
+            let repl_ref = repl.borrow();
+            let repl_xlated = ruby_backref_to_dollar(&repl_ref);
+            let out = re.replace(&a_ref, repl_xlated.as_str()).into_owned();
+            check(out.len())?;
+            Some(Value::new_str(out))
+        }
+        (Value::Str(a), "gsub", [Value::Regex(re), Value::Str(repl)]) => {
+            let a_ref = a.borrow();
+            let repl_ref = repl.borrow();
+            let repl_xlated = ruby_backref_to_dollar(&repl_ref);
+            let out = re.replace_all(&a_ref, repl_xlated.as_str()).into_owned();
+            check(out.len())?;
+            Some(Value::new_str(out))
+        }
         (Value::Str(a), "gsub", [Value::Str(pat), Value::Str(repl)]) => {
             let a_ref = a.borrow();
             let pat_ref = pat.borrow();
@@ -753,3 +775,42 @@ pub(crate) fn str_succ(s: &str) -> String {
     }
 }
 
+/// Translate Ruby's `\0` / `\1` / … backref syntax in a
+/// String#gsub replacement template into the `regex` crate's
+/// `$0` / `$1` / … convention. Doubled backslash (`\\`) escapes
+/// a literal backslash. `\&` is the entire match (CRuby alias
+/// for `\0`); `\'` (post-match) / `\`` (pre-match) are NOT
+/// supported in our subset — they'd need MatchData state we
+/// don't currently carry.
+///
+/// Also escapes any literal `$` in the template so the regex
+/// crate doesn't interpret it as its own backref form.
+pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.peek() {
+                Some(&n) if n.is_ascii_digit() => {
+                    chars.next();
+                    out.push('$');
+                    out.push(n);
+                }
+                Some(&'&') => {
+                    chars.next();
+                    out.push('$');
+                    out.push('0');
+                }
+                Some(&'\\') => {
+                    chars.next();
+                    out.push('\\');
+                }
+                _ => out.push('\\'),
+            },
+            // Escape `$` so the regex crate doesn't capture it.
+            '$' => out.push_str("$$"),
+            _ => out.push(c),
+        }
+    }
+    out
+}

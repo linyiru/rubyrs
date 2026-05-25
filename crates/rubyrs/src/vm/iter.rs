@@ -216,6 +216,47 @@ impl Vm {
             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
             return Ok(Some(if name == "tap" { recv.clone() } else { r }));
         }
+        // `s.gsub(/pat/) { |m| ... }` / `s.sub(/pat/) { |m| ... }`.
+        // For each match the block is invoked with the matched
+        // substring; its return value is converted to a string and
+        // spliced in place of the match. gsub iterates all matches;
+        // sub does only the first. Backref groups in the matched
+        // text are NOT exposed to the block — only the full match —
+        // matching CRuby's "block gets the match string, not the
+        // MatchData" convention for the common case.
+        if let (Value::Str(s), Value::Regex(re), 1) = (recv, args.first().unwrap_or(&Value::Nil), args.len())
+            && (name == "gsub" || name == "sub") {
+                let source = s.borrow().clone();
+                let only_first = name == "sub";
+                let mut g = PinGuard::new(self);
+                g.pin(recv.clone());
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut out = String::with_capacity(source.len());
+                let mut last_end = 0usize;
+                let mut bail = false;
+                for m in re.find_iter(&source) {
+                    out.push_str(&source[last_end..m.start()]);
+                    g.vm.invoke_block(block, vec![Value::new_str(m.as_str().to_string())])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { bail = true; break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        // CRuby semantics: break val from inside a
+                        // gsub block returns val as the call's
+                        // result (not the partially-built string).
+                        return Ok(Some(r));
+                    }
+                    let r_str = r.to_display(&g.vm.heap, &g.vm.interner);
+                    out.push_str(&r_str);
+                    last_end = m.end();
+                    if only_first { break; }
+                }
+                if bail { return Ok(None); }
+                out.push_str(&source[last_end..]);
+                return Ok(Some(Value::new_str(out)));
+            }
         Ok(match (recv, name, args) {
             (Value::Array(id), "each", []) => {
                 let mut g = PinGuard::new(self);

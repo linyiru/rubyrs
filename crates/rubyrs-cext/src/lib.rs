@@ -619,8 +619,13 @@ pub unsafe extern "C" fn RSTRING_LEN(v: Value) -> c_long {
 pub unsafe extern "C" fn rb_long2num(n: c_long) -> Value {
     // `c_long` is i64 on Linux/macOS but i32 on wasm32-wasip1, so
     // widen to i64 explicitly. Lossless on every target where
-    // c_long ≤ 64 bits (all rubyrs supports).
-    with_state(|st| st.intern(CValue::Int(n.into())))
+    // c_long ≤ 64 bits (all rubyrs supports). `n as i64` here
+    // rather than `.into()` because on the i64-c_long targets
+    // clippy's `useless_conversion` flags `.into()` as a no-op —
+    // the cast spelling is no-op on those targets and
+    // sign-extension on the smaller-c_long ones.
+    #[allow(clippy::unnecessary_cast)]
+    with_state(|st| st.intern(CValue::Int(n as i64)))
 }
 
 /// Convert a Ruby Integer VALUE to a C `long`. Range overflow
