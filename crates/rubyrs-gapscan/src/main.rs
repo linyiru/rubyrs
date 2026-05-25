@@ -201,7 +201,11 @@ fn run_diff(args: Vec<String>) -> ExitCode {
                 print!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
-            other if other.starts_with("--") => {
+            // Mirror run_scan: reject any unknown long OR short flag
+            // early so `-x` doesn't sneak through as a positional and
+            // later die with a misleading "expected exactly two JSON
+            // paths" message.
+            other if other.starts_with("--") || (other.starts_with('-') && other.len() > 1) => {
                 eprintln!("diff: unknown flag `{other}`");
                 return ExitCode::from(2);
             }
