@@ -13,6 +13,7 @@ const T_NIL: c_int = 1;
 const T_TRUE: c_int = 2;
 const T_FALSE: c_int = 3;
 const T_FIXNUM: c_int = 4;
+const T_FLOAT: c_int = 5;
 const T_STRING: c_int = 6;
 const T_ARRAY: c_int = 7;
 const T_HASH: c_int = 8;
@@ -36,6 +37,7 @@ pub unsafe extern "C" fn rb_value_type(v: Value) -> c_int {
         CValue::Hash(_) => T_HASH,
         CValue::Class(_) => T_CLASS,
         CValue::HeapRef(_) => T_DATA,
+        CValue::Float(_) => T_FLOAT,
     })
 }
 
@@ -45,10 +47,13 @@ pub unsafe extern "C" fn rb_value_is_fixnum(v: Value) -> c_int {
     with_state(|st| matches!(st.resolve(v), CValue::Int(_)) as c_int)
 }
 
-/// rubyrs has no Float variant; always 0.
+/// PR #63 review #2: now that CValue::Float is a real variant
+/// (post-L3-I), this should return 1 for Float values so cexts
+/// using FLONUM_P / RB_FLONUM_P see the same answer as
+/// rb_value_type's T_FLOAT branch.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_value_is_flonum(_v: Value) -> c_int {
-    0
+pub unsafe extern "C" fn rb_value_is_flonum(v: Value) -> c_int {
+    with_state(|st| matches!(st.resolve(v), CValue::Float(_)) as c_int)
 }
 
 /// 1 if v is an immediate-like singleton (nil/true/false) or a fixnum.
@@ -69,10 +74,12 @@ pub unsafe extern "C" fn rb_ll2num(n: c_longlong) -> Value {
     with_state(|st| st.intern(CValue::Int(n)))
 }
 
-/// rubyrs has no Float CValue; return Qnil.
+/// double -> VALUE Float. Alias of rb_float_new — DBL2NUM /
+/// rb_dbl2num are the same shape in CRuby. Post-L3-I (PR #63
+/// review #5: doc was stale from when this returned Qnil).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_dbl2num(_d: c_double) -> Value {
-    Qnil
+pub unsafe extern "C" fn rb_dbl2num(d: c_double) -> Value {
+    with_state(|st| st.intern(CValue::Float(d)))
 }
 
 /// Parse a C string to an integer via strtoll; base==0 treated as 10.
@@ -86,16 +93,124 @@ pub unsafe extern "C" fn rb_cstr2inum(str: *const c_char, base: c_int) -> Value 
     with_state(|st| st.intern(CValue::Int(n as i64)))
 }
 
-/// rubyrs has no Float; always 0.0.
+/// Parse a C string to double, strtod-style — pick the longest
+/// valid numeric prefix and parse THAT (locale-invariant). flori-
+/// json calls this for every float literal it parses
+/// (parser.rl:1734). Pre-L3-I returned 0.0 unconditionally;
+/// pre-code-review used `strtod` (locale-dependent) then a
+/// UTF-8-strict prefix walker (rejected trailing non-UTF-8).
+///
+/// This version (post-code-review-round-3):
+///   - Operates on raw bytes (CStr::to_bytes), so a NUL-terminated
+///     buffer with non-UTF-8 trailing garbage like `"1.5\xff"`
+///     parses as 1.5 (matches strtod).
+///   - Accepts inf / -inf / Infinity / -Infinity / nan / NaN as
+///     ASCII-case-insensitive prefix tokens. CRuby `Float()` and
+///     libc `strtod` both accept these.
+///   - Backtracks on `"1e"` / `"1e+"` — exponent marker without
+///     digits parses as `1.0`, not 0.0.
+///   - Locale-invariant: always uses `.` as the decimal separator.
+///   - `"1xyz"` → 1.0 (parses "1", stops at 'x').
+///   - `""`, `"+"`, `"-"`, `"."`, all-whitespace → 0.0.
+///
+/// `badcheck=1`'s strict-error mode (raise on trailing garbage)
+/// is a documented spike gap; we always parse permissively.
+///
+/// Hex floats (`"0x1.fp3"`) are NOT recognised — strtod accepts
+/// them; this stub doesn't. Deferred until a real gem needs them.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_cstr_to_dbl(_str: *const c_char, _badcheck: c_int) -> c_double {
-    0.0
+pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) -> c_double {
+    if str.is_null() {
+        return 0.0;
+    }
+    // Use raw bytes (not UTF-8): strtod is byte-oriented; the
+    // walker only cares about ASCII digit/sign/./e — trailing
+    // non-UTF-8 garbage must not abort the whole parse.
+    let raw = unsafe { std::ffi::CStr::from_ptr(str) }.to_bytes();
+    // Skip ASCII whitespace at the front (matches strtod).
+    let mut start = 0;
+    while start < raw.len() && (raw[start] == b' ' || raw[start] == b'\t'
+        || raw[start] == b'\n' || raw[start] == b'\r' || raw[start] == b'\x0c'
+        || raw[start] == b'\x0b') {
+        start += 1;
+    }
+    let bytes = &raw[start..];
+
+    // Optional sign for inf / nan / numeric prefix alike.
+    let (sign, after_sign): (f64, &[u8]) = match bytes.first() {
+        Some(b'+') => (1.0, &bytes[1..]),
+        Some(b'-') => (-1.0, &bytes[1..]),
+        _ => (1.0, bytes),
+    };
+
+    // Inf / Infinity / NaN — ASCII-case-insensitive prefix match.
+    fn starts_ci(b: &[u8], pat: &[u8]) -> bool {
+        b.len() >= pat.len()
+            && b.iter().zip(pat.iter()).all(|(x, p)| x.eq_ignore_ascii_case(p))
+    }
+    if starts_ci(after_sign, b"infinity") || starts_ci(after_sign, b"inf") {
+        return sign * f64::INFINITY;
+    }
+    if starts_ci(after_sign, b"nan") {
+        // NaN has no sign in IEEE numerically; CRuby returns
+        // f64::NAN regardless of leading +/-.
+        return f64::NAN;
+    }
+
+    // Numeric prefix walker. Operates on `bytes` (with sign still
+    // attached) so the slice we ultimately parse retains it.
+    let mut end = 0;
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+        end += 1;
+    }
+    while end < bytes.len() {
+        let c = bytes[end];
+        if c.is_ascii_digit() {
+            seen_digit = true;
+            end += 1;
+        } else if c == b'.' && !seen_dot {
+            seen_dot = true;
+            end += 1;
+        } else if (c == b'e' || c == b'E') && seen_digit {
+            // Try to consume the exponent. Snapshot `end` so we
+            // can roll back if no digit follows.
+            let pre_exp = end;
+            end += 1;
+            if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+                end += 1;
+            }
+            let exp_digit_start = end;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end == exp_digit_start {
+                // No digits after `e[±]` — backtrack.
+                end = pre_exp;
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    if !seen_digit {
+        return 0.0;
+    }
+    // The matched slice is by construction ASCII (digits / sign /
+    // '.' / 'e'), so it's always valid UTF-8 — safe to convert.
+    let s = std::str::from_utf8(&bytes[..end]).unwrap_or("");
+    s.parse::<f64>().unwrap_or(0.0)
 }
 
-/// rubyrs has no Float CValue; always 0.0.
+/// RFLOAT_VALUE — extract the f64 from a Float VALUE. L3-I: now
+/// reads through CValue::Float; non-Float resolves to 0.0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_float_value(_v: Value) -> c_double {
-    0.0
+pub unsafe extern "C" fn rb_float_value(v: Value) -> c_double {
+    with_state(|st| match st.resolve(v) {
+        CValue::Float(f) => *f,
+        _ => 0.0,
+    })
 }
 
 /// rubyrs has no Symbol CValue; stub for dlopen.
@@ -173,22 +288,30 @@ pub unsafe extern "C" fn rb_ull2inum(n: u64) -> Value {
     with_state(|st| st.intern(CValue::Int(n as i64)))
 }
 
-/// VALUE -> double. CValue::Int converts; everything else -> 0.0
-/// (rubyrs has no Float CValue variant).
+/// VALUE -> double. CValue::Float reads through; CValue::Int
+/// promotes (matches CRuby's Integer-to-Float coercion). Other
+/// variants return 0.0.
+///
+/// Precision note (post-PR-#63 code-review finding F7): the
+/// `*n as c_double` cast silently truncates for |n| > 2^53 —
+/// any 64-bit integer outside the f64 mantissa range comes
+/// back rounded. msgpack u64/i64 frames in that range round-
+/// trip lossily through this function. No diagnostic; spike-
+/// acceptable, but tests that compare a Float result against
+/// `expected as f64` can falsely pass for big integers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_num2dbl(v: Value) -> c_double {
     with_state(|st| match st.resolve(v) {
+        CValue::Float(f) => *f,
         CValue::Int(n) => *n as c_double,
         _ => 0.0,
     })
 }
 
-/// double -> VALUE Float. rubyrs has no Float CValue; stub returns Qnil.
-/// msgpack uses rb_float_new during unpack of msgpack float frames —
-/// callers will see Qnil where MRI would see a Float.
+/// double -> VALUE Float. L3-I: real `CValue::Float` slot now.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_float_new(_d: c_double) -> Value {
-    Qnil
+pub unsafe extern "C" fn rb_float_new(d: c_double) -> Value {
+    with_state(|st| st.intern(CValue::Float(d)))
 }
 
 /// Bignum byte size. rubyrs's Int is fixed i64 so the absolute value

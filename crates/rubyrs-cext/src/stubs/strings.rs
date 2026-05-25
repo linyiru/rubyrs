@@ -273,8 +273,22 @@ pub unsafe extern "C" fn rb_check_string_type(v: Value) -> Value {
 // .to_s. Spike: if already String, return; else return Qnil (lossy).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_String(v: Value) -> Value {
+    // Post-L3-I: CValue::Float reaches here. CRuby's rb_String
+    // calls #to_s on the receiver — Float#to_s formats the
+    // value (e.g. 3.14 → "3.14"). Pre-this-fix the stub returned
+    // Qnil for Float, dropping the value silently.
     with_state(|st| match st.resolve(v) {
         CValue::Str(_) => v,
+        CValue::Float(f) => {
+            let f = *f;
+            let s = format!("{}", f);
+            st.intern(CValue::str_from_bytes(s.as_bytes()))
+        }
+        CValue::Int(n) => {
+            let n = *n;
+            let s = format!("{}", n);
+            st.intern(CValue::str_from_bytes(s.as_bytes()))
+        }
         _ => Qnil,
     })
 }
