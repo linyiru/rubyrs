@@ -31,6 +31,19 @@ impl Vm {
             // as its return. Exit the whole dispatch if we
             // unwound off the bottom of the frame stack.
             if let Some(val) = self.method_return.take() {
+                // A non-local `return` from inside an ensure body
+                // that was running due to a pending break/next
+                // supersedes the structured transfer (CRuby
+                // semantics: `return` wins, the break value is
+                // dropped). Clear the slot so no EndEnsure in a
+                // surviving frame can resume into the now-stale
+                // target IP. (Today's compiler invariant makes
+                // EndEnsure reachable only via unwind_with_exception
+                // which also clears, so this is hygiene rather
+                // than a fix for an observable bug — but the
+                // invariant is delicate enough to be worth
+                // belt-and-braces.)
+                self.pending_loop_transfer = None;
                 while let Some(f) = self.frames.last() {
                     if !f.is_block { break; }
                     let f = self.frames.pop().unwrap();
@@ -868,7 +881,16 @@ impl Vm {
                 if self.pending_loop_transfer.is_some() {
                     self.continue_loop_transfer()?;
                 } else {
-                    let v = self.stack.pop().unwrap_or(Value::Nil);
+                    // Stack invariant on the exception path: the
+                    // unwinder pushed exactly one exception value
+                    // when entering this ensure handler, and the
+                    // ensure body is compile_stmt-balanced (every
+                    // statement Pops its result). An empty stack
+                    // here means stack-balance regression — surface
+                    // it loudly rather than silently materialising
+                    // a Nil exception.
+                    let v = self.stack.pop()
+                        .expect("ICE: EndEnsure with empty stack on exception path");
                     let exc = self.normalize_exception(v);
                     self.unwind_with_exception(exc)?;
                 }

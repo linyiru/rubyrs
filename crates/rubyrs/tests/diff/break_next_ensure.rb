@@ -92,6 +92,24 @@ v6 = while true
 end
 puts "6: effects=#{side_effects.inspect} v=#{v6.inspect}"
 
+# 7a. GC root coverage for the in-flight break value. The ensure
+#     body deliberately allocates heavily so STRESS_GC=1 fires
+#     between BreakLoop and the landing; without `pending_loop_transfer`
+#     being walked as a GC root the heap slot for [10,20,30] is
+#     swept and the assertion below ICEs ("ICE: heap slot is not
+#     an Array"). Reproduced under STRESS_GC pre-fix.
+v7a = while true
+  begin
+    break [10, 20, 30]
+  ensure
+    100.times do
+      tmp = []
+      10.times { |i| tmp << i }
+    end
+  end
+end
+puts "7a: v=#{v7a.inspect}"
+
 # 7. next through ensure, with the `next val` form. CRuby
 #    discards the value (while has no iteration-value channel)
 #    but the expression evaluates for its side effects, and

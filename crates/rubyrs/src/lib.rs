@@ -855,6 +855,8 @@ end
         self.vm.stack.clear();
         self.vm.pinned.clear();
         self.vm.break_signaled = false;
+        self.vm.method_return = None;
+        self.vm.pending_loop_transfer = None;
         // Anchor the wall-clock deadline (P2-14a) to *this* eval
         // call. Each `eval` re-computes the absolute Instant from
         // the runtime's stored Duration, so a host can reuse a
