@@ -114,6 +114,11 @@ pub(crate) enum Expr {
     /// iteration in the calling driver (e.g. `arr.each`), making the
     /// driver's return value `val`.
     Break(Option<Box<SExpr>>),
+    /// `super` (forwarding all of the enclosing method's args)
+    /// or `super(arg1, arg2)` (explicit args). `super()` with
+    /// empty parens passes no args and is `Some(vec![])`;
+    /// bare `super` is `None`.
+    Super(Option<Vec<SExpr>>),
     /// `a || b` — short-circuit: returns `a` if truthy, else `b`.
     Or(Box<SExpr>, Box<SExpr>),
     /// `a && b` — short-circuit: returns `b` if `a` truthy, else `a`.
@@ -284,6 +289,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             None => vec![],
         };
         return sp(node, Expr::If { cond, then_body, else_body });
+    }
+    if let Some(_) = node.as_forwarding_super_node() {
+        // Bare `super` — forwards all of the enclosing method's
+        // args. The arg list is filled in at compile time by
+        // emitting LoadLocal for each param slot, so the AST
+        // just stores `None` here.
+        return sp(node, Expr::Super(None));
+    }
+    if let Some(n) = node.as_super_node() {
+        let args: Vec<SExpr> = n.arguments()
+            .map(|args| args.arguments().iter().map(|c| tr(&c)).collect())
+            .unwrap_or_default();
+        return sp(node, Expr::Super(Some(args)));
     }
     if let Some(n) = node.as_or_node() {
         return sp(node, Expr::Or(Box::new(tr(&n.left())), Box::new(tr(&n.right()))));

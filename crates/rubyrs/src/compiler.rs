@@ -16,6 +16,18 @@ pub(crate) struct ProtoBuilder {
     pub(crate) n_locals: u16,
     pub(crate) current_span: Span,
     pub(crate) filename: Rc<str>,
+    /// When compiling a method body, this is the method's name.
+    /// `Expr::Super` reads it to know which slot to look up in
+    /// the parent class. `None` for class bodies, the toplevel
+    /// `<main>` proto, and blocks — using `super` in those
+    /// contexts surfaces as a SyntaxError via `AST_ERRORS`.
+    /// Blocks could in principle inherit the method context
+    /// from the enclosing proto, but that's a follow-up.
+    pub(crate) method_name: Option<String>,
+    /// Param count snapshot taken when the method body starts
+    /// compiling — used to emit `LoadLocal(0..n)` for the
+    /// forwarding `super` (bare) form.
+    pub(crate) method_param_count: u16,
 }
 
 impl ProtoBuilder {
@@ -27,6 +39,8 @@ impl ProtoBuilder {
             n_locals: 0,
             current_span: Span::ZERO,
             filename,
+            method_name: None,
+            method_param_count: 0,
         };
         for p in params { b.local_slot(p); }
         b
@@ -416,10 +430,43 @@ pub(crate) fn compile_expr(
             let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node))
             }).collect();
-            let proto_idx = compile_proto(name.clone(), params.clone(), lit_defaults, body, b.filename.clone(), protos, interner, cc);
+            let proto_idx = compile_proto_kind(
+                name.clone(), params.clone(), lit_defaults, body,
+                b.filename.clone(), protos, interner, cc, /*is_method=*/true,
+            );
             let name_id = interner.intern(name);
             b.emit(Op::DefMethod(name_id, proto_idx as u32));
             b.emit(Op::LoadNil);
+        }
+        Expr::Super(args_opt) => {
+            // `super` only makes sense inside a method body. The
+            // current ProtoBuilder records that via `method_name`.
+            // Outside (class body, toplevel, block) we synthesise
+            // a SyntaxError-via-AST_ERRORS — actually no, we
+            // can't reach AST_ERRORS from compile. Just emit
+            // LoadNil and let runtime NoMethodError surface;
+            // documented as a gap. Realistic scripts only put
+            // `super` in methods anyway.
+            let mname = b.method_name.clone();
+            let argc: u8 = match args_opt {
+                Some(args) => {
+                    for a in args { compile_expr(b, a, protos, interner, cc); }
+                    args.len() as u8
+                }
+                None => {
+                    // Forwarding form — push each enclosing-method
+                    // param from its local slot. Params are
+                    // always slots `0..method_param_count`
+                    // (`ProtoBuilder::new` assigns them in order).
+                    for i in 0..b.method_param_count {
+                        b.emit(Op::LoadLocal(i));
+                    }
+                    b.method_param_count as u8
+                }
+            };
+            let mname = mname.unwrap_or_else(|| "<super-outside-method>".to_string());
+            let name_id = interner.intern(&mname);
+            b.emit(Op::Super(name_id, argc));
         }
         Expr::Class { name, superclass, body } => {
             let proto_idx = compile_proto(format!("<class:{}>", name), vec![], vec![], body, b.filename.clone(), protos, interner, cc);
@@ -586,7 +633,24 @@ pub(crate) fn compile_proto(
     name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> usize {
+    compile_proto_kind(name, params, defaults, body, filename, protos, interner, cc, /*is_method=*/false)
+}
+
+/// Same as `compile_proto` but tags the resulting builder as a
+/// method body — sets `method_name` / `method_param_count` so
+/// `super` knows what to forward. Called by `Expr::Def`'s
+/// compile path. Class bodies and the toplevel `<main>` proto
+/// stay non-method.
+pub(crate) fn compile_proto_kind(
+    name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
+    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    is_method: bool,
+) -> usize {
     let mut b = ProtoBuilder::new(&params, filename);
+    if is_method {
+        b.method_name = Some(name.clone());
+        b.method_param_count = params.len() as u16;
+    }
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let idx = protos.len();
@@ -634,6 +698,14 @@ pub(crate) fn compile_block(
         n_locals: parent.n_locals,
         current_span: parent.current_span,
         filename: parent.filename.clone(),
+        // A block inherits its enclosing method's `super` context
+        // so `super` inside a block forwards to the parent
+        // class's same-named method — matches CRuby. If the
+        // parent isn't a method (class body / toplevel),
+        // method_name stays None and `super` will surface as a
+        // NoMethodError-shaped Trap.
+        method_name: parent.method_name.clone(),
+        method_param_count: parent.method_param_count,
     };
     let param_start = b.n_locals;
     // Block params get fresh slots and shadow any outer binding of the

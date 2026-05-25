@@ -43,6 +43,14 @@ pub(crate) enum Op {
     /// Args: name SymId, argc, per-call-site inline-cache slot id.
     Call(SymId, u8, u16),
     CallNoRecv(SymId, u8, u16),
+    /// `super(args...)`. Receiver stays `self` (popped from the
+    /// current frame, not the operand stack). Method name and
+    /// argc are baked in at compile time. Lookup starts at the
+    /// SUPERCLASS of `self.class`, so the current method is
+    /// skipped — letting overrides delegate "up" the chain.
+    /// IC slot isn't used (super resolves via class chain, not
+    /// the per-site cache).
+    Super(SymId, u8),
     DefMethod(SymId, u32),         // name, proto_idx
     DefClass(SymId, u32),
     NewArray(u16),

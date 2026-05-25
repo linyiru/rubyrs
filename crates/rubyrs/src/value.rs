@@ -70,4 +70,12 @@ pub struct Instance {
 pub struct Method {
     pub(crate) params: Vec<String>,
     pub(crate) proto_idx: usize,
+    /// Class whose method table holds this Method instance — i.e.
+    /// the class the `def` literally lives inside. `super` uses
+    /// this class's *superclass* as the starting point for the
+    /// parent-method lookup, matching CRuby's "module of
+    /// definition" rule. Methods defined at the toplevel (in
+    /// `<main>`, not inside any class body) have `None`; calling
+    /// `super` from there raises NoMethodError.
+    pub(crate) defining_class: Option<Rc<Class>>,
 }

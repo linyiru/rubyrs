@@ -66,6 +66,14 @@ pub(crate) struct Frame {
     /// reference it by `ObjId` — earlier code held an
     /// `Rc<BlockHandle>` here which could cycle.
     pub(crate) block_arg: Option<ObjId>,
+    /// Defining class of the method this frame is running.
+    /// Used by `Op::Super` — `super` lookup starts at this
+    /// class's superclass, not at `self.class.superclass` (the
+    /// latter would re-find the current method on a sub-class
+    /// instance, causing infinite recursion through the
+    /// chain). `None` for blocks, toplevel `<main>`, class
+    /// bodies; only methods set this.
+    pub(crate) defining_class: Option<Rc<Class>>,
     pub(crate) rescues: Vec<RescueHandler>,
 }
 
@@ -426,7 +434,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(vec_nil(n_locals))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, rescues: vec![],
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, rescues: vec![],
         });
         self.dispatch()?;
         Ok(self.stack.pop().unwrap_or(Value::Nil))
@@ -1346,7 +1354,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(locals)),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block, rescues: vec![],
+            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.clone(), rescues: vec![],
         });
         Ok(())
     }
@@ -1380,7 +1388,7 @@ impl Vm {
             locals: captured,
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, rescues: vec![],
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, rescues: vec![],
         });
         Ok(())
     }
@@ -2309,6 +2317,47 @@ impl Vm {
             Op::CallNoRecvBlock(name_id, argc, cache_id) => {
                 self.do_call_block(name_id, argc as usize, true, cache_id)?;
             }
+            Op::Super(name_id, argc) => {
+                let split = self.stack.len() - argc as usize;
+                let args: Vec<Value> = self.stack.drain(split..).collect();
+                let frame = self.frames.last().expect("ICE: Super no frame");
+                let self_val = frame.self_val.clone();
+                // Start the lookup at the *defining class's*
+                // superclass, not `self.class.superclass`. The
+                // latter would re-find the current method when
+                // `self` is a subclass instance and recurse
+                // forever. CRuby's "module of definition" rule.
+                let defining = match frame.defining_class.clone() {
+                    Some(c) => c,
+                    None => {
+                        return Err(self.trap(RubyError::NoMethodError {
+                            method: "super called outside of method".to_string(),
+                            recv_type: self_val.type_name(),
+                        }));
+                    }
+                };
+                let parent = match defining.superclass.borrow().clone() {
+                    Some(p) => p,
+                    None => {
+                        return Err(self.trap(RubyError::NoMethodError {
+                            method: format!("super: no superclass method `{}'",
+                                self.interner.resolve(name_id)),
+                            recv_type: self_val.type_name(),
+                        }));
+                    }
+                };
+                let m = match self.lookup_method_uncached(&parent, name_id) {
+                    Some(m) => m,
+                    None => {
+                        return Err(self.trap(RubyError::NoMethodError {
+                            method: format!("super: no superclass method `{}'",
+                                self.interner.resolve(name_id)),
+                            recv_type: self_val.type_name(),
+                        }));
+                    }
+                };
+                self.invoke_method(m, self_val, args)?;
+            }
             Op::CreateBlock(p_idx, param_start, n_params) => {
                 // Snapshot the surrounding frame's captured locals
                 // (shared Rc with subsequent invocations of this
@@ -2344,7 +2393,16 @@ impl Vm {
             }
             Op::DefMethod(name_id, p_idx) => {
                 let proto = &self.protos[p_idx as usize];
-                let m = Rc::new(Method { params: proto.params.clone(), proto_idx: p_idx as usize });
+                // Capture the defining class (top of class_stack
+                // when we're inside `class Foo; def bar; end; end`)
+                // so `super` later starts its lookup from the
+                // right place. `None` for toplevel defs.
+                let defining_class = self.class_stack.last().cloned();
+                let m = Rc::new(Method {
+                    params: proto.params.clone(),
+                    proto_idx: p_idx as usize,
+                    defining_class,
+                });
                 if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 // Conservatively invalidate the inline cache — any previous
@@ -2382,7 +2440,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, rescues: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, rescues: vec![],
                 });
             }
             Op::NewArray(n) => {
