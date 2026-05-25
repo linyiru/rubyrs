@@ -208,6 +208,7 @@ fn run_diff(name: &str) {
 #[test] fn pack_unpack() { run_diff("pack_unpack"); }
 #[test] fn pack_endian() { run_diff("pack_endian"); }
 #[test] fn integer_bit_index() { run_diff("integer_bit_index"); }
+#[test] fn class_instance_method_primitive() { run_diff("class_instance_method_primitive"); }
 #[test] fn integer_literal_i64() { run_diff("integer_literal_i64"); }
 #[test] fn lambda_slot_isolation() { run_diff("lambda_slot_isolation"); }
 #[test] fn require_relative_main() { run_diff("require_relative_main"); }

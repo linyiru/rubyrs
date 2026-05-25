@@ -1299,8 +1299,37 @@ impl Vm {
                 // isn't defined anywhere in the chain. Captures the
                 // receiver class (not the *defining* class) — the
                 // same approximation as `Method#unbind`.
+                //
+                // Primitive-class special case: classes whose
+                // instances are backed by non-Object `Value`
+                // variants (Integer / Float / String / Symbol /
+                // Array / Hash / Range / Regexp / Proc / Method /
+                // UnboundMethod / TrueClass / FalseClass / NilClass)
+                // have no entries in their `methods` table — their
+                // dispatch happens through `primitive_call` /
+                // `numeric_call` / etc. instead of user-Method
+                // records. `lookup_method_uncached` always returns
+                // None for them.
+                //
+                // The CRuby-faithful answer here is "look up the
+                // built-in dispatch table and synthesise an
+                // UnboundMethod with real arity / parameters."
+                // The Tier 1 pragmatic answer is "produce a
+                // synthetic UnboundMethod that exists for any
+                // method name on these classes; the downstream
+                // `arity` / `parameters` arms already return the
+                // sensible fallback (arity = -1,
+                // parameters = [[:rest]]) when the Method record
+                // is absent." That's enough to let pure-Ruby gem
+                // helpers (msgpack's `lib/msgpack/bigint.rb`'s
+                // `if Integer.instance_method(:[]).arity != 1`
+                // version detect) load cleanly. User classes
+                // still raise NameError for unknown methods —
+                // matching CRuby behaviour for the case that
+                // matters most (typo detection in user code).
                 ("instance_method", [Value::Sym(sid)]) => {
-                    if self.lookup_method_uncached(cls, *sid).is_none() {
+                    let found = self.lookup_method_uncached(cls, *sid).is_some();
+                    if !found && !is_primitive_class_name(&cls.name) {
                         let mname = self.interner.resolve(*sid).to_string();
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
@@ -2467,6 +2496,26 @@ impl Vm {
 /// recvs compare by ObjId / Rc-pointer; primitives compare by
 /// value. Matches CRuby's `equal?`-style semantics, narrowed to
 /// the cases that can appear in a BoundMethod recv slot.
+/// True for class names whose instances are backed by a non-Object
+/// `Value` variant. Used by `Class#instance_method` to decide
+/// between "real lookup, NameError on miss" (user class — the
+/// methods table is the source of truth) and "synthesise an
+/// UnboundMethod, let downstream arity / parameters fall back to
+/// the builtin sentinel" (primitive — methods live in
+/// `primitive_call` arms, not in a per-class table).
+///
+/// Mirrors `Vm::class_of`'s class-name set (`vm/lookup.rs`).
+fn is_primitive_class_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Integer" | "Float" | "String" | "Symbol"
+            | "Array" | "Hash" | "Range"
+            | "Regexp" | "Proc"
+            | "Method" | "UnboundMethod"
+            | "TrueClass" | "FalseClass" | "NilClass"
+    )
+}
+
 fn method_recv_identity(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Object(x), Value::Object(y)) => x == y,
