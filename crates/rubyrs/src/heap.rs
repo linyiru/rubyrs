@@ -365,7 +365,7 @@ impl Heap {
 
     pub(crate) fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
         match v {
-            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) | Value::Block(id) => {
+            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) | Value::Block(id) | Value::BoundMethod(id) => {
                 let i = id.0 as usize;
                 if !marks[i] {
                     marks[i] = true;
