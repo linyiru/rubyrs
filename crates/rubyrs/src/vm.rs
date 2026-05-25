@@ -4631,7 +4631,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
     // Helper: enforce the per-value byte cap (P2-14c) at every
     // string-growing arm. Returns Err if the projected size would
     // exceed the cap; callers wrap it in `Trap` via `Vm::trap`.
-    let check = |new_len: usize| -> Result<(), RubyError> {
+    let _check = |new_len: usize| -> Result<(), RubyError> {
         if let Some(max) = max_value_bytes {
             if new_len > max {
                 return Err(RubyError::ResourceExhausted {

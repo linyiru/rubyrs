@@ -9,8 +9,6 @@
 //! follow-up cut once their iterator-driver helpers are
 //! similarly grouped.
 
-use std::rc::Rc;
-
 use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{ObjId, Value};

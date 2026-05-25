@@ -6,7 +6,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{ObjId, Value};
 
-use super::{value_cmp_v, Vm};
+use super::Vm;
 
 impl Vm {
     pub(crate) fn range_collection_call(
