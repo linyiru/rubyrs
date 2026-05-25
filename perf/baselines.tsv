@@ -71,3 +71,4 @@ crates/rubyrs/tests/fixtures/fizzbuzz.rb	5500	0	tiny script; wall is sub-100ms n
 crates/rubyrs/examples/metaprog_bench/mm_bench.rb	5500	1100	2M method_missing dispatch
 crates/rubyrs/examples/metaprog_bench/dm_bench.rb	5500	700	2M define_method dispatch (closure-method)
 crates/rubyrs/examples/metaprog_bench/static_bench.rb	5500	1000	2M def+ivar (control for the metaprog comparisons)
+crates/rubyrs/benches/fizzbuzz_1m.rb	6000	600	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
