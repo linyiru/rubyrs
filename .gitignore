@@ -18,3 +18,6 @@ crates/rubyrs/examples/callback-cext/callback_ext.dll
 crates/rubyrs/examples/raise-cext/raise_ext.so
 crates/rubyrs/examples/raise-cext/raise_ext.bundle
 crates/rubyrs/examples/raise-cext/raise_ext.dll
+crates/rubyrs/examples/counter-cext/counter_ext.so
+crates/rubyrs/examples/counter-cext/counter_ext.bundle
+crates/rubyrs/examples/counter-cext/counter_ext.dll
