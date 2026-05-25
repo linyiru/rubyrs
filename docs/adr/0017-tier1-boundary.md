@@ -233,9 +233,19 @@ would import the rule violation along with the feature.
 ## Related: prior art (empirical, verified 2026-05)
 
 This spec was written after empirically verifying tier-1 design
-choices in four mature embeddable scripting languages. The
-convergence is striking — none of them ships regex, OS threads,
-or unsanitised IO in their default tier-1 surface.
+choices in four mature embeddable scripting languages. They
+diverge sharply on *default* posture — Lua opens its full
+stdlib (including `io` / `os` / `debug`) when the embedder
+calls the convenience `luaL_openlibs`, while mruby / rhai / rune
+default to a minimal surface and require the embedder (or
+build configuration) to opt features in. **The convergence is
+on the *mechanism*, not the default**: every one of them
+provides a documented way for the embedder to disable regex,
+disable OS-threaded primitives, and disable script-accessible
+IO. ADR 0017 picks the opt-in posture (matching mruby / rhai /
+rune) so that the default `cargo install rubyrs` shape is the
+small, sandbox-friendly one and the larger surfaces are an
+explicit choice.
 
 | Language | Tier 1 stdlib | Regex | OS threads | Resource caps | Workspace |
 |----------|--------------|-------|------------|---------------|-----------|
