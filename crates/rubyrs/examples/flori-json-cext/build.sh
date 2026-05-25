@@ -57,6 +57,11 @@ COMMON_CFLAGS=(
     -fno-strict-aliasing
     -DHAVE_STDBOOL_H
     -DHAVE_STRNLEN
+    # Take the direct rb_enc_interned_str path for hash-key
+    # construction instead of the fallback `rb_funcall(s, :uminus, 0)`
+    # — rubyrs Strings don't yet implement `String#-@`, which would
+    # collapse every parsed hash key to Qnil.
+    -DHAVE_RB_ENC_INTERNED_STR
     -I "$WORKSPACE_ROOT/crates/rubyrs-cext/include"
     -I "$SCRIPT_DIR/vendor/fbuffer"
 )
