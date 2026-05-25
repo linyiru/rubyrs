@@ -109,6 +109,17 @@ u.feed(msg_bytes)
 actual = []
 done = false
 loop_count = 0
+last_err_class = nil
+last_err_msg = nil
+# Loop until buffer empties (rescue terminates the loop).
+# Self-review (post-Phase-2 code-review finding F4): the rescue
+# is intentionally broad — rubyrs's EOFError class isn't reachable
+# from script-level rescue (it would be RuntimeError-wrapped via
+# the cext_dispatch sentinel→class fallback), so a class filter
+# isn't reliable. To compensate, record the FIRST exception's
+# class + message so a future regression that raises something
+# unexpected mid-decode shows up in the diagnostic, not buried
+# under "case N: FAIL got=nil" attribution.
 # `break` from inside a `rescue` body doesn't propagate to the
 # enclosing while in rubyrs's current subset (caught while
 # writing this test). Use a flag instead.
@@ -117,9 +128,16 @@ while loop_count < 200 && !done
     v = u.read
     actual << v
     loop_count = loop_count + 1
-  rescue => _e
+  rescue => e
+    last_err_class = e.class.to_s
+    last_err_msg = e.message
     done = true
   end
+end
+if actual.length < 51
+  puts "TRUNCATED at i=" + actual.length.to_s +
+    " err_class=" + last_err_class.to_s +
+    " err_msg=" + last_err_msg.to_s
 end
 
 pass = 0

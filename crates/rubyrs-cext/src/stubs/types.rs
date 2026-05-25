@@ -93,41 +93,72 @@ pub unsafe extern "C" fn rb_cstr2inum(str: *const c_char, base: c_int) -> Value 
     with_state(|st| st.intern(CValue::Int(n as i64)))
 }
 
-/// Parse a C string to double. flori-json calls this for every
-/// float literal it parses (parser.rl:1734). Pre-L3-I returned
-/// 0.0 unconditionally, collapsing all JSON floats.
+/// Parse a C string to double, strtod-style — pick the longest
+/// valid numeric prefix and parse THAT (locale-invariant). flori-
+/// json calls this for every float literal it parses
+/// (parser.rl:1734). Pre-L3-I returned 0.0 unconditionally;
+/// pre-code-review used `strtod` (locale-dependent) then a
+/// UTF-8-strict prefix walker (rejected trailing non-UTF-8).
 ///
-/// PR #63 review #3: libc `strtod` is locale-dependent —
-/// `1.5` parses as `1` (stop at `.`) under e.g. de_DE.UTF-8
-/// where `,` is the decimal separator. JSON and Ruby float
-/// literals are locale-invariant (always `.`). Hand-rolled
-/// longest-valid-prefix walker + Rust's `str::parse::<f64>`
-/// on the matched slice (locale-invariant).
-///
-/// PR #63 review #6: parsing semantic is strtod-style — pick the
-/// longest valid numeric prefix and parse THAT, not the whole
-/// string. `"1xyz"` → 1.0 (parses "1", stops at 'x'). `""` or
-/// strings with no digits parse to 0.0.
-///
-/// PR #63 review #7: exponent marker without digits backtracks.
-/// `"1e"`, `"1e+"` parse as 1.0 (stop before the 'e'); strtod
-/// + CRuby do the same. We track exp-digit-seen and rewind
-/// `end` to the position before the exponent marker if no
-/// digit followed.
+/// This version (post-code-review-round-3):
+///   - Operates on raw bytes (CStr::to_bytes), so a NUL-terminated
+///     buffer with non-UTF-8 trailing garbage like `"1.5\xff"`
+///     parses as 1.5 (matches strtod).
+///   - Accepts inf / -inf / Infinity / -Infinity / nan / NaN as
+///     ASCII-case-insensitive prefix tokens. CRuby `Float()` and
+///     libc `strtod` both accept these.
+///   - Backtracks on `"1e"` / `"1e+"` — exponent marker without
+///     digits parses as `1.0`, not 0.0.
+///   - Locale-invariant: always uses `.` as the decimal separator.
+///   - `"1xyz"` → 1.0 (parses "1", stops at 'x').
+///   - `""`, `"+"`, `"-"`, `"."`, all-whitespace → 0.0.
 ///
 /// `badcheck=1`'s strict-error mode (raise on trailing garbage)
-/// is a documented spike gap; we always treat input as
-/// `badcheck=0` permissive.
+/// is a documented spike gap; we always parse permissively.
+///
+/// Hex floats (`"0x1.fp3"`) are NOT recognised — strtod accepts
+/// them; this stub doesn't. Deferred until a real gem needs them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) -> c_double {
     if str.is_null() {
         return 0.0;
     }
-    let s = unsafe { std::ffi::CStr::from_ptr(str) }
-        .to_str()
-        .unwrap_or("");
-    let s = s.trim_start();
-    let bytes = s.as_bytes();
+    // Use raw bytes (not UTF-8): strtod is byte-oriented; the
+    // walker only cares about ASCII digit/sign/./e — trailing
+    // non-UTF-8 garbage must not abort the whole parse.
+    let raw = unsafe { std::ffi::CStr::from_ptr(str) }.to_bytes();
+    // Skip ASCII whitespace at the front (matches strtod).
+    let mut start = 0;
+    while start < raw.len() && (raw[start] == b' ' || raw[start] == b'\t'
+        || raw[start] == b'\n' || raw[start] == b'\r' || raw[start] == b'\x0c'
+        || raw[start] == b'\x0b') {
+        start += 1;
+    }
+    let bytes = &raw[start..];
+
+    // Optional sign for inf / nan / numeric prefix alike.
+    let (sign, after_sign): (f64, &[u8]) = match bytes.first() {
+        Some(b'+') => (1.0, &bytes[1..]),
+        Some(b'-') => (-1.0, &bytes[1..]),
+        _ => (1.0, bytes),
+    };
+
+    // Inf / Infinity / NaN — ASCII-case-insensitive prefix match.
+    fn starts_ci(b: &[u8], pat: &[u8]) -> bool {
+        b.len() >= pat.len()
+            && b.iter().zip(pat.iter()).all(|(x, p)| x.eq_ignore_ascii_case(p))
+    }
+    if starts_ci(after_sign, b"infinity") || starts_ci(after_sign, b"inf") {
+        return sign * f64::INFINITY;
+    }
+    if starts_ci(after_sign, b"nan") {
+        // NaN has no sign in IEEE numerically; CRuby returns
+        // f64::NAN regardless of leading +/-.
+        return f64::NAN;
+    }
+
+    // Numeric prefix walker. Operates on `bytes` (with sign still
+    // attached) so the slice we ultimately parse retains it.
     let mut end = 0;
     let mut seen_digit = false;
     let mut seen_dot = false;
@@ -144,7 +175,7 @@ pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) ->
             end += 1;
         } else if (c == b'e' || c == b'E') && seen_digit {
             // Try to consume the exponent. Snapshot `end` so we
-            // can roll back if no digit follows (PR #63 review #7).
+            // can roll back if no digit follows.
             let pre_exp = end;
             end += 1;
             if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
@@ -166,7 +197,10 @@ pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) ->
     if !seen_digit {
         return 0.0;
     }
-    s[..end].parse::<f64>().unwrap_or(0.0)
+    // The matched slice is by construction ASCII (digits / sign /
+    // '.' / 'e'), so it's always valid UTF-8 — safe to convert.
+    let s = std::str::from_utf8(&bytes[..end]).unwrap_or("");
+    s.parse::<f64>().unwrap_or(0.0)
 }
 
 /// RFLOAT_VALUE — extract the f64 from a Float VALUE. L3-I: now
@@ -257,6 +291,14 @@ pub unsafe extern "C" fn rb_ull2inum(n: u64) -> Value {
 /// VALUE -> double. CValue::Float reads through; CValue::Int
 /// promotes (matches CRuby's Integer-to-Float coercion). Other
 /// variants return 0.0.
+///
+/// Precision note (post-PR-#63 code-review finding F7): the
+/// `*n as c_double` cast silently truncates for |n| > 2^53 —
+/// any 64-bit integer outside the f64 mantissa range comes
+/// back rounded. msgpack u64/i64 frames in that range round-
+/// trip lossily through this function. No diagnostic; spike-
+/// acceptable, but tests that compare a Float result against
+/// `expected as f64` can falsely pass for big integers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_num2dbl(v: Value) -> c_double {
     with_state(|st| match st.resolve(v) {

@@ -37,6 +37,20 @@ impl Vm {
                 // arbitrary bytes via Vec<u8>, so we can store the
                 // content verbatim and let downstream code that
                 // needs string semantics call to_string_lossy.
+                //
+                // Post-PR-#63 code-review finding F5: this is a
+                // SEMANTIC FLIP from the prior raise-on-binary
+                // behavior. Existing scripts that did
+                // `File.read(cfg).split("\n")` relied on the raise
+                // as a fast-fail when a binary file was passed by
+                // mistake; they now get U+FFFD-laden output from
+                // to_string_lossy and parse on. The trade-off is
+                // intentional (msgpack/protobuf fixtures need
+                // binary-safe read), but the safety net is gone —
+                // no `File.binread` exists as the explicit binary
+                // path yet. Adding one is a follow-up so callers
+                // can opt back into the strict-text mode if they
+                // want it.
                 match std::fs::read(&path) {
                     Ok(b) => Value::new_str_bytes(b),
                     Err(e) => return Err(self.trap(RubyError::RuntimeError {

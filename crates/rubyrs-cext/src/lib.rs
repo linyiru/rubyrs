@@ -817,8 +817,13 @@ pub unsafe extern "C" fn rb_long2num(n: c_long) -> Value {
 /// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_num2long(v: Value) -> c_long {
+    // Post-L3-I: CValue::Float can reach here too. CRuby's
+    // rb_num2long truncates Float → Integer (matching `to_i`
+    // semantics); `*f as c_long` does exactly that (saturating
+    // at c_long bounds, NaN → 0).
     with_state(|st| match st.resolve(v) {
         CValue::Int(n) => *n as c_long,
+        CValue::Float(f) => *f as c_long,
         _ => 0,
     })
 }
@@ -838,6 +843,7 @@ pub unsafe extern "C" fn rb_num2long(v: Value) -> c_long {
 pub unsafe extern "C" fn rb_num2ulong(v: Value) -> c_ulong {
     with_state(|st| match st.resolve(v) {
         CValue::Int(n) => *n as c_ulong,
+        CValue::Float(f) => *f as c_ulong,
         _ => 0,
     })
 }
@@ -871,6 +877,7 @@ pub unsafe extern "C" fn rb_int2num(n: c_int) -> Value {
 pub unsafe extern "C" fn rb_num2int(v: Value) -> c_int {
     with_state(|st| match st.resolve(v) {
         CValue::Int(n) => *n as c_int,
+        CValue::Float(f) => *f as c_int,
         _ => 0,
     })
 }
@@ -1360,15 +1367,18 @@ fn cvalue_eq_d(st: &CExtState, a: Value, b: Value, depth: usize) -> bool {
         (CValue::False, CValue::False) => true,
         (CValue::Str(x), CValue::Str(y)) => x == y,
         (CValue::Int(x), CValue::Int(y)) => x == y,
-        // PR #63 review #4: Float key equality for Hash lookup
-        // (rb_hash_aref). Uses bitwise IEEE 754 equality, so:
-        //   - 0.0 == 0.0, -0.0 != 0.0 (different bit patterns),
-        //     NaN != NaN (every NaN has a distinct bit pattern)
-        // This matches CRuby's Hash semantics: `{nan => 1}[nan]`
-        // returns nil because the key is hashed/compared by
-        // object identity for NaN, and `-0.0` and `0.0` are
-        // distinct keys.
-        (CValue::Float(x), CValue::Float(y)) => x.to_bits() == y.to_bits(),
+        // Float key equality for Hash lookup (rb_hash_aref).
+        // PR #63 self-review finding (post-merge): the previous
+        // `to_bits()` form claimed to match CRuby but had it
+        // backwards. CRuby uses Float#eql? for Hash keys, which
+        // is IEEE `==`:
+        //   - 0.0 == -0.0 (true — they hash to the same key in MRI)
+        //   - NaN != NaN (always, regardless of bit pattern)
+        // `f64 == f64` is precisely IEEE 754 equality and gives
+        // exactly those semantics, so two Floats are equal-as-
+        // keys iff their values are equal-as-numbers.
+        #[allow(clippy::float_cmp)]
+        (CValue::Float(x), CValue::Float(y)) => x == y,
         (CValue::Array(x), CValue::Array(y)) => {
             x.len() == y.len()
                 && x.iter()
