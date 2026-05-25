@@ -216,3 +216,4 @@ fn run_diff(name: &str) {
 #[test] fn next_in_while() { run_diff("next_in_while"); }
 #[test] fn singleton_class_body() { run_diff("singleton_class_body"); }
 #[test] fn global_variables() { run_diff("global_variables"); }
+#[test] fn op_assign_extended() { run_diff("op_assign_extended"); }
