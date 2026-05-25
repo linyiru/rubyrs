@@ -42,6 +42,9 @@ AST view *under*-states the gap — many runtime features
 `CallNode` and so look Supported. See each report's "Top bareword
 calls" section for the semantic-gap view.
 
+Candidate codebases for the next round of scans are tracked in
+[`docs/gap-reports/TARGETS.md`](gap-reports/TARGETS.md).
+
 ## Done
 
 These are landed and locked down by tests:
@@ -110,6 +113,79 @@ In rough order of ROI for the embedding / DSL use case:
 - **Concurrency story**: probably actor / message passing, not Threads
 - **CRuby C-extension compat layer** — only if a clear use case appears.
   Mostly we expect to *not* do this; see [SUBSET.md](SUBSET.md).
+
+## Metaprogramming: known unknowns
+
+Many real Ruby libraries lean heavily on metaprogramming —
+`method_missing`, `define_method`, `instance_eval`, `send` with
+non-literal symbols, `class_eval`, `Module.new { ... }`,
+`ObjectSpace`. rubyrs supports **none** of these today, and
+[SUBSET.md](SUBSET.md) currently lists most as "explicitly out of
+scope". That language is too strong for our actual position — it's
+"out of scope *for v1*", not "we will never look at this". This
+section records what we do plan to do, eventually, and why we
+haven't yet.
+
+### Why rubyrs doesn't have it yet
+
+- **Inline-cache hostile.** rubyrs's perf story (and roadmap item
+  for monomorphic method dispatch IC) assumes class methods are
+  fixed at compile time. `method_missing` and `define_method` add
+  an unpredictable layer that defeats simple caches; doing it well
+  needs the deopt machinery a JIT would have.
+- **Embedding niche doesn't need it.** Brewfile, Gemfile, and most
+  DSL files don't use it. The cost of implementing it would buy
+  zero benefit for the current target use cases.
+- **Cheap shims often suffice.** `attr_accessor` / `attr_reader` /
+  `attr_writer` are the dominant real-world consumers of "define
+  methods at class-load time"; implementing them as built-in
+  macros (Near term #6) covers the common case without any
+  general metaprogramming support.
+
+### What we'd do, when the time comes
+
+In rough order of effort vs. payoff. Each level subsumes the
+previous — you'd implement them as a sequence, not in parallel.
+
+1. **`attr_*` as built-in macros.** Already on Near term #6.
+   Recognised at class-definition time, expand to compile-time
+   method emission. Doesn't introduce any runtime metaprogramming
+   surface. Closes a large fraction of the apparent gap surfaced
+   by gapscan's bareword report (Jekyll: 32 `attr_reader`
+   occurrences alone).
+2. **`define_method :literal_name`.** When both receiver and name
+   are static literals at compile time, lower to the same
+   bytecode as `def`. No runtime support needed; the cache stays
+   monomorphic.
+3. **`send` / `public_send` with literal symbols.** Same shape as
+   above: a sugar over direct dispatch when the symbol is a
+   compile-time literal. Falls back to a trap otherwise.
+4. **`Module.new { ... }` + `include`.** Once Near term #4
+   (`Module` + `include`) lands, supporting anonymous modules is
+   mostly already there.
+5. **`method_missing` proper.** The hard one. Requires:
+   (a) every method dispatch to check the class chain and fall to
+   `method_missing` on miss; (b) the IC to handle the
+   missing-then-found case via a deopt path; (c) `respond_to?`
+   integration so libraries that probe for methods behave
+   correctly. Probably the gating feature for "Run `mspec` inside
+   rubyrs" in Long term, and the dividing line between "tiny
+   embeddable runtime" and "general-purpose Ruby".
+6. **`instance_eval` / `class_eval` with blocks.** Rebinds `self`
+   inside a block scope; commonly used for DSLs (RSpec
+   `describe`/`it`, Rake `task`). Builds on `Module.new` work.
+   Plain string-eval (`eval "..."`) stays explicitly out of scope
+   regardless — the WASM/embedding deployment story doesn't tolerate
+   a runtime compiler.
+
+### Decision gate
+
+We'd start on (1) when an *embedding-niche* use case demands it
+(several already do — see attr_* in the Jekyll bareword report).
+We'd start on (5) only after a concrete user need — most likely
+"running mspec natively" or "running a specific DSL library
+that's worth the complexity budget". Until then, the position is
+"document, don't build".
 
 ## Not on the roadmap (explicitly)
 

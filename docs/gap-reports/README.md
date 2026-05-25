@@ -16,6 +16,9 @@ it's the next thing worth implementing.
 | [Jekyll `lib/`](jekyll.md) | 89 | 81.65% | `ModuleNode` (×145) |
 | [Liquid `lib/`](liquid.md) | 64 | 81.16% | `ConstantWriteNode` (×141) |
 
+Planned next scans (and the rationale for each) live in
+[`TARGETS.md`](TARGETS.md).
+
 ## Why these numbers under-state the gap
 
 The headline "% Supported" is **AST-level only** and is an
