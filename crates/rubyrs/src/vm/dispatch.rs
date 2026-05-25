@@ -1189,6 +1189,82 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // `obj.methods` — Array of Symbols of every method the
+        // receiver can dispatch. For user instances walks the
+        // class chain (own + includes + superclass); for other
+        // shapes returns an empty Array (the subset doesn't
+        // expose Kernel-level methods individually). De-dups by
+        // SymId, sorted by interner string order for determinism.
+        if &*name == "methods" && args.is_empty() {
+            let mut names: Vec<crate::intern::SymId> = Vec::new();
+            if let Value::Object(id) = &recv {
+                let cls = self.heap.class_of(*id);
+                let mut visited: Vec<*const crate::value::Class> = Vec::new();
+                fn walk(
+                    c: &std::rc::Rc<crate::value::Class>,
+                    out: &mut Vec<crate::intern::SymId>,
+                    visited: &mut Vec<*const crate::value::Class>,
+                ) {
+                    let ptr = std::rc::Rc::as_ptr(c);
+                    if visited.iter().any(|p| *p == ptr) { return; }
+                    visited.push(ptr);
+                    for k in c.methods.borrow().keys() {
+                        if !out.contains(k) { out.push(*k); }
+                    }
+                    for inc in c.includes.borrow().iter() {
+                        walk(inc, out, visited);
+                    }
+                    if let Some(sup) = c.superclass.borrow().clone() {
+                        walk(&sup, out, visited);
+                    }
+                }
+                walk(&cls, &mut names, &mut visited);
+                names.sort_by(|a, b| {
+                    self.interner.resolve(*a).cmp(&self.interner.resolve(*b))
+                });
+            }
+            let elems: Vec<Value> = names.into_iter().map(Value::Sym).collect();
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(elems));
+            self.stack.push(Value::Array(id));
+            return Ok(());
+        }
+        // `obj.instance_variables` — Array of Symbols (with `@`
+        // prefix). Only Value::Object instances actually carry
+        // ivars; other shapes get an empty Array.
+        if &*name == "instance_variables" && args.is_empty() {
+            let mut names: Vec<Value> = Vec::new();
+            if let Value::Object(id) = &recv {
+                let ivar_ids: Vec<crate::intern::SymId> = {
+                    if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
+                        inst.ivars.keys().copied().collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                let mut decorated: Vec<(String, crate::intern::SymId)> = ivar_ids.into_iter()
+                    .map(|s| {
+                        let raw = self.interner.resolve(s).to_string();
+                        // Internal interner key includes the `@`
+                        // prefix already (matches how parser interns
+                        // ivar names). If not, prepend.
+                        let key = if raw.starts_with('@') { raw } else { format!("@{}", raw) };
+                        (key, s)
+                    })
+                    .collect();
+                decorated.sort_by(|a, b| a.0.cmp(&b.0));
+                for (key, _) in decorated {
+                    let sid = self.interner.intern(&key);
+                    names.push(Value::Sym(sid));
+                }
+            }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(names));
+            self.stack.push(Value::Array(id));
+            return Ok(());
+        }
         // `Integer#digits([base])` — LSB-first digit Array. Default
         // base 10; custom base must be >= 2. Negative receivers
         // raise (CRuby raises Math::DomainError; subset uses
