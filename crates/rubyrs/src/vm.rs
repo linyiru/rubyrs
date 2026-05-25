@@ -3257,6 +3257,66 @@ fn current_vm_ptr() -> *mut Vm {
     CURRENT_VM_PTR.with(|c| c.get())
 }
 
+/// RAII guard around `rubyrs_cext::enter()` / `leave()`. Normal path
+/// calls [`Self::into_state`] to consume the guard and receive the
+/// drained `CExtState`. Panic path runs `Drop`, which discards the
+/// state but always pops the stack — so a panic between `enter()`
+/// and the matching pop doesn't leave a leaked CExtState on the
+/// thread-local stack to corrupt subsequent cext calls.
+#[cfg(not(target_os = "wasi"))]
+struct CExtStateGuard {
+    /// True until `into_state` consumes the guard. Tracks whether
+    /// `Drop` should still pop (only on the panic path).
+    active: bool,
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl CExtStateGuard {
+    fn enter() -> Self {
+        rubyrs_cext::enter();
+        Self { active: true }
+    }
+
+    /// Consume the guard on the normal path, returning the drained
+    /// `CExtState` for handle translation. Suppresses the `Drop`
+    /// pop because the caller has already taken responsibility.
+    fn into_state(mut self) -> rubyrs_cext::CExtState {
+        self.active = false;
+        rubyrs_cext::leave()
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl Drop for CExtStateGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = rubyrs_cext::leave();
+        }
+    }
+}
+
+/// RAII guard around `push_funcall_callback` / `pop_funcall_callback`.
+/// Always pops on `Drop`, whether normal scope exit or panic unwinding.
+/// Without this guard, a panic after the callback push but before the
+/// matching pop would leak the callback into the next cext call.
+#[cfg(not(target_os = "wasi"))]
+struct FuncallCallbackGuard;
+
+#[cfg(not(target_os = "wasi"))]
+impl FuncallCallbackGuard {
+    fn install(cb: rubyrs_cext::FuncallCallback) -> Self {
+        rubyrs_cext::push_funcall_callback(cb);
+        Self
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl Drop for FuncallCallbackGuard {
+    fn drop(&mut self) {
+        rubyrs_cext::pop_funcall_callback();
+    }
+}
+
 /// Translate a C-side opaque handle back into a `Value`. Currently
 /// covers exactly the `CValue` variants the spike supports.
 ///
@@ -3370,26 +3430,28 @@ fn cext_dispatch(
     // registered with that exact signature by the C ext; we just
     // recovered it through the `ANYARGS` convention.
     unsafe {
-        rubyrs_cext::enter();
-
-        // Install a funcall callback for the duration of this C call.
         // SAFETY: `current_vm_ptr()` returns the same Vm pointer that
         // `do_call` stashed before invoking us; it stays valid until
         // `do_call` returns. The closure captures the pointer by
         // value so subsequent host_fn invocations don't have to
         // re-stash it (they will anyway, with the same value).
+        //
+        // Check the invariant BEFORE pushing any cext state on the
+        // thread-local stacks — if this assert ever fires, no STATE
+        // or callback gets leaked to corrupt the next cext call.
         let vm_ptr = current_vm_ptr();
-        // Hard `assert!` (not `debug_assert!`): a null `vm_ptr` here
-        // would mean we install a funcall callback that captures
-        // null, and the next `rb_funcallv` deref turns into UB.
-        // Worth the one branch on every cext call to refuse to enter
-        // an unsafe state in release builds too.
         assert!(
             !vm_ptr.is_null(),
             "ICE: cext_dispatch reached with null CURRENT_VM_PTR; \
              host did not set it before calling host fn"
         );
-        rubyrs_cext::push_funcall_callback(Box::new(
+
+        // From here on, every push has a matching RAII guard. A panic
+        // (or any future early-return) will unwind through these and
+        // pop both stacks in LIFO order, leaving thread-local state
+        // exactly as we found it.
+        let state_guard = CExtStateGuard::enter();
+        let _cb_guard = FuncallCallbackGuard::install(Box::new(
             move |recv_h, method_name, arg_hs| {
                 cext_funcall_to_vm(vm_ptr, recv_h, method_name, arg_hs)
             },
@@ -3483,8 +3545,12 @@ fn cext_dispatch(
                 _ => unreachable!("arity validated above"),
             }
         });
-        rubyrs_cext::pop_funcall_callback();
-        let st = rubyrs_cext::leave();
+        // Normal-exit cleanup. `_cb_guard` drops at end of `unsafe`
+        // block (LIFO with state_guard), so we consume the state
+        // guard here to extract the drained `CExtState` for handle
+        // translation. `_cb_guard` then pops the callback when the
+        // block ends. Both happen via `Drop` on the panic path too.
+        let st = state_guard.into_state();
         let ret_handle = ret_handle.map_err(|panic_msg| {
             Trap::new(RubyError::RuntimeError {
                 msg: format!("C ext `{}' panicked: {}", name, panic_msg),
