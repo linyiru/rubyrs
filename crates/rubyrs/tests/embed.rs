@@ -1625,3 +1625,63 @@ fn gemfile_dsl_real_hosting_end_to_end() {
         "rake (top-level) should have no source override; \
          a non-None here means pop didn't pair with push");
 }
+
+// ADR 0017 host-capability defaults — embed users get sandbox-
+// friendly emptiness until they explicitly inject capability via
+// `Config::env` / `Config::pid` / `Runtime::set_stdout`. The CLI
+// binary `rubyrs` overrides all three; library users do not
+// inherit those overrides.
+#[test]
+fn adr_0017_default_stdout_is_silent() {
+    // No set_stdout — default is std::io::sink(). `puts` succeeds
+    // (no error), the bytes just go nowhere.
+    let mut rt = rubyrs::Runtime::new();
+    rt.eval(r#"puts "should be silent""#, "embed-test").expect("puts should not error");
+    // No way to assert "nothing was written" without intercepting
+    // the sink; the assertion is the eval doesn't error and we
+    // didn't see output in the test runner.
+}
+
+#[test]
+fn adr_0017_default_env_is_empty() {
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"puts ENV.size"#, "embed-test").expect("ENV access should not error");
+    assert_eq!(buf.snapshot().trim(), "0",
+        "Config::env default is None → script-visible ENV is empty");
+}
+
+#[test]
+fn adr_0017_default_pid_is_zero_sentinel() {
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"puts $$"#, "embed-test").expect("$$ access should not error");
+    assert_eq!(buf.snapshot().trim(), "0",
+        "Config::pid default is None → $$ returns 0 sentinel, never the real host PID");
+}
+
+#[test]
+fn adr_0017_config_env_overrides_inject_into_script() {
+    let buf = SharedBuf::new();
+    let mut env = std::collections::HashMap::new();
+    env.insert("INJECTED".to_string(), "from_host".to_string());
+    let cfg = rubyrs::Config { env: Some(env), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"puts ENV["INJECTED"]"#, "embed-test").expect("ENV read should succeed");
+    assert_eq!(buf.snapshot().trim(), "from_host",
+        "Config::env Some(map) should expose exactly that map and nothing else");
+}
+
+#[test]
+fn adr_0017_config_pid_overrides_dollar_dollar() {
+    let buf = SharedBuf::new();
+    let cfg = rubyrs::Config { pid: Some(42), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"puts $$"#, "embed-test").expect("$$ read should succeed");
+    assert_eq!(buf.snapshot().trim(), "42",
+        "Config::pid Some(n) should expose that n through $$ verbatim");
+}

@@ -344,19 +344,26 @@ impl Vm {
                 } else if let Some(v) = self.constants.get(&name_id).cloned() {
                     v
                 } else if &**self.interner.resolve(name_id) == "ENV" {
-                    // Lazy-build ENV as a regular String-keyed Hash
-                    // snapshotted from the process environment. Cached
-                    // for the lifetime of the Vm so all `ENV` reads
-                    // see a single object — writes via `ENV[k] = v`
-                    // mutate the snapshot but not the real process
-                    // env (documented divergence; would need a
-                    // setenv wrapper otherwise).
+                    // ADR 0017 Rule 1+2: the ENV map a script sees is
+                    // exactly the one the host provided via
+                    // `Config::env` — never the host process's real
+                    // env vars. `None` (default) → empty Hash; the
+                    // CLI binary `rubyrs` populates from
+                    // `std::env::vars()` to preserve `rubyrs script.rb`
+                    // ergonomics. Cached for the lifetime of the Vm
+                    // so all `ENV` reads see a single object — writes
+                    // via `ENV[k] = v` mutate the snapshot but not
+                    // anything host-side (documented divergence).
                     let id = if let Some(id) = self.env_hash {
                         id
                     } else {
-                        let pairs: Vec<(Value, Value)> = std::env::vars()
-                            .map(|(k, v)| (Value::new_str(k), Value::new_str(v)))
-                            .collect();
+                        let pairs: Vec<(Value, Value)> = match &self.env_override {
+                            Some(map) => map
+                                .iter()
+                                .map(|(k, v)| (Value::new_str(k.clone()), Value::new_str(v.clone())))
+                                .collect(),
+                            None => Vec::new(),
+                        };
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Hash(pairs));
                         self.env_hash = Some(id);
@@ -377,7 +384,13 @@ impl Vm {
                 // to whatever the host passed).
                 let name = self.interner.resolve(name_id).clone();
                 let v = match &*name {
-                    "$$" => Value::Int(std::process::id() as i64),
+                    // ADR 0017 Rule 1: the script never reads the
+                    // host process's real PID. `Config::pid = Some(n)`
+                    // → `$$` returns `n`; `None` (default) → returns
+                    // `0` as a sentinel. CLI binary `rubyrs` fills
+                    // this from `std::process::id()` to preserve
+                    // CRuby parity.
+                    "$$" => Value::Int(self.pid.unwrap_or(0)),
                     "$0" => {
                         // Bottommost frame = script entry; its
                         // proto's filename is the script's top-level

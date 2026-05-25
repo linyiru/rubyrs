@@ -430,6 +430,35 @@ pub struct Config {
     /// reuse a Runtime across many short evaluations without each
     /// one inheriting the previous timer.
     pub deadline: Option<std::time::Duration>,
+    /// Host-injected ENV map. Closes the ADR 0017 deviation: with
+    /// the previous default, `LoadConst("ENV")` populated a Hash
+    /// from `std::env::vars()` of the host process — script-visible
+    /// non-deterministic value and a capability leak from the host's
+    /// environment into untrusted scripts.
+    ///
+    /// `None` (default) means the script sees an empty `ENV` Hash.
+    /// `Some(map)` means script-visible `ENV[k]` resolves against
+    /// `map` only. The host explicitly chooses what to expose; the
+    /// script never reads the host process directly.
+    ///
+    /// The CLI binary `rubyrs` sets this from `std::env::vars()` so
+    /// `rubyrs script.rb` behaves like CRuby; library/embed users
+    /// must opt in explicitly.
+    pub env: Option<std::collections::HashMap<String, String>>,
+    /// Host-injected PID for the `$$` global. Closes the ADR 0017
+    /// deviation: with the previous default, `$$` returned the host
+    /// process's PID via `std::process::id()` — script-visible
+    /// non-deterministic value.
+    ///
+    /// `None` (default) means `$$` returns `0` as a sentinel
+    /// (CRuby's `$$` is documented to always be a positive Integer;
+    /// `0` is a sentinel that won't collide with any real PID).
+    /// `Some(n)` means `$$` returns `n`.
+    ///
+    /// The CLI binary `rubyrs` sets this from `std::process::id()`
+    /// so `rubyrs script.rb` behaves like CRuby; embed users that
+    /// want the host PID exposed must opt in.
+    pub pid: Option<i64>,
 }
 
 /// Read-only handle into the runtime's heap, passed to closures
@@ -538,6 +567,8 @@ impl Runtime {
         vm.heap.max_live = cfg.max_heap_objects;
         vm.max_symbols = cfg.max_symbols;
         vm.max_value_bytes = cfg.max_value_bytes;
+        vm.env_override = cfg.env;
+        vm.pid = cfg.pid;
         let mut rt = Runtime {
             vm,
             deadline: cfg.deadline,
