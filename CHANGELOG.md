@@ -57,6 +57,161 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `crates/rubyrs/benches/fizzbuzz_1m.rb`.
 
 ### Added
+- **Method / UnboundMethod / Proc reflection chain.** Full
+  surface for the captured-method object family, in atomic
+  commits:
+  - **`Method#unbind` / `UnboundMethod#bind(obj)`.** Strip the
+    receiver, keep `(class_of(recv), name_id)`; bind checks
+    `is_a?(class)` and rebuilds a BoundMethod (TypeError on
+    mismatch). Subclass instances bind fine.
+  - **`Method#arity` / `#parameters`.** Walks the captured
+    class chain to find the user `Method` record; computes
+    arity with CRuby's keyword rule (a required keyword bumps
+    mandatory count by 1, optional kwargs / kw_rest push to
+    negative). `parameters` returns `[[kind, name], ...]`
+    pairs with `:req` / `:opt` / `:rest` / `:keyreq` / `:key`
+    / `:keyrest`; builtins fall back to `arity == -1` /
+    `parameters == [[:rest]]`.
+  - **`Method#==` / `UnboundMethod#==`.** Identity on the
+    BoundMethod's receiver (Rc-ptr / ObjId / value depending
+    on type) plus name_id; UnboundMethod compares resolved
+    `Rc<Method>` by pointer so inherited methods across
+    parent/subclass compare equal.
+  - **`Method#>>` / `#<<` composition.** Shared lazily-built
+    forwarder proto that captures (outer, inner) plus a rest
+    slot for args; runs the chain in the right order. Both
+    BoundMethod and Block are accepted on either side, so
+    `f >> g` where one is a `Method` and the other a `Proc`
+    just works.
+  - **`Method#curry` / `Proc#curry`.** Host-side
+    `HeapObj::CurriedProc { underlying, gathered, target_arity }`
+    that gathers args across successive `.call` / `.[]` / `.()`
+    invocations until the arity is hit, then dispatches the
+    underlying. `class_of` reports `Proc`. Explicit arity hint
+    (`m.curry(n)`) honoured.
+  - **`Method#to_proc`.** Explicit form of the implicit `&m`
+    coercion; reuses the existing `coerce_bound_method_to_block`
+    forwarder.
+  - **`Class#instance_method(:sym)`.** Direct `UnboundMethod`
+    construction without the `Object.new.method(:sym).unbind`
+    detour. `NameError` if the method isn't anywhere in the
+    chain.
+  - **`Method#owner` / `#receiver`.** Owner walks
+    `Method.defining_class.upgrade()` so an inherited method's
+    owner is its defining class (not the receiver's class).
+    Receiver returns the captured Value for BoundMethod;
+    UnboundMethod#receiver raises NoMethodError to match
+    CRuby.
+  - **`Method#hash` + `#source_location`.** Hash is derived
+    from receiver-identity + name_id, mixed with a
+    golden-ratio constant so `==` Methods collide. source_location
+    returns `[filename, lineno]` for user methods (resolved
+    via a Vm-side mirror of Runtime's source map);
+    builtins return `nil`.
+  Also surfaced and fixed a pre-existing toplevel-block slot
+  collision: `f = ->(a, b) { ... }; x = 99` was clobbering `x`
+  through the lambda's `b` slot. `compile_block` now propagates
+  the inner builder's `n_locals` back to the parent so outer
+  slot allocations don't reuse a block's reserved range.
+  New diff fixtures: `method_introspect`, `method_equality`,
+  `method_compose`, `method_curry`, `unbound_method`,
+  `class_instance_method`, `method_to_proc_explicit`,
+  `method_owner_receiver`, `method_hash_source`,
+  `proc_curry_compose`. All byte-identical to CRuby.
+
+- **SUBSET-roadmap fill-ins.** A batch of small atomic
+  additions plugging high-priority gaps in the SUBSET coverage:
+  - **`Integer#digits([base])` / `#bit_length`.** LSB-first
+    digit Array (default base 10); custom base must be ≥ 2.
+    `bit_length` uses two's-complement semantics for
+    negatives, so `-1.bit_length == 0` and
+    `-256.bit_length == 8`.
+  - **`String#squeeze([charset])`.** Collapse consecutive
+    identical chars; with a char-set, only chars in the set
+    squeeze. Char-set ranges (`"a-z"`) and `^`-negation are
+    NOT expanded — same conservative semantics as `tr`,
+    documented in SUBSET.md.
+  - **`String#scan` regex + block form.** Extends from
+    string-only to also accept Regex patterns with CRuby's
+    capture-group rule (groups → Array-of-captures per match;
+    no groups → match string). Block form yields each match
+    and returns the receiver.
+  - **`Enumerable#chunk_while`.** Partition into runs where
+    the 2-arg block `{|a, b| ...}` returns truthy for adjacent
+    pairs. Returns a materialised Array (no Enumerator type);
+    idiomatic `.to_a` use works unchanged.
+  - **`Enumerable#min_by(n)` / `#max_by(n)`.** Top-n forms.
+    Sort by key + truncate (O(n log n), fine at our sizes).
+    Edge cases match CRuby: `n=0 → []`, `n > len → all`,
+    `n<0 → ArgumentError`.
+  - **`String#center` / `#ljust` / `#rjust`.** All three pad
+    to width with an optional pad string (default `" "`); pad
+    cycles when multichar. CRuby's odd-total center rule
+    (extra char on the right). Empty pad raises ArgumentError.
+  - **`Array#bsearch`.** Block-form binary search with
+    CRuby's two modes — find-minimum (Bool/nil block return)
+    and find-any (Int return: 0 = match, sign drives
+    direction). Other block returns raise TypeError.
+  - **`Hash#transform_keys` / `#transform_values`.** Both
+    block-form, both non-mutating; `transform_keys` collisions
+    follow CRuby's later-wins iteration order.
+  - **`Hash#except` / `#slice`.** Subset projections. `except`
+    drops listed keys in receiver order; `slice` keeps listed
+    keys in ARGUMENT order (CRuby semantics — not receiver
+    order).
+  - **`Array#take_while` / `#drop_while`.** Prefix partitions.
+    `drop_while` stops at the first falsy block return and
+    keeps every element from that point — the block is not
+    re-invoked on the remainder.
+  - **`Array#tally`.** Counts each element into a Hash keyed
+    by element, ordered by first appearance. (`tally_by` from
+    the open Ruby proposal #16504 isn't shipped in MRI yet,
+    so the commit covers just `tally`.) Documented divergence:
+    CRuby uses `eql?` so `1 == 1.0` distinct; the subset uses
+    `==` and collapses.
+  - **`Comparable#clamp(Range)`.** Range-arg form for the
+    Comparable mixin. Nil bounds are honoured for one-sided
+    ranges (`(..max)` / `(min..)`). 2-arg form still works.
+    Numeric primitives don't include Comparable in the subset
+    yet, so the fixture exercises user-class instances.
+  - **`Float#round(n)` / `#truncate(n)`.** Precision-arg
+    forms. `n > 0` returns Float; `n == 0` returns Int (same
+    as no-arg); `n < 0` zeroes low-order digits and returns
+    Int. Lives before the broader `(Float, op, [Int])`
+    coercion arm in `numeric_call` — placing it after would
+    shadow it (the shadow lesson is logged in the commit).
+  - **`Hash#compact` / `#compact!` + `Array#filter_map` /
+    `Hash#filter_map`.** `compact!` returns `nil` if there
+    were no nils to drop (matches CRuby's "nil = unchanged"
+    convention). `filter_map` uses strict truthiness;
+    Hash#filter_map collects truthy results into a flat
+    Array (not a Hash).
+  - **`Array#combination(n)` / `#permutation([n])`.**
+    Lexicographic enumeration of n-element subsets and
+    n-element ordered arrangements. Permutation defaults to
+    full length. Edges: `n=0 → [[]]`, `n > len → []`.
+  - **`Array#assoc` / `#rassoc`.** First sub-Array whose `[0]`
+    (assoc) or `[1]` (rassoc) equals the needle. Non-Array
+    elements in the receiver are silently skipped.
+  - **`Range#cover?(Range)` + `Range#step` block form.**
+    `cover?(other_range)` is true iff other is fully contained;
+    empty sub-ranges (begin ≥ end excl, or begin > end incl)
+    do NOT cover, matching CRuby. `step` block-form yields
+    each step value and returns the receiver.
+  - **`Object#methods` / `#instance_variables`.** Methods
+    walks the user-class chain (own → includes → superclass)
+    and returns Symbols; primitives currently return `[]` (no
+    per-Kernel-method enumeration in the subset — documented
+    divergence). instance_variables returns `@`-prefixed
+    Symbols for Object instances, `[]` for everything else.
+
+  Net effect of this batch (Method-reflection wave + SUBSET
+  fill-ins): ~30 atomic commits, 131 byte-identical fixtures
+  in `tests/diff/*.rb`. Each addition shipped as a single
+  commit; per-file panic budgets re-verified after each;
+  full Miri sweep (Stacked + Tree Borrows) and perf baseline
+  ran clean throughout.
+
 - **`String#sub` / `#gsub` / `#tr` (literal forms).**
   Three commonly-needed string transformations. `sub` replaces
   the first occurrence of the literal pattern; `gsub` replaces
