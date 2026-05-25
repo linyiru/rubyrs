@@ -113,8 +113,16 @@ fn register_fn_v2_reads_array_arg_via_host_ctx() {
 
 #[test]
 fn register_fn_v2_reads_hash_arg_via_host_ctx() {
-    // Same shape for Hash. Locks in the (key, value) ordering
-    // contract — insertion order, matching CRuby.
+    // Two checks against the same Hash:
+    //   1. key lookup returns the right Value (exercises the
+    //      resolve_hash → (k, v) pair shape end-to-end).
+    //   2. iteration order matches insertion order. CRuby's
+    //      Hash guarantees this since 1.9; rubyrs's
+    //      `Vec<(Value, Value)>` representation preserves it
+    //      mechanically. The `hash_keys` host fn below joins
+    //      keys with `|` so a regression that switched to a
+    //      `HashMap` or any unordered shape would fail with a
+    //      different concrete output string.
     let mut rt = Runtime::new();
     rt.register_fn_v2("hash_lookup", |ctx: &HostCtx, args: &[Value]| {
         let (h, want) = match args {
@@ -139,11 +147,47 @@ fn register_fn_v2_reads_hash_arg_via_host_ctx() {
         }
         Ok(Value::Nil)
     });
+    // Captures the iteration order Rust-side so the assertion
+    // below can read an actual String (sidesteps `Value::Str`'s
+    // non-public constructor).
+    let captured_keys: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![]));
+    let captured_for_fn = captured_keys.clone();
+    rt.register_fn_v2("hash_keys", move |ctx: &HostCtx, args: &[Value]| {
+        let h = match args {
+            [h] => ctx.resolve_hash(h).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "expected Hash".into() },
+                backtrace: vec![],
+            })?,
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "wrong arity".into() },
+                backtrace: vec![],
+            }),
+        };
+        let mut out = captured_for_fn.borrow_mut();
+        out.clear();
+        for (k, _) in h {
+            if let Value::Str(s) = k { out.push(s.borrow().clone()); }
+        }
+        Ok(Value::Nil)
+    });
+
+    // Key lookup.
     let v = rt.eval(
         r#"hash_lookup({ "a" => 1, "b" => 2, "c" => 3 }, "b")"#,
         "t.rb",
     ).unwrap();
     assert!(matches!(v, Value::Int(2)), "expected Int(2), got {:?}", v);
+
+    // Iteration order. Insertion order is `a, b, c`; if the
+    // underlying representation ever became unordered (e.g.
+    // HashMap) this assertion would fail with a different
+    // permutation rather than passing silently.
+    rt.eval(
+        r#"hash_keys({ "a" => 1, "b" => 2, "c" => 3 })"#,
+        "t.rb",
+    ).unwrap();
+    assert_eq!(&*captured_keys.borrow(), &["a", "b", "c"],
+        "hash iteration order should match insertion");
 }
 
 #[test]

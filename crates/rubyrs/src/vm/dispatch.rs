@@ -123,18 +123,27 @@ impl Vm {
     /// the raw-ptr reborrow inside cext is the only access path and
     /// aliasing is well-defined.
     ///
-    /// V2 deliberately does NOT set `CURRENT_VM_PTR`. The V2 closure
-    /// holds a `HostCtx` that borrows `&self.heap` for the duration
-    /// of the call; if we also stashed a `*mut Vm` and a v2 closure
-    /// reached for it (today only via `unsafe` on a pub(crate)
-    /// thread-local — not exploitable externally), the resulting
-    /// `&mut Vm` reborrow would alias the live `&self.heap` borrow
-    /// and any heap mutation during the inner call could realloc
-    /// the backing `Vec<HeapObj>` and dangle slices returned by
-    /// `ctx.resolve_array` / `resolve_hash`. Skipping the ptr makes
-    /// "v2 closures cannot mutate the VM" a static guarantee instead
-    /// of an unenforced convention; cext bridges register as V1, so
-    /// nothing legitimate needs the ptr from the V2 arm.
+    /// V2 deliberately does NOT call `with_vm_ptr_set`. The V2
+    /// closure holds a `HostCtx` that borrows `&self.heap` for the
+    /// duration of the call; if we *also* re-aimed CURRENT_VM_PTR at
+    /// `self` and the closure reborrowed it as `&mut Vm`, that
+    /// reborrow would alias the live `&self.heap` borrow — any heap
+    /// mutation during the inner call could realloc the backing
+    /// `Vec<HeapObj>` and dangle slices returned by
+    /// `ctx.resolve_array` / `resolve_hash`.
+    ///
+    /// Note that `CURRENT_VM_PTR` may already be non-null on entry
+    /// (an outer v1/cext frame set it), so the V2 arm is NOT
+    /// asserting "TLS is null." The actual boundary is: the TLS is
+    /// `pub(crate)`, so an external v2 closure has no language-level
+    /// path to read it — the unsafe re-entry channel is unreachable
+    /// to user code in the V2 slot. Skipping the overwrite here is
+    /// the closing brick: even an internal future v2 helper would
+    /// have to explicitly opt into touching the TLS, which is the
+    /// point at which the soundness review is expected.
+    ///
+    /// cext bridges register as V1, so nothing legitimate needs the
+    /// ptr from the V2 arm.
     fn invoke_host_fn(&mut self, slot: HostFnSlot, args: &[Value]) -> Result<Value, Trap> {
         match slot {
             HostFnSlot::V1(host) => {

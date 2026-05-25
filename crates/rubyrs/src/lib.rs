@@ -265,14 +265,16 @@ pub struct Config {
 ///
 /// Mutability is omitted by construction:
 /// - `HostCtx` exposes no mutating method.
-/// - The V2 dispatch path (see `Vm::invoke_host_fn`) deliberately
-///   does NOT set `CURRENT_VM_PTR`, so a v2 closure cannot reach a
-///   `&mut Vm` through the unsafe re-entry channel either.
+/// - The V2 dispatch path (see `Vm::invoke_host_fn`) does NOT
+///   overwrite `CURRENT_VM_PTR`, and the TLS itself is `pub(crate)`,
+///   so an external v2 closure has no language-level path to reach
+///   the `*mut Vm` re-entry channel. The TLS may already be non-null
+///   from an outer v1/cext frame — the guarantee is "unreachable
+///   from external v2 code," not "TLS is null."
 ///
-/// Together these make the slices returned by `resolve_array` /
-/// `resolve_hash` valid for the entire closure body without further
-/// caveat — there is no path through which the heap can be mutated
-/// while a v2 closure is on the stack. Embed hosts MUST NOT leak
+/// Together these mean the slices returned by `resolve_array` /
+/// `resolve_hash` are valid for the entire closure body without
+/// further caveat from outside the crate. Embed hosts MUST NOT leak
 /// the returned slices past the closure return (the lifetime
 /// already prevents this, but worth stating).
 pub struct HostCtx<'a> {
