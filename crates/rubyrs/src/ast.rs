@@ -658,6 +658,95 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             args: write_args,
         });
     }
+    // Global-variable op-writes — same desugar pattern as IVar.
+    // Unknown globals read as nil (Op::LoadGlobal default), so
+    // `$g ||= 1` on an unset `$g` correctly assigns.
+    if let Some(n) = node.as_global_variable_operator_write_node() {
+        let name = cid_to_string(n.name());
+        let op = cid_to_string(n.binary_operator());
+        let read = sp(node, Expr::GVarRead(name.clone()));
+        let rhs = sp(node, Expr::Call {
+            receiver: Some(Box::new(read)),
+            name: op,
+            args: vec![tr(&n.value())],
+        });
+        return sp(node, Expr::GVarWrite(name, Box::new(rhs)));
+    }
+    if let Some(n) = node.as_global_variable_or_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::GVarRead(name.clone()));
+        let write = sp(node, Expr::GVarWrite(name, Box::new(tr(&n.value()))));
+        return sp(node, Expr::Or(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_global_variable_and_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::GVarRead(name.clone()));
+        let write = sp(node, Expr::GVarWrite(name, Box::new(tr(&n.value()))));
+        return sp(node, Expr::And(Box::new(read), Box::new(write)));
+    }
+    // Constant op-writes — `FOO += 1`, `FOO ||= default`. Unknown
+    // constants raise NameError on read in CRuby, so `||=` on an
+    // unset constant is the standard "lazy init" idiom; the read
+    // raises and the assignment never happens. Our Op::LoadConst
+    // currently returns nil for unset constants (spike-scope
+    // divergence) which makes `FOO ||= 1` work like the global
+    // form. Acceptable for now.
+    if let Some(n) = node.as_constant_operator_write_node() {
+        let name = cid_to_string(n.name());
+        let op = cid_to_string(n.binary_operator());
+        let read = sp(node, Expr::ConstRead(name.clone()));
+        let rhs = sp(node, Expr::Call {
+            receiver: Some(Box::new(read)),
+            name: op,
+            args: vec![tr(&n.value())],
+        });
+        return sp(node, Expr::ConstWrite(name, Box::new(rhs)));
+    }
+    if let Some(n) = node.as_constant_or_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::ConstRead(name.clone()));
+        let write = sp(node, Expr::ConstWrite(name, Box::new(tr(&n.value()))));
+        return sp(node, Expr::Or(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_constant_and_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::ConstRead(name.clone()));
+        let write = sp(node, Expr::ConstWrite(name, Box::new(tr(&n.value()))));
+        return sp(node, Expr::And(Box::new(read), Box::new(write)));
+    }
+    // ConstantPath op-writes — `Foo::Bar += 1`. Target is a
+    // ConstantPathNode; flatten via the same helper used by
+    // ConstantPathWriteNode. Dynamic-head paths
+    // (`obj.const::Bar += 1`) fall through unsupported.
+    if let Some(n) = node.as_constant_path_operator_write_node() {
+        let target = n.target().as_node();
+        if let Some(joined) = flatten_constant_path(&target) {
+            let op = cid_to_string(n.binary_operator());
+            let read = sp(node, Expr::ConstRead(joined.clone()));
+            let rhs = sp(node, Expr::Call {
+                receiver: Some(Box::new(read)),
+                name: op,
+                args: vec![tr(&n.value())],
+            });
+            return sp(node, Expr::ConstWrite(joined, Box::new(rhs)));
+        }
+    }
+    if let Some(n) = node.as_constant_path_or_write_node() {
+        let target = n.target().as_node();
+        if let Some(joined) = flatten_constant_path(&target) {
+            let read = sp(node, Expr::ConstRead(joined.clone()));
+            let write = sp(node, Expr::ConstWrite(joined, Box::new(tr(&n.value()))));
+            return sp(node, Expr::Or(Box::new(read), Box::new(write)));
+        }
+    }
+    if let Some(n) = node.as_constant_path_and_write_node() {
+        let target = n.target().as_node();
+        if let Some(joined) = flatten_constant_path(&target) {
+            let read = sp(node, Expr::ConstRead(joined.clone()));
+            let write = sp(node, Expr::ConstWrite(joined, Box::new(tr(&n.value()))));
+            return sp(node, Expr::And(Box::new(read), Box::new(write)));
+        }
+    }
     if let Some(n) = node.as_multi_write_node() {
         // `a, b = expr`, `a, *r, b = expr`, `@x, @y = expr`,
         // `a, b = 1, 2`. Targets come from `lefts` (pre-splat),

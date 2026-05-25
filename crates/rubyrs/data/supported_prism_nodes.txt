@@ -17,7 +17,13 @@ BreakNode
 CallNode
 CaseNode
 ClassNode
+ConstantAndWriteNode
+ConstantOperatorWriteNode
+ConstantOrWriteNode
+ConstantPathAndWriteNode
 ConstantPathNode
+ConstantPathOperatorWriteNode
+ConstantPathOrWriteNode
 ConstantPathWriteNode
 ConstantReadNode
 ConstantWriteNode
@@ -29,6 +35,9 @@ EmbeddedVariableNode
 FalseNode
 FloatNode
 ForwardingSuperNode
+GlobalVariableAndWriteNode
+GlobalVariableOperatorWriteNode
+GlobalVariableOrWriteNode
 GlobalVariableReadNode
 GlobalVariableWriteNode
 HashNode
