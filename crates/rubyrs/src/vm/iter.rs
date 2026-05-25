@@ -257,6 +257,85 @@ impl Vm {
                 out.push_str(&source[last_end..]);
                 return Ok(Some(Value::new_str(out)));
             }
+        // `s.scan(/pat/) { |m| ... }` / `s.scan(string) { |m| ... }`
+        // — yield each match to the block (capture-group Array if
+        // the regex has groups, the matched substring otherwise).
+        // Returns the receiver String, matching CRuby.
+        if let (Value::Str(s), 1) = (recv, args.len()) && name == "scan" {
+            let source = s.borrow().clone();
+            let mut g = PinGuard::new(self);
+            g.pin(recv.clone());
+            g.pin(Value::Block(block));
+            let pre_frames = g.vm.frames.len();
+            let mut early: Option<Value> = None;
+            match &args[0] {
+                Value::Regex(re) => {
+                    let has_groups = re.captures_len() > 1;
+                    if has_groups {
+                        for caps in re.captures_iter(&source) {
+                            let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
+                            for i in 1..caps.len() {
+                                let v = caps.get(i)
+                                    .map(|m| Value::new_str(m.as_str()))
+                                    .unwrap_or(Value::Nil);
+                                group_vec.push(v);
+                            }
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let gid = g.vm.heap.alloc(HeapObj::Array(group_vec));
+                            g.vm.invoke_block(block, vec![Value::Array(gid)])?;
+                            g.vm.dispatch_until(pre_frames)?;
+                            if g.vm.method_return.is_some() { return Ok(None); }
+                            let _ = g.vm.stack.pop();
+                            if g.vm.break_signaled {
+                                g.vm.break_signaled = false;
+                                early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
+                                break;
+                            }
+                        }
+                    } else {
+                        for m in re.find_iter(&source) {
+                            g.vm.invoke_block(block, vec![Value::new_str(m.as_str())])?;
+                            g.vm.dispatch_until(pre_frames)?;
+                            if g.vm.method_return.is_some() { return Ok(None); }
+                            let _ = g.vm.stack.pop();
+                            if g.vm.break_signaled {
+                                g.vm.break_signaled = false;
+                                early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Value::Str(pat) => {
+                    let pat_owned = pat.borrow().clone();
+                    if !pat_owned.is_empty() {
+                        let bytes = source.as_bytes();
+                        let pat_bytes = pat_owned.as_bytes();
+                        let plen = pat_bytes.len();
+                        let mut i = 0;
+                        while i + plen <= bytes.len() {
+                            if &bytes[i..i + plen] == pat_bytes {
+                                g.vm.invoke_block(block, vec![Value::new_str(pat_owned.clone())])?;
+                                g.vm.dispatch_until(pre_frames)?;
+                                if g.vm.method_return.is_some() { return Ok(None); }
+                                let _ = g.vm.stack.pop();
+                                if g.vm.break_signaled {
+                                    g.vm.break_signaled = false;
+                                    early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
+                                    break;
+                                }
+                                i += plen;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+                _ => return Ok(None),
+            }
+            return Ok(Some(early.unwrap_or_else(|| recv.clone())));
+        }
         Ok(match (recv, name, args) {
             (Value::Array(id), "each", []) => {
                 let mut g = PinGuard::new(self);

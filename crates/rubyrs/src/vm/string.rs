@@ -698,6 +698,43 @@ impl Vm {
                     // implement. An empty pattern returns
                     // `[""] * (chars + 1)` to match CRuby; this is
                     // unusual but well-defined and cheap.
+                    // `String#scan(/pat/)` — Regex form. Returns
+                    // either an Array of matched strings (no
+                    // capture groups in the pattern) or an Array
+                    // of capture-group Arrays (one or more
+                    // groups). CRuby's behaviour: with groups the
+                    // FULL match is dropped and only captures
+                    // appear; without groups the full match is
+                    // the element.
+                    ("scan", [Value::Regex(re)]) => {
+                        let s_ref = s.borrow();
+                        let has_groups = re.captures_len() > 1;
+                        let mut out: Vec<Value> = Vec::new();
+                        if has_groups {
+                            for caps in re.captures_iter(&s_ref) {
+                                let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
+                                for i in 1..caps.len() {
+                                    let g = caps.get(i)
+                                        .map(|m| Value::new_str(m.as_str()))
+                                        .unwrap_or(Value::Nil);
+                                    group_vec.push(g);
+                                }
+                                self.maybe_gc();
+                                self.check_alloc()?;
+                                let gid = self.heap.alloc(HeapObj::Array(group_vec));
+                                out.push(Value::Array(gid));
+                            }
+                        } else {
+                            for m in re.find_iter(&s_ref) {
+                                out.push(Value::new_str(m.as_str()));
+                            }
+                        }
+                        drop(s_ref);
+                        self.maybe_gc();
+                        self.check_alloc()?;
+                        let id = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(id))
+                    }
                     ("scan", [Value::Str(pat)]) => {
                         let parts: Vec<Value> = if pat.borrow().is_empty() {
                             std::iter::repeat_with(|| Value::new_str(""))
