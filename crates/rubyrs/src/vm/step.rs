@@ -890,6 +890,36 @@ impl Vm {
                 // patched offset reaches the loop's join label.
                 f.ip = (f.ip as i32 + off) as usize;
             }
+            Op::NextLoop(off) => {
+                // Symmetric to BreakLoop: pop dynamic handlers down
+                // to the EnterLoop snapshot, then jump. Target is
+                // the loop's iter-check label (patched by while
+                // codegen) rather than the join, so the loop re-
+                // evaluates its condition and either continues or
+                // falls through to the natural exit.
+                let f = self.frames.last_mut().expect("ICE: NextLoop no frame");
+                let target_depth = *f.loop_rescue_depths.last()
+                    .expect("ICE: NextLoop outside a while loop");
+                // Same `ensure` defense as BreakLoop. CRuby runs
+                // the ensure body and continues with the next
+                // iteration; doing this correctly needs a next-
+                // aware Trap variant + Op::Raise hook. Until then,
+                // abort with a non-rescuable Uncaught so an outer
+                // `rescue` cannot mask the gap.
+                let has_pending_ensure = f.rescues[target_depth..]
+                    .iter().any(|h| h.is_ensure);
+                if has_pending_ensure {
+                    return Err(self.trap(RubyError::Uncaught {
+                        class_name: "NotImplementedError".to_string(),
+                        message: "next inside `ensure` of a while loop is not yet supported \
+                                  (CRuby runs ensure then re-checks the loop guard; \
+                                  rubyrs aborts here so an outer rescue cannot mask the gap). \
+                                  Track at SUBSET.md.".to_string(),
+                    }));
+                }
+                while f.rescues.len() > target_depth { f.rescues.pop(); }
+                f.ip = (f.ip as i32 + off) as usize;
+            }
             Op::BinOpInt(kind, rhs) => {
                 let a = self.stack.pop().expect("ICE: BinOpInt lhs underflow");
                 if let Value::Int(x) = a {

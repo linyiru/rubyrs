@@ -202,6 +202,15 @@ pub(crate) enum Op {
     /// signals an iteration driver / block return, NOT a structured
     /// `while`-loop exit).
     BreakLoop(i32),
+    /// `next` from a `while` loop — skip the rest of this iteration
+    /// and re-evaluate the condition. Same handler-pop logic as
+    /// `Op::BreakLoop`; jumps to the per-loop "iter_check" label
+    /// (the condition expression's position) so the loop either
+    /// continues with the next iteration or falls through to the
+    /// natural exit. Distinct from `Op::Return` (the pre-PR fallback
+    /// `next` used to emit, which returned from the enclosing
+    /// method/block).
+    NextLoop(i32),
     Return,
     /// Explicit `return val` — non-local. Unlike `Op::Return`
     /// which pops a single frame, this signals the dispatch

@@ -105,3 +105,6 @@ fn run_error_fixture(name: &str) {
 // structured transfer that never triggers `rescue`). If a future
 // refactor routes through a rescuable variant, this test goes red.
 #[test] fn err_break_through_ensure_outer_rescue() { run_error_fixture("break_through_ensure_outer_rescue"); }
+// Sibling defense for `next` — same shape, same Uncaught
+// NotImplementedError until the proper semantics land.
+#[test] fn err_next_through_ensure() { run_error_fixture("next_through_ensure"); }
