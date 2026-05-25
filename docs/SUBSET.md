@@ -82,11 +82,20 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 - `obj.instance_eval { |o| ... }` — runs the block with `self`
   swapped to `obj`. Inside, `@ivar` reads/writes go to `obj`'s
   ivars, and method calls use `obj` as the receiver. The block's
-  last expression is the return value (matches CRuby). The
-  `def name` inside an `instance_eval` block — which CRuby
-  installs as a *singleton* method on the receiver — currently
-  lands on `toplevel_methods` because rubyrs doesn't model
-  singleton classes yet. See "Caveats" below.
+  last expression is the return value (matches CRuby).
+- `def obj.name; ...; end` — singleton method install. Allocates
+  an eigenclass for `obj` on first install (a synthetic
+  `Rc<Class>` whose `superclass` is `obj.class`, so method
+  lookup walks the singleton first then falls through to the
+  real class). `obj.class` still reports the user-declared
+  class — CRuby skips the eigenclass when reporting. Only
+  user-class instances (`Value::Object`) are supported;
+  `def 1.foo` / `def "x".foo` raise `TypeError`. `super`
+  inside walks the original class chain. Same allocation /
+  GC plumbing is reachable via `obj.define_singleton_method`.
+- `obj.define_singleton_method(:name) { |args| ... }` —
+  closure-method form of the above, with the same
+  block-captures-outer-locals semantic as `define_method`.
 - `cls.class_eval { |c| ... }` (alias `module_eval`) — runs the
   block with `self = cls` AND with the class-body machinery
   active, so `def name; ...; end` inside lands on `cls`'s method
@@ -227,12 +236,11 @@ end
 
 These will not be added unless the project changes direction:
 
-- `eval` (string form), `binding`, `ObjectSpace`,
-  singleton classes (`def obj.foo`), `define_singleton_method`
+- `eval` (string form), `binding`, `ObjectSpace`
 - (`define_method` / `method_missing` / `alias_method` /
-  `instance_eval` / `class_eval` are now in the supported set
-  as a PoC — see above. The remaining items above stay out of
-  scope.)
+  `instance_eval` / `class_eval` / `def obj.foo` /
+  `define_singleton_method` are now in the supported set as a
+  PoC — see above. The remaining items stay out of scope.)
 - `Fiber`, `Thread`, `Mutex`, `Ractor`
 - `require / load / autoload`, gems, Bundler
 - C extension API

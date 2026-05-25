@@ -264,6 +264,7 @@ impl Vm {
                     g.vm.heap.alloc(HeapObj::Instance(Instance {
                         class: cls.clone(),
                         ivars: HashMap::new(),
+                        singleton_class: None,
                     }))
                 };
                 let obj = Value::Object(id);
@@ -1117,6 +1118,7 @@ impl Vm {
                     g.vm.check_alloc()?;
                     g.vm.heap.alloc(HeapObj::Instance(Instance {
                         class: cls.clone(), ivars: HashMap::new(),
+                        singleton_class: None,
                     }))
                 };
                 let obj = Value::Object(id);

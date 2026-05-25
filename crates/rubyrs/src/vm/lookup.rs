@@ -219,7 +219,11 @@ impl Vm {
             Value::Block(_) => "Proc",
             Value::Class(_) => "Class",
             Value::Regex(_) => "Regexp",
-            Value::Object(id) => return Value::Class(self.heap.class_of(*id)),
+            // `Object#class` script call: CRuby reports the
+            // user-declared class, not the eigenclass. Use
+            // `real_class_of` so a `def obj.foo` installation
+            // doesn't change what `obj.class` returns.
+            Value::Object(id) => return Value::Class(self.heap.real_class_of(*id)),
         };
         let sym = self.interner.intern(name);
         match self.classes.get(&sym) {

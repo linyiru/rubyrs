@@ -171,6 +171,19 @@ Tracked separately so they don't bloat this PR:
 - ✅ `*args` splat (master `a24d7cb`; rest-param GC root hole
   widened in PR #15).
 - ✅ `RubyError::is(class_name)` helper (PR #20).
-- "Mutable layers" doc — still pending; needs singleton class
-  to land first to draw a useful picture.
-- `def obj.foo` / `define_singleton_method` / singleton class.
+- ✅ `class_eval` / `instance_eval` / `module_eval` (PR #28).
+- ✅ Singleton class: `def obj.foo` + `define_singleton_method`
+  — landed via lazy `Instance.singleton_class: Option<Rc<Class>>`
+  whose `superclass` is the original class, so method lookup
+  is a single chain walk and `Object#class` uses a separate
+  `Heap::real_class_of` to skip the eigenclass.
+- "Mutable layers" doc — still pending; now writable since
+  singleton class is in place. Adds a third interior-mutable
+  layer (per-Instance singleton-class method table) on top of
+  the existing two (`Class.methods` + `MethodClosure.captured`).
+- `instance_eval { def name; ... }` routing to the receiver's
+  singleton class (currently falls through to toplevel; the
+  building blocks exist, just not wired). Same shape as the
+  `attr_*` / `alias_method` outside-class-body divergence
+  documented in SUBSET.md — a single class-body-context
+  tracking fix would close all of them.

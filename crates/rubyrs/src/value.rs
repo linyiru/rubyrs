@@ -124,6 +124,22 @@ pub struct Class {
 pub struct Instance {
     pub(crate) class: Rc<Class>,
     pub(crate) ivars: HashMap<SymId, Value>,
+    /// CRuby-style eigenclass: a synthetic Class whose
+    /// `superclass` is `self.class`, holding methods unique to
+    /// this one object. `None` until the first singleton method
+    /// is installed (`def obj.foo` or
+    /// `obj.define_singleton_method(:foo)`); allocated lazily so
+    /// the common case where an object never gets a singleton
+    /// method pays nothing.
+    ///
+    /// Method lookup goes through `Heap::class_of(id)` which
+    /// returns this eigenclass if present (and the eigenclass's
+    /// `superclass` chain walks back to the real class
+    /// transparently). `Object#class` script behaviour uses
+    /// `Heap::real_class_of(id)` to skip past the eigenclass and
+    /// report the original — matching CRuby, where `obj.class`
+    /// returns the user-declared class, not the eigenclass.
+    pub(crate) singleton_class: Option<Rc<Class>>,
 }
 
 #[derive(Debug)]
