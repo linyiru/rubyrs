@@ -77,14 +77,19 @@ ruby/spec coverage delta: spec/core/string/chomp: 0/7 → 4/7.
 
 ## What gets merged
 
-A PR is mergeable when **every check in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) is green**. Treat
-red as blocking, including on the master baseline — fix master first,
-then merge. The compounded cleanup PRs in May 2026 (#36 / #39 / #41 / #45)
-were all "previous PR landed with one of these red and we didn't
-notice until the next person's PR inherited the failure".
+A PR is mergeable when **all** of the following hold. Green CI is
+necessary but not sufficient — the non-CI items below count too.
 
-The gates, in roughly the order they fire:
+Treat any red check as blocking, including on the master baseline —
+fix master first, then merge. The compounded cleanup PRs in May 2026
+(#36 / #39 / #41 / #45) were all "previous PR landed with one of
+these red and we didn't notice until the next person's PR inherited
+the failure".
+
+The CI gates (every job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) must be green;
+the jobs themselves run in parallel — only steps within each job
+have a fire order):
 
 - **`cargo clippy --release --all-targets --workspace -- -D warnings`**
   (Test job, both ubuntu + macos). Catches style / pedantic /
@@ -105,10 +110,15 @@ The gates, in roughly the order they fire:
   (no wasmtime smoke), only proves the crate still compiles for
   the WASI target.
 - **Panic budget (per-file ratchet)** — separate job, see
-  [`docs/PANIC_AUDIT.md`](docs/PANIC_AUDIT.md). A new
-  `panic!` / `.unwrap()` / `.expect()` site in any production
-  source file requires bumping the per-file budget IN THE SAME PR
-  with a justification in the commit message.
+  [`docs/PANIC_AUDIT.md`](docs/PANIC_AUDIT.md). Per-file counts of
+  `panic!` / `.unwrap()` / `.expect()` are ratcheted: **the direction
+  is always down, never up**. The intended workflow is to convert a
+  panic site to a `Trap`, then lower the budget. Bumping a budget
+  *up* is a documented escape hatch that needs reviewer agreement
+  the new site is genuinely ICE-class (an invariant the compiler /
+  dispatch loop already enforces) AND that no Trap-class alternative
+  exists; the bump and the new site land in the same commit so the
+  history shows the trade-off.
 - **Perf budget (peak-RSS ratchet)** — separate job. Wall-time +
   peak-RSS for fixed inputs. Regressions surface as a hard fail.
 - **Miri smoke (Stacked + Tree Borrows)** — separate job. Catches
