@@ -1,10 +1,11 @@
 # Mutex — rubyrs is single-threaded so the entire lock surface
 # degenerates to a no-op. CRuby's actual Mutex enforces real
-# exclusion across threads; with one thread the externally
-# observable stdout from a non-pathological program is identical
-# for both. Real codebases (tilt, sinatra, dry-struct, many gems)
-# use Mutex for cache-compilation locks that don't care about the
-# lock itself in a single-thread world.
+# exclusion across threads and tracks lock state; we model
+# NEITHER — only the `synchronize { ... }` cache-guard shape
+# that tilt / sinatra / dry-struct / many gems actually use to
+# protect compilation caches. For that shape the externally
+# observable stdout is identical to CRuby. Direct state queries
+# (`m.lock; puts m.locked?`) WILL diverge and are out of scope.
 #
 # DIVERGENCES not covered (and intentional):
 # - `Mutex.new.class` reports `Mutex` here; CRuby says
@@ -14,6 +15,16 @@
 #   succeeds here, deadlocks on CRuby. We can't model the real
 #   semantics without threads; the divergence is in the
 #   user-friendly direction.
+
+# Arity check — `Mutex.new` takes zero args. Regression guard
+# against silently accepting extras (the issue the explicit
+# 0-arity `def initialize` in the preamble fixes).
+begin
+  Mutex.new(1)
+  puts "BUG: no error"
+rescue ArgumentError => e
+  puts "ArgumentError: #{e.message}"
+end
 
 LOCK = Mutex.new
 
