@@ -10,8 +10,19 @@ rust-version.workspace = true
 
 [dependencies]
 ruby-prism.workspace = true
-libloading.workspace = true
+# `rubyrs-cext` is pure Rust + std; no target restriction. The cext
+# symbols stay in the binary on wasi too (the `#[used]` exports in
+# `src/lib.rs` are valid on every target) — they're just unreachable
+# without a working `require`-cext path.
 rubyrs-cext = { path = "../rubyrs-cext" }
+
+# `libloading` is only meaningful where there's a dynamic loader.
+# wasm32-wasip1 has no `dlopen`; gating the dep here lets the WASI
+# build go through with the cext path stubbed out (see `Vm::cext_require`
+# in `vm.rs`, which has a wasi-flavoured alt that returns a clear Trap
+# instead of trying to dlopen).
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+libloading.workspace = true
 
 [build-dependencies]
 cc.workspace = true

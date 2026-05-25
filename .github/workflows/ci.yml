@@ -75,6 +75,56 @@ jobs:
           test -f "crates/rubyrs/examples/hello-cext/hello.$ext"
           test -f "crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.$ext"
 
+  wasm:
+    name: Build (wasm32-wasip1)
+    # docs/DEVELOPMENT.md advertises wasm32-wasip1 as a supported
+    # target. This job proves we don't quietly break that with cext
+    # changes — particularly that `libloading` stays target-gated
+    # and `Vm::cext_require` keeps its wasi-flavoured alt.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (wasm32-wasip1 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo + wasi-sdk
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            /opt/wasi-sdk-24.0-x86_64-linux
+          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-wasm-
+
+      - name: Install wasi-sdk 24
+        # crates/rubyrs/build.rs compiles a tiny `__wasi_init_tp`
+        # stub via the `cc` crate on the wasm32-wasi target. That
+        # needs a wasi-aware C compiler. wasi-sdk 24 matches the
+        # version documented in docs/DEVELOPMENT.md.
+        run: |
+          set -euo pipefail
+          if [ ! -d /opt/wasi-sdk-24.0-x86_64-linux ]; then
+            curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz \
+              | sudo tar -xz -C /opt
+          fi
+          echo "WASI_SDK_PATH=/opt/wasi-sdk-24.0-x86_64-linux" >> $GITHUB_ENV
+
+      - name: Build (wasm32-wasip1)
+        # Builds the rubyrs binary as a wasi reactor. Verifies:
+        # 1. `libloading` is properly target-gated (was missing
+        #    before review #3 from PR #2).
+        # 2. `Vm::cext_require` keeps its `#[cfg(target_os = "wasi")]`
+        #    alt that returns a trap instead of dlopening.
+        # 3. The rest of the crate stays wasi-portable.
+        # We don't run the resulting wasm here (would need wasmtime
+        # + a script). A separate smoke job can land later.
+        run: cargo build --release --target wasm32-wasip1 -p rubyrs
+
   panic-budget:
     name: Panic budget (per-file ratchet)
     runs-on: ubuntu-latest

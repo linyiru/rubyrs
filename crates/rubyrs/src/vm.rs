@@ -2479,6 +2479,11 @@ impl Vm {
     ///   tracks them on the Vm and unloads on drop.
     /// - Only arity 0 callbacks dispatch correctly; other arities
     ///   register, then trap on invocation with an ArgumentError.
+    ///
+    /// wasm32-wasi has no `dlopen` — a separate
+    /// `#[cfg(target_os = "wasi")]` stub below returns a clear Trap
+    /// instead of the dlopen path.
+    #[cfg(not(target_os = "wasi"))]
     fn cext_require(&mut self, path_str: &str) -> Result<Value, Trap> {
         use libloading::{Library, Symbol};
         use std::path::Path;
@@ -2612,6 +2617,21 @@ impl Vm {
         }
 
         Ok(Value::Nil)
+    }
+
+    /// wasm32-wasi alt for [`Vm::cext_require`]. WASI has no dynamic
+    /// loader, so any `require "path/to/some.so"` from Ruby on wasi
+    /// has no way to succeed; we trap with a precise message instead
+    /// of silently returning Nil. Native targets get the dlopen-based
+    /// implementation above.
+    #[cfg(target_os = "wasi")]
+    fn cext_require(&mut self, path_str: &str) -> Result<Value, Trap> {
+        Err(self.trap(RubyError::RuntimeError {
+            msg: format!(
+                "require: C-ext loading is not supported on wasm32-wasi (attempted to load {})",
+                path_str
+            ),
+        }))
     }
 }
 
