@@ -386,9 +386,11 @@ impl Vm {
                     ("+", [Value::Array(other)]) => {
                         // Pin both source Arrays across maybe_gc — by the
                         // time we get here the receiver has been popped
-                        // from the operand stack, and the rhs is held
-                        // only in the Rust-local `args` vec from
-                        // primitive_call's dispatch. Heap-typed elements
+                        // from the operand stack (by `do_call`'s drain
+                        // path), and the rhs is held only in `do_call`'s
+                        // local `args: Vec<Value>` which is handed through
+                        // `collection_call` → here as the `args: &[Value]`
+                        // slice. Heap-typed elements
                         // inside either Array (e.g. a trailing kwargs
                         // Hash in a mixed-splat call expansion like
                         // `f(*arr, c: 100)`) would otherwise have no
