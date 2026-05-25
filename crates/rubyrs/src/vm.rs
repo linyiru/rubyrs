@@ -275,6 +275,87 @@ impl Vm {
             }
         }
     }
+
+    /// `Object#respond_to?(name)` semantics: does `recv` have a
+    /// callable method named `name`? Used directly by the
+    /// `respond_to?` dispatch arm; doesn't invoke anything, so
+    /// it's cheap to call from feature-detection guards
+    /// (`spec.respond_to?(:add_dependency)`).
+    ///
+    /// For `Value::Object`, walks the class chain — this is the
+    /// precise case and the one most user code actually cares
+    /// about. For built-in types we enumerate the methods our
+    /// `primitive_call` / `collection_call` / iterator-driver
+    /// arms support; the list has to stay in sync as those
+    /// arms grow. Universal methods (`nil?`, `to_s`,
+    /// `respond_to?` itself, `==` / `!=`) are matched first
+    /// regardless of receiver.
+    pub(crate) fn responds_to(&self, recv: &Value, name_id: SymId) -> bool {
+        let name: &str = &self.interner.resolve(name_id).clone();
+        // Universal — every receiver responds to these.
+        if matches!(name,
+            "nil?" | "to_s" | "respond_to?" | "==" | "!="
+        ) {
+            return true;
+        }
+        match recv {
+            Value::Int(_) => matches!(name,
+                "+" | "-" | "*" | "/" | "%" |
+                "<" | "<=" | ">" | ">=" |
+                "to_i" | "abs" | "even?" | "odd?" |
+                "zero?" | "positive?" | "negative?" |
+                "succ" | "next" | "pred" | "-@" | "+@" |
+                "times" | "upto" | "downto"
+            ),
+            Value::Str(_) => matches!(name,
+                "+" | "*" | "<" | "<=" | ">" | ">=" |
+                "length" | "size" | "empty?" |
+                "upcase" | "downcase" | "reverse" |
+                "strip" | "lstrip" | "rstrip" |
+                "include?" | "start_with?" | "end_with?" |
+                "to_i" | "chars" | "split" | "to_sym"
+            ),
+            Value::Sym(_) => matches!(name, "to_sym"),
+            Value::Array(_) => matches!(name,
+                "length" | "size" | "push" | "<<" | "[]" | "[]=" |
+                "first" | "last" | "empty?" | "include?" |
+                "count" | "sum" | "min" | "max" | "sort" |
+                "inject" | "reduce" |
+                "to_a" | "reverse" | "uniq" | "compact" |
+                "flatten" | "join" |
+                "+" | "-" | "concat" | "take" | "drop" |
+                "each" | "map" | "select" | "filter" |
+                "reject" | "find" | "detect" |
+                "any?" | "all?" | "none?" |
+                "each_with_index" | "sort_by"
+            ),
+            Value::Hash(_) => matches!(name,
+                "length" | "size" | "[]" | "[]=" | "empty?" |
+                "include?" | "has_key?" | "key?" | "member?" |
+                "keys" | "values" | "to_h" | "to_a" |
+                "merge" | "delete" | "invert" | "store" |
+                "each" | "each_pair" |
+                "select" | "filter" | "reject" | "find" | "detect" |
+                "any?" | "all?" | "none?"
+            ),
+            Value::Range(_) => matches!(name,
+                "begin" | "end" | "first" | "last" | "min" | "max" |
+                "size" | "length" | "count" |
+                "exclude_end?" | "include?" | "to_a" |
+                "sum" | "inject" | "reduce" |
+                "each" | "map" | "select" | "filter" |
+                "reject" | "find" | "detect" |
+                "any?" | "all?" | "none?"
+            ),
+            Value::Bool(_) | Value::Nil => false,
+            Value::Class(_) => name == "new",
+            Value::Object(id) => {
+                let cls = self.heap.instance(*id).class.clone();
+                self.lookup_method_uncached(&cls, name_id).is_some()
+            }
+            Value::Block(_) => matches!(name, "call"),
+        }
+    }
 }
 
 /// `child` is-a `ancestor` if `ancestor` appears anywhere in `child`'s
@@ -486,6 +567,23 @@ impl Vm {
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());
+        }
+        // `Object#respond_to?(name)` — pure feature detection, no
+        // invocation. Goes last so user classes that override
+        // `respond_to?` (we don't support that yet, but conceptually)
+        // would shadow this. Accepts either a `Symbol` or a `String`
+        // argument; anything else falls through to NoMethodError.
+        if &*name == "respond_to?" && args.len() == 1 {
+            let lookup_name: Option<SymId> = match &args[0] {
+                Value::Sym(id) => Some(*id),
+                Value::Str(s) => Some(self.interner.intern(s)),
+                _ => None,
+            };
+            if let Some(id) = lookup_name {
+                let yes = self.responds_to(&recv, id);
+                self.stack.push(Value::Bool(yes));
+                return Ok(());
+            }
         }
         Err(self.trap(RubyError::NoMethodError {
             method: name.to_string(), recv_type: recv.type_name(),

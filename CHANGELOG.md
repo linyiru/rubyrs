@@ -7,6 +7,23 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`Object#respond_to?(name)`** for duck-typed feature
+  detection. Accepts either a `Symbol` (`:length`) or a
+  `String` (`"length"`). For `Value::Object` receivers walks
+  the class chain via `lookup_method_uncached` — the precise
+  answer for the common case (`spec.respond_to?(:add_dependency)`
+  in gemspec eval). For built-in types (Int, Str, Sym, Array,
+  Hash, Range, Bool, Nil, Class, Block) it consults an
+  enumerated method list; universal methods (`nil?`, `to_s`,
+  `respond_to?` itself, `==`, `!=`) are matched first
+  regardless of receiver. The enumeration has to stay in sync
+  as new built-in methods land — same maintenance shape as
+  CRuby's per-class method tables. New diff fixture
+  `respond_to.rb` covers universals, built-in positive cases,
+  built-in negative cases, both Sym and String args,
+  inherited methods on user classes, and the
+  feature-detection idiom (`if x.respond_to?(:upcase)`).
+  Byte-identical to CRuby.
 - **Default method arguments** (literal defaults). `def foo(x,
   y = 1, msg = "hello")` and `def open(path, mode = nil)` now
   compile and run. Defaults are restricted to literal Values —
