@@ -34,6 +34,12 @@ it's the next thing worth implementing.
 Planned next scans (and the rationale for each) live in
 [`TARGETS.md`](TARGETS.md).
 
+What happens when we actually `rubyrs <file>` the highest-AST-
+Supported files from each of these codebases? See
+[`TRY_RUNS.md`](TRY_RUNS.md) — that's the AST-view → real-run
+sanity check, and it confirms which Missing classes are blocking
+actual execution (not just chart numbers).
+
 ## Cross-codebase observations (n=10)
 
 After scanning ten codebases (Tier 1 framework set + Tier 2
