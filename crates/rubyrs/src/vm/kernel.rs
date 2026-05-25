@@ -375,15 +375,16 @@ impl Vm {
     pub(crate) fn require_relative(&mut self, path_str: &str) -> Result<Value, Trap> {
         use std::path::{Path, PathBuf};
         // Resolve relative to the current file's directory. Walk
-        // frames from the top to find a non-block, non-class-body
-        // frame and read its proto's filename. Toplevel `<main>` is
-        // a valid anchor too — its filename is whatever the host
-        // passed to `Runtime::eval`.
+        // frames from the top and read the first non-block,
+        // non-class-body frame's proto.filename. Toplevel `<main>`
+        // qualifies (is_block=false, is_class_body=false), so a
+        // require_relative called at the top level resolves
+        // against the script's directory. No fallback needed —
+        // every require_relative call necessarily runs inside at
+        // least the `<main>` frame.
         let anchor_filename: Option<String> = self.frames.iter().rev()
             .find(|f| !f.is_block && !f.is_class_body)
-            .map(|f| self.protos[f.proto_idx].filename.to_string())
-            .or_else(|| self.frames.last()
-                .map(|f| self.protos[f.proto_idx].filename.to_string()));
+            .map(|f| self.protos[f.proto_idx].filename.to_string());
         let base_dir: PathBuf = match anchor_filename {
             Some(f) => Path::new(&f).parent().map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from(".")),
