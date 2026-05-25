@@ -46,7 +46,16 @@ measure_once() {
     local secs rss_b
     secs=$(awk '/real/ {print $1; exit}' <<<"$out")
     rss_b=$(awk '/maximum resident set size/ {print $1; exit}' <<<"$out")
-    awk -v s="$secs" -v b="$rss_b" 'BEGIN { printf "%d %d\n", s*1000, b/1024 }'
+    # Round UP on the bytes-to-KB conversion so the budget check is
+    # conservative — a script using 4 MB + 1 byte should report as
+    # 4097 KB rather than be rounded down to 4096 and slip past a
+    # tight budget. Ceiling is the right semantic for a regression
+    # gate; truncation could let sub-KB overruns past.
+    awk -v s="$secs" -v b="$rss_b" 'BEGIN {
+      kb = int(b / 1024);
+      if (b % 1024 != 0) kb = kb + 1;
+      printf "%d %d\n", s*1000, kb;
+    }'
   else
     # GNU /usr/bin/time -v on Linux. RSS is already in KB.
     out=$(/usr/bin/time -v "$RUBYRS_BIN" "$script" 2>&1 >/dev/null)
