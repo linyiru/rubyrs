@@ -13,10 +13,11 @@ and intentional bumps require an explicit comment in the file.
 | Wall time (ms) | Dispatch-loop overhead; the second-most-visible cost. ADR 0010's bench shows we're currently 3× CRuby per iteration — `static_bench` etc. lock that gap in. | ~20-30% across CI runs |
 
 RSS is the tighter gate (≤5% noise tolerates a snug budget); wall has
-~2× headroom over the observed minimum to avoid flakes. The
-`max_wall_ms` column accepts `0` to disable the wall check on a
-workload — used for sub-100ms scripts where measurement noise
-dominates the signal (fizzbuzz).
+~1.5× headroom over the observed minimum to absorb the ~20-30% noise
+floor with margin for occasional outliers. The `max_wall_ms` column
+accepts `0` to disable the wall check on a workload — used for
+sub-100ms scripts where measurement noise dominates the signal
+(fizzbuzz).
 
 ## Why absolute baselines, not master-relative
 

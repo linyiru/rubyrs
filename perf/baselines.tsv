@@ -62,9 +62,10 @@
 #
 # Headroom: budgets sit at ~1.3× the CI observation for RSS and
 # ~1.5× for wall. RSS is tighter because it's the less-noisy
-# metric; wall has 2× variance across runs on the same CI runner
-# and we want to avoid flakes. Both should ratchet down further
-# once a few stable CI runs accumulate.
+# metric (≤5% across runs); wall has a ~20-30% noise floor on
+# the same CI runner, and the extra ~1.5× padding gives margin
+# for occasional outliers without inviting flakes. Both should
+# ratchet down further once a few stable CI runs accumulate.
 
 crates/rubyrs/tests/fixtures/fizzbuzz.rb	5500	0	tiny script; wall is sub-100ms noise floor, disabled
 crates/rubyrs/examples/metaprog_bench/mm_bench.rb	5500	1100	2M method_missing dispatch
