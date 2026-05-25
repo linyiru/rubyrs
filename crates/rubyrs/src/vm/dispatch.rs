@@ -795,7 +795,11 @@ impl Vm {
                 locals: cl.captured.clone(),
                 self_val,
                 base_sp: self.stack.len(),
-                is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false, rescues: vec![],
+                is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false,
+                // `define_method` enforces exact arity (no
+                // defaults), so all params are "given".
+                n_given_positional: given as u16,
+                rescues: vec![],
             });
             return Ok(());
         }
@@ -822,7 +826,7 @@ impl Vm {
             - (if has_rest { 1 } else { 0 })
             - kw_count
             - (if has_kw_rest { 1 } else { 0 });
-        let required = proto.defaults.iter().take_while(|d| d.is_none()).count();
+        let required = proto.n_required_positional as usize;
         // Pop trailing Hash arg (if present and we expect kw
         // params) — those entries become keyword bindings, not
         // positional args.
@@ -862,14 +866,14 @@ impl Vm {
         // subsequent maybe_gc / heap.alloc calls (for the rest
         // Array) can take &mut self.
         let kw_defaults_snapshot: Vec<Option<Value>> = proto.kw_param_defaults.clone();
-        // Snapshot defaults for the omitted-slot fill, since we're
-        // about to take `&mut self` to push the frame.
-        // Defaults fill any positional slot the caller didn't
-        // provide (given..positional_max). Required slots are
-        // already guaranteed populated by the arity check above.
-        let default_fill: Vec<Value> = (given..positional_max).map(|i| {
-            proto.defaults[i].clone().unwrap_or(Value::Nil)
-        }).collect();
+        // Optional positional slots that the caller omitted stay
+        // `Nil` here; the method body's entry prologue runs
+        // `Op::JumpIfArgGiven(slot, skip)` + default-expr +
+        // `Op::StoreLocal(slot)` per optional, evaluating any
+        // expression (literal, prior param, constant lookup, full
+        // method call). `frame.n_given_positional = positional_take`
+        // is what the prologue consults to tell "caller-supplied"
+        // from "left for default-eval".
         let mut locals = vec_nil(n_locals);
         // Bind up to positional_max args into positional slots; any
         // overflow flows into the rest slot as a fresh Array.
@@ -877,9 +881,6 @@ impl Vm {
         let mut args_iter = args.into_iter();
         for slot in locals.iter_mut().take(positional_take) {
             *slot = args_iter.next().unwrap();
-        }
-        for (offset, v) in default_fill.into_iter().enumerate() {
-            locals[positional_take + offset] = v;
         }
         if has_rest {
             // Remaining args (possibly empty) → fresh Array in the
@@ -1017,7 +1018,15 @@ impl Vm {
             locals: Rc::new(RefCell::new(locals)),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false, rescues: vec![],
+            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false,
+            // Drives the body's default-arg prologue. Slots
+            // `[0, positional_take)` came from the caller; slots
+            // `[positional_take, positional_max)` are left Nil
+            // here and the prologue's `Op::JumpIfArgGiven` skips
+            // the default-eval for the former, executes it for
+            // the latter.
+            n_given_positional: positional_take as u16,
+            rescues: vec![],
         });
         Ok(())
     }
@@ -1133,6 +1142,7 @@ impl Vm {
             // past a `is_block && is_class_body` frame) lives
             // in `vm/step.rs`.
             is_block: true,
+            n_given_positional: 0,
             rescues: vec![],
         });
         Ok(())
@@ -1190,7 +1200,7 @@ impl Vm {
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
-            is_block: true, rescues: vec![],
+            is_block: true, n_given_positional: 0, rescues: vec![],
         });
         Ok(())
     }

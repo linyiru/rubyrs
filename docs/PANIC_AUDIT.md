@@ -42,7 +42,7 @@ owns the change.
 |---|---|---|
 | `crates/rubyrs/src/vm.rs` | 0 | — |
 | `crates/rubyrs/src/vm/dispatch.rs` | 13 | 🟢 |
-| `crates/rubyrs/src/vm/step.rs` | 51 | 🟢 |
+| `crates/rubyrs/src/vm/step.rs` | 52 | 🟢 |
 | `crates/rubyrs/src/vm/iter.rs` | 10 | 🟢 |
 | `crates/rubyrs/src/vm/cext.rs` | 5 | 🟡 |
 | `crates/rubyrs/src/vm/raise.rs` | 3 | 🟢 |

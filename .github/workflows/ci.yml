@@ -233,7 +233,7 @@ jobs:
           # dispatch + step + iter). The total can ratchet down
           # if/when individual sites become Trap-class.
           check crates/rubyrs/src/vm/dispatch.rs     13
-          check crates/rubyrs/src/vm/step.rs         51
+          check crates/rubyrs/src/vm/step.rs         52
           check crates/rubyrs/src/vm/iter.rs         10
           check crates/rubyrs/src/vm/cext.rs          5
           check crates/rubyrs/src/vm/raise.rs         3

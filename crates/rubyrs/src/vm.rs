@@ -67,6 +67,14 @@ pub(crate) struct Frame {
     /// enclosing method. Method frames, class bodies, and the
     /// toplevel `<main>` keep `false`.
     pub(crate) is_block: bool,
+    /// Count of positional args the caller supplied. Method
+    /// dispatch (`invoke_method_with_block`) sets this to
+    /// `positional_take`; `Op::JumpIfArgGiven(slot, off)` consults
+    /// it to decide whether `slot` was caller-supplied or left
+    /// for the default-arg prologue to fill. Block / class-body
+    /// / toplevel frames all use 0 — they don't carry an arity
+    /// model that the prologue op would consult.
+    pub(crate) n_given_positional: u16,
     pub(crate) rescues: Vec<RescueHandler>,
 }
 
