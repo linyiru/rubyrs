@@ -180,6 +180,20 @@ pub(crate) struct Vm {
     /// emit "already initialized constant" and reassign). If you
     /// need to shadow a class with a constant, pick a different name.
     pub(crate) constants: HashMap<SymId, Value>,
+    /// Files already loaded via `require_relative` — keyed by
+    /// canonical path. Suppresses re-loading on subsequent calls
+    /// the same way CRuby's `$LOADED_FEATURES` does. The Set
+    /// shape (no associated value) is intentional: rubyrs doesn't
+    /// expose the list to script code yet, and the "true → false"
+    /// return semantic only needs membership.
+    pub(crate) loaded_features: std::collections::HashSet<std::path::PathBuf>,
+    /// Per-call-site inline-cache counter. Each compiled `Op::Call`
+    /// gets a unique u16 slot id; the Vm side allocates
+    /// `call_caches[id]` lazily. Lives on the Vm so kernel
+    /// builtins (e.g. `require_relative`) that compile new Ruby
+    /// source at runtime can advance the counter without
+    /// round-tripping through Runtime.
+    pub(crate) cache_counter: u32,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, HostFnSlot>,
     /// C-ext singleton-method dispatch table. Indexed by
@@ -298,6 +312,8 @@ impl Vm {
             interner,
             classes: HashMap::new(),
             constants: HashMap::new(),
+            loaded_features: std::collections::HashSet::new(),
+            cache_counter: 0,
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
             cext_class_methods: HashMap::new(),

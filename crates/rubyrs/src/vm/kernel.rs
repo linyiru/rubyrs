@@ -309,8 +309,152 @@ impl Vm {
                     ),
                 }))),
             },
+            // `require_relative "name"` — resolve relative to the
+            // CURRENTLY-EXECUTING file's directory (not cwd), auto-
+            // append `.rb`, parse + compile + dispatch the body in
+            // the current Vm, track in `loaded_features` so
+            // duplicate requires no-op. Returns true on first load,
+            // false on a repeat.
+            //
+            // Spike scope deliberately small:
+            //   - no load-path walking (LOAD_PATH is CRuby's, not
+            //     ours); only the relative-to-current-file form.
+            //   - no exception class for LoadError; missing files
+            //     surface as a `RuntimeError` Trap.
+            //   - no concurrency / monitor protection; rubyrs is
+            //     single-threaded at the script level.
+            #[cfg(not(target_os = "wasi"))]
+            "require_relative" => match args {
+                [Value::Str(path)] => Some(self.require_relative(&path.to_string_lossy())),
+                _ => Some(Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "require_relative: expected 1 String arg, got {}",
+                        args.len()
+                    ),
+                }))),
+            },
+            #[cfg(target_os = "wasi")]
+            "require_relative" => Some(Err(self.trap(RubyError::RuntimeError {
+                msg: "require_relative: file I/O not available on wasm32-wasi".into(),
+            }))),
             _ => None,
         }
+    }
+
+    /// `require_relative` host: read + parse + compile + execute the
+    /// target file inline in this Vm. Path is resolved relative to
+    /// the currently-executing source file's directory (mirrors
+    /// CRuby) and `.rb` is appended if absent. Tracks loaded paths
+    /// in `Vm.loaded_features` so a repeat call returns `false`
+    /// without re-evaluation.
+    ///
+    /// Implementation notes:
+    /// - the new file's top-level body becomes a fresh `<main>`-
+    ///   shaped Proto; we push a frame for it and then run an inner
+    ///   dispatch loop (`dispatch_until`) until that frame returns.
+    ///   The return value (the file's last expression) is discarded
+    ///   — `require_relative` returns the load-status Bool instead.
+    /// - the new Proto carries fresh call-site cache slots; the Vm's
+    ///   `cache_counter` advances by however many `Op::Call`s were
+    ///   emitted, and `ensure_call_caches` grows the IC table to
+    ///   match.
+    /// - SyntaxError / IO errors surface as Trap (file-not-found
+    ///   maps to RuntimeError; would be LoadError in CRuby but the
+    ///   class hierarchy doesn't ship it yet).
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn require_relative(&mut self, path_str: &str) -> Result<Value, Trap> {
+        use std::path::{Path, PathBuf};
+        // Resolve relative to the current file's directory. Walk
+        // frames from the top to find a non-block, non-class-body
+        // frame and read its proto's filename. Toplevel `<main>` is
+        // a valid anchor too — its filename is whatever the host
+        // passed to `Runtime::eval`.
+        let anchor_filename: Option<String> = self.frames.iter().rev()
+            .find(|f| !f.is_block && !f.is_class_body)
+            .map(|f| self.protos[f.proto_idx].filename.to_string())
+            .or_else(|| self.frames.last()
+                .map(|f| self.protos[f.proto_idx].filename.to_string()));
+        let base_dir: PathBuf = match anchor_filename {
+            Some(f) => Path::new(&f).parent().map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
+            None => PathBuf::from("."),
+        };
+        let mut target = base_dir.join(path_str);
+        if target.extension().is_none() {
+            target.set_extension("rb");
+        }
+        // Canonicalise so the duplicate-load check works regardless
+        // of `./` / `..` or relative-cwd shape.
+        let canon = match std::fs::canonicalize(&target) {
+            Ok(p) => p,
+            Err(e) => return Err(self.trap(RubyError::RuntimeError {
+                msg: format!("require_relative: cannot find {} ({})", target.display(), e),
+            })),
+        };
+        if self.loaded_features.contains(&canon) {
+            return Ok(Value::Bool(false));
+        }
+        let source = match std::fs::read_to_string(&canon) {
+            Ok(s) => s,
+            Err(e) => return Err(self.trap(RubyError::RuntimeError {
+                msg: format!("require_relative: read {} failed: {}", canon.display(), e),
+            })),
+        };
+        // Parse + AST translate. Errors surface as SyntaxError
+        // through the standard Trap path.
+        let parse_result = ruby_prism::parse(source.as_bytes());
+        let parse_errors: Vec<_> = parse_result.errors().collect();
+        if !parse_errors.is_empty() {
+            let msg = parse_errors.iter()
+                .map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("; ");
+            return Err(self.trap(RubyError::SyntaxError { msg }));
+        }
+        let (prog, ast_errors) = crate::ast::tr_with_errors(&parse_result.node());
+        if !ast_errors.is_empty() {
+            return Err(self.trap(RubyError::SyntaxError {
+                msg: ast_errors.join("; "),
+            }));
+        }
+        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(canon.to_string_lossy().into_owned());
+        // Mark loaded BEFORE running the body — matches CRuby's
+        // semantics for circular requires (mid-load is treated as
+        // "already loading"; the partially-defined module is visible
+        // to the re-entrant require).
+        self.loaded_features.insert(canon.clone());
+        let entry = crate::compiler::compile_proto(
+            "<require_relative>".into(), vec![], &[prog], filename_rc,
+            &mut self.protos, &mut self.interner, &mut self.cache_counter,
+        );
+        let cc = self.cache_counter as usize;
+        self.ensure_call_caches(cc);
+        // Push a fresh top-level frame for the loaded body and run
+        // the inner dispatch loop until it returns. dispatch_until
+        // is the same helper iterator drivers use to run a block
+        // body without unwinding the outer dispatch.
+        let depth_before = self.frames.len();
+        self.frames.push(super::Frame {
+            proto_idx: entry,
+            ip: 0,
+            locals: std::rc::Rc::new(std::cell::RefCell::new(
+                super::vec_nil(self.protos[entry].n_locals as usize)
+            )),
+            self_val: Value::Nil,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: None,
+            is_block: false,
+            n_given_positional: 0,
+            rescues: vec![],
+        });
+        self.dispatch_until(depth_before)?;
+        // The required file's last expression sits on top of the
+        // operand stack (Op::Return pushed it before the frame
+        // popped). Discard — `require_relative` returns the
+        // load-status Bool.
+        let _ = self.stack.pop();
+        Ok(Value::Bool(true))
     }
 
 }
