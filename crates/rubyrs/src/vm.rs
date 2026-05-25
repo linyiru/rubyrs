@@ -732,7 +732,7 @@ impl Vm {
             // class, name resolves with no receiver. Mirrors the
             // explicit-receiver branch below; see the comment
             // there for the copy semantics.
-            if &*name == "include" && !args.is_empty() {
+            if (&*name == "include" || &*name == "extend") && !args.is_empty() {
                 if let Value::Class(target) = &self_val {
                     for a in &args {
                         let src = match a {
@@ -897,7 +897,7 @@ impl Vm {
         // Class receivers; the call is a no-op for any other
         // receiver and falls through to NoMethodError.
         if let Value::Class(target) = &recv {
-            if &*name == "include" && !args.is_empty() {
+            if (&*name == "include" || &*name == "extend") && !args.is_empty() {
                 for a in &args {
                     let src = match a {
                         Value::Class(c) => c.clone(),

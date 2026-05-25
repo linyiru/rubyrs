@@ -3,9 +3,11 @@
 # the classifier reports them as Missing. Counts matter — adjust
 # tests/scan.rs together with this file if you change anything.
 
-module Foo                       # ModuleNode (× 1)
+class Foo                        # ClassNode (supported)
   CONST = 42                     # ConstantWriteNode (× 1)
   def bar
-    /\A\d+\z/                    # RegularExpressionNode (× 1)
+    fn = ->(x) { x + 1 }         # LambdaNode (× 1)
+    pat = /\A\d+\z/              # RegularExpressionNode (× 1)
+    [fn, pat]
   end
 end

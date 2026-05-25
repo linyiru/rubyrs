@@ -805,6 +805,28 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::Class { name, superclass, body });
     }
+    // `module Foo; ... end` — our subset doesn't distinguish
+    // modules from classes (Comparable was already a stub class
+    // in the preamble). Reusing Expr::Class lets `include`,
+    // method definitions, and constant lookups inside the
+    // module body all work via the existing class machinery.
+    // What's missing vs CRuby: `Module#instance_methods`
+    // introspection, and the strict "can't `.new` a module"
+    // check. Acceptable for the subset.
+    if let Some(n) = node.as_module_node() {
+        let name = if let Some(cr) = n.constant_path().as_constant_read_node() {
+            cid_to_string(cr.name())
+        } else { "?".to_string() };
+        let body: Vec<SExpr> = match n.body() {
+            Some(b) => {
+                if let Some(stmts) = b.as_statements_node() {
+                    stmts.body().iter().map(|c| tr(&c)).collect()
+                } else { vec![tr(&b)] }
+            }
+            None => vec![],
+        };
+        return sp(node, Expr::Class { name, superclass: None, body });
+    }
     if let Some(n) = node.as_parentheses_node() {
         // `(expr)` — just unwrap to the inner expression / statements.
         if let Some(body) = n.body() {

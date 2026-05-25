@@ -45,6 +45,7 @@ LocalVariableOrWriteNode
 LocalVariableReadNode
 LocalVariableTargetNode
 LocalVariableWriteNode
+ModuleNode
 MultiWriteNode
 NextNode
 NilNode

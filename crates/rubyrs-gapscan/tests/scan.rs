@@ -82,7 +82,7 @@ fn classify_returns_expected_for_known_classes() {
     assert_eq!(classify("IfNode"), Classification::Supported);
     assert_eq!(classify("ArgumentsNode"), Classification::RidesAlong);
     assert_eq!(classify("RescueNode"), Classification::RidesAlong);
-    assert_eq!(classify("ModuleNode"), Classification::Missing);
+    assert_eq!(classify("LambdaNode"), Classification::Missing);
     assert_eq!(classify("RegularExpressionNode"), Classification::Missing);
     // Sanity: a name that is not a Prism node at all also lands in
     // Missing (caller's job to validate using `unknown_classes_in`).
@@ -120,10 +120,10 @@ fn fixture_exercises_three_missing_classes() {
         .map(|(k, _)| k.as_str())
         .collect();
     // Exact set, exact counts.
-    assert!(names.contains(&"ModuleNode"), "got {names:?}");
+    assert!(names.contains(&"LambdaNode"), "got {names:?}");
     assert!(names.contains(&"ConstantWriteNode"), "got {names:?}");
     assert!(names.contains(&"RegularExpressionNode"), "got {names:?}");
-    for cls in ["ModuleNode", "ConstantWriteNode", "RegularExpressionNode"] {
+    for cls in ["LambdaNode", "ConstantWriteNode", "RegularExpressionNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
@@ -153,12 +153,13 @@ fn json_roundtrip_preserves_essentials() {
 
 #[test]
 fn diff_detects_closed_and_new_gaps() {
-    // Synthetic before/after: before has ModuleNode missing, after
-    // does not — closed gap. After introduces CaseNode — new gap.
+    // Synthetic before/after: before has LambdaNode missing, after
+    // does not — closed gap. After introduces RegularExpressionNode
+    // — new gap.
     let mut before = Report::default();
     before.total_nodes = 10;
     before.histogram.insert(
-        "ModuleNode".to_string(),
+        "LambdaNode".to_string(),
         rubyrs_gapscan::NodeStat {
             count: 5,
             ..Default::default()
@@ -192,7 +193,7 @@ fn diff_detects_closed_and_new_gaps() {
     let d = diff(&before, &after);
     assert_eq!(d.supported_delta, 5);
     assert_eq!(d.missing_delta, -3);
-    assert_eq!(d.closed_missing_classes, vec![("ModuleNode".to_string(), 5)]);
+    assert_eq!(d.closed_missing_classes, vec![("LambdaNode".to_string(), 5)]);
     assert_eq!(d.new_missing_classes, vec![("RegularExpressionNode".to_string(), 2)]);
 }
 
