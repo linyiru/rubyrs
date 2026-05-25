@@ -2702,9 +2702,24 @@ impl Vm {
         if has_rest {
             // Remaining args (possibly empty) → fresh Array in the
             // rest slot.
+            //
+            // PinGuard self_val + the rest-vec elements across the
+            // explicit `maybe_gc` (master pre-existing STRESS_GC
+            // bug, surfaced by `def initialize(*items); @items =
+            // items; end` + Bag.new(1,2,3)): self_val is just a
+            // Rust local at this point — the new frame hasn't been
+            // pushed yet, so the Bag instance isn't on vm.stack /
+            // vm.frames / vm.pinned. maybe_gc sweeps it, then
+            // heap.alloc(rest_vec) reuses its slot, and later
+            // method-body access of `self.@items` blows up with
+            // "ICE: heap slot is not an Instance". Same shape as
+            // the GC root holes fixed in PR #6 / #10.
             let rest_vec: Vec<Value> = args_iter.collect();
-            self.maybe_gc();
-            let arr_id = self.heap.alloc(HeapObj::Array(rest_vec));
+            let mut g = PinGuard::new(self);
+            g.pin(self_val.clone());
+            for v in &rest_vec { g.pin(v.clone()); }
+            g.vm.maybe_gc();
+            let arr_id = g.vm.heap.alloc(HeapObj::Array(rest_vec));
             let rest_slot = positional_max;
             locals[rest_slot] = Value::Array(arr_id);
         }
