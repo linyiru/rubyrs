@@ -159,3 +159,4 @@ fn run_diff(name: &str) {
 #[test] fn kwrest_args() { run_diff("kwrest_args"); }
 #[test] fn case_splat() { run_diff("case_splat"); }
 #[test] fn nonlocal_return() { run_diff("nonlocal_return"); }
+#[test] fn lambda_builtin() { run_diff("lambda_builtin"); }

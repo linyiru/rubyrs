@@ -368,12 +368,17 @@ impl Vm {
         // accessible from script code (rather than only from
         // builtin iterators).
         if let Value::Block(bid) = &recv
-            && &*name == "call" {
+            && matches!(&*name, "call" | "[]" | "()" | "yield") {
+                // CRuby exposes block invocation under four names:
+                // `.call(args)`, `.()` (already lowered to `call`
+                // by parsers but kept here defensively), `[args]`
+                // bracket form, and `.yield(args)` (mostly a
+                // documentation alias). All four route the same
+                // way: invoke the block, drive until its frame
+                // returns, leave the result on the stack.
                 let pre_frames = self.frames.len();
                 self.invoke_block(*bid, args)?;
                 self.dispatch_until(pre_frames)?;
-                // Result already on stack from the block frame's
-                // return. Nothing more to do.
                 return Ok(());
             }
         if let Value::Class(target) = &recv
@@ -1071,6 +1076,18 @@ impl Vm {
             }
 
         if no_recv {
+            // `lambda { ... }` / `proc { ... }` / `Proc.new { ... }`-
+            // style block-to-Value capture. rubyrs doesn't
+            // distinguish Lambda from Proc at runtime (the strict-
+            // arity check is the documented gap in SUBSET.md), so
+            // both names just hand the attached block back as a
+            // Value::Block. `args.is_empty()` keeps us out of the
+            // way of user-defined `lambda(arg)` shapes if anyone
+            // overrides the name.
+            if args.is_empty() && (&*name == "lambda" || &*name == "proc") {
+                self.stack.push(Value::Block(block));
+                return Ok(());
+            }
             if let Some(res) = self.builtin_call(&name, &args) { self.stack.push(res?); return Ok(()); }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
                 #[cfg(not(target_os = "wasi"))]
