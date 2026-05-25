@@ -990,9 +990,9 @@ pub(crate) fn compile_proto(
 ///
 /// `default_exprs` is parallel to the *positional* part of `params`:
 /// `None` for required slots, `Some(expr)` for optionals. When
-/// non-empty, a per-optional `JumpIfArgGiven(slot, skip)
-/// + <default expr> + StoreLocal(slot)` prologue is emitted before
-/// the body so non-literal defaults work.
+/// non-empty, a per-optional prologue (`JumpIfArgGiven(slot, skip)`
+/// then the default expression then `StoreLocal(slot)`) is emitted
+/// before the body so non-literal defaults work.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_proto_kind(
     name: String, params: Vec<String>, n_required_positional: u16,
