@@ -251,6 +251,38 @@ pub(crate) fn compile_expr(
             let id = interner.intern(name);
             b.emit(Op::LoadConst(id));
         }
+        Expr::MultiWrite { targets, value } => {
+            // Compile the RHS once, leave it on the stack. For each
+            // target, Dup the source, index it via the Array#[]
+            // method (`source[i]`), and store. The source remains
+            // on top after every iteration via the Dup; we pop
+            // nothing here — the expression's result is the
+            // source Array, matching CRuby.
+            //
+            // Out-of-bounds indices on Array#[] return nil (our
+            // existing behaviour), which matches CRuby's
+            // "extra targets get nil" rule. So `a, b = [1]`
+            // leaves `b` as nil naturally — no extra logic
+            // needed here.
+            compile_expr(b, value, protos, interner, cc);
+            let bracket_id = interner.intern("[]");
+            for (i, target) in targets.iter().enumerate() {
+                b.emit(Op::Dup);
+                b.emit(Op::LoadConstInt(i as i64));
+                let cid = *cc as u16; *cc += 1;
+                b.emit(Op::Call(bracket_id, 1, cid));
+                match target {
+                    crate::ast::MultiWriteTarget::Local(name) => {
+                        let slot = b.local_slot(name);
+                        b.emit(Op::StoreLocal(slot));
+                    }
+                    crate::ast::MultiWriteTarget::Ivar(name) => {
+                        let id = interner.intern(name);
+                        b.emit(Op::StoreIvar(id));
+                    }
+                }
+            }
+        }
         Expr::If { cond, then_body, else_body } => {
             compile_expr(b, cond, protos, interner, cc);
             let jf = b.emit(Op::JumpIfFalse(0));

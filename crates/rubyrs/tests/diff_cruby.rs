@@ -109,3 +109,4 @@ fn run_diff(name: &str) {
 #[test] fn methods_batch() { run_diff("methods_batch"); }
 #[test] fn rescue_primitive() { run_diff("rescue_primitive"); }
 #[test] fn zero_division() { run_diff("zero_division"); }
+#[test] fn multi_write() { run_diff("multi_write"); }

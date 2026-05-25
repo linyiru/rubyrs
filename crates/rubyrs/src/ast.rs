@@ -53,6 +53,17 @@ pub(crate) enum Expr {
     LVarWrite(String, Box<SExpr>),
     IVarRead(String),
     IVarWrite(String, Box<SExpr>),
+    /// Multi-write destructuring: `a, b = arr`, `@x, @y = pt`,
+    /// `a, b = 1, 2`. The RHS is always an Array — multiple
+    /// right-side expressions get packed into an Array literal
+    /// at translation time. Targets are extracted by index; if
+    /// there are more targets than elements, the surplus get
+    /// `nil`. Splat (`*rest`) and call-targets (`obj.x =`) are
+    /// not supported yet — those nodes are dropped silently.
+    MultiWrite {
+        targets: Vec<MultiWriteTarget>,
+        value: Box<SExpr>,
+    },
     SelfExpr,
     ConstRead(String),
     Call {
@@ -131,6 +142,12 @@ pub(crate) enum Expr {
         rescue: Vec<RescueClause>,
         ensure: Option<Vec<SExpr>>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum MultiWriteTarget {
+    Local(String),
+    Ivar(String),
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +279,34 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_instance_variable_write_node() {
         return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+    }
+    if let Some(n) = node.as_multi_write_node() {
+        // `a, b = expr` / `@x, @y = expr` / `a, b = 1, 2`.
+        // Targets come from `lefts`; ignore `rest` (splat) and
+        // `rights` (post-splat) for now — both are out of scope.
+        // If Prism gave us multiple right-side values (no array
+        // literal in source), they're already packed into an
+        // ArrayNode at the `value` slot.
+        let mut targets: Vec<MultiWriteTarget> = Vec::new();
+        for tgt in n.lefts().iter() {
+            if let Some(lvt) = tgt.as_local_variable_target_node() {
+                targets.push(MultiWriteTarget::Local(cid_to_string(lvt.name())));
+            } else if let Some(ivt) = tgt.as_instance_variable_target_node() {
+                targets.push(MultiWriteTarget::Ivar(cid_to_string(ivt.name())));
+            } else {
+                // Other target shapes (constant, call, index, splat)
+                // aren't implemented; record an unsupported-node
+                // marker so eval surfaces a SyntaxError.
+                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                    format!("unsupported multi-write target: {:?}", tgt)
+                ));
+            }
+        }
+        let value = tr(&n.value());
+        return sp(node, Expr::MultiWrite {
+            targets,
+            value: Box::new(value),
+        });
     }
     if let Some(n) = node.as_call_node() {
         let receiver = n.receiver().map(|r| Box::new(tr(&r)));
