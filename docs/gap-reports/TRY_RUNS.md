@@ -40,7 +40,28 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
-## Results — 2026-05-25, rubyrs at `6063af8`
+## Results — 2026-05-25 (re-run), rubyrs at `a35348b`
+
+Second pass after PR #30 (`ConstantWriteNode`) landed. Same 13
+files, same pinned target commits, same fuel cap. Diff vs the
+first pass:
+
+| File | Was | Now | Change |
+|---|---|---|---|
+| rake/scope.rb | D | ✅ A | `EMPTY = Class.new` now executes; file runs clean |
+| bundler/version.rb | D | ✅ A | `VERSION = "...".freeze` now executes; file runs clean |
+| rake/linked_list.rb | D + E | E | `ConstantWriteNode` resolved; remaining blocker is the literal-default-arg rule |
+| (all 9 other files) | — | unchanged | failure stays in same category |
+
+Pass count: **3 → 5** (out of 12 non-host-DSL files = 42%).
+Category D drops from 3 → 0, validating both the gapscan
+prioritisation (D was the top "syntactic" blocker) and the
+fix itself. The lingering blocker on `rake/linked_list.rb`
+(Category E) is now the cleanest next target: a single
+documented divergence that, once relaxed, would push pass to
+6/12.
+
+### Results — 2026-05-25 (first pass), rubyrs at `6063af8`
 
 Target-codebase commits scanned (matching the source-tree commits
 that the gap reports were generated against):
