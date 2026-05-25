@@ -26,12 +26,15 @@ Add three metaprogramming primitives, scoped to the simplest forms that
 exercise the hard parts:
 
 1. **`alias_method :new, :old`** — compile-time desugar to a new
-   `Op::AliasMethod(new_id, old_id)`. At runtime, copy the existing
-   `Rc<Method>` from `class.methods` (or `toplevel_methods`) under the
-   new SymId. *Share the Rc.* The alias is intentionally
+   `Op::AliasMethod(new_id, old_id)`. At runtime, resolve the source
+   `Rc<Method>` via `lookup_method_uncached` (which walks the
+   surrounding class's ancestor chain, so inherited methods can be
+   aliased) and install the same Rc under the new SymId on the
+   *current* class. *Share the Rc.* The alias is intentionally
    indistinguishable from the original at lookup, including
    `defining_class` — so `super` from the aliased name walks the
-   same chain.
+   *original*'s superclass chain, matching CRuby's "module of
+   definition" semantics. A missing source name raises `NameError`.
 2. **`method_missing` fallback** — extract a `Vm::try_method_missing`
    helper. Call it at each of the four NoMethodError raise sites
    (`do_call` no_recv + recv, `do_call_block` no_recv + recv) before

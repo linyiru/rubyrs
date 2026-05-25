@@ -52,13 +52,15 @@ pub(crate) enum Op {
     /// the per-site cache).
     Super(SymId, u8),
     DefMethod(SymId, u32),         // name, proto_idx
-    /// `alias_method :new, :old`. Looks up the Method entry under
-    /// `old` in the surrounding class (or toplevel_methods at the
-    /// top level) and re-inserts the same Rc under `new`. Sharing
-    /// the Rc keeps the alias and the original semantically
-    /// identical — including any defining_class fixup for `super`.
-    /// Bumps `method_gen` so per-call-site IC entries that observed
-    /// the older table re-resolve.
+    /// `alias_method :new, :old`. Resolves `old` by walking the
+    /// surrounding class's ancestor chain (or `toplevel_methods` at
+    /// the top level) so inherited methods can be aliased; installs
+    /// the same `Rc<Method>` under `new` on the *current* class.
+    /// Sharing the Rc keeps the alias and the original semantically
+    /// identical — including `defining_class`, so `super` from the
+    /// aliased name walks the *original*'s superclass chain. Bumps
+    /// `method_gen` so per-call-site IC entries re-resolve. Raises
+    /// `NameError` if `old` doesn't exist anywhere on the chain.
     AliasMethod(SymId, SymId),     // new, old
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured

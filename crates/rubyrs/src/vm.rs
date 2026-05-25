@@ -3940,10 +3940,11 @@ impl Vm {
                 //
                 // GC: the captured Rc keeps its slots alive via the
                 // Method, which lives in Class.methods (rooted via
-                // Vm.classes) or toplevel_methods. `gather_methods`
-                // adds those captured slots to the GC root set, so
-                // Objects/Arrays reachable through the closure
-                // survive collections. See `maybe_gc`.
+                // Vm.classes) or toplevel_methods. `maybe_gc`'s
+                // root-gathering loops walk every installed method
+                // table and add closure-captured slots to the root
+                // set, so Objects/Arrays reachable through the
+                // closure survive collections.
                 let bv = self.stack.pop().expect("ICE: DefMethodBlock no block on stack");
                 let id = if let Value::Block(id) = bv { id } else {
                     panic!("ICE: DefMethodBlock without Block on stack");

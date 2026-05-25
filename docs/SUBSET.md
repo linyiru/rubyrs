@@ -57,11 +57,15 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 - `Integer#times { |i| ... }`
 
 ### Metaprogramming (PoC)
-- `alias_method :new, :old` — copies the `Rc<Method>` entry in the
-  surrounding class (or toplevel) under a new SymId. Alias shares
-  the original's `defining_class`, so `super` from the aliased name
-  walks the same chain. Compile-time desugar; both args must be
-  Symbol literals (dynamic `alias_method(*syms)` falls through).
+- `alias_method :new, :old` — resolves the source method by walking
+  the surrounding class's ancestor chain (so inherited methods can
+  be aliased) and installs the same `Rc<Method>` under the new
+  SymId on the *current* class. Alias shares the original's
+  `defining_class`, so `super` from the aliased name walks the
+  original's superclass chain, matching CRuby's "module of
+  definition" rule. A missing source name raises `NameError`.
+  Compile-time desugar; both args must be Symbol literals (dynamic
+  `alias_method(*syms)` falls through).
 - `method_missing(name)` — on an Object receiver whose class chain
   defines `method_missing`, missed calls route there with the
   missed name passed as a Symbol. Inherited through the superclass
