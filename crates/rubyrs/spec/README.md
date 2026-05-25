@@ -50,15 +50,19 @@ spec/
     │                              # (re-extracted from PR #61's
     │                              # v0.1 + hand polish)
     │
-    └── array_count_spec.rb        # core/array subset
-                                   # — extractor v0.2 output
+    ├── array_count_spec.rb        # core/array subset
+    │                              # — extractor v0.2 output
+    │
+    ├── array_take_spec.rb         # core/array — extractor v0.3
+    ├── array_compact_spec.rb      # core/array — extractor v0.3
+    └── hash_keys_spec.rb          # core/hash  — extractor v0.3
 ```
 
 The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **118 examples across 21
+"Future work" below). Current total: **130 examples across 24
 files**, all passing.
 
 ## DSL the helper provides
