@@ -5,20 +5,23 @@
 #
 # Each entry must justify why it rides along.
 #
-# Format: one CamelCase name per line, sorted, `#` comments OK.
-
-# def.parameters() returns ParametersNode; ast.rs walks its
-# requireds/optionals directly without as_parameters_node.
-ParametersNode
+# Format: one CamelCase name per line, sorted alphabetically (so the
+# file diffs cleanly), `#` comments OK. build.rs reads into a
+# BTreeSet so order is functionally irrelevant — the convention is
+# purely for review hygiene.
 
 # call.arguments() / yield.arguments() / return.arguments() etc.
 # all return ArgumentsNode; ast.rs iterates a.arguments() inline.
 ArgumentsNode
 
-# begin.rescue_clause() returns RescueNode; ast.rs walks the
-# rescue chain via subsequent() without as_rescue_node.
-RescueNode
-
 # begin.ensure_clause() returns EnsureNode; ast.rs reads its
 # statements directly.
 EnsureNode
+
+# def.parameters() returns ParametersNode; ast.rs walks its
+# requireds/optionals directly without as_parameters_node.
+ParametersNode
+
+# begin.rescue_clause() returns RescueNode; ast.rs walks the
+# rescue chain via subsequent() without as_rescue_node.
+RescueNode
