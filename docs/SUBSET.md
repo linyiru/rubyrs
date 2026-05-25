@@ -60,8 +60,11 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 
 Covered: `length` / `size`, `+`, `==`, `empty?`, `reverse`,
 `upcase`, `downcase`, `include?(String)`, `equal?` (identity),
-`object_id` (not yet — use `equal?` for identity assertions),
 interpolation `"... #{expr} ..."`.
+
+Not yet covered on String identity / inspection:
+
+- `object_id` — use `equal?` instead for identity assertions.
 
 `String#sub` and `String#gsub` cover the patterns shipped so
 far:
@@ -69,7 +72,7 @@ far:
 - **Regex pattern, String replacement**:
   `"hello".sub(/[aeiou]/, '*')` → `"h*llo"`
 - **Regex pattern, block replacement**:
-  `"hello".gsub(/[aeiou]) { |m| m.upcase }` → `"hEllO"`
+  `"hello".gsub(/[aeiou]/) { |m| m.upcase }` → `"hEllO"`
 - **String pattern, String replacement** (literal, no regex
   metacharacter interpretation): `"\\d".sub('\\d', 'a')` → `"a"`
 
@@ -97,9 +100,11 @@ Divergence from CRuby on the `^` anchor: rubyrs's regex engine
 fires `^` only at the string start, not at every line start in
 multi-line input. `"Text\nFoo".gsub(/^/, ' ')` returns
 `" Text\nFoo"` (one anchor); CRuby returns `" Text\n Foo"` (one
-per line). Tracked as a separate engine upgrade — pin a
-divergent-but-acceptable example in
-`spec/ruby/string_gsub_spec.rb`'s anchor block.
+per line). Tracked as a separate engine upgrade. The upstream
+ruby/spec `it` block covering this is skipped in
+`spec/ruby/string_gsub_spec.rb` with a comment naming the
+upstream expectation and pointing back at this section; the
+skip un-resolves once per-line anchoring lands.
 
 ### Metaprogramming (PoC)
 - `alias_method :new, :old` — resolves the source method by walking
