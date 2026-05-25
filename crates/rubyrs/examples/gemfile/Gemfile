@@ -41,5 +41,27 @@ if RUBY_VERSION >= "3.4.0"
   gem "csv"
 end
 
+# Negative branch — must NOT include the gem. The lock-in
+# test asserts this gem is absent, so a regression in
+# String comparison or `if` polarity is caught.
+if RUBY_VERSION >= "99.0.0"
+  gem "future-only-gem"
+end
+
 # A gem with a fully populated hash kwarg.
 gem "sidekiq", "~> 7.3", require: "sidekiq", platforms: :mri
+
+# platforms block — multi-symbol args, like `group`.
+platforms :mri do
+  gem "rb-readline"
+end
+
+# git block — source override scope.
+git "https://github.com/example/forked-gem.git" do
+  gem "forked-gem"
+end
+
+# path block — local source override scope.
+path "vendor/cache" do
+  gem "vendored-gem"
+end

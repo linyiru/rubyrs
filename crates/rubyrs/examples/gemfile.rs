@@ -94,8 +94,15 @@ struct GemfileState {
     // inside resolve that to a Vec<String> on capture.
     group_stack: Vec<String>,
     platforms_stack: Vec<String>,
-    git_stack: Vec<String>,
-    path_stack: Vec<String>,
+    /// Unified source-override stack — `git` and `path` push
+    /// onto the same Vec so the most-recently-entered block
+    /// always wins. Tracked as `(kind, value)` tuples; the
+    /// top entry is the active override. Earlier sketches
+    /// kept `git_stack` + `path_stack` separately and checked
+    /// git-then-path; for nested `git "url" do path "x" do …`
+    /// that returned the outer git rather than the inner path,
+    /// silently mis-tagging the inner gem (PR #35 review F1).
+    source_stack: Vec<(String, String)>,
 }
 
 impl GemfileState {
@@ -112,17 +119,23 @@ impl GemfileState {
             .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
             .unwrap_or_default()
     }
+    /// Most-recent source override (or `None` if no `git`/`path`
+    /// block is active). Push-order wins, so a nested
+    /// `git "..." do path "..." do gem end end` correctly
+    /// tags the gem with the inner `path`.
     fn active_source_override(&self) -> Option<(String, String)> {
-        if let Some(u) = self.git_stack.last() {
-            Some(("git".into(), u.clone()))
-        } else { self.path_stack.last().map(|p| ("path".into(), p.clone())) }
+        self.source_stack.last().cloned()
     }
 
     fn print_summary(&self) {
         println!("Collected Gemfile contents:");
         if let Some(s) = &self.source { println!("  source:        {}", s); }
         if let Some(v) = &self.ruby_version { println!("  ruby version:  {}", v); }
-        println!("  gem count:     {}", self.gems.len());
+        // Unique-gem count. The per-group sub-headers below add
+        // up to *more* than this when a gem appears in multiple
+        // groups (e.g. `group :development, :test`), so the
+        // label calls out which count this is.
+        println!("  gem count (unique): {}", self.gems.len());
 
         // Bucket by group. `default` is the implicit bucket
         // for any gem declared outside a `group do ... end`.
@@ -243,8 +256,34 @@ fn main() {
     }
     push_pop!("__gemfile_push_groups",    "__gemfile_pop_groups",    group_stack);
     push_pop!("__gemfile_push_platforms", "__gemfile_pop_platforms", platforms_stack);
-    push_pop!("__gemfile_push_git",       "__gemfile_pop_git",       git_stack);
-    push_pop!("__gemfile_push_path",      "__gemfile_pop_path",      path_stack);
+
+    // `git` and `path` share the unified `source_stack` so the
+    // most-recently-entered block wins on nested forms. Push
+    // the `(kind, value)` tuple; the matching pop just removes
+    // the top entry — the prelude's begin/ensure guarantees
+    // pairing.
+    macro_rules! source_push_pop {
+        ($push_name:expr, $pop_name:expr, $kind:expr) => {
+            {
+                let st = state.clone();
+                rt.register_fn($push_name, move |args| {
+                    if let [v] = args {
+                        st.borrow_mut().source_stack.push(($kind.into(), s(v)));
+                    }
+                    Ok(Value::Nil)
+                });
+            }
+            {
+                let st = state.clone();
+                rt.register_fn($pop_name, move |_args| {
+                    st.borrow_mut().source_stack.pop();
+                    Ok(Value::Nil)
+                });
+            }
+        };
+    }
+    source_push_pop!("__gemfile_push_git",  "__gemfile_pop_git",  "git");
+    source_push_pop!("__gemfile_push_path", "__gemfile_pop_path", "path");
 
     // ---- prelude, then the unmodified Gemfile ----
 

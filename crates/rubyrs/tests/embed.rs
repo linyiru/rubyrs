@@ -1148,19 +1148,31 @@ fn gemfile_dsl_real_hosting_end_to_end() {
     use std::rc::Rc;
 
     // Mirror the example's GemfileState shape — small enough to
-    // dup here and keeps the test self-contained.
+    // dup here and keeps the test self-contained. Named fields
+    // (rather than a positional tuple) so the assertions below
+    // read as `puma.require_kw` not `puma.3` — much harder to
+    // mis-order when the schema grows.
+    #[derive(Default)]
+    struct Gem {
+        name: String,
+        reqs: Vec<String>,
+        groups: Vec<String>,
+        require_kw: String,
+        platforms_kw: String,
+        platforms_scope: Vec<String>,
+        source_override: Option<(String, String)>,
+    }
     #[derive(Default)]
     struct State {
         source: Option<String>,
         ruby_version: Option<String>,
-        // name, reqs, groups, require_kw, platforms_kw — the
-        // last two are what the prelude pulls out of the
-        // trailing `**opts` hash. Capturing them here means a
-        // regression in `**kwargs` unpacking (Hash receive,
-        // Symbol-key access, `.to_s` round-trip) actually fails
-        // the test rather than landing in unused `_` bindings.
-        gems: Vec<(String, Vec<String>, Vec<String>, String, String)>,
+        gems: Vec<Gem>,
         group_stack: Vec<String>,
+        platforms_stack: Vec<String>,
+        // Unified source-override stack — matches the example's
+        // shape so `git` / `path` precedence is push-order, not
+        // type-priority. See `examples/gemfile.rs::GemfileState`.
+        source_stack: Vec<(String, String)>,
     }
     let state = Rc::new(RefCell::new(State::default()));
     let mut rt = Runtime::new();
@@ -1191,13 +1203,25 @@ fn gemfile_dsl_real_hosting_end_to_end() {
                 let groups: Vec<String> = sm.group_stack.last()
                     .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
                     .unwrap_or_default();
+                let platforms_scope: Vec<String> = sm.platforms_stack.last()
+                    .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+                    .unwrap_or_default();
+                let source_override = sm.source_stack.last().cloned();
                 let req_str = s(reqs);
                 let reqs_vec = if req_str.is_empty() {
                     vec![]
                 } else {
                     req_str.split('|').map(String::from).collect()
                 };
-                sm.gems.push((s(name), reqs_vec, groups, s(req_kw), s(plat_kw)));
+                sm.gems.push(Gem {
+                    name: s(name),
+                    reqs: reqs_vec,
+                    groups,
+                    require_kw: s(req_kw),
+                    platforms_kw: s(plat_kw),
+                    platforms_scope,
+                    source_override,
+                });
             }
             Ok(Value::Nil)
         });
@@ -1216,13 +1240,41 @@ fn gemfile_dsl_real_hosting_end_to_end() {
             Ok(Value::Nil)
         });
     }
-    // The other shims (platforms / git / path) aren't exercised
-    // by the test Gemfile — register no-ops so the prelude's
-    // `def` doesn't crash if a future Gemfile edit adds them.
-    for name in ["__gemfile_push_platforms", "__gemfile_pop_platforms",
-                 "__gemfile_push_git", "__gemfile_pop_git",
-                 "__gemfile_push_path", "__gemfile_pop_path"] {
-        rt.register_fn(name, |_args| Ok(Value::Nil));
+    // Real push/pop wiring for platforms / git / path so a
+    // regression in those scope blocks (block-yield ordering,
+    // ensure-pop pairing, source-precedence) actually fails
+    // the test instead of silently no-op'ing.
+    {
+        let st = state.clone();
+        rt.register_fn("__gemfile_push_platforms", move |args| {
+            if let [v] = args { st.borrow_mut().platforms_stack.push(s(v)); }
+            Ok(Value::Nil)
+        });
+    }
+    {
+        let st = state.clone();
+        rt.register_fn("__gemfile_pop_platforms", move |_args| {
+            st.borrow_mut().platforms_stack.pop();
+            Ok(Value::Nil)
+        });
+    }
+    for (push_name, pop_name, kind) in [
+        ("__gemfile_push_git",  "__gemfile_pop_git",  "git"),
+        ("__gemfile_push_path", "__gemfile_pop_path", "path"),
+    ] {
+        let st = state.clone();
+        let kind_s: String = kind.into();
+        rt.register_fn(push_name, move |args| {
+            if let [v] = args {
+                st.borrow_mut().source_stack.push((kind_s.clone(), s(v)));
+            }
+            Ok(Value::Nil)
+        });
+        let st = state.clone();
+        rt.register_fn(pop_name, move |_args| {
+            st.borrow_mut().source_stack.pop();
+            Ok(Value::Nil)
+        });
     }
 
     // Read the actual prelude + Gemfile from the repo. That's
@@ -1240,48 +1292,81 @@ fn gemfile_dsl_real_hosting_end_to_end() {
     let st = state.borrow();
     assert_eq!(st.source.as_deref(), Some("https://rubygems.org"));
     assert_eq!(st.ruby_version.as_deref(), Some("3.4.0"));
-    assert_eq!(st.gems.len(), 15,
-        "expected 15 gems from examples/gemfile/Gemfile, got {}",
+    // 15 from the original list + rb-readline + forked-gem +
+    // vendored-gem = 18. The negative `if RUBY_VERSION >=
+    // "99.0.0"` branch must NOT contribute `future-only-gem`.
+    assert_eq!(st.gems.len(), 18,
+        "expected 18 gems from examples/gemfile/Gemfile, got {}",
         st.gems.len());
+
+    let find = |n: &str| st.gems.iter().find(|g| g.name == n)
+        .unwrap_or_else(|| panic!("{n} missing"));
 
     // Spot-check the splat-receive case: rack should have 2
     // version constraints, not 1.
-    let rack = st.gems.iter().find(|g| g.0 == "rack").expect("rack missing");
-    assert_eq!(rack.1, vec![">= 3.0", "< 4.0"]);
+    assert_eq!(find("rack").reqs, vec![">= 3.0", "< 4.0"]);
 
     // Spot-check the multi-group block: rspec-rails should be
     // tagged with BOTH `:development` and `:test`.
-    let rspec = st.gems.iter().find(|g| g.0 == "rspec-rails").expect("rspec missing");
-    assert_eq!(rspec.2, vec!["development", "test"]);
+    assert_eq!(find("rspec-rails").groups, vec!["development", "test"]);
 
-    // Spot-check the conditional: `csv` lives behind
-    // `if RUBY_VERSION >= "3.4.0"`. With prelude setting
-    // RUBY_VERSION = "3.4.0" it should be present.
-    assert!(st.gems.iter().any(|g| g.0 == "csv"),
+    // Conditional truthy branch: with prelude setting
+    // RUBY_VERSION = "3.4.0", `csv` (guarded by >= "3.4.0")
+    // should be present.
+    assert!(st.gems.iter().any(|g| g.name == "csv"),
         "csv should be present when RUBY_VERSION >= 3.4.0");
+    // Conditional falsy branch: `future-only-gem` is guarded by
+    // `if RUBY_VERSION >= "99.0.0"`. If String `>=` inverted or
+    // `if` polarity flipped, this gem would sneak in.
+    assert!(!st.gems.iter().any(|g| g.name == "future-only-gem"),
+        "future-only-gem must NOT appear under RUBY_VERSION 3.4.0");
 
-    // Spot-check `**kwargs` Hash unpacking: the prelude's
-    // `def gem(name, *requirements, **opts)` should produce a
-    // `require:` / `platforms:` round-trip into our captured
-    // (require_kw, platforms_kw) tuple slots. Without these
-    // assertions the kwargs path could regress to empty
-    // strings (Hash receive broken, Symbol-key lookup broken,
-    // `.to_s` returning the wrong shape) and the test would
-    // still pass on the positional-only fields above.
-    let puma = st.gems.iter().find(|g| g.0 == "puma").expect("puma missing");
-    assert_eq!(puma.3, "false", "puma's require: false should round-trip");
-    assert_eq!(puma.4, "", "puma has no platforms: kwarg");
+    // `**kwargs` Hash round-trip into our named fields. A
+    // regression in Hash receive / Symbol-key / `.to_s` would
+    // blank these out.
+    let puma = find("puma");
+    assert_eq!(puma.require_kw, "false", "puma's require: false should round-trip");
+    assert_eq!(puma.platforms_kw, "", "puma has no platforms: kwarg");
 
-    let sidekiq = st.gems.iter().find(|g| g.0 == "sidekiq").expect("sidekiq missing");
-    assert_eq!(sidekiq.3, "sidekiq", "sidekiq's require: 'sidekiq' should round-trip");
-    assert_eq!(sidekiq.4, "mri", "sidekiq's platforms: :mri should round-trip");
+    let sidekiq = find("sidekiq");
+    assert_eq!(sidekiq.require_kw, "sidekiq", "sidekiq's require: 'sidekiq' should round-trip");
+    assert_eq!(sidekiq.platforms_kw, "mri", "sidekiq's platforms: :mri should round-trip");
 
-    let pry = st.gems.iter().find(|g| g.0 == "pry-byebug").expect("pry-byebug missing");
-    assert_eq!(pry.3, "pry-byebug");
-    assert_eq!(pry.4, "mri");
+    let pry = find("pry-byebug");
+    assert_eq!(pry.require_kw, "pry-byebug");
+    assert_eq!(pry.platforms_kw, "mri");
 
     // Bare gem — no kwargs, both slots empty.
-    let rake = st.gems.iter().find(|g| g.0 == "rake").expect("rake missing");
-    assert_eq!(rake.3, "");
-    assert_eq!(rake.4, "");
+    let rake = find("rake");
+    assert_eq!(rake.require_kw, "");
+    assert_eq!(rake.platforms_kw, "");
+
+    // `platforms :mri do ... end` block — rb-readline picks up
+    // the platforms_scope via the push/pop wiring above.
+    let rb_readline = find("rb-readline");
+    assert_eq!(rb_readline.platforms_scope, vec!["mri"],
+        "rb-readline should inherit platforms-scope from its block");
+
+    // `git "url" do ... end` block — forked-gem picks up the
+    // source override. If git/path used separate stacks with
+    // git-then-path precedence this would still work for a
+    // bare git block, but nested git/path would mis-tag.
+    let forked = find("forked-gem");
+    assert_eq!(forked.source_override,
+        Some(("git".into(), "https://github.com/example/forked-gem.git".into())),
+        "forked-gem should be tagged with its enclosing git source");
+
+    // `path "..." do ... end` block — vendored-gem.
+    let vendored = find("vendored-gem");
+    assert_eq!(vendored.source_override,
+        Some(("path".into(), "vendor/cache".into())),
+        "vendored-gem should be tagged with its enclosing path source");
+
+    // None of the gems declared outside a source block should
+    // have a stale source_override. If pop_git/pop_path leaked
+    // or the unified stack didn't drain, a later gem would
+    // pick up an override it shouldn't have.
+    assert_eq!(rake.source_override, None,
+        "rake (top-level) should have no source override; \
+         a non-None here means pop didn't pair with push");
 }

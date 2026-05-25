@@ -20,7 +20,10 @@ script-side tweaks.
 | `gem "puma", require: false` | `**kwargs` Hash receive |
 | `gem "x", "~> 7.3", require: "x", platforms: :mri` | full mix |
 | `group :development, :test do ... end` | multi-symbol block, `ensure`-balanced scope pop |
-| `if RUBY_VERSION >= "3.4.0" ... end` | file-scope conditional + constant comparison |
+| `platforms :mri do ... end` | same block shape as `group`, different scope stack |
+| `git "url" do ... end`, `path "vendor/cache" do ... end` | source-override scope; push-order wins on nesting |
+| `if RUBY_VERSION >= "3.4.0" ... end` | file-scope conditional + constant comparison (positive branch) |
+| `if RUBY_VERSION >= "99.0.0" ... end` | same conditional, falsy branch (the gem must NOT appear) |
 
 The Gemfile is at `Gemfile` (no `.rb` extension — Bundler's
 convention). The host-side DSL hooks are in `../gemfile.rs`.
@@ -68,9 +71,9 @@ Sample output:
 Collected Gemfile contents:
   source:        https://rubygems.org
   ruby version:  3.4.0
-  gem count:     15
+  gem count (unique): 18
 
-  [default] 7 gem(s):
+  [default] 10 gem(s):
     - rake
     - rails (~> 8.0.0)
     - rack (>= 3.0, < 4.0)
@@ -78,14 +81,22 @@ Collected Gemfile contents:
     - pry-byebug    [require: pry-byebug, platforms: mri]
     - csv
     - sidekiq (~> 7.3)    [require: sidekiq, platforms: mri]
+    - rb-readline    [platforms-scope: mri]
+    - forked-gem    [git: https://github.com/example/forked-gem.git]
+    - vendored-gem    [path: vendor/cache]
 
   [development] 6 gem(s):
     …
   [test] 5 gem(s):
     …
 
-rubyrs ran the unmodified Gemfile in 0.42 ms
+rubyrs ran the unmodified Gemfile in 0.20 ms
 ```
+
+`gem count (unique)` counts each gem once; the per-group
+sub-headers sum to more than that whenever a gem belongs to
+multiple groups (e.g. `rspec-rails` is in both `:development`
+and `:test`).
 
 ## Lock-in test
 
