@@ -171,6 +171,37 @@ pub(crate) enum Op {
     /// return value. Almost always emitted as `<val>; Break; Return` so
     /// the block frame also pops.
     Break,
+    /// Push the current `rescues.len()` onto the frame's
+    /// `loop_rescue_depths` stack — emitted at the start of a `while`
+    /// expression so a `break` inside the loop body knows how many
+    /// `PushRescue`/`PushEnsure` handlers it needs to discard before
+    /// jumping out. Paired with `Op::ExitLoop` on the structured exit
+    /// paths (normal cond-false exit AND `break`). Non-local control
+    /// transfers can bypass the matching `ExitLoop`:
+    ///   - Exception unwind: `unwind_with_exception` truncates
+    ///     `loop_rescue_depths` to the matched handler's
+    ///     `loop_depth_at_push` snapshot, so any `EnterLoop` entries
+    ///     pushed by loops the exception is escaping out of are
+    ///     discarded along with the handler entries above them.
+    ///   - Non-local `return` (`Op::ReturnMethod`) pops the frame
+    ///     entirely, taking `loop_rescue_depths` with it.
+    /// Without those two compensating paths the entry would stay
+    /// installed on the frame and a later `BreakLoop` would read it
+    /// as the innermost loop.
+    EnterLoop,
+    /// Pop the most-recent entry off `loop_rescue_depths`. Emitted at
+    /// the join point past a `while` expression's body. Not reached
+    /// on the exception-unwind path; see `Op::EnterLoop` for how the
+    /// entry is reclaimed in that case.
+    ExitLoop,
+    /// `break` from a `while` loop. Pops dynamic rescue/ensure handlers
+    /// down to the depth recorded by the matching `Op::EnterLoop`, then
+    /// jumps by `i32` offset (same encoding as `Op::Jump`). The break
+    /// value (or `nil`) is already on the operand stack and stays for
+    /// the post-loop expression value. Distinct from `Op::Break` (which
+    /// signals an iteration driver / block return, NOT a structured
+    /// `while`-loop exit).
+    BreakLoop(i32),
     Return,
     /// Explicit `return val` — non-local. Unlike `Op::Return`
     /// which pops a single frame, this signals the dispatch

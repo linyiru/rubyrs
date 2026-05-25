@@ -495,6 +495,7 @@ impl Vm {
             is_block: false,
             n_given_positional: 0,
             rescues: vec![],
+            loop_rescue_depths: vec![],
         });
         // Dispatch loop. We can't just call `dispatch_until` and
         // bail on the first method_return: a non-local `return`

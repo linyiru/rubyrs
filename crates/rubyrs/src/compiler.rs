@@ -38,6 +38,18 @@ pub(crate) struct ProtoBuilder {
     /// to the enclosing method). Class bodies and the toplevel
     /// `<main>` proto stay false.
     pub(crate) is_method_body: bool,
+    /// Stack of in-progress `while` loops within this proto. Each
+    /// entry is the list of code offsets where a `break` inside the
+    /// loop emitted `Op::BreakLoop(0)` — patched to the loop's join
+    /// label when the `while` finishes compiling. Empty when no
+    /// loop is active; `Expr::Break` then falls back to the existing
+    /// `Op::Break + Op::Return` block/iterator-driver semantics.
+    /// The stack lives on the proto builder (not the compile ctx)
+    /// because a block introduces a fresh proto with its own
+    /// builder — so `break` inside `do … end` inside a `while`
+    /// naturally sees an empty stack and breaks the BLOCK, matching
+    /// Ruby's lexical break-target rule.
+    pub(crate) loop_break_jumps: Vec<Vec<usize>>,
 }
 
 impl ProtoBuilder {
@@ -52,6 +64,7 @@ impl ProtoBuilder {
             method_name: None,
             method_param_count: 0,
             is_method_body: false,
+            loop_break_jumps: vec![],
         };
         for p in params { b.local_slot(p); }
         b
@@ -87,6 +100,7 @@ impl ProtoBuilder {
             Op::Jump(o) => *o = off,
             Op::JumpIfFalse(o) => *o = off,
             Op::JumpIfArgGiven(_, o) => *o = off,
+            Op::BreakLoop(o) => *o = off,
             _ => panic!("ICE: patch_jump on non-jump op at {}", at),
         }
     }
@@ -430,6 +444,14 @@ pub(crate) fn compile_expr(
             b.patch_jump(je, end);
         }
         Expr::While { cond, body, post } => {
+            // EnterLoop / ExitLoop bracket the loop so `break` inside
+            // the body can pop dynamic rescue/ensure handlers down to
+            // the depth at loop entry. The break-jumps stack on the
+            // builder collects every `Op::BreakLoop(0)` placeholder
+            // emitted by `Expr::Break` while THIS loop is the
+            // innermost; we patch them to the join label below.
+            b.emit(Op::EnterLoop);
+            b.loop_break_jumps.push(vec![]);
             if *post {
                 // `begin … end while cond` — body runs first, cond
                 // is checked after. JumpIfFalse-to-end, jump-back-
@@ -442,8 +464,8 @@ pub(crate) fn compile_expr(
                 let jf = b.emit(Op::JumpIfFalse(0));
                 let j = b.emit(Op::Jump(0));
                 b.patch_jump(j, body_start);
-                let end = b.pos();
-                b.patch_jump(jf, end);
+                let exit_normal = b.pos();
+                b.patch_jump(jf, exit_normal);
                 b.emit(Op::LoadNil);
             } else {
                 // Pre-condition `while cond; …; end` — cond first,
@@ -455,10 +477,19 @@ pub(crate) fn compile_expr(
                 b.emit(Op::Pop);
                 let j = b.emit(Op::Jump(0));
                 b.patch_jump(j, start);
-                let end = b.pos();
-                b.patch_jump(jf, end);
+                let exit_normal = b.pos();
+                b.patch_jump(jf, exit_normal);
                 b.emit(Op::LoadNil);
             }
+            // Join label: both normal exit (after LoadNil) and every
+            // `break` converge here. `BreakLoop` jumps with the
+            // break value already on the stack, so we don't push
+            // again. `ExitLoop` is the last shared step.
+            let join = b.pos();
+            for j in b.loop_break_jumps.pop().expect("ICE: while popped loop_break_jumps without push") {
+                b.patch_jump(j, join);
+            }
+            b.emit(Op::ExitLoop);
         }
         Expr::Call { receiver, name, args } => {
             if receiver.is_none() && name == "__seq__" {
@@ -867,12 +898,32 @@ pub(crate) fn compile_expr(
             return;
         }
         Expr::Break(val) => {
+            // Compile the break value (or nil) — same for both forms;
+            // it stays on the operand stack as the loop expression's
+            // value (for structured `while` break) or as the
+            // iteration-driver's return (for block break).
             match val {
                 Some(e) => compile_expr(b, e, protos, interner, cc),
                 None => { b.emit(Op::LoadNil); }
             }
-            b.emit(Op::Break);
-            b.emit(Op::Return);
+            if !b.loop_break_jumps.is_empty() {
+                // Inside a `while` (the innermost lexical enclosing
+                // structured loop in this proto). Emit BreakLoop to
+                // unwind handlers + jump; record the placeholder so
+                // the `while` codegen patches it to the join label.
+                let placeholder = b.emit(Op::BreakLoop(0));
+                b.loop_break_jumps.last_mut().expect("ICE: just checked").push(placeholder);
+            } else {
+                // No enclosing `while` in this proto — fall back to
+                // block / iteration-driver break (`Op::Break` flags
+                // the surrounding host loop, `Op::Return` pops the
+                // block frame so `collection_call_block` reads the
+                // value off the stack).
+                b.emit(Op::Break);
+                b.emit(Op::Return);
+            }
+            // Sentinel for stack-balance of any unreachable code
+            // following this statement (matches Op::Return arm).
             b.emit(Op::LoadNil);
             b.current_span = prev_span;
             return;
@@ -1102,6 +1153,11 @@ pub(crate) fn compile_block(
         // unwinds non-locally to the enclosing method
         // (Op::ReturnMethod), not just the block frame.
         is_method_body: false,
+        // Fresh `break` target stack for the block. A `break`
+        // inside `[1,2,3].each { break }` should signal the
+        // iteration driver via the existing `Op::Break` path,
+        // NOT jump to an enclosing `while` in the parent proto.
+        loop_break_jumps: vec![],
     };
     let param_start = b.n_locals;
     // Slot layout in two phases:
