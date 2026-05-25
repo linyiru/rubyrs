@@ -257,6 +257,51 @@ pub struct Config {
     pub deadline: Option<std::time::Duration>,
 }
 
+/// Read-only handle into the runtime's heap, passed to closures
+/// registered via [`Runtime::register_fn_v2`]. Lets the closure
+/// unpack `Value::Array` / `Value::Hash` arguments without going
+/// back through [`Runtime::resolve_array`] / [`Runtime::resolve_hash`]
+/// (which clone).
+///
+/// Mutability is deliberately omitted — the dispatch site holds
+/// `&mut Vm` for the duration of the host call, and the heap reads
+/// here borrow from inside that same `&mut`. Letting a host fn
+/// mutate the heap (or push more frames) would alias with the
+/// VM's borrow; see ADR 0013.
+pub struct HostCtx<'a> {
+    heap: &'a heap::Heap,
+}
+
+impl<'a> HostCtx<'a> {
+    /// Internal constructor — the dispatch site borrows `&Heap` from
+    /// the VM and hands it to the v2 closure via this ctx.
+    pub(crate) fn new(heap: &'a heap::Heap) -> Self {
+        Self { heap }
+    }
+
+    /// Borrow the contents of a `Value::Array`. Returns `None` for
+    /// any other shape — the host fn can decide whether to error or
+    /// fall through.
+    pub fn resolve_array(&self, val: &Value) -> Option<&[Value]> {
+        if let Value::Array(id) = val {
+            Some(self.heap.array(*id).as_slice())
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the entries of a `Value::Hash` as a flat slice of
+    /// `(key, value)` pairs (preserving insertion order). Returns
+    /// `None` for any other shape.
+    pub fn resolve_hash(&self, val: &Value) -> Option<&[(Value, Value)]> {
+        if let Value::Hash(id) = val {
+            Some(self.heap.hash(*id).as_slice())
+        } else {
+            None
+        }
+    }
+}
+
 /// A self-contained rubyrs runtime. State (class definitions, top-level
 /// methods, registered host functions, GC heap) persists across calls to
 /// [`Runtime::eval`].
@@ -491,7 +536,30 @@ end
         F: Fn(&[Value]) -> Result<Value, Trap> + 'static,
     {
         let id = self.vm.interner.intern(name);
-        self.vm.host_fns.insert(id, Rc::new(f));
+        self.vm.host_fns.insert(id, vm::HostFnSlot::V1(Rc::new(f)));
+    }
+
+    /// Variant of [`Runtime::register_fn`] whose closure also receives a
+    /// [`HostCtx`] handle for reading heap-y arguments.
+    ///
+    /// Use this when the Ruby caller passes an `Array` or `Hash` shape
+    /// that the closure needs to inspect — `Value::Array` and
+    /// `Value::Hash` are opaque heap handles, so the v1 `&[Value]`-only
+    /// signature can't reach their contents from inside the closure.
+    /// `HostCtx::resolve_array` / `resolve_hash` borrow directly from
+    /// the heap, no clone.
+    ///
+    /// The ctx is read-only by design: mutating the heap from inside a
+    /// host fn would alias with the VM's `&mut self` at the dispatch
+    /// site (see ADR 0013). Re-entrant eval needs the cext path, not
+    /// this one. Replaces a previous v1 or v2 registration under the
+    /// same name.
+    pub fn register_fn_v2<F>(&mut self, name: &str, f: F)
+    where
+        F: Fn(&HostCtx, &[Value]) -> Result<Value, Trap> + 'static,
+    {
+        let id = self.vm.interner.intern(name);
+        self.vm.host_fns.insert(id, vm::HostFnSlot::V2(Rc::new(f)));
     }
 
     /// Parse, compile, and run a Ruby source. The returned value is the

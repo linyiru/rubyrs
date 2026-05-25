@@ -961,12 +961,12 @@ impl Vm {
                 let cfn_name = cfn.name.clone();
                 self.host_fns.insert(
                     sym,
-                    Rc::new(move |args: &[Value]| {
+                    crate::vm::HostFnSlot::V1(Rc::new(move |args: &[Value]| {
                         // Top-level functions get Qnil as `self`,
                         // matching CRuby's `rb_define_global_function`
                         // convention.
                         cext_dispatch(&cfn_name, func, arity, args, CextSelfHandle::Global)
-                    }),
+                    })),
                 );
             }
 

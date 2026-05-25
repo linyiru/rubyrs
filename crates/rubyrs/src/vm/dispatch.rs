@@ -27,8 +27,9 @@ use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 #[cfg(not(target_os = "wasi"))]
 use super::with_vm_ptr_set;
 use super::{
-    primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, PinGuard, Vm,
+    primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
 };
+use crate::HostCtx;
 
 impl Vm {
     /// Re-entrant dispatch entry for C extensions calling back into
@@ -114,6 +115,39 @@ impl Vm {
 
 
 
+    /// Invoke a registered host fn (either v1 or v2 slot). For v1
+    /// the heap stays untouched; for v2 we borrow `&self.heap` into
+    /// a `HostCtx` so the closure can read `Value::Array` /
+    /// `Value::Hash` shapes. Both paths stash the Vm ptr via
+    /// `with_vm_ptr_set` so a cext-style re-entrant `rb_funcall`
+    /// (still v1-only today) can find the running VM. See ADR 0013.
+    fn invoke_host_fn(&mut self, slot: HostFnSlot, args: &[Value]) -> Result<Value, Trap> {
+        match slot {
+            HostFnSlot::V1(host) => {
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    let vm_ptr: *mut Vm = self;
+                    with_vm_ptr_set(vm_ptr, || host(args))
+                }
+                #[cfg(target_os = "wasi")]
+                { host(args) }
+            }
+            HostFnSlot::V2(host) => {
+                // Take the raw pointer first (the reborrow happens
+                // and ends on this line), then take `&self.heap` —
+                // raw ptrs don't track borrows, so the immutable
+                // heap borrow that follows is unrestricted.
+                #[cfg(not(target_os = "wasi"))]
+                let vm_ptr: *mut Vm = self;
+                let ctx = HostCtx::new(&self.heap);
+                #[cfg(not(target_os = "wasi"))]
+                { with_vm_ptr_set(vm_ptr, || host(&ctx, args)) }
+                #[cfg(target_os = "wasi")]
+                { host(&ctx, args) }
+            }
+        }
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
@@ -130,18 +164,7 @@ impl Vm {
                 return Ok(());
             }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
-                // Stash this Vm pointer for the duration of the host
-                // call so `cext_dispatch` (if the host fn is a cext
-                // closure) can install a `rb_funcallv` callback that
-                // re-enters this Vm. See CURRENT_VM_PTR for the
-                // borrow-aliasing discussion.
-                #[cfg(not(target_os = "wasi"))]
-                let v = {
-                    let vm_ptr: *mut Vm = self;
-                    with_vm_ptr_set(vm_ptr, || host(&args))?
-                };
-                #[cfg(target_os = "wasi")]
-                let v = host(&args)?;
+                let v = self.invoke_host_fn(host, &args)?;
                 self.stack.push(v);
                 return Ok(());
             }
@@ -1284,13 +1307,7 @@ impl Vm {
             }
             if let Some(res) = self.builtin_call(&name, &args) { self.stack.push(res?); return Ok(()); }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
-                #[cfg(not(target_os = "wasi"))]
-                let v = {
-                    let vm_ptr: *mut Vm = self;
-                    with_vm_ptr_set(vm_ptr, || host(&args))?
-                };
-                #[cfg(target_os = "wasi")]
-                let v = host(&args)?;
+                let v = self.invoke_host_fn(host, &args)?;
                 self.stack.push(v);
                 return Ok(());
             }
