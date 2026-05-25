@@ -162,7 +162,9 @@ pub(crate) enum Op {
     /// unwinding and hits a PushEnsure handler, the exception value is
     /// pushed onto the operand stack and control jumps to the handler;
     /// the handler runs the ensure body (which must leave the stack
-    /// unchanged) and ends with `Raise` to rethrow.
+    /// unchanged) and ends with `Op::EndEnsure` to either rethrow the
+    /// exception or resume an in-flight `break`/`next` loop transfer
+    /// (see `Op::EndEnsure` for the two paths).
     PushEnsure(i32),
     PopEnsure,
     Raise,

@@ -749,7 +749,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![],
                 });
             }
             Op::NewArray(n) => {
@@ -835,14 +835,19 @@ impl Vm {
                 self.break_signaled = true;
             }
             Op::EnterLoop => {
-                let depth = self.frames.last().expect("ICE: EnterLoop no frame").rescues.len();
-                self.frames.last_mut().expect("ICE: EnterLoop no frame")
-                    .loop_rescue_depths.push(depth);
+                let f = self.frames.last().expect("ICE: EnterLoop no frame");
+                let depth = f.rescues.len();
+                let stack_depth = self.stack.len();
+                let f = self.frames.last_mut().expect("ICE: EnterLoop no frame");
+                f.loop_rescue_depths.push(depth);
+                f.loop_stack_depths.push(stack_depth);
             }
             Op::ExitLoop => {
-                self.frames.last_mut().expect("ICE: ExitLoop no frame")
-                    .loop_rescue_depths.pop()
+                let f = self.frames.last_mut().expect("ICE: ExitLoop no frame");
+                f.loop_rescue_depths.pop()
                     .expect("ICE: ExitLoop with empty loop_rescue_depths");
+                f.loop_stack_depths.pop()
+                    .expect("ICE: ExitLoop with empty loop_stack_depths");
             }
             Op::BreakLoop(off) => {
                 // Compute the loop-target IP at the source site (the

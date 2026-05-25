@@ -1686,7 +1686,7 @@ impl Vm {
                 // `define_method` enforces exact arity (no
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
-                rescues: vec![], loop_rescue_depths: vec![],
+                rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![],
             });
             return Ok(());
         }
@@ -1930,7 +1930,7 @@ impl Vm {
             // the default-eval for the former, executes it for
             // the latter.
             n_given_positional: positional_take as u16,
-            rescues: vec![], loop_rescue_depths: vec![],
+            rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![],
         });
         Ok(())
     }
@@ -2047,7 +2047,7 @@ impl Vm {
             // in `vm/step.rs`.
             is_block: true,
             n_given_positional: 0,
-            rescues: vec![], loop_rescue_depths: vec![],
+            rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![],
         });
         Ok(())
     }
@@ -2264,7 +2264,7 @@ impl Vm {
             self_val,
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
-            is_block: true, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![],
+            is_block: true, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![],
         });
         Ok(())
     }

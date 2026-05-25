@@ -91,6 +91,17 @@ pub(crate) struct Frame {
     /// iteration-driver / block return (the existing `Op::Break`
     /// path stays untouched).
     pub(crate) loop_rescue_depths: Vec<usize>,
+    /// Parallel stack to `loop_rescue_depths`: `stack.len()` at the
+    /// moment each enclosing `while`'s `Op::EnterLoop` ran. Used by
+    /// `continue_loop_transfer`'s landing path to truncate any
+    /// operand-stack residue accumulated inside the body — most
+    /// importantly the exception value `unwind_with_exception`
+    /// pushes when entering an ensure handler (which `break`/`next`
+    /// from inside that handler would otherwise leave stranded).
+    /// Kept in lock-step with `loop_rescue_depths`: same push site
+    /// (EnterLoop), pop site (ExitLoop), and truncate site
+    /// (rescue/ensure match in `unwind_with_exception`).
+    pub(crate) loop_stack_depths: Vec<usize>,
 }
 
 /// In-flight structured `break`/`next` walking through an
@@ -108,6 +119,16 @@ pub(crate) struct LoopTransfer {
     pub(crate) target_ip: usize,
     pub(crate) target_rescues_len: usize,
     pub(crate) target_loop_depth: usize,
+    /// `stack.len()` at the time `Op::EnterLoop` ran for this
+    /// transfer's target loop. On landing the stack is truncated
+    /// to this depth before the break value (if any) is pushed —
+    /// flushes any operand-stack residue the body accumulated,
+    /// including the exception that `unwind_with_exception` pushed
+    /// when it entered an ensure handler we're now `break`ing out
+    /// of. Without this, `while; begin; raise; ensure; break; end;
+    /// end` leaks the exception value on the operand stack until
+    /// the surrounding frame pops.
+    pub(crate) target_stack_depth: usize,
 }
 
 pub(crate) enum LoopTransferKind {

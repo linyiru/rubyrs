@@ -92,6 +92,33 @@ v6 = while true
 end
 puts "6: effects=#{side_effects.inspect} v=#{v6.inspect}"
 
+# 8. break inside an ensure body that was entered via exception
+#    unwind. The unwinder pushes the exception onto the operand
+#    stack when entering the ensure; without flushing it the
+#    transfer landing would strand the exception value as stack
+#    residue (semantics: a structured transfer from an ensure
+#    cancels the exception). Pinning this exercises the
+#    `target_stack_depth` truncate in continue_loop_transfer.
+v8 = while true
+  begin
+    raise "primary"
+  ensure
+    break "broke-via-ensure"
+  end
+end
+puts "8: v=#{v8.inspect}"
+
+# 8a. Sequential break-through-exc-ensure expressions in the same
+#     frame — without the truncate fix each leaks one exception
+#     value on the operand stack. Stack-balance bug, not visible
+#     in stdout (frame-pop wipes residue) but a real semantics
+#     divergence. Three calls, then a final assertion that the
+#     surrounding expression evaluates cleanly.
+a8 = while true; begin; raise "x"; ensure; break 1; end; end
+b8 = while true; begin; raise "x"; ensure; break 2; end; end
+c8 = while true; begin; raise "x"; ensure; break 3; end; end
+puts "8a: [#{a8}, #{b8}, #{c8}]"
+
 # 7a. GC root coverage for the in-flight break value. The ensure
 #     body deliberately allocates heavily so STRESS_GC=1 fires
 #     between BreakLoop and the landing; without `pending_loop_transfer`
