@@ -74,7 +74,9 @@ pub unsafe extern "C" fn rb_ll2num(n: c_longlong) -> Value {
     with_state(|st| st.intern(CValue::Int(n)))
 }
 
-/// rubyrs has no Float CValue; return Qnil.
+/// double -> VALUE Float. Alias of rb_float_new — DBL2NUM /
+/// rb_dbl2num are the same shape in CRuby. Post-L3-I (PR #63
+/// review #5: doc was stale from when this returned Qnil).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_dbl2num(d: c_double) -> Value {
     with_state(|st| st.intern(CValue::Float(d)))
@@ -98,11 +100,24 @@ pub unsafe extern "C" fn rb_cstr2inum(str: *const c_char, base: c_int) -> Value 
 /// PR #63 review #3: libc `strtod` is locale-dependent —
 /// `1.5` parses as `1` (stop at `.`) under e.g. de_DE.UTF-8
 /// where `,` is the decimal separator. JSON and Ruby float
-/// literals are locale-invariant (always `.`). Use Rust's
-/// `str::parse::<f64>` instead, which honours `.` regardless of
-/// the process locale. Trailing garbage parses as 0.0 (matches
-/// CRuby's behaviour with `badcheck=0`); `badcheck=1`'s strict-
-/// error mode is documented as a spike gap.
+/// literals are locale-invariant (always `.`). Hand-rolled
+/// longest-valid-prefix walker + Rust's `str::parse::<f64>`
+/// on the matched slice (locale-invariant).
+///
+/// PR #63 review #6: parsing semantic is strtod-style — pick the
+/// longest valid numeric prefix and parse THAT, not the whole
+/// string. `"1xyz"` → 1.0 (parses "1", stops at 'x'). `""` or
+/// strings with no digits parse to 0.0.
+///
+/// PR #63 review #7: exponent marker without digits backtracks.
+/// `"1e"`, `"1e+"` parse as 1.0 (stop before the 'e'); strtod
+/// + CRuby do the same. We track exp-digit-seen and rewind
+/// `end` to the position before the exponent marker if no
+/// digit followed.
+///
+/// `badcheck=1`'s strict-error mode (raise on trailing garbage)
+/// is a documented spike gap; we always treat input as
+/// `badcheck=0` permissive.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) -> c_double {
     if str.is_null() {
@@ -111,17 +126,11 @@ pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) ->
     let s = unsafe { std::ffi::CStr::from_ptr(str) }
         .to_str()
         .unwrap_or("");
-    // CRuby strips leading whitespace before parsing.
     let s = s.trim_start();
-    // Manually pick the longest valid f64 prefix — Rust's
-    // str::parse::<f64>() requires the WHOLE string to be a
-    // valid number, while strtod stops at the first invalid
-    // char. Walk forward consuming sign/digits/decimal/exponent.
     let bytes = s.as_bytes();
     let mut end = 0;
     let mut seen_digit = false;
     let mut seen_dot = false;
-    let mut seen_exp = false;
     if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
         end += 1;
     }
@@ -130,15 +139,26 @@ pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) ->
         if c.is_ascii_digit() {
             seen_digit = true;
             end += 1;
-        } else if c == b'.' && !seen_dot && !seen_exp {
+        } else if c == b'.' && !seen_dot {
             seen_dot = true;
             end += 1;
-        } else if (c == b'e' || c == b'E') && !seen_exp && seen_digit {
-            seen_exp = true;
+        } else if (c == b'e' || c == b'E') && seen_digit {
+            // Try to consume the exponent. Snapshot `end` so we
+            // can roll back if no digit follows (PR #63 review #7).
+            let pre_exp = end;
             end += 1;
             if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
                 end += 1;
             }
+            let exp_digit_start = end;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end == exp_digit_start {
+                // No digits after `e[±]` — backtrack.
+                end = pre_exp;
+            }
+            break;
         } else {
             break;
         }
