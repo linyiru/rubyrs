@@ -880,7 +880,20 @@ impl Vm {
             swap_return: None,
             block_arg: None,
             defining_class: None,
-            is_block: !as_class_body,
+            // class_eval's frame is BOTH `is_block: true` and
+            // `is_class_body: true`. That dual role matters for
+            // non-local `return`: per the unwind loop in
+            // `vm/step.rs` (Op::ReturnMethod's branch), a
+            // `return` inside the block walks back through
+            // is_block frames to find the enclosing method.
+            // With `is_block: false` the class_eval frame would
+            // be the target itself — `return` would return *from
+            // class_eval* rather than the enclosing method,
+            // diverging from CRuby. The matching unwind change
+            // (pop class_stack/visibility_stack when walking
+            // past a `is_block && is_class_body` frame) lives
+            // in `vm/step.rs`.
+            is_block: true,
             rescues: vec![],
         });
         Ok(())

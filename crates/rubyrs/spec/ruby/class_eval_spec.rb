@@ -51,6 +51,24 @@ describe "Module#class_eval" do
     end
   end
 
+  it "lets non-local return exit the enclosing method, not class_eval itself" do
+    # Per PR #28 review: class_eval's frame is both is_block and
+    # is_class_body, so non-local `return` walks back through it
+    # (matching CRuby's block-return semantic) and the
+    # class_stack pops cleanly during the unwind. Without that
+    # fix the return would return from class_eval rather than
+    # the method `runner`, AND would leak class_stack entries.
+    class CENonLocal
+    end
+    def runner
+      CENonLocal.class_eval do
+        return 99
+      end
+      "never reached"
+    end
+    assert_eq(runner, 99)
+  end
+
   it "returns_the_class_for_now (rubyrs divergence from CRuby)" do
     # In CRuby this returns 99 (block's last expression).
     # In rubyrs we re-use the class-body Return path, which
