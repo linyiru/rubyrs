@@ -2782,9 +2782,24 @@ impl Vm {
         if has_rest {
             // Remaining args (possibly empty) → fresh Array in the
             // rest slot.
+            //
+            // PinGuard self_val + the rest-vec elements across the
+            // explicit `maybe_gc` (master pre-existing STRESS_GC
+            // bug, surfaced by `def initialize(*items); @items =
+            // items; end` + Bag.new(1,2,3)): self_val is just a
+            // Rust local at this point — the new frame hasn't been
+            // pushed yet, so the Bag instance isn't on vm.stack /
+            // vm.frames / vm.pinned. maybe_gc sweeps it, then
+            // heap.alloc(rest_vec) reuses its slot, and later
+            // method-body access of `self.@items` blows up with
+            // "ICE: heap slot is not an Instance". Same shape as
+            // the GC root holes fixed in PR #6 / #10.
             let rest_vec: Vec<Value> = args_iter.collect();
-            self.maybe_gc();
-            let arr_id = self.heap.alloc(HeapObj::Array(rest_vec));
+            let mut g = PinGuard::new(self);
+            g.pin(self_val.clone());
+            for v in &rest_vec { g.pin(v.clone()); }
+            g.vm.maybe_gc();
+            let arr_id = g.vm.heap.alloc(HeapObj::Array(rest_vec));
             let rest_slot = positional_max;
             locals[rest_slot] = Value::Array(arr_id);
         }
@@ -5544,99 +5559,79 @@ fn cext_dispatch(
             })?
         };
 
-        let ret_handle = with_caught_unwind(|| {
-            // Build the `self` handle:
-            // - For singleton methods (`rb_define_singleton_method`),
-            //   `self_class` is `Some(class_joined_name)`; intern a
-            //   `CValue::Class` handle so the C ext sees its own
-            //   class object as `self`, matching CRuby.
-            // - For top-level functions (`rb_define_global_function`),
-            //   `self_class` is `None`; pass `Qnil`, matching CRuby
-            //   (top-level functions are conceptually attached to
-            //   the main object, but extensions universally treat
-            //   their `self` as opaque-and-unused there).
-            let self_handle = match self_class {
-                Some(cname) => rubyrs_cext::with_state(|st| {
-                    st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
-                }),
-                None => rubyrs_cext::Qnil,
-            };
-            match arity {
-                0 => {
-                    type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(self_handle)
-                }
-                1 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(self_handle, arg_handles[0])
-                }
-                2 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(self_handle, arg_handles[0], arg_handles[1])
-                }
-                3 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(self_handle, arg_handles[0], arg_handles[1], arg_handles[2])
-                }
-                4 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(
-                        self_handle,
-                        arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3],
-                    )
-                }
-                5 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(
-                        self_handle,
-                        arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3], arg_handles[4],
-                    )
-                }
-                _ => unreachable!("arity validated above"),
+        // L3-A: build the self handle + args array in Rust, then
+        // hand off to `invoke_with_raise` which does the setjmp +
+        // C-side arity dispatch + cext call ENTIRELY in C frames.
+        // There are NO Rust frames between setjmp and the cext fn,
+        // so a longjmp from `rb_raise` never has to unwind a Rust
+        // RAII Drop (closes Copilot reviews #7 / #8 on PR #14 —
+        // the earlier Rust trampoline + FnOnce design WAS letting
+        // longjmp skip Rust frames, which is at-best implementation-
+        // defined).
+        //
+        // The earlier `with_caught_unwind` wrapper is gone: it
+        // can't catch panics from inside the cext fn either (they
+        // cross the same C-ABI boundary and abort regardless), and
+        // the previous overclaim about it covering trampoline
+        // panics was already flagged by review #1.
+        //
+        // **Known limitation** (L3-A spike): a `rb_raise` from a
+        // deeply-nested rb_funcall chain longjmps PAST any
+        // intermediate Rust frames inside `cext_funcall_to_vm`.
+        // Their `PinGuard`s' `Drop` never runs → vm.pinned grows.
+        // Harmless for non-pathological loads; cleanup protocol is
+        // the next spike step.
+        let self_handle = match self_class {
+            Some(cname) => rubyrs_cext::with_state(|st| {
+                st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
+            }),
+            None => rubyrs_cext::Qnil,
+        };
+        // C helper expects [self, arg0, arg1, ...]; pre-allocate
+        // with capacity to keep the hot path branch-free.
+        let mut invoke_args: Vec<rubyrs_cext::Value> =
+            Vec::with_capacity(arg_handles.len() + 1);
+        invoke_args.push(self_handle);
+        invoke_args.extend_from_slice(&arg_handles);
+        let raised = rubyrs_cext::raise::invoke_with_raise(
+            func, arity, &invoke_args,
+        );
+        let ret_handle = match raised {
+            rubyrs_cext::raise::Raised::Returned(v) => v,
+            rubyrs_cext::raise::Raised::Raised { class, msg } => {
+                // Map sentinel → typed RubyError variant when we
+                // recognise it so script-level `rescue
+                // ArgumentError` / `rescue TypeError` etc. behaves
+                // exactly like a same-named Ruby-side raise. Unknown
+                // sentinels fall through to RuntimeError with the
+                // class name prefixed onto the message (wedge
+                // behaviour; per-class mapping is mechanical
+                // follow-up — add a RubyError variant or extend
+                // class_name() to cover the rest).
+                let class_name = rubyrs_cext::raise::exception_class_name_for_sentinel(class);
+                let err = match class_name {
+                    "ArgumentError"     => RubyError::ArgumentError { msg },
+                    "RuntimeError"      => RubyError::RuntimeError { msg },
+                    "TypeError"         => RubyError::TypeError { msg },
+                    "NameError"         => RubyError::NameError { msg },
+                    "ZeroDivisionError" => RubyError::ZeroDivisionError { msg },
+                    other => RubyError::RuntimeError {
+                        msg: format!("{}: {}", other, msg),
+                    },
+                };
+                // state_guard / _cb_guard drop normally on this
+                // early return — Rust unwinding still works because
+                // the longjmp landed in C frames BELOW us (inside
+                // rubyrs_jmp_call) and returned into Rust here. No
+                // RAII is skipped at this level.
+                return Err(Trap::new(err));
             }
-        });
+        };
         // Normal-exit cleanup. `_cb_guard` drops at end of `unsafe`
         // block (LIFO with state_guard), so we consume the state
         // guard here to extract the drained `CExtState` for handle
-        // translation. `_cb_guard` then pops the callback when the
-        // block ends. Both happen via `Drop` on the panic path too.
+        // translation.
         let st = state_guard.into_state();
-        let ret_handle = ret_handle.map_err(|panic_msg| {
-            Trap::new(RubyError::RuntimeError {
-                msg: format!("C ext `{}' panicked: {}", name, panic_msg),
-            })
-        })?;
         // Re-deref vm_ptr for the result translation (Array/Hash
         // returns need `&mut Vm` to allocate on the heap). Time-
         // disjoint from any earlier &Vm uses in this function.
@@ -5737,33 +5732,6 @@ fn cext_funcall_to_vm(
         match cext_value_to_cvalue(vm_for_result, st, "rb_funcallv:result", 0, &result) {
             Ok(cv) => st.intern(cv),
             Err(_) => rubyrs_cext::Qnil,
-        }
-    })
-}
-
-/// Run `f`, catching any Rust panic that escapes from our own
-/// argument-interning / handle-management code wrapping the C call.
-///
-/// **What this catches**: panics raised in Rust code that runs around
-/// the `extern "C"` call — `state.intern`, our `Vec` building, any
-/// `expect("ICE: ...")` in `rubyrs_cext::with_state`.
-///
-/// **What this does NOT catch**: panics raised inside the C function
-/// itself. The C side cannot raise a Rust panic; if one of OUR
-/// `rb_*` ABI functions panics from inside the C call, the process
-/// aborts under `panic = abort` semantics (the default for `extern "C"`
-/// since Rust 2018+). The cext ABI surface is documented as
-/// abort-on-contract-violation in docs/PANIC_AUDIT.md — conversion to
-/// error sentinels is Level 3+ work tied to `rb_raise` integration.
-#[cfg(not(target_os = "wasi"))]
-fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
-        if let Some(s) = p.downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = p.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "non-string panic payload".to_string()
         }
     })
 }
