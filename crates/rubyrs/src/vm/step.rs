@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::bytecode::{BinOpKind, Op};
-use crate::error::{RubyError, Span, Trap};
+use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{BlockHandle, Class, Method, Value, Visibility};
 
