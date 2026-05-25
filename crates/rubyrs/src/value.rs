@@ -190,6 +190,11 @@ pub struct Class {
     /// a bare `Instance`. `initialize` is then called on the
     /// returned handle. Set only via cext-side `rb_define_alloc_func`
     /// drained by `Vm::cext_require`.
+    ///
+    /// With the `cext` feature off this field disappears — there is
+    /// no path that could set it, and the dispatcher's cext-allocator
+    /// branch is cfg'd out alongside.
+    #[cfg(feature = "cext")]
     pub(crate) cext_alloc_func: Cell<Option<rubyrs_cext::OpaqueFn>>,
 }
 
