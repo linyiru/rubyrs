@@ -456,7 +456,15 @@ impl Vm {
         // the inner dispatch loop until it returns. dispatch_until
         // is the same helper iterator drivers use to run a block
         // body without unwinding the outer dispatch.
+        //
+        // Capture the stack depth at push time so we can later
+        // distinguish "my frame popped via Op::Return" (stack ends
+        // at stack_before + 1) from "outer rescue unwound past my
+        // frame" (stack truncated to some prior frame's base_sp,
+        // which is <= stack_before). Both look identical from a
+        // frames.len() perspective once dispatch_until returns Ok.
         let depth_before = self.frames.len();
+        let stack_before = self.stack.len();
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
@@ -497,10 +505,30 @@ impl Vm {
             self.loaded_features.remove(&canon);
             return Ok(Value::Nil);
         }
-        // The required file's last expression sits on top of the
-        // operand stack (Op::Return pushed it before the frame
-        // popped). Discard — `require_relative` returns the
-        // load-status Bool.
+        // Outer-rescue-unwound-past-us case. When an exception
+        // raised inside the required file is caught by a `rescue`
+        // in OUR caller (or further up), `unwind_with_exception`
+        // truncates the operand stack to the handler frame's
+        // `base_sp` and re-routes its IP. dispatch_until then
+        // exits via the loop condition `frames.len() > until_depth`
+        // becoming false (the caller's frame is at <= depth_before
+        // now), returning Ok(()). At this point the operand stack
+        // is the rescue handler's, NOT ours — popping or pushing
+        // would corrupt it (overwrite the bound exception, smash
+        // saved values). The signal is that the stack didn't end
+        // at `stack_before + 1` (which is what Op::Return leaves
+        // behind). Roll back the feature mark, return Nil so the
+        // caller's do_call push is harmless (the rescue handler's
+        // next op will either consume it or `base_sp` truncation
+        // discards it), and let the outer unwind finish.
+        if self.stack.len() != stack_before + 1 {
+            self.loaded_features.remove(&canon);
+            return Ok(Value::Nil);
+        }
+        // Normal completion: the required file's last expression
+        // sits on top of the operand stack (Op::Return pushed it
+        // before the frame popped). Discard — `require_relative`
+        // returns the load-status Bool.
         let _ = self.stack.pop();
         Ok(Value::Bool(true))
     }

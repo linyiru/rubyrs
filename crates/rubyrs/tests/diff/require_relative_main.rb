@@ -25,3 +25,21 @@ puts result2
 # returns false (no re-execution).
 result3 = require_relative "require_relative_lib.rb"
 puts result3
+
+# Outer-rescue-catches-from-required-file. The required helper
+# raises mid-execution; the begin/rescue here catches it. The
+# fixture verifies (a) the rescue actually fires, (b) the
+# bound exception is the right object (not garbage from a
+# corrupted operand stack), and (c) loaded_features was rolled
+# back so a retry would attempt to load again.
+begin
+  require_relative "require_relative_raise"
+rescue RuntimeError => e
+  puts "caught: #{e.message}"
+end
+# Retry should attempt to load again (not silently no-op).
+begin
+  require_relative "require_relative_raise"
+rescue RuntimeError => e
+  puts "caught again: #{e.message}"
+end
