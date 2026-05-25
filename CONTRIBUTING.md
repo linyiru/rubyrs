@@ -77,17 +77,61 @@ ruby/spec coverage delta: spec/core/string/chomp: 0/7 → 4/7.
 
 ## What gets merged
 
-A PR is mergeable when:
+A PR is mergeable when **all** of the following hold. Green CI is
+necessary but not sufficient — the non-CI items below count too.
 
-- `cargo test --release` passes locally and in CI.
+Treat any red check as blocking, including on the master baseline —
+fix master first, then merge. The compounded cleanup PRs in May 2026
+(#36 / #39 / #41 / #45) were all "previous PR landed with one of
+these red and we didn't notice until the next person's PR inherited
+the failure".
+
+The CI gates (every job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) must be green;
+the jobs themselves run in parallel — only steps within each job
+have a fire order):
+
+- **`cargo clippy --release --all-targets --workspace -- -D warnings`**
+  (Test job, both ubuntu + macos). Catches style / pedantic /
+  soundness lints. The workspace is at zero warnings; this is the
+  wall that keeps it there.
+- **`cargo build --release`** with `RUSTFLAGS: "-D warnings"`.
+- **`cargo test --release`** — full workspace test, diff_cruby
+  suite included.
+- **`cargo test --release` with `STRESS_GC=1`** — same suite under
+  every-alloc GC. GC root holes silently corrupt slot state under
+  normal collection; STRESS_GC turns them into reproducible test
+  failures. Any PR adding a `heap.alloc` / `maybe_gc` site MUST run
+  this locally before pushing.
+- **Verify cext example bundles build** — independent
+  `bash build.sh` runs so a path/flag regression in cext examples
+  shows up here even if their integration tests were skipped.
+- **Build (wasm32-wasip1)** — separate job. Doesn't run tests yet
+  (no wasmtime smoke), only proves the crate still compiles for
+  the WASI target.
+- **Panic budget (per-file ratchet)** — separate job, see
+  [`docs/PANIC_AUDIT.md`](docs/PANIC_AUDIT.md). Per-file counts of
+  `panic!` / `.unwrap()` / `.expect()` are ratcheted: **the direction
+  is always down, never up**. The intended workflow is to convert a
+  panic site to a `Trap`, then lower the budget. Bumping a budget
+  *up* is a documented escape hatch that needs reviewer agreement
+  the new site is genuinely ICE-class (an invariant the compiler /
+  dispatch loop already enforces) AND that no Trap-class alternative
+  exists; the bump and the new site land in the same commit so the
+  history shows the trade-off.
+- **Perf budget (peak-RSS ratchet)** — separate job. Wall-time +
+  peak-RSS for fixed inputs. Regressions surface as a hard fail.
+- **Miri smoke (Stacked + Tree Borrows)** — separate job. Catches
+  UB in the cext FFI surface (CURRENT_VM_PTR aliasing, etc.).
+
+Also required for a merge:
+
 - Fixtures match CRuby behaviour, or a deliberate divergence is
   documented (in code comment + CHANGELOG, ideally an ADR).
-- No new warnings under `-D warnings`.
 - CHANGELOG.md updated.
 
-What doesn't gate a PR: rustfmt output, clippy warnings (we don't
-enforce these in CI today), benchmark numbers (we eyeball, we don't
-gate).
+What doesn't gate: rustfmt output (we don't run it), benchmark
+numbers beyond the perf-budget ratchet (we eyeball, we don't gate).
 
 ## Tests we particularly want
 
