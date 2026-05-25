@@ -11,13 +11,39 @@ it's the next thing worth implementing.
 
 ## Current reports
 
-| Codebase | Files | % Supported | Top blocker |
-|---|---:|---:|---|
-| [Jekyll `lib/`](jekyll.md) | 89 | 81.65% | `ModuleNode` (×145) |
-| [Liquid `lib/`](liquid.md) | 64 | 81.16% | `ConstantWriteNode` (×141) |
+| Codebase | Files | % Supported | #1 missing | Shape |
+|---|---:|---:|---|---|
+| [Jekyll `lib/`](jekyll.md) | 89 | 81.65% | `ModuleNode` (×145) | static-site framework |
+| [Liquid `lib/`](liquid.md) | 64 | 81.16% | `ConstantWriteNode` (×141) | template engine |
+| [Sinatra `lib/`](sinatra.md) | 7 | 79.85% | `BlockArgumentNode` (×65) | web DSL |
+| [dry-struct `lib/`](dry-struct.md) | 15 | 80.13% | `ModuleNode` (×16) | modern data DSL |
+| [Rake `lib/`](rake.md) | 44 | 80.87% | `ModuleNode` (×52) | task DSL |
 
 Planned next scans (and the rationale for each) live in
 [`TARGETS.md`](TARGETS.md).
+
+## Cross-codebase observations (n=5)
+
+After scanning five codebases the picture has converged enough to
+draw a few stable conclusions:
+
+- **All five hover at 79–82% Supported at AST level.** Different
+  shapes (framework / template engine / DSL), same headline. The
+  remaining ~20% is the actual subset gap, not a Jekyll-specific
+  quirk.
+- **`ModuleNode` is the #1 missing class in 3/5 scans** (Jekyll,
+  dry-struct, Rake) and #2 in Liquid. Sinatra is the outlier
+  (single `module Sinatra` so it ranks low there). This confirms
+  ROADMAP Near term #4 as the highest-leverage feature.
+- **Block / rest / splat parameter family** (`BlockArgumentNode`,
+  `BlockParameterNode`, `RestParameterNode`, `SplatNode`) dominates
+  Sinatra and shows up heavily in dry-struct and Rake. These are
+  the *DSL framework* blockers — Jekyll/Liquid don't surface them
+  because they're more "library" than "DSL host".
+- **`UnlessNode`** is in the top 5 of 4/5 scans. Trivial syntax
+  sugar; cheap to implement; broad reach.
+- **`RegularExpressionNode`** is widespread (4/5) but a much
+  bigger semantic lift than the others.
 
 ## Why these numbers under-state the gap
 

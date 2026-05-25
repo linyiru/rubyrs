@@ -29,22 +29,32 @@ Snapshots of `rubyrs-gapscan` against canonical Ruby projects —
 these drive which "Near term" items below to attack first. Full
 reports: [`docs/gap-reports/`](gap-reports/README.md).
 
-| Codebase | % Supported (AST) | #1 missing | #2 missing | #3 missing |
-|---|---:|---|---|---|
-| Jekyll `lib/` (89 files) | **81.65%** | `ModuleNode` (×145) | `InstanceVariableOrWriteNode` (×136) | `UnlessNode` (×112) |
-| Liquid `lib/` (64 files) | **81.16%** | `ConstantWriteNode` (×141) | `ModuleNode` (×74) | `UnlessNode` (×72) |
+| Codebase | Shape | % Supported (AST) | #1 missing |
+|---|---|---:|---|
+| Jekyll `lib/` | static-site framework | **81.65%** | `ModuleNode` (×145) |
+| Liquid `lib/` | template engine | **81.16%** | `ConstantWriteNode` (×141) |
+| Sinatra `lib/` | web DSL | **79.85%** | `BlockArgumentNode` (×65) |
+| dry-struct `lib/` | modern data DSL | **80.13%** | `ModuleNode` (×16) |
+| Rake `lib/` | task DSL | **80.87%** | `ModuleNode` (×52) |
 
-**Headline:** both Jekyll and Liquid sit just over 81% inside the
-subset at AST level. Jekyll already has **56 files at ≥95%
-translatability** today (out of 86 non-trivial); `ModuleNode` is
-the single most-frequent remaining blocker across them, so
-Near term #4 below has the highest practical leverage. Caveat: the
-AST view *under*-states the gap — many runtime features
-(`require`, `attr_accessor`, `include`, `private`) parse as
-`CallNode` and so look Supported. See each report's "Top bareword
-calls" section for the semantic-gap view.
+**Headline (n=5):** all five hover at 79–82% Supported regardless
+of codebase shape — the remaining gap is the actual subset edge,
+not project-specific noise. **`ModuleNode` is #1 in 3/5 scans
+(and #2 in Liquid)**, validating Near term #4 below as the highest-
+leverage feature. The **block-parameter family** (`BlockArgumentNode`,
+`BlockParameterNode`, `RestParameterNode`, `SplatNode`) dominates
+Sinatra and ranks high in dry-struct + Rake — runner-up priority,
+matters especially for DSL frameworks. **`UnlessNode`** sits in
+the top 5 of 4/5 scans — cheap syntax sugar with broad reach.
 
-Candidate codebases for the next round of scans are tracked in
+Caveat: the AST view *under*-states the gap — many runtime
+features (`require`, `attr_accessor`, `include`, `private`) parse
+as `CallNode` and so look Supported. See each report's "Top
+bareword calls" section for the semantic-gap view.
+
+Cross-scan observations and a deeper breakdown live in
+[`docs/gap-reports/README.md`](gap-reports/README.md).
+Candidate codebases for future scans are tracked in
 [`docs/gap-reports/TARGETS.md`](gap-reports/TARGETS.md).
 
 ## Done
