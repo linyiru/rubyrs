@@ -94,6 +94,12 @@ that the gap reports were generated against):
 | tilt/string.rb | 100% | ❌ `undefined method 'require_relative'` | C |
 | crates/rubyrs/examples/brewfile/Brewfile.rb | 100% | ❌ `undefined method 'tap'` | G |
 
+> The sections below — **Category legend**, **What this tells
+> us**, **What "Phase 3" would look like** — were written
+> against the first-pass data and are kept verbatim as the
+> historical record. After the re-run above, Category D = 0
+> and "Phase 3 step 1" (ConstantWriteNode) is already done.
+
 ### Category legend
 
 | Code | Category | Count |
