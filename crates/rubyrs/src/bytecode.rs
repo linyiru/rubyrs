@@ -175,11 +175,24 @@ pub(crate) enum Op {
     /// `loop_rescue_depths` stack — emitted at the start of a `while`
     /// expression so a `break` inside the loop body knows how many
     /// `PushRescue`/`PushEnsure` handlers it needs to discard before
-    /// jumping out. Paired with `Op::ExitLoop` at the loop's natural
-    /// end (which all paths — normal exit AND `break` — converge on).
+    /// jumping out. Paired with `Op::ExitLoop` on the structured exit
+    /// paths (normal cond-false exit AND `break`). Non-local control
+    /// transfers can bypass the matching `ExitLoop`:
+    ///   - Exception unwind: `unwind_with_exception` truncates
+    ///     `loop_rescue_depths` to the matched handler's
+    ///     `loop_depth_at_push` snapshot, so any `EnterLoop` entries
+    ///     pushed by loops the exception is escaping out of are
+    ///     discarded along with the handler entries above them.
+    ///   - Non-local `return` (`Op::ReturnMethod`) pops the frame
+    ///     entirely, taking `loop_rescue_depths` with it.
+    /// Without those two compensating paths the entry would stay
+    /// installed on the frame and a later `BreakLoop` would read it
+    /// as the innermost loop.
     EnterLoop,
     /// Pop the most-recent entry off `loop_rescue_depths`. Emitted at
-    /// the join point past a `while` expression's body.
+    /// the join point past a `while` expression's body. Not reached
+    /// on the exception-unwind path; see `Op::EnterLoop` for how the
+    /// entry is reclaimed in that case.
     ExitLoop,
     /// `break` from a `while` loop. Pops dynamic rescue/ensure handlers
     /// down to the depth recorded by the matching `Op::EnterLoop`, then
