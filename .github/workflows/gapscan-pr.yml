@@ -1,0 +1,159 @@
+name: gapscan PR diff
+
+on:
+  pull_request:
+    branches: [master]
+    # Skip the whole workflow when the PR can't possibly affect
+    # gapscan output. This includes docs-only PRs and anything that
+    # doesn't touch rubyrs source / data / the gapscan crate / this
+    # workflow itself. The script also has a fast-path for changes
+    # inside the watched paths that don't actually shift the
+    # classifier (e.g. internal vm.rs refactors); see the script
+    # for the strict file list.
+    paths:
+      - 'crates/rubyrs/src/**'
+      - 'crates/rubyrs/data/**'
+      - 'crates/rubyrs/build.rs'
+      - 'crates/rubyrs-gapscan/**'
+      # Dependency-only PRs (Cargo.toml feature flips, ruby_prism
+      # bumps, etc.) can shift classification too — mirror the
+      # script's CLASSIFIER_PATHS list so they don't skip the
+      # workflow entirely.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/rubyrs/Cargo.toml'
+      - 'crates/rubyrs-gapscan/Cargo.toml'
+      - 'scripts/gapscan-pr-diff.sh'
+      - '.github/workflows/gapscan-pr.yml'
+
+# Cancel any older runs for the same PR — only the latest commit's
+# diff is useful as a sticky comment.
+concurrency:
+  group: gapscan-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Threat model note (PR #18 review #8): this workflow runs the
+# script from the PR's checkout while a write-scoped GITHUB_TOKEN
+# exists at the job level. A malicious PR author with push access
+# (same-repo PRs) could in theory modify the script to abuse the
+# token before merge — but same-repo push access is itself a
+# higher trust grant. Fork PRs run with a read-only token and the
+# `Detect fork PR` step below skips the comment step for them.
+#
+# The standard hardening for this pattern is the two-workflow split
+# (build job with no perms uploads a comment artifact; a separate
+# `workflow_run`-triggered job with write perms downloads and posts
+# it). Not worth the complexity for current scope — revisit if the
+# project grows external contributors with write access to specific
+# branches but not the repo overall.
+
+env:
+  # Match the main CI workflow so warnings caught there are also
+  # caught here. Otherwise a feature PR could green-light here and
+  # fail the main `cargo build` job.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  diff:
+    name: Render gapscan diff comment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (PR head + master)
+        uses: actions/checkout@v6
+        with:
+          # Need the full history so the script can build the base
+          # commit in a separate worktree.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base SHA
+        # Fetch the exact SHA from the event payload (not the
+        # moving `base.ref`). Otherwise the cache key (keyed on
+        # `pull_request.base.sha`) and the actually-resolved base
+        # commit could diverge if the base branch advances between
+        # the webhook firing and this job running. The script reads
+        # GAPSCAN_BASE_REF below — passing the same SHA there keeps
+        # everything aligned.
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + HEAD target dir
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # PR HEAD compiles incrementally against this cache;
+          # cleanest invalidation is per-Cargo.lock-change.
+          key: gapscan-pr-head-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: gapscan-pr-head-${{ runner.os }}-
+
+      - name: Cache BASE target dir (keyed on master SHA, not PR's Cargo.lock)
+        uses: actions/cache@v5
+        with:
+          path: /tmp/gapscan-work/base-target
+          # The base build is from origin/${base_ref}, which moves
+          # forward as features land. Key on its SHA so consecutive
+          # PRs against the same master tip reuse the base build.
+          key: gapscan-pr-base-${{ runner.os }}-${{ github.event.pull_request.base.sha }}
+          restore-keys: gapscan-pr-base-${{ runner.os }}-
+
+      - name: Cache scanned target codebases
+        uses: actions/cache@v5
+        with:
+          # The pins live inline in the script; hashing the script
+          # invalidates the cache on pin bumps. Slightly conservative
+          # (changes to anything else in the script also invalidate)
+          # but the script is small and rarely edited.
+          key: gapscan-targets-${{ hashFiles('scripts/gapscan-pr-diff.sh') }}
+          path: /tmp/gapscan-targets
+
+      - name: Detect fork PR
+        # Fork PRs get a read-only GITHUB_TOKEN even when
+        # `permissions: pull-requests: write` is declared; the
+        # sticky-comment step below will fail to write. Skip
+        # commenting in that case (still run the diff for the log).
+        id: fork
+        run: |
+          if [[ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.event.pull_request.base.repo.full_name }}" ]]; then
+            echo "is_fork=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Fork PR detected — diff will run but sticky comment will be skipped (no write token on fork PRs). For full coverage of fork-PR comments, switch this workflow to pull_request_target with safe-checkout."
+          else
+            echo "is_fork=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run gapscan diff
+        env:
+          # Pin to the exact base SHA (matches the cache key and
+          # the `Fetch base SHA` step above) so the script doesn't
+          # see a different base commit than the cache was built
+          # against if the base branch advanced mid-job.
+          GAPSCAN_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          GAPSCAN_WORK: /tmp/gapscan-work
+          # Pass the actual PR head SHA explicitly. On pull_request
+          # events GITHUB_SHA is the synthetic merge ref; using it
+          # for blob URLs sends readers to a tree they didn't
+          # intend. The script prefers GAPSCAN_COMMIT_SHA when set.
+          GAPSCAN_COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p /tmp/gapscan-work
+          ./scripts/gapscan-pr-diff.sh > /tmp/gapscan-comment.md
+          echo "--- comment preview ---"
+          cat /tmp/gapscan-comment.md
+
+      - name: Post or update sticky comment
+        if: steps.fork.outputs.is_fork != 'true'
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          # The header marker uniquely identifies this comment so
+          # subsequent runs update it in place instead of stacking.
+          header: gapscan-pr-diff
+          path: /tmp/gapscan-comment.md
