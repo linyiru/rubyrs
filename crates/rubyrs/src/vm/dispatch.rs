@@ -2511,7 +2511,15 @@ impl Vm {
 /// the builtin sentinel" (primitive — methods live in
 /// `primitive_call` arms, not in a per-class table).
 ///
-/// Mirrors `Vm::class_of`'s class-name set (`vm/lookup.rs`).
+/// Mirrors `Vm::class_of`'s class-name set (`vm/lookup.rs`),
+/// PLUS one intentional extra: `Kernel`. Kernel's instances are
+/// Object-backed in CRuby (not a distinct `Value` variant), but
+/// we treat it as a sentinel primitive here so
+/// `Kernel.instance_method(:foo)` resolves via the same path as
+/// real primitives — see the Kernel arm below for the rationale.
+/// The two lists are NOT meant to be kept identical; future
+/// editors should add new entries to whichever side actually
+/// needs them.
 fn is_primitive_class_name(name: &str) -> bool {
     matches!(
         name,
