@@ -98,7 +98,7 @@ pattern as a version increment:
 | v0.1 | `expr.should == val`, `require_relative` strip | ~10–20% of spec files | **shipped** |
 | v0.2 | `should_not == val`, predicate matchers (`.should.foo?` / `.should_not.foo?`), `-> { ... }.should.raise(X)` lambda lowering (incl. `M::Cls` class paths) | +20–25% | **shipped** |
 | v0.3 | `before :each` body lift into sibling `it`s, `mock_int(LITERAL_INT)` substitution, skip-log header listing unrewritten patterns per file | +10% | **shipped** |
-| v0.4 | `shared_examples` / `it_behaves_like` cross-file inline | +20% | pending |
+| v0.4 | `it_behaves_like :NAME, args...` cross-file inlining (via `--shared <path>` CLI flag); `@method` / `@method2` / ... substitution; recognisers run on the substituted body | +20% | **shipped** |
 | ... | ... approaching mspec full | ... | |
 
 Anything the extractor doesn't recognise — at any version — passes

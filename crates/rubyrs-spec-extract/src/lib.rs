@@ -54,7 +54,45 @@ use ruby_prism::{Node, Visit};
 /// Parse errors are NOT surfaced here — callers that care
 /// should use [`parse_errors`] alongside this fn. The CLI does
 /// (`main.rs`); golden tests don't need to.
+/// A vendored `shared/foo.rb` upstream file. Pass into
+/// [`extract_with_shared`] so the extractor can inline
+/// `it_behaves_like :NAME, args...` calls in the consumer
+/// against the body of `describe :NAME, shared: true do ... end`
+/// found in the shared source.
+///
+/// The CLI builds these from `--shared <path>` flags; library
+/// callers can construct them directly.
+pub struct SharedSpec<'a> {
+    /// Source text of the shared file (verbatim — same shape
+    /// as the consumer source the extractor consumes).
+    pub source: &'a str,
+}
+
+/// Same as [`extract`] but also resolves
+/// `it_behaves_like :NAME, args...` calls against the supplied
+/// `shared` specs. v0.4 implementation:
+///
+/// 1. Walks each `SharedSpec` looking for `describe :NAME, shared: true do BODY end`.
+/// 2. Builds a `name → body source` registry.
+/// 3. In the consumer, finds `it_behaves_like :NAME, arg1, arg2, ...`
+///    calls. Looks up `NAME` in the registry; substitutes
+///    `@method` (= `arg1`), `@method2` (= `arg2`), etc. inside
+///    the shared body; runs the matcher recognisers on the
+///    substituted body; and replaces the `it_behaves_like` call
+///    with the unwrapped `it` blocks.
+/// 4. Unknown names (not in the registry) fall through to the
+///    skip-log header so the human can either supply the
+///    missing shared file or hand-translate.
+pub fn extract_with_shared(source: &str, shared: &[SharedSpec<'_>]) -> String {
+    let registry = build_shared_registry(shared);
+    extract_inner(source, &registry)
+}
+
 pub fn extract(source: &str) -> String {
+    extract_inner(source, &SharedRegistry::default())
+}
+
+fn extract_inner(source: &str, registry: &SharedRegistry) -> String {
     let parsed = ruby_prism::parse(source.as_bytes());
     let root = parsed.node();
     let mut collector = SubstitutionCollector {
@@ -73,6 +111,17 @@ pub fn extract(source: &str) -> String {
     lifter.visit(&root);
     let consumed = lifter.consumed_before_ranges;
 
+    // v0.4: inline `it_behaves_like :NAME, args...` calls
+    // against the shared registry.
+    let mut inliner = SharedInliner {
+        source,
+        registry,
+        substitutions: Vec::new(),
+        consumed_it_behaves_like_ranges: Vec::new(),
+    };
+    inliner.visit(&root);
+    let consumed_iblike = inliner.consumed_it_behaves_like_ranges.clone();
+
     // Drop recogniser substitutions that fall inside a lifter
     // delete range. The bytes they target are about to be wiped
     // by the delete; applying them first would mutate `out` with
@@ -88,8 +137,12 @@ pub fn extract(source: &str) -> String {
         .filter(|s| !consumed.iter().any(|(dstart, dend)| {
             s.start >= *dstart && s.end <= *dend
         }))
+        .filter(|s| !consumed_iblike.iter().any(|(dstart, dend)| {
+            s.start >= *dstart && s.end <= *dend
+        }))
         .collect();
     all_subs.extend(lifter.substitutions);
+    all_subs.extend(inliner.substitutions);
 
     let rewritten = apply_substitutions(source, all_subs);
     let stripped = strip_require_relative(&rewritten);
@@ -99,7 +152,11 @@ pub fn extract(source: &str) -> String {
     // those ARE handled, just by a different code path. Reuses
     // the existing parse rather than re-running prism over the
     // source.
-    let unhandled = collect_unhandled(source, &root, &consumed);
+    // Merge consumed ranges from the lifter AND inliner so
+    // the unhandled scanner doesn't flag handled calls.
+    let mut all_consumed: Vec<(usize, usize)> = consumed.clone();
+    all_consumed.extend(consumed_iblike.iter().copied());
+    let unhandled = collect_unhandled(source, &root, &all_consumed);
     if unhandled.is_empty() {
         stripped
     } else {
@@ -756,8 +813,18 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
         // up in the lifted copies that go into each `it`, so the
         // human still needs them flagged in the skip log.
         let name_bytes_for_consumed = node.name().as_slice();
-        let was_consumed = name_bytes_for_consumed == b"before"
-            && self.consumed.iter().any(|(s, e)| start >= *s && start < *e);
+        // Suppress when this is one of the specific call kinds
+        // a specialised handler consumed:
+        //   - `before` → BeforeEachLifter
+        //   - `it_behaves_like` → SharedInliner (v0.4)
+        // Other names inside a consumed range fall through to
+        // the detail-switch — nested patterns inside a
+        // consumed before/it_behaves_like body still go in the
+        // skip log so the human notices them.
+        let was_consumed = matches!(
+            name_bytes_for_consumed,
+            b"before" | b"it_behaves_like"
+        ) && self.consumed.iter().any(|(s, e)| start >= *s && start < *e);
         if !was_consumed {
             let name_bytes = node.name().as_slice();
             // For mock_int, mirror try_mock_int's gate so the skip
@@ -789,7 +856,7 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
                 b"before" => Some("only the bare `before :each do ... end` form is lifted (no extra args, all sibling `it`s must have bodies); other forms like `before :all` or `before :each, :foo` pass through and need hand polish"),
                 b"after" => Some("not lifted; inline cleanup into each `it` or comment the block out"),
                 b"context" => Some("the micro-runner's spec_helper.rb doesn't define `context` — rename to `describe` (or remove) before running, or the file crashes with NoMethodError on `context`"),
-                b"it_behaves_like" => Some("shared-example inlining is v0.4"),
+                b"it_behaves_like" => Some("shared-example name not found in the supplied --shared registry (or none supplied); pass the matching `shared/...` file via `--shared <path>` to inline, or hand-translate"),
                 b"mock" => Some("no mock library in the micro-runner; hand-translate"),
                 b"mock_int" if !mock_int_substitutable => Some("only `mock_int(literal_int)` with no receiver is substituted; other forms (explicit receiver, multi-arg, non-int-literal) pass through"),
                 b"should_receive" => Some("mock expectations; hand-translate"),
@@ -832,4 +899,178 @@ fn render_skip_header(patterns: &[UnhandledPattern]) -> String {
     }
     out.push('\n');
     out
+}
+
+
+// === v0.4 — shared examples cross-file inlining =======================
+
+/// Registry mapping shared-example name (e.g. `string_length`)
+/// to the source slice of the `describe :NAME, shared: true do
+/// BODY end` block's body. Built once per `extract_with_shared`
+/// call from the supplied `SharedSpec`s. `body_source` is the
+/// raw text we re-parse + substitute + inline at each call site.
+#[derive(Default)]
+struct SharedRegistry {
+    /// `name → body source slice` (each slice is owned because
+    /// the input SharedSpec sources live outside the consumer's
+    /// lifetime — simpler to clone the body once than thread
+    /// extra lifetimes through every visitor).
+    entries: std::collections::HashMap<String, String>,
+}
+
+impl SharedRegistry {
+    fn get(&self, name: &str) -> Option<&str> {
+        self.entries.get(name).map(|s| s.as_str())
+    }
+}
+
+fn build_shared_registry(specs: &[SharedSpec<'_>]) -> SharedRegistry {
+    let mut registry = SharedRegistry::default();
+    for spec in specs {
+        let parsed = ruby_prism::parse(spec.source.as_bytes());
+        let root = parsed.node();
+        let mut collector = SharedSpecCollector {
+            source: spec.source,
+            entries: &mut registry.entries,
+        };
+        collector.visit(&root);
+    }
+    registry
+}
+
+/// Walks a shared-file AST, looking for `describe :NAME, shared:
+/// true do BODY end` blocks. Two requirements per match:
+///   1. First positional arg is a Symbol literal (the shared
+///      name; we use it as the registry key).
+///   2. The KEYWORD args (Hash literal at end) include
+///      `shared: true`. Without this, a regular `describe`
+///      with a symbol name would be misclassified.
+struct SharedSpecCollector<'a> {
+    source: &'a str,
+    entries: &'a mut std::collections::HashMap<String, String>,
+}
+
+impl<'pr> Visit<'pr> for SharedSpecCollector<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if name_is(node.name(), b"describe") {
+            self.try_capture(node);
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+impl SharedSpecCollector<'_> {
+    fn try_capture(&mut self, node: &ruby_prism::CallNode<'_>) -> Option<()> {
+        let args = node.arguments()?;
+        let mut iter = args.arguments().iter();
+        let first = iter.next()?;
+        // First arg must be a SymbolNode. The slice is e.g.
+        // ":string_length" — strip the leading colon for the
+        // registry key.
+        let first_text = slice(self.source, &first);
+        let shared_name = first_text.strip_prefix(':')?.to_string();
+        // Subsequent arg(s) should contain `shared: true`. Look
+        // for a KeywordHashNode (parses as a HashNode arg with
+        // KeywordHashNode shape) with an assoc whose key is
+        // `:shared` and value is `true`.
+        let mut saw_shared_true = false;
+        for arg in iter {
+            if let Some(kh) = arg.as_keyword_hash_node() {
+                for assoc in kh.elements().iter() {
+                    if let Some(a) = assoc.as_assoc_node() {
+                        let key_text = slice(self.source, &a.key());
+                        let val_text = slice(self.source, &a.value());
+                        if (key_text == "shared:" || key_text == ":shared")
+                            && val_text == "true"
+                        {
+                            saw_shared_true = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !saw_shared_true {
+            return None;
+        }
+        let block_node = node.block()?;
+        let block = block_node.as_block_node()?;
+        let body = block.body()?;
+        let body_text = slice(self.source, &body);
+        self.entries.insert(shared_name, body_text);
+        Some(())
+    }
+}
+
+/// Walks the consumer AST, looking for `it_behaves_like :NAME,
+/// arg1, arg2, ...` calls. For each one whose `:NAME` is in the
+/// registry: substitute `@method` (= arg1), `@method2` (= arg2),
+/// etc. inside a fresh copy of the shared body; run the matcher
+/// recognisers on the substituted body; emit a substitution that
+/// replaces the `it_behaves_like` call's location range with the
+/// rewritten body. Unknown `:NAME`s pass through to the skip log.
+struct SharedInliner<'a> {
+    source: &'a str,
+    registry: &'a SharedRegistry,
+    substitutions: Vec<Substitution>,
+    /// Byte ranges of `it_behaves_like` calls the inliner
+    /// consumed. Used to filter overlapping recogniser
+    /// substitutions and to suppress the skip-log entry for the
+    /// `it_behaves_like` call that was handled.
+    consumed_it_behaves_like_ranges: Vec<(usize, usize)>,
+}
+
+impl<'pr> Visit<'pr> for SharedInliner<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if name_is(node.name(), b"it_behaves_like") {
+            self.try_inline(node);
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+impl SharedInliner<'_> {
+    fn try_inline(&mut self, node: &ruby_prism::CallNode<'_>) -> Option<()> {
+        let args = node.arguments()?;
+        let arg_list: Vec<_> = args.arguments().iter().collect();
+        if arg_list.is_empty() {
+            return None;
+        }
+        // First arg is the shared-name symbol; rest are the
+        // `@method` / `@method2` / ... bindings.
+        let name_text = slice(self.source, &arg_list[0]);
+        let shared_name = name_text.strip_prefix(':')?;
+        let body_template = self.registry.get(shared_name)?;
+
+        // Substitute `@method`, `@method2`, ... with the args.
+        // Done as a simple textual replace on the body source —
+        // sound for the upstream convention (mspec uses bare
+        // `@method` identifiers, never as substrings of longer
+        // identifiers like `@methodology`).
+        let mut body = body_template.to_string();
+        for (i, arg) in arg_list.iter().skip(1).enumerate() {
+            let placeholder = if i == 0 {
+                "@method".to_string()
+            } else {
+                format!("@method{}", i + 1)
+            };
+            let arg_text = slice(self.source, arg);
+            body = body.replace(&placeholder, &arg_text);
+        }
+        // Run the matcher recognisers on the substituted body
+        // so its `should ==` / predicate / lambda-raise calls
+        // get rewritten. (Re-uses the same helper the lifter
+        // uses to rewrite `before :each` bodies.)
+        let rewritten = rewrite_recognisers(&body);
+
+        let loc = node.location();
+        let start = loc.start_offset();
+        let end = loc.end_offset();
+        self.substitutions.push(Substitution {
+            start,
+            end,
+            replacement: rewritten,
+        });
+        self.consumed_it_behaves_like_ranges.push((start, end));
+        Some(())
+    }
 }

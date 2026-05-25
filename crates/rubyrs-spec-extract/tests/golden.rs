@@ -74,6 +74,51 @@ fn golden_v0_3_guards() {
 }
 
 #[test]
+fn golden_shared_inline() {
+    // v0.4 fixture with a paired shared/ file; uses the
+    // dedicated runner so the extract API gets the
+    // `--shared` source too.
+    run_golden_with_shared("shared_inline", &["shared_inline.shared.rb"]);
+}
+
+fn run_golden_with_shared(name: &str, shared_names: &[&str]) {
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let input_path = base.join(format!("{name}.input.rb"));
+    let expected_path = base.join(format!("{name}.expected.rb"));
+
+    let input = std::fs::read_to_string(&input_path)
+        .unwrap_or_else(|e| panic!("read {input_path:?}: {e}"));
+    let shared_sources: Vec<String> = shared_names
+        .iter()
+        .map(|n| {
+            let p = base.join(n);
+            std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("read {p:?}: {e}"))
+        })
+        .collect();
+    let shared_specs: Vec<rubyrs_spec_extract::SharedSpec<'_>> = shared_sources
+        .iter()
+        .map(|s| rubyrs_spec_extract::SharedSpec { source: s.as_str() })
+        .collect();
+    let actual = rubyrs_spec_extract::extract_with_shared(&input, &shared_specs);
+
+    if std::env::var("UPDATE_EXPECTED").is_ok() {
+        std::fs::write(&expected_path, &actual)
+            .unwrap_or_else(|e| panic!("write {expected_path:?}: {e}"));
+        eprintln!("regenerated {expected_path:?}");
+        return;
+    }
+
+    let expected = std::fs::read_to_string(&expected_path)
+        .unwrap_or_else(|e| panic!("read {expected_path:?}: {e}"));
+    assert_eq!(
+        actual, expected,
+        "\n--- golden mismatch for {name} (with shared) ---\n\
+         re-run with UPDATE_EXPECTED=1 to refresh if the change was intentional."
+    );
+}
+
+#[test]
 fn golden_header_after_magic_block() {
     run_golden("header_after_magic_block");
 }

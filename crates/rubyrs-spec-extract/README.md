@@ -58,7 +58,8 @@ human polish step.
 | *`after :each / :all`* | *passthrough + skip-log entry* | logged v0.3; full rewrite is future work, not yet scheduled |
 | *`before :all`* | *passthrough + skip-log entry* | logged v0.3; full rewrite is future work, not yet scheduled |
 | *`context "..." do ... end`* | *passthrough + skip-log entry* | logged v0.3; the micro-runner doesn't define `context` — must be renamed to `describe` (or removed) during hand-polish, otherwise the file fails at load with NoMethodError on `context` |
-| *`it_behaves_like :shared, ...`* | *passthrough + skip-log entry* | logged v0.3; **shared-example inlining is v0.4 scope** per `docs/TESTING.md` |
+| `it_behaves_like :NAME, args...` (with matching `--shared <path/to/shared.rb>`) | shared body inlined at call site; `@method` / `@method2` / ... substituted with the positional args; recognisers run on the substituted body | **v0.4** |
+| *`it_behaves_like :NAME, ...` (no matching shared file)* | *passthrough + skip-log entry naming the missing `--shared`* | v0.4 (logging-only when shared file not supplied) |
 | *`should_receive` / `mock(...)` / `mock_int(dynamic)`* | *passthrough + skip-log entry* | logged v0.3; no mock lib in micro-runner — always hand-translate |
 
 The skip-log header lists a **curated allow-list** of names —
@@ -87,6 +88,42 @@ exception: the `-> { BODY }` shape is unwrapped and the body
 is re-emitted inside a `do ... end` block, so indentation
 shifts (the body's own multi-statement structure stays
 intact, just under different leading whitespace).
+
+## v0.4 highlights
+
+Shared-example inlining. For files that use
+`it_behaves_like :NAME, args...`, pass each `shared/*.rb`
+upstream file via `--shared <path>` (repeatable):
+
+```bash
+cargo run --release -p rubyrs-spec-extract -- \
+  /path/to/upstream/core/string/length_spec.rb \
+  --shared /path/to/upstream/core/string/shared/length.rb
+```
+
+The extractor:
+
+1. Parses each `--shared` file, looking for
+   `describe :NAME, shared: true do BODY end` blocks.
+   Builds a `name → body source` registry.
+2. In the consumer, finds `it_behaves_like :NAME, arg1,
+   arg2, ...` calls. For each, looks up `:NAME` in the
+   registry; substitutes `@method` (= `arg1`), `@method2`
+   (= `arg2`), etc. inside a fresh copy of the shared body;
+   runs the matcher recognisers (so `should ==` inside the
+   shared body becomes `assert_eq(...)`); replaces the
+   `it_behaves_like` call with the unwrapped, rewritten
+   body.
+3. Unknown `:NAME`s (shared file not supplied) fall through
+   to the skip-log header.
+
+Multi-arg shared examples (`it_behaves_like :foo, :method,
+:other`) work — each positional arg maps to `@method`,
+`@method2`, etc. by index.
+
+Substitution is plain text replace on the body slice
+because mspec uses bare `@method` identifiers, never as
+prefixes of longer names like `@methodology`.
 
 ## v0.3 highlights
 
