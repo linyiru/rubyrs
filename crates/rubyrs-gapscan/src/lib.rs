@@ -9,8 +9,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-include!(concat!(env!("OUT_DIR"), "/prism_codegen.rs"));
-
 /// How a Prism node class relates to the rubyrs subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classification {
@@ -23,16 +21,11 @@ pub enum Classification {
     Missing,
 }
 
-/// Static lookup: how does `node_name` (a Prism class name) classify?
-pub fn classify(node_name: &str) -> Classification {
-    if rubyrs::SUPPORTED_PRISM_NODES.contains(&node_name) {
-        Classification::Supported
-    } else if rubyrs::RIDES_ALONG_PRISM_NODES.contains(&node_name) {
-        Classification::RidesAlong
-    } else {
-        Classification::Missing
-    }
-}
+// `pub fn classify(name: &str) -> Classification`, `ALL_PRISM_NODES`,
+// and the `impl_full_visit_for!` macro all come from here. See
+// build.rs — the codegen reads rubyrs/data/*.txt so the runtime
+// classifier stays in lockstep with the published manifests.
+include!(concat!(env!("OUT_DIR"), "/prism_codegen.rs"));
 
 /// Per-class histogram entry.
 #[derive(Debug, Default, Clone)]
