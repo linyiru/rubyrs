@@ -77,6 +77,34 @@ const OPERATOR_NAMES: &[&str] = &[
     "+@", "-@",
 ];
 
+/// Per-file translatability summary.
+#[derive(Debug, Default, Clone)]
+pub struct FileStat {
+    pub path: PathBuf,
+    pub total: u64,
+    pub supported: u64,
+    pub rides_along: u64,
+    pub missing: u64,
+    /// Distinct Missing class names that appear in this file.
+    pub missing_classes: BTreeSet<String>,
+}
+
+impl FileStat {
+    pub fn translatable(&self) -> u64 {
+        self.supported + self.rides_along
+    }
+    /// Fraction of nodes in the file that are Supported or RidesAlong.
+    /// Empty files (`total == 0`) are treated as 1.0 (vacuously fully
+    /// translatable).
+    pub fn translatable_ratio(&self) -> f64 {
+        if self.total == 0 {
+            1.0
+        } else {
+            self.translatable() as f64 / self.total as f64
+        }
+    }
+}
+
 /// One scan result.
 #[derive(Debug, Default, Clone)]
 pub struct Report {
@@ -87,6 +115,8 @@ pub struct Report {
     pub histogram: BTreeMap<String, NodeStat>,
     /// Per-method-name CallNode breakdown.
     pub calls: BTreeMap<String, CallStat>,
+    /// Per-file translatability — populated even when `total == 0`.
+    pub files: Vec<FileStat>,
 }
 
 impl Report {
@@ -155,6 +185,26 @@ impl Report {
         v.sort_by(|(_, a), (_, b)| b.receiver.cmp(&a.receiver));
         v
     }
+
+    /// Files with at least `min_nodes` AST nodes whose translatable
+    /// ratio is ≥ `threshold`. Sorted by descending ratio, then by
+    /// descending total (bigger files first within the same ratio).
+    /// `min_nodes` filters out trivial files (constants-only, etc.)
+    /// so fixture candidates are non-degenerate.
+    pub fn files_at_least(&self, threshold: f64, min_nodes: u64) -> Vec<&FileStat> {
+        let mut v: Vec<&FileStat> = self
+            .files
+            .iter()
+            .filter(|f| f.total >= min_nodes && f.translatable_ratio() >= threshold)
+            .collect();
+        v.sort_by(|a, b| {
+            b.translatable_ratio()
+                .partial_cmp(&a.translatable_ratio())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.total.cmp(&a.total))
+        });
+        v
+    }
 }
 
 /// Scan options.
@@ -198,15 +248,21 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
             report.files_parse_errors.push(file.clone());
         }
         let rel = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
+        let mut file_stat = FileStat {
+            path: rel.clone(),
+            ..Default::default()
+        };
         let mut visitor = Histogrammer {
             histogram: &mut report.histogram,
             total: &mut report.total_nodes,
             calls: &mut report.calls,
+            file_stat: &mut file_stat,
             src: &src,
             file: &rel,
         };
         use ruby_prism::Visit;
         visitor.visit(&parsed.node());
+        report.files.push(file_stat);
     }
 
     Ok(report)
@@ -216,6 +272,7 @@ struct Histogrammer<'a> {
     histogram: &'a mut BTreeMap<String, NodeStat>,
     total: &'a mut u64,
     calls: &'a mut BTreeMap<String, CallStat>,
+    file_stat: &'a mut FileStat,
     src: &'a [u8],
     file: &'a Path,
 }
@@ -246,6 +303,15 @@ impl<'a> Histogrammer<'a> {
     /// so we never allocate on the hot path until inserting a new key.
     fn record(&mut self, class: &'static str, node: &ruby_prism::Node<'_>) {
         *self.total += 1;
+        self.file_stat.total += 1;
+        match classify(class) {
+            Classification::Supported => self.file_stat.supported += 1,
+            Classification::RidesAlong => self.file_stat.rides_along += 1,
+            Classification::Missing => {
+                self.file_stat.missing += 1;
+                self.file_stat.missing_classes.insert(class.to_string());
+            }
+        }
         let entry = self.histogram.entry(class.to_string()).or_default();
         entry.count += 1;
         if entry.first_example.is_none() {
@@ -365,6 +431,58 @@ pub fn render_text(report: &Report, top_missing: usize) -> String {
     let _ = writeln!(s, "{}", "-".repeat(56));
     for (name, stat) in receiver.iter().take(top_missing) {
         let _ = writeln!(s, "{name:<40} {:>10}", stat.receiver);
+    }
+
+    // Per-file translatability — fixture-candidate buckets.
+    // min_nodes=20 excludes degenerate `version.rb`-style files where
+    // 100% just means "two constants and a module declaration".
+    let full = report.files_at_least(1.0, 20);
+    let near = report.files_at_least(0.95, 20);
+    let nontrivial: u64 = report
+        .files
+        .iter()
+        .filter(|f| f.total >= 20)
+        .count() as u64;
+    let _ = writeln!(
+        s,
+        "\n### Per-file translatability (≥20 nodes: {nontrivial} non-trivial files)"
+    );
+    let _ = writeln!(
+        s,
+        "  100% translatable: {} files",
+        full.len()
+    );
+    let _ = writeln!(
+        s,
+        "  ≥95% translatable: {} files (good fixture candidates)",
+        near.len()
+    );
+    let show = top_missing.min(near.len());
+    if show > 0 {
+        let _ = writeln!(s, "\n  Top {show} fixture candidates (ratio × nodes):");
+        for f in near.iter().take(show) {
+            let miss = if f.missing_classes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " — needs: {}",
+                    f.missing_classes
+                        .iter()
+                        .take(4)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let _ = writeln!(
+                s,
+                "    {:>6.2}%  {:>5} nodes  {}{}",
+                100.0 * f.translatable_ratio(),
+                f.total,
+                f.path.display(),
+                miss
+            );
+        }
     }
     s
 }
