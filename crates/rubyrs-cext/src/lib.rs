@@ -133,8 +133,9 @@ pub enum CValue {
     /// by `rb_define_singleton_method`.
     Class(String),
     /// An Array of handles. C extensions build these via `rb_ary_new`
-    /// + `rb_ary_push`; the host's `cext_handle_to_value` translates
-    /// recursively into a `Value::Array` on the Vm heap on return.
+    /// and `rb_ary_push`; the host's `cext_handle_to_value`
+    /// translates recursively into a `Value::Array` on the Vm heap
+    /// on return.
     Array(Vec<Value>),
     /// A Hash of (key handle, value handle) pairs, ordered (Ruby
     /// semantics since 1.9). Built via `rb_hash_new` + `rb_hash_aset`;
@@ -582,7 +583,7 @@ pub unsafe extern "C" fn RSTRING_LEN(v: Value) -> c_long {
 /// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_long2num(n: c_long) -> Value {
-    with_state(|st| st.intern(CValue::Int(n as i64)))
+    with_state(|st| st.intern(CValue::Int(n)))
 }
 
 /// Convert a Ruby Integer VALUE to a C `long`. Range overflow
@@ -680,7 +681,7 @@ pub unsafe extern "C" fn rb_define_global_function(
         st.registered_fns.push(CFn {
             name,
             func,
-            arity: arity as i32,
+            arity,
         });
     });
 }
@@ -787,7 +788,7 @@ pub unsafe extern "C" fn rb_define_singleton_method(
             class_joined_name: class_name,
             method_name,
             func,
-            arity: arity as i32,
+            arity,
         });
     });
 }
@@ -1009,10 +1010,10 @@ const CVALUE_EQ_MAX_DEPTH: usize = 256;
 ///   - Nil / True / False / Str / Int : per-variant value compare
 ///   - Array : same length AND pairwise-equal elements (recursive)
 ///   - Hash  : same length AND every (k, v) in self has a matching
-///             pair somewhere in other (recursive, order-independent)
+///     pair somewhere in other (recursive, order-independent)
 ///   - Class : handle-identity only (CRuby's Module / Class compare
-///             by identity by default; spike doesn't model singleton
-///             classes that might override)
+///     by identity by default; spike doesn't model singleton
+///     classes that might override)
 ///
 /// Matches Ruby's `eql?` semantics for the variants we model. Recursive
 /// equality matters because L2-3 lets a C ext build a Hash key as

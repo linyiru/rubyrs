@@ -319,12 +319,12 @@ pub(crate) fn compile_expr(
                     // exactly what CRuby does for pre-targets
                     // (only the post group can be "starved" by a
                     // greedy pre — never the other way around).
-                    for i in 0..s {
+                    for (i, target) in targets.iter().enumerate().take(s) {
                         b.emit(Op::Dup);
                         b.emit(Op::LoadConstInt(i as i64));
                         let cid = *cc as u16; *cc += 1;
                         b.emit(Op::Call(bracket_id, 1, cid));
-                        emit_store(b, interner, &targets[i]);
+                        emit_store(b, interner, target);
                     }
                     // splat slice: `arr.__mw_splat(pre, post)`
                     b.emit(Op::Dup);
@@ -833,6 +833,12 @@ pub(crate) fn compile_expr(
     b.current_span = prev_span;
 }
 
+// Eight positional args is past clippy's default cap, but every one
+// is load-bearing: the proto name + the four shape inputs (params,
+// defaults, body, filename) + the three target sinks the compiler
+// mutates (protos vec, interner, call-cache counter). Bundling into
+// a builder struct doesn't reduce the surface; it just renames it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_proto(
     name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
@@ -845,6 +851,7 @@ pub(crate) fn compile_proto(
 /// `super` knows what to forward. Called by `Expr::Def`'s
 /// compile path. Class bodies and the toplevel `<main>` proto
 /// stay non-method.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_proto_kind(
     name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,

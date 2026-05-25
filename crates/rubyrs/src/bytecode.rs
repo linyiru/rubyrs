@@ -6,6 +6,11 @@ use crate::value::Value;
 
 // ---------- Bytecode ----------
 
+// `BinOp` + `BinOpInt` are paired variants — the suffix distinguishes
+// the integer-fused fast path from the generic dispatch one; both
+// match an existing convention in the rest of the codebase ("Op" is
+// the bytecode-instruction nature, not a redundant tag).
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
     LoadConstInt(i64),

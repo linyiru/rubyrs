@@ -167,7 +167,7 @@ impl Report {
             .iter()
             .filter(|(k, stat)| stat.effective_classification(k) == want)
             .collect();
-        v.sort_by(|(_, a), (_, b)| b.count.cmp(&a.count));
+        v.sort_by_key(|(_, s)| std::cmp::Reverse(s.count));
         v
     }
 
@@ -180,7 +180,7 @@ impl Report {
             .iter()
             .filter(|(_, s)| s.bareword > 0)
             .collect();
-        v.sort_by(|(_, a), (_, b)| b.bareword.cmp(&a.bareword));
+        v.sort_by_key(|(_, s)| std::cmp::Reverse(s.bareword));
         v
     }
     /// Top-N receiver calls. Useful for spotting heavy stdlib reliance
@@ -191,7 +191,7 @@ impl Report {
             .iter()
             .filter(|(_, s)| s.receiver > 0)
             .collect();
-        v.sort_by(|(_, a), (_, b)| b.receiver.cmp(&a.receiver));
+        v.sort_by_key(|(_, s)| std::cmp::Reverse(s.receiver));
         v
     }
 
@@ -615,8 +615,7 @@ fn md_inline_code(s: &str) -> String {
         return s
             .replace('\\', "\\\\")
             .replace('|', "\\|")
-            .replace('\n', " ")
-            .replace('\r', " ");
+            .replace(['\n', '\r'], " ");
     }
     // Find longest run of backticks in `s`, then use a longer fence.
     let mut longest_run = 0usize;
@@ -932,10 +931,12 @@ pub fn parse_json(text: &str) -> Result<Report, String> {
         None => return Err("missing required `schema_version` field".into()),
     }
 
-    let mut report = Report::default();
-    report.root = PathBuf::from(v["root"].as_str().unwrap_or(""));
-    report.files_scanned = v["files_scanned"].as_u64().unwrap_or(0);
-    report.total_nodes = v["total_nodes"].as_u64().unwrap_or(0);
+    let mut report = Report {
+        root: PathBuf::from(v["root"].as_str().unwrap_or("")),
+        files_scanned: v["files_scanned"].as_u64().unwrap_or(0),
+        total_nodes: v["total_nodes"].as_u64().unwrap_or(0),
+        ..Report::default()
+    };
     if let Some(arr) = v["files_with_errors"].as_array() {
         for p in arr {
             if let Some(s) = p.as_str() {
@@ -1071,8 +1072,8 @@ pub fn diff(before: &Report, after: &Report) -> ReportDiff {
             d.closed_missing_classes.push((k.to_string(), v));
         }
     }
-    d.new_missing_classes.sort_by(|a, b| b.1.cmp(&a.1));
-    d.closed_missing_classes.sort_by(|a, b| b.1.cmp(&a.1));
+    d.new_missing_classes.sort_by_key(|e| std::cmp::Reverse(e.1));
+    d.closed_missing_classes.sort_by_key(|e| std::cmp::Reverse(e.1));
 
     // Bareword call deltas.
     let mut names: BTreeSet<&String> = BTreeSet::new();
@@ -1087,7 +1088,7 @@ pub fn diff(before: &Report, after: &Report) -> ReportDiff {
         }
     }
     d.bareword_call_changes
-        .sort_by(|x, y| y.3.abs().cmp(&x.3.abs()));
+        .sort_by_key(|e| std::cmp::Reverse(e.3.abs()));
     d
 }
 

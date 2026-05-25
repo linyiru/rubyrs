@@ -690,8 +690,8 @@ impl Vm {
         // overflow flows into the rest slot as a fresh Array.
         let positional_take = given.min(positional_max);
         let mut args_iter = args.into_iter();
-        for i in 0..positional_take {
-            locals[i] = args_iter.next().unwrap();
+        for slot in locals.iter_mut().take(positional_take) {
+            *slot = args_iter.next().unwrap();
         }
         for (offset, v) in default_fill.into_iter().enumerate() {
             locals[positional_take + offset] = v;

@@ -40,6 +40,11 @@ impl<T> Spanned<T> {
 
 pub(crate) type SExpr = Spanned<Expr>;
 
+// `SelfExpr` tripping enum_variant_names is the variant `Self` would
+// be — but `Self` is reserved by the language, so the `Expr` suffix
+// disambiguates rather than echoes. The other "Expr"-shaped variants
+// are non-suffixed.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 pub(crate) enum Expr {
     IntLit(i64),

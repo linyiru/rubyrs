@@ -110,7 +110,7 @@ fn brewfile_example_is_fully_inside_subset() {
         report.total_nodes
     );
     // And the per-file translatable ratio should be exactly 1.0.
-    let file = report.files.iter().next().expect("one file");
+    let file = report.files.first().expect("one file");
     assert_eq!(file.translatable_ratio(), 1.0);
     assert!(file.missing_classes.is_empty());
 }

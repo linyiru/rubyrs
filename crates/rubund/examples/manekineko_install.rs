@@ -98,11 +98,10 @@ fn run_rubyrs_eval(gemfile_path: &Path) -> Vec<GemRequirement> {
     rt.register_fn("gem", move |args| {
         if let Some(Value::Str(name)) = args.first() {
             let mut version = "1.0.0".to_string(); // fallback
-            if args.len() > 1 {
-                if let Value::Str(v) = &args[1] {
+            if args.len() > 1
+                && let Value::Str(v) = &args[1] {
                     version = v.borrow().clone();
                 }
-            }
             reqs_clone.borrow_mut().push(GemRequirement {
                 name: name.borrow().clone(),
                 version: clean_version(&version),
@@ -165,12 +164,11 @@ fn perform_parallel_install(reqs: &[GemRequirement]) {
                     match ureq::get(&url).call() {
                         Ok(response) => {
                             let mut reader = response.into_reader();
-                            if let Ok(mut out_file) = File::create(&gem_path) {
-                                if std::io::copy(&mut reader, &mut out_file).is_err() {
+                            if let Ok(mut out_file) = File::create(&gem_path)
+                                && std::io::copy(&mut reader, &mut out_file).is_err() {
                                     let _ = fs::remove_file(&gem_path);
                                     continue;
                                 }
-                            }
                         }
                         Err(_) => {
                             // Skip if gem doesn't exist (404/etc)
@@ -186,16 +184,14 @@ fn perform_parallel_install(reqs: &[GemRequirement]) {
                         let mut gem_archive = Archive::new(file);
                         if let Ok(entries) = gem_archive.entries() {
                             for entry_result in entries {
-                                if let Ok(entry) = entry_result {
-                                    if let Ok(path) = entry.path() {
-                                        if path.to_str() == Some("data.tar.gz") {
+                                if let Ok(entry) = entry_result
+                                    && let Ok(path) = entry.path()
+                                        && path.to_str() == Some("data.tar.gz") {
                                             let gz_decoder = GzDecoder::new(entry);
                                             let mut inner_tar = Archive::new(gz_decoder);
                                             let _ = inner_tar.unpack(&extracted_dir);
                                             break;
                                         }
-                                    }
-                                }
                             }
                         }
                     }
@@ -233,7 +229,7 @@ fn perform_parallel_install(reqs: &[GemRequirement]) {
 // -----------------------------------------------------------------------------
 fn clean_version(v: &str) -> String {
     // Strip leading constraint operators (~>, >=, <=, >, <, =, ~, !)
-    let stripped = v.trim_start_matches(|c: char| c == '~' || c == '>' || c == '<' || c == '=' || c == '!' || c == ' ');
+    let stripped = v.trim_start_matches(['~', '>', '<', '=', '!', ' ']);
     // Keep alphanumeric, dots, and hyphens (preserves pre-release tags like rc, beta)
     let cleaned: String = stripped.chars()
         .filter(|&c| c.is_alphanumeric() || c == '.' || c == '-')
@@ -305,7 +301,7 @@ fn preprocess_gemfile(content: &str) -> String {
             let parts: Vec<&str> = trimmed.split(',').collect();
             if parts.is_empty() {
                 out.push_str(line);
-                out.push_str("\n");
+                out.push('\n');
                 continue;
             }
             
@@ -324,10 +320,10 @@ fn preprocess_gemfile(content: &str) -> String {
             let leading_whitespace = line.chars().take_while(|c| c.is_whitespace()).collect::<String>();
             out.push_str(&leading_whitespace);
             out.push_str(&cleaned_line);
-            out.push_str("\n");
+            out.push('\n');
         } else {
             out.push_str(line);
-            out.push_str("\n");
+            out.push('\n');
         }
     }
     

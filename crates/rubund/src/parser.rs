@@ -121,14 +121,14 @@ pub fn parse_lockfile(content: &str) -> Lockfile<'_> {
         match current_section {
             SectionState::GemSection | SectionState::GitSection | SectionState::PathSection => {
                 if indent == 2 {
-                    if trimmed.starts_with("remote:") {
-                        current_remote = trimmed["remote:".len()..].trim();
-                    } else if trimmed.starts_with("revision:") {
-                        current_revision = Some(trimmed["revision:".len()..].trim());
-                    } else if trimmed.starts_with("branch:") {
-                        current_branch = Some(trimmed["branch:".len()..].trim());
-                    } else if trimmed.starts_with("path:") {
-                        current_path = Some(trimmed["path:".len()..].trim());
+                    if let Some(rest) = trimmed.strip_prefix("remote:") {
+                        current_remote = rest.trim();
+                    } else if let Some(rest) = trimmed.strip_prefix("revision:") {
+                        current_revision = Some(rest.trim());
+                    } else if let Some(rest) = trimmed.strip_prefix("branch:") {
+                        current_branch = Some(rest.trim());
+                    } else if let Some(rest) = trimmed.strip_prefix("path:") {
+                        current_path = Some(rest.trim());
                     } else if trimmed == "specs:" {
                         parsing_specs = true;
                     }
