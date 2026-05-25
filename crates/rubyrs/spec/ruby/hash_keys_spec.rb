@@ -2,10 +2,13 @@
 # upstream commit 448cb340 (2026-05). 5th extractor-derived
 # spec — produced by `rubyrs-spec-extract` v0.3. The two
 # `Hash.new(default)` / `Hash.new { ... }` assertions are
-# split out to a SKIPPED inline comment because the
-# micro-runner doesn't support Hash with a default value /
-# default-proc (those forms return a plain Object, not a
-# Hash). The rest of the upstream `it` block ships.
+# split out to a SKIPPED inline comment because rubyrs
+# itself doesn't yet construct a Hash from those forms —
+# `Hash.new(5)` returns a plain Object, so any Hash method
+# on the result (`.keys`, `.[]`) raises NoMethodError
+# before the micro-runner sees it. See docs/SUBSET.md →
+# "Hash built-in methods" for the runtime-level divergence.
+# The rest of the upstream `it` block ships.
 
 describe "Hash#keys" do
 
