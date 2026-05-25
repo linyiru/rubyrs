@@ -338,7 +338,7 @@ impl Vm {
                             // …) — go straight to cext.
                             std::path::PathBuf::new()
                         };
-                        if rb_candidate.as_os_str().len() > 0 && rb_candidate.exists() {
+                        if !rb_candidate.as_os_str().is_empty() && rb_candidate.exists() {
                             Some(self.require_ruby(&path_str))
                         } else {
                             #[cfg(feature = "cext")]
