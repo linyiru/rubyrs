@@ -4488,6 +4488,34 @@ fn cext_value_to_cvalue(
     idx: usize,
     v: &Value,
 ) -> Result<rubyrs_cext::CValue, Trap> {
+    cext_value_to_cvalue_d(vm, st, name, idx, v, 0)
+}
+
+/// Bounded-depth helper for [`cext_value_to_cvalue`]. Mirrors the
+/// `CEXT_TRANSLATE_MAX_DEPTH` discipline applied on the C → Ruby
+/// direction (see [`cext_handle_to_value_d`]). A Ruby-side Array
+/// or Hash can also be self-referential (`a = []; a << a`) and
+/// without this guard the recursion would stack-overflow when
+/// crossing into a C ext via `rb_funcall`'s arg translation or
+/// when returning a result. Trap with ArgumentError instead so
+/// the caller sees a clean Ruby-level error.
+#[cfg(not(target_os = "wasi"))]
+fn cext_value_to_cvalue_d(
+    vm: &Vm,
+    st: &mut rubyrs_cext::CExtState,
+    name: &str,
+    idx: usize,
+    v: &Value,
+    depth: usize,
+) -> Result<rubyrs_cext::CValue, Trap> {
+    if depth >= CEXT_TRANSLATE_MAX_DEPTH {
+        return Err(Trap::new(RubyError::ArgumentError {
+            msg: format!(
+                "C ext `{}': arg {} exceeds max nesting depth {} (cycle or pathological input)",
+                name, idx, CEXT_TRANSLATE_MAX_DEPTH
+            ),
+        }));
+    }
     Ok(match v {
         Value::Nil => rubyrs_cext::CValue::Nil,
         Value::Bool(true) => rubyrs_cext::CValue::True,
@@ -4515,7 +4543,7 @@ fn cext_value_to_cvalue(
             let elements = vm.heap.array(*id);
             let mut handles: Vec<rubyrs_cext::Value> = Vec::with_capacity(elements.len());
             for elem in elements {
-                let cv = cext_value_to_cvalue(vm, st, name, idx, elem)?;
+                let cv = cext_value_to_cvalue_d(vm, st, name, idx, elem, depth + 1)?;
                 handles.push(st.intern(cv));
             }
             rubyrs_cext::CValue::Array(handles)
@@ -4526,9 +4554,9 @@ fn cext_value_to_cvalue(
             let mut pairs_out: Vec<(rubyrs_cext::Value, rubyrs_cext::Value)> =
                 Vec::with_capacity(pairs.len());
             for (k, v) in pairs {
-                let kc = cext_value_to_cvalue(vm, st, name, idx, k)?;
+                let kc = cext_value_to_cvalue_d(vm, st, name, idx, k, depth + 1)?;
                 let kh = st.intern(kc);
-                let vc = cext_value_to_cvalue(vm, st, name, idx, v)?;
+                let vc = cext_value_to_cvalue_d(vm, st, name, idx, v, depth + 1)?;
                 let vh = st.intern(vc);
                 pairs_out.push((kh, vh));
             }
@@ -4776,14 +4804,30 @@ fn cext_funcall_to_vm(
     // alive in the same block, which Stacked Borrows flags as UB.
     let result = unsafe {
         let vm = &mut *vm_ptr;
-        let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(vm, st, recv));
+        // PinGuard the translated `recv_v` and each arg Value as
+        // they are produced: `cext_handle_to_value` recursively
+        // allocates Vm-heap Arrays/Hashes for nested C-built
+        // structures, and each alloc can trigger `maybe_gc`. A
+        // previously-translated recv or earlier arg sitting only
+        // in a Rust local has no GC root, so STRESS_GC would sweep
+        // it before `cext_invoke_method` saw it (slot-reuse → ICE
+        // "use-after-free" inside dispatch). Pinning closes the
+        // window; the guard drops at end of the unsafe block,
+        // before `cext_invoke_method` runs its own roots.
+        let mut g = PinGuard::new(vm);
+        let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(g.vm, st, recv));
+        g.pin(recv_v.clone());
         let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
             arg_handles
                 .iter()
-                .map(|h| cext_handle_to_value(vm, st, *h))
+                .map(|h| {
+                    let v = cext_handle_to_value(g.vm, st, *h);
+                    g.pin(v.clone());
+                    v
+                })
                 .collect()
         });
-        match vm.cext_invoke_method(recv_v, method, arg_vs) {
+        match g.vm.cext_invoke_method(recv_v, method, arg_vs) {
             Ok(v) => v,
             // Spike: propagating Trap back through the C-ABI boundary
             // needs `rb_raise` / longjmp coordination (Level 3+).
