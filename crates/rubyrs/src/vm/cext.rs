@@ -20,11 +20,13 @@
 
 #![cfg(not(target_os = "wasi"))]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
-use crate::value::Value;
+use crate::value::{Class, Value};
 
 use super::{PinGuard, Vm, CURRENT_VM_PTR};
 
@@ -700,3 +702,158 @@ fn cext_funcall_to_vm(
         }
     })
 }
+
+impl Vm {
+
+    /// Load a C extension shared library, run its `Init_<stem>` symbol,
+    /// and register every function it declared via
+    /// `rb_define_global_function` into `self.host_fns`.
+    ///
+    /// Level 0 caveats:
+    /// - Only literal paths (with optional auto-extension) are resolved;
+    ///   `$LOAD_PATH` and gem lookup are deferred.
+    /// - Loaded libraries are leaked (never unloaded). A real impl
+    ///   tracks them on the Vm and unloads on drop.
+    /// - Only arity 0 callbacks dispatch correctly; other arities
+    ///   register, then trap on invocation with an ArgumentError.
+    ///
+    /// wasm32-wasi has no `dlopen` — a separate
+    /// `#[cfg(target_os = "wasi")]` stub below returns a clear Trap
+    /// instead of the dlopen path.
+    pub(crate) fn cext_require(&mut self, path_str: &str) -> Result<Value, Trap> {
+        use libloading::{Library, Symbol};
+        use std::path::Path;
+
+        // Auto-extension: `require "foo"` resolves "foo.dylib" / "foo.so"
+        // / "foo.bundle" depending on host. Matches CRuby's behaviour for
+        // the literal-path case.
+        let exts: &[&str] = if cfg!(target_os = "macos") {
+            &["dylib", "bundle"]
+        } else if cfg!(windows) {
+            &["dll"]
+        } else {
+            &["so"]
+        };
+        let p = Path::new(path_str);
+        let so_path = if p.exists() {
+            p.to_path_buf()
+        } else {
+            let mut found = None;
+            for ext in exts {
+                let with = p.with_extension(ext);
+                if with.exists() {
+                    found = Some(with);
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                self.trap(RubyError::RuntimeError {
+                    msg: format!("cannot find C ext: {}", path_str),
+                })
+            })?
+        };
+
+        let stem = so_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                self.trap(RubyError::RuntimeError {
+                    msg: format!("invalid C ext filename: {}", so_path.display()),
+                })
+            })?
+            .to_string();
+        let init_sym = format!("Init_{}", stem);
+
+        // SAFETY: dlopen is intrinsically unsafe; the C ext can do
+        // anything. We trust extensions we explicitly load — sandboxing
+        // is for the Ruby-language layer, not the FFI layer.
+        unsafe {
+            rubyrs_cext::enter();
+            let lib = match Library::new(&so_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = rubyrs_cext::leave();
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!("dlopen {}: {}", so_path.display(), e),
+                    }));
+                }
+            };
+            let init: Symbol<unsafe extern "C" fn()> = match lib.get(init_sym.as_bytes()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = rubyrs_cext::leave();
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!(
+                            "symbol {} not found in {}: {}",
+                            init_sym,
+                            so_path.display(),
+                            e
+                        ),
+                    }));
+                }
+            };
+            init();
+            let state = rubyrs_cext::leave();
+
+            for cfn in state.registered_fns {
+                let sym = self.interner.intern(&cfn.name);
+                let func = cfn.func;
+                let arity = cfn.arity;
+                let cfn_name = cfn.name.clone();
+                self.host_fns.insert(
+                    sym,
+                    Rc::new(move |args: &[Value]| {
+                        // Top-level functions get Qnil as `self`,
+                        // matching CRuby's `rb_define_global_function`
+                        // convention.
+                        cext_dispatch(&cfn_name, func, arity, args, None)
+                    }),
+                );
+            }
+
+            // Materialise every class/module the C ext declared, so
+            // `LoadConst("BCrypt::Engine")` finds them.
+            for cls in state.registered_classes {
+                let name_sym = self.interner.intern(&cls.joined_name);
+                let new_class = Rc::new(Class {
+                    name: cls.joined_name.clone(),
+                    methods: RefCell::new(HashMap::new()),
+                    superclass: RefCell::new(None),
+                });
+                self.classes.insert(name_sym, new_class);
+            }
+
+            // Register every singleton method into the per-class
+            // dispatch table consulted by `do_call`.
+            for sm in state.registered_singletons {
+                let method_sym = self.interner.intern(&sm.method_name);
+                let func = sm.func;
+                let arity = sm.arity;
+                let class_name = sm.class_joined_name.clone();
+                let qualified = format!("{}.{}", class_name, sm.method_name);
+                self.cext_class_methods
+                    .entry(sm.class_joined_name)
+                    .or_default()
+                    .insert(
+                        method_sym,
+                        Rc::new(move |args: &[Value]| {
+                            // Singleton methods get the class itself
+                            // as `self`, matching CRuby's
+                            // `rb_define_singleton_method` contract.
+                            cext_dispatch(&qualified, func, arity, args, Some(&class_name))
+                        }),
+                    );
+            }
+
+            // Level 0: keep the library mapped for the lifetime of the
+            // process. Registered function pointers point into its
+            // text segment; unmapping would dangle them. A real impl
+            // stores `lib` on the Vm so it drops with the Vm.
+            std::mem::forget(lib);
+        }
+
+        Ok(Value::Nil)
+    }
+
+}
+
