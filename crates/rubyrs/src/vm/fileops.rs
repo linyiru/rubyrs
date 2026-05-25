@@ -30,8 +30,15 @@ impl Vm {
         Ok(Some(match (name, args) {
             ("read", [p]) => {
                 let path = path_arg(p)?;
-                match std::fs::read_to_string(&path) {
-                    Ok(s) => Value::new_str(s),
+                // L3-G follow-up: read raw bytes, not UTF-8-validated
+                // String. msgpack/protobuf/binary-protocol fixtures
+                // are not valid UTF-8; the previous read_to_string
+                // path raised on every binary file. RStr now backs
+                // arbitrary bytes via Vec<u8>, so we can store the
+                // content verbatim and let downstream code that
+                // needs string semantics call to_string_lossy.
+                match std::fs::read(&path) {
+                    Ok(b) => Value::new_str_bytes(b),
                     Err(e) => return Err(self.trap(RubyError::RuntimeError {
                         msg: format!("File.read({}): {}", path, e),
                     })),
