@@ -35,6 +35,23 @@ impl Vm {
                     if !f.is_block { break; }
                     let f = self.frames.pop().unwrap();
                     self.stack.truncate(f.base_sp);
+                    // `class_eval { ... }` frames are both
+                    // `is_block: true` (so this loop walks
+                    // through them, matching CRuby's "return
+                    // exits the method, not the block") AND
+                    // `is_class_body: true` (so `def name`
+                    // inside the block lands on the class).
+                    // The class-body cleanup that the Op::Return
+                    // arm does inline (pop class_stack +
+                    // class_visibility_stack) has to happen here
+                    // too — otherwise a non-local return through
+                    // a class_eval block would leak class-stack
+                    // entries.
+                    if f.is_class_body {
+                        let _cls = self.class_stack.pop()
+                            .expect("ICE: class_stack empty unwinding through class_eval");
+                        self.class_visibility_stack.pop();
+                    }
                 }
                 if let Some(f) = self.frames.pop() {
                     self.stack.truncate(f.base_sp);

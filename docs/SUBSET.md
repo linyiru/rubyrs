@@ -79,6 +79,23 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
   the same method). Compile-time desugar; arg must be a Symbol
   literal. GC walks all installed closure-methods as roots — see
   [ADR 0010](adr/0010-metaprogramming-poc.md).
+- `obj.instance_eval { |o| ... }` — runs the block with `self`
+  swapped to `obj`. Inside, `@ivar` reads/writes go to `obj`'s
+  ivars, and method calls use `obj` as the receiver. The block's
+  last expression is the return value (matches CRuby). The
+  `def name` inside an `instance_eval` block — which CRuby
+  installs as a *singleton* method on the receiver — currently
+  lands on `toplevel_methods` because rubyrs doesn't model
+  singleton classes yet. See "Caveats" below.
+- `cls.class_eval { |c| ... }` (alias `module_eval`) — runs the
+  block with `self = cls` AND with the class-body machinery
+  active, so `def name; ...; end` inside lands on `cls`'s method
+  table. This is the dominant DSL use of `class_eval`. Non-class
+  receivers raise `TypeError`. **Divergence**: rubyrs returns
+  the class (re-using the class-body Return path), CRuby returns
+  the block's last expression — see the lock-in test
+  `returns_the_class_for_now` in
+  [`spec/ruby/class_eval_spec.rb`](../crates/rubyrs/spec/ruby/class_eval_spec.rb).
 
 **Caveats for the PoC**
 - No `*args` splat — `method_missing(name, *args)` and arity-flexible
@@ -210,11 +227,12 @@ end
 
 These will not be added unless the project changes direction:
 
-- `eval`, `instance_eval`, `class_eval`, `binding`, `ObjectSpace`,
+- `eval` (string form), `binding`, `ObjectSpace`,
   singleton classes (`def obj.foo`), `define_singleton_method`
-- (`define_method` / `method_missing` / `alias_method` are now in the
-  supported set as a PoC — see above. The remaining items above stay
-  out of scope.)
+- (`define_method` / `method_missing` / `alias_method` /
+  `instance_eval` / `class_eval` are now in the supported set
+  as a PoC — see above. The remaining items above stay out of
+  scope.)
 - `Fiber`, `Thread`, `Mutex`, `Ractor`
 - `require / load / autoload`, gems, Bundler
 - C extension API
