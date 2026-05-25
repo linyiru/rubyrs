@@ -15,19 +15,11 @@
 # The `__gemfile_*` shims are an internal seam between the
 # prelude and the Rust host — invisible to the Gemfile.
 
-# Bundler usually exposes RUBY_VERSION via Ruby itself; rubyrs
-# doesn't have it built in, so we seed it from the prelude.
-# The Gemfile uses it for conditional inclusion
-# (`if RUBY_VERSION >= "3.4.0"`).
-#
-# Caveat: this becomes a top-level constant on the Runtime,
-# so a Gemfile that runs *after* another script in the same
-# process will see whatever value the earlier prelude set.
-# For the example binary (one Gemfile per process) that's
-# fine, but an embed-host running multiple Gemfiles back-to-
-# back should `Runtime::new()` between them, or wait for the
-# upcoming per-eval constant-isolation work.
-RUBY_VERSION = "3.4.0"
+# RUBY_VERSION is now seeded by the rubyrs preamble (see
+# `Runtime::load_preamble`), so the Gemfile can rely on
+# `if RUBY_VERSION >= "3.4.0"` directly. The earlier
+# prelude-level assignment was removed to avoid an
+# already-initialised-constant reassignment.
 
 # ---------- top-level DSL ----------
 
