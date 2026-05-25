@@ -13,11 +13,11 @@ it's the next thing worth implementing.
 
 | Codebase | Files | % Supported | #1 missing | Shape |
 |---|---:|---:|---|---|
-| [Jekyll `lib/`](jekyll.md) | 89 | 83.47% | `ModuleNode` (×145) | static-site framework |
-| [Liquid `lib/`](liquid.md) | 64 | 82.62% | `ConstantWriteNode` (×141) | template engine |
-| [Sinatra `lib/`](sinatra.md) | 7 | 82.32% | `BlockParameterNode` (×58) | web DSL |
-| [dry-struct `lib/`](dry-struct.md) | 15 | 81.54% | `ModuleNode` (×16) | modern data DSL |
-| [Rake `lib/`](rake.md) | 44 | 82.79% | `ModuleNode` (×52) | task DSL |
+| [Jekyll `lib/`](jekyll.md) | 89 | 84.03% | `ConstantWriteNode` (×70) | static-site framework |
+| [Liquid `lib/`](liquid.md) | 64 | 83.07% | `ConstantWriteNode` (×141) | template engine |
+| [Sinatra `lib/`](sinatra.md) | 7 | 82.46% | `BlockParameterNode` (×58) | web DSL |
+| [dry-struct `lib/`](dry-struct.md) | 15 | 82.38% | `BlockParameterNode` (×11) | modern data DSL |
+| [Rake `lib/`](rake.md) | 44 | 83.30% | `RegularExpressionNode` (×42) | task DSL |
 
 Planned next scans (and the rationale for each) live in
 [`TARGETS.md`](TARGETS.md).
@@ -27,19 +27,25 @@ Planned next scans (and the rationale for each) live in
 After scanning five codebases the picture has converged enough to
 draw a few stable conclusions:
 
-- **All five hover at 81–83% Supported at AST level.** Different
+- **All five hover at 82–84% Supported at AST level.** Different
   shapes (framework / template engine / DSL), same headline. The
-  remaining ~17–19% is the actual subset gap, not a Jekyll-specific
+  remaining ~16–18% is the actual subset gap, not a Jekyll-specific
   quirk. (Initial snapshot was 79–82%; a batch of master features
   — `unless`/`until`, `**`, `Hash#sort_by`, `String#[]`/`String#[]=`,
   more `Float`/`Kernel#p`/visibility/`op_assign`/`Range`/
   `Comparable`/`String#match`, inline `rescue`, `__method__`,
-  Inspect round-out, `&:method_name`, `case`/`when` — moved the
-  band up 1.4–2.5 pp across the board.)
-- **`ModuleNode` is the #1 missing class in 3/5 scans** (Jekyll,
-  dry-struct, Rake) and #2 in Liquid. Sinatra is the outlier
-  (single `module Sinatra` so it ranks low there). This confirms
-  ROADMAP Near term #4 as the highest-leverage feature.
+  Inspect round-out, `&:method_name`, `case`/`when`, **`Module` +
+  `extend`**, `Kernel#Integer`/`Float`/`String` — moved the band up
+  1.9–2.6 pp across the board.)
+- **`ModuleNode` *was* the #1 missing class in 3/5 scans (and #2
+  in Liquid) at PR #7 baseline.** Master landed `Module` + `extend`,
+  reclassifying it Supported — biggest single feature impact of any
+  single landing measured by gapscan: jekyll −145 Missing nodes,
+  rake −52, liquid −74 (was #2), dry-struct −16, sinatra −1.
+  The new #1 missing classes are diverse: `ConstantWriteNode`
+  (Jekyll + Liquid — top-level `FOO = ...`),
+  `BlockParameterNode` (Sinatra + dry-struct — `&block` params),
+  `RegularExpressionNode` (Rake — regex literals).
 - **Block / rest / splat parameter family** (`BlockParameterNode`,
   `RestParameterNode`, `SplatNode`) dominates Sinatra and shows up
   heavily in dry-struct and Rake. These are the *DSL framework*
@@ -60,11 +66,11 @@ broad feature batch on master moved every codebase up by 1–2 pp:
 
 | Codebase | PR #7 baseline | Current | Δ |
 |---|---:|---:|---:|
-| Jekyll | 81.65% | 83.47% | +1.82 |
-| Liquid | 81.16% | 82.62% | +1.46 |
-| Sinatra | 79.85% | 82.32% | +2.47 |
-| dry-struct | 80.13% | 81.54% | +1.41 |
-| Rake | 80.87% | 82.79% | +1.92 |
+| Jekyll | 81.65% | 84.03% | +2.38 |
+| Liquid | 81.16% | 83.07% | +1.91 |
+| Sinatra | 79.85% | 82.46% | +2.61 |
+| dry-struct | 80.13% | 82.38% | +2.25 |
+| Rake | 80.87% | 83.30% | +2.43 |
 
 For per-feature impact use `gapscan diff before.json after.json` —
 PR #9 fixed a bug where `diff` re-classified both sides with the
