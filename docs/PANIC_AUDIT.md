@@ -50,7 +50,7 @@ owns the change.
 | `crates/rubyrs/src/vm/range.rs` | 1 | 🟢 |
 | `crates/rubyrs/src/vm/string.rs` | 1 | 🟢 |
 | `crates/rubyrs/src/heap.rs` | 13 | 🟡 |
-| `crates/rubyrs/src/ast.rs` | 7 | 🟢 / 🔴 |
+| `crates/rubyrs/src/ast.rs` | 8 | 🟢 / 🔴 |
 | `crates/rubyrs/src/lib.rs` | 1 | 🟢 (bootstrap) |
 | `crates/rubyrs/src/compiler.rs` | 2 | 🟢 |
 | **Total (excl. doc comments)** | **110** | |
