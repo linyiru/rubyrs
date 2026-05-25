@@ -294,22 +294,72 @@ impl Vm {
                 }
                 Some(Ok(Value::Nil))
             }
-            // C-ext compat spike (Level 0). Only supports the literal-path
-            // form (`require "/abs/path/to/hello"` with auto-extension);
-            // gem/load-path resolution is deferred.
+            // `require` — supports two file kinds:
+            //
+            //   - Ruby source (`.rb` extension, or no extension with
+            //     a `.rb` sibling present): parse + compile + execute
+            //     the file in this Vm (same machinery as
+            //     `require_relative`, but resolved relative to cwd
+            //     instead of caller's directory). Lets gem `lib/`
+            //     wrapper files (msgpack's `register_type` /
+            //     `MessagePack::Bigint`, etc.) load without the
+            //     caller hand-rolling them.
+            //
+            //   - C extension (`.dylib` / `.bundle` / `.so` /
+            //     `.dll`, or no extension with such a sibling
+            //     present): dlopen + `Init_<stem>`. Existing
+            //     `cext_require` path.
+            //
+            // Detection rule: if the resolved file ends in `.rb`,
+            // route to the Ruby loader; otherwise fall through to
+            // the cext loader. The Ruby loader also auto-appends
+            // `.rb` when the input has no extension, so plain
+            // `require "foo"` finds `foo.rb` first if it exists,
+            // and only falls through to the cext path when the
+            // `.rb` lookup fails.
+            //
+            // Gem / LOAD_PATH walking still deferred — only
+            // literal-path / cwd-relative resolution.
             "require" => match args {
                 [Value::Str(path)] => {
-                    #[cfg(feature = "cext")]
+                    #[cfg(not(target_os = "wasi"))]
                     {
-                        let path = path.to_string_lossy();
-                        Some(self.cext_require(&path))
+                        let path_str = path.to_string_lossy();
+                        // Probe for a `.rb` sibling first, regardless
+                        // of cfg!("cext"). The Ruby-source path is
+                        // always available.
+                        let p = std::path::Path::new(&*path_str);
+                        let rb_candidate = if p.extension().and_then(|e| e.to_str()) == Some("rb") {
+                            p.to_path_buf()
+                        } else if p.extension().is_none() {
+                            p.with_extension("rb")
+                        } else {
+                            // Has a non-.rb extension (.so / .dylib /
+                            // …) — go straight to cext.
+                            std::path::PathBuf::new()
+                        };
+                        if rb_candidate.as_os_str().len() > 0 && rb_candidate.exists() {
+                            Some(self.require_ruby(&path_str))
+                        } else {
+                            #[cfg(feature = "cext")]
+                            { Some(self.cext_require(&path_str)) }
+                            #[cfg(not(feature = "cext"))]
+                            {
+                                Some(Err(self.trap(RubyError::RuntimeError {
+                                    msg: format!(
+                                        "require: no .rb at {} and built without \
+                                         `cext` feature for native extension fallback",
+                                        path_str
+                                    ),
+                                })))
+                            }
+                        }
                     }
-                    #[cfg(not(feature = "cext"))]
+                    #[cfg(target_os = "wasi")]
                     {
                         let _ = path;
                         Some(Err(self.trap(RubyError::RuntimeError {
-                            msg: "require: built without `cext` feature; \
-                                 C extension loading is unavailable".to_string(),
+                            msg: "require: file I/O not available on wasm32-wasi".into(),
                         })))
                     }
                 }
@@ -424,13 +474,69 @@ impl Vm {
                 msg: format!("require_relative: cannot find {} ({})", target.display(), e),
             })),
         };
+        self.load_ruby_source_from_canon(canon)
+    }
+
+    /// `require "path.rb"` — load a Ruby source file by literal
+    /// path (subset of CRuby's LOAD_PATH-walking `require`). Used
+    /// when the cext path doesn't apply (no `.so` / `.bundle` /
+    /// `.dylib` extension) and the file is a Ruby source. Path
+    /// is resolved relative to cwd; `.rb` is appended if the
+    /// input has no extension.
+    ///
+    /// This is the load-side companion to `cext_require`: the
+    /// caller in `kernel.rs`'s `require` arm tries `.rb` first
+    /// (if extension already says `.rb` or there's no extension
+    /// and a `.rb` file exists), falling back to the cext path
+    /// for native extensions. Lets pure-Ruby gem helper files
+    /// (msgpack's `lib/msgpack/packer.rb` `register_type`
+    /// wrapper, etc.) load cleanly without the caller having to
+    /// hand-roll the wrapper.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn require_ruby(&mut self, path_str: &str) -> Result<Value, Trap> {
+        use std::path::{Path, PathBuf};
+        let p = Path::new(path_str);
+        // Auto-`.rb` if the input has no extension.
+        let mut target: PathBuf = if p.extension().is_none() {
+            p.with_extension("rb")
+        } else {
+            p.to_path_buf()
+        };
+        if !target.exists() {
+            // Mirror CRuby behaviour for `require "foo"` when foo
+            // exists in cwd but the auto-extension path doesn't:
+            // fall back to the raw input. (Mostly defensive — the
+            // common cases are absolute paths or extensionless
+            // names that the `.rb` append catches.)
+            target = p.to_path_buf();
+        }
+        let canon = match std::fs::canonicalize(&target) {
+            Ok(p) => p,
+            Err(e) => return Err(self.trap(RubyError::RuntimeError {
+                msg: format!("require: cannot find {} ({})", target.display(), e),
+            })),
+        };
+        self.load_ruby_source_from_canon(canon)
+    }
+
+    /// Shared load body for `require` / `require_relative` once
+    /// the canonical path is resolved. Handles loaded-features
+    /// dedup, source read, parse, compile, frame push, dispatch
+    /// until completion. Returns `Bool(true)` on first load,
+    /// `Bool(false)` on a repeat, and propagates parse / load
+    /// errors as `Trap`.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn load_ruby_source_from_canon(
+        &mut self,
+        canon: std::path::PathBuf,
+    ) -> Result<Value, Trap> {
         if self.loaded_features.contains(&canon) {
             return Ok(Value::Bool(false));
         }
         let source = match std::fs::read_to_string(&canon) {
             Ok(s) => s,
             Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                msg: format!("require_relative: read {} failed: {}", canon.display(), e),
+                msg: format!("require: read {} failed: {}", canon.display(), e),
             })),
         };
         // Parse + AST translate. Errors surface as SyntaxError
@@ -462,7 +568,7 @@ impl Vm {
         // to the re-entrant require).
         self.loaded_features.insert(canon.clone());
         let entry = crate::compiler::compile_proto(
-            "<require_relative>".into(), vec![], &[prog], filename_rc,
+            "<require>".into(), vec![], &[prog], filename_rc,
             &mut self.protos, &mut self.interner, &mut self.cache_counter,
         );
         let cc = self.cache_counter as usize;
@@ -541,7 +647,7 @@ impl Vm {
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
                     let _cls = self.class_stack.pop()
-                        .expect("ICE: class_stack empty unwinding through class_eval (require_relative)");
+                        .expect("ICE: class_stack empty unwinding through class_eval (require/_relative)");
                     self.class_visibility_stack.pop();
                 }
             }
@@ -562,7 +668,7 @@ impl Vm {
             self.stack.truncate(f.base_sp);
             if f.is_class_body {
                 let cls = self.class_stack.pop()
-                    .expect("ICE: class_stack empty on method-return (require_relative)");
+                    .expect("ICE: class_stack empty on method-return (require/_relative)");
                 self.class_visibility_stack.pop();
                 self.stack.push(Value::Class(cls));
             } else if let Some(r) = f.swap_return {
