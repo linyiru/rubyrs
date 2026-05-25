@@ -2,11 +2,20 @@
 # Both rubyrs and CRuby must produce identical stdout.
 
 # Named block param: callee captures the block as data, calls
-# back via .call. No-block case binds Nil.
+# back via .call.
 def each_double(&blk)
   [1, 2, 3].each { |x| blk.call(x * 2) }
 end
 each_double { |y| puts y }
+
+# No-block case explicitly binds nil to the &blk slot. Verify
+# the binding directly rather than relying on the
+# "blk.call → NoMethodError" symptom.
+def show_blk(&blk)
+  puts blk.nil?
+end
+show_blk            # true
+show_blk { }        # false
 
 # block_given? alone (no &blk).
 def maybe(x)

@@ -96,6 +96,15 @@ impl Vm {
                 // surrounding method's block-arg, not the block's
                 // own slot. Toplevel `<main>` answers false (no
                 // method context, no block to inherit).
+                //
+                // Arity 0 — CRuby raises ArgumentError on any args
+                // (verified against `ruby -e`). Silently ignoring
+                // extras would hide caller bugs.
+                if !args.is_empty() {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                    })));
+                }
                 let has_block = self.frames.iter().rev()
                     .find(|f| !f.is_block && !f.is_class_body)
                     .map(|f| f.block_arg.is_some())

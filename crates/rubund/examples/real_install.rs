@@ -96,10 +96,14 @@ fn run_rubyrs_eval() -> Vec<GemRequirement> {
     let reqs_clone = requirements.clone();
     rt.register_fn("host_register_gem", move |args| {
         if let [Value::Str(name), Value::Str(version), Value::Str(group)] = args {
+            // `RStr::borrow()` now returns `Vec<u8>` (post-PR #53
+            // length-vs-bytesize work). Convert lossily for the
+            // String-typed GemRequirement fields — gem names /
+            // versions are ASCII in practice.
             reqs_clone.borrow_mut().push(GemRequirement {
-                name: name.borrow().clone(),
-                version: version.borrow().clone(),
-                group: group.borrow().clone(),
+                name: name.to_string_lossy(),
+                version: version.to_string_lossy(),
+                group: group.to_string_lossy(),
             });
         }
         Ok(Value::Nil)
