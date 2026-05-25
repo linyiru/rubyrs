@@ -886,7 +886,7 @@ pub unsafe extern "C" fn rb_define_method(
             class_joined_name: class_name,
             method_name,
             func,
-            arity: arity as i32,
+            arity,
         });
     });
 }

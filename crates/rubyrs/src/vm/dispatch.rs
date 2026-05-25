@@ -323,8 +323,8 @@ impl Vm {
             // on the same class, which works correctly.
             #[cfg(not(target_os = "wasi"))]
             {
-                if let Some(table) = self.cext_instance_methods.get(&cls.name) {
-                    if let Some(reg) = table.get(&name_id).cloned() {
+                if let Some(table) = self.cext_instance_methods.get(&cls.name)
+                    && let Some(reg) = table.get(&name_id).cloned() {
                         // Pin recv + args across the cext call
                         // (review #4 on PR #27). cext_dispatch may
                         // run maybe_gc during arg translation /
@@ -393,7 +393,6 @@ impl Vm {
                         self.stack.push(v);
                         return Ok(());
                     }
-                }
             }
         }
         // C-ext singleton dispatch: `BCrypt::Engine.__bc_crypt(args)`

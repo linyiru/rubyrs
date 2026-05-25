@@ -624,7 +624,7 @@ pub(crate) fn cext_dispatch(
                         // unsafe inheritance).
                         rubyrs_jmp_raise(
                             rubyrs_cext::raise::rb_eTypeError,
-                            b"wrong argument type (expected wrapped object)\0".as_ptr() as *const std::ffi::c_char,
+                            c"wrong argument type (expected wrapped object)".as_ptr(),
                         );
                     }
                 };
@@ -633,7 +633,7 @@ pub(crate) fn cext_dispatch(
                     None => {
                         rubyrs_jmp_raise(
                             rubyrs_cext::raise::rb_eTypeError,
-                            b"wrong argument type (object is not wrapped TypedData)\0".as_ptr() as *const std::ffi::c_char,
+                            c"wrong argument type (object is not wrapped TypedData)".as_ptr(),
                         );
                     }
                 };
