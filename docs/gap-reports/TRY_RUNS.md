@@ -45,9 +45,9 @@ RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 Third pass after PR #34 (`default args = any expression`) landed
 plus the subsequent Method-* / cext / GC-root-hole cleanup wave
 (#41 #45 #49 #51). Same 12 standalone files at the same pinned
-target commits. Diff vs the post-PR #30 re-run:
+target commits. Diff vs the second pass (post-PR #30) below:
 
-| File | Was (re-run) | Now | Change |
+| File | Was (second pass) | Now | Change |
 |---|---|---|---|
 | sinatra/middleware/logger.rb | E | **B** | E rule gone, but the file's line 3 `require "logger"` (hidden behind the line-8 literal-default-arg compile error) now fires first |
 | rake/linked_list.rb | E | **F** | E rule gone, file now reaches line 7 `include Enumerable` — `Enumerable` isn't registered, trips "wrong argument type NilClass (expected Module)" |
