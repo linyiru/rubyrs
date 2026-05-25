@@ -263,11 +263,18 @@ pub struct Config {
 /// back through [`Runtime::resolve_array`] / [`Runtime::resolve_hash`]
 /// (which clone).
 ///
-/// Mutability is deliberately omitted — the dispatch site holds
-/// `&mut Vm` for the duration of the host call, and the heap reads
-/// here borrow from inside that same `&mut`. Letting a host fn
-/// mutate the heap (or push more frames) would alias with the
-/// VM's borrow; see ADR 0013.
+/// Mutability is omitted by construction:
+/// - `HostCtx` exposes no mutating method.
+/// - The V2 dispatch path (see `Vm::invoke_host_fn`) deliberately
+///   does NOT set `CURRENT_VM_PTR`, so a v2 closure cannot reach a
+///   `&mut Vm` through the unsafe re-entry channel either.
+///
+/// Together these make the slices returned by `resolve_array` /
+/// `resolve_hash` valid for the entire closure body without further
+/// caveat — there is no path through which the heap can be mutated
+/// while a v2 closure is on the stack. Embed hosts MUST NOT leak
+/// the returned slices past the closure return (the lifetime
+/// already prevents this, but worth stating).
 pub struct HostCtx<'a> {
     heap: &'a heap::Heap,
 }
@@ -529,8 +536,13 @@ end
 
     /// Register a host function callable from Ruby code with `name(args)`.
     /// The function receives evaluated argument values and returns either
-    /// a `Value` or a `Trap`. Calling `register_fn` with the same name
-    /// replaces a previous registration.
+    /// a `Value` or a `Trap`.
+    ///
+    /// Calling `register_fn` (or [`Runtime::register_fn_v2`]) with the
+    /// same name replaces any previous registration — v1 and v2 share
+    /// a single slot per name. Class- or instance-attached methods
+    /// installed by a C extension live in independent dispatch tables
+    /// and are NOT affected by this call.
     pub fn register_fn<F>(&mut self, name: &str, f: F)
     where
         F: Fn(&[Value]) -> Result<Value, Trap> + 'static,
@@ -549,11 +561,14 @@ end
     /// `HostCtx::resolve_array` / `resolve_hash` borrow directly from
     /// the heap, no clone.
     ///
-    /// The ctx is read-only by design: mutating the heap from inside a
-    /// host fn would alias with the VM's `&mut self` at the dispatch
-    /// site (see ADR 0013). Re-entrant eval needs the cext path, not
-    /// this one. Replaces a previous v1 or v2 registration under the
-    /// same name.
+    /// The ctx is read-only by design (see the [`HostCtx`] doc for the
+    /// soundness argument). Re-entrant eval needs the cext path, not
+    /// this one.
+    ///
+    /// Replaces any previous v1 or v2 registration under the same name
+    /// (same slot as [`Runtime::register_fn`]). Class- or instance-
+    /// attached methods installed by a C extension live in independent
+    /// dispatch tables and are NOT affected by this call.
     pub fn register_fn_v2<F>(&mut self, name: &str, f: F)
     where
         F: Fn(&HostCtx, &[Value]) -> Result<Value, Trap> + 'static,

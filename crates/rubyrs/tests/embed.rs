@@ -162,6 +162,26 @@ fn register_fn_v2_replaces_prior_v1_registration() {
 }
 
 #[test]
+fn register_fn_replaces_prior_v2_registration() {
+    // Symmetric direction. Both register_fn / register_fn_v2 doc
+    // strings promise replacement either way; without this test a
+    // future map-split refactor (separate v1_fns / v2_fns maps)
+    // could keep a stale v2 closure live after the embedder
+    // re-registered with v1. Existing v1→v2 test above wouldn't
+    // catch that direction.
+    let mut rt = Runtime::new();
+    rt.register_fn_v2("answer", |_ctx, _args| Ok(Value::Int(99)));
+    let first = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(first, Value::Int(99)));
+
+    rt.register_fn("answer", |_| Ok(Value::Int(42)));
+    let second = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(second, Value::Int(42)),
+        "v1 registration should have replaced the prior v2 slot, got {:?}",
+        second);
+}
+
+#[test]
 fn singleton_class_closures_do_not_cycle_leak() {
     // Regression for PR #31 review (vm/step.rs:521): Method's
     // `defining_class` used to be `Rc<Class>`. For singleton

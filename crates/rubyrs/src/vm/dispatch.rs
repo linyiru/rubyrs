@@ -115,12 +115,26 @@ impl Vm {
 
 
 
-    /// Invoke a registered host fn (either v1 or v2 slot). For v1
-    /// the heap stays untouched; for v2 we borrow `&self.heap` into
-    /// a `HostCtx` so the closure can read `Value::Array` /
-    /// `Value::Hash` shapes. Both paths stash the Vm ptr via
-    /// `with_vm_ptr_set` so a cext-style re-entrant `rb_funcall`
-    /// (still v1-only today) can find the running VM. See ADR 0013.
+    /// Invoke a registered host fn (either v1 or v2 slot).
+    ///
+    /// V1 stashes `*mut Vm` via `with_vm_ptr_set` so a cext-style
+    /// re-entrant `rb_funcall` can find the running VM (ADR 0013).
+    /// V1 closures hold no Rust borrow of `self` during the call, so
+    /// the raw-ptr reborrow inside cext is the only access path and
+    /// aliasing is well-defined.
+    ///
+    /// V2 deliberately does NOT set `CURRENT_VM_PTR`. The V2 closure
+    /// holds a `HostCtx` that borrows `&self.heap` for the duration
+    /// of the call; if we also stashed a `*mut Vm` and a v2 closure
+    /// reached for it (today only via `unsafe` on a pub(crate)
+    /// thread-local — not exploitable externally), the resulting
+    /// `&mut Vm` reborrow would alias the live `&self.heap` borrow
+    /// and any heap mutation during the inner call could realloc
+    /// the backing `Vec<HeapObj>` and dangle slices returned by
+    /// `ctx.resolve_array` / `resolve_hash`. Skipping the ptr makes
+    /// "v2 closures cannot mutate the VM" a static guarantee instead
+    /// of an unenforced convention; cext bridges register as V1, so
+    /// nothing legitimate needs the ptr from the V2 arm.
     fn invoke_host_fn(&mut self, slot: HostFnSlot, args: &[Value]) -> Result<Value, Trap> {
         match slot {
             HostFnSlot::V1(host) => {
@@ -133,17 +147,8 @@ impl Vm {
                 { host(args) }
             }
             HostFnSlot::V2(host) => {
-                // Take the raw pointer first (the reborrow happens
-                // and ends on this line), then take `&self.heap` —
-                // raw ptrs don't track borrows, so the immutable
-                // heap borrow that follows is unrestricted.
-                #[cfg(not(target_os = "wasi"))]
-                let vm_ptr: *mut Vm = self;
                 let ctx = HostCtx::new(&self.heap);
-                #[cfg(not(target_os = "wasi"))]
-                { with_vm_ptr_set(vm_ptr, || host(&ctx, args)) }
-                #[cfg(target_os = "wasi")]
-                { host(&ctx, args) }
+                host(&ctx, args)
             }
         }
     }
