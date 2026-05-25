@@ -602,10 +602,15 @@ pub(crate) fn compile_expr(
             // `**kwrest` slot goes at the very end of the param
             // list so the existing kw_params block above stays
             // contiguous (invoke_method indexes by offset).
-            if let Some(krname) = kw_rest
-                && !krname.is_empty() {
-                    effective_params.push(krname.clone());
-                }
+            // Anonymous `**` (no name) still reserves the slot —
+            // it absorbs leftover kwargs but the body has no way
+            // to read them. Implemented with a synthesised
+            // `__kw_rest_anon` name so the invoke_method binding
+            // path uniformly treats both shapes.
+            if let Some(krname) = kw_rest {
+                let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
+                effective_params.push(slot_name);
+            }
             let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
@@ -617,10 +622,10 @@ pub(crate) fn compile_expr(
                 protos[proto_idx].rest_param = Some(rname.clone());
             }
             protos[proto_idx].kw_param_defaults = kw_lit_defaults;
-            if let Some(krname) = kw_rest
-                && !krname.is_empty() {
-                    protos[proto_idx].kw_rest_param = Some(krname.clone());
-                }
+            if let Some(krname) = kw_rest {
+                let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
+                protos[proto_idx].kw_rest_param = Some(slot_name);
+            }
             let name_id = interner.intern(name);
             if *is_singleton {
                 b.emit(Op::DefSingletonMethod(name_id, proto_idx as u32));
