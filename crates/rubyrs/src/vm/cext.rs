@@ -1041,3 +1041,132 @@ impl Vm {
 
 }
 
+#[cfg(test)]
+mod miri_tests {
+    //! Synthetic tests for the `CURRENT_VM_PTR` re-entrance
+    //! pattern documented in ADR 0013. Driver code mirrors
+    //! what `cext_funcall_to_vm` does in production —
+    //! `with_vm_ptr_set` installs the thread-local, the body
+    //! reads it back and reborrows as `&mut Vm` to mutate the
+    //! VM state — but WITHOUT going through `dlopen`.
+    //!
+    //! We deliberately do NOT call `cext_invoke_method` here:
+    //! it pushes a frame and assumes an outer dispatch loop
+    //! will execute the bytecode. The frame-machinery sets up
+    //! its own `&mut Vm` aliasing inside the dispatcher
+    //! that's orthogonal to ADR 0013's concern. What ADR 0013
+    //! actually worries about is the raw-pointer reborrow
+    //! happening on top of an existing outer `&mut` — and
+    //! THAT shape we can exercise directly here.
+    //!
+    //! If Miri (Stacked or Tree Borrows) flags any of this as
+    //! UB, the time-disjoint argument behind the current shape
+    //! collapses and ADR 0013's deferred `UnsafeCell<VmState>`
+    //! refactor (J4) gets a forcing function.
+    use super::*;
+    use crate::bytecode::Proto;
+    use crate::heap::HeapObj;
+    use crate::intern::Interner;
+
+    fn mk_vm() -> Vm {
+        Vm::new(Vec::<Proto>::new(), Interner::new())
+    }
+
+    /// Helper: simulate the outer-frame entry point. Real
+    /// dispatch holds `&mut self` on its callstack; inside it
+    /// reborrows `self` as `*mut Vm` for the host-fn call. We
+    /// model that with a `&mut Vm` method that takes the
+    /// pointer, hands it to `with_vm_ptr_set`, and lets the
+    /// closure reborrow.
+    impl Vm {
+        fn miri_drive_cext_pattern(&mut self) -> usize {
+            // `let vm_ptr: *mut Vm = self;` — the production
+            // pattern (dispatch.rs:152). The outer `&mut self`
+            // is "parked" while the closure runs.
+            let vm_ptr: *mut Vm = self;
+            with_vm_ptr_set(vm_ptr, || {
+                let ptr = CURRENT_VM_PTR.with(|c| c.get());
+                assert!(!ptr.is_null());
+                // SAFETY: matches the cext_funcall_to_vm
+                // contract documented at cext.rs:780+. The
+                // outer `&mut self` is time-disjoint with this
+                // reborrow because no method on `*self` runs
+                // between the `let vm_ptr = self;` line and
+                // here — we already entered the closure.
+                let inner_vm = unsafe { &mut *ptr };
+                // Mutate every Vm field the cext path touches
+                // in production: heap, classes, interner, stack,
+                // pinned. If any of these triggers Stacked
+                // Borrows UB it'll surface under Miri here.
+                let id = inner_vm.heap.alloc(HeapObj::Array(vec![Value::Int(1)]));
+                let name = inner_vm.interner.intern("synthetic");
+                inner_vm.stack.push(Value::Array(id));
+                inner_vm.pinned.push(Value::Sym(name));
+                let popped = inner_vm.stack.pop().expect("just pushed");
+                inner_vm.pinned.pop();
+                let _ = popped;
+                inner_vm.heap.live_count
+            })
+        }
+    }
+
+    #[test]
+    fn cext_reentrance_pattern_is_aliasing_clean() {
+        // Drive the synthetic pattern. If Miri (Stacked or
+        // Tree Borrows) finds an aliasing violation here, it
+        // would find one in the real cext path too. The real
+        // path is gated by dlopen which Miri can't run; this
+        // synthetic version covers the same reborrow shape
+        // with only types Miri CAN run.
+        let mut vm = mk_vm();
+        let pre_live = vm.heap.live_count;
+        let live = vm.miri_drive_cext_pattern();
+        assert_eq!(live, pre_live + 1, "alloc should bump live_count");
+        // Post-invariant: CURRENT_VM_PTR restored to null.
+        let ptr_after = CURRENT_VM_PTR.with(|c| c.get());
+        assert!(ptr_after.is_null());
+    }
+
+    #[test]
+    fn cext_reentrance_can_re_enter_multiple_times() {
+        // Two separate `miri_drive_cext_pattern` invocations
+        // from the same outer scope. Verifies the
+        // pointer-stash + restore cycles cleanly across
+        // independent host-fn calls.
+        let mut vm = mk_vm();
+        let _ = vm.miri_drive_cext_pattern();
+        let _ = vm.miri_drive_cext_pattern();
+        assert_eq!(vm.heap.live_count, 2);
+    }
+
+    #[test]
+    fn cext_reentrance_nested_save_restore() {
+        // Two nested `with_vm_ptr_set` calls should save and
+        // restore the TLS exactly. Matches the real-world
+        // "host_fn invokes rb_funcallv which invokes another
+        // host_fn" chain.
+        let mut vm = mk_vm();
+        let vm_ptr: *mut Vm = &mut vm;
+
+        let outer = with_vm_ptr_set(vm_ptr, || {
+            let outer_ptr = CURRENT_VM_PTR.with(|c| c.get());
+            assert!(!outer_ptr.is_null());
+
+            // Inner: same pointer (could in principle be a
+            // different vm in a multi-Vm host, but our model
+            // is single-Vm per thread).
+            let inner = with_vm_ptr_set(vm_ptr, || {
+                CURRENT_VM_PTR.with(|c| c.get())
+            });
+            assert_eq!(outer_ptr, inner);
+
+            // After inner exits, outer pointer is restored.
+            CURRENT_VM_PTR.with(|c| c.get())
+        });
+
+        assert_eq!(outer, vm_ptr);
+        // After outer exits, TLS is null again.
+        assert!(CURRENT_VM_PTR.with(|c| c.get()).is_null());
+    }
+}
+

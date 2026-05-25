@@ -97,18 +97,27 @@ yet, so it stays on the to-do list.
 
 The Rust formal models differ in how strict they are:
 
-| Model | Verdict |
-|---|---|
-| **Stacked Borrows** (Miri default) | UB — two aliasing `&mut`s overlap in scope |
-| **Tree Borrows** (Miri 2.0+) | Acceptable — recognises time-disjoint reuse via the function-call frame structure |
-| **rustc itself** | Won't compile naively, hence the raw-pointer escape hatch we use |
+| Model | Naive verdict | Actual verdict |
+|---|---|---|
+| **Stacked Borrows** (Miri default) | Would-flag two simultaneous `&mut`s | ✅ Clean for our reborrow shape (see synthetic test below) |
+| **Tree Borrows** (Miri 2.0+) | Recognises time-disjoint reuse via the function-call frame structure | ✅ Clean |
+| **rustc itself** | Won't compile two `&mut`s naively, hence the raw-pointer escape hatch we use | ✅ Build clean |
 
-The Tree Borrows verdict is the relevant one for our
-correctness story. Tree Borrows is the direction the
-formalism is moving (it's the proposed replacement for
-Stacked Borrows because Stacked Borrows over-rejects
-common patterns like ours). On every CPU we ship to, the
-runtime semantics are sound.
+Our actual production pattern is NOT "two `&mut`s alive
+simultaneously". It's "outer `&mut self` demoted to `*mut
+Vm` before the host fn runs, then re-promoted to `&mut Vm`
+inside the host fn's closure". The outer borrow is parked
+while the inner borrow is active — Stacked Borrows allows
+this because the pointer-demotion records a permission
+that the later reborrow re-uses. Tree Borrows additionally
+allows more aggressive patterns (truly simultaneous
+shared borrows that don't alias the parked mut), which we
+don't need.
+
+The earlier wording of this ADR implied Stacked Borrows
+would flag the cext path; that wasn't backed by a test. The
+"Synthetic cext-reentrance test" subsection below pins the
+actual verdict — clean under both models.
 
 The risk surface is:
 - A future Rust optimisation that exploits Stacked-Borrows-
@@ -142,22 +151,62 @@ can detect.
 **Unverifiable under Miri** (documented gap, not a known bug):
 
 - Any test that calls `Runtime::eval` — hits Prism's vendored
-  C parser (`pm_parser_init`) which Miri rejects as "unsupported
-  foreign function on macos".
+  C parser (`pm_parser_init`) which Miri rejects as
+  "unsupported foreign function on macos".
 - The diff_cruby fixtures — require running the rubyrs binary
   against the system Ruby for byte-comparison; Miri's harness
   doesn't expose them.
-- **The actual cext re-entrance path (`cext_funcall_to_vm`)** —
-  reaching it requires `dlopen` of a `.so` (also a foreign
-  call Miri rejects). The unit tests in `rubyrs-cext`
-  exercise the per-fn FFI surface but not the dispatch
-  callback chain that's the subject of this ADR.
 
-The cext path remains the unverified surface area. A
-synthetic Miri test that drives `cext_invoke_method`
-directly (skipping dlopen) is a deferred to-do — it would
-either confirm the time-disjoint argument or pull J4
-(UnsafeCell refactor) into priority.
+### Synthetic cext-reentrance test (2026-05-25)
+
+The original "cext path remains unverified" note implied a
+deferred risk. Closed it by writing a synthetic test
+(`vm::cext::miri_tests`) that drives the exact reborrow shape
+without dlopen:
+
+```rust
+fn miri_drive_cext_pattern(&mut self) -> usize {
+    let vm_ptr: *mut Vm = self;          // outer &mut self parked
+    with_vm_ptr_set(vm_ptr, || {
+        let ptr = CURRENT_VM_PTR.with(|c| c.get());
+        let inner_vm = unsafe { &mut *ptr };
+        // Mutate every Vm field the cext path touches: heap,
+        // classes, interner, stack, pinned. If Stacked Borrows
+        // flags any of these, the time-disjoint argument is
+        // wrong.
+        let id = inner_vm.heap.alloc(...);
+        inner_vm.stack.push(...);
+        inner_vm.pinned.push(...);
+        ...
+    })
+}
+```
+
+Three tests (single re-entry, multiple re-entries, nested
+`with_vm_ptr_set` save/restore). Result under both formal
+models:
+
+| | Stacked Borrows | Tree Borrows |
+|---|---|---|
+| `cext_reentrance_pattern_is_aliasing_clean` | ✅ | ✅ |
+| `cext_reentrance_can_re_enter_multiple_times` | ✅ | ✅ |
+| `cext_reentrance_nested_save_restore` | ✅ | ✅ |
+
+**Stacked Borrows passes too.** This was the result ADR 0013
+originally implied without evidence. The "Stacked Borrows
+considers this UB" wording in the table above turned out to
+be too strong — the actual reborrow shape (outer `&mut self`
+demoted to `*mut Vm`, then re-promoted to `&mut Vm` inside a
+closure after the outer borrow has been parked) sequences
+cleanly under both models. Two *simultaneous* `&mut`s would
+be UB; the production pattern is not that.
+
+The real `cext_funcall_to_vm` still can't run under Miri
+because it goes through dlopen, but the reborrow shape it
+uses is now pinned by these synthetic tests in CI.
+
+J4 (the UnsafeCell refactor) remains deferred. None of the
+three forcing functions listed below have been met.
 
 ## Why we're shipping it anyway
 

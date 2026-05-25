@@ -379,8 +379,15 @@ jobs:
           cargo +nightly miri test --lib -p rubyrs vm::gc::
           cargo +nightly miri test --lib -p rubyrs vm::raise::
 
-      - name: Miri (Stacked Borrows) — cext FFI negative tests
-        run: cargo +nightly miri test -p rubyrs-cext --test safety_negative
+      - name: Miri (Stacked Borrows) — cext reentrance + FFI tests
+        # vm::cext::miri_tests covers the CURRENT_VM_PTR
+        # reborrow shape that the actual cext path uses (ADR
+        # 0013); rubyrs-cext::safety_negative covers per-fn
+        # FFI surface. Neither hits dlopen, so both are
+        # Miri-runnable.
+        run: |
+          cargo +nightly miri test --lib -p rubyrs vm::cext::miri_tests::
+          cargo +nightly miri test -p rubyrs-cext --test safety_negative
 
       - name: Miri (Tree Borrows) — same subset
         env:
@@ -389,4 +396,5 @@ jobs:
           cargo +nightly miri test --lib -p rubyrs vm::lookup::
           cargo +nightly miri test --lib -p rubyrs vm::gc::
           cargo +nightly miri test --lib -p rubyrs vm::raise::
+          cargo +nightly miri test --lib -p rubyrs vm::cext::miri_tests::
           cargo +nightly miri test -p rubyrs-cext --test safety_negative
