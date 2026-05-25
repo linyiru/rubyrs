@@ -52,8 +52,10 @@ same pinned target commits. Diff vs the third pass:
 | tilt/string.rb | C | **D** | PR #66's `require_relative` makes line 12 reachable; now hits `SingletonClassNode` (`class << self`) + `GlobalVariableReadNode` — the AST-level next layer down |
 | (all 11 other files) | — | — | unchanged — same failure category as the third pass |
 
-Pass count: **5 → 5** (out of 12, unchanged for the third time
-in a row).
+Pass count: **5 → 5** (out of 12 — third consecutive pass at
+5/12; the only growth across the session was the
+first→second-pass jump from 3 to 5, when PR #30's
+ConstantWriteNode unlocked rake/scope.rb + bundler/version.rb).
 
 ### What the C → D shift means
 
@@ -66,11 +68,15 @@ in the data — Cat C dropped to 0, the file it gated shifted
 into Cat D (next blocker is back to AST).
 
 Confirms: **winning at the AST frontier now requires
-multi-step investment**. Each "stacked" file needs (in this case) at
-least three independent capabilities — bare ConstantWrite
-(#30), default args (#34), `require_relative` (#66) — before
-its NEXT (AST) blocker surfaces. tilt/string.rb is now at the
-fourth tier (`class << self`).
+multi-step investment for the deeply-stacked files**. Other
+files in this dataset were one capability away from passing
+(bundler/version.rb and rake/scope.rb both went A after #30
+alone; sinatra/middleware/logger went E → B after #34's
+default-args relaxation). tilt/string.rb is the outlier: it
+sat behind three layers (require_relative → class << self
+→ global vars) before any pass-count movement is possible.
+The fourth pass now visibly puts it at the second of three
+remaining tiers (`class << self`).
 
 ### Cumulative category histogram
 
@@ -88,9 +94,7 @@ After 4 passes:
 
 Net direction: the language has absorbed every blocker that
 was AST-shaped at the start of the session AND `require_relative`,
-but the **C-ext require wall (Cat B)** and the **
-"project-internal helper / undefined module" issues (Cat F)**
-are now load-bearing. Both are non-AST and need infrastructure
+but the **C-ext require wall (Cat B)** and the **"project-internal helper / undefined module" issues (Cat F)** are now load-bearing. Both are non-AST and need infrastructure
 (Logger built-in / Enumerable register-as-Module / C-ext
 require chain) to fix.
 
@@ -205,9 +209,11 @@ that the gap reports were generated against):
 > against the first-pass data and are kept as the historical
 > record (body unchanged; the legend heading was labelled
 > "(first pass)" for clarity). After the **fourth pass** above:
-> Category D = 1 (was 3 — tilt/string.rb came back to D from C
-> after PR #66 landed `require_relative` and exposed its next
-> AST blocker, `class << self`). Category E = 0
+> Category D = 1 (was 3 — the original three D files all moved
+> to A or F; tilt/string.rb newly entered D after PR #66's
+> `require_relative` exposed its next blocker, `class << self`,
+> a different AST node than the original D-class
+> ConstantWriteNode). Category E = 0
 > (PR #34 default-args-any-expression). Category C = 0
 > (PR #66 require_relative). The "Phase 3 step 1"
 > ConstantPathWriteNode half of the original plan has also
