@@ -15,3 +15,6 @@ crates/rubyrs/examples/self-cext/self_test.dll
 crates/rubyrs/examples/callback-cext/callback_ext.so
 crates/rubyrs/examples/callback-cext/callback_ext.bundle
 crates/rubyrs/examples/callback-cext/callback_ext.dll
+crates/rubyrs/examples/raise-cext/raise_ext.so
+crates/rubyrs/examples/raise-cext/raise_ext.bundle
+crates/rubyrs/examples/raise-cext/raise_ext.dll
