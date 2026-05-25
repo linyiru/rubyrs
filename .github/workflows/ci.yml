@@ -63,17 +63,21 @@ jobs:
 
       - name: Verify cext example bundles build
         # Belt-and-suspenders: even if the integration tests changed
-        # paths or were skipped, this step independently runs both
-        # cext build scripts and asserts the .bundle/.so artifact
-        # got produced. Without this a partial regression in build.sh
+        # paths or were skipped, this step independently runs each
+        # cext build script and asserts the .bundle/.so artifact got
+        # produced. Without this a partial regression in build.sh
         # (e.g. a missing -D flag) could ship as "tests passed".
         run: |
           set -euo pipefail
           bash crates/rubyrs/examples/hello-cext/build.sh
           bash crates/rubyrs/examples/bcrypt-cext/build.sh
+          bash crates/rubyrs/examples/self-cext/build.sh
+          bash crates/rubyrs/examples/callback-cext/build.sh
           ext=$([ "$(uname -s)" = "Darwin" ] && echo bundle || echo so)
           test -f "crates/rubyrs/examples/hello-cext/hello.$ext"
           test -f "crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.$ext"
+          test -f "crates/rubyrs/examples/self-cext/self_test.$ext"
+          test -f "crates/rubyrs/examples/callback-cext/callback_ext.$ext"
 
   wasm:
     name: Build (wasm32-wasip1)
