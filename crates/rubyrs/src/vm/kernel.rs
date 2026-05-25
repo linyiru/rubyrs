@@ -448,7 +448,16 @@ impl Vm {
             n_given_positional: 0,
             rescues: vec![],
         });
-        self.dispatch_until(depth_before)?;
+        // Roll the loaded-features mark back on error so a retry
+        // can attempt the load again — matches CRuby semantics
+        // (a failed require/require_relative does NOT leave the
+        // feature marked as loaded). The mid-execution mark is
+        // still needed for circular-require correctness; we just
+        // can't leave it in place if the body trapped.
+        if let Err(trap) = self.dispatch_until(depth_before) {
+            self.loaded_features.remove(&canon);
+            return Err(trap);
+        }
         // The required file's last expression sits on top of the
         // operand stack (Op::Return pushed it before the frame
         // popped). Discard — `require_relative` returns the

@@ -20,6 +20,8 @@ puts g.call("there")
 result2 = require_relative "require_relative_lib"
 puts result2
 
-# Auto `.rb` extension on bare names.
-result3 = require_relative "require_relative_lib"  # same file
+# Explicit `.rb` extension resolves to the same canonical path
+# as the bare name above, so it dedupes via loaded_features and
+# returns false (no re-execution).
+result3 = require_relative "require_relative_lib.rb"
 puts result3
