@@ -217,3 +217,4 @@ fn run_diff(name: &str) {
 #[test] fn singleton_class_body() { run_diff("singleton_class_body"); }
 #[test] fn global_variables() { run_diff("global_variables"); }
 #[test] fn op_assign_extended() { run_diff("op_assign_extended"); }
+#[test] fn mutex_stub() { run_diff("mutex_stub"); }

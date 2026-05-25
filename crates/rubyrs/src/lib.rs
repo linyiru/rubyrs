@@ -637,6 +637,35 @@ end
 ## empty; methods are not defined here.
 class File
 end
+## Mutex — rubyrs is single-threaded, so the entire lock surface
+## degenerates to "run the block / no-op". Real codebases use
+## `LOCK = Mutex.new` + `LOCK.synchronize { ... }` to wrap
+## compilation caches (tilt, sinatra, dry-struct all do this);
+## with one thread the critical section is already exclusive.
+## `try_lock` returns true (the lock is always available);
+## `locked?` returns false (we never actually hold one).
+## Re-entrant `synchronize` "just works" because there's no
+## real lock state to deadlock against.
+class Mutex
+  def synchronize
+    yield
+  end
+  def lock
+    self
+  end
+  def unlock
+    self
+  end
+  def try_lock
+    true
+  end
+  def locked?
+    false
+  end
+  def owned?
+    false
+  end
+end
 ## Comparable — a stub class (we don't have Modules in this subset)
 ## that holds the six derived comparison methods plus `between?`
 ## and `clamp`, each defined in terms of `<=>`. `include Comparable`
