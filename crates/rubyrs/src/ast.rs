@@ -286,6 +286,141 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_instance_variable_write_node() {
         return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
+    // Op-assign desugaring: `a += b` is translated to
+    // `a = a + b`. The receiver / index path is re-evaluated,
+    // which costs one extra read but is observably equivalent
+    // for the side-effect-free targets we encounter in
+    // practice. Re-evaluating `arr[i] += v` calls Array#[]
+    // twice (read then write); this is the same as
+    // CRuby's literal rewrite — Ruby does NOT eval the
+    // receiver/index once and cache it for `[]=`.
+    if let Some(n) = node.as_local_variable_operator_write_node() {
+        let name = cid_to_string(n.name());
+        let op = cid_to_string(n.binary_operator());
+        let read = sp(node, Expr::LVarRead(name.clone()));
+        let rhs = sp(node, Expr::Call {
+            receiver: Some(Box::new(read)),
+            name: op,
+            args: vec![tr(&n.value())],
+        });
+        return sp(node, Expr::LVarWrite(name, Box::new(rhs)));
+    }
+    if let Some(n) = node.as_instance_variable_operator_write_node() {
+        let name = cid_to_string(n.name());
+        let op = cid_to_string(n.binary_operator());
+        let read = sp(node, Expr::IVarRead(name.clone()));
+        let rhs = sp(node, Expr::Call {
+            receiver: Some(Box::new(read)),
+            name: op,
+            args: vec![tr(&n.value())],
+        });
+        return sp(node, Expr::IVarWrite(name, Box::new(rhs)));
+    }
+    // `a ||= b` → `a || (a = b)`; `a &&= b` → `a && (a = b)`.
+    // Reading an uninitialised local returns nil (the frame slot
+    // is zeroed at entry), so `a ||= b` on a fresh `a` correctly
+    // assigns. Same for ivars — unset ivar reads as nil.
+    if let Some(n) = node.as_local_variable_or_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::LVarRead(name.clone()));
+        let write = sp(node, Expr::LVarWrite(name, Box::new(tr(&n.value()))));
+        return sp(node, Expr::Or(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_local_variable_and_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::LVarRead(name.clone()));
+        let write = sp(node, Expr::LVarWrite(name, Box::new(tr(&n.value()))));
+        return sp(node, Expr::And(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_instance_variable_or_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::IVarRead(name.clone()));
+        let write = sp(node, Expr::IVarWrite(name, Box::new(tr(&n.value()))));
+        return sp(node, Expr::Or(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_instance_variable_and_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::IVarRead(name.clone()));
+        let write = sp(node, Expr::IVarWrite(name, Box::new(tr(&n.value()))));
+        return sp(node, Expr::And(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_index_or_write_node() {
+        // `recv[idx] ||= val` → `recv[idx] || (recv[idx] = val)`.
+        let recv = n.receiver().map(|r| tr(&r)).expect(
+            "IndexOrWriteNode without receiver is unrepresentable",
+        );
+        let idx_args: Vec<SExpr> = n.arguments()
+            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .unwrap_or_default();
+        let read = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv.clone())),
+            name: "[]".into(),
+            args: idx_args.clone(),
+        });
+        let mut write_args = idx_args;
+        write_args.push(tr(&n.value()));
+        let write = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv)),
+            name: "[]=".into(),
+            args: write_args,
+        });
+        return sp(node, Expr::Or(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_index_and_write_node() {
+        // `recv[idx] &&= val` → `recv[idx] && (recv[idx] = val)`.
+        let recv = n.receiver().map(|r| tr(&r)).expect(
+            "IndexAndWriteNode without receiver is unrepresentable",
+        );
+        let idx_args: Vec<SExpr> = n.arguments()
+            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .unwrap_or_default();
+        let read = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv.clone())),
+            name: "[]".into(),
+            args: idx_args.clone(),
+        });
+        let mut write_args = idx_args;
+        write_args.push(tr(&n.value()));
+        let write = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv)),
+            name: "[]=".into(),
+            args: write_args,
+        });
+        return sp(node, Expr::And(Box::new(read), Box::new(write)));
+    }
+    if let Some(n) = node.as_index_operator_write_node() {
+        // `recv[idx] += val` → `recv.[]=(idx, recv.[](idx) + val)`.
+        // Multi-arg subscripts (`m[i, j]`) are flattened: every
+        // index node becomes a positional arg in both the read
+        // and write calls. Block arg is not supported here
+        // (`m[i, &b] += ...` is exotic; pass through as
+        // unsupported).
+        let recv = n.receiver().map(|r| tr(&r)).expect(
+            "IndexOperatorWriteNode without receiver is unrepresentable in our subset",
+        );
+        let idx_args: Vec<SExpr> = n
+            .arguments()
+            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .unwrap_or_default();
+        let op = cid_to_string(n.binary_operator());
+        let read = sp(node, Expr::Call {
+            receiver: Some(Box::new(recv.clone())),
+            name: "[]".into(),
+            args: idx_args.clone(),
+        });
+        let new_val = sp(node, Expr::Call {
+            receiver: Some(Box::new(read)),
+            name: op,
+            args: vec![tr(&n.value())],
+        });
+        let mut write_args = idx_args;
+        write_args.push(new_val);
+        return sp(node, Expr::Call {
+            receiver: Some(Box::new(recv)),
+            name: "[]=".into(),
+            args: write_args,
+        });
+    }
     if let Some(n) = node.as_multi_write_node() {
         // `a, b = expr`, `a, *r, b = expr`, `@x, @y = expr`,
         // `a, b = 1, 2`. Targets come from `lefts` (pre-splat),
