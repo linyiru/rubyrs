@@ -1309,10 +1309,22 @@ impl Vm {
 
         // captured[0] = the BoundMethod; captured[1] left to
         // invoke_block to populate with the rest Array.
+        //
+        // Pin the BoundMethod across maybe_gc — the Rc<RefCell<Vec>>
+        // we just built is a Rust-local with no GC root yet (the
+        // Block that would own it isn't alloc'd until after the
+        // maybe_gc). Without the pin, STRESS_GC sweeps the
+        // BoundMethod slot between Vec construction and Block alloc;
+        // the new Block alloc reuses the freed slot, and the
+        // captured BoundMethod ObjId silently points at the Block
+        // itself — invoke_block then panics with "BoundMethod slot
+        // holds non-BoundMethod" when `.call` dispatches.
         let captured = Rc::new(RefCell::new(vec![Value::BoundMethod(bm_id), Value::Nil]));
-        self.maybe_gc();
-        self.check_alloc()?;
-        let id = self.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
+        let mut g = crate::vm::PinGuard::new(self);
+        g.pin(Value::BoundMethod(bm_id));
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let id = g.vm.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
             proto_idx,
             captured,
             self_val: Value::Nil,
