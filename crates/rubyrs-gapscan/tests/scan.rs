@@ -80,6 +80,10 @@ fn scan_path(p: PathBuf) -> Report {
 fn classify_returns_expected_for_known_classes() {
     assert_eq!(classify("CallNode"), Classification::Supported);
     assert_eq!(classify("IfNode"), Classification::Supported);
+    // UnlessNode landed as Supported (syntax sugar for `if !`,
+    // swapped branches inside ast.rs). Pinned here as a regression
+    // guard.
+    assert_eq!(classify("UnlessNode"), Classification::Supported);
     assert_eq!(classify("ArgumentsNode"), Classification::RidesAlong);
     assert_eq!(classify("RescueNode"), Classification::RidesAlong);
     assert_eq!(classify("LambdaNode"), Classification::Missing);
@@ -112,23 +116,29 @@ fn brewfile_example_is_fully_inside_subset() {
 }
 
 #[test]
-fn fixture_exercises_three_missing_classes() {
+fn fixture_exercises_exact_missing_class_set() {
     let report = scan_path(fixture("missing_features.rb"));
-    let names: Vec<&str> = report
+    let names: std::collections::BTreeSet<&str> = report
         .missing_sorted()
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    // Exact set, exact counts.
-    assert!(names.contains(&"LambdaNode"), "got {names:?}");
-    assert!(names.contains(&"ConstantWriteNode"), "got {names:?}");
-    assert!(names.contains(&"RegularExpressionNode"), "got {names:?}");
+    // Exact set, exact counts. With Module + extend now Supported
+    // on master, the Missing exemplars shifted: LambdaNode (`->`
+    // lambdas) and RegularExpressionNode (bare `/.../`). Both have
+    // no Missing children — clean tripwires (unlike `case/when`
+    // which used to pull WhenNode along with it).
+    let expected: std::collections::BTreeSet<&str> =
+        ["LambdaNode", "ConstantWriteNode", "RegularExpressionNode"]
+            .into_iter()
+            .collect();
+    assert_eq!(names, expected, "Missing-class set drifted");
     for cls in ["LambdaNode", "ConstantWriteNode", "RegularExpressionNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
     // Sanity: at least one Supported node from the body (DefNode,
-    // ReturnNode, etc.) — the test isn't trivially "everything missing".
+    // IntegerNode, etc.) — the test isn't trivially "everything missing".
     assert!(report.supported_total() > 0);
 }
 
@@ -195,6 +205,54 @@ fn diff_detects_closed_and_new_gaps() {
     assert_eq!(d.missing_delta, -3);
     assert_eq!(d.closed_missing_classes, vec![("LambdaNode".to_string(), 5)]);
     assert_eq!(d.new_missing_classes, vec![("RegularExpressionNode".to_string(), 2)]);
+}
+
+#[test]
+fn diff_honours_scan_time_classification_for_cross_version_runs() {
+    // The UnlessNode-landing PR exposed this bug: diff() used to
+    // re-classify both sides with today's classify(), so a feature
+    // that moved a class from Missing → Supported between scans
+    // looked like a no-op. Now NodeStat carries a frozen
+    // `scan_time_classification`; this test pins the cross-version
+    // semantics by constructing reports as if scanned by two
+    // different gapscan binaries.
+    use rubyrs_gapscan::NodeStat;
+    let mut before = Report::default();
+    before.total_nodes = 10;
+    // `CallNode` is a stand-in here: imagine a node class that
+    // counted as Missing at "before" scan time and was reclassified
+    // Supported later (just like `UnlessNode` actually did between
+    // PR #7 and master's unless landing). We force scan-time
+    // Missing on the before side and Supported on the after side to
+    // simulate that without depending on which classes are
+    // currently Missing.
+    before.histogram.insert(
+        "CallNode".to_string(),
+        NodeStat {
+            count: 4,
+            scan_time_classification: Some(Classification::Missing),
+            ..Default::default()
+        },
+    );
+    // The "after" scan is on the same source but a newer rubyrs:
+    // same CallNode count, but now classified Supported.
+    let mut after = Report::default();
+    after.total_nodes = 10;
+    after.histogram.insert(
+        "CallNode".to_string(),
+        NodeStat {
+            count: 4,
+            scan_time_classification: Some(Classification::Supported),
+            ..Default::default()
+        },
+    );
+
+    let d = diff(&before, &after);
+    // Before: 4 missing, 0 supported.  After: 0 missing, 4 supported.
+    assert_eq!(d.missing_delta, -4);
+    assert_eq!(d.supported_delta, 4);
+    assert_eq!(d.closed_missing_classes, vec![("CallNode".to_string(), 4)]);
+    assert!(d.new_missing_classes.is_empty());
 }
 
 #[test]

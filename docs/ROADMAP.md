@@ -31,21 +31,36 @@ reports: [`docs/gap-reports/`](gap-reports/README.md).
 
 | Codebase | Shape | % Supported (AST) | #1 missing |
 |---|---|---:|---|
-| Jekyll `lib/` | static-site framework | **81.65%** | `ModuleNode` (×145) |
-| Liquid `lib/` | template engine | **81.16%** | `ConstantWriteNode` (×141) |
-| Sinatra `lib/` | web DSL | **79.85%** | `BlockArgumentNode` (×65) |
-| dry-struct `lib/` | modern data DSL | **80.13%** | `ModuleNode` (×16) |
-| Rake `lib/` | task DSL | **80.87%** | `ModuleNode` (×52) |
+| Jekyll `lib/` | static-site framework | **84.03%** | `ConstantWriteNode` (×70) |
+| Liquid `lib/` | template engine | **83.07%** | `ConstantWriteNode` (×141) |
+| Sinatra `lib/` | web DSL | **82.46%** | `BlockParameterNode` (×58) |
+| dry-struct `lib/` | modern data DSL | **82.38%** | `BlockParameterNode` (×11) |
+| Rake `lib/` | task DSL | **83.30%** | `RegularExpressionNode` (×42) |
 
-**Headline (n=5):** all five hover at 79–82% Supported regardless
-of codebase shape — the remaining gap is the actual subset edge,
-not project-specific noise. **`ModuleNode` is #1 in 3/5 scans
-(and #2 in Liquid)**, validating Near term #4 below as the highest-
-leverage feature. The **block-parameter family** (`BlockArgumentNode`,
-`BlockParameterNode`, `RestParameterNode`, `SplatNode`) dominates
-Sinatra and ranks high in dry-struct + Rake — runner-up priority,
-matters especially for DSL frameworks. **`UnlessNode`** sits in
-the top 5 of 4/5 scans — cheap syntax sugar with broad reach.
+**Headline (n=5):** all five sit at 82–84% Supported regardless of
+codebase shape — the remaining gap is the actual subset edge, not
+project-specific noise. The previous #1 blocker `ModuleNode`
+(which dominated 3/5 scans at PR #7 baseline) is now Supported on
+master — biggest single feature impact gapscan has measured.
+Today's top blockers are diverse: `ConstantWriteNode` (Jekyll,
+Liquid — top-level `FOO = ...`), `BlockParameterNode` (Sinatra,
+dry-struct — `&block` params), `RegularExpressionNode` (Rake).
+The **block-parameter family** (`BlockParameterNode`,
+`RestParameterNode`, `SplatNode`) is now the most distinct
+remaining theme on DSL-shaped codebases.
+
+Master moved the band up 1.9–2.6 pp from the PR #7 baseline
+(79–82%) by landing a feature batch (`unless`/`until`, `**`, more
+`Hash`/`String`/`Float` methods, `Kernel#p`, visibility,
+op-assigns, `Range`/`Comparable`/`String#match`, inline `rescue`
+modifier, `__method__`, `String#[]=`, Inspect round-out,
+`&:method_name` symbol-to-proc, `case`/`when` with
+`Range#===` / `Class#===`, **`Module` + `extend`**,
+`Kernel#Integer`/`Float`/`String`). The two highest-impact landings
+were `Module` (Jekyll −145, Rake −52, Liquid −74) and
+`&:method_name` (Sinatra +0.81 pp because `BlockArgumentNode` was
+its #1 blocker). Per-feature impact is now measurable via
+`gapscan diff` — see the gap-reports README.
 
 Caveat: the AST view *under*-states the gap — many runtime
 features (`require`, `attr_accessor`, `include`, `private`) parse

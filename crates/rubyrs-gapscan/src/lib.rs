@@ -35,6 +35,25 @@ pub struct NodeStat {
     pub first_example: Option<String>,
     /// Path of the first file the class appeared in (relative).
     pub first_file: Option<PathBuf>,
+    /// Classification recorded at scan time. `None` for Reports
+    /// built in-process (the live `classify()` is the source of
+    /// truth there) and for legacy JSON reports written before
+    /// `parse_json` started reading the field. Set when loaded
+    /// from JSON so `diff()` can compare two Reports against the
+    /// classifier that produced each — without this, a feature
+    /// that moves a class from Missing to Supported between scans
+    /// looks like a no-op to `diff()` (both before AND after get
+    /// reclassified with today's `classify()`).
+    pub scan_time_classification: Option<Classification>,
+}
+
+impl NodeStat {
+    /// What this entry counted as at scan time. Falls back to the
+    /// live classifier when no scan-time value was recorded.
+    pub fn effective_classification(&self, class_name: &str) -> Classification {
+        self.scan_time_classification
+            .unwrap_or_else(|| classify(class_name))
+    }
 }
 
 /// Per-method call counts, split by call shape.
@@ -119,42 +138,34 @@ pub struct Report {
 
 impl Report {
     pub fn supported_total(&self) -> u64 {
-        self.histogram
-            .iter()
-            .filter(|(k, _)| classify(k) == Classification::Supported)
-            .map(|(_, v)| v.count)
-            .sum()
+        self.totals_for(Classification::Supported)
     }
     pub fn rides_along_total(&self) -> u64 {
-        self.histogram
-            .iter()
-            .filter(|(k, _)| classify(k) == Classification::RidesAlong)
-            .map(|(_, v)| v.count)
-            .sum()
+        self.totals_for(Classification::RidesAlong)
     }
     pub fn missing_total(&self) -> u64 {
+        self.totals_for(Classification::Missing)
+    }
+    fn totals_for(&self, want: Classification) -> u64 {
         self.histogram
             .iter()
-            .filter(|(k, _)| classify(k) == Classification::Missing)
+            .filter(|(k, stat)| stat.effective_classification(k) == want)
             .map(|(_, v)| v.count)
             .sum()
     }
     /// Returns missing entries sorted by descending count.
     pub fn missing_sorted(&self) -> Vec<(&String, &NodeStat)> {
-        let mut v: Vec<_> = self
-            .histogram
-            .iter()
-            .filter(|(k, _)| classify(k) == Classification::Missing)
-            .collect();
-        v.sort_by(|(_, a), (_, b)| b.count.cmp(&a.count));
-        v
+        self.entries_for(Classification::Missing)
     }
     /// Returns supported entries sorted by descending count.
     pub fn supported_sorted(&self) -> Vec<(&String, &NodeStat)> {
+        self.entries_for(Classification::Supported)
+    }
+    fn entries_for(&self, want: Classification) -> Vec<(&String, &NodeStat)> {
         let mut v: Vec<_> = self
             .histogram
             .iter()
-            .filter(|(k, _)| classify(k) == Classification::Supported)
+            .filter(|(k, stat)| stat.effective_classification(k) == want)
             .collect();
         v.sort_by(|(_, a), (_, b)| b.count.cmp(&a.count));
         v
@@ -879,6 +890,18 @@ fn classification_str(c: Classification) -> &'static str {
     }
 }
 
+/// Inverse of [`classification_str`]. Returns `None` for any other
+/// string so unknown / future variants don't quietly degrade into a
+/// surprise category.
+fn classification_from_str(s: &str) -> Option<Classification> {
+    match s {
+        "Supported" => Some(Classification::Supported),
+        "RidesAlong" => Some(Classification::RidesAlong),
+        "Missing" => Some(Classification::Missing),
+        _ => None,
+    }
+}
+
 /// Parse a JSON report previously produced by [`render_json`].
 ///
 /// Validates the `tool` and `schema_version` envelope so unrelated
@@ -930,6 +953,14 @@ pub fn parse_json(text: &str) -> Result<Report, String> {
                 count: item["count"].as_u64().unwrap_or(0),
                 first_example: item["first_example"].as_str().map(|s| s.to_string()),
                 first_file: item["first_file"].as_str().map(PathBuf::from),
+                // Pull the scan-time classification when present so
+                // diff() honours what each report meant at scan
+                // time. Pre-this-field reports default to None and
+                // `effective_classification` falls back to live
+                // classify() — back-compat preserved.
+                scan_time_classification: item["classification"]
+                    .as_str()
+                    .and_then(classification_from_str),
             };
             report.histogram.insert(class, stat);
         }
@@ -1014,17 +1045,20 @@ pub fn diff(before: &Report, after: &Report) -> ReportDiff {
         missing_delta: after.missing_total() as i64 - before.missing_total() as i64,
         ..Default::default()
     };
-    // Missing-class movements.
+    // Missing-class movements. Each side filters with its own
+    // scan-time classifier so a class moved from Missing to
+    // Supported between scans shows up as a closed gap, not a
+    // no-op.
     let before_missing: BTreeMap<&String, u64> = before
         .histogram
         .iter()
-        .filter(|(k, _)| classify(k) == Classification::Missing)
+        .filter(|(k, stat)| stat.effective_classification(k) == Classification::Missing)
         .map(|(k, v)| (k, v.count))
         .collect();
     let after_missing: BTreeMap<&String, u64> = after
         .histogram
         .iter()
-        .filter(|(k, _)| classify(k) == Classification::Missing)
+        .filter(|(k, stat)| stat.effective_classification(k) == Classification::Missing)
         .map(|(k, v)| (k, v.count))
         .collect();
     for (k, &v) in &after_missing {
