@@ -648,9 +648,32 @@ pub unsafe extern "C" fn rb_intern(name: *const c_char) -> ID {
 ///
 /// Looks up the topmost [`FuncallCallback`] (installed by the host
 /// before transferring control to the C extension) and delegates.
-/// Panics if no callback is installed — that would mean the C ext
-/// is calling `rb_funcallv` from outside a host-managed cext call,
-/// which is a programmer error.
+///
+/// # Panic policy
+///
+/// Three contract-violation conditions `assert!` / `expect!` and
+/// abort the process under Rust's default `extern "C"` `nounwind`
+/// semantics (Rust 2018+):
+///
+/// - `mid` not previously interned via `rb_intern` (unknown ID)
+/// - `argc < 0` (signed-int ABI contract violation)
+/// - no [`FuncallCallback`] installed (called from outside an
+///   active cext dispatch, e.g. from `Init_<name>` or a thread the
+///   host didn't set up)
+///
+/// All three are programmer-error / C-ABI-contract violations, not
+/// runtime conditions arising from valid input. Aborting loudly
+/// is intentional, defined behaviour — **not** UB despite the
+/// `extern "C"` boundary. See
+/// [ADR 0009](../../docs/adr/0009-cext-panic-policy.md) for the
+/// full rationale (and the forward path: once `rb_raise` /
+/// longjmp-coordinated exception propagation lands, these convert
+/// to catchable Ruby exceptions, and ADR 0009 supersedes).
+///
+/// Ruby-level errors from the dispatched method itself do NOT
+/// panic — the host-side `FuncallCallback` catches `Trap` and
+/// collapses to `Qnil` (a spike-level concession also noted in
+/// ADR 0009's forward path).
 ///
 /// # Safety
 ///
