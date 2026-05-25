@@ -10,6 +10,8 @@ rust-version.workspace = true
 
 [dependencies]
 ruby-prism.workspace = true
+libloading.workspace = true
+rubyrs-cext = { path = "../rubyrs-cext" }
 
 [build-dependencies]
 cc.workspace = true

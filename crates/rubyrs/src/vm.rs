@@ -2429,8 +2429,165 @@ impl Vm {
                 }
                 Some(Ok(Value::Nil))
             }
+            // C-ext compat spike (Level 0). Only supports the literal-path
+            // form (`require "/abs/path/to/hello"` with auto-extension);
+            // gem/load-path resolution is deferred.
+            "require" => match args {
+                [Value::Str(path)] => {
+                    let path = path.to_string();
+                    Some(self.cext_require(&path))
+                }
+                _ => Some(Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "require: expected 1 String arg, got {}",
+                        args.len()
+                    ),
+                }))),
+            },
             _ => None,
         }
+    }
+
+    /// Load a C extension shared library, run its `Init_<stem>` symbol,
+    /// and register every function it declared via
+    /// `rb_define_global_function` into `self.host_fns`.
+    ///
+    /// Level 0 caveats:
+    /// - Only literal paths (with optional auto-extension) are resolved;
+    ///   `$LOAD_PATH` and gem lookup are deferred.
+    /// - Loaded libraries are leaked (never unloaded). A real impl
+    ///   tracks them on the Vm and unloads on drop.
+    /// - Only arity 0 callbacks dispatch correctly; other arities
+    ///   register, then trap on invocation with an ArgumentError.
+    fn cext_require(&mut self, path_str: &str) -> Result<Value, Trap> {
+        use libloading::{Library, Symbol};
+        use std::path::Path;
+
+        // Auto-extension: `require "foo"` resolves "foo.dylib" / "foo.so"
+        // / "foo.bundle" depending on host. Matches CRuby's behaviour for
+        // the literal-path case.
+        let exts: &[&str] = if cfg!(target_os = "macos") {
+            &["dylib", "bundle"]
+        } else if cfg!(windows) {
+            &["dll"]
+        } else {
+            &["so"]
+        };
+        let p = Path::new(path_str);
+        let so_path = if p.exists() {
+            p.to_path_buf()
+        } else {
+            let mut found = None;
+            for ext in exts {
+                let with = p.with_extension(ext);
+                if with.exists() {
+                    found = Some(with);
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                self.trap(RubyError::RuntimeError {
+                    msg: format!("cannot find C ext: {}", path_str),
+                })
+            })?
+        };
+
+        let stem = so_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                self.trap(RubyError::RuntimeError {
+                    msg: format!("invalid C ext filename: {}", so_path.display()),
+                })
+            })?
+            .to_string();
+        let init_sym = format!("Init_{}", stem);
+
+        // SAFETY: dlopen is intrinsically unsafe; the C ext can do
+        // anything. We trust extensions we explicitly load — sandboxing
+        // is for the Ruby-language layer, not the FFI layer.
+        unsafe {
+            rubyrs_cext::enter();
+            let lib = match Library::new(&so_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = rubyrs_cext::leave();
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!("dlopen {}: {}", so_path.display(), e),
+                    }));
+                }
+            };
+            let init: Symbol<unsafe extern "C" fn()> = match lib.get(init_sym.as_bytes()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = rubyrs_cext::leave();
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!(
+                            "symbol {} not found in {}: {}",
+                            init_sym,
+                            so_path.display(),
+                            e
+                        ),
+                    }));
+                }
+            };
+            init();
+            let state = rubyrs_cext::leave();
+
+            for cfn in state.registered_fns {
+                let sym = self.interner.intern(&cfn.name);
+                let func = cfn.func;
+                let arity = cfn.arity;
+                let cfn_name = cfn.name.clone();
+                self.host_fns.insert(
+                    sym,
+                    Rc::new(move |args: &[Value]| {
+                        if arity != 0 {
+                            return Err(Trap::new(RubyError::ArgumentError {
+                                msg: format!(
+                                    "C ext `{}': Level 0 spike only supports arity 0 (got arity {})",
+                                    cfn_name, arity
+                                ),
+                            }));
+                        }
+                        if !args.is_empty() {
+                            return Err(Trap::new(RubyError::ArgumentError {
+                                msg: format!(
+                                    "C ext `{}': expected 0 args, got {}",
+                                    cfn_name,
+                                    args.len()
+                                ),
+                            }));
+                        }
+                        // Fresh per-call state so the C ext can intern
+                        // VALUEs without leaking handles across calls.
+                        rubyrs_cext::enter();
+                        let ret = func(rubyrs_cext::Qnil);
+                        let st = rubyrs_cext::leave();
+                        Ok(cext_handle_to_value(&st, ret))
+                    }),
+                );
+            }
+
+            // Level 0: keep the library mapped for the lifetime of the
+            // process. Registered function pointers point into its
+            // text segment; unmapping would dangle them. A real impl
+            // stores `lib` on the Vm so it drops with the Vm.
+            std::mem::forget(lib);
+        }
+
+        Ok(Value::Nil)
+    }
+}
+
+/// Translate a C-side opaque handle back into a `Value`. Currently
+/// covers exactly the `CValue` variants the spike supports.
+fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -> Value {
+    match state.resolve(h) {
+        rubyrs_cext::CValue::Nil => Value::Nil,
+        rubyrs_cext::CValue::True => Value::Bool(true),
+        rubyrs_cext::CValue::False => Value::Bool(false),
+        rubyrs_cext::CValue::Str(s) => Value::Str(Rc::from(s.as_str())),
     }
 }
 

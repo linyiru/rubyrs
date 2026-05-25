@@ -3,3 +3,6 @@
 .claude/
 .rubund_global_cache/
 .rubund_project_gems/
+crates/rubyrs/examples/hello-cext/hello.so
+crates/rubyrs/examples/hello-cext/hello.bundle
+crates/rubyrs/examples/hello-cext/hello.dll

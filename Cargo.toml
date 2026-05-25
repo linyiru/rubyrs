@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/rubyrs",
+    "crates/rubyrs-cext",
     "crates/rubund",
 ]
 
@@ -23,3 +24,4 @@ ureq = "2.9"
 tar = "0.4"
 flate2 = "1.0"
 cc = "1"
+libloading = "0.8"

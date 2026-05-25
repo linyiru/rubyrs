@@ -34,6 +34,27 @@ pub use error::{RubyError, Span, Trap, TrapFrame};
 pub use value::Value;
 pub use intern::SymId;
 
+// C-ext compat (spike Level 0): the `rb_*` functions from `rubyrs-cext`
+// are only ever called from dlopen'd C extensions — there is no Rust
+// call site for the linker to see. Without this `#[used]` static
+// holding raw function pointers, dead-code elimination drops them from
+// the rubyrs binary and `dlsym` from the bundle returns NULL.
+//
+// `Qnil` / `Qtrue` / `Qfalse` get their own `#[used]` on the statics
+// themselves over in `rubyrs-cext`; functions need this indirection
+// because `#[used]` only applies to statics, not function definitions.
+// Function pointers are `Sync`; using strongly-typed statics avoids
+// the `fn as usize` cast which isn't allowed in const context.
+#[used]
+static _RB_STR_NEW_CSTR: unsafe extern "C" fn(*const std::ffi::c_char) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_str_new_cstr;
+#[used]
+static _RB_DEFINE_GLOBAL_FUNCTION: unsafe extern "C" fn(
+    *const std::ffi::c_char,
+    unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value,
+    std::ffi::c_int,
+) = rubyrs_cext::rb_define_global_function;
+
 /// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
 /// untrusted scripts.
 #[derive(Default)]
