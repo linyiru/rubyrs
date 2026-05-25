@@ -137,6 +137,103 @@ impl Vm {
                         let hit = a.iter().any(|x| x.ruby_eq(needle, &self.heap));
                         Some(Value::Bool(hit))
                     }
+                    // `arr.combination(n)` — every n-element subset
+                    // in lexicographic order. `n == 0` → `[[]]`;
+                    // `n > len` → `[]`. Non-block form returns the
+                    // materialised Array of Arrays (no Enumerator
+                    // in the subset).
+                    ("combination", [Value::Int(n)]) => {
+                        let n_take = *n;
+                        let snapshot: Vec<Value> = self.heap.array(id).clone();
+                        let len = snapshot.len();
+                        let mut out: Vec<Value> = Vec::new();
+                        if n_take == 0 {
+                            self.maybe_gc();
+                            let empty_id = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            out.push(Value::Array(empty_id));
+                        } else if n_take > 0 && (n_take as usize) <= len {
+                            let k = n_take as usize;
+                            let mut idx: Vec<usize> = (0..k).collect();
+                            loop {
+                                let pick: Vec<Value> = idx.iter().map(|&i| snapshot[i].clone()).collect();
+                                self.maybe_gc();
+                                let pid = self.heap.alloc(HeapObj::Array(pick));
+                                out.push(Value::Array(pid));
+                                // Advance idx like CRuby (rightmost
+                                // that can still advance bumps; tail
+                                // resets to consecutive).
+                                let mut i = k;
+                                while i > 0 {
+                                    i -= 1;
+                                    if idx[i] < len - (k - i) {
+                                        idx[i] += 1;
+                                        for j in (i + 1)..k { idx[j] = idx[j - 1] + 1; }
+                                        break;
+                                    }
+                                    if i == 0 { i = k; break; }  // exhausted
+                                }
+                                if i == k { break; }
+                            }
+                        }
+                        self.maybe_gc();
+                        let result_id = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(result_id))
+                    }
+                    // `arr.permutation` / `arr.permutation(n)` — every
+                    // n-element ordered arrangement. Defaults to
+                    // length (full permutations). Edge cases match
+                    // CRuby: `n == 0` → `[[]]`; `n > len` → `[]`.
+                    ("permutation", []) | ("permutation", [Value::Int(_)]) => {
+                        let snapshot: Vec<Value> = self.heap.array(id).clone();
+                        let len = snapshot.len();
+                        let n_take = match args {
+                            [Value::Int(n)] => *n,
+                            _ => len as i64,
+                        };
+                        let mut out: Vec<Value> = Vec::new();
+                        if n_take == 0 {
+                            self.maybe_gc();
+                            let empty_id = self.heap.alloc(HeapObj::Array(Vec::new()));
+                            out.push(Value::Array(empty_id));
+                        } else if n_take > 0 && (n_take as usize) <= len {
+                            let k = n_take as usize;
+                            // Recursive lexicographic enumeration —
+                            // pick index sets without repetition,
+                            // each in source order.
+                            let indices: Vec<usize> = (0..len).collect();
+                            let mut current: Vec<usize> = Vec::with_capacity(k);
+                            let mut used = vec![false; len];
+                            fn rec(
+                                indices: &[usize], used: &mut [bool],
+                                current: &mut Vec<usize>, k: usize,
+                                snapshot: &[Value], out: &mut Vec<Vec<usize>>,
+                            ) {
+                                if current.len() == k {
+                                    out.push(current.clone());
+                                    return;
+                                }
+                                for &i in indices {
+                                    if used[i] { continue; }
+                                    used[i] = true;
+                                    current.push(i);
+                                    rec(indices, used, current, k, snapshot, out);
+                                    current.pop();
+                                    used[i] = false;
+                                }
+                            }
+                            let mut perms: Vec<Vec<usize>> = Vec::new();
+                            rec(&indices, &mut used, &mut current, k, &snapshot, &mut perms);
+                            for p in perms {
+                                let pick: Vec<Value> = p.into_iter().map(|i| snapshot[i].clone()).collect();
+                                self.maybe_gc();
+                                let pid = self.heap.alloc(HeapObj::Array(pick));
+                                out.push(Value::Array(pid));
+                            }
+                        }
+                        self.maybe_gc();
+                        let result_id = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(result_id))
+                    }
                     // `arr.tally` — count occurrences into a Hash
                     // keyed by element value, value=occurrence
                     // count. Preserves first-appearance insertion
