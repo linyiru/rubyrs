@@ -827,18 +827,124 @@ fn alias_method_shares_super_lookup_chain() {
 #[test]
 fn method_missing_catches_unknown_call_on_object() {
     let (mut rt, buf) = rt_with_buf();
-    // Splat-args isn't part of the subset; pass the missed name
-    // only and confirm the symbol survives the round-trip.
-    rt.eval(r#"
+    // method_missing's real use is as a proxy — accept any name +
+    // any arg count, route somewhere. That requires `*args` splat
+    // in the method def. Master added splat in a24d7cb; this test
+    // locks in the integration (metaprog + splat) so neither side
+    // can regress unnoticed.
+    rt.eval(r##"
         class Ghost
-          def method_missing(name)
-            name.to_s
+          def method_missing(name, *args)
+            "#{name}(#{args.length}: #{args.inspect})"
           end
         end
-        puts Ghost.new.poof
-        puts Ghost.new.boo
+        g = Ghost.new
+        puts g.poof
+        puts g.boo(1)
+        puts g.zap(1, 2, 3)
+    "##, "t.rb").unwrap();
+    assert_eq!(
+        buf.snapshot(),
+        "poof(0: [])\nboo(1: [1])\nzap(3: [1, 2, 3])\n"
+    );
+}
+
+#[test]
+fn splat_rest_param_survives_stress_gc() {
+    // Regression: `invoke_method_with_block` allocates the
+    // rest-Array via `heap.alloc(HeapObj::Array(rest_vec))` after
+    // a `maybe_gc()`. Before this fix (master a24d7cb,
+    // vm.rs:2615-2620), GC ran while `locals` and `rest_vec` were
+    // bare Rust Vecs not in any root set — any Object / Array /
+    // Hash / Range / Block referenced through them would be
+    // swept under `STRESS_GC=1`, leaving dangling ObjIds inside
+    // the freshly-built frame.
+    //
+    // Force the situation: pass heap-allocated values (Arrays) as
+    // rest-args, do enough method-internal work that we'd notice
+    // a sweep, then read the rest contents back. Without the pin
+    // guards the inner Array elements would dangle and `.inspect`
+    // would either panic or print garbage.
+    let mut rt = Runtime::with_config(Config {
+        // `stress_gc` triggers a collection at every alloc check,
+        // matching the CI `STRESS_GC=1` mode.
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        def collect(*items)
+          # A few extra allocations after the rest-Array is built,
+          # so a hypothetical dangling slot has had time to be
+          # reused by the time we inspect.
+          tmp = []
+          i = 0
+          while i < 50
+            tmp << [i, i + 1]
+            i = i + 1
+          end
+          items
+        end
+        # Crucially: pass Array LITERALS inline, not via locals.
+        # If the rest-args came from local-variable slots, those
+        # slots would already be in `frames[0].locals` and the
+        # GC would mark through them via the normal root walk —
+        # the bug wouldn't reproduce. Inline literals are
+        # constructed right before the call, pushed to the
+        # operand stack, drained into `args: Vec<Value>`, and held
+        # ONLY via that bare Rust Vec by the time `maybe_gc()`
+        # runs inside the rest-collect branch.
+        result = collect([1, 2], [3, 4], [5, 6])
+        puts result.length
+        puts result[0].inspect
+        puts result[1].inspect
+        puts result[2].inspect
     "#, "t.rb").unwrap();
-    assert_eq!(buf.snapshot(), "poof\nboo\n");
+    assert_eq!(buf.snapshot(), "3\n[1, 2]\n[3, 4]\n[5, 6]\n");
+}
+
+#[test]
+fn splat_rest_inline_receiver_survives_stress_gc() {
+    // Companion regression for the second half of the same
+    // PinGuard window — beyond locals/rest_vec, the *receiver*
+    // (`self_val`) is also unrooted during the rest-Array alloc.
+    // Inline-allocated receivers like `Container.new.collect(...)`
+    // hold the Object only as a Rust local; without pinning it,
+    // STRESS_GC would sweep the instance mid-call and the method
+    // body would see a dangling self.
+    let mut rt = Runtime::with_config(Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r##"
+        class Container
+          def initialize
+            @label = "live"
+          end
+          def collect(*items)
+            tmp = []
+            i = 0
+            while i < 20
+              tmp << [i, i + 1]
+              i = i + 1
+            end
+            "#{@label}: #{items.length}"
+          end
+        end
+        # Inline `.new` — the Container Object is held only as a
+        # Rust local in do_call's recv slot, never bound to a Ruby
+        # variable. Without `self_val` in the rest-alloc PinGuard,
+        # STRESS_GC would sweep the instance during the rest-Array
+        # alloc and `@label` would land on a dangling ObjId.
+        puts Container.new.collect([1, 2], [3, 4], [5, 6])
+    "##, "t.rb").unwrap();
+    let out = buf.snapshot();
+    // The body interpolates `@label` (= "live") and items.length
+    // (= 3); both rely on self surviving the alloc window.
+    assert_eq!(out, "live: 3\n");
 }
 
 #[test]

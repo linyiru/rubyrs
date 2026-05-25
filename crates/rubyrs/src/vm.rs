@@ -2783,24 +2783,51 @@ impl Vm {
             // Remaining args (possibly empty) → fresh Array in the
             // rest slot.
             //
-            // PinGuard self_val + the rest-vec elements across the
-            // explicit `maybe_gc` (master pre-existing STRESS_GC
-            // bug, surfaced by `def initialize(*items); @items =
-            // items; end` + Bag.new(1,2,3)): self_val is just a
-            // Rust local at this point — the new frame hasn't been
-            // pushed yet, so the Bag instance isn't on vm.stack /
-            // vm.frames / vm.pinned. maybe_gc sweeps it, then
-            // heap.alloc(rest_vec) reuses its slot, and later
-            // method-body access of `self.@items` blows up with
-            // "ICE: heap slot is not an Instance". Same shape as
-            // the GC root holes fixed in PR #6 / #10.
+            // GC root hole guard: at this point everything we need
+            // to survive `maybe_gc` lives only as Rust locals —
+            // not in `self.stack`, `self.frames`, or `self.pinned`.
+            // That covers:
+            //   - `locals` — the not-yet-installed frame locals
+            //     (already populated with positional + default args)
+            //   - `rest_vec` — trailing args destined for the rest slot
+            //   - `self_val` — the receiver. For inline-allocated
+            //     receivers like `Ghost.new.poof`, the Object isn't
+            //     bound to any caller local, so this window is the
+            //     only thing keeping it alive
+            //   - `block` (when Some) — heap-resident `BlockHandle`
+            //     not yet attached to the new frame
+            //   - `kw_hash` keys+values (when present) — the Hash
+            //     contents were cloned out earlier; the per-pair
+            //     Values may be heap-y and need to survive until
+            //     the kw_count > 0 branch below reads them.
+            //
+            // Master commit 01b28ed shipped a narrower version of
+            // this guard (pinning only `self_val` + `rest_vec`).
+            // This widens it to `locals` / `block` / `kw_hash` and
+            // adds the `check_alloc?` the original cut was missing
+            // — a host configured with `max_heap_objects` would
+            // otherwise see the rest-Array silently slip past the
+            // cap, since `heap.alloc` itself doesn't enforce it.
+            // The PinGuard's Drop pops on the early-return path of
+            // `check_alloc?` too, so adding the check is safe.
             let rest_vec: Vec<Value> = args_iter.collect();
-            let mut g = PinGuard::new(self);
-            g.pin(self_val.clone());
-            for v in &rest_vec { g.pin(v.clone()); }
-            g.vm.maybe_gc();
-            let arr_id = g.vm.heap.alloc(HeapObj::Array(rest_vec));
             let rest_slot = positional_max;
+            let arr_id = {
+                let mut g = PinGuard::new(self);
+                for v in &locals { g.pin(v.clone()); }
+                for v in &rest_vec { g.pin(v.clone()); }
+                g.pin(self_val.clone());
+                if let Some(id) = block { g.pin(Value::Block(id)); }
+                if let Some(kw) = &kw_hash {
+                    for (k, v) in kw {
+                        g.pin(k.clone());
+                        g.pin(v.clone());
+                    }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                g.vm.heap.alloc(HeapObj::Array(rest_vec))
+            };
             locals[rest_slot] = Value::Array(arr_id);
         }
         // Bind keyword params. kw names live at the tail of
