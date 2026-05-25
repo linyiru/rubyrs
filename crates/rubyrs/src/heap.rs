@@ -30,6 +30,14 @@ pub(crate) enum HeapObj {
     /// `class` is kept so future `obj.class` / `is_a?` checks
     /// resolve to the right user-facing class without needing a
     /// separate per-instance class slot.
+    ///
+    /// `#[allow(dead_code)]`: the variant is allocated only through
+    /// the cext bridge, which is `#[cfg(not(target_os = "wasi"))]`.
+    /// On wasi the cext path is stubbed and nothing ever
+    /// constructs this variant, so `-D warnings` would flag it as
+    /// dead. Explicit allow keeps the wasi build green without
+    /// splitting the enum across targets.
+    #[allow(dead_code)]
     TypedData(TypedDataObj),
 }
 
