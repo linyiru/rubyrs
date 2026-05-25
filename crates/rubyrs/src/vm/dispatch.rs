@@ -218,6 +218,24 @@ impl Vm {
                     return Ok(());
                 }
             }
+            // `self` is a Class — inside a class singleton method
+            // body (`def self.foo; bar; end` or `class << self; def
+            // foo; bar; end; end`), a bare call to `bar` should
+            // resolve against THIS class's own `singleton_methods`
+            // table. Without this arm the lookup fell through to
+            // toplevel_methods only and produced
+            // "undefined method ... for Class" — even though
+            // `bar` was sitting right there on `self`.
+            //
+            // Note: only checks `c.singleton_methods` directly, not
+            // the ancestor chain's singleton tables. That's enough
+            // for the within-class case; cross-class singleton
+            // inheritance (rare) is a follow-up.
+            if let Value::Class(c) = &self_val
+                && let Some(m) = c.singleton_methods.borrow().get(&name_id).cloned() {
+                self.invoke_method(m, self_val.clone(), args)?;
+                return Ok(());
+            }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());

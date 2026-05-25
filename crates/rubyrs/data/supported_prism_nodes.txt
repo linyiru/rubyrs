@@ -70,6 +70,7 @@ RescueModifierNode
 RestParameterNode
 ReturnNode
 SelfNode
+SingletonClassNode
 SplatNode
 StatementsNode
 StringNode

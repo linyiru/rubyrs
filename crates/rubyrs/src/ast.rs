@@ -1428,6 +1428,74 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::Class { name, superclass: None, body });
     }
+    // `class << X; body; end` — singleton class body. Spike scope:
+    // each top-level Expr in the body must be a Def; the Def gets
+    // rewritten with `receiver: Some(<translated X>)` so the existing
+    // `def X.foo` machinery (`Op::DefSingletonMethod` when X = self
+    // inside a `class Foo` body; `Op::DefObjectSingletonMethod`
+    // otherwise) lands each method on the right singleton table.
+    //
+    // Non-Def entries in the body (constant assignments, helper
+    // calls like `attr_accessor`, embedded `begin/end`) surface as
+    // SyntaxError — they'd need either a real
+    // singleton-class-as-class-stack-entry opcode or a `class_eval`
+    // detour, and no current try-run target uses them.
+    //
+    // We don't translate to an `Expr::Class { ... }` because the
+    // wrapping `class << X` doesn't introduce a NEW class with its
+    // own name; the defs already address the existing
+    // singleton_methods table on X's class chain.
+    if let Some(n) = node.as_singleton_class_node() {
+        let recv_expr = tr(&n.expression());
+        let body_nodes: Vec<_> = match n.body() {
+            Some(b) => {
+                if let Some(stmts) = b.as_statements_node() {
+                    stmts.body().iter().collect::<Vec<_>>()
+                } else { vec![b] }
+            }
+            None => vec![],
+        };
+        let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len());
+        for bn in &body_nodes {
+            if let Some(_def) = bn.as_def_node() {
+                let translated = tr(bn);
+                // Reach into the translated Def and set its receiver.
+                if let Expr::Def {
+                    name, params, defaults, rest, kw_params, kw_rest,
+                    block_param, receiver: _, body,
+                } = translated.node {
+                    out.push(sp(bn, Expr::Def {
+                        name, params, defaults, rest, kw_params, kw_rest,
+                        block_param,
+                        receiver: Some(Box::new(recv_expr.clone())),
+                        body,
+                    }));
+                } else {
+                    // Defensive: tr_def should always yield Expr::Def for a DefNode.
+                    AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                        "class << self: internal — def translated unexpectedly".into()
+                    ));
+                    out.push(sp(bn, Expr::Nil));
+                }
+            } else {
+                // Non-Def entry — out of spike scope.
+                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                    "class << X body: only `def` statements are supported in the spike subset".into()
+                ));
+                out.push(sp(bn, Expr::Nil));
+            }
+        }
+        // Flatten the rewritten Defs into the surrounding scope by
+        // wrapping them in a Begin (no rescue) so they all execute
+        // in source order. Begin's body returns the last expression
+        // — for a sequence of `def`s, that's the Sym of the last
+        // method name, which the surrounding class body discards.
+        return sp(node, Expr::Begin {
+            body: out,
+            rescue: vec![],
+            ensure: None,
+        });
+    }
     if let Some(n) = node.as_parentheses_node() {
         // `(expr)` — just unwrap to the inner expression / statements.
         if let Some(body) = n.body() {
