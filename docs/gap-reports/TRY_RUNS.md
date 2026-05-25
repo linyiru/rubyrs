@@ -40,7 +40,31 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
-## Results — 2026-05-25, rubyrs at `6063af8`
+## Results — 2026-05-25 (re-run), rubyrs at `a35348b`
+
+Second pass after PR #30 (`ConstantWriteNode`) landed. Same
+pinned target commits and fuel cap as the first pass, re-running
+the 12 standalone files (the host-DSL `Brewfile.rb` is excluded
+— it needs the embedding wrapper, not a rubyrs change). Diff
+vs the first pass:
+
+| File | Was | Now | Change |
+|---|---|---|---|
+| rake/scope.rb | D | ✅ A | `EMPTY = Class.new` now executes; file runs clean |
+| bundler/version.rb | D | ✅ A | `VERSION = "...".freeze` now executes; file runs clean |
+| rake/linked_list.rb | D + E | E | `ConstantWriteNode` resolved; remaining blocker is the literal-default-arg rule |
+| (all 9 other files) | — | — | unchanged — failure stays in same category |
+
+Pass count: **3 → 5** (out of 12 non-host-DSL files = 42%).
+Category D drops from 3 → 0, validating both the gapscan
+prioritisation (D was the top "syntactic" blocker) and the
+fix itself. The remaining Category E files (`rake/linked_list.rb` —
+now E-only after PR #30 — and `sinatra/middleware/logger.rb`,
+which was always E-only) are the cleanest next target: a
+single documented divergence that, once relaxed, would push
+pass to 7/12.
+
+### Results — 2026-05-25 (first pass), rubyrs at `6063af8`
 
 Target-codebase commits scanned (matching the source-tree commits
 that the gap reports were generated against):
@@ -71,7 +95,16 @@ that the gap reports were generated against):
 | tilt/string.rb | 100% | ❌ `undefined method 'require_relative'` | C |
 | crates/rubyrs/examples/brewfile/Brewfile.rb | 100% | ❌ `undefined method 'tap'` | G |
 
-### Category legend
+> The sections below — **Category legend**, **What this tells
+> us**, **What "Phase 3" would look like** — were written
+> against the first-pass data and are kept as the historical
+> record (body unchanged; the legend heading was labelled
+> "(first pass)" for clarity). After the re-run above,
+> Category D = 0 and the `ConstantWriteNode` half of "Phase 3
+> step 1" is done (the `ConstantPathWriteNode` half is still
+> outstanding).
+
+### Category legend (first pass)
 
 | Code | Category | Count |
 |---:|---|---:|
