@@ -785,6 +785,107 @@ impl Vm {
 
 
 
+    /// `obj.instance_eval { |o| ... }` / `cls.class_eval { |c| ... }`
+    /// — invoke the block with `self` swapped to `new_self`.
+    ///
+    /// When `as_class_body` is true (the `class_eval` case),
+    /// we also push `cls` onto `class_stack` + a fresh
+    /// `Public` visibility entry, and mark the new frame
+    /// `is_class_body: true`. That re-uses the existing
+    /// class-body machinery so `def name; …; end` inside the
+    /// block lands on the receiver class's method table — the
+    /// dominant DSL use of `class_eval`. The cost: per the
+    /// existing class-body Return semantics
+    /// (`vm/step.rs::Op::Return`), the frame returns the class
+    /// itself rather than the block's last expression. CRuby
+    /// returns the block value; we'll need a non-`is_class_body`
+    /// path to match exactly when a real use-case appears (see
+    /// SUBSET.md). For `instance_eval` (`as_class_body=false`)
+    /// the frame is a normal block, so the block's last
+    /// expression is the return value — that part matches CRuby.
+    ///
+    /// `instance_eval { def name; ...; end }` defines a
+    /// *singleton* method on the receiver in CRuby. rubyrs
+    /// doesn't model singleton classes yet; `def` inside an
+    /// `instance_eval` block lands on `toplevel_methods` (the
+    /// same documented divergence as `attr_*` / `alias_method` /
+    /// `define_method` outside a class body — see SUBSET.md's
+    /// PoC caveat list). Real uses of `instance_eval` in our
+    /// niche (configuration DSLs) typically read state rather
+    /// than define methods, so this is acceptable for now.
+    pub(crate) fn invoke_block_with_self(
+        &mut self,
+        block_id: ObjId,
+        new_self: Value,
+        as_class_body: bool,
+        args: Vec<Value>,
+    ) -> Result<(), Trap> {
+        self.check_frames()?;
+        let (proto_idx, captured, param_start, n_params) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+        };
+        // Bind args into the block's param slots, same auto-splat
+        // shape as `invoke_block`. For instance_eval/class_eval
+        // the conventional arg is a single value (self), so the
+        // single-Array auto-splat case is unlikely to trigger,
+        // but we keep the rule identical to avoid surprising
+        // future callers.
+        let args: Vec<Value> = if n_params > 1 && args.len() == 1 {
+            match &args[0] {
+                Value::Array(aid) => self.heap.array(*aid).clone(),
+                _ => args,
+            }
+        } else {
+            args
+        };
+        let proto = &self.protos[proto_idx];
+        let needed = proto.n_locals as usize;
+        {
+            let mut locals = captured.borrow_mut();
+            if locals.len() < needed {
+                while locals.len() < needed { locals.push(Value::Nil); }
+            }
+            for (i, a) in args.into_iter().enumerate() {
+                if i < n_params as usize {
+                    locals[param_start as usize + i] = a;
+                }
+            }
+        }
+        if as_class_body {
+            // class_eval: re-use the class-body machinery so
+            // `def` inside the block goes onto cls's method
+            // table. Mirrors what `Op::DefClass` does at the
+            // top of a `class X ... end` body. The return-path
+            // handlers in vm/step.rs pop both stacks when this
+            // frame returns, keyed off `is_class_body: true`.
+            if let Value::Class(cls) = &new_self {
+                self.class_stack.push(cls.clone());
+                self.class_visibility_stack.push(crate::value::Visibility::Public);
+            } else {
+                // Caller checked Type before getting here, so
+                // this is a programmer-error path. ICE rather
+                // than silent-corruption: the class_stack pop
+                // on frame return would underflow.
+                panic!("ICE: invoke_block_with_self as_class_body=true requires Value::Class new_self");
+            }
+        }
+        self.frames.push(Frame {
+            proto_idx,
+            ip: 0,
+            locals: captured,
+            self_val: new_self,
+            base_sp: self.stack.len(),
+            is_class_body: as_class_body,
+            swap_return: None,
+            block_arg: None,
+            defining_class: None,
+            is_block: !as_class_body,
+            rescues: vec![],
+        });
+        Ok(())
+    }
+
     pub(crate) fn invoke_block(&mut self, block_id: ObjId, args: Vec<Value>) -> Result<(), Trap> {
         self.check_frames()?;
         // Snapshot what we need out of the block's heap slot before
@@ -863,6 +964,39 @@ impl Vm {
         // path on the no_recv / Object-recv branches doesn't
         // trigger GC before installing the block as the frame's
         // `block_arg`, so the gap is safe there too.
+        //
+        // `instance_eval` / `class_eval` / `module_eval` — swap
+        // `self` for the duration of the block. Intercepted here
+        // so the receiver-type dispatch below can't claim them
+        // first (e.g. a future `Object#instance_eval` primitive
+        // would shadow this). `args.is_empty()` keeps us out of
+        // the way of any hypothetical user-defined
+        // `instance_eval(arg)` that someone might define.
+        if let Some(r) = &recv {
+            let is_instance_eval = &*name == "instance_eval";
+            let is_class_eval = &*name == "class_eval" || &*name == "module_eval";
+            if (is_instance_eval || is_class_eval) && args.is_empty() {
+                if is_class_eval && !matches!(r, Value::Class(_)) {
+                    // Align with the existing wording for `include`
+                    // (vm/dispatch.rs:171, :369) so error messages
+                    // are consistent across the Module-receiver
+                    // family.
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Module)",
+                            r.type_name(),
+                        ),
+                    }));
+                }
+                // CRuby passes `self` as the sole block arg (so
+                // `obj.instance_eval { |o| o == obj }` works);
+                // mirror that. The single-arg matches the
+                // common DSL shape `cls.class_eval { |k| ... }`.
+                let block_args = vec![r.clone()];
+                self.invoke_block_with_self(block, r.clone(), is_class_eval, block_args)?;
+                return Ok(());
+            }
+        }
         if let Some(r) = &recv
             && let Some(v) = self.collection_call_block(r, &name, &args, block)? {
                 self.stack.push(v);
