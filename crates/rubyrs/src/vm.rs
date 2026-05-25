@@ -180,6 +180,20 @@ pub(crate) struct Vm {
     /// emit "already initialized constant" and reassign). If you
     /// need to shadow a class with a constant, pick a different name.
     pub(crate) constants: HashMap<SymId, Value>,
+    /// Files already loaded via `require_relative` — keyed by
+    /// canonical path. Suppresses re-loading on subsequent calls
+    /// the same way CRuby's `$LOADED_FEATURES` does. The Set
+    /// shape (no associated value) is intentional: rubyrs doesn't
+    /// expose the list to script code yet, and the "true → false"
+    /// return semantic only needs membership.
+    pub(crate) loaded_features: std::collections::HashSet<std::path::PathBuf>,
+    /// Per-call-site inline-cache counter. Each compiled `Op::Call`
+    /// gets a unique u16 slot id; the Vm side allocates
+    /// `call_caches[id]` lazily. Lives on the Vm so kernel
+    /// builtins (e.g. `require_relative`) that compile new Ruby
+    /// source at runtime can advance the counter without
+    /// round-tripping through Runtime.
+    pub(crate) cache_counter: u32,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, HostFnSlot>,
     /// C-ext singleton-method dispatch table. Indexed by
@@ -268,6 +282,16 @@ pub(crate) struct Vm {
     /// semantics: `return` inside a `do…end` exits the enclosing
     /// method, not just the block.
     pub(crate) method_return: Option<Value>,
+    /// One-shot flag set by a builtin that detected its caller was
+    /// unwound past its own call-site (e.g. `require_relative` saw
+    /// `unwind_with_exception` route control to an outer
+    /// `rescue` handler mid-load). The do_call caller checks +
+    /// clears this flag before doing `stack.push(builtin_result)`;
+    /// pushing in this state would corrupt the rescue handler's
+    /// stack (it's already at `base_sp` after unwind truncation).
+    /// Distinct from `method_return` because that path keeps frames
+    /// > until_depth, while rescue unwind drops below.
+    pub(crate) suppress_call_result_push: bool,
     /// Cached index into `protos` of the BoundMethod→Block
     /// forwarder. Lazily built on first `&method_object`
     /// coercion in `do_call_block`. The forwarder is a tiny
@@ -298,6 +322,8 @@ impl Vm {
             interner,
             classes: HashMap::new(),
             constants: HashMap::new(),
+            loaded_features: std::collections::HashSet::new(),
+            cache_counter: 0,
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
             cext_class_methods: HashMap::new(),
@@ -326,6 +352,7 @@ impl Vm {
             method_compose_forwarder_proto: None,
             sources: HashMap::new(),
             method_return: None,
+            suppress_call_result_push: false,
         }
     }
 

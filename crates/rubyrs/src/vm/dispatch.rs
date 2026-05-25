@@ -174,7 +174,18 @@ impl Vm {
 
         if no_recv {
             if let Some(res) = self.builtin_call(&name, &args) {
-                self.stack.push(res?);
+                let v = res?;
+                // `require_relative` (and any future builtin that
+                // could see its caller unwound to an outer `rescue`
+                // mid-call) sets `suppress_call_result_push` to
+                // signal "don't push my return value — the stack
+                // is now the rescue handler's, not yours". Check +
+                // clear here so the flag is one-shot.
+                if self.suppress_call_result_push {
+                    self.suppress_call_result_push = false;
+                } else {
+                    self.stack.push(v);
+                }
                 return Ok(());
             }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
@@ -2322,7 +2333,17 @@ impl Vm {
                 self.stack.push(Value::Block(block));
                 return Ok(());
             }
-            if let Some(res) = self.builtin_call(&name, &args) { self.stack.push(res?); return Ok(()); }
+            if let Some(res) = self.builtin_call(&name, &args) {
+                let v = res?;
+                // See suppress_call_result_push doc on Vm —
+                // mirrors the no_recv path above.
+                if self.suppress_call_result_push {
+                    self.suppress_call_result_push = false;
+                } else {
+                    self.stack.push(v);
+                }
+                return Ok(());
+            }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
                 let v = self.invoke_host_fn(host, &args)?;
                 self.stack.push(v);

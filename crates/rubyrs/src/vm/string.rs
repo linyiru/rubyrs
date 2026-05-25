@@ -1230,7 +1230,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 } else {
                     out.extend_from_slice(&bytes);
                     let pad: u8 = if dir == 'A' { b' ' } else { 0 };
-                    out.extend(std::iter::repeat(pad).take(want - bytes.len()));
+                    out.extend(std::iter::repeat_n(pad, want - bytes.len()));
                 }
             }
             ' ' | '\t' | '\n' => {}

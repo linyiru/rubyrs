@@ -309,8 +309,298 @@ impl Vm {
                     ),
                 }))),
             },
+            // `require_relative "name"` — resolve relative to the
+            // CURRENTLY-EXECUTING file's directory (not cwd), auto-
+            // append `.rb`, parse + compile + dispatch the body in
+            // the current Vm, track in `loaded_features` so
+            // duplicate requires no-op. Returns true on first load,
+            // false on a repeat.
+            //
+            // Spike scope deliberately small:
+            //   - no load-path walking (LOAD_PATH is CRuby's, not
+            //     ours); only the relative-to-current-file form.
+            //   - no exception class for LoadError; missing files
+            //     surface as a `RuntimeError` Trap.
+            //   - no concurrency / monitor protection; rubyrs is
+            //     single-threaded at the script level.
+            #[cfg(not(target_os = "wasi"))]
+            "require_relative" => match args {
+                // `with_str_lossy` is Cow-backed: zero-alloc on
+                // the valid-UTF-8 hot path, only the invalid-UTF-8
+                // fallback owns a String. `to_string_lossy()` would
+                // allocate unconditionally.
+                [Value::Str(path)] => Some(path.with_str_lossy(|s| self.require_relative(s))),
+                // Distinguish type mismatch from arity: CRuby raises
+                // TypeError for `require_relative :sym`, ArgumentError
+                // for the wrong count. Reporting just "got 1" hides
+                // which case the caller hit.
+                [other] => Some(Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        other.type_name()
+                    ),
+                }))),
+                _ => Some(Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len()
+                    ),
+                }))),
+            },
+            #[cfg(target_os = "wasi")]
+            "require_relative" => Some(Err(self.trap(RubyError::RuntimeError {
+                msg: "require_relative: file I/O not available on wasm32-wasi".into(),
+            }))),
             _ => None,
         }
+    }
+
+    /// `require_relative` host: read + parse + compile + execute the
+    /// target file inline in this Vm. Path is resolved relative to
+    /// the currently-executing source file's directory (mirrors
+    /// CRuby) and `.rb` is appended if absent. Tracks loaded paths
+    /// in `Vm.loaded_features` so a repeat call returns `false`
+    /// without re-evaluation.
+    ///
+    /// Implementation notes:
+    /// - the new file's top-level body becomes a fresh `<main>`-
+    ///   shaped Proto; we push a frame for it and then run an inner
+    ///   dispatch loop (`dispatch_until`) until that frame returns.
+    ///   The return value (the file's last expression) is discarded
+    ///   — `require_relative` returns the load-status Bool instead.
+    /// - the new Proto carries fresh call-site cache slots; the Vm's
+    ///   `cache_counter` advances by however many `Op::Call`s were
+    ///   emitted, and `ensure_call_caches` grows the IC table to
+    ///   match.
+    /// - SyntaxError / IO errors surface as Trap (file-not-found
+    ///   maps to RuntimeError; would be LoadError in CRuby but the
+    ///   class hierarchy doesn't ship it yet).
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn require_relative(&mut self, path_str: &str) -> Result<Value, Trap> {
+        use std::path::{Path, PathBuf};
+        // Resolve relative to the CALL SITE's source file. CRuby's
+        // contract is "the file containing the calling code" —
+        // i.e., the source file the `require_relative` token
+        // appears in. Each proto carries its source filename
+        // (compile_proto threads `filename_rc` through), and the
+        // currently-running proto is exactly the top frame's. So
+        // the right anchor is `frames.last().proto.filename`
+        // regardless of is_block / is_class_body.
+        //
+        // (Earlier rounds of this PR skipped block frames thinking
+        // they'd want the enclosing method's file — that's wrong:
+        // a block's proto.filename is the file the BLOCK was
+        // defined in, which is the call-site file for any
+        // `require_relative` lexically inside that block. Methods
+        // called from a different file via `define_method` /
+        // `instance_eval` would otherwise mis-anchor.)
+        let anchor_filename: Option<String> = self.frames.last()
+            .map(|f| self.protos[f.proto_idx].filename.to_string());
+        let base_dir: PathBuf = match anchor_filename {
+            Some(f) => Path::new(&f).parent().map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
+            None => PathBuf::from("."),
+        };
+        let mut target = base_dir.join(path_str);
+        if target.extension().is_none() {
+            target.set_extension("rb");
+        }
+        // Canonicalise so the duplicate-load check works regardless
+        // of `./` / `..` or relative-cwd shape.
+        let canon = match std::fs::canonicalize(&target) {
+            Ok(p) => p,
+            Err(e) => return Err(self.trap(RubyError::RuntimeError {
+                msg: format!("require_relative: cannot find {} ({})", target.display(), e),
+            })),
+        };
+        if self.loaded_features.contains(&canon) {
+            return Ok(Value::Bool(false));
+        }
+        let source = match std::fs::read_to_string(&canon) {
+            Ok(s) => s,
+            Err(e) => return Err(self.trap(RubyError::RuntimeError {
+                msg: format!("require_relative: read {} failed: {}", canon.display(), e),
+            })),
+        };
+        // Parse + AST translate. Errors surface as SyntaxError
+        // through the standard Trap path.
+        let parse_result = ruby_prism::parse(source.as_bytes());
+        let parse_errors: Vec<_> = parse_result.errors().collect();
+        if !parse_errors.is_empty() {
+            let msg = parse_errors.iter()
+                .map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("; ");
+            return Err(self.trap(RubyError::SyntaxError { msg }));
+        }
+        let (prog, ast_errors) = crate::ast::tr_with_errors(&parse_result.node());
+        if !ast_errors.is_empty() {
+            return Err(self.trap(RubyError::SyntaxError {
+                msg: ast_errors.join("; "),
+            }));
+        }
+        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(canon.to_string_lossy().into_owned());
+        // Register the loaded source so `Method#source_location` and
+        // any other Vm-side byte-offset → line/col resolver can find
+        // it. `Runtime::eval` does the same for top-level scripts; we
+        // must mirror it here, otherwise methods defined inside the
+        // required file lose backtrace fidelity.
+        let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source.as_str());
+        self.sources.insert(filename_rc.clone(), source_rc);
+        // Mark loaded BEFORE running the body — matches CRuby's
+        // semantics for circular requires (mid-load is treated as
+        // "already loading"; the partially-defined module is visible
+        // to the re-entrant require).
+        self.loaded_features.insert(canon.clone());
+        let entry = crate::compiler::compile_proto(
+            "<require_relative>".into(), vec![], &[prog], filename_rc,
+            &mut self.protos, &mut self.interner, &mut self.cache_counter,
+        );
+        let cc = self.cache_counter as usize;
+        self.ensure_call_caches(cc);
+        // Push a fresh top-level frame for the loaded body and run
+        // the inner dispatch loop until it returns. dispatch_until
+        // is the same helper iterator drivers use to run a block
+        // body without unwinding the outer dispatch.
+        //
+        // Capture the stack depth at push time so we can later
+        // distinguish "my frame popped via Op::Return" (stack ends
+        // at stack_before + 1) from "outer rescue unwound past my
+        // frame" (stack truncated to some prior frame's base_sp,
+        // which is <= stack_before). Both look identical from a
+        // frames.len() perspective once dispatch_until returns Ok.
+        let depth_before = self.frames.len();
+        let stack_before = self.stack.len();
+        self.frames.push(super::Frame {
+            proto_idx: entry,
+            ip: 0,
+            locals: std::rc::Rc::new(std::cell::RefCell::new(
+                super::vec_nil(self.protos[entry].n_locals as usize)
+            )),
+            self_val: Value::Nil,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: None,
+            is_block: false,
+            n_given_positional: 0,
+            rescues: vec![],
+        });
+        // Dispatch loop. We can't just call `dispatch_until` and
+        // bail on the first method_return: a non-local `return`
+        // INSIDE the required file (e.g. `def helper;
+        // arr.each { return }; end; helper`) targets a method
+        // defined WITHIN the file and should unwind locally,
+        // letting the rest of the file keep loading. Only escape
+        // when the unwind would pop our pushed <main> frame.
+        //
+        // Structure mirrors `Vm::dispatch`'s loop body around the
+        // method_return arm, but with a depth cap so we stop at
+        // `depth_before` instead of `frames.is_empty()`.
+        loop {
+            // Step until method_return fires or we drop to
+            // depth_before (normal completion / outer rescue
+            // unwound past us).
+            if let Err(trap) = self.dispatch_until(depth_before) {
+                self.loaded_features.remove(&canon);
+                return Err(trap);
+            }
+            if self.method_return.is_none() {
+                // Either Op::Return on our <main> (frames at
+                // depth_before with value on stack), or outer
+                // rescue unwound below (frames < depth_before).
+                // The stack-length check below distinguishes.
+                break;
+            }
+            // method_return is set; mimic dispatch's unwind. If it
+            // stays within the required file (frames > depth_before
+            // after unwind), continue dispatching. If the unwind
+            // would pop OUR <main> frame or beyond, the return
+            // escapes — bail with suppress flag.
+            let val = self.method_return.take().unwrap();
+            // Pop block frames (handling class_eval block + class
+            // body bookkeeping).
+            while let Some(f) = self.frames.last() {
+                if !f.is_block { break; }
+                if self.frames.len() <= depth_before + 1 {
+                    // Next pop would be our <main> — escape.
+                    break;
+                }
+                let f = self.frames.pop().unwrap();
+                self.stack.truncate(f.base_sp);
+                if f.is_class_body {
+                    let _cls = self.class_stack.pop()
+                        .expect("ICE: class_stack empty unwinding through class_eval (require_relative)");
+                    self.class_visibility_stack.pop();
+                }
+            }
+            if self.frames.len() <= depth_before + 1 {
+                // The next pop would be our <main>, meaning the
+                // non-local return targets either our <main> itself
+                // (treat as file-return-with-value) or something
+                // above it (escapes). Either way, restore the
+                // method_return signal and exit the loop — the
+                // post-loop bookkeeping decides between
+                // "successful load with this value as result" and
+                // "outer unwind takes over".
+                self.method_return = Some(val);
+                break;
+            }
+            // Pop the enclosing method frame, mirroring dispatch.
+            let f = self.frames.pop().unwrap();
+            self.stack.truncate(f.base_sp);
+            if f.is_class_body {
+                let cls = self.class_stack.pop()
+                    .expect("ICE: class_stack empty on method-return (require_relative)");
+                self.class_visibility_stack.pop();
+                self.stack.push(Value::Class(cls));
+            } else if let Some(r) = f.swap_return {
+                self.stack.push(r);
+            } else {
+                self.stack.push(val);
+            }
+            // Continue dispatching at the method's caller (still
+            // inside required file body since we capped at
+            // depth_before + 1).
+        }
+        // If method_return is still set, the unwind targeted our
+        // <main> or above — let the outer dispatch finish it.
+        if self.method_return.is_some() {
+            self.loaded_features.remove(&canon);
+            self.suppress_call_result_push = true;
+            return Ok(Value::Nil);
+        }
+        // Outer-rescue-unwound-past-us case. When an exception
+        // raised inside the required file is caught by a `rescue`
+        // in OUR caller (or further up), `unwind_with_exception`
+        // truncates the operand stack to the handler frame's
+        // `base_sp` and re-routes its IP. dispatch_until then
+        // exits via the loop condition `frames.len() > until_depth`
+        // becoming false (the caller's frame is at <= depth_before
+        // now), returning Ok(()). At this point the operand stack
+        // is the rescue handler's, NOT ours — popping or pushing
+        // would corrupt it (overwrite the bound exception, smash
+        // saved values). The signal is that the stack didn't end
+        // at `stack_before + 1` (which is what Op::Return leaves
+        // behind).
+        //
+        // Set `suppress_call_result_push` so do_call's builtin arm
+        // skips its `stack.push(builtin_result)` step — otherwise
+        // it'd add one slot to a stack the compiler expects at
+        // exactly the rescue handler's saved `base_sp`. The Nil
+        // we return is just a placeholder (the flag suppresses
+        // its push); the rescue handler resumes from its own ip
+        // with its own stack intact.
+        if self.stack.len() != stack_before + 1 {
+            self.loaded_features.remove(&canon);
+            self.suppress_call_result_push = true;
+            return Ok(Value::Nil);
+        }
+        // Normal completion: the required file's last expression
+        // sits on top of the operand stack (Op::Return pushed it
+        // before the frame popped). Discard — `require_relative`
+        // returns the load-status Bool.
+        let _ = self.stack.pop();
+        Ok(Value::Bool(true))
     }
 
 }

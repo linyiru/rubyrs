@@ -25,7 +25,6 @@ mod intern;
 mod value;
 mod vm;
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
@@ -488,13 +487,6 @@ impl<'a> HostCtx<'a> {
 /// [`Runtime::eval`].
 pub struct Runtime {
     vm: vm::Vm,
-    /// Source text per filename, retained so that backtrace formatting can
-    /// resolve byte offsets to line/column without re-reading the file.
-    sources: HashMap<Rc<str>, Rc<str>>,
-    /// Per-call-site inline-cache id allocator, monotonically increasing
-    /// across every `eval` call so subsequent compiles don't collide with
-    /// cached methods from earlier ones.
-    cache_counter: u32,
     /// Per-`eval` wall-clock budget (P2-14a). Retained as a
     /// Duration; an absolute `Instant` is computed at the start of
     /// each `eval` call and stored on `Vm.deadline_at`. `None` means
@@ -527,7 +519,7 @@ impl Runtime {
         vm.max_symbols = cfg.max_symbols;
         vm.max_value_bytes = cfg.max_value_bytes;
         let mut rt = Runtime {
-            vm, sources: HashMap::new(), cache_counter: 0,
+            vm,
             deadline: cfg.deadline,
         };
         rt.load_preamble();
@@ -795,10 +787,13 @@ end
     pub fn eval(&mut self, source: &str, filename: &str) -> Result<Value, Trap> {
         let filename_rc: Rc<str> = Rc::from(filename);
         let source_rc: Rc<str> = Rc::from(source);
-        self.sources.insert(filename_rc.clone(), source_rc.clone());
-        // Mirror into the Vm so dispatch-time helpers (e.g.
-        // `Method#source_location`) can resolve byte offsets to
-        // line numbers without going back through Runtime.
+        // Single source-of-truth map on the Vm. Backtrace
+        // formatting (`Runtime::line_for`) and dispatch-time
+        // helpers (`Method#source_location`) both consult it.
+        // Kernel builtins that compile new Ruby at runtime —
+        // currently `require_relative` — insert here too,
+        // so traps and source_location stay accurate for code
+        // loaded outside the top-level `eval` path.
         self.vm.sources.insert(filename_rc.clone(), source_rc);
 
         let parse_result = ruby_prism::parse(source.as_bytes());
@@ -825,9 +820,10 @@ end
         }
         let entry = compiler::compile_proto(
             "<main>".into(), vec![], &[prog], filename_rc,
-            &mut self.vm.protos, &mut self.vm.interner, &mut self.cache_counter,
+            &mut self.vm.protos, &mut self.vm.interner, &mut self.vm.cache_counter,
         );
-        self.vm.ensure_call_caches(self.cache_counter as usize);
+        let cache_count = self.vm.cache_counter as usize;
+        self.vm.ensure_call_caches(cache_count);
         // A previous `eval` on this Runtime may have left frames,
         // operand-stack residue, or pins behind if it ended in a
         // Trap (uncaught exception, fuel exhaustion, deadline hit).
@@ -916,7 +912,7 @@ end
     }
 
     fn line_for(&self, filename: &str, byte_offset: u32) -> u32 {
-        match self.sources.get(filename) {
+        match self.vm.sources.get(filename) {
             Some(src) => error::line_col(src, byte_offset).0,
             None => 0,
         }
