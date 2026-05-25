@@ -90,7 +90,8 @@ measure_min() {
   echo "$best_ms $best_kb"
 }
 
-fail=0
+budget_fail=0   # at least one workload exceeded its budget → exit 1
+setup_fail=0    # at least one row in baselines.tsv is malformed → exit 2
 total=0
 printf "%-58s %-11s %-12s %-10s\n" "WORKLOAD" "WALL_MS_MIN" "RSS_KB_MIN" "BUDGET_KB"
 printf "%-58s %-11s %-12s %-10s\n" "--------" "-----------" "----------" "---------"
@@ -98,9 +99,12 @@ printf "%-58s %-11s %-12s %-10s\n" "--------" "-----------" "----------" "------
 while IFS=$'\t' read -r workload budget _note; do
   # Skip comments + blank lines.
   case "$workload" in ''|\#*) continue ;; esac
+  # Missing workload paths are a setup/config error, not a budget
+  # regression. Categorise them separately so the header-comment
+  # exit-code contract (0/1/2) actually matches what we emit.
   if [[ ! -f "$workload" ]]; then
     echo "perf/check: workload not found: $workload" >&2
-    fail=1
+    setup_fail=1
     continue
   fi
   total=$((total + 1))
@@ -108,12 +112,19 @@ while IFS=$'\t' read -r workload budget _note; do
   status="ok"
   if (( kb > budget )); then
     status="OVER"
-    fail=1
+    budget_fail=1
   fi
   printf "%-58s %-11s %-12s %-10s %s\n" "$workload" "$ms" "$kb" "$budget" "$status"
 done < "$BASELINES"
 
-if (( fail != 0 )); then
+if (( setup_fail != 0 )); then
+  echo ""
+  echo "perf/check: one or more workload paths in $BASELINES don't exist." >&2
+  echo "perf/check: this is a setup/config error, not a perf regression." >&2
+  echo "perf/check: fix the path or remove the row." >&2
+  exit 2
+fi
+if (( budget_fail != 0 )); then
   echo ""
   echo "perf/check: at least one workload exceeded its RSS budget." >&2
   echo "perf/check: bump perf/baselines.tsv if the growth is intentional," >&2
