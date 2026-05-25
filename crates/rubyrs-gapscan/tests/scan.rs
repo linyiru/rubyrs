@@ -233,20 +233,26 @@ fn parse_json_rejects_missing_envelope() {
 
 #[test]
 fn scan_skips_spec_and_test_dirs_by_default() {
-    // Sanity: the same fixture file lives only at tests/fixtures —
-    // not under a `spec/` or `test/` dir — so we can't directly
-    // assert exclusion against committed files without conflating
-    // with the test runner. Instead assert the option is honored
-    // structurally: scanning the gapscan crate root excludes
-    // tests/ (cargo's `tests/` lives at crate root, not under a
-    // dir named exactly `spec` or `test`, so this would still
-    // include it — guard the assertion only on `--include-tests`
-    // changing the count when a spec/ dir exists somewhere we
-    // control). For now we just verify the option flag flips.
-    let mut opts = ScanOptions::default();
-    assert!(opts.skip_tests);
-    opts.skip_tests = false;
-    assert!(!opts.skip_tests);
+    // PR #3 round 3 review #19: the previous version of this test
+    // only verified the flag could be flipped — it never invoked
+    // scan(). Now actually build a tree with both kinds of skip-
+    // candidate dirs and assert the file count differs.
+    let td = TempDir::new("skip");
+    td.write("app.rb", "puts 1\n");                // always counted
+    td.write("spec/app_spec.rb", "puts 2\n");      // skipped by default
+    td.write("test/app_test.rb", "puts 3\n");      // skipped by default
+    td.write("lib/util.rb", "puts 4\n");           // always counted
+    // Negative control: a dir whose name *contains* "test" but isn't
+    // exactly `test` must NOT be skipped (the filter is exact-match).
+    td.write("tester/aux.rb", "puts 5\n");
+
+    let default_report = scan(td.path(), &ScanOptions::default()).unwrap();
+    assert_eq!(default_report.files_scanned, 3, "expected app + lib/util + tester/aux");
+
+    let mut all = ScanOptions::default();
+    all.skip_tests = false;
+    let full_report = scan(td.path(), &all).unwrap();
+    assert_eq!(full_report.files_scanned, 5, "expected every .rb file");
 }
 
 #[test]
