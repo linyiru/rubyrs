@@ -26,10 +26,13 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
   `!=`. Symbol equality is a single integer compare.
 - `true`, `false`, `nil` — including `nil.to_s` (`""`), `nil.inspect`
   (`"nil"`), `nil.nil?`, and `Bool#to_s`
-- `Array` with `length`/`size`, `push`/`<<`, `[]`, `[]=`, `first`,
-  `last`, `empty?`, `each`, `map`
-- `Hash` (insertion-ordered, linear lookup) with `length`/`size`, `[]`,
-  `[]=`, `empty?`, `keys`, `values`, `each`
+- `Array` — see "Array built-in methods" below for the
+  full method list (~50 methods covering iteration,
+  filtering, combinatorics, pack/unpack, bsearch, etc.).
+- `Hash` — insertion-ordered, linear lookup; see "Hash
+  built-in methods" below for the full method list
+  (~25 methods including transform_keys/values, except/slice,
+  compact, filter_map, etc.).
 - Class instances with instance variables and methods
 - `Proc` (Block value) — opaque; created by `arr.each { ... }` and
   consumed by built-in iterators or `yield`
@@ -58,8 +61,23 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 
 ### String built-in methods
 
-Covered: `length` / `size`, `+`, `==`, `empty?`, `reverse`,
-`upcase`, `downcase`, `include?(String)`, `equal?` (identity),
+Covered: `length` / `size`, `bytesize`, `bytes`, `chars`,
+`+`, `==`, `<=>` (lexicographic), `empty?`, `reverse`,
+`upcase`, `downcase`, `strip` / `lstrip` / `rstrip`,
+`squeeze` / `squeeze(charset)` (literal char-set, no range
+expansion — same conservative semantics as `tr`),
+`center(width[, pad])` / `ljust(width[, pad])` /
+`rjust(width[, pad])` (pad cycles when multichar; empty pad
+raises ArgumentError),
+`include?(String)`, `start_with?` / `end_with?`,
+`equal?` (identity), `match?` / `match`, `scan` (String and
+Regex patterns; both non-block and block forms — capture
+groups in the regex make `scan` return Array-of-captures
+per match, no groups → match-string), `tr(from, to)`,
+`sub` / `gsub` (see below), `to_i` / `to_f` / `to_sym`,
+`encode` / `force_encoding` (no-op stubs — the subset has no
+encoding tag; see "String encoding stubs" below),
+`unpack(format)` (subset — see "Pack/Unpack"),
 interpolation `"... #{expr} ..."`.
 
 Not yet covered on String identity / inspection:
@@ -164,6 +182,146 @@ rubyrs collapses both to `ArgumentError`. The
 the distinction has no place to land. The upstream ruby/spec
 `it` block covering this is skipped in
 [`crates/rubyrs/spec/ruby/integer_digits_spec.rb`](../crates/rubyrs/spec/ruby/integer_digits_spec.rb).
+
+### Float built-in methods
+
+Covered: arithmetic (`+ - * / % **`), comparisons
+(`< <= > >=` via spaceship), mixed-numeric coercion
+(`5 + 5.0`, `5 == 5.0`), `to_s` / `inspect`, `to_i` / `to_f`,
+`abs`, predicates (`zero?` / `positive?` / `negative?` /
+`nan?` / `infinite?` / `finite?`), `floor` / `ceil` (Int
+result), `round` / `truncate` — both nullary (Int) and the
+precision-arg form (`round(n)` returns Float for `n > 0`,
+Int for `n == 0`, Int with low-order digits zeroed for
+`n < 0`; `truncate(n)` analogous).
+
+### Array built-in methods
+
+Covered (no-block): `length` / `size`, `push` / `<<`, `[]`,
+`[]=`, `first` / `last`, `empty?`, `include?`, `count` /
+`count(needle)`, `sum` (Int-only), `min` / `max`, `sort`,
+`reverse`, `uniq`, `compact`, `flatten` (depth 1), `join` /
+`join(sep)`, `+` / `-`, `concat`, `take(n)` / `drop(n)`,
+`to_a`, `tally`, `combination(n)` / `permutation([n])` (both
+return materialised Arrays — Enumerator isn't modelled),
+`assoc` / `rassoc`, `pack(format)` (subset of CRuby's
+directives — see Pack/Unpack below), `dig(*keys)`, `inject` /
+`reduce` with Symbol or block.
+
+Covered (block): `each`, `map` / `collect`, `select` /
+`filter`, `reject`, `find` / `detect`, `any?` / `all?` /
+`none?`, `each_with_index`, `each_with_object`, `sort_by`,
+`min_by` / `max_by` (both single-element and `min_by(n)` /
+`max_by(n)` top-n forms), `group_by`, `partition`,
+`chunk_while`, `take_while` / `drop_while`, `flat_map` /
+`collect_concat`, `each_slice` / `each_cons`, `bsearch`
+(two CRuby modes — Bool-block for find-minimum, Int-block
+for find-any), `filter_map`, `chunk`, `zip`.
+
+Mutating bang forms: `sort!`, `uniq!`, `compact!`, `flatten!`,
+`reverse!`.
+
+### Hash built-in methods
+
+Insertion-ordered with linear lookup (O(n) on n keys —
+acceptable for the niche).
+
+Covered (no-block): `length` / `size`, `[]` / `[]=`,
+`empty?`, `include?` / `has_key?` / `key?` / `member?`,
+`keys`, `values`, `to_h` / `to_a`, `merge` (other Hash),
+`delete`, `invert`, `store`, `except(*keys)`, `slice(*keys)`
+(argument-order result), `compact` / `compact!` (the
+mutating form returns `nil` when nothing changed, matching
+CRuby's "nil = unchanged" convention), `dig(*keys)`,
+`fetch(key)` / `fetch(key, default)` / `fetch(key) { ... }`,
+`inspect`.
+
+Covered (block): `each` / `each_pair` (yields `|k, v|`),
+`each_with_index`, `map` / `collect` (returns Array of block
+results), `select` / `filter`, `reject`, `find` / `detect`,
+`any?` / `all?` / `none?`, `sort` / `sort_by`, `min_by` /
+`max_by`, `group_by`, `transform_keys` / `transform_values`
+(both non-mutating; collisions in `transform_keys` follow
+CRuby's later-wins iteration order), `filter_map` (collects
+truthy block returns into a flat Array — not a Hash —
+matching CRuby).
+
+### Range built-in methods
+
+Closed Int–Int ranges (and the partial-range cases listed
+below) are the primary subset. String–String ranges drive
+`('a'..'z').each` / `.to_a` / `.size` / `.include?(String)`.
+
+Covered (no-block): `begin` / `first` / `min`, `end` /
+`last` / `max`, `size` / `length` / `count`, `exclude_end?`,
+`include?(Int)`, `cover?(Int)`, `cover?(Range)` (true iff
+the other range is fully contained; empty sub-ranges —
+`begin ≥ end` excl or `begin > end` incl — do NOT cover,
+matching CRuby), `to_a` / `sort`, `sum` / `sum(init)`,
+`step(n)` (Array result), `inject` / `reduce`. Endless
+ranges (`(1..)`) support `first(n)`; beginless (`..n`) only
+the methods that don't need an anchor.
+
+Covered (block): `each`, `step(n) { |i| ... }` (yields step
+values, returns the receiver), `map`, `select` / `filter`,
+`reject`, `find` / `detect`, `any?` / `all?` / `none?`,
+`each_with_index`, `each_with_object`, `min_by` / `max_by`,
+`group_by`, `sort_by`, `partition`, `inject` / `reduce`
+(with block, optional init).
+
+### String pack/unpack (subset)
+
+`String#unpack(format)` and `Array#pack(format)` support the
+directives the niche actually uses:
+
+  `C` / `c`       8-bit unsigned / signed
+  `n` / `N`       16-bit / 32-bit big-endian unsigned
+  `v` / `V`       16-bit / 32-bit little-endian unsigned
+  `q` / `Q`       64-bit signed / unsigned (native LE)
+  `a` / `A` / `Z` raw / space-null-trimmed / null-terminated
+                  strings
+
+Counts (digits or `*`) are honoured. Whitespace inside the
+format string is silently ignored (CRuby behaviour).
+Unsupported directives (`m`, `U`, `w`, `f` / `d` / `e` / `E`
+/ `g` / `G`, etc.) raise `ArgumentError`. `String#bytes`
+ships alongside for inspecting packed output without a
+`unpack("C*")` round-trip.
+
+### String encoding stubs
+
+`String#encode(target)` and `String#force_encoding(target)`
+are no-ops that return the receiver (Rc-shared, no copy).
+The subset stores raw bytes with no per-string encoding tag
+(`Vec<u8>`-backed `RStr`); cross-encoding transliteration is
+explicitly out of scope. The methods exist for compatibility
+with library code that defensively normalises at boundaries
+(`s.force_encoding("UTF-8")`).
+
+### Object reflection
+
+Covered: `obj.class`, `obj.is_a?(C)` / `kind_of?` /
+`instance_of?`, `obj.respond_to?(sym)`, `obj.equal?(other)`
+(identity), `obj.methods` (Array of Symbols of every method
+the receiver can dispatch — for user-class instances walks
+the class chain; primitives currently return `[]`, see
+divergence below), `obj.instance_variables` (Array of
+`@`-prefixed Symbols for Object instances; `[]` for
+everything else), `obj.tap` / `obj.then` / `obj.yield_self`,
+`obj.frozen?`, plus the Method-object capture chain
+described in the "Method objects" section above.
+
+Divergence from CRuby on `obj.methods` for primitives:
+
+```ruby
+5.methods         # CRuby: ~150-method Array (Kernel, Numeric,
+                  #        Comparable, Integer)
+                  # rubyrs: []
+```
+
+The subset doesn't enumerate Kernel methods individually —
+they're handled as universal arms in `primitive_call` /
+`responds_to`. User-class instances enumerate fine.
 
 ### Metaprogramming (PoC)
 - `alias_method :new, :old` — resolves the source method by walking
