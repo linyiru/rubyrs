@@ -40,6 +40,15 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Clippy (workspace, -D warnings)
+        # Catches the style / pedantic lints that `cargo build`
+        # won't notice. The workspace is at zero warnings as of
+        # the May 2026 cleanup pass; this step is the wall that
+        # keeps it there. Build / test already enforce -D warnings
+        # at compile time via RUSTFLAGS, but neither runs clippy
+        # itself, so the lints would silently regress without this.
+        run: cargo clippy --release --all-targets --workspace -- -D warnings
+
       - name: Build
         run: cargo build --release --verbose
 

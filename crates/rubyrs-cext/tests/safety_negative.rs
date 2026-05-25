@@ -214,7 +214,7 @@ fn hash_aset_then_aref_roundtrip() {
 }
 
 #[test]
-fn rb_str_new_cstr_on_known_cstring_then_RSTRING_LEN() {
+fn rb_str_new_cstr_on_known_cstring_then_rstring_len() {
     // Mixed positive/negative — exercises the happy path that
     // underlies the forged-handle tests above.
     let c_string = b"hello\0";

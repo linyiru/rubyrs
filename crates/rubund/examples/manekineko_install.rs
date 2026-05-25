@@ -136,7 +136,7 @@ fn perform_parallel_install(reqs: &[GemRequirement]) {
 
     // Set up standard mpsc channel to feed requirements to workers
     let (tx, rx) = mpsc::channel();
-    for gem in reqs.to_vec() {
+    for gem in reqs.iter().cloned() {
         tx.send(gem).unwrap();
     }
     drop(tx); // Close channel sender so workers exit when done

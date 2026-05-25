@@ -451,10 +451,10 @@ impl Value {
                         }
                         if let Value::Sym(sid) = k {
                             let name = interner.resolve(*sid);
-                            if sym_needs_quotes(&name) {
-                                format!("\"{}\": {}", name, v.to_inspect(heap, interner))
+                            if sym_needs_quotes(name) {
+                                format!("\"{name}\": {}", v.to_inspect(heap, interner))
                             } else {
-                                format!("{}: {}", name, v.to_inspect(heap, interner))
+                                format!("{name}: {}", v.to_inspect(heap, interner))
                             }
                         } else {
                             format!("{} => {}", k.to_inspect(heap, interner), v.to_inspect(heap, interner))

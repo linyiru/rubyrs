@@ -1,3 +1,10 @@
+// Several tests build synthetic Reports via `let mut r =
+// Report::default(); r.field = ...;`. clippy's
+// `field_reassign_with_default` lint would have us collapse to a
+// struct-literal `..Default::default()` spread, but the test cases
+// are clearer when each field's purpose is on its own line.
+#![allow(clippy::field_reassign_with_default)]
+
 //! End-to-end tests for `rubyrs-gapscan`.
 //!
 //! Two checked-in fixtures drive these:

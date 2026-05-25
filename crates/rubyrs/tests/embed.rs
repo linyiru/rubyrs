@@ -422,9 +422,8 @@ fn pin_guard_balanced_when_block_raises_inside_iterator() {
     }
     // If we got here without the debug_assert in eval firing, the
     // PinGuard's Drop was wired up correctly for every iterator
-    // exit path. The assertion is the real test; this expression
-    // just keeps the loop in scope.
-    assert!(true);
+    // exit path. The assertion fired in `rt.eval` is the real test;
+    // reaching this line is the success signal.
 }
 
 #[test]
