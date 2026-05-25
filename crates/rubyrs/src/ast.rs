@@ -83,17 +83,26 @@ pub(crate) enum Expr {
     Def {
         name: String,
         /// All formal parameters in source order — required ones
-        /// first, then optionals. (Splat / keyword / block params
-        /// aren't supported yet.)
+        /// first, then optionals, then (if present) the rest-param.
+        /// Keyword and block-args (`&blk`) still aren't supported.
         params: Vec<String>,
         /// Parallel to `params`. `None` = required (must be passed
-        /// by the caller). `Some(SExpr)` = optional with a default
+        /// by the caller) OR the rest slot (filled with an Array at
+        /// call time). `Some(SExpr)` = optional with a default
         /// expression. The default is restricted at AST-translate
         /// time to literal values (Int / Str / Sym / Bool / Nil) —
         /// arbitrary default expressions can reference earlier
         /// params and need a per-callsite prologue, which is more
         /// invasive than what this minimal pass handles.
         defaults: Vec<Option<SExpr>>,
+        /// `Some(idx)` when the method has a `*rest` param at
+        /// position `idx` in `params`. The rest slot consumes
+        /// trailing args after required + filled-optional positions
+        /// are claimed; if no excess args remain, it receives an
+        /// empty Array. Required-post-rest (`def f(a, *r, b)`) is
+        /// not supported yet — Prism's `rest()` reports only the
+        /// rest param; required-post would come from `posts()`.
+        rest_param: Option<u16>,
         body: Vec<SExpr>,
     },
     Class {
@@ -723,6 +732,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let name = cid_to_string(n.name());
         let mut params: Vec<String> = Vec::new();
         let mut defaults: Vec<Option<SExpr>> = Vec::new();
+        let mut rest_param: Option<u16> = None;
         if let Some(p) = n.parameters() {
             for r in p.requireds().iter() {
                 if let Some(rp) = r.as_required_parameter_node() {
@@ -754,6 +764,34 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     }
                 }
             }
+            // `*rest` param. Prism's `rest()` returns either a
+            // `RestParameterNode` (named: `*r`) or, when the user
+            // wrote a bare `*`, the same node with no `.name()`.
+            // Anonymous rest is rare in real DSL code; for the PoC
+            // we synthesise the local name `*` so the slot still
+            // exists in the locals table but isn't reachable by
+            // any read in the body. CRuby treats `def f(*)` the
+            // same way (no named binding, but trailing args are
+            // discarded).
+            if let Some(rest) = p.rest() {
+                if let Some(rpn) = rest.as_rest_parameter_node() {
+                    let name = rpn.name()
+                        .map(cid_to_string)
+                        .unwrap_or_else(|| "*".to_string());
+                    rest_param = Some(params.len() as u16);
+                    params.push(name);
+                    defaults.push(None);
+                }
+            }
+            // Required-post-rest (`def f(a, *r, b)`) lives in
+            // `p.posts()`. We don't support it yet — flag any
+            // appearance as a SyntaxError so it isn't silently
+            // dropped. Same posture as keyword/block args.
+            if p.posts().iter().next().is_some() {
+                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                    format!("post-rest required parameters not supported in `def {}`", name)
+                ));
+            }
         }
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
@@ -763,7 +801,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Def { name, params, defaults, body });
+        return sp(node, Expr::Def { name, params, defaults, rest_param, body });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;

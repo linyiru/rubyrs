@@ -56,6 +56,7 @@ ProgramNode
 RangeNode
 RequiredParameterNode
 RescueModifierNode
+RestParameterNode
 ReturnNode
 SelfNode
 SplatNode

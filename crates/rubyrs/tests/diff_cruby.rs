@@ -135,3 +135,4 @@ fn run_diff(name: &str) {
 #[test] fn modules() { run_diff("modules"); }
 #[test] fn conversions() { run_diff("conversions"); }
 #[test] fn unless_basics() { run_diff("unless_basics"); }
+#[test] fn splat_params() { run_diff("splat_params"); }

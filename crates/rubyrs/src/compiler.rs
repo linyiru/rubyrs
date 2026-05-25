@@ -78,9 +78,15 @@ impl ProtoBuilder {
             _ => panic!("ICE: patch_jump on non-jump op at {}", at),
         }
     }
-    pub(crate) fn build(self, name: String, params: Vec<String>, defaults: Vec<Option<Value>>) -> Proto {
+    pub(crate) fn build(
+        self,
+        name: String,
+        params: Vec<String>,
+        defaults: Vec<Option<Value>>,
+        rest_param: Option<u16>,
+    ) -> Proto {
         Proto {
-            name, params, defaults,
+            name, params, defaults, rest_param,
             n_locals: self.n_locals,
             code: self.code,
             op_spans: self.op_spans,
@@ -552,12 +558,12 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, defaults, body } => {
+        Expr::Def { name, params, defaults, rest_param, body } => {
             let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node))
             }).collect();
             let proto_idx = compile_proto_kind(
-                name.clone(), params.clone(), lit_defaults, body,
+                name.clone(), params.clone(), lit_defaults, *rest_param, body,
                 b.filename.clone(), protos, interner, cc, /*is_method=*/true,
             );
             let name_id = interner.intern(name);
@@ -795,7 +801,7 @@ pub(crate) fn compile_proto(
     name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> usize {
-    compile_proto_kind(name, params, defaults, body, filename, protos, interner, cc, /*is_method=*/false)
+    compile_proto_kind(name, params, defaults, /*rest_param=*/None, body, filename, protos, interner, cc, /*is_method=*/false)
 }
 
 /// Same as `compile_proto` but tags the resulting builder as a
@@ -804,7 +810,9 @@ pub(crate) fn compile_proto(
 /// compile path. Class bodies and the toplevel `<main>` proto
 /// stay non-method.
 pub(crate) fn compile_proto_kind(
-    name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
+    name: String, params: Vec<String>, defaults: Vec<Option<Value>>,
+    rest_param: Option<u16>,
+    body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
     is_method: bool,
 ) -> usize {
@@ -816,7 +824,7 @@ pub(crate) fn compile_proto_kind(
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let idx = protos.len();
-    protos.push(b.build(name, params, defaults));
+    protos.push(b.build(name, params, defaults, rest_param));
     idx
 }
 
@@ -877,6 +885,6 @@ pub(crate) fn compile_block(
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let idx = protos.len();
-    protos.push(b.build("<block>".into(), block_params.to_vec(), vec![None; block_params.len()]));
+    protos.push(b.build("<block>".into(), block_params.to_vec(), vec![None; block_params.len()], None));
     (idx, param_start, n_params)
 }

@@ -825,18 +825,24 @@ fn alias_method_shares_super_lookup_chain() {
 #[test]
 fn method_missing_catches_unknown_call_on_object() {
     let (mut rt, buf) = rt_with_buf();
-    // Splat-args isn't part of the subset; pass the missed name
-    // only and confirm the symbol survives the round-trip.
-    rt.eval(r#"
+    // The reason `method_missing` matters in real DSLs: receiving
+    // `(name, *args)`, formatting the bag of args without knowing
+    // their shape. Splat-in-params landing made this expressible.
+    rt.eval(r##"
         class Ghost
-          def method_missing(name)
-            name.to_s
+          def method_missing(name, *args)
+            "#{name}(#{args.length}: #{args.inspect})"
           end
         end
-        puts Ghost.new.poof
-        puts Ghost.new.boo
-    "#, "t.rb").unwrap();
-    assert_eq!(buf.snapshot(), "poof\nboo\n");
+        g = Ghost.new
+        puts g.poof
+        puts g.boo(1)
+        puts g.zap(1, 2, 3)
+    "##, "t.rb").unwrap();
+    assert_eq!(
+        buf.snapshot(),
+        "poof(0: [])\nboo(1: [1])\nzap(3: [1, 2, 3])\n"
+    );
 }
 
 #[test]

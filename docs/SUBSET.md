@@ -37,7 +37,9 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 ### Syntax
 - Local and instance variables (`x`, `@x`)
 - `if / elsif / else`, `while`
-- `def` (top-level and inside `class`)
+- `def` (top-level and inside `class`), including `*rest` splat in
+  the param list (`def f(a, *xs)`). Required-post-rest
+  (`def f(a, *r, b)`) is not supported.
 - `class Foo ... end`, `Foo.new(args)`, `initialize`, instance methods,
   implicit-self method calls
 - `self`
@@ -81,9 +83,13 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
   [ADR 0010](adr/0010-metaprogramming-poc.md).
 
 **Caveats for the PoC**
-- No `*args` splat — `method_missing(name, *args)` and arity-flexible
-  `define_method` aren't expressible yet. Tracking item on the
-  "Not supported" list.
+- `define_method` block params don't yet honour `*rest` splat —
+  the closure-method dispatch path uses fixed `n_params`.
+  `def`-installed methods (including `method_missing(name, *args)`)
+  do support splat.
+- Required-post-rest (`def f(a, *r, b)`) is still rejected with a
+  SyntaxError at AST-translate time. Splat-at-end is enough for
+  the common DSL shapes.
 - `method_missing` is only invoked when the receiver is a user-class
   instance (`Value::Object`). Adding per-primitive class chains is
   a follow-up.
@@ -202,7 +208,7 @@ end
 | `Rational`, `Complex`, big-Integer overflow promotion | low |
 | Exception class hierarchy (`raise SomeError`), `ensure` | medium |
 | `attr_reader / attr_writer / attr_accessor` | medium |
-| Default args, keyword args, splat, block-arg `&blk` | medium |
+| Keyword args, block-arg `&blk`, required-post-rest, splat in `define_method` block params | medium |
 | `return`, `break`, `next`, `redo` | medium |
 | Inline cache for method dispatch | low (perf-only) |
 

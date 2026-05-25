@@ -2311,22 +2311,35 @@ impl Vm {
             });
             return Ok(());
         }
-        // Default-argument support (literal defaults only): a Proto
-        // carries a `defaults` vec parallel to `params`. `None`
-        // entries are required; `Some(v)` entries can be omitted by
-        // the caller and the slot is filled from the literal at
-        // invocation time. Required params always come before
-        // optionals in source order, so the legal arg-count range
-        // is `[required, params.len()]`.
+        // Default-argument + `*rest` support. A Proto carries:
+        //  - `defaults`: parallel to `params`. `None` = required (or
+        //    the rest slot). `Some(v)` = optional with literal default.
+        //  - `rest_param`: `Some(idx)` when `params[idx]` is the
+        //    `*rest` collector; trailing args bundle into a new Array.
+        //
+        // Source order for `def f(a, b=1, *r)` puts a at 0 (required),
+        // b at 1 (optional), r at 2 (rest). Required-pre-rest counts
+        // are taken from the prefix of `None`s before any `Some`.
+        // Required-post-rest is rejected at AST translate time.
         let proto = &self.protos[m.proto_idx];
-        let required = proto.defaults.iter().take_while(|d| d.is_none()).count();
-        let max_args = m.params.len();
+        let rest_at = proto.rest_param.map(|i| i as usize);
+        // `required` = leading `None` defaults. If there's a rest param,
+        // it's the last `None` in the prefix; subtract one so it's not
+        // counted as a required position the caller has to fill.
+        let raw_required = proto.defaults.iter().take_while(|d| d.is_none()).count();
+        let required = match rest_at {
+            Some(idx) if idx < raw_required => raw_required - 1,
+            _ => raw_required,
+        };
+        let max_args = if rest_at.is_some() { usize::MAX } else { m.params.len() };
         let given = args.len();
         if given < required || given > max_args {
-            let expected = if required == max_args {
+            let expected = if rest_at.is_some() {
+                format!("{}+", required)
+            } else if required == m.params.len() {
                 format!("{}", required)
             } else {
-                format!("{}..{}", required, max_args)
+                format!("{}..{}", required, m.params.len())
             };
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected {})", given, expected),
@@ -2334,20 +2347,43 @@ impl Vm {
         }
         self.check_frames()?;
         let n_locals = proto.n_locals as usize;
-        // Snapshot defaults for the omitted-slot fill, since we're
-        // about to take `&mut self` to push the frame.
-        let default_fill: Vec<Value> = (given..max_args).map(|i| {
-            // `i < required` is impossible: `given >= required`
-            // already, so any `i in given..max_args` lands in the
-            // optional range, which has Some(v).
-            proto.defaults[i].clone().unwrap_or(Value::Nil)
-        }).collect();
+        // Distribute `args` across (required → optionals → rest).
+        // Caller args at positions <required fill required slots.
+        // Args [required..rest_at) fill optionals if given long
+        // enough; unfilled optionals take their default. Anything
+        // past optionals lands in the rest-slot Array.
         let mut locals = vec_nil(n_locals);
-        for (i, a) in args.into_iter().enumerate() {
-            locals[i] = a;
-        }
-        for (offset, v) in default_fill.into_iter().enumerate() {
-            locals[given + offset] = v;
+        let mut args_iter = args.into_iter();
+        match rest_at {
+            None => {
+                // No rest: original behaviour. Required-then-optional fill.
+                for i in 0..given.min(m.params.len()) {
+                    locals[i] = args_iter.next().expect("arity bound holds");
+                }
+                for i in given..m.params.len() {
+                    locals[i] = proto.defaults[i].clone().unwrap_or(Value::Nil);
+                }
+            }
+            Some(idx) => {
+                let n_optional = idx - required;
+                let consumed_by_pre = (required + n_optional).min(given);
+                for i in 0..consumed_by_pre {
+                    locals[i] = args_iter.next().expect("arity bound holds");
+                }
+                // Fill any unused optional slots with defaults.
+                for i in consumed_by_pre..idx {
+                    locals[i] = proto.defaults[i].clone().unwrap_or(Value::Nil);
+                }
+                // Remainder lands in the rest slot as a fresh Array.
+                // Goes through the heap so the Array participates in
+                // GC like every other user-visible Array; the frame's
+                // locals Rc keeps the ObjId alive while the method runs.
+                let rest_vals: Vec<Value> = args_iter.collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                let rest_id = self.heap.alloc(HeapObj::Array(rest_vals));
+                locals[idx] = Value::Array(rest_id);
+            }
         }
         self.frames.push(Frame {
             proto_idx: m.proto_idx,

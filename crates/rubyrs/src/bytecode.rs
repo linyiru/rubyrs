@@ -169,6 +169,12 @@ pub(crate) struct Proto {
     /// needed. Required params always come before optionals in
     /// source order, so `defaults` has the shape `[None…, Some…]`.
     pub(crate) defaults: Vec<Option<Value>>,
+    /// `Some(idx)` when the method has a `*rest` param at position
+    /// `idx` in `params`. The arity check accepts unlimited args
+    /// past the required + optional positions; trailing args land
+    /// in this slot as a fresh Array. `None` for class bodies,
+    /// blocks, and ordinary methods without a rest-param.
+    pub(crate) rest_param: Option<u16>,
     pub(crate) n_locals: u16,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.
