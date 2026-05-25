@@ -12,6 +12,10 @@ pub struct ObjId(pub(crate) u32);
 #[derive(Clone, Debug)]
 pub enum Value {
     Int(i64),
+    /// 64-bit float. Mixed arithmetic with Int promotes the Int
+    /// (CRuby's "Float wins on mix" rule). Equality across the
+    /// numeric types coerces too — `5 == 5.0` is `true`.
+    Float(f64),
     Str(Rc<str>),
     Sym(SymId),
     Bool(bool),

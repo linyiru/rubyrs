@@ -98,3 +98,4 @@ fn run_diff(name: &str) {
 #[test] fn respond_to() { run_diff("respond_to"); }
 #[test] fn object_class() { run_diff("object_class"); }
 #[test] fn cross_type_eq() { run_diff("cross_type_eq"); }
+#[test] fn float_basics() { run_diff("float_basics"); }

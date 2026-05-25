@@ -6,6 +6,30 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **`Float` type (MVP).** `Value::Float(f64)`, literal parsing
+  via Prism's `FloatNode`, new `Op::LoadConstFloat(f64)`. Pure
+  Float arithmetic (`+ - * / %` and comparisons), mixed
+  Int/Float coercion ("Float wins" — `5 + 0.5 == 5.5`),
+  cross-numeric equality (`5 == 5.0` is `true`). Methods:
+  `to_i` / `to_f` / `to_s` / `abs` / `-@` / `+@`, predicates
+  (`zero?`, `positive?`, `negative?`, `nan?`, `finite?`),
+  `infinite?` returning `1` / `-1` / `nil`,
+  `floor` / `ceil` / `round` (all Integer-returning).
+  Companion conversions: `Integer#to_f`, `String#to_f` (CRuby-
+  lenient parse: leading whitespace, optional sign, optional
+  exponent, junk-tail → 0.0). `ruby_eq` extended for
+  Float-Float and Int-Float coercion. Preamble adds
+  `class Float; end` so `1.5.class.name == "Float"`. `class_of`
+  and `responds_to` extended.
+  Diff fixture `float_basics.rb` (~60 lines) covers literals,
+  arithmetic, coercion, comparisons, conversions, predicates,
+  rounding, Infinity/NaN sentinels, class identity,
+  `respond_to?`. Byte-identical to CRuby in the everyday
+  magnitude range; scientific notation (≥ `1e16`, `< 1e-3`)
+  diverges from CRuby's formatter and is a documented gap in
+  SUBSET.md.
+
 ### Fixed
 - **Cross-type `==` / `!=` no longer raises NoMethodError.**
   `"x" == nil`, `nil == :foo`, `5 == "5"`, `[] == ""` — every

@@ -302,10 +302,19 @@ impl Vm {
             Value::Int(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" |
                 "<" | "<=" | ">" | ">=" |
-                "to_i" | "abs" | "even?" | "odd?" |
+                "to_i" | "to_f" | "abs" | "even?" | "odd?" |
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
                 "times" | "upto" | "downto"
+            ),
+            Value::Float(_) => matches!(name,
+                "+" | "-" | "*" | "/" | "%" |
+                "<" | "<=" | ">" | ">=" |
+                "to_i" | "to_f" | "abs" |
+                "zero?" | "positive?" | "negative?" |
+                "nan?" | "infinite?" | "finite?" |
+                "floor" | "ceil" | "round" |
+                "-@" | "+@"
             ),
             Value::Str(_) => matches!(name,
                 "+" | "*" | "<" | "<=" | ">" | ">=" |
@@ -313,7 +322,7 @@ impl Vm {
                 "upcase" | "downcase" | "reverse" |
                 "strip" | "lstrip" | "rstrip" |
                 "include?" | "start_with?" | "end_with?" |
-                "to_i" | "chars" | "split" | "to_sym"
+                "to_i" | "to_f" | "chars" | "split" | "to_sym"
             ),
             Value::Sym(_) => matches!(name, "to_sym"),
             Value::Array(_) => matches!(name,
@@ -367,6 +376,7 @@ impl Vm {
     pub(crate) fn class_of(&mut self, recv: &Value) -> Value {
         let name: &'static str = match recv {
             Value::Int(_) => "Integer",
+            Value::Float(_) => "Float",
             Value::Str(_) => "String",
             Value::Sym(_) => "Symbol",
             Value::Array(_) => "Array",
@@ -2042,6 +2052,7 @@ impl Vm {
         self.check_fuel()?;
         match op {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
+            Op::LoadConstFloat(f) => self.stack.push(Value::Float(f)),
             Op::LoadConstStr(id) => {
                 let s = self.interner.resolve(id).clone();
                 self.stack.push(Value::Str(s));
@@ -2475,6 +2486,84 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Int(a), "negative?", []) => Some(Value::Bool(*a < 0)),
         (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => Some(Value::Int(a.wrapping_add(1))),
         (Value::Int(a), "pred", []) => Some(Value::Int(a.wrapping_sub(1))),
+        (Value::Int(a), "to_f", []) => Some(Value::Float(*a as f64)),
+
+        // Float × Float
+        (Value::Float(a), op, [Value::Float(b)]) => match op {
+            "+" => Some(Value::Float(a + b)),
+            "-" => Some(Value::Float(a - b)),
+            "*" => Some(Value::Float(a * b)),
+            // Float / 0.0 == ±Infinity (or NaN), not an exception —
+            // matches IEEE 754 and CRuby.
+            "/" => Some(Value::Float(a / b)),
+            "%" => Some(Value::Float(a % b)),
+            "==" => Some(Value::Bool(a == b)),
+            "!=" => Some(Value::Bool(a != b)),
+            "<"  => Some(Value::Bool(a < b)),
+            "<=" => Some(Value::Bool(a <= b)),
+            ">"  => Some(Value::Bool(a > b)),
+            ">=" => Some(Value::Bool(a >= b)),
+            _ => None,
+        },
+        // Mixed Int/Float — CRuby's "Float wins" coercion.
+        (Value::Float(a), op, [Value::Int(b)]) => {
+            let b = *b as f64;
+            match op {
+                "+" => Some(Value::Float(a + b)),
+                "-" => Some(Value::Float(a - b)),
+                "*" => Some(Value::Float(a * b)),
+                "/" => Some(Value::Float(a / b)),
+                "%" => Some(Value::Float(a % b)),
+                "==" => Some(Value::Bool(*a == b)),
+                "!=" => Some(Value::Bool(*a != b)),
+                "<"  => Some(Value::Bool(*a < b)),
+                "<=" => Some(Value::Bool(*a <= b)),
+                ">"  => Some(Value::Bool(*a > b)),
+                ">=" => Some(Value::Bool(*a >= b)),
+                _ => None,
+            }
+        }
+        (Value::Int(a), op, [Value::Float(b)]) => {
+            let a = *a as f64;
+            match op {
+                "+" => Some(Value::Float(a + b)),
+                "-" => Some(Value::Float(a - b)),
+                "*" => Some(Value::Float(a * b)),
+                "/" => Some(Value::Float(a / b)),
+                "%" => Some(Value::Float(a % b)),
+                "==" => Some(Value::Bool(a == *b)),
+                "!=" => Some(Value::Bool(a != *b)),
+                "<"  => Some(Value::Bool(a < *b)),
+                "<=" => Some(Value::Bool(a <= *b)),
+                ">"  => Some(Value::Bool(a > *b)),
+                ">=" => Some(Value::Bool(a >= *b)),
+                _ => None,
+            }
+        }
+        // Float predicates and conversions.
+        (Value::Float(a), "to_s", []) => Some(Value::Str(Rc::from(crate::heap::format_float(*a).as_str()))),
+        (Value::Float(a), "to_f", []) => Some(Value::Float(*a)),
+        (Value::Float(a), "to_i", []) => Some(Value::Int(*a as i64)),
+        (Value::Float(a), "abs", []) => Some(Value::Float(a.abs())),
+        (Value::Float(a), "-@", []) => Some(Value::Float(-*a)),
+        (Value::Float(a), "+@", []) => Some(Value::Float(*a)),
+        (Value::Float(a), "zero?", []) => Some(Value::Bool(*a == 0.0)),
+        (Value::Float(a), "positive?", []) => Some(Value::Bool(*a > 0.0)),
+        (Value::Float(a), "negative?", []) => Some(Value::Bool(*a < 0.0)),
+        (Value::Float(a), "nan?", []) => Some(Value::Bool(a.is_nan())),
+        (Value::Float(a), "infinite?", []) => {
+            // CRuby's `Float#infinite?` returns 1 / -1 / nil, not bool.
+            if a.is_infinite() {
+                Some(Value::Int(if *a > 0.0 { 1 } else { -1 }))
+            } else {
+                Some(Value::Nil)
+            }
+        }
+        (Value::Float(a), "finite?", []) => Some(Value::Bool(a.is_finite())),
+        (Value::Float(a), "floor", []) => Some(Value::Int(a.floor() as i64)),
+        (Value::Float(a), "ceil", []) => Some(Value::Int(a.ceil() as i64)),
+        (Value::Float(a), "round", []) => Some(Value::Int(a.round() as i64)),
+
         (Value::Str(a), "+", [Value::Str(b)]) => {
             check(a.len().saturating_add(b.len()))?;
             let mut s = a.to_string();
@@ -2514,6 +2603,42 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
                 } else { break; }
             }
             Some(Value::Int(if saw_digit { sign.wrapping_mul(n) } else { 0 }))
+        }
+        (Value::Str(a), "to_f", []) => {
+            // CRuby's leniency: trim leading whitespace, parse what
+            // we can, return 0.0 for "garbage". Rust's stdlib
+            // `f64::from_str` is stricter (rejects trailing junk),
+            // so we scan a Ruby-shaped prefix ourselves.
+            let s = a.trim_start();
+            let bytes = s.as_bytes();
+            let mut end = 0usize;
+            if bytes.first() == Some(&b'-') || bytes.first() == Some(&b'+') {
+                end += 1;
+            }
+            let mut saw_digit = false;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                saw_digit = true;
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'.' {
+                end += 1;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    saw_digit = true;
+                    end += 1;
+                }
+            }
+            // Optional exponent
+            if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+                let mut e = end + 1;
+                if e < bytes.len() && (bytes[e] == b'+' || bytes[e] == b'-') { e += 1; }
+                let exp_start = e;
+                while e < bytes.len() && bytes[e].is_ascii_digit() { e += 1; }
+                if e > exp_start { end = e; }
+            }
+            let parsed = if saw_digit {
+                s[..end].parse::<f64>().unwrap_or(0.0)
+            } else { 0.0 };
+            Some(Value::Float(parsed))
         }
         (Value::Str(a), "*", [Value::Int(n)]) => {
             let n = (*n).max(0) as usize;

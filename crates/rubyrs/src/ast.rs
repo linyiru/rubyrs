@@ -43,6 +43,7 @@ pub(crate) type SExpr = Spanned<Expr>;
 #[derive(Debug, Clone)]
 pub(crate) enum Expr {
     IntLit(i64),
+    FloatLit(f64),
     StrLit(String),
     SymbolLit(String),
     InterpolatedStr(Vec<SExpr>),
@@ -173,6 +174,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_integer_node() {
         let v: i32 = n.value().try_into().unwrap_or(0);
         return sp(node, Expr::IntLit(v as i64));
+    }
+    if let Some(n) = node.as_float_node() {
+        return sp(node, Expr::FloatLit(n.value()));
     }
     if let Some(n) = node.as_string_node() {
         return sp(node, Expr::StrLit(String::from_utf8_lossy(n.unescaped()).into_owned()));
@@ -316,7 +320,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     // via the AST_ERRORS thread-local rather than
                     // silently miscompiling.
                     match &val.node {
-                        Expr::IntLit(_) | Expr::StrLit(_) | Expr::SymbolLit(_)
+                        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StrLit(_) | Expr::SymbolLit(_)
                         | Expr::BoolLit(_) | Expr::Nil => {
                             defaults.push(Some(val));
                         }

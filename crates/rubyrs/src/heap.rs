@@ -184,6 +184,7 @@ impl Value {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "Integer",
+            Value::Float(_) => "Float",
             Value::Str(_) => "String",
             Value::Sym(_) => "Symbol",
             Value::Bool(_) => "Boolean",
@@ -199,6 +200,7 @@ impl Value {
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
             Value::Int(i) => i.to_string(),
+            Value::Float(f) => format_float(*f),
             Value::Str(s) => s.to_string(),
             Value::Sym(id) => interner.resolve(*id).to_string(),
             Value::Bool(true) => "true".into(),
@@ -237,6 +239,13 @@ impl Value {
     pub(crate) fn ruby_eq(&self, other: &Value, heap: &Heap) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            // Numeric coercion: CRuby treats `5 == 5.0` as `true`.
+            // NaN never equals anything, including itself —
+            // f64::==-on-NaN already gives `false`, so the comparison
+            // via `as f64` does the right thing.
+            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
+            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
             (Value::Str(a), Value::Str(b)) => **a == **b,
             (Value::Sym(a), Value::Sym(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -270,4 +279,19 @@ impl Value {
             _ => false,
         }
     }
+}
+
+/// Format a `Value::Float` for `to_display` / `to_inspect`.
+/// Rust's `{:?}` already preserves `.0` on whole numbers
+/// (`5.0` → `"5.0"`) so common cases match CRuby for free.
+/// Scientific notation for very large / small magnitudes is a
+/// known divergence — Rust prints `1e16`, CRuby prints `1.0e+16`.
+/// Restrict diff fixtures to the everyday range until P3-class
+/// formatter work lands.
+pub(crate) fn format_float(f: f64) -> String {
+    if f.is_nan() { return "NaN".into(); }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+    }
+    format!("{:?}", f)
 }

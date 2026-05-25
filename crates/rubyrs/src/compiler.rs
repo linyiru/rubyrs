@@ -157,6 +157,7 @@ pub(crate) fn compile_expr(
     b.current_span = e.span;
     match &e.node {
         Expr::IntLit(i) => { b.emit(Op::LoadConstInt(*i)); }
+        Expr::FloatLit(f) => { b.emit(Op::LoadConstFloat(*f)); }
         Expr::StrLit(s) => { let id = interner.intern(s); b.emit(Op::LoadConstStr(id)); }
         Expr::SymbolLit(s) => { let id = interner.intern(s); b.emit(Op::LoadSymbol(id)); }
         Expr::InterpolatedStr(parts) => {
@@ -547,6 +548,7 @@ pub(crate) fn compile_proto(
 fn literal_to_value(e: &Expr) -> Value {
     match e {
         Expr::IntLit(n) => Value::Int(*n),
+        Expr::FloatLit(f) => Value::Float(*f),
         Expr::StrLit(s) => Value::Str(std::rc::Rc::from(s.as_str())),
         Expr::SymbolLit(_) => {
             // SymbolLit-to-Value needs the interner, which the
