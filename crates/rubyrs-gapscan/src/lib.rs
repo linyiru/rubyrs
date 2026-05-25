@@ -404,6 +404,10 @@ fn collect_ruby_files(
     // symlinks so `gapscan scan ~/symlinked.rb` works; a dangling symlink
     // surfaces as NotFound here, which propagates out via the `?` and is
     // exactly the loud failure mode we want at the root.
+    //
+    // (No non-root file branch: when called recursively, the parent
+    // already gated entry on `file_type.is_dir()`, so `dir` is
+    // always a directory.)
     if is_root {
         let meta = std::fs::metadata(dir)?;
         if meta.is_file() {
@@ -412,11 +416,6 @@ fn collect_ruby_files(
             }
             return Ok(());
         }
-    } else if dir.is_file() {
-        if dir.extension().is_some_and(|e| e == "rb") {
-            out.push(dir.to_path_buf());
-        }
-        return Ok(());
     }
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
