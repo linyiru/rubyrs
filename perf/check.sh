@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# perf/check.sh — Per-workload peak-RSS regression check.
+# perf/check.sh — Per-workload peak-RSS + wall-time regression check.
 #
 # For each row in perf/baselines.tsv: run the workload through the
-# release rubyrs binary three times under `/usr/bin/time`, take the
-# MIN peak-RSS, and fail if it exceeds the row's `max_rss_kb`.
+# release rubyrs binary three times under `/usr/bin/time`, take
+# the min wall-time and min peak-RSS *independently* across those
+# runs, and fail if either exceeds the row's `max_rss_kb` /
+# `max_wall_ms`. (Independently: the reported pair may not come
+# from the same run — e.g. run 1 had the lowest wall, run 2 had
+# the lowest RSS. That's intentional, we want each metric's floor
+# as the most stable estimate of its underlying cost.) A
+# `max_wall_ms` of `0` disables the wall check for that workload
+# (sub-100ms scripts where measurement noise dominates the
+# signal).
 #
-# Wall time is collected and printed for visibility but not enforced
-# — CI-runner variance makes wall-time gating noisy at this scale.
-# Once enough runs accumulate to know the noise floor, a follow-up
-# can add a wall-time column to baselines.tsv. See perf/README.md
-# for the policy and ratchet etiquette.
+# Both budgets are absolute baselines committed to source — same
+# ratchet pattern as the panic budget. We deliberately don't
+# compare against master at runtime, because relative gates
+# chain-degrade across PRs. See perf/README.md for the policy.
 #
 # Exit codes:
-#   0  — all workloads under their RSS budgets
-#   1  — at least one workload over budget
-#   2  — setup error (binary not built, etc.)
+#   0  — all workloads within their RSS and wall budgets
+#   1  — at least one workload over a budget
+#   2  — setup error (binary not built, time missing, row malformed)
 
 set -euo pipefail
 
@@ -90,15 +97,19 @@ measure_once() {
       echo "ERR ERR"
       return
     fi
-    # Round UP on the bytes-to-KB conversion so the budget check is
-    # conservative — a script using 4 MB + 1 byte should report as
-    # 4097 KB rather than be rounded down to 4096 and slip past a
-    # tight budget. Ceiling is the right semantic for a regression
-    # gate; truncation could let sub-KB overruns past.
+    # Round UP both conversions so budget checks stay
+    # conservative — a script using 4 MB + 1 byte should report
+    # as 4097 KB rather than 4096, and 0.4565 seconds should
+    # report as 457 ms rather than 456. Truncation could let
+    # sub-unit overruns past a tight budget. Same conservatism
+    # principle as the RSS ceiling.
     awk -v s="$secs" -v b="$rss_b" 'BEGIN {
       kb = int(b / 1024);
       if (b % 1024 != 0) kb = kb + 1;
-      printf "%d %d\n", s*1000, kb;
+      ms_f = s * 1000;
+      ms = int(ms_f);
+      if (ms_f > ms) ms = ms + 1;
+      printf "%d %d\n", ms, kb;
     }'
   else
     # Force `C` locale — see the macOS arm for rationale. GNU
@@ -124,13 +135,19 @@ measure_once() {
       echo "ERR ERR"
       return
     fi
-    # Parse `m:ss.ss` (or `h:mm:ss.ss`) into ms.
+    # Parse `m:ss.ss` (or `h:mm:ss.ss`) into ms. Round UP to keep
+    # budget checks conservative — same rationale as the macOS
+    # arm above: a sub-ms overrun shouldn't slip past a tight
+    # max_wall_ms.
     local ms
     ms=$(awk -v w="$wall" 'BEGIN {
       n = split(w, parts, ":");
       total = 0;
       for (i = 1; i <= n; i++) total = total * 60 + parts[i];
-      printf "%d", total * 1000;
+      ms_f = total * 1000;
+      ms = int(ms_f);
+      if (ms_f > ms) ms = ms + 1;
+      printf "%d", ms;
     }')
     echo "$ms $rss_kb"
   fi
@@ -159,18 +176,36 @@ measure_min() {
 budget_fail=0   # at least one workload exceeded its budget → exit 1
 setup_fail=0    # at least one row in baselines.tsv is malformed → exit 2
 total=0
-printf "%-58s %-11s %-12s %-10s\n" "WORKLOAD" "WALL_MS_MIN" "RSS_KB_MIN" "BUDGET_KB"
-printf "%-58s %-11s %-12s %-10s\n" "--------" "-----------" "----------" "---------"
+printf "%-58s %-11s %-11s %-12s %-12s %s\n" "WORKLOAD" "RSS_MIN_KB" "RSS_MAX_KB" "WALL_MIN_MS" "WALL_MAX_MS" "STATUS"
+printf "%-58s %-11s %-11s %-12s %-12s %s\n" "--------" "----------" "----------" "-----------" "-----------" "------"
 
-while IFS=$'\t' read -r workload budget _note; do
+while IFS=$'\t' read -r workload rss_max wall_max _note; do
   # Skip comments + blank lines.
   case "$workload" in ''|\#*) continue ;; esac
-  # A malformed budget (empty, non-integer, missing column) would
-  # blow up the `(( kb > budget ))` test as a bash arithmetic
-  # error — categorise as setup_fail to keep the 0/1/2 exit-code
-  # contract honest.
-  if [[ ! "$budget" =~ ^[0-9]+$ ]]; then
-    echo "perf/check: row '$workload' has invalid budget '$budget' (expected non-negative integer)" >&2
+  # Display "-" instead of "0" when the wall check is disabled —
+  # easier to read in the result table than a literal 0 budget.
+  # Compute here so every row (happy, SETUP, malformed) renders
+  # the same way. For malformed `wall_max` (e.g. "abc") the raw
+  # value passes through so the SETUP row shows the bad input.
+  local_wall_display="$wall_max"
+  [[ "$wall_max" == "0" ]] && local_wall_display="-"
+  # Validate both numeric columns. A malformed value would blow up
+  # the `(( … > … ))` tests as a bash arithmetic error — route to
+  # setup_fail to keep the 0/1/2 exit-code contract honest. Each
+  # validation arm also emits a `SETUP` row in the result table so
+  # CI logs always show one of the documented STATUS values per
+  # baseline row, matching `perf/README.md`'s status semantics.
+  if [[ ! "$rss_max" =~ ^[0-9]+$ ]]; then
+    echo "perf/check: row '$workload' has invalid max_rss_kb '$rss_max' (expected non-negative integer)" >&2
+    printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
+    setup_fail=1
+    continue
+  fi
+  # `0` is a valid wall_max — it's the "disable wall check"
+  # sentinel for tiny workloads (sub-100ms noise floor).
+  if [[ ! "$wall_max" =~ ^[0-9]+$ ]]; then
+    echo "perf/check: row '$workload' has invalid max_wall_ms '$wall_max' (expected non-negative integer; 0 disables)" >&2
+    printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
     setup_fail=1
     continue
   fi
@@ -179,26 +214,35 @@ while IFS=$'\t' read -r workload budget _note; do
   # exit-code contract (0/1/2) actually matches what we emit.
   if [[ ! -f "$workload" ]]; then
     echo "perf/check: workload not found: $workload" >&2
+    printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
     setup_fail=1
     continue
   fi
   total=$((total + 1))
+  # `local_wall_display` was already computed near the top of the
+  # loop so all SETUP rows (malformed/missing/measurement-fail)
+  # render consistently; reuse the same value here.
   read -r ms kb <<<"$(measure_min "$workload")"
   # measure_min emits "ERR ERR" when /usr/bin/time itself failed
   # or the output didn't parse. Already logged a workload-specific
   # message inside measure_once; route to setup_fail and skip the
   # arithmetic comparison (which would die on non-numeric input).
   if [[ "$ms" == "ERR" || "$kb" == "ERR" ]]; then
-    printf "%-58s %-11s %-12s %-10s %s\n" "$workload" "ERR" "ERR" "$budget" "SETUP"
+    printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
     setup_fail=1
     continue
   fi
   status="ok"
-  if (( kb > budget )); then
-    status="OVER"
+  if (( kb > rss_max )); then
+    status="RSS-OVER"
     budget_fail=1
   fi
-  printf "%-58s %-11s %-12s %-10s %s\n" "$workload" "$ms" "$kb" "$budget" "$status"
+  # Skip wall check when wall_max is 0 (sub-100ms workload).
+  if (( wall_max > 0 && ms > wall_max )); then
+    status=$([[ "$status" == "ok" ]] && echo "WALL-OVER" || echo "$status+WALL")
+    budget_fail=1
+  fi
+  printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "$kb" "$rss_max" "$ms" "$local_wall_display" "$status"
 done < "$BASELINES"
 
 if (( setup_fail != 0 )); then
@@ -211,9 +255,10 @@ if (( setup_fail != 0 )); then
 fi
 if (( budget_fail != 0 )); then
   echo ""
-  echo "perf/check: at least one workload exceeded its RSS budget." >&2
+  echo "perf/check: at least one workload exceeded an RSS or wall-time budget." >&2
+  echo "perf/check: STATUS column shows RSS-OVER / WALL-OVER / RSS-OVER+WALL." >&2
   echo "perf/check: bump perf/baselines.tsv if the growth is intentional," >&2
-  echo "perf/check: with a comment explaining what allocation grew and why." >&2
+  echo "perf/check: with a comment explaining what grew and why." >&2
   exit 1
 fi
 
