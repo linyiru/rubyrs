@@ -47,7 +47,7 @@ to draw a few stable conclusions:
   **Bundler tops the list at 85.25%** despite being by far the
   largest scan target (225 files, 106k AST nodes); size doesn't
   hurt translatability.
-- **The #1-missing class field is now diverse — no single dominant
+- **The #1 missing class is now diverse — no single dominant
   blocker** (was 3/5 ModuleNode at PR #7 baseline, before master
   landed `Module + extend`):
   - `ConstantWriteNode` — 3/10 (Jekyll, Liquid, stdlib URI):
@@ -65,7 +65,7 @@ to draw a few stable conclusions:
 - **Block / rest / splat parameter family confirmed broadly** —
   now seen as a major blocker in Sinatra, dry-struct, Tilt, plus
   stdlib optparse and set. Universal DSL-host theme, not just a
-  web-framework artefact. `BlockArgumentNode` (the `&block` /
+  web-framework artifact. `BlockArgumentNode` (the `&block` /
   `&:method` arg site) was Sinatra's #1 at PR #7 baseline; master's
   `&:method_name` (symbol-to-proc) landing reclassified it as
   Supported, which is why Sinatra jumped +2.3 pp.

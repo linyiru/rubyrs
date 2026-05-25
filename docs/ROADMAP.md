@@ -46,7 +46,7 @@ of codebase shape. Bundler tops the list at **85.25%** despite
 being by far the largest target (225 files, 106k AST nodes).
 The previous #1 blocker `ModuleNode` (which dominated 3/5 scans
 at PR #7 baseline) is now Supported on master — biggest single
-feature impact gapscan has measured. Today's #1 missing field is
+feature impact gapscan has measured. Today's #1 missing class is
 diverse: `ConstantWriteNode` ×3 (Jekyll, Liquid, stdlib URI),
 `BlockParameterNode` ×3 (Sinatra, dry-struct, Tilt),
 `KeywordHashNode` ×1 (Bundler — but ×430 occurrences),
