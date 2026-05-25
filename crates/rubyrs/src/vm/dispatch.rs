@@ -291,15 +291,54 @@ impl Vm {
                 // explicit receiver. CRuby additionally allows
                 // `self.foo` for some private writers; we keep
                 // the simpler "any explicit receiver = denied"
-                // rule. Protected is enforced as Public here —
-                // a real same-instance / same-class check would
-                // need to walk the caller's frame, which is
-                // beyond this subset's scope.
-                if m.visibility.get() == Visibility::Private {
+                // rule.
+                //
+                // Protected methods can be invoked with an
+                // explicit receiver only when the caller's `self`
+                // is an instance of the receiver's class (or a
+                // descendant). The common DSL use case is
+                // `def >(other); other.balance > balance; end`
+                // where both `self` and `other` are the same
+                // class. We walk the current frame to find the
+                // caller's self class and check kind_of? against
+                // the receiver class via the existing
+                // `class_is_a` helper.
+                let vis = m.visibility.get();
+                if vis == Visibility::Private {
                     return Err(self.trap(RubyError::NoMethodError {
                         method: format!("private method '{name}' called"),
                         recv_type: recv.type_name(),
                     }));
+                }
+                if vis == Visibility::Protected {
+                    // Check against the method's *defining* class
+                    // (where `def name` literally lives) rather
+                    // than the receiver's class — that's CRuby's
+                    // rule. `a > c` where a=Account and
+                    // c=SavingsAccount(<Account): inside `def >`
+                    // the caller is an Account instance and the
+                    // protected `balance` was defined on Account,
+                    // so `Account.is_a?(Account)` is true and the
+                    // call is allowed even though the receiver
+                    // is a subclass.
+                    let caller_self = self.frames.last()
+                        .map(|f| f.self_val.clone())
+                        .unwrap_or(Value::Nil);
+                    let caller_cls = match &caller_self {
+                        Value::Object(id) => Some(self.heap.class_of(*id)),
+                        _ => None,
+                    };
+                    let defining = m.defining_class.as_ref().and_then(|w| w.upgrade());
+                    let allowed = match (&caller_cls, &defining) {
+                        (Some(c), Some(d)) => super::class_is_a(c, d),
+                        _ => false,
+                    };
+                    if !allowed {
+                        return Err(self.trap(RubyError::NoMethodError {
+                            method: format!("protected method '{name}' called"),
+                            recv_type: recv.type_name(),
+                        }));
+                    }
                 }
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
