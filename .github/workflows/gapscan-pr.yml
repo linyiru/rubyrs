@@ -28,6 +28,21 @@ permissions:
   contents: read
   pull-requests: write
 
+# Threat model note (PR #18 review #8): this workflow runs the
+# script from the PR's checkout while a write-scoped GITHUB_TOKEN
+# exists at the job level. A malicious PR author with push access
+# (same-repo PRs) could in theory modify the script to abuse the
+# token before merge — but same-repo push access is itself a
+# higher trust grant. Fork PRs run with a read-only token and the
+# `Detect fork PR` step below skips the comment step for them.
+#
+# The standard hardening for this pattern is the two-workflow split
+# (build job with no perms uploads a comment artifact; a separate
+# `workflow_run`-triggered job with write perms downloads and posts
+# it). Not worth the complexity for current scope — revisit if the
+# project grows external contributors with write access to specific
+# branches but not the repo overall.
+
 env:
   # Match the main CI workflow so warnings caught there are also
   # caught here. Otherwise a feature PR could green-light here and

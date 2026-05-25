@@ -11,9 +11,10 @@
 #
 # Output goes to stdout. Diagnostic noise goes to stderr.
 #
-# Caching: target codebases are cloned shallow into
-# ${GAPSCAN_CACHE:-/tmp/gapscan-targets}. Re-runs against the same
-# pins are nearly free (we `git fetch` + checkout the pinned SHA).
+# Caching: target codebases are cloned blobless with sparse-checkout
+# (only the relpath we scan is materialised — see `ensure_target`)
+# into ${GAPSCAN_CACHE:-/tmp/gapscan-targets}. Re-runs against the
+# same pins are nearly free (we `git fetch` + checkout the pinned SHA).
 #
 # Pin philosophy: each target is pinned to a specific commit so the
 # diff measures *the PR's effect on rubyrs* — not "what the target
@@ -68,16 +69,21 @@ has_classifier_change() {
 }
 
 # --- clone or refresh each target into CACHE_DIR ------------------
+# Clones are *blobless* partial clones (`--filter=blob:none`) with
+# sparse-checkout restricted to the scanned relpath. The combination
+# means: clone keeps full commit + tree history (so arbitrary SHAs
+# resolve without re-fetching) but on first checkout only downloads
+# the blobs for files inside relpath. For ruby/ruby this is a
+# multi-hundred-MB saving — we only materialise lib/set.rb,
+# lib/optparse.rb, or lib/uri/ depending on which target.
 ensure_target() {
-  local key="$1" repo="$2" sha="$3"
+  local key="$1" repo="$2" sha="$3" relpath="$4"
   local dir="$CACHE_DIR/$key"
   if [[ ! -d "$dir/.git" ]]; then
-    log "cloning $key from $repo"
-    # `--filter=blob:none` is treeless; combined with `--no-tags`
-    # this is the minimum needed for a treeless lazy-fetching clone.
-    # We still need full ref history (not `--depth=1`) because the
-    # pinned SHA may not be the tip of any branch.
-    git clone --quiet --filter=blob:none --no-tags "$repo" "$dir"
+    log "cloning $key from $repo (blobless + sparse on $relpath)"
+    git clone --quiet --no-checkout --filter=blob:none --no-tags "$repo" "$dir"
+    # Non-cone mode handles single-file paths like `lib/set.rb`.
+    git -C "$dir" sparse-checkout set --no-cone "$relpath" "/$relpath"
   fi
   if ! git -C "$dir" rev-parse --verify --quiet "$sha^{commit}" >/dev/null; then
     log "fetching $sha for $key"
@@ -170,11 +176,13 @@ PY
 }
 
 # --- render the Markdown comment ----------------------------------
-# Takes the aggregated JSONL path as $1. We can't read it via stdin
-# redirection because the python source itself comes from a heredoc
-# on stdin (`python3 -`), which would consume the redirect.
+# Takes the aggregated JSONL path as $1 and an optional "fast-path"
+# marker as $2 (empty string when the full path ran). We can't read
+# the JSONL via stdin redirection because the python source itself
+# comes from a heredoc on stdin (`python3 -`), which would consume
+# the redirect.
 render_markdown() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "${2:-}" <<'PY'
 import json, os, sys
 rows = []
 with open(sys.argv[1]) as f:
@@ -182,6 +190,7 @@ with open(sys.argv[1]) as f:
         line = line.strip()
         if not line: continue
         rows.append(json.loads(line))
+fast_path = sys.argv[2] == "fast-path"
 
 total_supported = sum(r['supported_delta'] for r in rows)
 total_missing = sum(r['missing_delta'] for r in rows)
@@ -201,8 +210,22 @@ def url(rel):
 
 print("## gapscan PR diff")
 print()
+if fast_path:
+    # This branch is reached when the script's pre-flight check
+    # saw zero changes in classifier-relevant files (ast.rs,
+    # supported_prism_nodes.txt, rides_along_prism_nodes.txt, the
+    # gapscan crate). The classifier can't differ as a result.
+    print(f"This PR doesn't touch any file that affects gapscan classification — `SUPPORTED_PRISM_NODES` / `RIDES_ALONG_PRISM_NODES` are unchanged. Skipped the base build and the {len(rows)} per-target scans.")
+    print()
+    print(f"_See [docs/gap-reports/]({url('docs/gap-reports/README.md')}) for the dataset and methodology._")
+    sys.exit(0)
 if not any_change:
-    print(f"This PR doesn't change any node-classification across the {len(rows)} canonical scan targets — `rubyrs::SUPPORTED_PRISM_NODES` is unchanged.")
+    # Both binaries actually ran, both scanned all targets,
+    # results matched. The classifier output may still have
+    # changed for node classes that none of the 10 targets
+    # happen to exercise — keep the wording honest about what
+    # was observed.
+    print(f"Both binaries produced identical histograms across the {len(rows)} canonical scan targets. (If the classifier changed for node classes that none of these targets exercise, this view won't catch it — the data-file diff would.)")
     print()
     print(f"_See [docs/gap-reports/]({url('docs/gap-reports/README.md')}) for the dataset and methodology._")
     sys.exit(0)
@@ -248,7 +271,7 @@ if ! has_classifier_change; then
     IFS='|' read -r key _ _ _ <<< "$target"
     printf '{"key":"%s","before_supported_pct":0,"after_supported_pct":0,"supported_delta":0,"rides_along_delta":0,"missing_delta":0,"closed":[],"new":[]}\n' "$key" >> "$per_target_jsonl"
   done
-  render_markdown "$per_target_jsonl"
+  render_markdown "$per_target_jsonl" "fast-path"
   exit 0
 fi
 
@@ -258,7 +281,7 @@ build_base_gapscan
 : > "$per_target_jsonl"
 for target in "${TARGETS[@]}"; do
   IFS='|' read -r key repo sha relpath <<< "$target"
-  ensure_target "$key" "$repo" "$sha"
+  ensure_target "$key" "$repo" "$sha" "$relpath"
   scan_path="$CACHE_DIR/$key/$relpath"
   before="$WORK/${key}-base.json"
   after="$WORK/${key}-head.json"
