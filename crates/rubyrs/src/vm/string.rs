@@ -1031,10 +1031,57 @@ pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
 }
 
 /// Parse a pack/unpack format directive (single char + optional
-/// count). Returns the directive char and the count (`None` for
-/// `*`, `Some(1)` if no count specified, `Some(n)` otherwise).
+/// endian modifier + optional count). Returns the *canonical*
+/// directive char and count (`None` ≡ `Some(usize::MAX)` for `*`,
+/// `Some(1)` if no count given, `Some(n)` otherwise).
+///
+/// Endian modifier handling (CRuby compat):
+///   `L>` / `L<`  →  `N` / `V`   (32-bit BE/LE unsigned)
+///   `L`          →  `V`         (platform-native; LE on our targets)
+///   `S>` / `S<`  →  `n` / `v`   (16-bit BE/LE unsigned)
+///   `S`          →  `v`         (platform-native; LE on our targets)
+///   `Q>` / `Q<`  →  `J` / `Q`   (64-bit BE/LE unsigned;
+///                                `J` is the internal sentinel
+///                                we use for BE-Q since CRuby
+///                                doesn't expose a single-char
+///                                form. `j` mirrors for signed.)
+///   `q>` / `q<`  →  `j` / `q`
+///
+/// `J` / `j` are otherwise unused in CRuby's format-string
+/// grammar, so the sentinel doesn't shadow a real directive.
 fn parse_directive(it: &mut std::str::Chars<'_>) -> Option<(char, Option<usize>)> {
-    let dir = it.next()?;
+    let dir_raw = it.next()?;
+    // Look ahead for endian modifier `>` or `<`.
+    let endian: Option<char> = {
+        let mut peek = it.clone();
+        match peek.next() {
+            Some(c @ ('>' | '<')) => {
+                let _ = it.next(); // consume the modifier
+                Some(c)
+            }
+            _ => None,
+        }
+    };
+    let dir = match (dir_raw, endian) {
+        ('L', Some('>')) => 'N',
+        ('L', Some('<')) => 'V',
+        ('L', None)      => 'V', // native = LE on our targets
+        ('S', Some('>')) => 'n',
+        ('S', Some('<')) => 'v',
+        ('S', None)      => 'v',
+        ('Q', Some('>')) => 'J',
+        ('Q', Some('<')) => 'Q',
+        ('q', Some('>')) => 'j',
+        ('q', Some('<')) => 'q',
+        // Other directives with `>` / `<` aren't supported (CRuby
+        // also doesn't define endian modifiers on `C` / `c` /
+        // `a` / `A` / `Z`). Drop the modifier silently — the
+        // `>` / `<` won't match a known directive on its own,
+        // so the outer loop will surface "unsupported" if the
+        // caller really wanted endian semantics on a non-S/L/Q
+        // directive.
+        (c, _) => c,
+    };
     let mut peek = it.clone();
     let mut count: Option<usize> = Some(1);
     let mut consumed = 0usize;
@@ -1110,18 +1157,24 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
                     out.push(Value::Int(v as i64));
                 }
             }
-            'q' | 'Q' => {
+            'q' | 'Q' | 'j' | 'J' => {
+                // q = i64 LE, Q = u64 LE, j = i64 BE, J = u64 BE.
+                // Internal sentinels `j` / `J` come from the
+                // `q>` / `Q>` endian-modifier parse path.
                 let take = if n == usize::MAX { (input.len() - i) / 8 } else { n };
                 for _ in 0..take {
                     if i + 8 > input.len() { out.push(Value::Nil); break; }
                     let b = [input[i], input[i+1], input[i+2], input[i+3],
                              input[i+4], input[i+5], input[i+6], input[i+7]];
                     i += 8;
-                    out.push(Value::Int(if dir == 'q' {
-                        i64::from_le_bytes(b)
-                    } else {
-                        u64::from_le_bytes(b) as i64
-                    }));
+                    let v: i64 = match dir {
+                        'q' => i64::from_le_bytes(b),
+                        'Q' => u64::from_le_bytes(b) as i64,
+                        'j' => i64::from_be_bytes(b),
+                        'J' => u64::from_be_bytes(b) as i64,
+                        _ => unreachable!(),
+                    };
+                    out.push(Value::Int(v));
                 }
             }
             'a' | 'A' | 'Z' => {
@@ -1200,19 +1253,21 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                     out.extend_from_slice(&b);
                 }
             }
-            'q' | 'Q' => {
+            'q' | 'Q' | 'j' | 'J' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
                     let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
-                        _ => return Err("pack: expected Integer for q/Q".into()),
+                        _ => return Err("pack: expected Integer for q/Q/j/J".into()),
                     };
-                    let b = if dir == 'q' {
-                        i.to_le_bytes()
-                    } else {
-                        (i as u64).to_le_bytes()
+                    let b: [u8; 8] = match dir {
+                        'q' => i.to_le_bytes(),
+                        'Q' => (i as u64).to_le_bytes(),
+                        'j' => i.to_be_bytes(),
+                        'J' => (i as u64).to_be_bytes(),
+                        _ => unreachable!(),
                     };
                     out.extend_from_slice(&b);
                 }
