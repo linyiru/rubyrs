@@ -941,23 +941,34 @@ impl Vm {
                 // Build [[kind_sym, name_sym?], ...] array. Anonymous
                 // rest / kw_rest yields a single-element pair, matching
                 // CRuby's `[[:rest]]` / `[[:keyrest]]`.
+                //
+                // PinGuard across the whole loop so the inner-pair
+                // ObjIds in `outer` survive every maybe_gc — without
+                // this, under STRESS_GC each iteration's pair slot
+                // gets swept (no GC root: `outer` is a Rust-local
+                // Vec), the next alloc reuses it, and the final
+                // `heap.alloc(HeapObj::Array(outer))` can land on the
+                // same recycled slot — yielding a self-referencing
+                // Array whose `.inspect` recurses to stack overflow.
+                let mut g = crate::vm::PinGuard::new(self);
                 let mut outer: Vec<Value> = Vec::with_capacity(params_info.len());
                 for (kind, name_opt) in params_info {
-                    let kind_sym = self.interner.intern(kind);
+                    let kind_sym = g.vm.interner.intern(kind);
                     let mut pair = vec![Value::Sym(kind_sym)];
                     if let Some(n) = name_opt {
-                        let nsym = self.interner.intern(&n);
+                        let nsym = g.vm.interner.intern(&n);
                         pair.push(Value::Sym(nsym));
                     }
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let pid = self.heap.alloc(HeapObj::Array(pair));
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pid = g.vm.heap.alloc(HeapObj::Array(pair));
+                    g.pin(Value::Array(pid));
                     outer.push(Value::Array(pid));
                 }
-                self.maybe_gc();
-                self.check_alloc()?;
-                let aid = self.heap.alloc(HeapObj::Array(outer));
-                self.stack.push(Value::Array(aid));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let aid = g.vm.heap.alloc(HeapObj::Array(outer));
+                g.vm.stack.push(Value::Array(aid));
                 return Ok(());
             }
         if let Value::BoundMethod(bid) = &recv
