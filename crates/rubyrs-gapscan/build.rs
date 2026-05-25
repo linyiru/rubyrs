@@ -5,8 +5,13 @@
 //! 2. Reads rubyrs's own data files (the SUPPORTED + RIDES_ALONG sets
 //!    that lib.rs re-exports) and asserts both sit inside the Prism
 //!    universe. Catches any rename/removal when Prism upgrades.
-//! 3. Generates `node_name(&Node) -> &'static str` as a single 151-arm
-//!    match. Runtime classification is then O(1) discriminant compare.
+//! 3. Generates the `ALL_PRISM_NODES` const and the
+//!    `impl_full_visit_for!` macro, which produces a 151-arm
+//!    `impl ruby_prism::Visit` for `Histogrammer`. The macro is the
+//!    only way to surface every node class — relying on the default
+//!    `visit_branch_node_enter` hook silently skips wrapper nodes
+//!    that parents reach via specialised `visit_X_node(&X)` calls
+//!    (ArgumentsNode, RescueNode, etc.).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

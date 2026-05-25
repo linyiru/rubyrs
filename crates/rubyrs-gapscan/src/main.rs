@@ -1,7 +1,10 @@
 //! `rubyrs-gapscan` CLI.
 //!
-//! Subcommands and flags are intentionally bare today — formats and
-//! `diff` will land in later commits.
+//! Two subcommands: `scan <path>` and `diff <before.json> <after.json>`.
+//! Both accept `--format text|json|md` (diff rejects json — see
+//! `run_diff` for why) and `-o FILE` for output redirection. Library
+//! logic lives in [`rubyrs_gapscan`]; this module is only argv parsing
+//! and stdout/stderr glue.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

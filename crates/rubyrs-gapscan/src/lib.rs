@@ -924,16 +924,24 @@ pub fn parse_json(text: &str) -> Result<Report, String> {
 
 // ---- diff ----
 
-/// Difference between two [`Report`]s. All numeric fields are
-/// `after - before` (positive = "got worse" for missing/nodes,
-/// "got better" for supported).
+/// Difference between two [`Report`]s. All numeric deltas are
+/// `after - before`. Directionality of "better/worse" applies only
+/// to `supported_delta` (higher is better — gaps closing) and
+/// `missing_delta` (lower is better — gaps closing). `total_nodes_delta`
+/// and `rides_along_delta` are neutral — their sign just reflects how
+/// the underlying codebase changed in size or wrapper-node usage and
+/// shouldn't be read as a verdict.
 #[derive(Debug, Clone, Default)]
 pub struct ReportDiff {
     pub before_root: PathBuf,
     pub after_root: PathBuf,
+    /// Neutral — depends on what was scanned. See struct doc.
     pub total_nodes_delta: i64,
+    /// Higher is better: more nodes that rubyrs translates.
     pub supported_delta: i64,
+    /// Neutral — wrapper-node count is a function of source shape.
     pub rides_along_delta: i64,
+    /// Lower is better: fewer nodes outside the rubyrs subset.
     pub missing_delta: i64,
     /// Classes that appear with count > 0 in `after` but were absent
     /// (or zero) in `before`. New gaps surfaced.
