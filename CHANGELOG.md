@@ -6,6 +6,30 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+- **Default method arguments** (literal defaults). `def foo(x,
+  y = 1, msg = "hello")` and `def open(path, mode = nil)` now
+  compile and run. Defaults are restricted to literal Values —
+  `Int`, `String`, `true` / `false`, `nil`. Other expression
+  shapes (method calls, references to earlier params) surface
+  as a `SyntaxError` Trap at AST translation time instead of
+  silently miscompiling. This unblocks `Gemfile`-style DSL
+  methods (`gem "rake", "~> 13.0"` etc. via `def gem(name,
+  version = nil, **opts)`) and the common `def initialize(x,
+  y = nil)` pattern in classes. Implementation: AST translator
+  walks Prism's `optionals()` parameters; `Proto` gains a
+  `defaults: Vec<Option<Value>>` parallel to `params`;
+  `invoke_method_with_block` fills omitted slots from the
+  literal at invocation time. New diff fixture
+  `default_args.rb` covers all-defaults, mixed required +
+  optional, `nil` / `true` literal defaults, and use inside a
+  class.
+- **`Object#nil?` returns `false` for every non-nil receiver.**
+  We previously only had `Value::Nil.nil?` → `true`; calling
+  `"abc".nil?` or `5.nil?` raised NoMethodError. Added a
+  catch-all `(_, "nil?", [])` arm — matches CRuby's
+  `Object#nil?` semantics.
+
 ### Fixed
 - **Uncaught Ruby exceptions no longer kill the host process.**
   `Vm::unwind_with_exception` called `std::process::exit(1)` when

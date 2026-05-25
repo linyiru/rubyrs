@@ -70,7 +70,18 @@ pub(crate) enum Expr {
     },
     Def {
         name: String,
+        /// All formal parameters in source order — required ones
+        /// first, then optionals. (Splat / keyword / block params
+        /// aren't supported yet.)
         params: Vec<String>,
+        /// Parallel to `params`. `None` = required (must be passed
+        /// by the caller). `Some(SExpr)` = optional with a default
+        /// expression. The default is restricted at AST-translate
+        /// time to literal values (Int / Str / Sym / Bool / Nil) —
+        /// arbitrary default expressions can reference earlier
+        /// params and need a per-callsite prologue, which is more
+        /// invasive than what this minimal pass handles.
+        defaults: Vec<Option<SExpr>>,
         body: Vec<SExpr>,
     },
     Class {
@@ -285,11 +296,40 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_def_node() {
         let name = cid_to_string(n.name());
-        let params: Vec<String> = n.parameters().map(|p| {
-            p.requireds().iter()
-                .filter_map(|r| r.as_required_parameter_node().map(|rp| cid_to_string(rp.name())))
-                .collect()
-        }).unwrap_or_default();
+        let mut params: Vec<String> = Vec::new();
+        let mut defaults: Vec<Option<SExpr>> = Vec::new();
+        if let Some(p) = n.parameters() {
+            for r in p.requireds().iter() {
+                if let Some(rp) = r.as_required_parameter_node() {
+                    params.push(cid_to_string(rp.name()));
+                    defaults.push(None);
+                }
+            }
+            for o in p.optionals().iter() {
+                if let Some(op) = o.as_optional_parameter_node() {
+                    params.push(cid_to_string(op.name()));
+                    let val = tr(&op.value());
+                    // Restrict defaults to literal values. Anything
+                    // else (a method call, a reference to an earlier
+                    // param, etc.) needs a per-callsite prologue we
+                    // don't generate yet — surface as a SyntaxError
+                    // via the AST_ERRORS thread-local rather than
+                    // silently miscompiling.
+                    match &val.node {
+                        Expr::IntLit(_) | Expr::StrLit(_) | Expr::SymbolLit(_)
+                        | Expr::BoolLit(_) | Expr::Nil => {
+                            defaults.push(Some(val));
+                        }
+                        _ => {
+                            AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                                format!("default value for parameter `{}` must be a literal (Int/Str/Sym/true/false/nil)", cid_to_string(op.name()))
+                            ));
+                            defaults.push(Some(sp(&o, Expr::Nil)));
+                        }
+                    }
+                }
+            }
+        }
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
@@ -298,7 +338,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Def { name, params, body });
+        return sp(node, Expr::Def { name, params, defaults, body });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;

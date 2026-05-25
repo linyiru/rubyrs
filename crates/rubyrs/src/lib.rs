@@ -219,7 +219,7 @@ end
             });
         }
         let entry = compiler::compile_proto(
-            "<main>".into(), vec![], &[prog], filename_rc,
+            "<main>".into(), vec![], vec![], &[prog], filename_rc,
             &mut self.vm.protos, &mut self.vm.interner, &mut self.cache_counter,
         );
         self.vm.ensure_call_caches(self.cache_counter as usize);

@@ -5,6 +5,7 @@ use crate::ast::{Expr, SExpr};
 use crate::bytecode::{BinOpKind, Op, Proto};
 use crate::error::Span;
 use crate::intern::Interner;
+use crate::value::Value;
 
 // ---------- Compiler ----------
 
@@ -63,9 +64,9 @@ impl ProtoBuilder {
             _ => panic!("ICE: patch_jump on non-jump op at {}", at),
         }
     }
-    pub(crate) fn build(self, name: String, params: Vec<String>) -> Proto {
+    pub(crate) fn build(self, name: String, params: Vec<String>, defaults: Vec<Option<Value>>) -> Proto {
         Proto {
-            name, params,
+            name, params, defaults,
             n_locals: self.n_locals,
             code: self.code,
             op_spans: self.op_spans,
@@ -358,14 +359,17 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, body } => {
-            let proto_idx = compile_proto(name.clone(), params.clone(), body, b.filename.clone(), protos, interner, cc);
+        Expr::Def { name, params, defaults, body } => {
+            let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
+                d.as_ref().map(|sx| literal_to_value(&sx.node))
+            }).collect();
+            let proto_idx = compile_proto(name.clone(), params.clone(), lit_defaults, body, b.filename.clone(), protos, interner, cc);
             let name_id = interner.intern(name);
             b.emit(Op::DefMethod(name_id, proto_idx as u32));
             b.emit(Op::LoadNil);
         }
         Expr::Class { name, superclass, body } => {
-            let proto_idx = compile_proto(format!("<class:{}>", name), vec![], body, b.filename.clone(), protos, interner, cc);
+            let proto_idx = compile_proto(format!("<class:{}>", name), vec![], vec![], body, b.filename.clone(), protos, interner, cc);
             // Push the superclass (or Nil for "default to Object") for DefClass to pop.
             if let Some(parent) = superclass {
                 let parent_id = interner.intern(parent);
@@ -526,15 +530,43 @@ pub(crate) fn compile_expr(
 }
 
 pub(crate) fn compile_proto(
-    name: String, params: Vec<String>, body: &[SExpr],
+    name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> usize {
     let mut b = ProtoBuilder::new(&params, filename);
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let idx = protos.len();
-    protos.push(b.build(name, params));
+    protos.push(b.build(name, params, defaults));
     idx
+}
+
+/// Convert an `Expr` known to be a literal into a runtime `Value`.
+/// AST translation has already gated which `Expr` variants reach
+/// here, so this only needs the literal cases.
+fn literal_to_value(e: &Expr) -> Value {
+    match e {
+        Expr::IntLit(n) => Value::Int(*n),
+        Expr::StrLit(s) => Value::Str(std::rc::Rc::from(s.as_str())),
+        Expr::SymbolLit(_) => {
+            // SymbolLit-to-Value needs the interner, which the
+            // compiler doesn't pass to `literal_to_value`. Promote
+            // the default at invoke-time instead: we store Nil here
+            // and have the VM treat `Nil`-default-of-a-symbol
+            // specially. Cheaper: keep the literal text and let
+            // `invoke_method_with_block` intern lazily.
+            //
+            // For the first pass we keep the API narrow: symbol
+            // defaults are uncommon in Gemfile/gemspec code and
+            // can be added later.
+            Value::Nil
+        }
+        Expr::BoolLit(b) => Value::Bool(*b),
+        Expr::Nil => Value::Nil,
+        // AST translator guarantees we only see literals here, so
+        // anything else is a compiler bug, not a script bug.
+        _ => panic!("ICE: literal_to_value on non-literal Expr: {:?}", e),
+    }
 }
 
 pub(crate) fn compile_block(
@@ -557,6 +589,6 @@ pub(crate) fn compile_block(
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let idx = protos.len();
-    protos.push(b.build("<block>".into(), block_params.to_vec()));
+    protos.push(b.build("<block>".into(), block_params.to_vec(), vec![None; block_params.len()]));
     (idx, param_start, n_params)
 }

@@ -1119,17 +1119,43 @@ impl Vm {
     }
 
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
-        if m.params.len() != args.len() {
+        // Default-argument support (literal defaults only): a Proto
+        // carries a `defaults` vec parallel to `params`. `None`
+        // entries are required; `Some(v)` entries can be omitted by
+        // the caller and the slot is filled from the literal at
+        // invocation time. Required params always come before
+        // optionals in source order, so the legal arg-count range
+        // is `[required, params.len()]`.
+        let proto = &self.protos[m.proto_idx];
+        let required = proto.defaults.iter().take_while(|d| d.is_none()).count();
+        let max_args = m.params.len();
+        let given = args.len();
+        if given < required || given > max_args {
+            let expected = if required == max_args {
+                format!("{}", required)
+            } else {
+                format!("{}..{}", required, max_args)
+            };
             return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected {})", args.len(), m.params.len()),
+                msg: format!("wrong number of arguments (given {}, expected {})", given, expected),
             }));
         }
         self.check_frames()?;
-        let proto = &self.protos[m.proto_idx];
         let n_locals = proto.n_locals as usize;
+        // Snapshot defaults for the omitted-slot fill, since we're
+        // about to take `&mut self` to push the frame.
+        let default_fill: Vec<Value> = (given..max_args).map(|i| {
+            // `i < required` is impossible: `given >= required`
+            // already, so any `i in given..max_args` lands in the
+            // optional range, which has Some(v).
+            proto.defaults[i].clone().unwrap_or(Value::Nil)
+        }).collect();
         let mut locals = vec_nil(n_locals);
         for (i, a) in args.into_iter().enumerate() {
             locals[i] = a;
+        }
+        for (offset, v) in default_fill.into_iter().enumerate() {
+            locals[given + offset] = v;
         }
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
@@ -2351,6 +2377,10 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Nil, "to_s", []) => Some(Value::Str(Rc::from(""))),
         (Value::Nil, "inspect", []) => Some(Value::Str(Rc::from("nil"))),
         (Value::Nil, "nil?", []) => Some(Value::Bool(true)),
+        // Object#nil? is `false` for every non-nil receiver. We
+        // implement it here as a generic fallback so e.g.
+        // `"abc".nil?` and `5.nil?` work without per-type arms.
+        (_, "nil?", []) => Some(Value::Bool(false)),
         (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::from(if *b { "true" } else { "false" }))),
         _ => None,
     })

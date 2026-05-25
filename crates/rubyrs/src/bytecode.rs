@@ -123,6 +123,14 @@ impl BinOpKind {
 pub(crate) struct Proto {
     pub(crate) name: String,
     pub(crate) params: Vec<String>,
+    /// Parallel to `params`. `None` for required params; `Some(v)`
+    /// for optionals — at invocation time, slots that the caller
+    /// didn't fill get the corresponding `Some(v)` clone. The
+    /// AST translator restricts defaults to literal Values, so
+    /// `Vec<Option<Value>>` is enough — no bytecode prologue
+    /// needed. Required params always come before optionals in
+    /// source order, so `defaults` has the shape `[None…, Some…]`.
+    pub(crate) defaults: Vec<Option<Value>>,
     pub(crate) n_locals: u16,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.
