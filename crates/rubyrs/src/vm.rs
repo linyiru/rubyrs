@@ -3727,6 +3727,28 @@ impl Vm {
                 }
                 Some(Ok(Value::Nil))
             }
+            // Kernel#p — print each arg's `inspect` form, one per
+            // line. Return value mirrors CRuby: nil for zero args,
+            // the lone arg for one, an Array of the args for more.
+            // `pp` is aliased to `p` (we don't have a pretty-
+            // printer; single-line inspect is sufficient for our
+            // subset and matches CRuby for simple values).
+            "p" | "pp" => {
+                for a in args {
+                    let s = a.to_inspect(&self.heap, &self.interner);
+                    let _ = writeln!(self.stdout, "{}", s);
+                }
+                let result = match args {
+                    [] => Value::Nil,
+                    [one] => one.clone(),
+                    many => {
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(many.to_vec()));
+                        Value::Array(id)
+                    }
+                };
+                Some(Ok(result))
+            }
             "print" => {
                 for a in args {
                     let s = a.to_display(&self.heap, &self.interner);
