@@ -68,13 +68,24 @@ What we deliberately don't provide:
 
 ## How CI sees a spec
 
-The runner registers four `__spec_*` host functions
-(`__spec_describe`, `__spec_it`, `__spec_pass`, `__spec_fail`)
-which Ruby-side helpers call to report. Each `it` block is
-considered passing only when **at least one** matcher reported a
-pass AND **zero** matchers reported a fail. An `it` block that
-never calls a matcher (and doesn't raise) is treated as failing
-— prevents silently-empty examples from looking green.
+The runner registers five `__spec_*` host functions which
+the Ruby-side helpers call to report:
+
+- `__spec_describe_push(name)` — enter a describe scope
+- `__spec_describe_pop` — leave the current describe (driven
+  from spec_helper's `begin / ensure` around `yield`, so
+  nested + raising blocks restore correctly)
+- `__spec_it(name)` — start a new example
+- `__spec_pass(label)` — record an assertion success
+- `__spec_fail(message)` — record an assertion failure
+
+Each `it` block is considered passing only when **at least
+one** matcher reported a pass AND **zero** matchers reported a
+fail. An `it` block that never calls a matcher (and doesn't
+raise) is treated as failing — prevents silently-empty
+examples from looking green. A pass or fail reported outside
+any `it` (e.g. `assert_eq` at describe scope) lands on a
+synthetic `<orphan>` example so the misuse is loud.
 
 If a spec file itself fails to parse or raises an exception
 outside any `it` block, the runner synthesises a `<file-level>`
