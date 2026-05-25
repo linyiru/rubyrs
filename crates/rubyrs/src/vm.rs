@@ -5,6 +5,11 @@ use std::rc::Rc;
 
 use crate::bytecode::Proto;
 use crate::error::Trap;
+// `RubyError` is only referenced from the wasi-only `cext_require`
+// alt below; the import is gated so the non-wasi build doesn't
+// trip an unused-import lint under `-D warnings`.
+#[cfg(target_os = "wasi")]
+use crate::error::RubyError;
 use crate::heap::Heap;
 use crate::intern::{Interner, SymId};
 use crate::value::{Class, Method, ObjId, Value, Visibility};

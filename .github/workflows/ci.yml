@@ -108,13 +108,14 @@ jobs:
         # `dtolnay/rust-toolchain@stable` would install rust-std for
         # the *stable* channel — but `rust-toolchain.toml` in this
         # repo pins the build to 1.95, so cargo would run under 1.95
-        # while the wasm32-wasip1 std lives on stable, producing
-        # "can't find crate for `core`" (E0463). Use `@master` (which
-        # honours rust-toolchain.toml) and add the target explicitly
-        # against the pinned channel.
+        # while the wasm32-wasip1 std lived on stable, producing
+        # "can't find crate for `core`" (E0463). Use the `@master`
+        # variant, which reads `rust-toolchain.toml` for the channel
+        # and adds `targets` to that channel — keeps the version
+        # pinned in one place (rust-toolchain.toml) instead of
+        # duplicating it here.
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
           targets: wasm32-wasip1
 
       - name: Cache cargo + wasi-sdk
