@@ -252,13 +252,15 @@ VALUE rb_hash_aset(VALUE h, VALUE key, VALUE value);
  * Hash default proc / value). */
 VALUE rb_hash_aref(VALUE h, VALUE key);
 
-/* Register an instance method on a class.
+/* Register an instance method on a class or module.
  *
  * Spike L3-C. Mirrors CRuby's rb_define_method (defined in
- * ruby/intern.h). `klass` must be a class handle returned by
- * rb_define_class_under; `name` is a NUL-terminated method name;
- * `func` is the C entry point (transmuted at dispatch time
- * according to `arity`); `arity` is 0..5 in the spike.
+ * ruby/intern.h). `klass` must be a class/module handle returned
+ * by `rb_define_class_under` OR `rb_define_module` (both produce
+ * CValue::Class handles internally — review #8 on PR #27); `name`
+ * is a NUL-terminated method name; `func` is the C entry point
+ * (transmuted at dispatch time according to `arity`); `arity`
+ * is 0..5 in the spike.
  *
  * At call time, the receiver is passed as the FIRST argument
  * (CRuby convention: `static VALUE my_method(VALUE self, VALUE

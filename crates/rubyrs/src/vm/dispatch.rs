@@ -306,15 +306,52 @@ impl Vm {
             }
             // L3-C: cext-registered instance method
             // (`rb_define_method`). Looked up AFTER script-defined
-            // methods so a Ruby-side override wins (matches CRuby's
-            // ancestor-chain semantics).
+            // methods so a Ruby-side override wins for
+            // concrete-class methods.
+            //
+            // **Known limitation** (review #1 on PR #27): the
+            // current shape walks the script-method ancestor chain
+            // via lookup_method_cached, THEN checks cext methods
+            // only on the receiver's own class. So a Ruby method
+            // on a superclass shadows a cext method on the
+            // subclass, and a cext method on a superclass is
+            // invisible to subclass instances. A complete fix
+            // would interleave cext lookup INSIDE the per-class
+            // walk in lookup_method_cached — out of L3-C wedge
+            // scope. Real-world impact is small: the common pattern
+            // is `class Foo; end` + `rb_define_method(Foo, ...)`
+            // on the same class, which works correctly.
             #[cfg(not(target_os = "wasi"))]
             {
                 if let Some(table) = self.cext_instance_methods.get(&cls.name) {
                     if let Some(reg) = table.get(&name_id).cloned() {
+                        // Pin recv + args across the cext call
+                        // (review #4 on PR #27). cext_dispatch may
+                        // run maybe_gc during arg translation /
+                        // TypedData wrapping / result translation;
+                        // recv was popped from vm.stack before we
+                        // got here, so without pinning a STRESS_GC
+                        // sweep can reclaim it mid-call →
+                        // use-after-free in the cext body. Same
+                        // shape as the L1.5 P0-A pattern.
+                        //
+                        // Manual push/truncate instead of PinGuard
+                        // because `vm_ptr: *mut Vm = self` aliases
+                        // PinGuard's `&mut Vm`. Stacked Borrows
+                        // would flag the resulting raw deref inside
+                        // `cext_dispatch`'s rb_funcall reentrance —
+                        // same gotcha L3-A review #15 (PR #6) hit
+                        // in `cext_funcall_to_vm`. On the `?`
+                        // early-return path the truncate still
+                        // runs (it precedes the `?`); on a Rust
+                        // panic the leak is acceptable since cext
+                        // panics already abort under nounwind.
+                        let saved_pin_depth = self.pinned.len();
+                        self.pinned.push(recv.clone());
+                        for a in &args { self.pinned.push(a.clone()); }
                         let vm_ptr: *mut Vm = self;
                         let recv_clone = recv.clone();
-                        let v = with_vm_ptr_set(vm_ptr, || {
+                        let dispatch_result = with_vm_ptr_set(vm_ptr, || {
                             crate::vm::cext::cext_dispatch(
                                 &reg.qualified_name,
                                 reg.func,
@@ -322,7 +359,9 @@ impl Vm {
                                 &args,
                                 crate::vm::cext::CextSelfHandle::Object(recv_clone),
                             )
-                        })?;
+                        });
+                        self.pinned.truncate(saved_pin_depth);
+                        let v = dispatch_result?;
                         self.stack.push(v);
                         return Ok(());
                     }

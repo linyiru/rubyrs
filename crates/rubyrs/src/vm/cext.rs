@@ -246,9 +246,21 @@ fn cext_handle_to_value_d(
         // subsequent method call on the class handle segfault.
         rubyrs_cext::CValue::Class(name) => {
             let sym = vm.interner.intern(name);
+            // Class handles are produced by rb_define_class_under
+            // / rb_define_module which both register into
+            // vm.classes at drain time. A handle pointing to an
+            // unregistered class is an ICE — fall-back-to-Nil
+            // (the L0 default) would just mask the bug and surface
+            // later as a confusing NoMethodError far from the
+            // root cause. Review #5 on PR #27.
             match vm.classes.get(&sym).cloned() {
                 Some(c) => Value::Class(c),
-                None => Value::Nil,
+                None => panic!(
+                    "ICE: cext_handle_to_value: CValue::Class({:?}) \
+                     not registered in vm.classes — should have been \
+                     drained by cext_require",
+                    name
+                ),
             }
         }
         // Recursive translation: an Array/Hash CValue is a vector of

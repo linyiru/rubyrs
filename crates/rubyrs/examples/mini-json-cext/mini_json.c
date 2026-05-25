@@ -181,7 +181,13 @@ static VALUE mj_parse(VALUE self, VALUE str) {
 static ID id_class;
 static ID id_to_s;
 static ID id_name;
-static ID id_each_pair;
+/* `+` is hit on EVERY string fragment append in mj_gen's Array/
+ * Hash arms; caching avoids per-iteration rb_intern lookups
+ * (review #3 / #7 on PR #27). */
+static ID id_plus;
+/* `to_a` is the Hash generator's iteration trampoline (no rb_yield
+ * yet; see comment in mj_gen Hash arm). */
+static ID id_to_a;
 
 /* Append the generated form of `v` onto `out`. The C ext owns
  * `out` (Vm-managed VALUE) and mutates it via repeated rb_str_cat-
@@ -237,14 +243,11 @@ static VALUE mj_gen(VALUE v) {
         for (long i = 0; i < n; i++) {
             if (i > 0) {
                 VALUE comma = rb_str_new_cstr(",");
-                ID id_plus = rb_intern("+");
                 out = rb_funcall(out, id_plus, 1, comma);
             }
             VALUE elem_json = mj_gen(rb_ary_entry(v, i));
-            ID id_plus = rb_intern("+");
             out = rb_funcall(out, id_plus, 1, elem_json);
         }
-        ID id_plus = rb_intern("+");
         VALUE close = rb_str_new_cstr("]");
         out = rb_funcall(out, id_plus, 1, close);
         return out;
@@ -257,11 +260,9 @@ static VALUE mj_gen(VALUE v) {
          *
          * VALUE pairs = h.to_a   →  [[k1,v1],[k2,v2],...]
          */
-        ID id_to_a = rb_intern("to_a");
         VALUE pairs = rb_funcallv(v, id_to_a, 0, NULL);
         long n = RARRAY_LEN(pairs);
         VALUE out = rb_str_new_cstr("{");
-        ID id_plus = rb_intern("+");
         for (long i = 0; i < n; i++) {
             if (i > 0) {
                 VALUE comma = rb_str_new_cstr(",");
@@ -304,7 +305,8 @@ void Init_mini_json(void) {
     id_class = rb_intern("class");
     id_to_s  = rb_intern("to_s");
     id_name  = rb_intern("name");
-    id_each_pair = rb_intern("each_pair");
+    id_plus  = rb_intern("+");
+    id_to_a  = rb_intern("to_a");
 
     /* MiniJson Module with .parse / .generate as singleton
      * methods — mirrors `JSON.parse` / `JSON.generate`.
