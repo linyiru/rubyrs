@@ -31,11 +31,11 @@ reports: [`docs/gap-reports/`](gap-reports/README.md).
 
 | Codebase | Shape | % Supported (AST) | #1 missing |
 |---|---|---:|---|
-| Jekyll `lib/` | static-site framework | **83.05%** | `ModuleNode` (×145) |
+| Jekyll `lib/` | static-site framework | **83.06%** | `ModuleNode` (×145) |
 | Liquid `lib/` | template engine | **82.01%** | `ConstantWriteNode` (×141) |
 | Sinatra `lib/` | web DSL | **81.38%** | `BlockArgumentNode` (×65) |
 | dry-struct `lib/` | modern data DSL | **81.07%** | `ModuleNode` (×16) |
-| Rake `lib/` | task DSL | **82.06%** | `ModuleNode` (×52) |
+| Rake `lib/` | task DSL | **82.08%** | `ModuleNode` (×52) |
 
 **Headline (n=5):** all five hover at 81–83% Supported regardless
 of codebase shape — the remaining gap is the actual subset edge,
@@ -49,8 +49,10 @@ matters especially for DSL frameworks.
 Master moved the band up ~1–2 pp from the PR #7 baseline (79–82%)
 by landing a feature batch (`unless`/`until`, `**`, more `Hash`/
 `String`/`Float` methods, `Kernel#p`, visibility, op-assigns,
-`Range`/`Comparable`/`String#match`). Per-feature impact is now
-measurable via `gapscan diff` — see the gap-reports README.
+`Range`/`Comparable`/`String#match`, inline `rescue` modifier,
+`__method__`, `String#[]=`, Inspect round-out). Per-feature
+impact is now measurable via `gapscan diff` — see the
+gap-reports README.
 
 Caveat: the AST view *under*-states the gap — many runtime
 features (`require`, `attr_accessor`, `include`, `private`) parse
