@@ -116,23 +116,29 @@ fn brewfile_example_is_fully_inside_subset() {
 }
 
 #[test]
-fn fixture_exercises_three_missing_classes() {
+fn fixture_exercises_exact_missing_class_set() {
     let report = scan_path(fixture("missing_features.rb"));
-    let names: Vec<&str> = report
+    let names: std::collections::BTreeSet<&str> = report
         .missing_sorted()
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    // Exact set, exact counts.
-    assert!(names.contains(&"LambdaNode"), "got {names:?}");
-    assert!(names.contains(&"ConstantWriteNode"), "got {names:?}");
-    assert!(names.contains(&"RegularExpressionNode"), "got {names:?}");
+    // Exact set, exact counts. With Module + extend now Supported
+    // on master, the Missing exemplars shifted: LambdaNode (`->`
+    // lambdas) and RegularExpressionNode (bare `/.../`). Both have
+    // no Missing children — clean tripwires (unlike `case/when`
+    // which used to pull WhenNode along with it).
+    let expected: std::collections::BTreeSet<&str> =
+        ["LambdaNode", "ConstantWriteNode", "RegularExpressionNode"]
+            .into_iter()
+            .collect();
+    assert_eq!(names, expected, "Missing-class set drifted");
     for cls in ["LambdaNode", "ConstantWriteNode", "RegularExpressionNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
     // Sanity: at least one Supported node from the body (DefNode,
-    // ReturnNode, etc.) — the test isn't trivially "everything missing".
+    // IntegerNode, etc.) — the test isn't trivially "everything missing".
     assert!(report.supported_total() > 0);
 }
 
@@ -213,10 +219,13 @@ fn diff_honours_scan_time_classification_for_cross_version_runs() {
     use rubyrs_gapscan::NodeStat;
     let mut before = Report::default();
     before.total_nodes = 10;
-    // FooNode existed and counted as Missing at the time of the
-    // "before" scan, even though today's live classify() would call
-    // it Supported (we simulate that by overriding the scan-time
-    // classification to Missing).
+    // `CallNode` is a stand-in here: imagine a node class that
+    // counted as Missing at "before" scan time and was reclassified
+    // Supported later (just like `UnlessNode` actually did between
+    // PR #7 and master's unless landing). We force scan-time
+    // Missing on the before side and Supported on the after side to
+    // simulate that without depending on which classes are
+    // currently Missing.
     before.histogram.insert(
         "CallNode".to_string(),
         NodeStat {
