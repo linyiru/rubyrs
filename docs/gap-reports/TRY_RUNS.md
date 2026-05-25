@@ -53,7 +53,7 @@ vs the first pass:
 | rake/scope.rb | D | ✅ A | `EMPTY = Class.new` now executes; file runs clean |
 | bundler/version.rb | D | ✅ A | `VERSION = "...".freeze` now executes; file runs clean |
 | rake/linked_list.rb | D + E | E | `ConstantWriteNode` resolved; remaining blocker is the literal-default-arg rule |
-| (all 9 other files) | — | unchanged | failure stays in same category |
+| (all 9 other files) | — | — | unchanged — failure stays in same category |
 
 Pass count: **3 → 5** (out of 12 non-host-DSL files = 42%).
 Category D drops from 3 → 0, validating both the gapscan
@@ -96,10 +96,12 @@ that the gap reports were generated against):
 
 > The sections below — **Category legend**, **What this tells
 > us**, **What "Phase 3" would look like** — were written
-> against the first-pass data and are kept verbatim as the
-> historical record. After the re-run above, Category D = 0
-> and the `ConstantWriteNode` half of "Phase 3 step 1" is done
-> (the `ConstantPathWriteNode` half is still outstanding).
+> against the first-pass data and are kept as the historical
+> record (body unchanged; the legend heading was labelled
+> "(first pass)" for clarity). After the re-run above,
+> Category D = 0 and the `ConstantWriteNode` half of "Phase 3
+> step 1" is done (the `ConstantPathWriteNode` half is still
+> outstanding).
 
 ### Category legend (first pass)
 
