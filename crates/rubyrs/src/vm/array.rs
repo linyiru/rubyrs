@@ -381,7 +381,7 @@ impl Vm {
                         let parts: Vec<String> = self.heap.array(id).iter()
                             .map(|v| v.to_display(&self.heap, &self.interner))
                             .collect();
-                        Some(Value::new_str(parts.join(&*sep.borrow())))
+                        Some(Value::new_str(parts.join(sep.to_string_lossy().as_str())))
                     }
                     ("+", [Value::Array(other)]) => {
                         // Pin both source Arrays across maybe_gc — by the

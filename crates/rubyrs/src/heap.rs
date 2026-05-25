@@ -416,6 +416,10 @@ impl Value {
     pub fn new_str(s: impl Into<String>) -> Self {
         Value::Str(std::rc::Rc::new(crate::value::RStr::new(s.into())))
     }
+    /// Binary-safe constructor — preserves bytes verbatim (no UTF-8 check).
+    pub fn new_str_bytes(b: Vec<u8>) -> Self {
+        Value::Str(std::rc::Rc::new(crate::value::RStr::from_bytes(b)))
+    }
 
     pub(crate) fn is_truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
@@ -444,7 +448,7 @@ impl Value {
         match self {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => format_float(*f),
-            Value::Str(s) => s.borrow().clone(),
+            Value::Str(s) => s.to_string_lossy(),
             Value::Sym(id) => interner.resolve(*id).to_string(),
             Value::Bool(true) => "true".into(),
             Value::Bool(false) => "false".into(),
@@ -533,7 +537,7 @@ impl Value {
                 // Same escape set as String#inspect — keep both
                 // entry points consistent so `puts arr.inspect`
                 // and `arr.map(&:inspect)` agree on output.
-                let raw = s.borrow();
+                let raw = s.to_string_lossy();
                 let mut out = String::with_capacity(raw.len() + 2);
                 out.push('"');
                 for c in raw.chars() {

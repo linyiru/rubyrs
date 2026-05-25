@@ -91,7 +91,7 @@ fn arg_err(msg: impl Into<String>) -> Trap {
 fn value_to_kwarg_string(ctx: &HostCtx, v: &Value) -> Option<String> {
     match v {
         Value::Bool(b) => Some(if *b { "true".into() } else { "false".into() }),
-        Value::Str(rs) => Some(rs.borrow().clone()),
+        Value::Str(rs) => Some(rs.to_string_lossy()),
         // The arm already matched `Value::Sym`, so `resolve_sym` is
         // guaranteed to return Some. `expect` rather than `.map` so a
         // future interner-contract regression panics loudly instead
@@ -227,7 +227,7 @@ impl GemfileState {
 /// other shape. The prelude only passes Strings into the
 /// `__gemfile_*` host fns, so this is the only adapter needed.
 fn s(v: &Value) -> String {
-    if let Value::Str(rstr) = v { rstr.borrow().clone() } else { String::new() }
+    if let Value::Str(rstr) = v { rstr.to_string_lossy() } else { String::new() }
 }
 
 fn main() {
@@ -277,7 +277,7 @@ fn main() {
                 )));
             };
             let name = if let Value::Str(rs) = name {
-                rs.borrow().clone()
+                rs.to_string_lossy()
             } else {
                 return Err(arg_err("__gemfile_gem_v2: name must be a String"));
             };
@@ -291,7 +291,7 @@ fn main() {
             // element means the prelude regressed.
             let requirements: Vec<String> = reqs_slice.iter()
                 .map(|v| if let Value::Str(rs) = v {
-                    Ok(rs.borrow().clone())
+                    Ok(rs.to_string_lossy())
                 } else {
                     Err(arg_err("__gemfile_gem_v2: requirements element must be a String"))
                 })

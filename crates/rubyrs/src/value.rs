@@ -4,26 +4,58 @@ use std::rc::Rc;
 
 use crate::intern::SymId;
 
-/// Heap-shared string body with a frozen flag. Wraps a
-/// `RefCell<String>` so that aliases see mutations, and a
-/// `Cell<bool>` so `freeze` / `frozen?` round-trip without
-/// touching the content's borrow. Derefs to the inner RefCell —
-/// existing `.borrow()` / `.borrow_mut()` calls keep their
-/// terse form; the frozen flag rides as a sibling on the Rc.
+/// Heap-shared string body with a frozen flag. Holds raw bytes
+/// (not Rust `String`) so that arbitrary byte sequences can
+/// round-trip through Ruby — required for binary protocols
+/// (msgpack, protobuf, etc.) where cext output isn't valid UTF-8.
+///
+/// `RefCell<Vec<u8>>` so aliases see mutations and a `Cell<bool>`
+/// so `freeze` / `frozen?` round-trip without touching the
+/// content borrow. Helper accessors below give string-shaped
+/// views via `from_utf8_lossy` for code paths that need text;
+/// the byte path is the cheap one (zero copy).
 #[derive(Debug)]
 pub struct RStr {
-    pub(crate) content: RefCell<String>,
+    pub(crate) content: RefCell<Vec<u8>>,
     pub(crate) frozen: Cell<bool>,
 }
 
 impl RStr {
+    /// Construct from a Rust `String`. The bytes are consumed
+    /// (cheap — no copy) and the `Vec<u8>` becomes the backing
+    /// store; the UTF-8 invariant is preserved as long as the
+    /// content isn't later overwritten with non-UTF-8 bytes by
+    /// `borrow_mut()` callers (e.g. cext binary input).
     pub fn new(s: String) -> Self {
-        Self { content: RefCell::new(s), frozen: Cell::new(false) }
+        Self { content: RefCell::new(s.into_bytes()), frozen: Cell::new(false) }
+    }
+
+    /// Construct from raw bytes (binary-safe path). Used by
+    /// `cext_handle_to_value` when the cext crossed binary data
+    /// — msgpack pack output, etc.
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self { content: RefCell::new(bytes), frozen: Cell::new(false) }
+    }
+
+    /// Convenient string view. Lossy on invalid UTF-8 — replaces
+    /// each invalid byte sequence with U+FFFD. Allocates only when
+    /// the bytes aren't already valid UTF-8 (`Cow::Owned`); the
+    /// happy path is zero-copy (`Cow::Borrowed`).
+    pub fn with_str_lossy<R>(&self, f: impl FnOnce(&str) -> R) -> R {
+        let b = self.content.borrow();
+        let cow = String::from_utf8_lossy(&b);
+        f(&cow)
+    }
+
+    /// Owned `String` copy, lossy. Use for trait impls that need
+    /// `String` ownership (Display, etc.).
+    pub fn to_string_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.content.borrow()).into_owned()
     }
 }
 
 impl std::ops::Deref for RStr {
-    type Target = RefCell<String>;
+    type Target = RefCell<Vec<u8>>;
     fn deref(&self) -> &Self::Target { &self.content }
 }
 

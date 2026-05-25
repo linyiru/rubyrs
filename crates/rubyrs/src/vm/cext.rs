@@ -239,12 +239,14 @@ fn cext_handle_to_value_d(
         rubyrs_cext::CValue::True => Value::Bool(true),
         rubyrs_cext::CValue::False => Value::Bool(false),
         // CValue::Str stores bytes + sentinel NUL; the logical
-        // string is `.len() - 1` bytes. Decode lossily into UTF-8
-        // since rubyrs's Value::Str is `Rc<str>` (UTF-8). Binary-
-        // safe storage on the rubyrs side lands in a later level.
+        // string is `.len() - 1` bytes. L3-G: rubyrs's Value::Str
+        // now holds `Vec<u8>` directly, so we copy bytes through
+        // without the previous lossy UTF-8 round-trip — msgpack
+        // pack output (and any other binary-protocol cext) now
+        // survives the cext → Vm crossing intact.
         rubyrs_cext::CValue::Str(bytes) => {
             let logical = &bytes[..bytes.len().saturating_sub(1)];
-            Value::new_str(String::from_utf8_lossy(logical))
+            Value::new_str_bytes(logical.to_vec())
         }
         rubyrs_cext::CValue::Int(n) => Value::Int(*n),
         // L3-C: a CValue::Class handle resolves to the actual Vm
@@ -365,7 +367,7 @@ fn cext_value_to_cvalue_d(
         Value::Nil => rubyrs_cext::CValue::Nil,
         Value::Bool(true) => rubyrs_cext::CValue::True,
         Value::Bool(false) => rubyrs_cext::CValue::False,
-        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.borrow().as_bytes()),
+        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(&s.borrow()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
         // L3-B: a Value::Object handle crossing Ruby → C is
         // represented as a CValue::HeapRef carrying the raw ObjId.

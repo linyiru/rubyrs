@@ -178,7 +178,7 @@ impl Vm {
                         } else { Ok(Value::Int(*f as i64)) }
                     }
                     Value::Str(s) => {
-                        let raw = s.borrow();
+                        let raw = s.to_string_lossy();
                         let trimmed = raw.trim();
                         match trimmed.parse::<i64>() {
                             Ok(n) => Ok(Value::Int(n)),
@@ -206,7 +206,7 @@ impl Vm {
                     Value::Float(f) => Ok(Value::Float(*f)),
                     Value::Int(n) => Ok(Value::Float(*n as f64)),
                     Value::Str(s) => {
-                        let raw = s.borrow();
+                        let raw = s.to_string_lossy();
                         let trimmed = raw.trim();
                         match trimmed.parse::<f64>() {
                             Ok(f) => Ok(Value::Float(f)),
@@ -276,7 +276,7 @@ impl Vm {
             // gem/load-path resolution is deferred.
             "require" => match args {
                 [Value::Str(path)] => {
-                    let path = path.borrow().clone();
+                    let path = path.to_string_lossy();
                     Some(self.cext_require(&path))
                 }
                 _ => Some(Err(self.trap(RubyError::ArgumentError {

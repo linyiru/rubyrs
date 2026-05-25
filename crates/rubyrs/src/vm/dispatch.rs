@@ -260,7 +260,7 @@ impl Vm {
                         for a in &args {
                             let key: Option<SymId> = match a {
                                 Value::Sym(s) => Some(*s),
-                                Value::Str(s) => Some(self.interner.intern(&s.borrow())),
+                                Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
                                 _ => None,
                             };
                             if let Some(mid) = key
@@ -1380,7 +1380,7 @@ impl Vm {
                     hit
                 }
                 Value::Regex(re) => match arg {
-                    Value::Str(s) => re.is_match(&s.borrow()),
+                    Value::Str(s) => s.with_str_lossy(|s| re.is_match(s)),
                     _ => false,
                 },
                 _ => recv.ruby_eq(arg, &self.heap),
@@ -1395,7 +1395,7 @@ impl Vm {
         if &*name == "=~" && args.len() == 1 {
             let result = match (&recv, &args[0]) {
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
-                    let bound = s.borrow();
+                    let bound = s.to_string_lossy();
                     match re.find(&bound) {
                         Some(m) => Value::Int(m.start() as i64),
                         None => Value::Nil,
@@ -1441,7 +1441,7 @@ impl Vm {
         if &*name == "respond_to?" && args.len() == 1 {
             let lookup_name: Option<SymId> = match &args[0] {
                 Value::Sym(id) => Some(*id),
-                Value::Str(s) => Some(self.interner.intern(&s.borrow())),
+                Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
                 _ => None,
             };
             if let Some(id) = lookup_name {
