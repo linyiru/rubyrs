@@ -1223,3 +1223,80 @@ fn seq_inner(stmts: Vec<SExpr>) -> Expr {
 pub(crate) fn seq(stmts: Vec<SExpr>) -> SExpr {
     Spanned::new(Span::ZERO, seq_inner(stmts))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ruby_prism::parse;
+
+    /// Drive `tr_with_errors` over a source string. Returns the
+    /// (SExpr, errors) pair; we want both directions tested:
+    /// supported sources should produce no errors and a non-Nil
+    /// root, unsupported ones should accumulate messages without
+    /// panicking.
+    fn translate(src: &str) -> (SExpr, Vec<String>) {
+        let result = parse(src.as_bytes());
+        tr_with_errors(&result.node())
+    }
+
+    #[test]
+    fn supported_source_produces_no_errors() {
+        let (root, errs) = translate("puts 1 + 2");
+        assert!(errs.is_empty(), "expected no AST errors, got: {errs:?}");
+        // Root is a non-Nil program — the puts call lives inside
+        // the program-node wrapping.
+        assert!(!matches!(root.node, Expr::Nil));
+    }
+
+    #[test]
+    fn defined_keyword_supported() {
+        // `defined?` is a supported node — sanity-check that the
+        // supported path round-trips without false positives.
+        let (_, errs) = translate("defined?(x)");
+        assert!(errs.is_empty(), "defined? should be supported, got: {errs:?}");
+    }
+
+    #[test]
+    fn ast_errors_collected_for_unsupported_node() {
+        // `BEGIN { ... }` (pre-execution block) is outside the
+        // subset. The translator should collect a message instead
+        // of panicking.
+        let (_, errs) = translate("BEGIN { puts 1 }");
+        assert!(!errs.is_empty(), "BEGIN should produce AST errors");
+        assert!(
+            errs.iter().any(|e| e.contains("unsupported")),
+            "expected 'unsupported' wording, got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn ast_errors_buffer_resets_between_calls() {
+        // First call has unsupported nodes — leaves errors in the
+        // buffer (which tr_with_errors drains on the way out).
+        let (_, e1) = translate("BEGIN { puts 1 }");
+        assert!(!e1.is_empty());
+        // Second call on supported source must see an empty buffer
+        // — proves drain works.
+        let (_, e2) = translate("puts 1");
+        assert!(e2.is_empty(), "buffer leaked between calls: {e2:?}");
+    }
+
+    #[test]
+    fn empty_source_produces_no_errors() {
+        let (_, errs) = translate("");
+        assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_source_produces_no_errors() {
+        let (_, errs) = translate("   \n\t  ");
+        assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn comment_only_source_produces_no_errors() {
+        let (_, errs) = translate("# just a comment\n");
+        assert!(errs.is_empty());
+    }
+}
+
