@@ -376,7 +376,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let int_value = n.value();
         let (negative, digits) = int_value.to_u32_digits();
         let mut magnitude: u64 = 0;
-        let mut overflow = digits.len() > 2;
+        let overflow = digits.len() > 2;
         if !overflow {
             for (i, d) in digits.iter().enumerate() {
                 magnitude |= (*d as u64) << (i * 32);
