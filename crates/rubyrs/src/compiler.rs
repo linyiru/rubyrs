@@ -428,17 +428,36 @@ pub(crate) fn compile_expr(
             let end = b.pos();
             b.patch_jump(je, end);
         }
-        Expr::While { cond, body } => {
-            let start = b.pos();
-            compile_expr(b, cond, protos, interner, cc);
-            let jf = b.emit(Op::JumpIfFalse(0));
-            compile_body(b, body, protos, interner, cc);
-            b.emit(Op::Pop);
-            let j = b.emit(Op::Jump(0));
-            b.patch_jump(j, start);
-            let end = b.pos();
-            b.patch_jump(jf, end);
-            b.emit(Op::LoadNil);
+        Expr::While { cond, body, post } => {
+            if *post {
+                // `begin … end while cond` — body runs first, cond
+                // is checked after. JumpIfFalse-to-end, jump-back-
+                // to-start, but the start label is BEFORE the cond
+                // so the body re-runs only when cond stayed truthy.
+                let body_start = b.pos();
+                compile_body(b, body, protos, interner, cc);
+                b.emit(Op::Pop);
+                compile_expr(b, cond, protos, interner, cc);
+                let jf = b.emit(Op::JumpIfFalse(0));
+                let j = b.emit(Op::Jump(0));
+                b.patch_jump(j, body_start);
+                let end = b.pos();
+                b.patch_jump(jf, end);
+                b.emit(Op::LoadNil);
+            } else {
+                // Pre-condition `while cond; …; end` — cond first,
+                // body only runs when truthy.
+                let start = b.pos();
+                compile_expr(b, cond, protos, interner, cc);
+                let jf = b.emit(Op::JumpIfFalse(0));
+                compile_body(b, body, protos, interner, cc);
+                b.emit(Op::Pop);
+                let j = b.emit(Op::Jump(0));
+                b.patch_jump(j, start);
+                let end = b.pos();
+                b.patch_jump(jf, end);
+                b.emit(Op::LoadNil);
+            }
         }
         Expr::Call { receiver, name, args } => {
             if receiver.is_none() && name == "__seq__" {

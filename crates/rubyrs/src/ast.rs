@@ -94,6 +94,12 @@ pub(crate) enum Expr {
     While {
         cond: Box<SExpr>,
         body: Vec<SExpr>,
+        /// `true` for the post-condition form
+        /// `begin … end while cond` / `begin … end until cond`.
+        /// Body runs once before the first cond check (CRuby
+        /// semantics). `false` for the pre-condition form
+        /// `while cond; …; end`.
+        post: bool,
     },
     Def {
         name: String,
@@ -855,7 +861,10 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let body: Vec<SExpr> = n.statements()
             .map(|s| s.body().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
-        return sp(node, Expr::While { cond, body });
+        // `begin … end while cond` — Prism marks this with the
+        // `begin_modifier` flag. Body runs once before the first
+        // cond check, matching CRuby semantics.
+        return sp(node, Expr::While { cond, body, post: n.is_begin_modifier() });
     }
     // `unless cond; then; else else; end` and modifier
     // `expr unless cond` both desugar to `if cond; else_body;
@@ -1017,7 +1026,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let body: Vec<SExpr> = n.statements()
             .map(|s| s.body().iter().map(|c| tr(&c)).collect())
             .unwrap_or_default();
-        return sp(node, Expr::While { cond, body });
+        // `begin … end until cond` — same begin-modifier flag.
+        // Translates to a negated-cond do-while via the post flag.
+        return sp(node, Expr::While { cond, body, post: n.is_begin_modifier() });
     }
     if let Some(n) = node.as_def_node() {
         let name = cid_to_string(n.name());

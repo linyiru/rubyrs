@@ -222,9 +222,6 @@ impl BinOpKind {
 pub(crate) struct Proto {
     pub(crate) name: String,
     pub(crate) params: Vec<String>,
-    /// Count of leading required positional params. `params[0..n]`
-    /// must be supplied by the caller; `params[n..positional_max]`
-    /// are optionals whose defaults are evaluated by the method
     /// body's entry prologue (`JumpIfArgGiven` then the default
     /// expression then `StoreLocal`, one triple per optional slot,
     /// emitted by the compiler). Required params always come

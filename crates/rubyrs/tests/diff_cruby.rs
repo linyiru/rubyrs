@@ -167,3 +167,4 @@ fn run_diff(name: &str) {
 #[test] fn module_include() { run_diff("module_include"); }
 #[test] fn default_args_exprs() { run_diff("default_args_exprs"); }
 #[test] fn block_arg_forward() { run_diff("block_arg_forward"); }
+#[test] fn do_while() { run_diff("do_while"); }
