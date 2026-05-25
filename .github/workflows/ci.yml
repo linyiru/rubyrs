@@ -286,7 +286,7 @@ jobs:
           # Bumped 12 → 13 by F6: the eigenclass accessor on
           # Instance.singleton_class adds one more ICE-class
           # accessor in the same shape.
-          check crates/rubyrs/src/heap.rs             14
+          check crates/rubyrs/src/heap.rs             15
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-

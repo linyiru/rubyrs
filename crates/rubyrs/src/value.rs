@@ -95,6 +95,13 @@ pub enum Value {
     /// used for parity with BoundMethod; the inner `Rc<Class>`
     /// is not heap-managed so no GC walk is needed.
     UnboundMethod(ObjId),
+    /// `Method#curry` / `Proc#curry` result. Carries the
+    /// underlying callable, args gathered so far, and the target
+    /// arity. Each `.call` either invokes the underlying (once
+    /// gathered.len() >= target_arity) or returns a new
+    /// CurriedProc with the new args appended. `class_of`
+    /// reports it as `Proc` to match CRuby.
+    CurriedProc(ObjId),
 }
 
 #[derive(Debug)]

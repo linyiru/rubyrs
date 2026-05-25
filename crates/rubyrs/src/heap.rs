@@ -49,6 +49,13 @@ pub(crate) enum HeapObj {
     /// before reconstituting a BoundMethod. `Rc<Class>` is not
     /// a heap reference, so this variant carries no GC obligation.
     UnboundMethod { class: std::rc::Rc<crate::value::Class>, name_id: crate::intern::SymId },
+    /// `Method#curry` / `Proc#curry` partial-application state.
+    /// `underlying` is the callable (BoundMethod or Block) being
+    /// curried; `gathered` are args accumulated so far; once
+    /// `gathered.len() >= target_arity` the underlying is invoked.
+    /// All three fields walked by GC — `underlying` and each
+    /// gathered Value can hold heap references.
+    CurriedProc { underlying: Value, gathered: Vec<Value>, target_arity: u16 },
 }
 
 /// Heap representation of a CRuby-shape TypedData object. See
@@ -225,6 +232,11 @@ impl Heap {
         if let HeapObj::UnboundMethod { class, name_id } = self.get(id) { (class.clone(), *name_id) }
         else { panic!("ICE: heap slot is not an UnboundMethod") }
     }
+    pub(crate) fn curried_proc(&self, id: ObjId) -> (&Value, &Vec<Value>, u16) {
+        if let HeapObj::CurriedProc { underlying, gathered, target_arity } = self.get(id) {
+            (underlying, gathered, *target_arity)
+        } else { panic!("ICE: heap slot is not a CurriedProc") }
+    }
     /// Read a TypedData slot. Panics if the slot holds a different
     /// HeapObj variant — the caller must have proven the type
     /// via `rb_check_typeddata` (or equivalent) at the cext boundary
@@ -341,6 +353,12 @@ impl Heap {
                     // visit is needed.
                     Heap::visit_value(recv, &mut self.marks, &mut worklist);
                 }
+                Slot::Live(HeapObj::CurriedProc { underlying, gathered, .. }) => {
+                    Heap::visit_value(underlying, &mut self.marks, &mut worklist);
+                    for v in gathered {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                }
                 _ => {}
             }
         }
@@ -378,7 +396,7 @@ impl Heap {
 
     pub(crate) fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
         match v {
-            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) | Value::Block(id) | Value::BoundMethod(id) | Value::UnboundMethod(id) => {
+            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) | Value::Block(id) | Value::BoundMethod(id) | Value::UnboundMethod(id) | Value::CurriedProc(id) => {
                 let i = id.0 as usize;
                 if !marks[i] {
                     marks[i] = true;
@@ -418,6 +436,7 @@ impl Value {
             Value::Regex(_) => "Regexp",
             Value::BoundMethod(_) => "Method",
             Value::UnboundMethod(_) => "UnboundMethod",
+            Value::CurriedProc(_) => "Proc",
         }
     }
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
@@ -504,6 +523,7 @@ impl Value {
             Value::Regex(r) => format!("(?-mix:{})", r.as_str()),
             Value::BoundMethod(_) => "#<Method>".into(),
             Value::UnboundMethod(_) => "#<UnboundMethod>".into(),
+            Value::CurriedProc(_) => "#<Proc (curried)>".into(),
         }
     }
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {

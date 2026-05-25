@@ -645,6 +645,81 @@ impl Vm {
             self.stack.push(Value::BoundMethod(id));
             return Ok(());
         }
+        // `m.curry` / `m.curry(n)` — host-side partial application.
+        // Returns a CurriedProc that gathers args across successive
+        // `.call` invocations until `target_arity` is reached, then
+        // invokes the underlying with the full arg list. `class_of`
+        // reports CurriedProc as `Proc`, matching CRuby.
+        if let Value::BoundMethod(_) = &recv
+            && &*name == "curry" && args.len() <= 1 {
+                let target_arity: u16 = if let Some(Value::Int(n)) = args.first() {
+                    if *n < 0 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("negative arity for curry ({})", n),
+                        }));
+                    }
+                    if *n > u16::MAX as i64 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("curry arity out of range ({})", n),
+                        }));
+                    }
+                    *n as u16
+                } else {
+                    let bid = match &recv { Value::BoundMethod(b) => *b, _ => unreachable!() };
+                    let (bm_recv, m_name_id) = {
+                        let (r, n) = self.heap.bound_method(bid);
+                        (r.clone(), n)
+                    };
+                    let class = match self.class_of(&bm_recv) {
+                        Value::Class(c) => c,
+                        _ => return Err(self.trap(RubyError::TypeError {
+                            msg: "Method receiver has no resolvable class".into(),
+                        })),
+                    };
+                    match self.lookup_method_uncached(&class, m_name_id) {
+                        Some(m) => self.protos[m.proto_idx].n_required_positional,
+                        None => return Err(self.trap(RubyError::ArgumentError {
+                            msg: "cannot curry a method with unknown arity (builtin)".into(),
+                        })),
+                    }
+                };
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::CurriedProc {
+                    underlying: recv.clone(),
+                    gathered: Vec::new(),
+                    target_arity,
+                });
+                self.stack.push(Value::CurriedProc(id));
+                return Ok(());
+            }
+        // `cp.call(args)` — append to gathered; invoke if arity hit,
+        // else return a new CurriedProc carrying the appended state.
+        if let Value::CurriedProc(cid) = &recv
+            && matches!(&*name, "call" | "[]" | "()") {
+                let (underlying, gathered, arity) = {
+                    let (u, g, a) = self.heap.curried_proc(*cid);
+                    (u.clone(), g.clone(), a)
+                };
+                let mut combined = gathered;
+                combined.extend(args);
+                if combined.len() >= arity as usize {
+                    let argc = combined.len();
+                    self.stack.push(underlying);
+                    for a in combined { self.stack.push(a); }
+                    let call_sym = self.interner.intern("call");
+                    return self.do_call(call_sym, argc, false, u16::MAX);
+                }
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::CurriedProc {
+                    underlying,
+                    gathered: combined,
+                    target_arity: arity,
+                });
+                self.stack.push(Value::CurriedProc(id));
+                return Ok(());
+            }
         // `m >> other` / `m << other` — function composition.
         // `(m >> g).(x) == g.(m.(x))`; `(m << g).(x) == m.(g.(x))`.
         // Both sides must be callable — BoundMethod or Block. The
