@@ -35,8 +35,10 @@ reports: [`docs/gap-reports/`](gap-reports/README.md).
 | Liquid `lib/` (64 files) | **81.16%** | `ConstantWriteNode` (×141) | `ModuleNode` (×74) | `UnlessNode` (×72) |
 
 **Headline:** both Jekyll and Liquid sit just over 81% inside the
-subset at AST level. Adding `ModuleNode` alone (Near term #4 below)
-would unlock 55 Jekyll files to ≥95% translatability. Caveat: the
+subset at AST level. Jekyll already has **56 files at ≥95%
+translatability** today (out of 86 non-trivial); `ModuleNode` is
+the single most-frequent remaining blocker across them, so
+Near term #4 below has the highest practical leverage. Caveat: the
 AST view *under*-states the gap — many runtime features
 (`require`, `attr_accessor`, `include`, `private`) parse as
 `CallNode` and so look Supported. See each report's "Top bareword

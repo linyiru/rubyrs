@@ -55,7 +55,7 @@
 
 ### Top bareword calls
 
-Bareword (no-receiver) calls mix genuine built-ins (`raise`, `puts`, `Integer` — implemented) with hidden gaps (`require`, `attr_*`, `include`, `private` — parse as CallNode so look Supported, but aren't). Scan the list for known-unsupported names; the count column alone won't tell you which is which.
+Bareword (no-receiver) calls mix genuine built-ins (`raise`, `puts` — implemented) with hidden gaps (`require`, `attr_*`, `include`, `private` — parse as CallNode so look Supported, but aren't). Scan the list for known-unsupported names; the count column alone won't tell you which is which.
 
 | Method | Count |
 |---|---:|
@@ -169,7 +169,7 @@ Bareword (no-receiver) calls mix genuine built-ins (`raise`, `puts`, `Integer` �
 
 Counting only files with ≥20 AST nodes (60 non-trivial files).
 
-- **100% translatable:** 1 files
+- **100% translatable:** 1 file
 - **≥95% translatable:** 48 files (fixture candidates)
 
 Top 48 candidates:

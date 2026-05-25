@@ -26,7 +26,7 @@ The headline "% Supported" is **AST-level only** and is an
 NOT implement parse as `CallNode` (which counts as Supported):
 
 - `require`, `autoload` — semantically forbidden in rubyrs
-- `attr_reader / writer / accessor` — roadmap-medium, not yet implemented
+- `attr_reader / writer / accessor` — Near term #6 in [ROADMAP](../ROADMAP.md), not yet implemented
 - `include`, `extend` — coupled to `Module` support
 - `private`, `public`, `protected`
 
