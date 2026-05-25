@@ -144,3 +144,4 @@ fn run_diff(name: &str) {
 #[test] fn frozen_strings() { run_diff("frozen_strings"); }
 #[test] fn splat_calls() { run_diff("splat_calls"); }
 #[test] fn keyword_args() { run_diff("keyword_args"); }
+#[test] fn env_hash() { run_diff("env_hash"); }

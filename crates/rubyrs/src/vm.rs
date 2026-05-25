@@ -172,6 +172,11 @@ pub(crate) struct Vm {
     /// SymId; first `LoadRegex` for a given pattern compiles and
     /// caches, subsequent loads return the same Rc.
     pub(crate) regex_cache: HashMap<SymId, Rc<regex::Regex>>,
+    /// Lazily-built ENV Hash, shared across every `ENV`
+    /// reference. Set on first `LoadConst("ENV")` and reused
+    /// thereafter so script code observes a single mutable
+    /// snapshot of the process env.
+    pub(crate) env_hash: Option<ObjId>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -253,6 +258,7 @@ impl Vm {
             class_stack: vec![],
             class_visibility_stack: vec![],
             regex_cache: HashMap::new(),
+            env_hash: None,
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),
@@ -2429,6 +2435,10 @@ impl Vm {
         let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() + self.pinned.len() + 64);
         for v in &self.stack { roots.push(v.clone()); }
         for v in &self.pinned { roots.push(v.clone()); }
+        // ENV hash, once initialised, is reachable from script
+        // code via the `ENV` constant — pin it so the cache
+        // doesn't get swept between LoadConst loads.
+        if let Some(id) = self.env_hash { roots.push(Value::Hash(id)); }
         for f in &self.frames {
             roots.push(f.self_val.clone());
             for v in f.locals.borrow().iter() { roots.push(v.clone()); }
@@ -4106,7 +4116,31 @@ impl Vm {
                 }
             }
             Op::LoadConst(name_id) => {
-                let v = self.classes.get(&name_id).map(|c| Value::Class(c.clone())).unwrap_or(Value::Nil);
+                let v = if let Some(c) = self.classes.get(&name_id).cloned() {
+                    Value::Class(c)
+                } else if &**self.interner.resolve(name_id) == "ENV" {
+                    // Lazy-build ENV as a regular String-keyed Hash
+                    // snapshotted from the process environment. Cached
+                    // for the lifetime of the Vm so all `ENV` reads
+                    // see a single object — writes via `ENV[k] = v`
+                    // mutate the snapshot but not the real process
+                    // env (documented divergence; would need a
+                    // setenv wrapper otherwise).
+                    let id = if let Some(id) = self.env_hash {
+                        id
+                    } else {
+                        let pairs: Vec<(Value, Value)> = std::env::vars()
+                            .map(|(k, v)| (Value::new_str(k), Value::new_str(v)))
+                            .collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Hash(pairs));
+                        self.env_hash = Some(id);
+                        id
+                    };
+                    Value::Hash(id)
+                } else {
+                    Value::Nil
+                };
                 self.stack.push(v);
             }
             Op::Jump(off) => {
