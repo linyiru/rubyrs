@@ -58,10 +58,11 @@ vs the first pass:
 Pass count: **3 → 5** (out of 12 non-host-DSL files = 42%).
 Category D drops from 3 → 0, validating both the gapscan
 prioritisation (D was the top "syntactic" blocker) and the
-fix itself. The lingering blocker on `rake/linked_list.rb`
-(Category E) is now the cleanest next target: a single
-documented divergence that, once relaxed, would push pass to
-6/12.
+fix itself. The remaining Category E files (`rake/linked_list.rb` —
+now E-only after PR #30 — and `sinatra/middleware/logger.rb`,
+which was always E-only) are the cleanest next target: a
+single documented divergence that, once relaxed, would push
+pass to 7/12.
 
 ### Results — 2026-05-25 (first pass), rubyrs at `6063af8`
 
