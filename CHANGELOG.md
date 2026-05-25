@@ -7,6 +7,66 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`Kernel.instance_method(:name)` + `RUBY_VERSION` /
+  `RUBY_PLATFORM` constants.** Gemfile-shape prelude scripts
+  routinely probe `Kernel.instance_method(:require)` and
+  branch on `RUBY_VERSION` / `RUBY_PLATFORM`; both shapes
+  now work. `Kernel` is recognised as an intentional extra
+  in `is_primitive_class_name` (no user-Method table entry,
+  but the synthesised UnboundMethod path applies). The
+  two constants are populated at Vm boot and frozen via the
+  dsl prelude. New diff fixture
+  `kernel_instance_method.rb` pins the surface.
+- **`Mutex` single-threaded no-op stub.** `Mutex.new` +
+  `m.synchronize { … }` + `m.locked?` ship as a compatibility
+  shim so tilt / sinatra / dry-struct-style cache-guard
+  patterns (`LOCK.synchronize { @cache[k] ||= … }`) load and
+  execute. Because rubyrs is single-threaded the lock surface
+  degenerates: `synchronize` just yields the block, `locked?`
+  always returns `false`, re-entrant `synchronize` succeeds
+  rather than deadlocking (a user-friendly divergence vs
+  CRuby). `Mutex.new(...)` with extras raises `ArgumentError`
+  via an explicit 0-arity `initialize`. The stub does **not**
+  belong in Tier 1 by [ADR 0017](docs/adr/0017-tier1-boundary.md)
+  Rule 4 — it's a deliberate compatibility deviation, scoped
+  to "the `synchronize { }` shape real gems use" rather than
+  the full lock state-machine; direct `lock` / `try_lock` /
+  `unlock` queries diverge and are documented out of scope.
+  Diff fixture `mutex_stub.rb` pins the observable surface.
+- **Global variables — `$foo` read + write.** New AST nodes
+  `GlobalVariableReadNode` / `GlobalVariableWriteNode`,
+  bytecode `Op::LoadGlobal(SymId)` / `Op::StoreGlobal(SymId)`,
+  and a `Vm.globals` map that survives across `eval` calls
+  (so DSL host setup can stash state). Uninitialised reads
+  default to `Value::Nil` (CRuby's lenient semantics). Special
+  globals: `$$` reads host process PID (an [ADR 0017](docs/adr/0017-tier1-boundary.md)
+  deviation — Rule 1, target tier 2 / Config-injected) and
+  `$0` reads the script name. Globals are a GC root so
+  values they hold survive collection.
+- **`break` / `next` through `ensure` — proper Ruby semantics.**
+  Previously, `break` and `next` inside a `while` body that
+  walked through one or more enclosing `ensure` clauses either
+  skipped the ensure entirely or trapped. Now the unwinder
+  runs every `is_ensure` handler between the `break`/`next`
+  site and the loop's target IP before landing — mirroring
+  CRuby's structured-jump semantics. New `LoopTransfer` slot
+  on `Vm` carries kind / target IP / target rescue depth /
+  target stack depth across the ensure walk; the parallel
+  `loop_stack_depths` stack on each frame snapshots
+  `stack.len()` at every `EnterLoop` so the landing path can
+  truncate any operand-stack residue (most importantly the
+  exception value the unwinder pushes on entering an ensure).
+  New diff fixtures cover `break` from ensure, `next` from
+  ensure, `break` through nested ensures, and the same shapes
+  composed with `rescue`. Adds `vm/raise.rs` (10 ICE-class
+  invariant asserts) and a new `Op::EndEnsure` terminator
+  (replacing the prior `Op::Raise` the compiler used to emit
+  at the tail of every ensure body).
+- **`ConstantPath` op-write family.** `Foo::Bar ||= value`,
+  `Foo::Bar &&= value`, and `Foo::Bar += value` (plus the
+  full arithmetic op-write set) work end-to-end with a
+  fallback path for dynamic-head constant paths. Round-trip
+  diff fixtures pin every shape against CRuby.
 - **cext spike: BigInt protocol round-trip via msgpack/bigint.rb
   (A5 / A6a-A6d).** End-to-end load a real upstream gem-`lib/`
   Ruby helper and exercise its protocol path byte-identical to
@@ -784,6 +844,19 @@ won't be fixed until we have a clear use case demanding parity.
 - `CHANGELOG.md` and `CONTRIBUTING.md`
 
 ### Changed
+- **`Regexp` / `/pattern/` literals are now opt-in via the
+  `regex` Cargo feature** ([ADR 0017](docs/adr/0017-tier1-boundary.md)
+  Rule 3, PoC #2). The default `cargo install rubyrs` no
+  longer ships the `regex` crate (~300 KB compiled + ReDoS
+  attack vector — neither appropriate for the sandbox-host
+  niche). `Op::LoadRegex`, `Expr::RegexLit`, and every
+  `String#match` / `String#scan` / `String#=~` regex form
+  are cfg-gated; with the feature off, regex literals raise
+  a parse-time error pointing at the feature flag (same UX
+  shape as `require` without `cext`, per PR #75). Embedders
+  who need regex either enable the feature or register a
+  host fn. Parallels Lua / Wren / rhai / rune / Starlark's
+  same call.
 - **`[profile.release] lto = "thin"`** in `Cargo.toml`. The
   CRuby-mirrored vm.rs split moved hot dispatch / opcode /
   lookup code into separate compilation units; without LTO,
@@ -945,6 +1018,23 @@ won't be fixed until we have a clear use case demanding parity.
   `"ICE: ..."` to make the distinction explicit when one fires.
 
 ### Fixed
+- **CI unbreak — clippy, panic budget, wasm dead_code.**
+  Master CI was red on four independent gates after the
+  `break/next/ensure`, global-variable, op-write, `require .rb`,
+  and bundle-build-helper merges landed without updating the
+  gates. (a) Two `doc_lazy_continuation` lint sites
+  (`Op::EndEnsure` doc + `tests/common/mod.rs` `+ assertions`
+  list-bullet false-positive) regressed after rust-1.95
+  sharpened the lint. (b) Four files crossed their per-file
+  panic budgets — `vm/step.rs` 52 → 64, `vm/raise.rs` 3 → 10,
+  `vm/kernel.rs` 0 → 5, `compiler.rs` 2 → 6 — every new site
+  is an `.expect("ICE: …")` invariant assert (ICE-class, not
+  user-reachable; budgets ratchet up with annotated rationale
+  per the existing convention). (c) `Vm.loaded_features` was
+  dead code on `wasm32-wasi` because `require` short-circuits
+  to a trap there; gated the field + initializer with
+  `cfg(not(target_os = "wasi"))` to match the accessor fns.
+  Commit `07d3cd9`.
 - **Integer literals no longer truncate to i32.** `ast::tr`
   was reading `IntegerNode::value()` through Prism's
   `TryInto<i32>` and silently defaulting to `0` on overflow,
@@ -1105,6 +1195,35 @@ won't be fixed until we have a clear use case demanding parity.
   root list. `STRESS_GC=1 cargo test` exercises this in CI.
 
 ### Internal
+- **[ADR 0017](docs/adr/0017-tier1-boundary.md) — Tier-1 boundary
+  specification.** Concrete contract for what is / isn't in
+  Tier 1, populating the abstract shape ADR 0015 sketched.
+  Four inclusion rules (determinism from script inputs only;
+  no script-accessible OS capabilities by default; no regex;
+  no OS threads), an OUT-of-Tier-1 table covering 14
+  feature families with target tier + rationale, and a
+  "Current deviations" table tracking four code paths that
+  don't yet match the spec (stdout default sink, `ENV`
+  bleed, `$$` PID, `Regexp` in Tier 1 — the regex deviation
+  was closed by PR #86). Backed by empirical prior-art
+  review of Lua 5.4 / mruby 3.x / rhai 1.25 / rune 0.14.
+  SUBSET.md cross-links the ADR as the formal contract this
+  doc tracks implementation status against.
+- **Centralised cext-bundle build helper.** New
+  `crates/rubyrs/tests/common/mod.rs` exposes
+  `build_cext_bundle(example_dir_name, bundle_basename)` and
+  a `RUBY_DLEXT` const; 12 cext integration tests previously
+  inlined their own `bash build.sh` invocation, existence
+  checks, and platform-suffix logic. Removed the duplication
+  in one pass. `msgpack-cext` and `counter-cext` `build.sh`
+  gained `flock` + atomic-tmpfile-rename serialisation so
+  parallel `cargo test` runs can't race on a half-written
+  `.bundle`/`.so`.
+- **`rubyrs-spec-extract` v0.3.** Adds 3 more extractor-
+  derived ruby/spec specs (+12 examples) covering
+  `Array#compact`, `Array#take`, `Hash#keys`. Tightens the
+  extraction context heuristics and skip-log messages after
+  multiple rounds of Copilot review.
 - **CRuby-mirrored `vm.rs` split.** The 6593-line `vm.rs` is
   split into per-type submodules under `crates/rubyrs/src/vm/`,
   mirroring CRuby's file layout so "where does method X live?"

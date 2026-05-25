@@ -15,6 +15,16 @@ described here), with strictly opt-in outer tiers
 (`language` → `stdlib` → `mri-compat`) for everything from Sinatra-class
 Ruby semantics up to eventual CRuby-shaped binary compatibility.
 
+[ADR 0017](adr/0017-tier1-boundary.md) is the formal Tier 1 boundary
+specification — the four inclusion rules (deterministic from script
+inputs, no script-accessible OS capabilities by default, no regex,
+no OS threads) and the OUT-of-Tier-1 table that pin down exactly
+which feature lands in which tier. This document tracks *implementation
+status* against that contract; ADR 0017's "Current deviations" table
+is the authoritative list of code paths that don't yet match the spec
+(stdout sink default, `ENV` host-process bleed, `$$` PID exposure —
+the `regex` deviation was closed by PR #86, the `regex` Cargo feature).
+
 **This document defines Tier 1 only.** Everything below "Supported today"
 or "Divergences from CRuby" is a Tier 1 statement. Items labeled
 "explicitly out of scope" are out of Tier 1; they may land in a higher
