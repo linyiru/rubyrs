@@ -4807,9 +4807,14 @@ fn cext_funcall_to_vm(
         // previously-translated recv or earlier arg sitting only
         // in a Rust local has no GC root, so STRESS_GC would sweep
         // it before `cext_invoke_method` saw it (slot-reuse → ICE
-        // "use-after-free" inside dispatch). Pinning closes the
-        // window; the guard drops at end of the unsafe block,
-        // before `cext_invoke_method` runs its own roots.
+        // "use-after-free" inside dispatch). The guard is alive
+        // across `cext_invoke_method` itself — which is intentional:
+        // dispatch may also `maybe_gc` (e.g. compiling a string→sym,
+        // alloc'ing intermediate Arrays), and we want recv/args
+        // protected the whole way until they're consumed onto the
+        // operand stack. The guard drops at the end of the unsafe
+        // block, after the call has returned and the result Value
+        // is bound.
         let mut g = PinGuard::new(vm);
         let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(g.vm, st, recv));
         g.pin(recv_v.clone());
