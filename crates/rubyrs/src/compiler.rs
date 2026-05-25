@@ -28,6 +28,16 @@ pub(crate) struct ProtoBuilder {
     /// compiling — used to emit `LoadLocal(0..n)` for the
     /// forwarding `super` (bare) form.
     pub(crate) method_param_count: u16,
+    /// True iff this builder is compiling a real method body
+    /// (the proto bound to an `Op::DefMethod` /
+    /// `Op::DefSingletonMethod`). Distinct from `method_name`
+    /// which is inherited into blocks for `super`'s forwarding
+    /// semantics. `Expr::Return` uses this flag to decide
+    /// between `Op::Return` (local; method body) and
+    /// `Op::ReturnMethod` (non-local; block, walks frames out
+    /// to the enclosing method). Class bodies and the toplevel
+    /// `<main>` proto stay false.
+    pub(crate) is_method_body: bool,
 }
 
 impl ProtoBuilder {
@@ -41,6 +51,7 @@ impl ProtoBuilder {
             filename,
             method_name: None,
             method_param_count: 0,
+            is_method_body: false,
         };
         for p in params { b.local_slot(p); }
         b
@@ -713,17 +724,28 @@ pub(crate) fn compile_expr(
             }
         }
         Expr::Return(val) => {
-            // Non-local return: unwind through any block frames to
-            // the enclosing method, popping it and using the value
-            // as the method's return. The VM handles the unwind in
-            // its dispatch loop via the `method_return` signal.
+            // CRuby `return` has two scoping rules depending on the
+            // enclosing context:
+            //   1. Inside a `def` body (method_name is Some): local
+            //      return — just pop the current frame. `Op::Return`.
+            //   2. Inside a block body (method_name is None on the
+            //      block's ProtoBuilder, even if a method body lies
+            //      outside): non-local return — unwind through every
+            //      block frame to the enclosing method, pop that, use
+            //      the value as the method's return. `Op::ReturnMethod`.
+            // Class bodies / toplevel hit case 2 today; CRuby would
+            // raise LocalJumpError. Documented gap.
             match val {
                 Some(e) => compile_expr(b, e, protos, interner, cc),
                 None => { b.emit(Op::LoadNil); }
             }
-            b.emit(Op::ReturnMethod);
+            if b.is_method_body {
+                b.emit(Op::Return);
+            } else {
+                b.emit(Op::ReturnMethod);
+            }
             // Sentinel for stack-balance — unreachable once the
-            // method_return signal fires.
+            // return signal fires.
             b.emit(Op::LoadNil);
             b.current_span = prev_span;
             return;
@@ -896,6 +918,7 @@ pub(crate) fn compile_proto_kind(
     if is_method {
         b.method_name = Some(name.clone());
         b.method_param_count = params.len() as u16;
+        b.is_method_body = true;
     }
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
@@ -943,6 +966,10 @@ pub(crate) fn compile_block(
         // NoMethodError-shaped Trap.
         method_name: parent.method_name.clone(),
         method_param_count: parent.method_param_count,
+        // Blocks are NOT method bodies — `return` inside one
+        // unwinds non-locally to the enclosing method
+        // (Op::ReturnMethod), not just the block frame.
+        is_method_body: false,
     };
     let param_start = b.n_locals;
     // Block params get fresh slots and shadow any outer binding of the

@@ -73,15 +73,25 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   default arguments (a `slugify(s, sep = "-")` example), and
   `respond_to?` reachability. Byte-identical to CRuby.
 
-### Documented
-- **`return` from inside a block does not exit the enclosing
-  method.** CRuby's non-local-return semantics for `return`
-  inside a `do…end` / `{ }` block needs a Result-style
-  signal that propagates through `dispatch_until` and every
-  native iterator driver — non-trivial and deferred.
-  Workaround: `find` / `detect` / a guard flag, or
-  restructure the method so the `return` is at top-level.
-  Added a "Divergences" entry in `docs/SUBSET.md`.
+### Fixed
+- **`return` from inside a block now correctly exits the
+  enclosing method.** Previously, every `return` in the program
+  compiled to `Op::ReturnMethod` (non-local), which broke the
+  case where a helper method called from inside a block did
+  `return value` — the value escaped out through the block all
+  the way to the helper's caller, instead of just exiting the
+  helper. The compiler now distinguishes method-body `return`
+  (local; `Op::Return`) from block-body `return` (non-local;
+  `Op::ReturnMethod`) via a new `is_method_body` flag on
+  ProtoBuilder, which `compile_block` deliberately resets to
+  `false` even though it inherits the parent's `method_name`
+  for `super`'s benefit. New diff fixture
+  `nonlocal_return.rb` pins both directions: block-level
+  `return` exits the enclosing method (`find_first_even`-style
+  short-circuit) and method-local `return` from inside a
+  helper called by a block stays local (the block keeps
+  iterating). Byte-identical to CRuby. The older "Divergences"
+  entry in `docs/SUBSET.md` should be removed in a follow-up.
 
 ### Added
 - **`<=>` spaceship operator.** Returns `Integer(-1/0/1)`
