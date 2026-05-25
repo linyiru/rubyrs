@@ -256,7 +256,7 @@ jobs:
           # B6 / F4 / F6 that landed new ICE-class invariants in
           # dispatch + step + iter). The total can ratchet down
           # if/when individual sites become Trap-class.
-          check crates/rubyrs/src/vm/dispatch.rs     14
+          check crates/rubyrs/src/vm/dispatch.rs     16
           check crates/rubyrs/src/vm/step.rs         52
           check crates/rubyrs/src/vm/iter.rs         10
           check crates/rubyrs/src/vm/cext.rs          5

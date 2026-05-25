@@ -89,6 +89,12 @@ pub enum Value {
     /// other heap references). `.call(args)` / `.()` / `[args]`
     /// dispatches the captured method on the captured receiver.
     BoundMethod(ObjId),
+    /// `Method#unbind` result — a captured (class, method-name)
+    /// pair with no receiver. `.bind(obj)` produces a fresh
+    /// BoundMethod, provided `obj.is_a?(class)`. Heap slot is
+    /// used for parity with BoundMethod; the inner `Rc<Class>`
+    /// is not heap-managed so no GC walk is needed.
+    UnboundMethod(ObjId),
 }
 
 #[derive(Debug)]

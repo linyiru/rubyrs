@@ -215,7 +215,8 @@ impl Vm {
             }
             Value::Block(_) => matches!(name, "call"),
             Value::Regex(_) => matches!(name, "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"),
-            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()"),
+            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind"),
+            Value::UnboundMethod(_) => matches!(name, "bind"),
         }
     }
 
@@ -242,6 +243,7 @@ impl Vm {
             Value::Class(_) => "Class",
             Value::Regex(_) => "Regexp",
             Value::BoundMethod(_) => "Method",
+            Value::UnboundMethod(_) => "UnboundMethod",
             // `Object#class` script call: CRuby reports the
             // user-declared class, not the eigenclass. Use
             // `real_class_of` so a `def obj.foo` installation

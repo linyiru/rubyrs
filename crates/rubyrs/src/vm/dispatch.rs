@@ -592,6 +592,59 @@ impl Vm {
         // `do_call` recursively with the bound recv pushed below
         // the args, the captured name interned, and the original
         // argc.
+        // `bm.unbind` — strip the receiver, keep (class_of(recv),
+        // name_id). The captured class is the receiver's class at
+        // unbind time; CRuby technically captures the *owner* (the
+        // class that defined the method), but for our subset
+        // `class_of` is the closest approximation and roundtrips
+        // through `bind` correctly for the common shapes.
+        if let Value::BoundMethod(bid) = &recv && &*name == "unbind" && args.is_empty() {
+            let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+                _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
+            };
+            let cls = match self.class_of(&bm_recv) {
+                Value::Class(c) => c,
+                _ => return Err(self.trap(RubyError::TypeError {
+                    msg: "cannot unbind method on a value without a class".into(),
+                })),
+            };
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls, name_id: bm_name_id });
+            self.stack.push(Value::UnboundMethod(id));
+            return Ok(());
+        }
+        // `ubm.bind(obj)` — reconstitute a BoundMethod, checking
+        // that `obj` is_a? the captured class. Raises TypeError on
+        // mismatch, matching CRuby.
+        if let Value::UnboundMethod(uid) = &recv && &*name == "bind" && args.len() == 1 {
+            let (cap_class, cap_name_id) = match self.heap.get(*uid) {
+                HeapObj::UnboundMethod { class, name_id } => (class.clone(), *name_id),
+                _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
+            };
+            let mut args = args;
+            let target = args.swap_remove(0);
+            let target_class = match self.class_of(&target) {
+                Value::Class(c) => c,
+                _ => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("bind argument must have a class (got {})", target.type_name()),
+                })),
+            };
+            if !super::class_is_a(&target_class, &cap_class) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "bind argument must be an instance of {} (got {})",
+                        cap_class.name, target_class.name,
+                    ),
+                }));
+            }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::BoundMethod { recv: target, name_id: cap_name_id });
+            self.stack.push(Value::BoundMethod(id));
+            return Ok(());
+        }
         if let Value::BoundMethod(bid) = &recv
             && matches!(&*name, "call" | "[]" | "()") {
                 let (bm_recv, bm_name_id) = match self.heap.get(*bid) {

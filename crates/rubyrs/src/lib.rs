@@ -602,6 +602,10 @@ end
 ## resolves to "Method".
 class Method
 end
+## UnboundMethod — `Method#unbind` returns this; `bind(obj)`
+## rehydrates it into a Method.
+class UnboundMethod
+end
 class Class
 end
 ## File — class-method dispatch is wired host-side in

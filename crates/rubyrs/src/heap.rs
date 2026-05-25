@@ -44,6 +44,11 @@ pub(crate) enum HeapObj {
     /// must walk; `name_id` is the captured method name. `.call`
     /// dispatches the captured method on the captured receiver.
     BoundMethod { recv: Value, name_id: crate::intern::SymId },
+    /// `Method#unbind` result. `class` is the receiver's class
+    /// at unbind time; `bind(obj)` checks `obj.is_a?(class)`
+    /// before reconstituting a BoundMethod. `Rc<Class>` is not
+    /// a heap reference, so this variant carries no GC obligation.
+    UnboundMethod { class: std::rc::Rc<crate::value::Class>, name_id: crate::intern::SymId },
 }
 
 /// Heap representation of a CRuby-shape TypedData object. See
@@ -365,7 +370,7 @@ impl Heap {
 
     pub(crate) fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
         match v {
-            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) | Value::Block(id) | Value::BoundMethod(id) => {
+            Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id) | Value::Block(id) | Value::BoundMethod(id) | Value::UnboundMethod(id) => {
                 let i = id.0 as usize;
                 if !marks[i] {
                     marks[i] = true;
@@ -404,6 +409,7 @@ impl Value {
             Value::Block(_) => "Proc", // block lives in heap now (P2-13); type name unchanged
             Value::Regex(_) => "Regexp",
             Value::BoundMethod(_) => "Method",
+            Value::UnboundMethod(_) => "UnboundMethod",
         }
     }
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
@@ -489,6 +495,7 @@ impl Value {
             Value::Block(_) => "#<Proc>".into(),
             Value::Regex(r) => format!("(?-mix:{})", r.as_str()),
             Value::BoundMethod(_) => "#<Method>".into(),
+            Value::UnboundMethod(_) => "#<UnboundMethod>".into(),
         }
     }
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {
