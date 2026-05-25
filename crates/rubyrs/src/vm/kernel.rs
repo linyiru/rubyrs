@@ -326,9 +326,19 @@ impl Vm {
             #[cfg(not(target_os = "wasi"))]
             "require_relative" => match args {
                 [Value::Str(path)] => Some(self.require_relative(&path.to_string_lossy())),
+                // Distinguish type mismatch from arity: CRuby raises
+                // TypeError for `require_relative :sym`, ArgumentError
+                // for the wrong count. Reporting just "got 1" hides
+                // which case the caller hit.
+                [other] => Some(Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        other.type_name()
+                    ),
+                }))),
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
-                        "require_relative: expected 1 String arg, got {}",
+                        "wrong number of arguments (given {}, expected 1)",
                         args.len()
                     ),
                 }))),
@@ -416,6 +426,13 @@ impl Vm {
             }));
         }
         let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(canon.to_string_lossy().into_owned());
+        // Register the loaded source so `Method#source_location` and
+        // any other Vm-side byte-offset → line/col resolver can find
+        // it. `Runtime::eval` does the same for top-level scripts; we
+        // must mirror it here, otherwise methods defined inside the
+        // required file lose backtrace fidelity.
+        let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source.as_str());
+        self.sources.insert(filename_rc.clone(), source_rc);
         // Mark loaded BEFORE running the body — matches CRuby's
         // semantics for circular requires (mid-load is treated as
         // "already loading"; the partially-defined module is visible
@@ -448,15 +465,29 @@ impl Vm {
             n_given_positional: 0,
             rescues: vec![],
         });
-        // Roll the loaded-features mark back on error so a retry
-        // can attempt the load again — matches CRuby semantics
-        // (a failed require/require_relative does NOT leave the
-        // feature marked as loaded). The mid-execution mark is
-        // still needed for circular-require correctness; we just
-        // can't leave it in place if the body trapped.
+        // Roll the loaded-features mark back on error or non-local
+        // return so a retry can attempt the load again — matches
+        // CRuby semantics (a failed require/require_relative does
+        // NOT leave the feature marked as loaded). The mid-
+        // execution mark is still needed for circular-require
+        // correctness; we just can't leave it in place if the body
+        // bailed out.
         if let Err(trap) = self.dispatch_until(depth_before) {
             self.loaded_features.remove(&canon);
             return Err(trap);
+        }
+        // `dispatch_until` returns `Ok(())` early when
+        // `method_return` is set (a non-local `return` from inside
+        // a block propagating up); the frames stack hasn't unwound
+        // to `depth_before` yet — the outer dispatch loop will
+        // finish the unwind. In that state we must NOT claim a
+        // successful load: roll back the feature mark, skip the
+        // stack pop (there's no clean return value at the top), and
+        // return a placeholder Nil that the outer unwind will
+        // discard along with everything else.
+        if self.method_return.is_some() {
+            self.loaded_features.remove(&canon);
+            return Ok(Value::Nil);
         }
         // The required file's last expression sits on top of the
         // operand stack (Op::Return pushed it before the frame
