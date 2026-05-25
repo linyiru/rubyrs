@@ -282,6 +282,16 @@ pub(crate) struct Vm {
     /// semantics: `return` inside a `do…end` exits the enclosing
     /// method, not just the block.
     pub(crate) method_return: Option<Value>,
+    /// One-shot flag set by a builtin that detected its caller was
+    /// unwound past its own call-site (e.g. `require_relative` saw
+    /// `unwind_with_exception` route control to an outer
+    /// `rescue` handler mid-load). The do_call caller checks +
+    /// clears this flag before doing `stack.push(builtin_result)`;
+    /// pushing in this state would corrupt the rescue handler's
+    /// stack (it's already at `base_sp` after unwind truncation).
+    /// Distinct from `method_return` because that path keeps frames
+    /// > until_depth, while rescue unwind drops below.
+    pub(crate) suppress_call_result_push: bool,
     /// Cached index into `protos` of the BoundMethod→Block
     /// forwarder. Lazily built on first `&method_object`
     /// coercion in `do_call_block`. The forwarder is a tiny
@@ -342,6 +352,7 @@ impl Vm {
             method_compose_forwarder_proto: None,
             sources: HashMap::new(),
             method_return: None,
+            suppress_call_result_push: false,
         }
     }
 

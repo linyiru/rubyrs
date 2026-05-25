@@ -325,7 +325,11 @@ impl Vm {
             //     single-threaded at the script level.
             #[cfg(not(target_os = "wasi"))]
             "require_relative" => match args {
-                [Value::Str(path)] => Some(self.require_relative(&path.to_string_lossy())),
+                // `with_str_lossy` is Cow-backed: zero-alloc on
+                // the valid-UTF-8 hot path, only the invalid-UTF-8
+                // fallback owns a String. `to_string_lossy()` would
+                // allocate unconditionally.
+                [Value::Str(path)] => Some(path.with_str_lossy(|s| self.require_relative(s))),
                 // Distinguish type mismatch from arity: CRuby raises
                 // TypeError for `require_relative :sym`, ArgumentError
                 // for the wrong count. Reporting just "got 1" hides
@@ -517,12 +521,18 @@ impl Vm {
         // would corrupt it (overwrite the bound exception, smash
         // saved values). The signal is that the stack didn't end
         // at `stack_before + 1` (which is what Op::Return leaves
-        // behind). Roll back the feature mark, return Nil so the
-        // caller's do_call push is harmless (the rescue handler's
-        // next op will either consume it or `base_sp` truncation
-        // discards it), and let the outer unwind finish.
+        // behind).
+        //
+        // Set `suppress_call_result_push` so do_call's builtin arm
+        // skips its `stack.push(builtin_result)` step — otherwise
+        // it'd add one slot to a stack the compiler expects at
+        // exactly the rescue handler's saved `base_sp`. The Nil
+        // we return is just a placeholder (the flag suppresses
+        // its push); the rescue handler resumes from its own ip
+        // with its own stack intact.
         if self.stack.len() != stack_before + 1 {
             self.loaded_features.remove(&canon);
+            self.suppress_call_result_push = true;
             return Ok(Value::Nil);
         }
         // Normal completion: the required file's last expression
