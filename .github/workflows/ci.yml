@@ -266,22 +266,38 @@ jobs:
           # dispatch + step + iter). The total can ratchet down
           # if/when individual sites become Trap-class.
           check crates/rubyrs/src/vm/dispatch.rs     16
-          check crates/rubyrs/src/vm/step.rs         52
+          # Bumped 52 → 64 by PRs #78 (break/next through ensure —
+          # loop-transfer landing arms + frame/stack assertions in
+          # the new control-flow ops) and #79 (GlobalVariableRead /
+          # StoreGlobal stack-underflow ICE asserts). All sites are
+          # ICE-class `.expect("ICE: ...")` invariant checks; not
+          # user-reachable.
+          check crates/rubyrs/src/vm/step.rs         64
           check crates/rubyrs/src/vm/iter.rs         10
           check crates/rubyrs/src/vm/cext.rs          6
-          check crates/rubyrs/src/vm/raise.rs         3
+          # Bumped 3 → 10 by PR #78 (break/next through ensure).
+          # The proper unwinder needs frame/rescue-stack invariant
+          # asserts at the loop-transfer entry, landing, and pop
+          # points. All ICE-class; the alternative would be silent
+          # corruption when the unwinder state machine diverges
+          # from the bytecode's assumption.
+          check crates/rubyrs/src/vm/raise.rs        10
           check crates/rubyrs/src/vm/lookup.rs        3
           check crates/rubyrs/src/vm/range.rs         1
           check crates/rubyrs/src/vm/string.rs        1
           # The remaining vm/* submodules (array, fileops, gc, hash,
-          # kernel, numeric, primitive, sprintf, util) currently have
-          # zero panic-class sites; ratcheting them all at 0 keeps
-          # them honest.
+          # numeric, primitive, sprintf, util) have zero panic-class
+          # sites; ratcheting them at 0 keeps them honest.
           check crates/rubyrs/src/vm/array.rs         0
           check crates/rubyrs/src/vm/fileops.rs       0
           check crates/rubyrs/src/vm/gc.rs            0
           check crates/rubyrs/src/vm/hash.rs          0
-          check crates/rubyrs/src/vm/kernel.rs        0
+          # Bumped 0 → 5 by PR #66 (require .rb) + PR #78
+          # (break/next through ensure). The require/_relative
+          # method-return + class_eval unwind path needs the same
+          # class_stack / frame invariant asserts that the main
+          # dispatch loop has in step.rs. ICE-class.
+          check crates/rubyrs/src/vm/kernel.rs        5
           check crates/rubyrs/src/vm/numeric.rs       0
           check crates/rubyrs/src/vm/primitive.rs     0
           check crates/rubyrs/src/vm/sprintf.rs       0
@@ -315,7 +331,15 @@ jobs:
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
-          check crates/rubyrs/src/compiler.rs  2
+          #
+          # Bumped 2 → 6 by PR #78 (break/next through ensure) and
+          # PR #81 (ConstantPath op-write family). The compiler
+          # gains `loop_next_jumps` / `loop_break_jumps` stack
+          # invariants — paired push/pop at each `while` scope plus
+          # `last_mut().expect("ICE: just checked")` after the
+          # is_empty guard. ICE-class; the guards make the invariant
+          # statically true on each access.
+          check crates/rubyrs/src/compiler.rs  6
           exit "$fail"
 
   perf-budget:

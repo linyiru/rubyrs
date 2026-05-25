@@ -251,6 +251,13 @@ pub(crate) struct Vm {
     /// shape (no associated value) is intentional: rubyrs doesn't
     /// expose the list to script code yet, and the "true → false"
     /// return semantic only needs membership.
+    ///
+    /// Gated to non-wasi: `require` / `require_relative` short-
+    /// circuit to a trap on wasm32-wasi (no file I/O), so the
+    /// field would be dead code there and trip `-D dead_code`
+    /// under `--no-default-features` (the only meaningful wasi
+    /// build shape).
+    #[cfg(not(target_os = "wasi"))]
     pub(crate) loaded_features: std::collections::HashSet<std::path::PathBuf>,
     /// Per-call-site inline-cache counter. Each compiled `Op::Call`
     /// gets a unique u16 slot id; the Vm side allocates
@@ -413,6 +420,7 @@ impl Vm {
             interner,
             classes: HashMap::new(),
             constants: HashMap::new(),
+            #[cfg(not(target_os = "wasi"))]
             loaded_features: std::collections::HashSet::new(),
             cache_counter: 0,
             globals: HashMap::new(),

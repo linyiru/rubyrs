@@ -196,6 +196,7 @@ pub(crate) enum Op {
     ///     by walking the remaining rescues, running any further
     ///     `is_ensure` handlers, and eventually landing at the
     ///     loop's target IP.
+    ///
     /// Replaces the prior `Op::Raise` the compiler used to emit
     /// at the same position. User-level `raise` keyword still
     /// emits `Op::Raise` and never reaches this op.

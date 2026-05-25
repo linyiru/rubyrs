@@ -35,7 +35,7 @@ pub const RUBY_DLEXT: &str = std::cfg_select! {
 /// any future test that points a second binary at one of them
 /// should add the same `flock` + atomic-rename pattern to that
 /// `build.sh` before relying on it. Centralising the build steps
-/// + assertions here means the existence checks, error messages,
+/// and assertions here means the existence checks, error messages,
 /// and `RUBY_DLEXT` computation only have to be maintained in
 /// one place — previously 12 sibling test files had inline copies.
 ///
