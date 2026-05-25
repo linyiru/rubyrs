@@ -75,6 +75,31 @@ impl Vm {
     /// part of the walk) → superclass. Mirrors CRuby's ancestor walk
     /// where `Person.ancestors == [Person, IncludedB, IncludedA, Object,
     /// Kernel, BasicObject]` and `include` chains compose transitively
+    /// Walk `cls`'s `singleton_methods` table, then the superclass
+    /// chain's, returning the first hit. CRuby's metaclass model
+    /// gives `Sub < Super` a singleton class whose parent is
+    /// `Super`'s singleton class — so `Sub.foo` finds Super's
+    /// `def self.foo`. We approximate that shape with a straight
+    /// superclass walk over the per-class `singleton_methods`
+    /// tables. Used by both the explicit-receiver `cls.foo` path
+    /// (in `do_call`) and the bare `foo` path when `self` is a
+    /// Value::Class (also in `do_call`) — keeping both in lockstep
+    /// avoids "self.bar finds it but bare bar doesn't" surprises.
+    #[inline]
+    pub(crate) fn lookup_class_singleton_method(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+        let mut current = cls.clone();
+        loop {
+            if let Some(m) = current.singleton_methods.borrow().get(&name_id).cloned() {
+                return Some(m);
+            }
+            let parent = current.superclass.borrow().clone();
+            match parent {
+                Some(p) => current = p,
+                None => return None,
+            }
+        }
+    }
+
     /// (`module M; include N; end; class C; include M; end` ⇒ C
     /// resolves N's methods).
     #[inline]

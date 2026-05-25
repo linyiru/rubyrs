@@ -1428,6 +1428,108 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::Class { name, superclass: None, body });
     }
+    // `class << X; body; end` — singleton class body. Spike scope:
+    // each top-level Expr in the body must be a Def; the Def gets
+    // rewritten with `receiver: Some(<translated X>)` so the existing
+    // `def X.foo` machinery (`Op::DefSingletonMethod` when X = self
+    // inside a `class Foo` body; `Op::DefObjectSingletonMethod`
+    // otherwise) lands each method on the right singleton table.
+    //
+    // Non-Def entries in the body (constant assignments, helper
+    // calls like `attr_accessor`, embedded `begin/end`) surface as
+    // SyntaxError — they'd need either a real
+    // singleton-class-as-class-stack-entry opcode or a `class_eval`
+    // detour, and no current try-run target uses them.
+    //
+    // We don't translate to an `Expr::Class { ... }` because the
+    // wrapping `class << X` doesn't introduce a NEW class with its
+    // own name; the defs already address the existing
+    // singleton_methods table on X's class chain.
+    if let Some(n) = node.as_singleton_class_node() {
+        let recv_expr = tr(&n.expression());
+        let body_nodes: Vec<_> = match n.body() {
+            Some(b) => {
+                if let Some(stmts) = b.as_statements_node() {
+                    stmts.body().iter().collect::<Vec<_>>()
+                } else { vec![b] }
+            }
+            None => vec![],
+        };
+        // CRuby evaluates the `class << expr` receiver exactly
+        // ONCE for the whole body. Naive desugar `def expr.foo;
+        // def expr.bar; ...` would re-evaluate expr per def —
+        // fine for pure exprs (SelfExpr, ConstRead) but wrong
+        // for anything side-effectful.
+        //
+        // For SelfExpr specifically, we MUST keep the literal
+        // SelfExpr as the receiver — the compiler's special
+        // case emits `Op::DefSingletonMethod` (lands on
+        // class_stack.last().singleton_methods) only when it
+        // sees `receiver: Some(SelfExpr)`. A synthetic-local
+        // indirection would route to `Op::DefObjectSingletonMethod`
+        // instead, which rejects Class receivers.
+        //
+        // For ConstRead the constant lookup is also pure and
+        // can be re-evaluated cheaply, AND classes don't go
+        // through DefObjectSingletonMethod's reject path because
+        // the compiler routes them via the same special case.
+        // Actually no — only `SelfExpr` hits the special case.
+        // So for ConstRead we ALSO need to keep it literal so
+        // the compiler can detect Class-shaped receivers at
+        // dispatch time without going through the
+        // Object-only path.
+        //
+        // Rule: only bind to a synthetic local for receivers
+        // that are NEITHER SelfExpr NOR ConstRead — the
+        // side-effectful / allocating cases. For pure receivers
+        // the per-def re-evaluation is observably identical to
+        // one-eval anyway.
+        let needs_local = !matches!(
+            &recv_expr.node,
+            Expr::SelfExpr | Expr::ConstRead(_)
+        );
+        let synth_local = format!("__cls_lt_lt_recv_{}", node_span(node).byte_offset);
+        let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len() + 1);
+        if needs_local {
+            out.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
+        }
+        for bn in &body_nodes {
+            if bn.as_def_node().is_some() {
+                let translated = tr(bn);
+                if let Expr::Def {
+                    name, params, defaults, rest, kw_params, kw_rest,
+                    block_param, receiver: _, body,
+                } = translated.node {
+                    let receiver = if needs_local {
+                        sp(bn, Expr::LVarRead(synth_local.clone()))
+                    } else {
+                        recv_expr.clone()
+                    };
+                    out.push(sp(bn, Expr::Def {
+                        name, params, defaults, rest, kw_params, kw_rest,
+                        block_param,
+                        receiver: Some(Box::new(receiver)),
+                        body,
+                    }));
+                } else {
+                    AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                        "class << X: internal — def translated unexpectedly".into()
+                    ));
+                    out.push(sp(bn, Expr::Nil));
+                }
+            } else {
+                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                    "class << X body: only `def` statements are supported in the spike subset".into()
+                ));
+                out.push(sp(bn, Expr::Nil));
+            }
+        }
+        return sp(node, Expr::Begin {
+            body: out,
+            rescue: vec![],
+            ensure: None,
+        });
+    }
     if let Some(n) = node.as_parentheses_node() {
         // `(expr)` — just unwrap to the inner expression / statements.
         if let Some(body) = n.body() {
