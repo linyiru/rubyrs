@@ -842,23 +842,45 @@ impl Vm {
                 let f = self.frames.last_mut().expect("ICE: BreakLoop no frame");
                 let target_depth = *f.loop_rescue_depths.last()
                     .expect("ICE: BreakLoop outside a while loop");
-                // Detect `break` that would skip an `ensure` body. In
-                // CRuby, `break` inside a `begin … ensure … end`
-                // inside a `while` MUST run the ensure block before
-                // exiting the loop; carrying the break value through
-                // ensure-unwind needs a break-aware Trap variant and
-                // a corresponding hook in `Op::Raise`, which is too
-                // large to land in the same PR as the basic break
-                // semantics fix. For now, refuse the case cleanly
-                // (Trap::RuntimeError) instead of silently dropping
-                // the ensure body — see SUBSET.md and the
-                // `break_through_ensure_not_yet_supported` test.
+                // CRuby semantics for `break` inside a `begin …
+                // ensure … end` inside a `while`: the ensure body
+                // runs, the loop exits cleanly carrying the break
+                // VALUE (no exception involved). Carrying the value
+                // through the ensure-unwind chain needs a break-
+                // aware Trap variant plus an `Op::Raise` hook — too
+                // large to land alongside the basic break-in-while
+                // fix.
+                //
+                // Defensive interim: refuse the case via `Uncaught`
+                // so the script aborts non-zero with a clear error
+                // rather than silently diverging. Two tradeoffs the
+                // reviewer should know:
+                //   1. `Uncaught` is intentionally NON-rescuable
+                //      (raise.rs trap_to_exception bypass list).
+                //      Routing through a rescuable variant like
+                //      `RuntimeError` would let an outer `rescue
+                //      => e` silently swallow the limitation marker
+                //      while CRuby treats `break` as a structured
+                //      transfer that NEVER triggers `rescue` — that
+                //      false-positive rescue catch is worse than a
+                //      clean abort.
+                //   2. With `Uncaught` the ensure body's side
+                //      effects ARE skipped (the trap doesn't go
+                //      through unwind_with_exception). CRuby runs
+                //      them. We accept this regression for the
+                //      narrow defensive window; the proper fix
+                //      restores both ensure side effects AND the
+                //      break value.
+                // See SUBSET.md and tests/fixtures/errors/break_through_ensure.
                 let has_pending_ensure = f.rescues[target_depth..]
                     .iter().any(|h| h.is_ensure);
                 if has_pending_ensure {
-                    return Err(self.trap(RubyError::RuntimeError {
-                        msg: "break inside `ensure` of a while loop is not yet supported \
-                              (would skip the ensure body). Track at SUBSET.md.".to_string(),
+                    return Err(self.trap(RubyError::Uncaught {
+                        class_name: "NotImplementedError".to_string(),
+                        message: "break inside `ensure` of a while loop is not yet supported \
+                                  (CRuby runs ensure then exits with the break value; \
+                                  rubyrs aborts here so an outer rescue cannot mask the gap). \
+                                  Track at SUBSET.md.".to_string(),
                     }));
                 }
                 while f.rescues.len() > target_depth { f.rescues.pop(); }

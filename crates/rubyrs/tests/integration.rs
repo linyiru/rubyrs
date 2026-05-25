@@ -98,3 +98,10 @@ fn run_error_fixture(name: &str) {
 // case (or, conversely, the proper fix that removes the trap) shows
 // up as a test diff.
 #[test] fn err_break_through_ensure() { run_error_fixture("break_through_ensure"); }
+// Variant: outer `begin/rescue` around the offending loop. The
+// defensive trap is `Uncaught` (intentionally non-rescuable), so
+// the outer rescue must NOT silently catch it — that would mask
+// the limitation and diverge from CRuby (where `break` is a
+// structured transfer that never triggers `rescue`). If a future
+// refactor routes through a rescuable variant, this test goes red.
+#[test] fn err_break_through_ensure_outer_rescue() { run_error_fixture("break_through_ensure_outer_rescue"); }

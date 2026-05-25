@@ -1,0 +1,1 @@
+tests/fixtures/errors/break_through_ensure_outer_rescue.rb:12:in `<main>': break inside `ensure` of a while loop is not yet supported (CRuby runs ensure then exits with the break value; rubyrs aborts here so an outer rescue cannot mask the gap). Track at SUBSET.md. (NotImplementedError)
