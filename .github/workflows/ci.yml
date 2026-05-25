@@ -227,6 +227,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
 
       - name: Build (release)
         # Release-mode is required — the baselines were measured
