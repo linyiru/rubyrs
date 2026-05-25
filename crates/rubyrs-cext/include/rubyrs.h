@@ -252,6 +252,37 @@ VALUE rb_hash_aset(VALUE h, VALUE key, VALUE value);
  * Hash default proc / value). */
 VALUE rb_hash_aref(VALUE h, VALUE key);
 
+/* ===== Exception raising (Level 3-A) ===== */
+
+/* Well-known exception class handles. Like CRuby, these are
+ * pre-defined VALUEs (sentinels in rubyrs's opaque-handle scheme)
+ * that the host maps back to its internal exception classes when a
+ * `rb_raise` longjmp is caught. Pass any of these as the first arg
+ * to `rb_raise`. */
+extern VALUE rb_eRuntimeError;
+extern VALUE rb_eArgumentError;
+extern VALUE rb_eTypeError;
+extern VALUE rb_eRangeError;
+extern VALUE rb_eStandardError;
+extern VALUE rb_eNoMethodError;
+extern VALUE rb_eIOError;
+extern VALUE rb_eNameError;
+extern VALUE rb_eZeroDivError;
+extern VALUE rb_eNotImpError;
+
+/* Raise an exception. Formats `fmt` + varargs via vsnprintf into a
+ * 1024-byte buffer (matching CRuby's RUBY_FATAL cap), stashes the
+ * (class, msg) pair in a thread-local, and longjmps back to the
+ * nearest enclosing C-ext entry point installed by the rubyrs host.
+ * The host catches the longjmp and converts the stashed exception
+ * into a Ruby-level exception that propagates through the user's
+ * normal `rescue` handlers.
+ *
+ * `__attribute__((noreturn))` lets the compiler omit any code that
+ * would follow a call to rb_raise in a C extension function. */
+__attribute__((noreturn))
+void rb_raise(VALUE exc_class, const char *fmt, ...);
+
 #ifdef __cplusplus
 }
 #endif

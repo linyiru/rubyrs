@@ -1,4 +1,23 @@
 //! Spike L3-A: `rb_raise` + `longjmp`-based exception propagation
+//!
+//! ## Built-in exception class sentinels
+//!
+//! C extensions reference exception classes as global VALUEs
+//! (`rb_eArgumentError` etc.). In CRuby these resolve to actual
+//! `Class` objects on the heap; in our Option-A opaque-handle
+//! model we instead reserve a small range of high u64 sentinels
+//! and export them as `#[no_mangle] pub static` constants. C
+//! extensions link them at dlopen time (same `extern VALUE`
+//! mechanism as the `rb_e*` constants in MRI's `ruby.h`).
+//!
+//! When `rb_raise` fires, the class sentinel travels through
+//! `rubyrs_jmp_raise` → `Raised::Raised { class, .. }`; the host
+//! `vm.rs` maps the sentinel back to a rubyrs `RubyError` variant
+//! ([`exception_class_name_for_sentinel`]) and constructs the
+//! corresponding Trap. The sentinels sit in the top bits of the
+//! u64 namespace so they can never collide with a regular
+//! per-`CExtState` handle index (which is bottom-up from 3,
+//! reserving 0/1/2 for Qnil/Qtrue/Qfalse).
 //! across the C ABI boundary.
 //!
 //! See `c/setjmp_shim.c`'s header for the design (why setjmp lives
@@ -108,4 +127,78 @@ unsafe fn libc_free(p: *mut c_void) {
         fn free(p: *mut c_void);
     }
     unsafe { free(p) }
+}
+
+// === Built-in exception class sentinels ===
+//
+// High u64 range, one per class. The actual numeric values are
+// arbitrary; only their distinctness matters. Bump 0xE000... range
+// to leave room for future families.
+//
+// `#[no_mangle] pub static` exports the symbol under the exact
+// CRuby name so C extensions written against ruby.h link without
+// modification. `#[used]` would matter for a cdylib (LTO might
+// strip otherwise-unreferenced statics); since we're rlib + the
+// host binary references each one via its own `#[used]` static
+// (see crates/rubyrs/src/lib.rs), that's already handled.
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eRuntimeError:    super::Value = 0xE000_0000_0000_0001;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eArgumentError:   super::Value = 0xE000_0000_0000_0002;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eTypeError:       super::Value = 0xE000_0000_0000_0003;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eRangeError:      super::Value = 0xE000_0000_0000_0004;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eStandardError:   super::Value = 0xE000_0000_0000_0005;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eNoMethodError:   super::Value = 0xE000_0000_0000_0006;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eIOError:         super::Value = 0xE000_0000_0000_0007;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eNameError:       super::Value = 0xE000_0000_0000_0008;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eZeroDivError:    super::Value = 0xE000_0000_0000_0009;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eNotImpError:     super::Value = 0xE000_0000_0000_000A;
+
+/// Map a raised class sentinel back to the rubyrs exception-class
+/// name string used by `RubyError::*::class_name()`. Returns
+/// `"RuntimeError"` as the fallback for any unknown / future
+/// sentinel — matches CRuby's behaviour when an unrecognised
+/// VALUE is passed to `rb_raise`.
+pub fn exception_class_name_for_sentinel(class: super::Value) -> &'static str {
+    match class {
+        x if x == rb_eRuntimeError    => "RuntimeError",
+        x if x == rb_eArgumentError   => "ArgumentError",
+        x if x == rb_eTypeError       => "TypeError",
+        x if x == rb_eRangeError      => "RangeError",
+        x if x == rb_eStandardError   => "StandardError",
+        x if x == rb_eNoMethodError   => "NoMethodError",
+        x if x == rb_eIOError         => "IOError",
+        x if x == rb_eNameError       => "NameError",
+        x if x == rb_eZeroDivError    => "ZeroDivisionError",
+        x if x == rb_eNotImpError     => "NotImplementedError",
+        _ => "RuntimeError",
+    }
 }

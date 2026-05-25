@@ -17,10 +17,12 @@ fn main() {
 
     cc::Build::new()
         .file("c/setjmp_shim.c")
+        .file("c/raise.c")
         .warnings(true)
         .extra_warnings(true)
         .compile("rubyrs_setjmp_shim");
 
     println!("cargo:rerun-if-changed=c/setjmp_shim.c");
+    println!("cargo:rerun-if-changed=c/raise.c");
     println!("cargo:rerun-if-changed=build.rs");
 }
