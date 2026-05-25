@@ -385,11 +385,12 @@ fn collect_ruby_files(
     out: &mut Vec<PathBuf>,
     is_root: bool,
 ) -> std::io::Result<()> {
-    // Single-file root: treat as a one-element scan. Use symlink_metadata so a
-    // dangling symlink given as root surfaces an error rather than appearing
-    // to be a non-file (and silently producing an empty report).
+    // Single-file root: treat as a one-element scan. `fs::metadata` follows
+    // symlinks so `gapscan scan ~/symlinked.rb` works; a dangling symlink
+    // surfaces as NotFound here, which propagates out via the `?` and is
+    // exactly the loud failure mode we want at the root.
     if is_root {
-        let meta = std::fs::symlink_metadata(dir)?;
+        let meta = std::fs::metadata(dir)?;
         if meta.is_file() {
             if dir.extension().is_some_and(|e| e == "rb") {
                 out.push(dir.to_path_buf());
@@ -415,12 +416,24 @@ fn collect_ruby_files(
         if name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
+        // Skip symlinks during recursion: a `vendor -> ..` style loop would
+        // otherwise recurse without bound and blow the stack. Real-world
+        // Ruby projects have these (gem caches, vendor dirs). We accept the
+        // trade-off of missing legit symlinked subdirs in favour of safety;
+        // a future option can opt in to cycle-detected following.
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             if opts.skip_tests && (name == "spec" || name == "test") {
                 continue;
             }
             collect_ruby_files(&path, opts, out, /*is_root=*/ false)?;
-        } else if path.extension().is_some_and(|e| e == "rb") {
+        } else if file_type.is_file() && path.extension().is_some_and(|e| e == "rb") {
             out.push(path);
         }
     }

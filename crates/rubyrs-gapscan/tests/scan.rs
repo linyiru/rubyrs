@@ -16,6 +16,46 @@ use rubyrs_gapscan::{
 };
 use std::path::PathBuf;
 
+/// Per-test unique temp directory. Created on construct, removed on
+/// drop. Leaks on panic — acceptable: tests live under
+/// `std::env::temp_dir()` and the OS cleans up.
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "rubyrs-gapscan-{}-{}-{n}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create tempdir");
+        Self { path }
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+    fn write(&self, rel: &str, body: &str) -> PathBuf {
+        let p = self.path.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 fn workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR for this crate = crates/rubyrs-gapscan
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -207,4 +247,55 @@ fn scan_skips_spec_and_test_dirs_by_default() {
     assert!(opts.skip_tests);
     opts.skip_tests = false;
     assert!(!opts.skip_tests);
+}
+
+// ---- symlink edge cases (PR #3 round 3 reviews #16 #17) ----
+// Gated on `unix` because creating symlinks on Windows requires
+// elevated privileges; the production code itself is portable.
+
+#[cfg(unix)]
+#[test]
+fn scan_follows_symlink_to_root_rb_file() {
+    // Review #16: a symlink whose target is an existing .rb file
+    // used to fall through to `read_dir` and surface a misleading
+    // error. Now `fs::metadata` follows the link.
+    let td = TempDir::new("sym-file");
+    let real = td.write("real.rb", "puts 1\n");
+    let link = td.path().join("link.rb");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let report = scan(&link, &ScanOptions::default()).expect("scan via symlink");
+    assert_eq!(report.files_scanned, 1);
+    assert!(report.total_nodes > 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_dangling_symlink_root_still_errors() {
+    // The flip side: switching to fs::metadata mustn't weaken the
+    // loud-failure-on-missing-root guarantee that Review #9 added.
+    let td = TempDir::new("sym-dangle");
+    let link = td.path().join("dangling.rb");
+    std::os::unix::fs::symlink(td.path().join("does-not-exist.rb"), &link).unwrap();
+    let err = scan(&link, &ScanOptions::default()).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_does_not_follow_symlinked_directories() {
+    // Review #17: a `vendor -> ..` cycle would have recursed
+    // forever. We now skip symlinked dirs outright during walk.
+    let td = TempDir::new("sym-cycle");
+    td.write("a.rb", "puts 1\n");
+    td.write("sub/b.rb", "puts 2\n");
+    // Cycle: `loop` symlinks back to the root.
+    std::os::unix::fs::symlink(td.path(), td.path().join("loop")).unwrap();
+    // Should terminate quickly and only count the two real files.
+    let report = scan(td.path(), &ScanOptions::default()).expect("scan completes");
+    assert_eq!(
+        report.files_scanned, 2,
+        "expected 2 real files, got {} (files = {:?})",
+        report.files_scanned,
+        report.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+    );
 }
