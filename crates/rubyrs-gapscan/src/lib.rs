@@ -454,10 +454,10 @@ fn collect_ruby_files(
     Ok(())
 }
 
-/// `"file"` for 1, `"files"` otherwise. Trivial pluraliser used by
-/// both text and Markdown renderers so reports read naturally when
-/// a bucket has exactly one entry (Liquid's 100%-translatable
-/// bucket currently has 1 file — would have read "1 files").
+/// `"file"` for 1, `"files"` otherwise. Trivial pluraliser shared
+/// by the text and Markdown renderers so per-file bucket lines
+/// read naturally for the n=1 case (which does come up in
+/// real-world scans).
 fn plural_files(n: usize) -> &'static str {
     if n == 1 { "file" } else { "files" }
 }
