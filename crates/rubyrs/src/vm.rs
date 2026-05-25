@@ -383,7 +383,7 @@ impl Vm {
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
                 "sub" | "gsub" | "tr" |
-                "match?" | "scan" | "index" | "rindex" |
+                "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
                 "freeze" | "frozen?" | "dup"
@@ -1971,6 +1971,52 @@ impl Vm {
                 }
                 fn str_slice(chars: &[char], start: usize, n: usize) -> String {
                     chars.iter().skip(start).take(n).collect()
+                }
+                // String#match(regex) — returns a MatchData
+                // instance with @whole = whole match and
+                // @caps = numbered captures (Strings, or nil
+                // for groups that didn't participate). Returns
+                // nil if no match. CRuby additionally accepts
+                // a String (interpreted as a literal regex) and
+                // a starting offset; both out of scope here.
+                if name == "match" && args.len() == 1 {
+                    if let Value::Regex(re) = &args[0] {
+                        let bound = s.content.borrow().clone();
+                        let captures = re.captures(&bound);
+                        match captures {
+                            None => return Ok(Some(Value::Nil)),
+                            Some(caps) => {
+                                let whole = caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
+                                let mut group_vals: Vec<Value> = Vec::with_capacity(caps.len().saturating_sub(1));
+                                for i in 1..caps.len() {
+                                    group_vals.push(match caps.get(i) {
+                                        Some(m) => Value::new_str(m.as_str().to_string()),
+                                        None => Value::Nil,
+                                    });
+                                }
+                                self.maybe_gc();
+                                let caps_arr = self.heap.alloc(HeapObj::Array(group_vals));
+                                let cls_id = self.interner.intern("MatchData");
+                                let cls = match self.classes.get(&cls_id).cloned() {
+                                    Some(c) => c,
+                                    None => return Ok(Some(Value::Nil)),
+                                };
+                                let obj_id = self.heap.alloc(HeapObj::Instance(Instance {
+                                    class: cls,
+                                    ivars: HashMap::new(),
+                                }));
+                                let whole_ivar = self.interner.intern("@whole");
+                                let caps_ivar = self.interner.intern("@caps");
+                                {
+                                    let inst = self.heap.instance_mut(obj_id);
+                                    inst.ivars.insert(whole_ivar, Value::new_str(whole));
+                                    inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
+                                }
+                                return Ok(Some(Value::Object(obj_id)));
+                            }
+                        }
+                    }
+                    return Ok(None);
                 }
                 if (name == "[]" || name == "slice") && args.len() == 1 {
                     let chars: Vec<char> = s.borrow().chars().collect();

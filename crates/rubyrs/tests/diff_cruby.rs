@@ -145,3 +145,4 @@ fn run_diff(name: &str) {
 #[test] fn splat_calls() { run_diff("splat_calls"); }
 #[test] fn keyword_args() { run_diff("keyword_args"); }
 #[test] fn env_hash() { run_diff("env_hash"); }
+#[test] fn match_data() { run_diff("match_data"); }

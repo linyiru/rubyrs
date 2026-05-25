@@ -323,6 +323,46 @@ end
 ## predicates raise ArgumentError, matching CRuby. `==` returns
 ## `false` instead of raising — CRuby's documented exception to
 ## the rule (Object equality must never raise).
+## MatchData — the value returned by `String#match(regex)`. Wraps
+## the whole match + numbered captures. CRuby's MatchData has a
+## lot of API surface (`pre_match`, `post_match`, `named_captures`,
+## `regexp`); we expose only `[]`, `captures`, `to_a`, `size`,
+## `to_s`, and `inspect`. Stored as a regular user-class so the
+## existing instance-method dispatch carries the load.
+class MatchData
+  def initialize(whole, caps)
+    @whole = whole
+    @caps  = caps
+  end
+  def [](i)
+    if i == 0
+      @whole
+    else
+      @caps[i - 1]
+    end
+  end
+  def captures
+    @caps
+  end
+  def to_a
+    [@whole] + @caps
+  end
+  def size
+    @caps.length + 1
+  end
+  def length
+    size
+  end
+  def to_s
+    @whole
+  end
+  def inspect
+    # Plain concatenation — kept simple to avoid quote/hash
+    # sequences that conflict with the surrounding Rust raw
+    # string delimiter.
+    "<MatchData " + @whole + ">"
+  end
+end
 class Comparable
   def <(other)
     c = self <=> other
