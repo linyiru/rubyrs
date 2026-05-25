@@ -61,22 +61,28 @@ that's the TruffleRuby/JRuby long-tail path, not a near-term option.
 Instead, we treat ruby/spec as a **corpus** and ingest it mechanically:
 
 ```
-ruby/spec  (git submodule)
+ruby/spec  (git submodule — pending)
    │
-   ▼  ❶ tools/spec_extract  (Rust; uses our own ruby-prism binding)
-   │   Parses spec files. For each `it` block, emits a self-contained
-   │   .rb that asserts the same behaviour using primitive Ruby that
-   │   rubyrs can already run.
+   ▼  ❶ crates/rubyrs-spec-extract  (Rust crate; ruby_prism walk)
+   │   Reads an upstream spec file, rewrites the recognised
+   │   matcher patterns (v0.1: `expr.should == val`), passes
+   │   the rest through verbatim so a human can finish.
+   │   See crates/rubyrs-spec-extract/README.md for the
+   │   pattern surface.
    │
-   ▼  tests/spec/core/integer/plus_0.rb, plus_1.rb, ...
+   ▼  crates/rubyrs/spec/ruby/<feature>_spec.rb
+   │   The extracted file lands alongside the existing
+   │   hand-translated set and is picked up by the runner.
    │
-   ▼  ❷ tests/spec_diff.rs  (Rust integration test)
-   │   For each generated .rb: run on rubyrs, compare PASS/FAIL count
-   │   to CRuby. Test passes iff parity.
+   ▼  ❷ tests/ruby_spec.rs  (existing micro-runner)
+   │   Runs every spec file end-to-end through `Runtime`,
+   │   counting pass/fail per example. Today the file must
+   │   pass cleanly; a tagged-divergent lane is future work.
    │
-   ▼  ❸ SPEC_STATUS.md  (auto-generated)
-       Per-directory PASS rates. Commits land or don't based on what
-       this report shows.
+   ▼  ❸ docs/TESTING.md baseline table (this file)
+       Manually updated per PR (auto-gen via SPEC_STATUS.md
+       is future work; one row per ingested core/ area, with
+       file count and example count).
 ```
 
 Each piece is a small, focused tool. The pipeline grows by teaching
@@ -84,19 +90,22 @@ Each piece is a small, focused tool. The pipeline grows by teaching
 
 ## Pipeline versions
 
-`spec_extract` will support more mspec patterns over time. We treat each
+`rubyrs-spec-extract` will support more mspec patterns over time. We treat each
 pattern as a version increment:
 
-| Version | Recognises | Estimated reach |
-|---------|------------|----------------|
-| v0.1 | `(expr).should == literal`, `expr.should == literal` | ~10–20% of spec files |
-| v0.2 | `.should be_xxx` predicates, `raise_error(...)` | +10% |
-| v0.3 | `-> { ... }`, `before / after` hooks | +10% |
-| v0.4 | `shared_examples`, `include / extend` | +20% |
-| ... | ... approaching mspec full | ... |
+| Version | Recognises | Estimated reach | Status |
+|---------|------------|----------------|--------|
+| v0.1 | `expr.should == val` | ~10–20% of spec files | **shipped** |
+| v0.2 | `.should be_xxx` predicates, `raise_error(...)` / `.should.raise(...)`, `should_not == val` | +10% | pending |
+| v0.3 | `-> { ... }`, `before / after` hooks | +10% | pending |
+| v0.4 | `shared_examples`, `include / extend` | +20% | pending |
+| ... | ... approaching mspec full | ... | |
 
-Anything it doesn't recognise is **skipped and logged** to SPEC_STATUS.md.
-Progress is therefore always measurable and never blocking.
+Anything it doesn't recognise passes through unchanged in v0.1; the
+human reviewer sees what's still hand-translation territory. A
+"skipped and logged" report (per the original ingestion plan) lands
+in v0.2 alongside the predicate-matcher recogniser, when there's
+enough surface to make the log useful.
 
 ## Current state — manual translation baseline (2026-05)
 

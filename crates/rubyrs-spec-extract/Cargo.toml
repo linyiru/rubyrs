@@ -1,0 +1,19 @@
+[package]
+name = "rubyrs-spec-extract"
+description = "Mechanically rewrites ruby/spec files into the assert_eq / assert_raises shape rubyrs's micro-runner understands."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rubyrs-spec-extract"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ruby-prism.workspace = true
