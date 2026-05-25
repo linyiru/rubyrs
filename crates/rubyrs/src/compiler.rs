@@ -82,6 +82,7 @@ impl ProtoBuilder {
         Proto {
             name, params, defaults,
             rest_param: None,
+            kw_param_defaults: vec![],
             n_locals: self.n_locals,
             code: self.code,
             op_spans: self.op_spans,
@@ -563,27 +564,33 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, defaults, rest, body } => {
+        Expr::Def { name, params, defaults, rest, kw_params, body } => {
             let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
-                d.as_ref().map(|sx| literal_to_value(&sx.node))
+                d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
-            // If the method has a `*rest` param, ensure the rest
-            // name has a local slot too. ProtoBuilder allocates
-            // positional params in order; rest gets the slot
-            // right after them.
+            // Param layout in slot order: positional, then rest
+            // (if any), then keyword params (in source order).
+            // ProtoBuilder allocates slots in that sequence; the
+            // Proto's `rest_param` + `kw_param_defaults` tell
+            // invoke_method how to bind.
             let mut effective_params = params.clone();
             if let Some(rname) = rest {
                 effective_params.push(rname.clone());
             }
+            for (kname, _) in kw_params {
+                effective_params.push(kname.clone());
+            }
+            let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
+                d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
+            }).collect();
             let proto_idx = compile_proto_kind(
                 name.clone(), effective_params, lit_defaults, body,
                 b.filename.clone(), protos, interner, cc, /*is_method=*/true,
             );
-            // Stash the rest-name on the Proto so invoke_method
-            // can find the slot when binding args.
             if let Some(rname) = rest {
                 protos[proto_idx].rest_param = Some(rname.clone());
             }
+            protos[proto_idx].kw_param_defaults = kw_lit_defaults;
             let name_id = interner.intern(name);
             b.emit(Op::DefMethod(name_id, proto_idx as u32));
             b.emit(Op::LoadNil);
@@ -870,23 +877,14 @@ pub(crate) fn compile_proto_kind(
 /// Convert an `Expr` known to be a literal into a runtime `Value`.
 /// AST translation has already gated which `Expr` variants reach
 /// here, so this only needs the literal cases.
-fn literal_to_value(e: &Expr) -> Value {
+fn literal_to_value(e: &Expr, interner: &mut Interner) -> Value {
     match e {
         Expr::IntLit(n) => Value::Int(*n),
         Expr::FloatLit(f) => Value::Float(*f),
         Expr::StrLit(s) => Value::new_str(s.as_str()),
-        Expr::SymbolLit(_) => {
-            // SymbolLit-to-Value needs the interner, which the
-            // compiler doesn't pass to `literal_to_value`. Promote
-            // the default at invoke-time instead: we store Nil here
-            // and have the VM treat `Nil`-default-of-a-symbol
-            // specially. Cheaper: keep the literal text and let
-            // `invoke_method_with_block` intern lazily.
-            //
-            // For the first pass we keep the API narrow: symbol
-            // defaults are uncommon in Gemfile/gemspec code and
-            // can be added later.
-            Value::Nil
+        Expr::SymbolLit(s) => {
+            let id = interner.intern(s);
+            Value::Sym(id)
         }
         Expr::BoolLit(b) => Value::Bool(*b),
         Expr::Nil => Value::Nil,

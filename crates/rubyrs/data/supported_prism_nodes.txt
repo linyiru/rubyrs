@@ -40,6 +40,7 @@ InstanceVariableTargetNode
 InstanceVariableWriteNode
 IntegerNode
 InterpolatedStringNode
+KeywordHashNode
 LambdaNode
 LocalVariableAndWriteNode
 LocalVariableOperatorWriteNode
@@ -51,12 +52,14 @@ ModuleNode
 MultiWriteNode
 NextNode
 NilNode
+OptionalKeywordParameterNode
 OptionalParameterNode
 OrNode
 ParenthesesNode
 ProgramNode
 RangeNode
 RegularExpressionNode
+RequiredKeywordParameterNode
 RequiredParameterNode
 RescueModifierNode
 RestParameterNode

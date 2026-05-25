@@ -2566,11 +2566,27 @@ impl Vm {
         // upper bound on the arg count.
         let proto = &self.protos[m.proto_idx];
         let has_rest = proto.rest_param.is_some();
-        // `m.params` now includes the rest slot name at the tail
-        // (the compiler appends it). For arity, treat only the
-        // positional ones as fillable params.
-        let positional_max = if has_rest { m.params.len() - 1 } else { m.params.len() };
+        let kw_count = proto.kw_param_defaults.len();
+        // Layout of `m.params` tail:
+        //   [...positional..., rest?, ...kw_params...]
+        let positional_max = m.params.len()
+            - (if has_rest { 1 } else { 0 })
+            - kw_count;
         let required = proto.defaults.iter().take_while(|d| d.is_none()).count();
+        // Pop trailing Hash arg (if present and we expect kw
+        // params) — those entries become keyword bindings, not
+        // positional args.
+        let mut args = args;
+        let kw_hash: Option<Vec<(Value, Value)>> = if kw_count > 0 {
+            if let Some(Value::Hash(hid)) = args.last().cloned() {
+                args.pop();
+                Some(self.heap.hash(hid).clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let given = args.len();
         let arity_ok = if has_rest {
             given >= required
@@ -2591,6 +2607,11 @@ impl Vm {
         }
         self.check_frames()?;
         let n_locals = proto.n_locals as usize;
+        // Snapshot proto-derived data needed during arg binding,
+        // dropping the immutable borrow on self.protos so the
+        // subsequent maybe_gc / heap.alloc calls (for the rest
+        // Array) can take &mut self.
+        let kw_defaults_snapshot: Vec<Option<Value>> = proto.kw_param_defaults.clone();
         // Snapshot defaults for the omitted-slot fill, since we're
         // about to take `&mut self` to push the frame.
         // Defaults fill any positional slot the caller didn't
@@ -2612,12 +2633,37 @@ impl Vm {
         }
         if has_rest {
             // Remaining args (possibly empty) → fresh Array in the
-            // rest slot, which is `m.params.len() - 1`.
+            // rest slot.
             let rest_vec: Vec<Value> = args_iter.collect();
             self.maybe_gc();
             let arr_id = self.heap.alloc(HeapObj::Array(rest_vec));
-            let rest_slot = m.params.len() - 1;
+            let rest_slot = positional_max;
             locals[rest_slot] = Value::Array(arr_id);
+        }
+        // Bind keyword params. kw names live at the tail of
+        // m.params; for each, look up the corresponding key in
+        // the kw_hash (Symbol-keyed). Missing required keyword
+        // → ArgumentError. Missing optional → use literal default.
+        if kw_count > 0 {
+            let kw_start = positional_max + if has_rest { 1 } else { 0 };
+            for (i, (default, kw_name)) in kw_defaults_snapshot.iter()
+                .zip(m.params[kw_start..].iter())
+                .enumerate()
+            {
+                let key_sym = self.interner.intern(kw_name);
+                let key_val = Value::Sym(key_sym);
+                let found = kw_hash.as_ref().and_then(|h| {
+                    h.iter().find(|(k, _)| k.ruby_eq(&key_val, &self.heap))
+                        .map(|(_, v)| v.clone())
+                });
+                match (found, default) {
+                    (Some(v), _) => locals[kw_start + i] = v,
+                    (None, Some(d)) => locals[kw_start + i] = d.clone(),
+                    (None, None) => return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("missing keyword: :{}", kw_name),
+                    })),
+                }
+            }
         }
         self.frames.push(Frame {
             proto_idx: m.proto_idx,

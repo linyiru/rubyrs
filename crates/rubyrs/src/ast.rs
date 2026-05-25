@@ -102,6 +102,10 @@ pub(crate) enum Expr {
         /// the last positional slot collapse into a fresh Array
         /// bound to this name. `None` means no rest param.
         rest: Option<String>,
+        /// Keyword parameters: `def foo(name:, age: 0)` collects
+        /// `("name", None)` and `("age", Some(IntLit(0)))`.
+        /// Order is source order. None default = required.
+        kw_params: Vec<(String, Option<SExpr>)>,
         body: Vec<SExpr>,
     },
     Class {
@@ -533,7 +537,27 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 }
             }
         }
-        let args: Vec<SExpr> = arg_nodes.iter().map(|c| tr(c)).collect();
+        // KeywordHashNode at the tail of an argument list — Prism
+        // emits this for the `name: value, ...` sugar at call
+        // sites. Translate to a HashLit so the callee receives
+        // it as the trailing Hash arg; invoke_method splits
+        // keyword bindings out of it. NB: only the trailing
+        // position is conventional; CRuby allows interleaving
+        // but flags it `1.9 hash` style. We accept either spot
+        // but always normalize to a HashLit Expr.
+        let args: Vec<SExpr> = arg_nodes.iter().map(|c| {
+            if let Some(kh) = c.as_keyword_hash_node() {
+                let mut pairs: Vec<(SExpr, SExpr)> = Vec::new();
+                for el in kh.elements().iter() {
+                    if let Some(an) = el.as_assoc_node() {
+                        pairs.push((tr(&an.key()), tr(&an.value())));
+                    }
+                }
+                sp(c, Expr::HashLit(pairs))
+            } else {
+                tr(c)
+            }
+        }).collect();
         if let Some(bnode) = n.block() {
             if let Some(bn) = bnode.as_block_node() {
                 let block_params: Vec<String> = bn.parameters().and_then(|pn| pn.as_block_parameters_node()).and_then(|bp| bp.parameters())
@@ -863,10 +887,35 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let mut params: Vec<String> = Vec::new();
         let mut defaults: Vec<Option<SExpr>> = Vec::new();
         let mut rest: Option<String> = None;
+        let mut kw_params: Vec<(String, Option<SExpr>)> = Vec::new();
         if let Some(p) = n.parameters() {
             if let Some(r) = p.rest() {
                 if let Some(rp) = r.as_rest_parameter_node() {
                     rest = rp.name().map(|n| cid_to_string(n));
+                }
+            }
+            for kw in p.keywords().iter() {
+                if let Some(rk) = kw.as_required_keyword_parameter_node() {
+                    kw_params.push((cid_to_string(rk.name()), None));
+                } else if let Some(ok) = kw.as_optional_keyword_parameter_node() {
+                    let name = cid_to_string(ok.name());
+                    let val = tr(&ok.value());
+                    // Same literal-only restriction as positional
+                    // defaults: anything else needs a per-callsite
+                    // prologue we don't generate. Surface as a
+                    // SyntaxError via AST_ERRORS.
+                    match &val.node {
+                        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StrLit(_) | Expr::SymbolLit(_)
+                        | Expr::BoolLit(_) | Expr::Nil => {
+                            kw_params.push((name, Some(val)));
+                        }
+                        _ => {
+                            AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                                format!("default value for keyword parameter `{}` must be a literal", name)
+                            ));
+                            kw_params.push((name, Some(sp(&kw, Expr::Nil))));
+                        }
+                    }
                 }
             }
             for r in p.requireds().iter() {
@@ -908,7 +957,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Def { name, params, defaults, rest, body });
+        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, body });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;
