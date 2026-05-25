@@ -144,8 +144,10 @@ uint64_t rubyrs_jmp_invoke(void (*func)(void),
                 result = ((rubyrs_arity5_fn)func)(args[0], args[1], args[2], args[3], args[4], args[5]);
                 break;
             case -1:
-                /* Variadic: args[0] is self; args[1..nargs] are the
-                 * user args; argc = nargs - 1. */
+                /* Variadic: args has length `nargs`. args[0] is self;
+                 * the user args occupy args[1] .. args[nargs - 1]
+                 * (inclusive), i.e. `argc = nargs - 1` slots starting
+                 * at `&args[1]`. */
                 result = ((rubyrs_arityN1_fn)func)(nargs - 1, &args[1], args[0]);
                 break;
             default:

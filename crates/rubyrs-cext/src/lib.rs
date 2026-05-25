@@ -367,12 +367,22 @@ thread_local! {
     // dropped it — stored handles dangled across the boundary.
     //
     // Nested cext calls (rb_funcallv → host method → another cext
-    // call) share the same state. Both `registered_*` lists and
-    // `values` are shared; this is correct because:
-    //   - `registered_*` are only populated during `Init_<name>`
-    //     (the outermost call); subsequent calls don't register
-    //     anything, so nested calls see them already drained.
-    //   - `values` IS meant to be shared — that's the whole point.
+    // call) share the same state.
+    //
+    //   - `values` IS meant to be shared — that's the whole point
+    //     of L3-H persistence.
+    //   - `registered_*` are cleared on EVERY `enter` and drained
+    //     on EVERY `leave`. PR #60 review #8: this means a nested
+    //     `enter` mid-Init would clobber the outer Init's pending
+    //     registrations. **Limitation**: rubyrs assumes cexts do
+    //     NOT trigger rb_funcallv from inside `Init_<name>` (no
+    //     real gem does — Init registers; method bodies dispatch).
+    //     If a future cext breaks that assumption, registrations
+    //     made during the nested call would be silently dropped,
+    //     and the outer Init's already-staged registrations would
+    //     reset to empty on the nested `enter`. A proper fix would
+    //     stack `registered_*` per enter/leave pair while keeping
+    //     `values` shared; deferred until a real gem hits this.
     static STATE: RefCell<Option<CExtState>> = const { RefCell::new(None) };
 
     // PR #60 review #7: balance counter for `enter`/`leave` pairs.
