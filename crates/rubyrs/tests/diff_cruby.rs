@@ -154,3 +154,4 @@ fn run_diff(name: &str) {
 #[test] fn ternary() { run_diff("ternary"); }
 #[test] fn def_self_method() { run_diff("def_self_method"); }
 #[test] fn constant_write() { run_diff("constant_write"); }
+#[test] fn block_destructure() { run_diff("block_destructure"); }

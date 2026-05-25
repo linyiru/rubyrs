@@ -50,6 +50,7 @@ LocalVariableReadNode
 LocalVariableTargetNode
 LocalVariableWriteNode
 ModuleNode
+MultiTargetNode
 MultiWriteNode
 NextNode
 NilNode

@@ -586,8 +586,36 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         }).collect();
         if let Some(bnode) = n.block() {
             if let Some(bn) = bnode.as_block_node() {
-                let block_params: Vec<String> = bn.parameters().and_then(|pn| pn.as_block_parameters_node()).and_then(|bp| bp.parameters())
-                    .map(|p| p.requireds().iter().filter_map(|r| r.as_required_parameter_node().map(|rp| cid_to_string(rp.name()))).collect())
+                // Block params. Two shapes are accepted:
+                //   - `|a, b|` — each required parameter is a
+                //     `RequiredParameterNode`; the name maps directly to
+                //     a block-local slot.
+                //   - `|(a, b)|` — destructuring via `MultiTargetNode`.
+                //     For the common one-array-arg-per-iteration case the
+                //     observable semantics match `|a, b|` (auto-splat
+                //     of the single Array argument), so we flatten the
+                //     destructure into the same Vec<String>. This covers
+                //     `[[1,2],[3,4]].each { |(a,b)| ... }` and Hash#each
+                //     blocks. Nested destructures (`|((a, b), c)|`) and
+                //     mixed forms (`|head, (a, b)|`) are deferred.
+                let block_params: Vec<String> = bn.parameters()
+                    .and_then(|pn| pn.as_block_parameters_node())
+                    .and_then(|bp| bp.parameters())
+                    .map(|p| {
+                        let mut out: Vec<String> = Vec::new();
+                        for r in p.requireds().iter() {
+                            if let Some(rp) = r.as_required_parameter_node() {
+                                out.push(cid_to_string(rp.name()));
+                            } else if let Some(mt) = r.as_multi_target_node() {
+                                for inner in mt.lefts().iter() {
+                                    if let Some(ip) = inner.as_required_parameter_node() {
+                                        out.push(cid_to_string(ip.name()));
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    })
                     .unwrap_or_default();
                 let block_body: Vec<SExpr> = match bn.body() {
                     Some(b) => {

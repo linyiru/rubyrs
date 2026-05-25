@@ -956,11 +956,15 @@ impl Vm {
             if locals.len() < needed {
                 while locals.len() < needed { locals.push(Value::Nil); }
             }
-            // Place args into the block's param slots
-            for (i, a) in args.into_iter().enumerate() {
-                if i < n_params as usize {
-                    locals[param_start as usize + i] = a;
-                }
+            // Place args into the block's param slots. CRuby's
+            // arity-mismatch semantics: too few args → leftover
+            // params bind to Nil (not whatever stale value the
+            // shared captured locals held from a previous
+            // iteration). Walk every param slot, picking from
+            // `args` where available and Nil otherwise.
+            let mut it = args.into_iter();
+            for i in 0..n_params as usize {
+                locals[param_start as usize + i] = it.next().unwrap_or(Value::Nil);
             }
         }
         self.frames.push(Frame {
