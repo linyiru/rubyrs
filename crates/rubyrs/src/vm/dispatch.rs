@@ -156,7 +156,7 @@ impl Vm {
                 { host(args) }
             }
             HostFnSlot::V2(host) => {
-                let ctx = HostCtx::new(&self.heap);
+                let ctx = HostCtx::new(&self.heap, &self.interner);
                 host(&ctx, args)
             }
         }
