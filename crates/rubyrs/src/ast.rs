@@ -298,6 +298,41 @@ fn sp(node: &Node<'_>, e: Expr) -> SExpr {
     Spanned::new(node_span(node), e)
 }
 
+/// Translate a Prism `KeywordHashNode` into a single SExpr that
+/// evaluates to a Hash. Pairs like `a: 1` build into HashLit
+/// chunks; `**opts` splats interrupt the chunk and chain
+/// `.merge(opts)` against the accumulated hash. The final
+/// expression has shape `{...}.merge(opts).merge({...})...`
+/// — same Hash that CRuby would build for the same source.
+fn tr_kwhash(parent: &Node<'_>, kh_anchor: &Node<'_>, kh: &ruby_prism::KeywordHashNode<'_>) -> SExpr {
+    let mut chunks: Vec<SExpr> = Vec::new();
+    let mut buf: Vec<(SExpr, SExpr)> = Vec::new();
+    for el in kh.elements().iter() {
+        if let Some(an) = el.as_assoc_node() {
+            buf.push((tr(&an.key()), tr(&an.value())));
+        } else if let Some(spn) = el.as_assoc_splat_node()
+            && let Some(inner) = spn.value() {
+                if !buf.is_empty() {
+                    chunks.push(sp(kh_anchor, Expr::HashLit(std::mem::take(&mut buf))));
+                }
+                chunks.push(tr(&inner));
+            }
+    }
+    if !buf.is_empty() {
+        chunks.push(sp(kh_anchor, Expr::HashLit(buf)));
+    }
+    if chunks.is_empty() {
+        return sp(parent, Expr::HashLit(vec![]));
+    }
+    let mut it = chunks.into_iter();
+    let first = it.next().unwrap();
+    it.fold(first, |lhs, rhs| sp(parent, Expr::Call {
+        receiver: Some(Box::new(lhs)),
+        name: "merge".into(),
+        args: vec![rhs],
+    }))
+}
+
 pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     let span = node_span(node);
     if let Some(n) = node.as_program_node() {
@@ -590,9 +625,15 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let name = cid_to_string(n.name());
         // Detect single-splat call `foo(*arr)` — args is a
         // single SplatNode wrapping an Array-shaped expression.
-        // Mixed splats (`foo(a, *b, c)`) aren't supported here;
-        // they fall through to normal Call and a SplatNode in
-        // the arg list will be flagged as unsupported.
+        // Splat detection. Two paths:
+        //   1. Single splat as the sole arg (`foo(*arr)`): use the
+        //      existing `Expr::Apply` opcode — most efficient.
+        //   2. Mixed splats (`foo(a, *b, c)`): synthesise an array
+        //      literal with the same shape, then route through
+        //      `Expr::Apply` against that constructed array. The
+        //      array-literal-with-splat handler above translates
+        //      this into a `+`-chain of Array#+ calls; the Apply
+        //      op spreads the resulting Array as positional args.
         let arg_nodes: Vec<_> = n
             .arguments()
             .map(|a| a.arguments().iter().collect::<Vec<_>>())
@@ -606,6 +647,53 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                         splat: Box::new(tr(&splat_expr)),
                     });
                 }
+        // Detect any splat anywhere in the args; if present and
+        // multiple args exist, build a synthetic array expression
+        // from the args (preserving order, splats interleaved) and
+        // dispatch as a single-splat Apply.
+        //
+        // KeywordHashNode (the trailing `k: v, **opts` hash) is
+        // handled by the args-walk below and stays a regular
+        // positional arg (HashLit). For now we don't recombine
+        // multiple KeywordHash nodes — only the standard trailing
+        // form Prism emits.
+        let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
+        if has_splat {
+            // Walk and group: build the array from the elements.
+            let mut chunks: Vec<SExpr> = Vec::new();
+            let mut buf: Vec<SExpr> = Vec::new();
+            for c in &arg_nodes {
+                let cn: &ruby_prism::Node<'_> = c;
+                if let Some(sn) = cn.as_splat_node()
+                    && let Some(inner) = sn.expression() {
+                        if !buf.is_empty() {
+                            chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
+                        }
+                        chunks.push(tr(&inner));
+                    } else if let Some(kh) = cn.as_keyword_hash_node() {
+                    // Trailing kwarg-hash retains its sugar shape;
+                    // **opts merges via tr_kwhash's `.merge` chain.
+                    buf.push(tr_kwhash(node, cn, &kh));
+                } else {
+                    buf.push(tr(cn));
+                }
+            }
+            if !buf.is_empty() {
+                chunks.push(sp(node, Expr::ArrayLit(buf)));
+            }
+            let mut it = chunks.into_iter();
+            let first = it.next().unwrap_or_else(|| sp(node, Expr::ArrayLit(vec![])));
+            let acc = it.fold(first, |lhs, rhs| sp(node, Expr::Call {
+                receiver: Some(Box::new(lhs)),
+                name: "+".into(),
+                args: vec![rhs],
+            }));
+            return sp(node, Expr::Apply {
+                receiver,
+                name,
+                splat: Box::new(acc),
+            });
+        }
         // KeywordHashNode at the tail of an argument list — Prism
         // emits this for the `name: value, ...` sugar at call
         // sites. Translate to a HashLit so the callee receives
@@ -616,13 +704,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // but always normalize to a HashLit Expr.
         let args: Vec<SExpr> = arg_nodes.iter().map(|c| {
             if let Some(kh) = c.as_keyword_hash_node() {
-                let mut pairs: Vec<(SExpr, SExpr)> = Vec::new();
-                for el in kh.elements().iter() {
-                    if let Some(an) = el.as_assoc_node() {
-                        pairs.push((tr(&an.key()), tr(&an.value())));
-                    }
-                }
-                sp(c, Expr::HashLit(pairs))
+                tr_kwhash(node, c, &kh)
             } else {
                 tr(c)
             }
@@ -1122,14 +1204,82 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         });
     }
     if let Some(n) = node.as_array_node() {
-        let elems: Vec<SExpr> = n.elements().iter().map(|e| tr(&e)).collect();
-        return sp(node, Expr::ArrayLit(elems));
+        // Detect splats in the array literal: `[a, *b, c]`. When
+        // present, synthesise `[a] + b + [c]` via chained Array#+
+        // calls — no new opcode needed, since Array#+ is already
+        // a primitive. Splats in array literals are the building
+        // block for splat-in-call-args (K3 below).
+        let raw_elems: Vec<_> = n.elements().iter().collect();
+        let has_splat = raw_elems.iter().any(|e| e.as_splat_node().is_some());
+        if !has_splat {
+            let elems: Vec<SExpr> = raw_elems.iter().map(|e| tr(e)).collect();
+            return sp(node, Expr::ArrayLit(elems));
+        }
+        // Walk the elements building (group of consecutive non-splats
+        // → ArrayLit, splat → bare expression). Chain all results
+        // with `+`. The first chunk becomes the receiver; subsequent
+        // chunks are args to `+`.
+        let mut chunks: Vec<SExpr> = Vec::new();
+        let mut buf: Vec<SExpr> = Vec::new();
+        for e in &raw_elems {
+            let en: &ruby_prism::Node<'_> = e;
+            if let Some(sn) = en.as_splat_node()
+                && let Some(inner) = sn.expression() {
+                    if !buf.is_empty() {
+                        chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
+                    }
+                    chunks.push(tr(&inner));
+                } else {
+                buf.push(tr(en));
+            }
+        }
+        if !buf.is_empty() {
+            chunks.push(sp(node, Expr::ArrayLit(buf)));
+        }
+        // Reduce left: chunk0 + chunk1 + chunk2 + ...
+        let mut it = chunks.into_iter();
+        let first = it.next().unwrap_or_else(|| sp(node, Expr::ArrayLit(vec![])));
+        let acc = it.fold(first, |lhs, rhs| sp(node, Expr::Call {
+            receiver: Some(Box::new(lhs)),
+            name: "+".into(),
+            args: vec![rhs],
+        }));
+        return acc;
     }
     if let Some(n) = node.as_hash_node() {
-        let pairs: Vec<(SExpr, SExpr)> = n.elements().iter().filter_map(|e| {
-            e.as_assoc_node().map(|a| (tr(&a.key()), tr(&a.value())))
-        }).collect();
-        return sp(node, Expr::HashLit(pairs));
+        // Detect `**splat` inside the literal. Without one we
+        // take the fast path; with one we route through the
+        // same `.merge` chain shape as kwarg-hash call args.
+        let has_splat = n.elements().iter().any(|e| e.as_assoc_splat_node().is_some());
+        if !has_splat {
+            let pairs: Vec<(SExpr, SExpr)> = n.elements().iter().filter_map(|e| {
+                e.as_assoc_node().map(|a| (tr(&a.key()), tr(&a.value())))
+            }).collect();
+            return sp(node, Expr::HashLit(pairs));
+        }
+        let mut chunks: Vec<SExpr> = Vec::new();
+        let mut buf: Vec<(SExpr, SExpr)> = Vec::new();
+        for el in n.elements().iter() {
+            if let Some(an) = el.as_assoc_node() {
+                buf.push((tr(&an.key()), tr(&an.value())));
+            } else if let Some(spn) = el.as_assoc_splat_node()
+                && let Some(inner) = spn.value() {
+                    if !buf.is_empty() {
+                        chunks.push(sp(node, Expr::HashLit(std::mem::take(&mut buf))));
+                    }
+                    chunks.push(tr(&inner));
+                }
+        }
+        if !buf.is_empty() {
+            chunks.push(sp(node, Expr::HashLit(buf)));
+        }
+        let mut it = chunks.into_iter();
+        let first = it.next().unwrap_or_else(|| sp(node, Expr::HashLit(vec![])));
+        return it.fold(first, |lhs, rhs| sp(node, Expr::Call {
+            receiver: Some(Box::new(lhs)),
+            name: "merge".into(),
+            args: vec![rhs],
+        }));
     }
     if let Some(n) = node.as_class_node() {
         let name = if let Some(cr) = n.constant_path().as_constant_read_node() {

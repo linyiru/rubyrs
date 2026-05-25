@@ -168,3 +168,4 @@ fn run_diff(name: &str) {
 #[test] fn default_args_exprs() { run_diff("default_args_exprs"); }
 #[test] fn block_arg_forward() { run_diff("block_arg_forward"); }
 #[test] fn do_while() { run_diff("do_while"); }
+#[test] fn mixed_splat_call() { run_diff("mixed_splat_call"); }
