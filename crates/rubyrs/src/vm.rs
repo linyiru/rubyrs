@@ -1287,12 +1287,24 @@ impl Vm {
                         // of built-in types the fast path stays
                         // value_cmp_v; user-classed elements go
                         // through their `<=>` method via user_cmp.
-                        let mut copy: Vec<Value> = self.heap.array(id).clone();
+                        //
+                        // PinGuard wraps the entire impl: `copy` is
+                        // a Rust local with the receiver's element
+                        // ObjIds, NOT on `vm.stack`/`vm.pinned`. The
+                        // `user_cmp` call may invoke a user `<=>`
+                        // method which can trigger `maybe_gc` → sweeps
+                        // copy's contents → next access panics with
+                        // ICE use-after-free. Pin the receiver Array
+                        // so its children stay reachable via the GC
+                        // mark walk.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let mut copy: Vec<Value> = g.vm.heap.array(id).clone();
                         let n = copy.len();
                         for i in 1..n {
                             let mut j = i;
                             while j > 0 {
-                                let ord = self.user_cmp(&copy[j - 1], &copy[j])?;
+                                let ord = g.vm.user_cmp(&copy[j - 1], &copy[j])?;
                                 match ord {
                                     None => return Ok(None),
                                     Some(std::cmp::Ordering::Greater) => {
@@ -1303,8 +1315,8 @@ impl Vm {
                                 }
                             }
                         }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(copy));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(copy));
                         Some(Value::Array(nid))
                     }
                     ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
