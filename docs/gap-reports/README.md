@@ -13,11 +13,11 @@ it's the next thing worth implementing.
 
 | Codebase | Files | % Supported | #1 missing | Shape |
 |---|---:|---:|---|---|
-| [Jekyll `lib/`](jekyll.md) | 89 | 83.21% | `ModuleNode` (×145) | static-site framework |
-| [Liquid `lib/`](liquid.md) | 64 | 82.12% | `ConstantWriteNode` (×141) | template engine |
-| [Sinatra `lib/`](sinatra.md) | 7 | 82.19% | `BlockParameterNode` (×58) | web DSL |
+| [Jekyll `lib/`](jekyll.md) | 89 | 83.47% | `ModuleNode` (×145) | static-site framework |
+| [Liquid `lib/`](liquid.md) | 64 | 82.62% | `ConstantWriteNode` (×141) | template engine |
+| [Sinatra `lib/`](sinatra.md) | 7 | 82.32% | `BlockParameterNode` (×58) | web DSL |
 | [dry-struct `lib/`](dry-struct.md) | 15 | 81.54% | `ModuleNode` (×16) | modern data DSL |
-| [Rake `lib/`](rake.md) | 44 | 82.39% | `ModuleNode` (×52) | task DSL |
+| [Rake `lib/`](rake.md) | 44 | 82.79% | `ModuleNode` (×52) | task DSL |
 
 Planned next scans (and the rationale for each) live in
 [`TARGETS.md`](TARGETS.md).
@@ -34,8 +34,8 @@ draw a few stable conclusions:
   — `unless`/`until`, `**`, `Hash#sort_by`, `String#[]`/`String#[]=`,
   more `Float`/`Kernel#p`/visibility/`op_assign`/`Range`/
   `Comparable`/`String#match`, inline `rescue`, `__method__`,
-  Inspect round-out, `&:method_name` — moved the band up 1.0–2.3 pp
-  across the board.)
+  Inspect round-out, `&:method_name`, `case`/`when` — moved the
+  band up 1.4–2.5 pp across the board.)
 - **`ModuleNode` is the #1 missing class in 3/5 scans** (Jekyll,
   dry-struct, Rake) and #2 in Liquid. Sinatra is the outlier
   (single `module Sinatra` so it ranks low there). This confirms
@@ -60,11 +60,11 @@ broad feature batch on master moved every codebase up by 1–2 pp:
 
 | Codebase | PR #7 baseline | Current | Δ |
 |---|---:|---:|---:|
-| Jekyll | 81.65% | 83.21% | +1.56 |
-| Liquid | 81.16% | 82.12% | +0.96 |
-| Sinatra | 79.85% | 82.19% | +2.34 |
+| Jekyll | 81.65% | 83.47% | +1.82 |
+| Liquid | 81.16% | 82.62% | +1.46 |
+| Sinatra | 79.85% | 82.32% | +2.47 |
 | dry-struct | 80.13% | 81.54% | +1.41 |
-| Rake | 80.87% | 82.39% | +1.52 |
+| Rake | 80.87% | 82.79% | +1.92 |
 
 For per-feature impact use `gapscan diff before.json after.json` —
 PR #9 fixed a bug where `diff` re-classified both sides with the
