@@ -216,3 +216,35 @@ jobs:
           # never went down, just up here. See docs/PANIC_AUDIT.md.
           check crates/rubyrs/src/compiler.rs  2
           exit "$fail"
+
+  perf-budget:
+    name: Perf budget (peak-RSS ratchet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Build (release)
+        # Release-mode is required — the baselines were measured
+        # against optimised builds. Debug builds would blow every
+        # RSS budget and tell us nothing useful.
+        run: cargo build --release -p rubyrs
+
+      - name: Check peak-RSS budgets
+        # Runs each workload in perf/baselines.tsv three times,
+        # compares MIN peak-RSS to the row's budget, fails if any
+        # exceed. Wall-time is collected but not gated here — see
+        # perf/README.md for the rationale and ratchet etiquette.
+        run: perf/check.sh
