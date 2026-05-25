@@ -191,9 +191,10 @@ fn match_eq_against<'pr>(
 ///
 /// Class name is the source text of the outer call's first
 /// argument — covers `ArgumentError`, `Math::DomainError`, etc.
-/// Lambda body comes from the LambdaNode's body location, or
-/// the lambda's text minus the `-> {` / `}` wrappers as a
-/// fallback.
+/// Lambda body comes from `LambdaNode::body()`'s location;
+/// `body()` returns Some for any non-empty lambda, and an
+/// empty lambda (`-> {}.should.raise(X)`) produces an empty
+/// `do ... end` block which is still valid Ruby.
 fn try_lambda_raise(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
     if cid_to_string(node.name()) != "raise" {
         return None;
@@ -241,13 +242,11 @@ fn try_predicate_matcher(source: &str, node: &ruby_prism::CallNode<'_>) -> Optio
         return None;
     }
     let recv_call = node.receiver()?.as_call_node()?;
-    let recv_name = cid_to_string(recv_call.name());
-    let (negate, expect) = match recv_name.as_str() {
-        "should" => (false, "should"),
-        "should_not" => (true, "should_not"),
+    let negate = match cid_to_string(recv_call.name()).as_str() {
+        "should" => false,
+        "should_not" => true,
         _ => return None,
     };
-    let _ = expect; // silence unused — kept for symmetry / future
     if recv_call.arguments().is_some() {
         return None;
     }
