@@ -26,16 +26,20 @@ pub const RUBY_DLEXT: &str = std::cfg_select! {
 ///
 /// Each test file wraps this in a thin `OnceLock` so the build runs
 /// at most once per test binary (cargo invokes each integration test
-/// in its own process; `build.sh` is itself flock-guarded for the
-/// cross-process race). Centralising the build steps + assertions
-/// here means the existence checks, error messages, and `RUBY_DLEXT`
-/// computation only have to be maintained in one place — previously
-/// 11 sibling test files had inline copies.
+/// in its own process). Some of the `examples/*/build.sh` scripts
+/// (currently `msgpack-cext`) add their own `flock`-based serialisation
+/// for the cross-process race when multiple test binaries share the
+/// same artifact path; the others rely on the OnceLock alone, which
+/// is sufficient because no two test binaries write to the same
+/// bundle file. Centralising the build steps + assertions here means
+/// the existence checks, error messages, and `RUBY_DLEXT` computation
+/// only have to be maintained in one place — previously 12 sibling
+/// test files had inline copies.
 ///
 /// Panics with a clear message at each failure point:
-///   - missing `build.sh`
-///   - non-zero exit from `bash build.sh`
-///   - bundle file not produced
+///   - `build.sh` not found at the expected path
+///   - `bash build.sh` exits non-zero (i.e. `status.success() == false`)
+///   - bundle file not produced after a successful build
 pub fn build_cext_bundle(example_dir_name: &str, bundle_basename: &str) -> PathBuf {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let example_dir = crate_dir.join("examples").join(example_dir_name);
