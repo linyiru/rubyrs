@@ -42,6 +42,11 @@ pub enum RubyError {
     TypeError { msg: String },
     RuntimeError { msg: String },
     NameError { msg: String },
+    /// `Hash#fetch(key)` with no default and no block, when the
+    /// key isn't present. Surfaced as a host-level Trap today
+    /// (not script-catchable until the Trap-→-rescue plumbing
+    /// lands as a separate refactor).
+    KeyError { msg: String },
     /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
     /// when a Runtime was configured with caps for untrusted scripts.
     ResourceExhausted { msg: String },
@@ -64,6 +69,7 @@ impl RubyError {
             RubyError::TypeError { .. } => "TypeError",
             RubyError::RuntimeError { .. } => "RuntimeError",
             RubyError::NameError { .. } => "NameError",
+            RubyError::KeyError { .. } => "KeyError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
             // Uncaught carries the actual class name from the script's
             // exception object; static-class machinery doesn't apply.
@@ -79,6 +85,7 @@ impl RubyError {
             | RubyError::TypeError { msg }
             | RubyError::RuntimeError { msg }
             | RubyError::NameError { msg }
+            | RubyError::KeyError { msg }
             | RubyError::ResourceExhausted { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),
             RubyError::NoMethodError { method, recv_type } => {

@@ -326,7 +326,7 @@ impl Vm {
         let name: &str = &self.interner.resolve(name_id).clone();
         // Universal — every receiver responds to these.
         if matches!(name,
-            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>"
+            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?"
         ) {
             return true;
         }
@@ -371,7 +371,9 @@ impl Vm {
                 "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "sort_by" |
-                "min_by" | "max_by" | "group_by"
+                "min_by" | "max_by" | "group_by" |
+                "each_with_object" | "partition" |
+                "inspect"
             ),
             Value::Hash(_) => matches!(name,
                 "length" | "size" | "[]" | "[]=" | "empty?" |
@@ -380,7 +382,9 @@ impl Vm {
                 "merge" | "delete" | "invert" | "store" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |
-                "any?" | "all?" | "none?"
+                "any?" | "all?" | "none?" |
+                "each_with_index" | "map" | "collect" | "fetch" |
+                "inspect"
             ),
             Value::Range(_) => matches!(name,
                 "begin" | "end" | "first" | "last" | "min" | "max" |
@@ -684,6 +688,25 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // `Object#equal?` — identity comparison. For heap-managed
+        // receivers, same `ObjId`; for inline values, same content.
+        // CRuby never overrides this on subclasses, so we always
+        // intercept (above class-lookup would be redundant work).
+        if &*name == "equal?" && args.len() == 1 {
+            let same = match (&recv, &args[0]) {
+                (Value::Object(a), Value::Object(b)) => a == b,
+                (Value::Array(a), Value::Array(b)) => a == b,
+                (Value::Hash(a), Value::Hash(b)) => a == b,
+                (Value::Range(a), Value::Range(b)) => a == b,
+                (Value::Block(a), Value::Block(b)) => a == b,
+                (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
+                // Immediates (Int, Float, Sym, Bool, Nil, Str via
+                // value equality) — fall back on ruby_eq.
+                _ => recv.ruby_eq(&args[0], &self.heap),
+            };
+            self.stack.push(Value::Bool(same));
+            return Ok(());
+        }
         // `Object#==` / `Object#!=` cross-type fallback. The
         // per-type primitive arms (`String == String`,
         // `Sym == Sym`, `Class == Class`, etc.) all fired earlier
@@ -873,6 +896,10 @@ impl Vm {
                         Some(acc)
                     }
                     ("to_a", []) => Some(Value::Array(id)),
+                    ("inspect", []) => {
+                        let s = Value::Array(id).to_inspect(&self.heap, &self.interner);
+                        Some(Value::Str(Rc::from(s.as_str())))
+                    }
                     ("reverse", []) => {
                         let rev: Vec<Value> = self.heap.array(id).iter().rev().cloned().collect();
                         self.maybe_gc();
@@ -1009,6 +1036,33 @@ impl Vm {
                         Some(v.clone())
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.hash(id).is_empty())),
+                    ("fetch", [k]) => {
+                        // 1-arg fetch: return value or raise KeyError.
+                        // Currently surfaced as a host-level Trap
+                        // (not script-catchable until the
+                        // Trap-→-rescue conversion lands — see
+                        // SUBSET.md). Use the 2-arg or block form
+                        // for now.
+                        let pos = self.heap.hash(id).iter()
+                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                        match pos {
+                            Some(p) => Some(self.heap.hash(id)[p].1.clone()),
+                            None => {
+                                return Err(self.trap(RubyError::KeyError {
+                                    msg: format!("key not found: {}",
+                                        k.to_display(&self.heap, &self.interner)),
+                                }));
+                            }
+                        }
+                    }
+                    ("fetch", [k, default]) => {
+                        let pos = self.heap.hash(id).iter()
+                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                        Some(match pos {
+                            Some(p) => self.heap.hash(id)[p].1.clone(),
+                            None => default.clone(),
+                        })
+                    }
                     ("include?", [k]) | ("has_key?", [k]) | ("key?", [k]) | ("member?", [k]) => {
                         let h = self.heap.hash(id);
                         let hit = h.iter().any(|(key, _)| key.ruby_eq(k, &self.heap));
@@ -1031,6 +1085,10 @@ impl Vm {
                         Some(Value::Array(nid))
                     }
                     ("to_h", []) => Some(Value::Hash(id)),
+                    ("inspect", []) => {
+                        let s = Value::Hash(id).to_inspect(&self.heap, &self.interner);
+                        Some(Value::Str(Rc::from(s.as_str())))
+                    }
                     ("to_a", []) => {
                         // Hash#to_a returns an Array of two-element Arrays.
                         // Each inner [k, v] is freshly heap-allocated; we
@@ -1782,6 +1840,89 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Hash(id)))
             }
+            (Value::Hash(id), "each_with_index", []) => {
+                // Block invocation per CRuby: `(pair, idx)` where
+                // `pair` is the fresh `[k, v]` Array. The block
+                // running with a single param gets `pair` (an
+                // Array). Two-param destructured form
+                // (`|pair, idx|`) is what users usually want.
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (i, (k, v)) in snapshot.into_iter().enumerate() {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.pin(Value::Array(pair_id));
+                    g.vm.invoke_block(block, vec![Value::Array(pair_id), Value::Int(i as i64)])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(id)))
+            }
+            (Value::Hash(id), "map", []) | (Value::Hash(id), "collect", []) => {
+                // `h.map { |k, v| ... }` — yields each (k, v) and
+                // collects block return values into a new Array.
+                // CRuby returns an `Enumerator` for no-block, which
+                // we don't have; falls through to NoMethodError if
+                // misused that way.
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.invoke_block(block, vec![k, v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    g.vm.heap.array_mut(result_id).push(r);
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
+            (Value::Hash(id), "fetch", [k]) => {
+                // Block form: `h.fetch(k) { |k| default_expr }`.
+                // Block is invoked only on miss; CRuby ignores the
+                // 2-arg fetch + block combo (warns); we silently
+                // accept it (handled in non-block path too).
+                let id = *id;
+                let pos = self.heap.hash(id).iter()
+                    .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                if let Some(p) = pos {
+                    return Ok(Some(self.heap.hash(id)[p].1.clone()));
+                }
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                g.pin(k.clone());
+                let pre_frames = g.vm.frames.len();
+                g.vm.invoke_block(block, vec![k.clone()])?;
+                g.vm.dispatch_until(pre_frames)?;
+                if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
+                let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                Some(r)
+            }
             (Value::Int(start), "upto", [Value::Int(stop)]) => {
                 let start = *start;
                 let stop = *stop;
@@ -1886,6 +2027,74 @@ impl Vm {
                     }
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
+            }
+            (Value::Array(id), "each_with_object", [seed]) => {
+                // `arr.each_with_object(memo) { |elem, memo| ... }`.
+                // CRuby threads `memo` unchanged across iterations
+                // (unlike inject which uses the block's return as the
+                // next accumulator). The block's return value is
+                // ignored; users mutate `memo` for side effects.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                g.pin(seed.clone());
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v, seed.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                }
+                Some(early.unwrap_or_else(|| seed.clone()))
+            }
+            (Value::Array(id), "partition", []) => {
+                // `arr.partition { |x| pred(x) }` returns
+                // `[truthy_array, falsy_array]` — exactly two new
+                // Arrays. Used a lot in routing / grouping idioms.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let yes_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(yes_id));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let no_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(no_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() {
+                        g.vm.heap.array_mut(yes_id).push(v);
+                    } else {
+                        g.vm.heap.array_mut(no_id).push(v);
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![
+                    Value::Array(yes_id), Value::Array(no_id),
+                ]));
+                Some(Value::Array(pair_id))
             }
             (Value::Array(id), "min_by", []) | (Value::Array(id), "max_by", []) => {
                 // For each element, call the block once to produce a
