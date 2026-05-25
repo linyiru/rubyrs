@@ -10,16 +10,22 @@
 //!
 //! What this does NOT cover (documented gap):
 //!
-//!   - Literals BEYOND ±i64::MAX saturate at the rubyrs parser
-//!     boundary (master behavior, see ast.rs:as_integer_node).
-//!     For example `120938120391283122132313` becomes
-//!     `9223372036854775807` (i64::MAX) silently. msgpack's
-//!     `Bigint` extension type therefore can't be tested
-//!     end-to-end on rubyrs without real Bignum support — and
-//!     `MessagePack::Bigint` is pure Ruby (`lib/msgpack/bigint.rb`)
-//!     which rubyrs's `require` can't load anyway (it only
-//!     handles cext bundles; `.rb` files dlopen-fail as
-//!     "not a valid mach-o").
+//!   - Literals BEYOND the i64 range saturate at the rubyrs
+//!     parser boundary by sign (master behavior, see
+//!     `crates/rubyrs/src/ast.rs` integer-literal translation):
+//!     positive overflow clamps to i64::MAX, negative overflow
+//!     clamps to i64::MIN. For example `120938120391283122132313`
+//!     becomes `9223372036854775807` (i64::MAX) silently, and
+//!     `-120938120391283122132313` becomes `-9223372036854775808`
+//!     (i64::MIN) silently. msgpack's `Bigint` extension type
+//!     therefore can't be tested end-to-end on rubyrs without
+//!     real Bignum support — and `MessagePack::Bigint` is pure
+//!     Ruby (`lib/msgpack/bigint.rb`) which rubyrs's `require`
+//!     can't load anyway (it only handles cext bundles; passing
+//!     a `.rb` file to `require` dlopen-fails because it isn't
+//!     a shared library — the exact error text varies by host
+//!     ("not a valid mach-o file" on macOS, "invalid ELF
+//!     header" / "file too short" on Linux).
 //!
 //!   - msgpack-ruby's `bigint_spec.rb` is blocked on BOTH gaps
 //!     above; see commit message + SUBSET.md note for the full
@@ -163,8 +169,16 @@ end
             continue;
         }
         if seen >= cases.len() {
+            // Don't advance `seen` past `cases.len()` for extras;
+            // the post-loop `assert_eq!(seen, cases.len(), ...)`
+            // would otherwise fire BEFORE the `failures.is_empty()`
+            // assertion and swallow the per-line diagnostic
+            // (reviewer Copilot finding on PR #68). Track extras
+            // exclusively through `failures` so the assertions
+            // fire in the right order: per-line failures first,
+            // then a count mismatch only if extras were 0 but
+            // some case was skipped.
             failures.push(format!("unexpected extra line: {}", line));
-            seen += 1;
             continue;
         }
         let (expected_n, expected_wire) = cases[seen];
@@ -235,15 +249,18 @@ end
             ));
         }
     }
-    assert_eq!(
-        seen, cases.len(),
-        "expected {} lines in stdout, got {}.\nstdout:\n{}",
-        cases.len(), seen, stdout,
-    );
+    // Failures first — per-line diagnostics are more actionable
+    // than a bare count mismatch, and a malformed-line failure
+    // typically explains why the count also went wrong.
     assert!(
         failures.is_empty(),
         "msgpack int boundary failures:\n  {}\n\nFull stdout:\n{}",
         failures.join("\n  "),
         stdout,
+    );
+    assert_eq!(
+        seen, cases.len(),
+        "expected {} lines in stdout, got {}.\nstdout:\n{}",
+        cases.len(), seen, stdout,
     );
 }
