@@ -7,10 +7,15 @@ bumps require an explicit comment in the file.
 
 ## Why RSS, not wall time
 
-rubyrs' headline distinction over CRuby is **memory** (the README quotes
-"~5× lighter than CRuby on the same workload"). RSS is the metric that
-directly defends that claim. It's also <5% noise across runs on the
-same machine — easy to threshold without flakiness.
+rubyrs' headline distinction over CRuby is **memory**. The root
+`README.md` quantifies it via the fizzbuzz table (2.1 MB peak vs.
+CRuby's 18.4 MB — ~9× lighter on that workload); `docs/SUBSET.md`
+and [ADR 0010](../docs/adr/0010-metaprogramming-poc.md) describe
+the ratio more conservatively as "~5× lighter than CRuby on the
+same workload" for the metaprog workloads used here. RSS is the
+metric that directly defends that family of claims. It's also
+<5% noise across runs on the same machine — easy to threshold
+without flakiness.
 
 Wall time is collected and printed by `perf/check.sh` (so reviewers can
 spot a 30%+ slowdown), but **not gated**. CI runners vary by 2× even
