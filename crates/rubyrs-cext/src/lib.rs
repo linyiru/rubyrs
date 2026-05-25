@@ -28,11 +28,71 @@
 //! critical path for the Level 0 hypothesis we're testing.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 
 /// Opaque token the C side sees as `VALUE`. Numerically an index
 /// into [`CExtState::values`]; semantically meaningless to C code.
 pub type Value = u64;
+
+/// CRuby's `ID` type — opaque identifier for an interned name
+/// (method, symbol, class name, etc.). Returned by `rb_intern`;
+/// consumed by `rb_funcall`, `rb_funcallv`, `rb_define_method`'s
+/// future variants, etc. Process-wide stable across per-call
+/// `CExtState` lifecycles — that's why it lives in its own
+/// thread-local table, separate from `CExtState`'s ephemeral
+/// handle table.
+///
+/// `0` is reserved as "no ID" / `Qundef`-ish.
+pub type ID = u64;
+
+/// Process-wide intern table for [`ID`]s. C extensions call
+/// `rb_intern("name")` and stash the result in static globals
+/// (`static ID id_foo;`); those IDs must remain valid across every
+/// subsequent C ext call regardless of which per-call `CExtState`
+/// is active. This table is the only piece of cext state that
+/// outlives a single `enter`/`leave` cycle.
+struct InternTable {
+    /// 0-based; ID is index + 1 so we can reserve 0 as "no such ID".
+    names: Vec<String>,
+    map: HashMap<String, ID>,
+}
+
+impl InternTable {
+    fn new() -> Self {
+        Self { names: Vec::new(), map: HashMap::new() }
+    }
+
+    fn intern(&mut self, name: &str) -> ID {
+        if let Some(&id) = self.map.get(name) {
+            return id;
+        }
+        let id = self.names.len() as ID + 1;
+        self.names.push(name.to_string());
+        self.map.insert(name.to_string(), id);
+        id
+    }
+
+    fn resolve(&self, id: ID) -> Option<&str> {
+        if id == 0 {
+            return None;
+        }
+        self.names.get((id - 1) as usize).map(String::as_str)
+    }
+}
+
+thread_local! {
+    // Not `const { ... }` because HashMap::new is not const-fn.
+    static INTERN: RefCell<InternTable> = RefCell::new(InternTable::new());
+}
+
+/// Resolve a previously-interned [`ID`] back to its name. Used by
+/// the host VM when `rb_funcallv` lands and needs to look up the
+/// method by its symbolic name. Returns `None` for `ID(0)` or any
+/// ID that wasn't issued by this process's [`rb_intern`] calls.
+pub fn resolve_id(id: ID) -> Option<String> {
+    INTERN.with(|t| t.borrow().resolve(id).map(String::from))
+}
 
 /// Mirror of the subset of `rubyrs::Value` that crosses the C ABI.
 /// Kept independent so this crate doesn't pull in the whole
@@ -502,4 +562,35 @@ pub unsafe extern "C" fn rb_define_singleton_method(
             arity: arity as i32,
         });
     });
+}
+
+// ===== Process-wide intern table for ID =====
+
+/// Look up or create the [`ID`] for `name`. CRuby C extensions cache
+/// the returned `ID` in static globals at `Init_` time:
+///
+/// ```c
+/// static ID id_to_s;
+/// void Init_foo(void) {
+///     id_to_s = rb_intern("to_s");
+///     ...
+/// }
+/// ```
+///
+/// Those cached `ID`s are then passed to `rb_funcall` / `rb_funcallv`
+/// to dispatch named methods. Process-wide stability is the contract
+/// — the `ID` for a given name must compare equal across every C ext
+/// call in the same process, regardless of which per-call
+/// [`CExtState`] is active.
+///
+/// # Safety
+///
+/// `name` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_intern(name: *const c_char) -> ID {
+    assert!(!name.is_null(), "rb_intern: null name");
+    let s = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    INTERN.with(|t| t.borrow_mut().intern(&s))
 }

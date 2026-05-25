@@ -163,6 +163,17 @@ void rb_define_singleton_method(VALUE klass,
                                 VALUE (*func)(ANYARGS),
                                 int arity);
 
+/* CRuby's `ID` — opaque identifier for an interned name (method,
+ * symbol, class name). Stable across the process. C extensions
+ * cache `rb_intern` results in static globals at `Init_` time and
+ * pass them to `rb_funcall*`. */
+typedef uint64_t ID;
+
+/* Intern `name` to an [`ID`]. Idempotent: repeated calls with the
+ * same name return the same `ID`. Process-wide stable; survives
+ * the per-call cext state being reset. */
+ID rb_intern(const char *name);
+
 #ifdef __cplusplus
 }
 #endif
