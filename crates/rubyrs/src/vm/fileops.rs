@@ -21,7 +21,7 @@ impl Vm {
     pub(crate) fn file_class_dispatch(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         let path_arg = |a: &Value| -> Result<String, Trap> {
             match a {
-                Value::Str(s) => Ok(s.content.borrow().clone()),
+                Value::Str(s) => Ok(s.to_string_lossy()),
                 _ => Err(self.trap(RubyError::TypeError {
                     msg: format!("no implicit conversion of {} into String", a.type_name()),
                 })),
@@ -39,9 +39,9 @@ impl Vm {
             }
             ("write", [p, body]) => {
                 let path = path_arg(p)?;
-                let contents = match body {
+                let contents: Vec<u8> = match body {
                     Value::Str(s) => s.content.borrow().clone(),
-                    _ => body.to_display(&self.heap, &self.interner),
+                    _ => body.to_display(&self.heap, &self.interner).into_bytes(),
                 };
                 match std::fs::write(&path, &contents) {
                     Ok(()) => Value::Int(contents.len() as i64),

@@ -365,7 +365,7 @@ fn cext_value_to_cvalue_d(
         Value::Nil => rubyrs_cext::CValue::Nil,
         Value::Bool(true) => rubyrs_cext::CValue::True,
         Value::Bool(false) => rubyrs_cext::CValue::False,
-        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.borrow().as_bytes()),
+        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(&s.borrow()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
         // L3-B: a Value::Object handle crossing Ruby → C is
         // represented as a CValue::HeapRef carrying the raw ObjId.

@@ -139,7 +139,7 @@ pub(crate) fn ruby_sprintf(
                         }
                     })?
                 }
-                Value::Str(s) => s.borrow().chars().next().map(|c| c.to_string()).unwrap_or_default(),
+                Value::Str(s) => s.to_string_lossy().chars().next().map(|c| c.to_string()).unwrap_or_default(),
                 _ => return Err(RubyError::TypeError {
                     msg: format!("no implicit conversion to %c from {}", arg.type_name()),
                 }),
@@ -185,7 +185,7 @@ fn coerce_int(v: &Value) -> Result<i64, RubyError> {
     match v {
         Value::Int(n) => Ok(*n),
         Value::Float(f) => Ok(*f as i64),
-        Value::Str(s) => Ok(s.borrow().trim().parse::<i64>().unwrap_or(0)),
+        Value::Str(s) => Ok(s.to_string_lossy().trim().parse::<i64>().unwrap_or(0)),
         Value::Nil => Err(RubyError::TypeError {
             msg: "no implicit conversion from nil to Integer".into(),
         }),
@@ -199,7 +199,7 @@ fn coerce_float(v: &Value) -> Result<f64, RubyError> {
     match v {
         Value::Float(f) => Ok(*f),
         Value::Int(n) => Ok(*n as f64),
-        Value::Str(s) => Ok(s.borrow().trim().parse::<f64>().unwrap_or(0.0)),
+        Value::Str(s) => Ok(s.to_string_lossy().trim().parse::<f64>().unwrap_or(0.0)),
         Value::Nil => Err(RubyError::TypeError {
             msg: "no implicit conversion from nil to Float".into(),
         }),

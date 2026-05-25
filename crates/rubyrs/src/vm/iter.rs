@@ -226,7 +226,7 @@ impl Vm {
         // MatchData" convention for the common case.
         if let (Value::Str(s), Value::Regex(re), 1) = (recv, args.first().unwrap_or(&Value::Nil), args.len())
             && (name == "gsub" || name == "sub") {
-                let source = s.borrow().clone();
+                let source = s.to_string_lossy();
                 let only_first = name == "sub";
                 let mut g = PinGuard::new(self);
                 g.pin(recv.clone());
@@ -262,7 +262,8 @@ impl Vm {
         // the regex has groups, the matched substring otherwise).
         // Returns the receiver String, matching CRuby.
         if let (Value::Str(s), 1) = (recv, args.len()) && name == "scan" {
-            let source = s.borrow().clone();
+            let source: Vec<u8> = s.borrow().clone();
+            let source_str = String::from_utf8_lossy(&source).into_owned();
             let mut g = PinGuard::new(self);
             g.pin(recv.clone());
             g.pin(Value::Block(block));
@@ -272,7 +273,7 @@ impl Vm {
                 Value::Regex(re) => {
                     let has_groups = re.captures_len() > 1;
                     if has_groups {
-                        for caps in re.captures_iter(&source) {
+                        for caps in re.captures_iter(&source_str) {
                             let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
                             for i in 1..caps.len() {
                                 let v = caps.get(i)
@@ -294,7 +295,7 @@ impl Vm {
                             }
                         }
                     } else {
-                        for m in re.find_iter(&source) {
+                        for m in re.find_iter(&source_str) {
                             g.vm.invoke_block(block, vec![Value::new_str(m.as_str())])?;
                             g.vm.dispatch_until(pre_frames)?;
                             if g.vm.method_return.is_some() { return Ok(None); }
@@ -308,15 +309,15 @@ impl Vm {
                     }
                 }
                 Value::Str(pat) => {
-                    let pat_owned = pat.borrow().clone();
+                    let pat_owned: Vec<u8> = pat.borrow().clone();
                     if !pat_owned.is_empty() {
-                        let bytes = source.as_bytes();
-                        let pat_bytes = pat_owned.as_bytes();
+                        let bytes: &[u8] = &source;
+                        let pat_bytes: &[u8] = &pat_owned;
                         let plen = pat_bytes.len();
                         let mut i = 0;
                         while i + plen <= bytes.len() {
                             if &bytes[i..i + plen] == pat_bytes {
-                                g.vm.invoke_block(block, vec![Value::new_str(pat_owned.clone())])?;
+                                g.vm.invoke_block(block, vec![Value::new_str_bytes(pat_owned.clone())])?;
                                 g.vm.dispatch_until(pre_frames)?;
                                 if g.vm.method_return.is_some() { return Ok(None); }
                                 let _ = g.vm.stack.pop();
@@ -687,8 +688,8 @@ impl Vm {
                         // Walk via String#succ, comparing
                         // lexicographically — matches CRuby's
                         // ('a'..'z').each iteration model.
-                        let start = if let Value::Str(s) = &b { s.borrow().clone() } else { unreachable!() };
-                        let stop = if let Value::Str(s) = &e { s.borrow().clone() } else { unreachable!() };
+                        let start = if let Value::Str(s) = &b { s.to_string_lossy() } else { unreachable!() };
+                        let stop = if let Value::Str(s) = &e { s.to_string_lossy() } else { unreachable!() };
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Range(*id));
                         g.pin(Value::Block(block));

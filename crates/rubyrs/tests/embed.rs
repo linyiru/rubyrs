@@ -131,7 +131,7 @@ fn register_fn_v2_reads_hash_arg_via_host_ctx() {
                     err: RubyError::ArgumentError { msg: "expected Hash".into() },
                     backtrace: vec![],
                 })?,
-                s.borrow().clone(),
+                s.to_string_lossy(),
             ),
             _ => return Err(Trap {
                 err: RubyError::ArgumentError { msg: "wrong arity / types".into() },
@@ -140,7 +140,7 @@ fn register_fn_v2_reads_hash_arg_via_host_ctx() {
         };
         for (k, v) in h {
             if let Value::Str(ks) = k
-                && *ks.borrow() == want
+                && ks.to_string_lossy() == want
             {
                 return Ok(v.clone());
             }
@@ -166,7 +166,7 @@ fn register_fn_v2_reads_hash_arg_via_host_ctx() {
         let mut out = captured_for_fn.borrow_mut();
         out.clear();
         for (k, _) in h {
-            if let Value::Str(s) = k { out.push(s.borrow().clone()); }
+            if let Value::Str(s) = k { out.push(s.to_string_lossy()); }
         }
         Ok(Value::Nil)
     });
@@ -960,9 +960,9 @@ fn resolve_hash_unpacks_pairs() {
     let val = rt.eval(r#"{ "a" => 1, "b" => 2 }"#, "t.rb").unwrap();
     let pairs = rt.resolve_hash(&val).expect("should be a Hash");
     assert_eq!(pairs.len(), 2);
-    assert!(matches!(&pairs[0].0, Value::Str(s) if *s.borrow() == "a"));
+    assert!(matches!(&pairs[0].0, Value::Str(s) if s.to_string_lossy() == "a"));
     assert!(matches!(&pairs[0].1, Value::Int(1)));
-    assert!(matches!(&pairs[1].0, Value::Str(s) if *s.borrow() == "b"));
+    assert!(matches!(&pairs[1].0, Value::Str(s) if s.to_string_lossy() == "b"));
     assert!(matches!(&pairs[1].1, Value::Int(2)));
 }
 
@@ -1362,7 +1362,7 @@ fn gemfile_dsl_real_hosting_end_to_end() {
     let mut rt = Runtime::new();
 
     fn s(v: &Value) -> String {
-        if let Value::Str(rs) = v { rs.borrow().clone() } else { String::new() }
+        if let Value::Str(rs) = v { rs.to_string_lossy() } else { String::new() }
     }
 
     {
@@ -1397,7 +1397,7 @@ fn gemfile_dsl_real_hosting_end_to_end() {
                 });
             };
             let name = if let Value::Str(rs) = name {
-                rs.borrow().clone()
+                rs.to_string_lossy()
             } else {
                 return Err(Trap {
                     err: RubyError::ArgumentError { msg: "name must be a String".into() },
@@ -1415,7 +1415,7 @@ fn gemfile_dsl_real_hosting_end_to_end() {
 
             let reqs_vec: Vec<String> = reqs_slice.iter()
                 .map(|v| if let Value::Str(rs) = v {
-                    Ok(rs.borrow().clone())
+                    Ok(rs.to_string_lossy())
                 } else {
                     Err(Trap {
                         err: RubyError::ArgumentError {
@@ -1438,7 +1438,7 @@ fn gemfile_dsl_real_hosting_end_to_end() {
                 })?;
                 let vs = match v {
                     Value::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
-                    Value::Str(rs) => rs.borrow().clone(),
+                    Value::Str(rs) => rs.to_string_lossy(),
                     // The outer match already filtered on `Value::Sym`,
                     // so `resolve_sym` is guaranteed to return Some.
                     // `expect` rather than `unwrap_or("")` so a future
