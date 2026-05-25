@@ -49,7 +49,25 @@ TARGETS=(
 CACHE_DIR="${GAPSCAN_CACHE:-/tmp/gapscan-targets}"
 BASE_REF="${GAPSCAN_BASE_REF:-origin/master}"
 GAPSCAN_BIN_HEAD="${GAPSCAN_BIN_HEAD:-./target/release/rubyrs-gapscan}"
-WORK="${GAPSCAN_WORK:-$(mktemp -d)}"
+if [[ -n "${GAPSCAN_WORK:-}" ]]; then
+  WORK="$GAPSCAN_WORK"
+  WORK_OWNED=false   # caller manages lifecycle (CI passes a path)
+else
+  WORK=$(mktemp -d)
+  WORK_OWNED=true
+  # Clean up auto-created WORK on exit, including the git worktree
+  # registration the base build creates. Without this, repeated
+  # local runs leave $TMPDIR/tmp.* dirs and stale .git/worktrees/
+  # entries behind. Caller-supplied GAPSCAN_WORK is left alone (CI
+  # uses /tmp/gapscan-work and relies on action caching).
+  cleanup_work() {
+    if [[ -d "$WORK/base-worktree" ]]; then
+      git worktree remove --force "$WORK/base-worktree" 2>/dev/null || true
+    fi
+    rm -rf "$WORK"
+  }
+  trap cleanup_work EXIT
+fi
 
 log() { printf "[gapscan-pr-diff] %s\n" "$*" >&2; }
 
