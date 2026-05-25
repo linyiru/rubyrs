@@ -1,30 +1,72 @@
-# Per-workload peak-RSS baselines (KB).
+# Per-workload perf baselines.
 #
-# Format: <workload-path>\t<max_rss_kb>\t<note>
+# Format (tab-separated):
+#   <workload-path>\t<max_rss_kb>\t<max_wall_ms>\t<note>
+#
 # Workload paths are relative to the repository root. Lines starting
 # with `#` are ignored.
 #
-# Wall-time is NOT enforced here — too noisy across CI runners — but
-# `perf/check.sh` prints it for visibility. The "rubyrs is ~5× lighter
-# than CRuby on the same workload" story rests on RSS, so RSS is the
-# defended metric.
+# Two enforced metrics, both with the same ratchet etiquette:
 #
-# Bumping a threshold up means rubyrs allocates more memory than
-# before. ALWAYS add a comment line above the row explaining what
-# allocation grew and whether it's an explicit design choice or
-# regression that needs a separate fix. Same etiquette as the panic
-# budget in .github/workflows/ci.yml.
+#   max_rss_kb    Peak resident set size. The defended metric — see
+#                 `docs/SUBSET.md` and `docs/adr/0010-...` for the
+#                 "~5× lighter than CRuby" claim this guards. ≤5%
+#                 noise across runs on the same machine, easy to
+#                 threshold without flakiness.
 #
-# Initial measurements (local M-series Mac, release build):
-#   fizzbuzz                    ~2.6 MB
-#   mm_bench / dm_bench         ~2.6-2.7 MB
-#   static_bench                ~2.6 MB
+#   max_wall_ms   End-to-end wall-clock time. Noisier than RSS but
+#                 the second-most-important metric — rubyrs'
+#                 dispatch-loop overhead is the visible cost.
+#                 Set `0` to disable the wall-time check (use for
+#                 sub-100ms workloads where measurement noise
+#                 dominates).
 #
-# Headroom on first commit is ~2× to absorb CI-runner variance while
-# we calibrate. Expect a tightening PR after a couple of green CI
-# runs establish the real ceiling on GitHub-hosted runners.
+# Bumping etiquette (identical for both columns):
+#
+# 1. Add a comment line above the row explaining *what grew* and
+#    *whether it was intentional*. "Bumped because the new feature
+#    X allocates Y" is fine. "Bumped to make CI green" is not —
+#    investigate first.
+# 2. Don't lower a budget silently. Lowering with a comment
+#    ("workload X now runs at Y after Z's optimisation, tightening
+#    from N → M") is the right move when a workload genuinely got
+#    cheaper. Drive-by lowers erase historical ceilings.
+# 3. Don't bump a budget to absorb a regression you didn't intend.
+#    If the regression isn't part of the PR's stated change, treat
+#    it as a separate bug.
+#
+# Why absolute baselines, not master-relative
+# -------------------------------------------
+# An earlier proposal was to compare each PR against `master` HEAD
+# on the same runner ("PR's wall time must be ≤ 1.1× master's").
+# That sounds tighter but it chain-degrades: if every PR is within
+# 10% of "master at that moment", cumulative drift across N PRs is
+# unbounded. Absolute baselines in this file are the same shape as
+# the panic budget and the RSS budget — explicit, reviewable,
+# committed to source. The cost is that the initial calibration
+# numbers reflect a snapshot of one runner type; expect periodic
+# re-cal commits when GitHub bumps the ubuntu-latest image.
+#
+# Initial calibration sources
+# ---------------------------
+# RSS observed on:
+#   ubuntu-latest CI (PR #11 run 26383503758)  ~4.2-4.3 MB
+#   local M-series Mac (release build)         ~3.0 MB
+# Wall observed on:
+#   ubuntu-latest CI (PR #11 run 26383503758)  fizzbuzz 0 ms,
+#                                              mm 730 ms, dm 460 ms,
+#                                              static 650 ms
+#   local M-series Mac (release build)         fizzbuzz 0 ms,
+#                                              mm 450 ms, dm 280 ms,
+#                                              static 390 ms
+#
+# Headroom: budgets sit at ~1.3× the CI observation for RSS and
+# ~1.5× for wall. RSS is tighter because it's the less-noisy
+# metric; wall has 2× variance across runs on the same CI runner
+# and we want to avoid flakes. Both should ratchet down further
+# once a few stable CI runs accumulate.
 
-crates/rubyrs/tests/fixtures/fizzbuzz.rb	8192	tiny script, sanity baseline
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8192	2M method_missing dispatch
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	8192	2M define_method dispatch (closure-method)
-crates/rubyrs/examples/metaprog_bench/static_bench.rb	8192	2M def+ivar (control for the metaprog comparisons)
+crates/rubyrs/tests/fixtures/fizzbuzz.rb	5500	0	tiny script; wall is sub-100ms noise floor, disabled
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	5500	1100	2M method_missing dispatch
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	5500	700	2M define_method dispatch (closure-method)
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	5500	1000	2M def+ivar (control for the metaprog comparisons)
