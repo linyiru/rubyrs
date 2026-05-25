@@ -24,7 +24,7 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 #   - `--export-dynamic` linker arg on ELF targets (still emitted
 #     by build.rs unconditionally; harmless when cext is off
 #     because there are no `rb_*` symbols left to export, but
-#     pedantically still drag).
+#     pedantically still drags).
 #
 # Wasm32-wasi targets cannot enable `cext` — `dlopen` is
 # unavailable and the cext path cannot succeed. `build.rs` panics
