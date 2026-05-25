@@ -128,3 +128,4 @@ fn run_diff(name: &str) {
 #[test] fn unless_until() { run_diff("unless_until"); }
 #[test] fn string_assign() { run_diff("string_assign"); }
 #[test] fn inline_rescue() { run_diff("inline_rescue"); }
+#[test] fn method_name() { run_diff("method_name"); }

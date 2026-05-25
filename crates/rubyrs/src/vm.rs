@@ -3873,6 +3873,32 @@ impl Vm {
             // `pp` is aliased to `p` (we don't have a pretty-
             // printer; single-line inspect is sufficient for our
             // subset and matches CRuby for simple values).
+            // `__method__` / `__callee__` — return the enclosing
+            // method's name as a Symbol, or nil at the toplevel.
+            // Walks the frame stack from the top, skipping block
+            // and class-body frames so a `def foo; arr.each { ... }`
+            // inside reports `:foo` from inside the block. CRuby
+            // distinguishes the two when method aliasing is
+            // involved — we don't model aliases, so both resolve
+            // to the same name.
+            "__method__" | "__callee__" => {
+                let name_opt: Option<String> = {
+                    let mut found = None;
+                    for f in self.frames.iter().rev() {
+                        if f.is_block || f.is_class_body { continue; }
+                        let n = &self.protos[f.proto_idx].name;
+                        if n == "<main>" { break; }
+                        found = Some(n.clone());
+                        break;
+                    }
+                    found
+                };
+                let result = match name_opt {
+                    Some(n) => Value::Sym(self.interner.intern(&n)),
+                    None => Value::Nil,
+                };
+                Some(Ok(result))
+            }
             "p" | "pp" => {
                 for a in args {
                     let s = a.to_inspect(&self.heap, &self.interner);
