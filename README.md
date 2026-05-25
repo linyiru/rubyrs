@@ -13,7 +13,7 @@ dogfooding of the interpreter.
 
 [![CI](https://github.com/linyiru/rubyrs/actions/workflows/ci.yml/badge.svg)](https://github.com/linyiru/rubyrs/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org/)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-yellow)](docs/SUBSET.md)
 
 A tiny Ruby-subset interpreter written in Rust, built on

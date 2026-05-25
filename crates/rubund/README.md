@@ -35,7 +35,7 @@ Measured against the real-world **manekineko** project (196 gems, 1,379-line loc
 ## Quick Start
 
 ```bash
-# Build (requires Rust ≥ 1.85)
+# Build (requires Rust ≥ 1.95)
 cargo build -p rubund --release
 
 # Run the placeholder CLI
