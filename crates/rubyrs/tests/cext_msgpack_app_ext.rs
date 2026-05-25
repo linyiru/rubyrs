@@ -45,26 +45,7 @@ mod common;
 
 fn ensure_msgpack_bundle_built() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let mp_dir = crate_dir.join("examples/msgpack-cext");
-            let mp_build = mp_dir.join("build.sh");
-            let mp_out = Command::new("bash")
-                .arg(&mp_build)
-                .output()
-                .expect("failed to spawn msgpack build.sh");
-            assert!(
-                mp_out.status.success(),
-                "msgpack build.sh failed:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&mp_out.stdout),
-                String::from_utf8_lossy(&mp_out.stderr),
-            );
-            let mp_bundle = mp_dir.join(format!("msgpack.{}", common::RUBY_DLEXT));
-            assert!(mp_bundle.exists(), "missing {}", mp_bundle.display());
-            mp_bundle
-        })
-        .clone()
+    BUILT.get_or_init(|| common::build_cext_bundle("msgpack-cext", "msgpack")).clone()
 }
 
 #[test]

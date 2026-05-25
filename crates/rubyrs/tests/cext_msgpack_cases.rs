@@ -33,43 +33,13 @@ mod common;
 
 fn ensure_bundles_built() -> (PathBuf, PathBuf) {
     static BUILT: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            // msgpack.bundle (unpacker)
-            let mp_dir = crate_dir.join("examples/msgpack-cext");
-            let mp_build = mp_dir.join("build.sh");
-            let mp_out = Command::new("bash")
-                .arg(&mp_build)
-                .output()
-                .expect("failed to spawn msgpack build.sh");
-            assert!(
-                mp_out.status.success(),
-                "msgpack build.sh failed:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&mp_out.stdout),
-                String::from_utf8_lossy(&mp_out.stderr),
-            );
-            let mp_bundle = mp_dir.join(format!("msgpack.{}", common::RUBY_DLEXT));
-            assert!(mp_bundle.exists(), "missing {}", mp_bundle.display());
-            // parser.bundle (flori-json, for parsing the JSON
-            // reference file inside the Ruby driver)
-            let fj_dir = crate_dir.join("examples/flori-json-cext");
-            let fj_build = fj_dir.join("build.sh");
-            let fj_out = Command::new("bash")
-                .arg(&fj_build)
-                .output()
-                .expect("failed to spawn flori-json build.sh");
-            assert!(
-                fj_out.status.success(),
-                "flori-json build.sh failed:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&fj_out.stdout),
-                String::from_utf8_lossy(&fj_out.stderr),
-            );
-            let fj_bundle = fj_dir.join(format!("parser.{}", common::RUBY_DLEXT));
-            assert!(fj_bundle.exists(), "missing {}", fj_bundle.display());
-            (mp_bundle, fj_bundle)
-        })
-        .clone()
+    BUILT.get_or_init(|| {
+        // msgpack.bundle (unpacker) and parser.bundle (flori-json,
+        // for parsing the JSON reference inside the Ruby driver).
+        let mp = common::build_cext_bundle("msgpack-cext", "msgpack");
+        let fj = common::build_cext_bundle("flori-json-cext", "parser");
+        (mp, fj)
+    }).clone()
 }
 
 #[test]
