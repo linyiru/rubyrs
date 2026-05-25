@@ -116,7 +116,12 @@ pub fn extract(source: &str) -> String {
 fn insert_skip_header(source: &str, header: &str) -> String {
     let mut byte_cursor = 0usize;
     for line in source.split_inclusive('\n') {
-        let trimmed = line.trim_start();
+        // `trim()` strips both ends — important because
+        // `split_inclusive` keeps the trailing `\n`, so a
+        // blank source line comes through as `"\n"` (or
+        // `"  \n"`); `trim_start()` alone would leave the
+        // newline and `is_empty()` would never fire.
+        let trimmed = line.trim();
         // Shebang only on line 1 — but split_inclusive doesn't
         // expose line number directly; the loop just keeps
         // skipping while the line "looks like" something we
@@ -157,12 +162,16 @@ fn is_magic_comment(trimmed: &str) -> bool {
         || body.contains("-*- coding")
 }
 
-/// Apply just the matcher recognisers (no lifter, no
+/// Apply just the recogniser pass (no lifter, no
 /// require_relative strip, no skip-log header) to a source
-/// slice. Used by `BeforeEachLifter` to pre-rewrite a
-/// `before :each` body's `should ==` / predicate / lambda-raise
-/// calls before lifting the body into each `it`. Returns the
-/// rewritten slice verbatim if no recogniser fires.
+/// slice. Runs every recogniser the main collector runs —
+/// `should ==`, `should_not ==`, predicate, lambda-raise,
+/// `mock_int(literal_int)` — against the input. Used by
+/// `BeforeEachLifter` to pre-rewrite a `before :each` body
+/// before lifting it into each `it`; the cluster E
+/// "args-of-matched-subtree not re-rewritten" limitation
+/// doesn't apply because the body is its own parse here.
+/// Returns the input verbatim if no recogniser fires.
 fn rewrite_recognisers(source: &str) -> String {
     let parsed = ruby_prism::parse(source.as_bytes());
     let root = parsed.node();
@@ -782,7 +791,7 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
                 b"context" => Some("micro-runner treats as describe; if you use `before :all` here it won't lift"),
                 b"it_behaves_like" => Some("shared-example inlining is v0.4"),
                 b"mock" => Some("no mock library in the micro-runner; hand-translate"),
-                b"mock_int" if !mock_int_substitutable => Some("only int-literal arg is substituted in v0.3; dynamic arg passes through"),
+                b"mock_int" if !mock_int_substitutable => Some("only `mock_int(literal_int)` with no receiver is substituted; other forms (explicit receiver, multi-arg, non-int-literal) pass through"),
                 b"should_receive" => Some("mock expectations; hand-translate"),
                 _ => None,
             };

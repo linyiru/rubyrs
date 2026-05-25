@@ -3,8 +3,8 @@
 # (comment out, inline, or wait for a later extractor version)
 # before the file is consumable by the micro-runner.
 #
-#   - L8: `mock_int` — only int-literal arg is substituted in v0.3; dynamic arg passes through
-#   - L12: `mock_int` — only int-literal arg is substituted in v0.3; dynamic arg passes through
+#   - L8: `mock_int` — only `mock_int(literal_int)` with no receiver is substituted; other forms (explicit receiver, multi-arg, non-int-literal) pass through
+#   - L12: `mock_int` — only `mock_int(literal_int)` with no receiver is substituted; other forms (explicit receiver, multi-arg, non-int-literal) pass through
 
 describe "Integer#digits" do
   it "converts the radix with mock_int(2)" do

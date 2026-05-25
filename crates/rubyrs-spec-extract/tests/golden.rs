@@ -73,6 +73,11 @@ fn golden_v0_3_guards() {
     run_golden("v0_3_guards");
 }
 
+#[test]
+fn golden_header_after_magic_block() {
+    run_golden("header_after_magic_block");
+}
+
 fn run_golden(name: &str) {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let input_path = base.join(format!("{name}.input.rb"));

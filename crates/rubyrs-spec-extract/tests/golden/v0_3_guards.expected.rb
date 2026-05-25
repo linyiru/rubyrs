@@ -5,7 +5,7 @@
 #
 #   - L10: `before` — only `before :each` is lifted in v0.3
 #   - L26: `before` — only `before :each` is lifted in v0.3
-#   - L43: `mock_int` — only int-literal arg is substituted in v0.3; dynamic arg passes through
+#   - L43: `mock_int` — only `mock_int(literal_int)` with no receiver is substituted; other forms (explicit receiver, multi-arg, non-int-literal) pass through
 
 # Guards added in response to the /code-review pass on
 # v0.3. Each block exercises a defensive case. None should
