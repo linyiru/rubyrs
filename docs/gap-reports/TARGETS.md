@@ -40,20 +40,30 @@ the cross-codebase observations they produced.
 | **Rake** | [rake.md](rake.md) | Larger task-DSL scale. Profile closely matches Jekyll's. `ModuleNode` #1 again. |
 
 **Net conclusion:** ROADMAP Near term #4 (`Module` + `include`)
-is validated as the highest-leverage single feature; the block-
-parameter family (`&block`, `*args`, splat) is the runner-up and
-matters especially for DSL frameworks.
+was validated as the highest-leverage single feature; **it has
+since landed on master** (commit `df29e56`) and is the single
+biggest gap closure gapscan has measured (jekyll −145 Missing
+nodes alone). The block-parameter family (`&block`, `*args`,
+splat) is the standing runner-up and matters especially for DSL
+frameworks.
 
-## Tier 2 — specific-gap probes
+## Tier 2 — partly done ✅
 
-Run these only when investigating a specific question.
+The Bundler / Tilt / stdlib slice have been scanned. See
+[README.md](README.md) for cross-codebase observations.
+
+| Target | Report | What it added |
+|---|---|---|
+| **Bundler** | [bundler.md](bundler.md) | Largest single scan (225 files, 106k nodes) yet **highest %Supported (85.25%)**. New blocker surfaced: `KeywordHashNode` ×430 — modern kwargs style. Direct prep for rubund. |
+| **Tilt** | [tilt.md](tilt.md) | Confirms `BlockParameterNode` is broadly the DSL-host blocker, not Sinatra-specific. |
+| **stdlib `set` / `optparse` / `uri`** | [set](stdlib-set.md), [optparse](stdlib-optparse.md), [uri](stdlib-uri.md) | Stdlib slices sit in the same 80.7–84.7% band as user code — no special blockers beyond what frameworks already surface. `AliasMethodNode` newly visible (set ×16). |
+
+Still pending in Tier 2:
 
 | Target | What it answers |
 |---|---|
-| **Bundler (Gemfile + gemspec evaluation paths only)** | Direct prep for `rubund`; both files are pure DSLs. |
-| **Tilt** | Template-multiplexer pattern; lots of dynamic class registration. |
-| **stdlib slice**: `set`, `csv`, `optparse`, `uri`, `pathname`, `digest` | "What fraction of stdlib could rubyrs ship native?" Each is small enough to scan individually; aggregating builds a stdlib-coverage curve. |
 | **rubygems.org top-100 `.gemspec`** (corpus scan) | Mass-statistics on DSL shape; tells `rubund` which gemspec features to support first. Different workflow — scan as a single tree of N small files. |
+| **stdlib `csv` / `pathname` / `digest`** (extra packages bundled as gems, not in `ruby/lib`) | Lower-priority — first three stdlib scans already established the pattern. |
 
 ## Tier 3 — stress targets (defer)
 
