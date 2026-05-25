@@ -19,7 +19,16 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 #   - drops the 162 `#[used]` static cext function pointers from
 #     the binary's dynamic symbol table
 #   - drops the `mod cext;` and `cext_*` code paths in the VM
-#   - drops the `--export-dynamic` linker arg on ELF targets
+#
+# Not yet gated by the feature (deliberate PoC scope — followup
+# PRs):
+#   - `--export-dynamic` linker arg on ELF targets (still emitted
+#     by build.rs unconditionally; harmless when cext is off
+#     because there are no `rb_*` symbols left to export, but
+#     pedantically still drag).
+#   - A handful of `try_typed_data` / `cext_invoke_method` dead-
+#     code warnings under `--no-default-features` (they reference
+#     only `Value`, not cext types, so they still compile).
 #
 # Default features keep cext on so embedders and the CLI binary
 # behave identically to pre-PoC. Build without:
