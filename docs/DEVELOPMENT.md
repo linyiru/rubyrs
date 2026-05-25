@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Rust 1.85+ (stable). Newer is fine. Earlier may work but is untested.
+- Rust 1.95+ (stable). Newer is fine. Earlier may work but is untested.
 - A C compiler (clang/gcc). Required by `ruby-prism-sys` to build the
   vendored Prism parser.
 

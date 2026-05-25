@@ -15,7 +15,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/linyiru/rubyrs"
 authors = ["rubyrs contributors"]
-rust-version = "1.85"
+rust-version = "1.95"
 
 # Centralise shared dependency versions. Crates opt in with
 # `<name>.workspace = true` under their `[dependencies]`.

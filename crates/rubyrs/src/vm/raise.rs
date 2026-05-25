@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use std::hint::cold_path;
 use std::rc::Rc;
 
 use crate::error::{RubyError, Trap};
@@ -30,6 +31,7 @@ impl Vm {
     /// instance directly (skipping the `initialize` dispatch) and set
     /// `@message`. Already-Exception instances pass through unchanged.
     pub(crate) fn normalize_exception(&mut self, v: Value) -> Value {
+        cold_path();
         match &v {
             Value::Object(_) => v,
             Value::Str(_) => {
@@ -89,6 +91,7 @@ impl Vm {
     ///   stripped runtime missing the preamble) — propagate
     ///   instead of silently swallowing.
     pub(crate) fn trap_to_exception(&mut self, trap: &Trap) -> Option<Value> {
+        cold_path();
         match &trap.err {
             RubyError::ResourceExhausted { .. }
             | RubyError::Uncaught { .. }
@@ -110,6 +113,7 @@ impl Vm {
     }
 
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) -> Result<(), Trap> {
+        cold_path();
         // Resolve the raised value's class once up front; the unwind loop
         // may probe many handlers before finding (or not finding) a match.
         let exc_class: Option<Rc<Class>> = match &exc {
