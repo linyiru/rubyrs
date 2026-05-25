@@ -199,6 +199,112 @@ static _RB_CHECK_TYPEDDATA: unsafe extern "C" fn(
     *const rubyrs_cext::rb_data_type_t,
 ) -> *mut std::ffi::c_void = rubyrs_cext::rb_check_typeddata;
 
+// === L3-D: bulk #[used] force-exports for stubs/*.rs ===
+//
+// rubyrs-cext is consumed as an rlib. The linker drops object
+// files whose symbols aren't referenced from the consuming crate
+// (rubyrs binary). `#[unsafe(no_mangle)]` on a fn alone is not
+// enough — `#[used]` only applies to statics in stable Rust, so
+// each cext fn needs a static reference here to survive DCE.
+//
+// The list below is exhaustive for what flori/json's parser.c
+// and generator.c touch. Compile-checked by type inference: if
+// a signature drifts between header and impl, the static line
+// fails to type-check (catches ABI breakage early).
+#[allow(non_upper_case_globals)]
+mod _cext_l3d_exports {
+    use rubyrs_cext::{ID, Value};
+    use std::ffi::{c_char, c_double, c_int, c_long, c_longlong, c_void};
+
+    // Tricky fns (live in main lib.rs, not stubs/).
+    #[used] static F1: unsafe extern "C" fn(Value) -> Value = rubyrs_cext::rb_basic_class;
+    #[used] static F2: unsafe extern "C" fn(Value) -> *mut *mut c_void = rubyrs_cext::rb_typeddata_data_slot;
+    #[used] static F3: unsafe extern "C" fn(Value) -> Value = rubyrs_cext::rb_path_to_class;
+    #[used] static F4: unsafe extern "C" fn(*const c_char) -> Value = rubyrs_cext::rb_path2class;
+
+    // stubs/types.rs
+    use rubyrs_cext::stubs::types::*;
+    #[used] static T1: unsafe extern "C" fn(Value) -> c_int = rb_value_type;
+    #[used] static T2: unsafe extern "C" fn(Value) -> c_int = rb_value_is_fixnum;
+    #[used] static T3: unsafe extern "C" fn(Value) -> c_int = rb_value_is_flonum;
+    #[used] static T4: unsafe extern "C" fn(Value) -> c_int = rb_value_is_special_const;
+    #[used] static T5: unsafe extern "C" fn(c_longlong) -> Value = rb_ll2num;
+    #[used] static T6: unsafe extern "C" fn(c_double) -> Value = rb_dbl2num;
+    #[used] static T7: unsafe extern "C" fn(*const c_char, c_int) -> Value = rb_cstr2inum;
+    #[used] static T8: unsafe extern "C" fn(*const c_char, c_int) -> c_double = rb_cstr_to_dbl;
+    #[used] static T9: unsafe extern "C" fn(Value) -> c_double = rb_float_value;
+    #[used] static T10: unsafe extern "C" fn(ID) -> Value = rb_id2sym;
+    #[used] static T11: unsafe extern "C" fn(Value) -> ID = rb_sym2id;
+    #[used] static T12: unsafe extern "C" fn(Value) -> Value = rb_sym2str;
+    #[used] static T13: unsafe extern "C" fn(Value, c_int) = rb_check_type;
+    #[used] static T14: unsafe extern "C" fn(c_int, c_int, c_int) -> c_int = rb_check_arity;
+    #[used] static T15: unsafe extern "C" fn(Value, c_int, *const c_char, *const c_char) -> Value = rb_convert_type;
+    #[used] static T16: unsafe extern "C" fn(Value) -> c_long = RHASH_SIZE;
+
+    // stubs/strings.rs
+    use rubyrs_cext::stubs::strings::*;
+    #[used] static S1: unsafe extern "C" fn(c_long) -> Value = rb_str_buf_new;
+    #[used] static S2: unsafe extern "C" fn(Value) -> Value = rb_str_dup;
+    #[used] static S3: unsafe extern "C" fn(Value) -> Value = rb_str_freeze;
+    #[used] static S4: unsafe extern "C" fn(Value) -> Value = rb_str_intern;
+    #[used] static S5: unsafe extern "C" fn(Value, c_long) = rb_str_set_len;
+    #[used] static S6: unsafe extern "C" fn(Value, c_long, c_long) -> Value = rb_str_substr;
+    #[used] static S7: unsafe extern "C" fn(*mut Value) -> Value = rb_string_value;
+    #[used] static S8: unsafe extern "C" fn(*const c_char, c_long) -> Value = rb_utf8_str_new;
+    #[used] static S9: unsafe extern "C" fn(*const c_char) -> Value = rb_utf8_str_new_cstr;
+    #[used] static S10: unsafe extern "C" fn(*const c_char, c_long) -> Value = rb_usascii_str_new;
+    #[used] static S11: unsafe extern "C" fn(*const c_char, c_long, *const c_void) -> Value = rb_enc_str_new;
+    #[used] static S12: unsafe extern "C" fn(*const c_char, c_long, *const c_void) -> Value = rb_enc_interned_str;
+    #[used] static S13: unsafe extern "C" fn() -> *mut c_void = rb_utf8_encoding;
+    #[used] static S14: unsafe extern "C" fn() -> *mut c_void = rb_ascii8bit_encoding;
+    #[used] static S15: unsafe extern "C" fn() -> *mut c_void = rb_usascii_encoding;
+    #[used] static S16: unsafe extern "C" fn() -> c_int = rb_utf8_encindex;
+    #[used] static S17: unsafe extern "C" fn() -> c_int = rb_usascii_encindex;
+    #[used] static S18: unsafe extern "C" fn() -> c_int = rb_ascii8bit_encindex;
+    #[used] static S19: unsafe extern "C" fn(Value, c_int) -> Value = rb_enc_associate_index;
+    #[used] static S20: unsafe extern "C" fn(Value) -> c_int = rb_enc_get_index;
+    #[used] static S21: unsafe extern "C" fn(Value) -> c_int = rb_enc_str_coderange;
+    #[used] static S22: unsafe extern "C-unwind" fn(*mut c_void, Value, *const c_char) -> ! = rb_enc_raise;
+
+    // stubs/gc.rs
+    use rubyrs_cext::stubs::gc::*;
+    #[used] static G1: unsafe extern "C" fn(Value) = rb_gc_mark;
+    #[used] static G2: unsafe extern "C" fn(Value) = rb_gc_mark_movable;
+    #[used] static G3: unsafe extern "C" fn(Value) -> Value = rb_gc_location;
+    #[used] static G4: unsafe extern "C" fn(Value) = rb_gc_register_mark_object;
+    #[used] static G5: unsafe extern "C" fn(*mut Value) = rb_global_variable;
+    #[used] static G6: unsafe extern "C" fn(c_int) = rb_ext_ractor_safe;
+    #[used] static G7: unsafe extern "C" fn(*const c_char) = rb_warn;
+    #[used] static G8: unsafe extern "C" fn(c_int, *const c_char) = rb_category_warn;
+    #[used] static G9: unsafe extern "C" fn(*const c_char, *mut c_void) -> Value = rb_vsprintf;
+    #[used] static G10: unsafe extern "C" fn(Value) -> Value = rb_io_flush;
+    #[used] static G11: unsafe extern "C" fn(Value, Value) -> Value = rb_io_write;
+    #[used] static G12: unsafe extern "C" fn(*const c_char) -> Value = rb_require;
+
+    // stubs/dispatch.rs
+    use rubyrs_cext::stubs::dispatch::*;
+    #[used] static D1: unsafe extern "C" fn(Value) -> Value = rb_obj_class;
+    #[used] static D2: unsafe extern "C" fn(Value) -> *const c_char = rb_class_name;
+    #[used] static D3: unsafe extern "C" fn(c_int, *const Value, Value) -> Value = rb_class_new_instance;
+    #[used] static D4: unsafe extern "C" fn(Value, Value) -> Value = rb_obj_is_kind_of;
+    #[used] static D5: unsafe extern "C" fn(Value, ID) -> c_int = rb_respond_to;
+    #[used] static D6: unsafe extern "C" fn(Value, *const c_char, *const c_char) = rb_define_alias;
+    #[used] static D7: unsafe extern "C" fn(Value, extern "C" fn(Value) -> Value) = rb_define_alloc_func;
+    #[used] static D8: unsafe extern "C" fn(Value, *const c_char, rubyrs_cext::OpaqueFn, c_int) = rb_define_private_method;
+    #[used] static D9: unsafe extern "C" fn(Value, *const c_char) -> Value = rb_define_module_under;
+    #[used] static D10: unsafe extern "C" fn(Value, ID) -> Value = rb_const_get;
+    #[used] static D11: unsafe extern "C" fn(Value, ID, Value) -> Value = rb_ivar_set;
+    #[used] static D12: unsafe extern "C" fn(Value, ID) -> Value = rb_ivar_get;
+    #[used] static D13: unsafe extern "C" fn(c_int, *const Value) -> Value = rb_call_super;
+    #[used] static D14: unsafe extern "C" fn(Value, Value) -> Value = rb_exc_new_str;
+    #[used] static D15: unsafe extern "C" fn(Value) -> ! = rb_exc_raise;
+    #[used] static D16: unsafe extern "C" fn(extern "C" fn(Value) -> Value, Value, *const c_void, Value) -> Value = rb_rescue;
+    #[used] static D17: unsafe extern "C" fn(c_int, *const Value, *const c_char) -> c_int = rb_scan_args;
+    #[used] static D18: unsafe extern "C" fn(c_long, *const Value) -> Value = rb_ary_new_from_values;
+    #[used] static D19: unsafe extern "C" fn(Value, extern "C" fn(Value, Value, Value) -> c_int, Value) = rb_hash_foreach;
+    #[used] static D20: unsafe extern "C" fn(c_long) -> Value = rb_hash_new_capa;
+}
+
 // Public Prism node-class manifests. Generated by build.rs from
 // `data/supported_prism_nodes.txt` and `data/rides_along_prism_nodes.txt`,
 // and validated against `src/ast.rs` — see build.rs. Consumed by
