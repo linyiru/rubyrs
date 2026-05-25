@@ -195,6 +195,35 @@ pub(crate) fn string_call(
             check(out.len())?;
             Some(Value::new_str(out))
         }
+        // `String#squeeze` — collapse consecutive runs of the same
+        // character. With a char-set arg, only chars in the set
+        // are squeezed. Char-set ranges (`"a-z"`) and ^-negation
+        // are NOT expanded here — same conservative semantics as
+        // `tr`. Documented in SUBSET.md.
+        (Value::Str(a), "squeeze", rest) if rest.is_empty()
+            || (rest.len() == 1 && matches!(rest[0], Value::Str(_))) => {
+            let a_ref = a.borrow();
+            let set: Option<Vec<char>> = match rest.first() {
+                None => None,
+                Some(Value::Str(s)) => Some(s.borrow().chars().collect()),
+                _ => unreachable!(),
+            };
+            let mut out = String::with_capacity(a_ref.len());
+            let mut prev: Option<char> = None;
+            for ch in a_ref.chars() {
+                let in_set = match &set {
+                    Some(s) => s.iter().any(|c| *c == ch),
+                    None => true,
+                };
+                if in_set && Some(ch) == prev {
+                    continue;
+                }
+                out.push(ch);
+                prev = Some(ch);
+            }
+            check(out.len())?;
+            Some(Value::new_str(out))
+        }
         (Value::Str(a), "start_with?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().starts_with(&*b.borrow()))),
         (Value::Str(a), "end_with?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().ends_with(&*b.borrow()))),
         (Value::Str(a), "to_i", []) => {

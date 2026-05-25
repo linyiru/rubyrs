@@ -157,7 +157,7 @@ impl Vm {
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
-                "sub" | "gsub" | "tr" |
+                "sub" | "gsub" | "tr" | "squeeze" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
