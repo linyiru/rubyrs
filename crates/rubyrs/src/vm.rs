@@ -4316,12 +4316,37 @@ impl Drop for FuncallCallbackGuard {
 /// (`cext_dispatch` invoked from closures registered in
 /// `Vm::cext_require`) is itself wasi-stubbed. Without the gate the
 /// `-D dead-code` warning fires on the wasi build.
+/// Bounded recursion depth for translating C-built Array/Hash
+/// structures back into rubyrs `Value`. A C extension can construct
+/// a self-referential `CValue::Array(_)` (e.g. `a.push(a)` from C);
+/// without a depth limit the recursion would stack-overflow during
+/// `cext_handle_to_value`. 256 is generous for realistic
+/// JSON-shape inputs and well below the host stack limit.
+#[cfg(not(target_os = "wasi"))]
+const CEXT_TRANSLATE_MAX_DEPTH: usize = 256;
+
 #[cfg(not(target_os = "wasi"))]
 fn cext_handle_to_value(
     vm: &mut Vm,
     state: &rubyrs_cext::CExtState,
     h: rubyrs_cext::Value,
 ) -> Value {
+    cext_handle_to_value_d(vm, state, h, 0)
+}
+
+#[cfg(not(target_os = "wasi"))]
+fn cext_handle_to_value_d(
+    vm: &mut Vm,
+    state: &rubyrs_cext::CExtState,
+    h: rubyrs_cext::Value,
+    depth: usize,
+) -> Value {
+    if depth >= CEXT_TRANSLATE_MAX_DEPTH {
+        // Pathological input — cycle or implausibly deep nesting.
+        // Return Nil rather than overflow the host stack. A C ext
+        // that hits this almost certainly has a bug.
+        return Value::Nil;
+    }
     match state.resolve(h) {
         rubyrs_cext::CValue::Nil => Value::Nil,
         rubyrs_cext::CValue::True => Value::Bool(true),
@@ -4353,7 +4378,7 @@ fn cext_handle_to_value(
             let mut g = PinGuard::new(vm);
             let mut elements: Vec<Value> = Vec::with_capacity(handles.len());
             for child in &handles {
-                let v = cext_handle_to_value(g.vm, state, *child);
+                let v = cext_handle_to_value_d(g.vm, state, *child, depth + 1);
                 g.pin(v.clone());
                 elements.push(v);
             }
@@ -4372,9 +4397,9 @@ fn cext_handle_to_value(
             let mut g = PinGuard::new(vm);
             let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
             for (kh, vh) in &pairs {
-                let k = cext_handle_to_value(g.vm, state, *kh);
+                let k = cext_handle_to_value_d(g.vm, state, *kh, depth + 1);
                 g.pin(k.clone());
-                let v = cext_handle_to_value(g.vm, state, *vh);
+                let v = cext_handle_to_value_d(g.vm, state, *vh, depth + 1);
                 g.pin(v.clone());
                 entries.push((k, v));
             }

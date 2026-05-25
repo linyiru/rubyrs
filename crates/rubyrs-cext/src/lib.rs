@@ -745,6 +745,13 @@ pub unsafe extern "C" fn rb_hash_aref(h: Value, key: Value) -> Value {
     })
 }
 
+/// Bounded recursion depth for [`cvalue_eq`]. C extensions can build
+/// self-referential `CValue::Array` / `CValue::Hash` (`a.push(a)`
+/// from C); without a depth limit, comparing such a value against
+/// any equal-shape peer stack-overflows. 256 is generous for
+/// realistic key shapes and well below the host stack limit.
+const CVALUE_EQ_MAX_DEPTH: usize = 256;
+
 /// CValue equality for Hash key lookup. Compares by handle identity
 /// first, then falls back to content equality:
 ///
@@ -760,9 +767,24 @@ pub unsafe extern "C" fn rb_hash_aref(h: Value, key: Value) -> Value {
 /// equality matters because L2-3 lets a C ext build a Hash key as
 /// `rb_ary_new()`-based or `rb_hash_new()`-based, and a lookup with
 /// content-equal but distinct-handle key would otherwise miss.
+///
+/// Recursion is depth-limited (see [`CVALUE_EQ_MAX_DEPTH`]) so a
+/// C-built self-referential Array/Hash bottoms out as `false` instead
+/// of stack-overflowing.
 fn cvalue_eq(st: &CExtState, a: Value, b: Value) -> bool {
+    cvalue_eq_d(st, a, b, 0)
+}
+
+fn cvalue_eq_d(st: &CExtState, a: Value, b: Value, depth: usize) -> bool {
     if a == b {
         return true;
+    }
+    if depth >= CVALUE_EQ_MAX_DEPTH {
+        // Pathological input (cycle or implausible depth). Bottom
+        // out as not-equal rather than overflow the stack; the
+        // identity check at the top already handled the trivial
+        // same-handle case.
+        return false;
     }
     match (st.resolve(a), st.resolve(b)) {
         (CValue::Nil, CValue::Nil) => true,
@@ -774,7 +796,7 @@ fn cvalue_eq(st: &CExtState, a: Value, b: Value) -> bool {
             x.len() == y.len()
                 && x.iter()
                     .zip(y.iter())
-                    .all(|(ah, bh)| cvalue_eq(st, *ah, *bh))
+                    .all(|(ah, bh)| cvalue_eq_d(st, *ah, *bh, depth + 1))
         }
         (CValue::Hash(x), CValue::Hash(y)) => {
             // Order-independent: every (k, v) in x must have a
@@ -784,7 +806,8 @@ fn cvalue_eq(st: &CExtState, a: Value, b: Value) -> bool {
             x.len() == y.len()
                 && x.iter().all(|(ak, av)| {
                     y.iter().any(|(bk, bv)| {
-                        cvalue_eq(st, *ak, *bk) && cvalue_eq(st, *av, *bv)
+                        cvalue_eq_d(st, *ak, *bk, depth + 1)
+                            && cvalue_eq_d(st, *av, *bv, depth + 1)
                     })
                 })
         }
