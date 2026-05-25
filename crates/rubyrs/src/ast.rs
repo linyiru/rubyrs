@@ -437,6 +437,25 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_constant_write_node() {
         return sp(node, Expr::ConstWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
+    // `Foo::Bar = expr` — ConstantPathWriteNode. Same spike-scope
+    // model as ConstantPathNode read: flatten the LHS path into a
+    // joined "A::B::C" name and route through the existing
+    // `Vm.constants` table (StoreConst opcode). No real module
+    // nesting; the assignment binds the joined name, and a later
+    // `Foo::Bar` read picks it up via `ConstRead("Foo::Bar")`.
+    if let Some(n) = node.as_constant_path_write_node() {
+        let target = n.target();
+        // target is a ConstantPathNode; flatten via the same helper
+        // the read path uses.
+        if let Some(joined) = flatten_constant_path(&target.as_node()) {
+            return sp(node, Expr::ConstWrite(joined, Box::new(tr(&n.value()))));
+        }
+        // Dynamic-path fallback (rare): use the trailing name only,
+        // matching the ConstantPathNode read fallback at line ~415.
+        if let Some(name_id) = target.name() {
+            return sp(node, Expr::ConstWrite(cid_to_string(name_id), Box::new(tr(&n.value()))));
+        }
+    }
     // Op-assign desugaring: `a += b` is translated to
     // `a = a + b`. The receiver / index path is re-evaluated,
     // which costs one extra read but is observably equivalent

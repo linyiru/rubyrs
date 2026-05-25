@@ -620,19 +620,20 @@ fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     // arbitrary third-party Ruby — that's a denial-of-service waiting
     // to happen.
     //
-    // `case` is currently outside the supported subset and reaches
-    // the unsupported-node fallback. We expect a SyntaxError Trap
-    // back, not a SIGABRT.
+    // `@@var = 1` (ClassVariableWriteNode) is currently outside
+    // the supported subset and reaches the unsupported-node
+    // fallback. We expect a SyntaxError Trap back, not a SIGABRT.
+    // (Previous canaries: `case`, then `Foo::Bar = 1` — both
+    // landed as supported. Pick something genuinely unimplemented
+    // each time the gap closes.)
     let mut rt = Runtime::new();
     let err = rt.eval(
         r#"
-        # Constant-path write `Foo::Bar = 1` — still unsupported,
-        # used as the canary for "AST translation cannot handle
-        # this node".
-        class Foo; end
-        Foo::Bar = 1
+        class Foo
+          @@count = 0
+        end
         "#,
-        "const_path_write.rb",
+        "cvar_write.rb",
     ).unwrap_err();
     assert!(
         matches!(err.err, RubyError::SyntaxError { .. }),
