@@ -549,6 +549,11 @@ class NilClass
 end
 class Proc
 end
+## Method — `Object#method(:foo)` returns a BoundMethod value
+## whose class reports as Method. Stub class so `m.class.name`
+## resolves to "Method".
+class Method
+end
 class Class
 end
 ## File — class-method dispatch is wired host-side in

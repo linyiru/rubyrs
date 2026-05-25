@@ -47,6 +47,7 @@ end
 d = Dispatcher.new(g, :hello)
 puts d.call_with("dispatched")
 
-# Type name. (`m.class.name` returns "Method" in CRuby but
-# requires the Method class to be registered in the preamble —
-# rubyrs deferred; SUBSET.md.)
+# Type name. `m.class.name == "Method"` works since K9
+# registered the Method class in the preamble.
+puts m.class.name
+puts m.is_a?(Method)
