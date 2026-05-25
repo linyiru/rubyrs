@@ -454,6 +454,14 @@ fn collect_ruby_files(
     Ok(())
 }
 
+/// `"file"` for 1, `"files"` otherwise. Trivial pluraliser shared
+/// by the text and Markdown renderers so per-file bucket lines
+/// read naturally for the n=1 case (which does come up in
+/// real-world scans).
+fn plural_files(n: usize) -> &'static str {
+    if n == 1 { "file" } else { "files" }
+}
+
 // ---- text output ----
 
 /// Render `report` as a human-readable plain-text summary.
@@ -528,17 +536,21 @@ pub fn render_text(report: &Report, top_missing: usize) -> String {
         .count() as u64;
     let _ = writeln!(
         s,
-        "\n### Per-file translatability (≥20 nodes: {nontrivial} non-trivial files)"
+        "\n### Per-file translatability (≥20 nodes: {} non-trivial {})",
+        nontrivial,
+        plural_files(nontrivial as usize),
     );
     let _ = writeln!(
         s,
-        "  100% translatable: {} files",
-        full.len()
+        "  100% translatable: {} {}",
+        full.len(),
+        plural_files(full.len()),
     );
     let _ = writeln!(
         s,
-        "  ≥95% translatable: {} files (good fixture candidates)",
-        near.len()
+        "  ≥95% translatable: {} {} (good fixture candidates)",
+        near.len(),
+        plural_files(near.len()),
     );
     let show = top_missing.min(near.len());
     if show > 0 {
@@ -670,7 +682,10 @@ pub fn render_markdown(report: &Report, top: usize) -> String {
 
     let bareword = report.bareword_calls_sorted();
     let _ = writeln!(s, "\n### Top bareword calls\n");
-    let _ = writeln!(s, "Bareword (no-receiver) calls are the eye-opener — `require`, `attr_*`, `include`, `private`, etc. parse as CallNode and so look syntactically supported, but rubyrs implements none of them.\n");
+    let _ = writeln!(
+        s,
+        "Bareword (no-receiver) calls mix genuine built-ins (`raise`, `puts` — implemented) with hidden gaps (`require`, `attr_*`, `include`, `private` — parse as CallNode so look Supported, but aren't). Scan the list for known-unsupported names; the count column alone won't tell you which is which.\n"
+    );
     let _ = writeln!(s, "| Method | Count |");
     let _ = writeln!(s, "|---|---:|");
     for (n, st) in bareword.iter().take(top) {
@@ -689,9 +704,24 @@ pub fn render_markdown(report: &Report, top: usize) -> String {
     let near = report.files_at_least(0.95, 20);
     let nontrivial = report.files.iter().filter(|f| f.total >= 20).count();
     let _ = writeln!(s, "\n### Per-file translatability\n");
-    let _ = writeln!(s, "Counting only files with ≥20 AST nodes ({nontrivial} non-trivial files).\n");
-    let _ = writeln!(s, "- **100% translatable:** {} files", full.len());
-    let _ = writeln!(s, "- **≥95% translatable:** {} files (fixture candidates)\n", near.len());
+    let _ = writeln!(
+        s,
+        "Counting only files with ≥20 AST nodes ({} non-trivial {}).\n",
+        nontrivial,
+        plural_files(nontrivial),
+    );
+    let _ = writeln!(
+        s,
+        "- **100% translatable:** {} {}",
+        full.len(),
+        plural_files(full.len()),
+    );
+    let _ = writeln!(
+        s,
+        "- **≥95% translatable:** {} {} (fixture candidates)\n",
+        near.len(),
+        plural_files(near.len()),
+    );
     let show = top.min(near.len());
     if show > 0 {
         let _ = writeln!(s, "Top {show} candidates:\n");

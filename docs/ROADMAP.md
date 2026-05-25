@@ -13,6 +13,40 @@ See [TESTING.md](TESTING.md) for the ingestion pipeline. We do not ship a
 new feature without spec coverage that demonstrates we got the semantics
 right.
 
+## Tooling
+
+- **`rubyrs-gapscan`** — workspace crate that scans a Ruby codebase
+  with Prism and classifies every AST node as Supported / RidesAlong /
+  Missing against the rubyrs subset. Three layers of compile-time
+  drift protection keep its classification in lockstep with `ast.rs`
+  and Prism's node universe. Used to produce the gap reports below
+  and to measure the delta after each gap-closing feature PR.
+  See `crates/rubyrs-gapscan/`.
+
+## Real-world gap data
+
+Snapshots of `rubyrs-gapscan` against canonical Ruby projects —
+these drive which "Near term" items below to attack first. Full
+reports: [`docs/gap-reports/`](gap-reports/README.md).
+
+| Codebase | % Supported (AST) | #1 missing | #2 missing | #3 missing |
+|---|---:|---|---|---|
+| Jekyll `lib/` (89 files) | **81.65%** | `ModuleNode` (×145) | `InstanceVariableOrWriteNode` (×136) | `UnlessNode` (×112) |
+| Liquid `lib/` (64 files) | **81.16%** | `ConstantWriteNode` (×141) | `ModuleNode` (×74) | `UnlessNode` (×72) |
+
+**Headline:** both Jekyll and Liquid sit just over 81% inside the
+subset at AST level. Jekyll already has **56 files at ≥95%
+translatability** today (out of 86 non-trivial); `ModuleNode` is
+the single most-frequent remaining blocker across them, so
+Near term #4 below has the highest practical leverage. Caveat: the
+AST view *under*-states the gap — many runtime features
+(`require`, `attr_accessor`, `include`, `private`) parse as
+`CallNode` and so look Supported. See each report's "Top bareword
+calls" section for the semantic-gap view.
+
+Candidate codebases for the next round of scans are tracked in
+[`docs/gap-reports/TARGETS.md`](gap-reports/TARGETS.md).
+
 ## Done
 
 These are landed and locked down by tests:
@@ -81,6 +115,79 @@ In rough order of ROI for the embedding / DSL use case:
 - **Concurrency story**: probably actor / message passing, not Threads
 - **CRuby C-extension compat layer** — only if a clear use case appears.
   Mostly we expect to *not* do this; see [SUBSET.md](SUBSET.md).
+
+## Metaprogramming: known unknowns
+
+Many real Ruby libraries lean heavily on metaprogramming —
+`method_missing`, `define_method`, `instance_eval`, `send` with
+non-literal symbols, `class_eval`, `Module.new { ... }`,
+`ObjectSpace`. rubyrs supports **none** of these today, and
+[SUBSET.md](SUBSET.md) currently lists most as "explicitly out of
+scope". That language is too strong for our actual position — it's
+"out of scope *for v1*", not "we will never look at this". This
+section records what we do plan to do, eventually, and why we
+haven't yet.
+
+### Why rubyrs doesn't have it yet
+
+- **Inline-cache hostile.** rubyrs's perf story (and roadmap item
+  for monomorphic method dispatch IC) assumes class methods are
+  fixed at compile time. `method_missing` and `define_method` add
+  an unpredictable layer that defeats simple caches; doing it well
+  needs the deopt machinery a JIT would have.
+- **Embedding niche doesn't need it.** Brewfile, Gemfile, and most
+  DSL files don't use it. The cost of implementing it would buy
+  zero benefit for the current target use cases.
+- **Cheap shims often suffice.** `attr_accessor` / `attr_reader` /
+  `attr_writer` are the dominant real-world consumers of "define
+  methods at class-load time"; implementing them as built-in
+  macros (Near term #6) covers the common case without any
+  general metaprogramming support.
+
+### What we'd do, when the time comes
+
+In rough order of effort vs. payoff. Each level subsumes the
+previous — you'd implement them as a sequence, not in parallel.
+
+1. **`attr_*` as built-in macros.** Already on Near term #6.
+   Recognised at class-definition time, expand to compile-time
+   method emission. Doesn't introduce any runtime metaprogramming
+   surface. Closes a large fraction of the apparent gap surfaced
+   by gapscan's bareword report (Jekyll: 32 `attr_reader`
+   occurrences alone).
+2. **`define_method :literal_name`.** When both receiver and name
+   are static literals at compile time, lower to the same
+   bytecode as `def`. No runtime support needed; the cache stays
+   monomorphic.
+3. **`send` / `public_send` with literal symbols.** Same shape as
+   above: a sugar over direct dispatch when the symbol is a
+   compile-time literal. Falls back to a trap otherwise.
+4. **`Module.new { ... }` + `include`.** Once Near term #4
+   (`Module` + `include`) lands, supporting anonymous modules is
+   mostly already there.
+5. **`method_missing` proper.** The hard one. Requires:
+   (a) every method dispatch to check the class chain and fall to
+   `method_missing` on miss; (b) the IC to handle the
+   missing-then-found case via a deopt path; (c) `respond_to?`
+   integration so libraries that probe for methods behave
+   correctly. Probably the gating feature for "Run `mspec` inside
+   rubyrs" in Long term, and the dividing line between "tiny
+   embeddable runtime" and "general-purpose Ruby".
+6. **`instance_eval` / `class_eval` with blocks.** Rebinds `self`
+   inside a block scope; commonly used for DSLs (RSpec
+   `describe`/`it`, Rake `task`). Builds on `Module.new` work.
+   Plain string-eval (`eval "..."`) stays explicitly out of scope
+   regardless — the WASM/embedding deployment story doesn't tolerate
+   a runtime compiler.
+
+### Decision gate
+
+We'd start on (1) when an *embedding-niche* use case demands it
+(several already do — see attr_* in the Jekyll bareword report).
+We'd start on (5) only after a concrete user need — most likely
+"running mspec natively" or "running a specific DSL library
+that's worth the complexity budget". Until then, the position is
+"document, don't build".
 
 ## Not on the roadmap (explicitly)
 
