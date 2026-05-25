@@ -5,12 +5,13 @@
 //! setjmp lives in C, the nested jmp-buf stack, the pending-
 //! exception slot). This module is the Rust-facing surface:
 //!
-//! - [`call_with_raise`] — wraps a Rust closure in `rubyrs_jmp_call`
-//!   so that any `rb_raise` fired from inside the C call
-//!   (transitively through any `extern "C"` work the closure does)
-//!   is caught, not aborted. Returns the raised class id + message
-//!   instead of the closure's normal `Value`. Used by
-//!   `vm::cext_dispatch`.
+//! - [`invoke_with_raise`] — calls the cext function pointer
+//!   directly via the C `rubyrs_jmp_invoke` helper, which does
+//!   setjmp + arity-dispatch + cext call entirely in C frames.
+//!   No Rust frame sits between setjmp and the cext call, so a
+//!   longjmp from `rb_raise` never has to unwind a Rust frame's
+//!   RAII Drop. Returns the raised class id + message instead of
+//!   the cext fn's normal `Value`. Used by `vm::cext_dispatch`.
 //!
 //! ## Built-in exception class sentinels
 //!

@@ -13,16 +13,20 @@
  * exact frame that called setjmp, and that frame would have to be
  * the one calling the C extension (otherwise Rust RAII drops in
  * intermediate frames are skipped). The cleanest fix is to do the
- * setjmp / call / check dance in a single C function and route the
- * Rust caller's actual work through a function-pointer callback.
+ * setjmp / call / check dance in a single C function — AND to do
+ * the arity-specific cast + cext call from the same C function too,
+ * so there are zero Rust frames between setjmp and the cext fn.
  *
  * That's this file:
  *
- *   - `rubyrs_jmp_call(cb, userdata, &out_class, &out_msg)`:
- *     installs a setjmp, calls `cb(userdata)`, returns the call's
- *     u64 result OR — if rb_raise fires from inside cb — sets
+ *   - `rubyrs_jmp_invoke(func, arity, args, &out_class, &out_msg)`:
+ *     installs a setjmp, dispatches on `arity` to cast the opaque
+ *     `func` to the right signature, calls it with the args in
+ *     `args[0..=arity]` (args[0] is self), returns the cext fn's
+ *     u64 result OR — if rb_raise fires from inside the call — sets
  *     out_class/out_msg to the stashed exception class+message and
- *     returns 0.
+ *     returns 0. Caller (Rust `cext_dispatch`) builds the args
+ *     array and validates `arity` before invoking.
  *
  *   - `rubyrs_jmp_raise(class_id, msg)`: stashes the exception in
  *     thread-locals and longjmps to the topmost installed setjmp.
@@ -58,7 +62,7 @@ typedef struct {
 static __thread jmp_stack_t g_jmps = { -1, {{0}} };
 
 /* Pending exception slot — populated by rubyrs_jmp_raise just
- * before longjmp, consumed by rubyrs_jmp_call's raised branch. */
+ * before longjmp, consumed by rubyrs_jmp_invoke's raised branch. */
 static __thread uint64_t g_pending_class = 0;
 static __thread char *g_pending_msg = NULL;
 
@@ -149,7 +153,7 @@ void rubyrs_jmp_raise(uint64_t class_id, const char *msg) {
     if (g_jmps.top < 0) {
         /* No setjmp installed → cannot longjmp anywhere. This is a
          * programmer error in the rubyrs integration (some path
-         * called into C without going through rubyrs_jmp_call).
+         * called into C without going through rubyrs_jmp_invoke).
          * Abort rather than silently dropping the raise. */
         abort();
     }

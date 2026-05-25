@@ -21,8 +21,19 @@
 #include <stdio.h>
 
 /* Forward decl — implemented in setjmp_shim.c. */
+__attribute__((noreturn))
 extern void rubyrs_jmp_raise(uint64_t class_id, const char *msg);
 
+/* Marked noreturn to match the rubyrs.h declaration and the Rust
+ * extern `fn(..) -> !` binding (review #13): without it the C
+ * compiler is allowed to assume control may continue past rb_raise
+ * (since the .h says noreturn but the definition didn't), risking
+ * miscompilation at cext call sites that rely on rb_raise being
+ * the last statement of a branch. The trailing __builtin_
+ * unreachable() also asserts the contract locally — if some path
+ * through rubyrs_jmp_raise ever returned (it cannot today: it
+ * either longjmps or aborts), the compiler would catch it. */
+__attribute__((noreturn))
 void rb_raise(uint64_t exc_class, const char *fmt, ...) {
     char buf[1024];
     va_list ap;
@@ -30,4 +41,5 @@ void rb_raise(uint64_t exc_class, const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     rubyrs_jmp_raise(exc_class, buf);
+    __builtin_unreachable();
 }
