@@ -172,3 +172,104 @@ impl Vm {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::Proto;
+    use crate::intern::Interner;
+
+    fn mk_vm() -> Vm {
+        Vm::new(Vec::<Proto>::new(), Interner::new())
+    }
+
+    #[test]
+    fn check_fuel_passes_when_unlimited() {
+        let mut vm = mk_vm();
+        // Default fuel is None — unlimited.
+        assert!(vm.check_fuel().is_ok());
+        // op_counter increments even on the unlimited path.
+        let before = vm.op_counter;
+        assert!(vm.check_fuel().is_ok());
+        assert_eq!(vm.op_counter, before.wrapping_add(1));
+    }
+
+    #[test]
+    fn check_fuel_decrements_then_traps_at_zero() {
+        let mut vm = mk_vm();
+        vm.fuel = Some(2);
+        assert!(vm.check_fuel().is_ok());
+        assert_eq!(vm.fuel, Some(1));
+        assert!(vm.check_fuel().is_ok());
+        assert_eq!(vm.fuel, Some(0));
+        let trap = vm.check_fuel().expect_err("third check_fuel should trap");
+        assert!(matches!(trap.err, RubyError::ResourceExhausted { .. }));
+        assert_eq!(trap.err.message(), "out of fuel");
+    }
+
+    #[test]
+    fn check_alloc_passes_under_cap() {
+        let mut vm = mk_vm();
+        vm.heap.max_live = Some(10);
+        assert!(vm.check_alloc().is_ok());
+    }
+
+    #[test]
+    fn check_alloc_traps_at_cap() {
+        let mut vm = mk_vm();
+        vm.heap.max_live = Some(0);
+        let trap = vm.check_alloc().expect_err("0-live cap should trap");
+        assert!(matches!(trap.err, RubyError::ResourceExhausted { .. }));
+        assert!(trap.err.message().contains("heap exhausted"));
+    }
+
+    #[test]
+    fn check_alloc_unlimited_passes() {
+        let vm = mk_vm();
+        // Default max_live = None.
+        assert!(vm.check_alloc().is_ok());
+    }
+
+    #[test]
+    fn check_frames_passes_under_cap() {
+        let mut vm = mk_vm();
+        vm.max_frames = Some(10);
+        assert!(vm.check_frames().is_ok());
+    }
+
+    #[test]
+    fn check_frames_traps_at_cap() {
+        let mut vm = mk_vm();
+        vm.max_frames = Some(0);
+        let trap = vm.check_frames().expect_err("0-frame cap should trap");
+        assert!(matches!(trap.err, RubyError::ResourceExhausted { .. }));
+        assert!(trap.err.message().contains("stack level too deep"));
+    }
+
+    #[test]
+    fn trap_with_empty_frames_has_empty_backtrace() {
+        let vm = mk_vm();
+        let t = vm.trap(RubyError::RuntimeError { msg: "boom".into() });
+        assert!(t.backtrace.is_empty());
+        assert!(matches!(t.err, RubyError::RuntimeError { .. }));
+    }
+
+    #[test]
+    fn maybe_gc_is_noop_when_not_due_and_not_stressed() {
+        let mut vm = mk_vm();
+        let before_live = vm.heap.live_count;
+        vm.maybe_gc();
+        assert_eq!(vm.heap.live_count, before_live);
+    }
+
+    #[test]
+    fn maybe_gc_runs_under_stress_with_no_roots() {
+        let mut vm = mk_vm();
+        vm.stress_gc = true;
+        let before = vm.heap.live_count;
+        vm.maybe_gc();
+        // live_count can only stay or decrease — and with no
+        // allocations and no roots, it stays at 0.
+        assert!(vm.heap.live_count <= before);
+    }
+}
