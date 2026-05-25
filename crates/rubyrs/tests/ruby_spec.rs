@@ -173,22 +173,48 @@ fn run_spec_file(path: &Path) -> Vec<ExampleOutcome> {
 #[test]
 fn ruby_spec_microrunner_all_examples_pass() {
     let dir = spec_dir().join("ruby");
-    let entries: Vec<PathBuf> = fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("read_dir {}: {}", dir.display(), e))
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rb"))
-        .collect();
+    // Surface read_dir entry errors instead of swallowing via
+    // `.filter_map(|e| e.ok())`. A permission-denied / I/O error
+    // on a single entry would otherwise let the runner pass with
+    // that file silently missing — same class of silent-skip as
+    // PR #17's SETUP-row gap.
+    let mut entries: Vec<PathBuf> = Vec::new();
+    let reader = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read_dir {}: {}", dir.display(), e));
+    for entry in reader {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!("read_dir entry in {} failed: {}", dir.display(), e)
+        });
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("rb") {
+            entries.push(path);
+        }
+    }
     assert!(!entries.is_empty(), "no spec files found in {}", dir.display());
 
     // Stable order so failures are easy to scan in CI output.
-    let mut entries = entries;
     entries.sort();
 
     let mut total = 0;
     let mut failures: Vec<(PathBuf, ExampleOutcome)> = Vec::new();
     for path in &entries {
         let outcomes = run_spec_file(path);
+        // A file that compiles cleanly but registers zero `it`
+        // blocks is almost always a mistake (forgot to wrap in
+        // `describe { }`, accidentally deleted everything,
+        // copy-paste boilerplate without bodies). Treat as a
+        // synthetic failure so it shows up in the per-file
+        // report rather than silently inflating the file count
+        // without contributing examples.
+        if outcomes.is_empty() {
+            failures.push((path.clone(), ExampleOutcome {
+                describe: "<file-level>".into(),
+                name: "spec file registered zero examples".into(),
+                passes: vec![],
+                fails: vec!["expected at least one `it` block; found none".into()],
+            }));
+            continue;
+        }
         total += outcomes.len();
         for o in outcomes {
             if !o.ok() {
