@@ -57,7 +57,7 @@ human polish step.
 | `require_relative '...'` | (stripped — line filter) | v0.1 |
 | *`after :each / :all`* | *passthrough + skip-log entry* | logged v0.3; full rewrite is future work, not yet scheduled |
 | *`before :all`* | *passthrough + skip-log entry* | logged v0.3; full rewrite is future work, not yet scheduled |
-| *`context "..." do ... end`* | *passthrough + skip-log entry* | logged v0.3; rewriting depends on `before :all` semantics inside, future work |
+| *`context "..." do ... end`* | *passthrough + skip-log entry* | logged v0.3; the micro-runner doesn't define `context` — must be renamed to `describe` (or removed) during hand-polish, otherwise the file fails at load with NoMethodError on `context` |
 | *`it_behaves_like :shared, ...`* | *passthrough + skip-log entry* | logged v0.3; **shared-example inlining is v0.4 scope** per `docs/TESTING.md` |
 | *`should_receive` / `mock(...)` / `mock_int(dynamic)`* | *passthrough + skip-log entry* | logged v0.3; no mock lib in micro-runner — always hand-translate |
 

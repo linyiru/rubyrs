@@ -3,8 +3,8 @@
 # (comment out, inline, or wait for a later extractor version)
 # before the file is consumable by the micro-runner.
 #
-#   - L10: `before` — only `before :each` is lifted in v0.3
-#   - L26: `before` — only `before :each` is lifted in v0.3
+#   - L10: `before` — only the bare `before :each do ... end` form is lifted (no extra args, all sibling `it`s must have bodies); other forms like `before :all` or `before :each, :foo` pass through and need hand polish
+#   - L26: `before` — only the bare `before :each do ... end` form is lifted (no extra args, all sibling `it`s must have bodies); other forms like `before :all` or `before :each, :foo` pass through and need hand polish
 #   - L43: `mock_int` — only `mock_int(literal_int)` with no receiver is substituted; other forms (explicit receiver, multi-arg, non-int-literal) pass through
 
 # Guards added in response to the /code-review pass on

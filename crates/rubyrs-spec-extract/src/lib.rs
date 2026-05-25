@@ -786,9 +786,9 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
                     }
                 };
             let detail: Option<&'static str> = match name_bytes {
-                b"before" => Some("only `before :each` is lifted in v0.3"),
-                b"after" => Some("not lifted; inline cleanup or skip the block"),
-                b"context" => Some("micro-runner treats as describe; if you use `before :all` here it won't lift"),
+                b"before" => Some("only the bare `before :each do ... end` form is lifted (no extra args, all sibling `it`s must have bodies); other forms like `before :all` or `before :each, :foo` pass through and need hand polish"),
+                b"after" => Some("not lifted; inline cleanup into each `it` or comment the block out"),
+                b"context" => Some("the micro-runner's spec_helper.rb doesn't define `context` — rename to `describe` (or remove) before running, or the file crashes with NoMethodError on `context`"),
                 b"it_behaves_like" => Some("shared-example inlining is v0.4"),
                 b"mock" => Some("no mock library in the micro-runner; hand-translate"),
                 b"mock_int" if !mock_int_substitutable => Some("only `mock_int(literal_int)` with no receiver is substituted; other forms (explicit receiver, multi-arg, non-int-literal) pass through"),
