@@ -66,3 +66,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0014 — Embed API v2 — `HostCtx` for heap-y arg reads](0014-embed-api-v2-host-ctx.md)
 - [0015 — Concentric architecture via tiered Cargo features](0015-concentric-architecture.md)
 - [0016 — Method-object reflection chain](0016-method-reflection-chain.md)
+- [0017 — Tier-1 boundary specification](0017-tier1-boundary.md)
