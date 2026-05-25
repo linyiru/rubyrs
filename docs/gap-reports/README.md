@@ -29,15 +29,16 @@ it's the next thing worth implementing.
 | [Tilt `lib/`](tilt.md) | 38 | 84.57% | `BlockParameterNode` (×18) | template multiplexer |
 | [stdlib `set.rb`](stdlib-set.md) | 1 | 80.70% | `AliasMethodNode` (×16) | stdlib Set |
 | [stdlib `optparse.rb`](stdlib-optparse.md) | 1 | 82.73% | `RestParameterNode` (×37) | stdlib OptionParser |
-| [stdlib `uri/`](stdlib-uri.md) | 7 | 84.72% | `ConstantWriteNode` (×53) | stdlib URI |
+| [stdlib `uri/`](stdlib-uri.md) | 14 | 84.72% | `ConstantWriteNode` (×53) | stdlib URI |
 
 Planned next scans (and the rationale for each) live in
 [`TARGETS.md`](TARGETS.md).
 
 ## Cross-codebase observations (n=10)
 
-After scanning five codebases the picture has converged enough to
-draw a few stable conclusions:
+After scanning ten codebases (Tier 1 framework set + Tier 2
+Bundler / Tilt / stdlib slice) the picture has converged enough
+to draw a few stable conclusions:
 
 - **All ten sit at 80.7–85.3% Supported at AST level.** Different
   shapes (framework / template engine / DSL / dependency manager /
@@ -56,7 +57,10 @@ draw a few stable conclusions:
   - `KeywordHashNode` — 1/10 BUT ×430 in Bundler: kwargs-heavy
     modern Ruby
   - `RegularExpressionNode` — 1/10 (Rake), widespread in others
-  - `AliasMethodNode` — 1/10 (stdlib set): `alias_method :foo, :bar`
+  - `AliasMethodNode` — 1/10 (stdlib set): the `alias new old`
+    keyword form (×16 in `set.rb`). The method-call form
+    `alias_method :new, :old` parses as `CallNode` and so isn't
+    counted here; that's a separate semantic-gap issue.
   - `RestParameterNode` — 1/10 (stdlib optparse): `*args`
 - **Block / rest / splat parameter family confirmed broadly** —
   now seen as a major blocker in Sinatra, dry-struct, Tilt, plus
@@ -68,8 +72,9 @@ draw a few stable conclusions:
 - **`KeywordHashNode` is the surprise top contender for "next
   highest leverage"** — Bundler alone has ×430. Bundler is also
   the codebase rubund will need to run; this isn't theoretical.
-- **`RegularExpressionNode`** remains widespread (5/10) but a much
-  bigger semantic lift than the others.
+- **`RegularExpressionNode`** is in the Missing tables of 9/10
+  codebases (only stdlib `set.rb` lacks it), but a much bigger
+  semantic lift than the other top blockers.
 - **`AliasMethodNode`** newly visible in stdlib set (×16). Pure
   static-method-aliasing form (no metaprogramming required to
   implement) — could be a quick win if any other future target
