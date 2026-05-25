@@ -54,6 +54,17 @@ pub(crate) enum Op {
     /// expression's value should also remain on the stack (CRuby's
     /// `FOO = 42` evaluates to 42).
     StoreConst(SymId),
+    /// `$foo` — push the global's current value onto the stack.
+    /// Special globals (`$$`, `$0`) are intercepted in the handler;
+    /// plain user globals are looked up in `Vm.globals`; unknown
+    /// names fall through to `Value::Nil` (CRuby's lenient
+    /// uninitialized-global default).
+    LoadGlobal(SymId),
+    /// `$foo = expr` — pop top of stack and store as the value of
+    /// global `SymId`. Caller emits `Dup` first if the assignment-
+    /// as-expression value should also remain on the stack (same
+    /// pattern as `Op::StoreConst`).
+    StoreGlobal(SymId),
     Jump(i32),
     JumpIfFalse(i32),
     /// Default-arg prologue helper. If positional `slot` was

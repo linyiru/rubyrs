@@ -29,6 +29,8 @@ EmbeddedVariableNode
 FalseNode
 FloatNode
 ForwardingSuperNode
+GlobalVariableReadNode
+GlobalVariableWriteNode
 HashNode
 IfNode
 ImplicitRestNode
