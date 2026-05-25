@@ -268,6 +268,13 @@ pub(crate) struct Vm {
     /// semantics: `return` inside a `do…end` exits the enclosing
     /// method, not just the block.
     pub(crate) method_return: Option<Value>,
+    /// Cached index into `protos` of the BoundMethod→Block
+    /// forwarder. Lazily built on first `&method_object`
+    /// coercion in `do_call_block`. The forwarder is a tiny
+    /// proto whose body does `captured[0].call(*args)`; one
+    /// instance is shared across every `&m` call site so the
+    /// allocation cost amortises to zero.
+    pub(crate) bound_method_forwarder_proto: Option<usize>,
 }
 
 
@@ -302,6 +309,7 @@ impl Vm {
             call_caches: Vec::new(),
             method_gen: 0,
             break_signaled: false,
+            bound_method_forwarder_proto: None,
             method_return: None,
         }
     }

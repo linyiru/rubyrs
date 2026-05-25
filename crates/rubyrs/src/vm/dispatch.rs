@@ -1262,6 +1262,67 @@ impl Vm {
         Ok(())
     }
 
+    /// Wrap a BoundMethod into a fresh `Value::Block` so it can
+    /// be passed wherever a block is expected. Lazily compiles a
+    /// single shared forwarder proto on first call; subsequent
+    /// calls reuse the same proto index. The synthesised
+    /// BlockHandle stashes the BoundMethod in `captured[0]` and
+    /// uses the proto's rest slot to splat the caller's args
+    /// into a `.call(...)` on it.
+    pub(crate) fn coerce_bound_method_to_block(&mut self, bm_id: crate::value::ObjId)
+        -> Result<crate::value::ObjId, Trap>
+    {
+        use crate::bytecode::{Op, Proto};
+        use crate::error::Span;
+        use crate::heap::HeapObj;
+        use std::cell::RefCell;
+
+        // Lazy proto build. Locals layout:
+        //   slot 0: the BoundMethod (captured)
+        //   slot 1: args Array (rest slot, filled by invoke_block)
+        let proto_idx = if let Some(idx) = self.bound_method_forwarder_proto {
+            idx
+        } else {
+            let call_id = self.interner.intern("call");
+            let proto = Proto {
+                name: "<bound-method-forwarder>".to_string(),
+                params: Vec::new(),
+                n_required_positional: 0,
+                rest_param: None,
+                kw_param_defaults: Vec::new(),
+                kw_rest_param: None,
+                n_locals: 2,
+                code: vec![
+                    Op::LoadLocal(0),
+                    Op::LoadLocal(1),
+                    Op::ApplyCall(call_id, u16::MAX),
+                    Op::Return,
+                ],
+                op_spans: vec![Span::ZERO; 4],
+                filename: "<synthetic>".into(),
+            };
+            let idx = self.protos.len();
+            self.protos.push(proto);
+            self.bound_method_forwarder_proto = Some(idx);
+            idx
+        };
+
+        // captured[0] = the BoundMethod; captured[1] left to
+        // invoke_block to populate with the rest Array.
+        let captured = Rc::new(RefCell::new(vec![Value::BoundMethod(bm_id), Value::Nil]));
+        self.maybe_gc();
+        self.check_alloc()?;
+        let id = self.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
+            proto_idx,
+            captured,
+            self_val: Value::Nil,
+            param_start: 0,
+            n_params: 0,
+            rest_slot: Some(1),
+        }));
+        Ok(id)
+    }
+
     pub(crate) fn invoke_block(&mut self, block_id: ObjId, args: Vec<Value>) -> Result<(), Trap> {
         self.check_frames()?;
         // Snapshot what we need out of the block's heap slot before
@@ -1347,8 +1408,15 @@ impl Vm {
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
-        let block = if let Value::Block(id) = block_val { id } else {
-            panic!("ICE: CallBlock without Block value on stack");
+        let block = match block_val {
+            Value::Block(id) => id,
+            // `&method_object` forwarding (K8): coerce the
+            // BoundMethod into a Block via `to_proc` semantics.
+            // Synthesises a vararg-lambda whose captured locals
+            // hold the BoundMethod; when invoked, it does
+            // `m.call(*args)`. See `coerce_bound_method_to_block`.
+            Value::BoundMethod(bm_id) => self.coerce_bound_method_to_block(bm_id)?,
+            _ => panic!("ICE: CallBlock without Block value on stack"),
         };
         let recv = if no_recv {
             None
