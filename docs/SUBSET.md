@@ -109,6 +109,36 @@ with a comment naming the upstream expectation and pointing
 back at this section; the skip un-resolves once per-line
 anchoring lands.
 
+### Method objects
+
+Covered: `obj.method(:name)` capture (including implicit-self
+`method(:foo)` inside a class body), `Class#instance_method`,
+`Method#call` / `Method#()` shorthand (with ArgumentError on
+arity mismatch), `Method#curry` (including the explicit-arity
+form), `Method#>>` / `Method#<<` composition (with another
+Method or any Proc on the RHS), `Method#==` /
+`UnboundMethod#==`, `&proc`-style forwarding
+(`arr.map(&doubler_method)`).
+
+Divergence from CRuby on `Method#==` for aliased methods:
+
+```ruby
+class Foo
+  def bar; 1; end
+  alias_method :baz, :bar
+end
+f = Foo.new
+f.method(:bar) == f.method(:baz)  # CRuby: true; rubyrs: false
+```
+
+rubyrs's `Method#==` compares both the underlying Method
+pointer and the call name; an `alias_method :baz, :bar`
+produces a Method whose call name is `:baz`, so the equality
+check returns false. CRuby looks through the alias. Tracked
+as a separate engine upgrade. The upstream ruby/spec `it`
+block covering aliased equality is skipped in
+[`crates/rubyrs/spec/ruby/method_equal_spec.rb`](../crates/rubyrs/spec/ruby/method_equal_spec.rb).
+
 ### Metaprogramming (PoC)
 - `alias_method :new, :old` — resolves the source method by walking
   the surrounding class's ancestor chain (so inherited methods can
