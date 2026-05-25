@@ -5464,99 +5464,137 @@ fn cext_dispatch(
             })?
         };
 
-        let ret_handle = with_caught_unwind(|| {
-            // Build the `self` handle:
-            // - For singleton methods (`rb_define_singleton_method`),
-            //   `self_class` is `Some(class_joined_name)`; intern a
-            //   `CValue::Class` handle so the C ext sees its own
-            //   class object as `self`, matching CRuby.
-            // - For top-level functions (`rb_define_global_function`),
-            //   `self_class` is `None`; pass `Qnil`, matching CRuby
-            //   (top-level functions are conceptually attached to
-            //   the main object, but extensions universally treat
-            //   their `self` as opaque-and-unused there).
-            let self_handle = match self_class {
-                Some(cname) => rubyrs_cext::with_state(|st| {
-                    st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
-                }),
-                None => rubyrs_cext::Qnil,
-            };
-            match arity {
-                0 => {
-                    type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(self_handle)
+        // L3-A: wrap the actual C call in BOTH `with_caught_unwind`
+        // (catches a Rust panic that escapes the trampoline) AND
+        // `call_with_raise` (catches a C-side `rb_raise` longjmp).
+        // The two mechanisms catch disjoint failure modes; only one
+        // fires per call. catch_unwind is on the outside so a panic
+        // inside call_with_raise's trampoline / FnOnce machinery
+        // still converts to a Trap rather than aborting.
+        //
+        // **Known limitation** (L3-A spike): a `rb_raise` from a
+        // deeply-nested rb_funcall chain longjmps PAST any
+        // intermediate Rust frames (specifically `cext_funcall_to_vm`
+        // bodies). Their `PinGuard`s' `Drop` never runs → vm.pinned
+        // grows. Harmless for non-pathological loads; the cleanup
+        // protocol is the next spike step.
+        let raise_outcome = with_caught_unwind(|| {
+            rubyrs_cext::raise::call_with_raise(|| {
+                let self_handle = match self_class {
+                    Some(cname) => rubyrs_cext::with_state(|st| {
+                        st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
+                    }),
+                    None => rubyrs_cext::Qnil,
+                };
+                match arity {
+                    0 => {
+                        type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
+                        let f: F = std::mem::transmute(func);
+                        f(self_handle)
+                    }
+                    1 => {
+                        type F = unsafe extern "C" fn(
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                        ) -> rubyrs_cext::Value;
+                        let f: F = std::mem::transmute(func);
+                        f(self_handle, arg_handles[0])
+                    }
+                    2 => {
+                        type F = unsafe extern "C" fn(
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                        ) -> rubyrs_cext::Value;
+                        let f: F = std::mem::transmute(func);
+                        f(self_handle, arg_handles[0], arg_handles[1])
+                    }
+                    3 => {
+                        type F = unsafe extern "C" fn(
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                        ) -> rubyrs_cext::Value;
+                        let f: F = std::mem::transmute(func);
+                        f(self_handle, arg_handles[0], arg_handles[1], arg_handles[2])
+                    }
+                    4 => {
+                        type F = unsafe extern "C" fn(
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                        ) -> rubyrs_cext::Value;
+                        let f: F = std::mem::transmute(func);
+                        f(
+                            self_handle,
+                            arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3],
+                        )
+                    }
+                    5 => {
+                        type F = unsafe extern "C" fn(
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                            rubyrs_cext::Value,
+                        ) -> rubyrs_cext::Value;
+                        let f: F = std::mem::transmute(func);
+                        f(
+                            self_handle,
+                            arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3], arg_handles[4],
+                        )
+                    }
+                    _ => unreachable!("arity validated above"),
                 }
-                1 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(self_handle, arg_handles[0])
-                }
-                2 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(self_handle, arg_handles[0], arg_handles[1])
-                }
-                3 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(self_handle, arg_handles[0], arg_handles[1], arg_handles[2])
-                }
-                4 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(
-                        self_handle,
-                        arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3],
-                    )
-                }
-                5 => {
-                    type F = unsafe extern "C" fn(
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                        rubyrs_cext::Value,
-                    ) -> rubyrs_cext::Value;
-                    let f: F = std::mem::transmute(func);
-                    f(
-                        self_handle,
-                        arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3], arg_handles[4],
-                    )
-                }
-                _ => unreachable!("arity validated above"),
-            }
+            })
         });
-        // Normal-exit cleanup. `_cb_guard` drops at end of `unsafe`
-        // block (LIFO with state_guard), so we consume the state
-        // guard here to extract the drained `CExtState` for handle
-        // translation. `_cb_guard` then pops the callback when the
-        // block ends. Both happen via `Drop` on the panic path too.
-        let st = state_guard.into_state();
-        let ret_handle = ret_handle.map_err(|panic_msg| {
+        // Unpack two layers: catch_unwind first (Rust panic → Trap),
+        // then call_with_raise's `Raised` (C raise → Trap).
+        let raised = raise_outcome.map_err(|panic_msg| {
             Trap::new(RubyError::RuntimeError {
                 msg: format!("C ext `{}' panicked: {}", name, panic_msg),
             })
         })?;
+        let ret_handle = match raised {
+            rubyrs_cext::raise::Raised::Returned(v) => v,
+            rubyrs_cext::raise::Raised::Raised { class, msg } => {
+                // Map sentinel → typed RubyError variant when we
+                // recognise it so script-level `rescue
+                // ArgumentError` / `rescue TypeError` etc. behaves
+                // exactly like a same-named Ruby-side raise. Unknown
+                // sentinels fall through to RuntimeError with the
+                // class name prefixed onto the message (wedge
+                // behaviour; per-class mapping is mechanical
+                // follow-up — add a RubyError variant or extend
+                // class_name() to cover the rest).
+                let class_name = rubyrs_cext::raise::exception_class_name_for_sentinel(class);
+                let err = match class_name {
+                    "ArgumentError"     => RubyError::ArgumentError { msg },
+                    "RuntimeError"      => RubyError::RuntimeError { msg },
+                    "TypeError"         => RubyError::TypeError { msg },
+                    "NameError"         => RubyError::NameError { msg },
+                    "ZeroDivisionError" => RubyError::ZeroDivisionError { msg },
+                    other => RubyError::RuntimeError {
+                        msg: format!("{}: {}", other, msg),
+                    },
+                };
+                // state_guard / _cb_guard drop normally on this
+                // early return — Rust unwinding still works because
+                // the longjmp landed in C frames BELOW us (inside
+                // rubyrs_jmp_call) and returned into Rust here. No
+                // RAII is skipped at this level.
+                return Err(Trap::new(err));
+            }
+        };
+        // Normal-exit cleanup. `_cb_guard` drops at end of `unsafe`
+        // block (LIFO with state_guard), so we consume the state
+        // guard here to extract the drained `CExtState` for handle
+        // translation.
+        let st = state_guard.into_state();
         // Re-deref vm_ptr for the result translation (Array/Hash
         // returns need `&mut Vm` to allocate on the heap). Time-
         // disjoint from any earlier &Vm uses in this function.

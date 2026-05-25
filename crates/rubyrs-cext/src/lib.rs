@@ -31,6 +31,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 
+// Spike L3-A: rb_raise / longjmp protection. See raise.rs and
+// c/setjmp_shim.c. Gated off wasi (no usable setjmp emulation).
+#[cfg(not(target_os = "wasi"))]
+pub mod raise;
+
 /// Opaque token the C side sees as `VALUE`. Numerically an index
 /// into [`CExtState::values`]; semantically meaningless to C code.
 pub type Value = u64;
