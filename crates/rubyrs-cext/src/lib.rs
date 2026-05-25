@@ -35,6 +35,7 @@ use std::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 // c/setjmp_shim.c. Gated off wasi (no usable setjmp emulation).
 #[cfg(not(target_os = "wasi"))]
 pub mod raise;
+pub mod stubs;
 
 /// Opaque token the C side sees as `VALUE`. Numerically an index
 /// into [`CExtState::values`]; semantically meaningless to C code.
@@ -237,18 +238,36 @@ pub struct CExtState {
 
 impl CExtState {
     pub fn new() -> Self {
+        // 64 = headroom for typical JSON-parse-style cext calls
+        // (~50 handles allocated during build). Avoids 2-3
+        // Vec::grow reallocations per cext_dispatch. The
+        // 20 sentinels seeded below already consume 31% of the
+        // initial capacity; `intern` grows from there if needed.
+        let mut values = Vec::with_capacity(64);
+        values.extend([
+                CValue::Nil,                                 // 0  Qnil
+                CValue::True,                                // 1  Qtrue
+                CValue::False,                               // 2  Qfalse
+                CValue::Class(String::from("Object")),       // 3  rb_cObject
+                CValue::Class(String::from("String")),       // 4  rb_cString
+                CValue::Class(String::from("Array")),        // 5  rb_cArray
+                CValue::Class(String::from("Hash")),         // 6  rb_cHash
+                CValue::Class(String::from("Float")),        // 7  rb_cFloat
+                CValue::Class(String::from("Integer")),      // 8  rb_cInteger
+                CValue::Class(String::from("Numeric")),      // 9  rb_cNumeric
+                CValue::Class(String::from("Symbol")),       // 10 rb_cSymbol
+                CValue::Class(String::from("TrueClass")),    // 11 rb_cTrueClass
+                CValue::Class(String::from("FalseClass")),   // 12 rb_cFalseClass
+                CValue::Class(String::from("NilClass")),     // 13 rb_cNilClass
+                CValue::Class(String::from("BasicObject")),  // 14 rb_cBasicObject
+                CValue::Class(String::from("Module")),       // 15 rb_cModule
+                CValue::Class(String::from("Class")),        // 16 rb_cClass
+                CValue::Class(String::from("Kernel")),       // 17 rb_mKernel
+                CValue::Class(String::from("Comparable")),   // 18 rb_mComparable
+                CValue::Class(String::from("Enumerable")),   // 19 rb_mEnumerable
+            ]);
         Self {
-            // Sentinel handle 3 = rb_cObject. We don't actually register
-            // an Object class on the rubyrs side; this exists purely so
-            // `rb_define_class_under(parent, name, rb_cObject)` accepts
-            // its third argument. Superclass is ignored at the spike
-            // level — flat namespace only.
-            values: vec![
-                CValue::Nil,
-                CValue::True,
-                CValue::False,
-                CValue::Class(String::from("Object")),
-            ],
+            values,
             registered_fns: Vec::new(),
             registered_classes: Vec::new(),
             registered_singletons: Vec::new(),
@@ -458,6 +477,33 @@ pub static Qfalse: Value = 2;
 #[used]
 #[unsafe(no_mangle)]
 pub static rb_cObject: Value = 3;
+
+// Class / module sentinels 4-19. CRuby exposes each as
+// `extern VALUE rb_c<Name>`; flori/json (and most non-trivial
+// cexts) use them as comparison targets in fast type dispatch
+// (`if (RBASIC_CLASS(obj) == rb_cString) {...}`). rubyrs's
+// `rb_basic_class` maps each `CValue` variant to the matching
+// sentinel — so `RBASIC_CLASS(rb_str_new(...))` returns
+// `rb_cString` by pointer identity, matching the C ext's
+// expectation.
+//
+// Numbers must match `CExtState::new`'s seeded `values` vec.
+#[used] #[unsafe(no_mangle)] pub static rb_cString: Value = 4;
+#[used] #[unsafe(no_mangle)] pub static rb_cArray: Value = 5;
+#[used] #[unsafe(no_mangle)] pub static rb_cHash: Value = 6;
+#[used] #[unsafe(no_mangle)] pub static rb_cFloat: Value = 7;
+#[used] #[unsafe(no_mangle)] pub static rb_cInteger: Value = 8;
+#[used] #[unsafe(no_mangle)] pub static rb_cNumeric: Value = 9;
+#[used] #[unsafe(no_mangle)] pub static rb_cSymbol: Value = 10;
+#[used] #[unsafe(no_mangle)] pub static rb_cTrueClass: Value = 11;
+#[used] #[unsafe(no_mangle)] pub static rb_cFalseClass: Value = 12;
+#[used] #[unsafe(no_mangle)] pub static rb_cNilClass: Value = 13;
+#[used] #[unsafe(no_mangle)] pub static rb_cBasicObject: Value = 14;
+#[used] #[unsafe(no_mangle)] pub static rb_cModule: Value = 15;
+#[used] #[unsafe(no_mangle)] pub static rb_cClass: Value = 16;
+#[used] #[unsafe(no_mangle)] pub static rb_mKernel: Value = 17;
+#[used] #[unsafe(no_mangle)] pub static rb_mComparable: Value = 18;
+#[used] #[unsafe(no_mangle)] pub static rb_mEnumerable: Value = 19;
 
 /// # Safety
 ///
@@ -1392,4 +1438,136 @@ pub unsafe extern "C" fn rb_check_typeddata(
             .expect("ICE: rb_check_typeddata called outside an active cext dispatch")
     });
     cb(obj, type_ptr as *const std::ffi::c_void)
+}
+
+// ---------------------------------------------------------------
+// L3-D tricky fns: semantically load-bearing, kept in the main
+// lib.rs because they touch internal state shape. Categorized
+// stubs live in `stubs/` submodules.
+// ---------------------------------------------------------------
+
+/// CRuby exposes `RBASIC_CLASS(obj)` as a struct-field accessor
+/// returning the object's class VALUE. flori/json (and most
+/// non-trivial cexts) use it for fast type dispatch — comparing
+/// the returned handle against `rb_cString` / `rb_cArray` etc.
+/// rather than going through `rb_obj_class` + method-call
+/// machinery.
+///
+/// We map each `CValue` variant to its built-in class sentinel
+/// (seeded at handles 4-19 in [`CExtState::new`]). `HeapRef` —
+/// references to objects on the rubyrs Vm heap, including
+/// user-defined classes — falls back to Qnil; the cext side
+/// can't introspect Vm-side class identity without a host
+/// round-trip we haven't wired. flori/json's dispatch only
+/// touches built-ins in the hot path, so Qnil for HeapRef is
+/// the documented gap.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_basic_class(v: Value) -> Value {
+    with_state(|st| match st.resolve(v) {
+        CValue::Str(_) => rb_cString,
+        CValue::Int(_) => rb_cInteger,
+        CValue::Array(_) => rb_cArray,
+        CValue::Hash(_) => rb_cHash,
+        CValue::True => rb_cTrueClass,
+        CValue::False => rb_cFalseClass,
+        CValue::Nil => rb_cNilClass,
+        CValue::Class(_) => rb_cClass,
+        CValue::HeapRef(_) => Qnil,
+    })
+}
+
+/// CRuby's macro `RTYPEDDATA_DATA(obj)` is an lvalue used both
+/// as a read (`p = RTYPEDDATA_DATA(v)`) and as an assignment
+/// target (`RTYPEDDATA_DATA(v) = NULL`, eg parser.rl:304's
+/// `rvalue_stack_eagerly_release` after stack drain).
+///
+/// We expose a `void**` slot helper rather than a value getter.
+/// The header's `#define RTYPEDDATA_DATA(obj) (*rb_typeddata_data_slot(obj))`
+/// dereferences the returned `void**` so the macro's lvalue
+/// usage compiles unchanged.
+///
+/// SPIKE STATUS: returns null. flori/json's parser uses this
+/// only in a runtime path (not Init); for L4 dlopen success the
+/// symbol need only exist. A correct impl would route through
+/// the host's TypedData slot store — TODO when we actually
+/// drive a `JSON.parse` call.
+///
+/// # Safety
+///
+/// Caller must hold a valid TypedData VALUE. Calling on a
+/// non-TypedData value (or after the wrapping value is GC'd) is
+/// caller-bug — we return a slot pointing at a sentinel, which
+/// would silently corrupt if the caller writes through it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_typeddata_data_slot(_obj: Value) -> *mut *mut std::ffi::c_void {
+    // Thread-local sentinel storage. Returned by every call;
+    // good enough for parser.c's `RTYPEDDATA_DATA(h) = NULL`
+    // pattern (where the write is observed only by a subsequent
+    // read in the same path — both land here). Will need
+    // proper per-VALUE slots before any cext actually relies on
+    // the slot reading back what was written across multiple
+    // TypedData objects in the same call.
+    thread_local! {
+        static SLOT: std::cell::UnsafeCell<*mut std::ffi::c_void> =
+            const { std::cell::UnsafeCell::new(std::ptr::null_mut()) };
+    }
+    SLOT.with(|s| s.get())
+}
+
+/// `rb_path_to_class("Foo::Bar")` is CRuby's "look up an
+/// already-defined class by its fully-qualified path string"
+/// helper, used in cexts that need a class handle without
+/// pre-storing one (e.g. exception classes defined on the Ruby
+/// side that the cext only raises against).
+///
+/// Two CRuby entry points share semantics:
+/// - `rb_path_to_class(VALUE pathname)` — takes a Ruby String.
+/// - `rb_path2class(const char *path)` — takes a C string.
+///
+/// We implement both. They search the current `CExtState`'s
+/// values for a `CValue::Class(joined_name)` matching the
+/// argument. If not found, we intern a fresh `CValue::Class`
+/// stub so the returned handle is non-nil and usable as a
+/// `rb_raise` target — the spike doesn't model class
+/// inheritance, so any class-handle works at the dispatch
+/// layer.
+fn path_lookup_or_stub(name: String) -> Value {
+    with_state(|st| {
+        for (idx, v) in st.values.iter().enumerate() {
+            if let CValue::Class(n) = v {
+                if n == &name {
+                    return idx as Value;
+                }
+            }
+        }
+        st.intern(CValue::Class(name))
+    })
+}
+
+/// # Safety
+///
+/// `pathname` must be a valid VALUE handle resolving to a String.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_path_to_class(pathname: Value) -> Value {
+    let name = with_state(|st| match st.resolve(pathname) {
+        CValue::Str(bytes) => {
+            // Strip trailing NUL sentinel.
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
+        }
+        _ => String::new(),
+    });
+    path_lookup_or_stub(name)
+}
+
+/// # Safety
+///
+/// `path` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_path2class(path: *const c_char) -> Value {
+    assert!(!path.is_null(), "rb_path2class: null path");
+    let name = unsafe { CStr::from_ptr(path) }
+        .to_string_lossy()
+        .into_owned();
+    path_lookup_or_stub(name)
 }
