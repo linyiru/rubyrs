@@ -211,3 +211,162 @@ impl Vm {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use crate::bytecode::Proto;
+    use crate::intern::Interner;
+
+    fn mk_vm() -> Vm {
+        Vm::new(Vec::<Proto>::new(), Interner::new())
+    }
+
+    fn mk_class(name: &str, superclass: Option<Rc<Class>>) -> Rc<Class> {
+        Rc::new(Class {
+            name: name.to_string(),
+            methods: RefCell::new(HashMap::new()),
+            singleton_methods: RefCell::new(HashMap::new()),
+            includes: RefCell::new(Vec::new()),
+            superclass: RefCell::new(superclass),
+        })
+    }
+
+    /// Register `RuntimeError` on the Vm's class table so the
+    /// `Value::Str → Exception` normalisation has somewhere to
+    /// look. Without it normalize_exception falls into the
+    /// "no-class-registered" path and returns the input
+    /// unchanged.
+    fn register_runtime_error(vm: &mut Vm) -> Rc<Class> {
+        let cls = mk_class("RuntimeError", None);
+        let cls_id = vm.interner.intern("RuntimeError");
+        vm.classes.insert(cls_id, cls.clone());
+        cls
+    }
+
+    #[test]
+    fn normalize_exception_passes_object_through() {
+        let mut vm = mk_vm();
+        let cls = mk_class("Anything", None);
+        // Allocate an empty Instance directly.
+        let id = vm.heap.alloc(HeapObj::Instance(Instance {
+            class: cls,
+            ivars: HashMap::new(),
+            singleton_class: None,
+        }));
+        let v = Value::Object(id);
+        let out = vm.normalize_exception(v.clone());
+        // Same ObjId comes back — the value passes through.
+        if let (Value::Object(a), Value::Object(b)) = (&v, &out) {
+            assert_eq!(a, b);
+        } else {
+            panic!("expected Object pass-through");
+        }
+    }
+
+    #[test]
+    fn normalize_exception_wraps_string_as_runtime_error() {
+        let mut vm = mk_vm();
+        register_runtime_error(&mut vm);
+        let msg = Value::new_str("boom".to_string());
+        let out = vm.normalize_exception(msg);
+        let id = match out {
+            Value::Object(id) => id,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        // Class is RuntimeError.
+        assert_eq!(vm.heap.class_of(id).name, "RuntimeError");
+        // `@message` is the original string.
+        let msg_sym = vm.interner.intern("@message");
+        let stored = vm.heap.instance(id).ivars.get(&msg_sym).cloned()
+            .expect("@message ivar should be set");
+        assert!(matches!(stored, Value::Str(_)));
+    }
+
+    #[test]
+    fn normalize_exception_string_without_class_passes_through() {
+        // No RuntimeError registered → normalize bails and the
+        // input passes through unchanged. Matches the documented
+        // "stripped runtime missing the preamble" fall-through.
+        let mut vm = mk_vm();
+        let msg = Value::new_str("boom".to_string());
+        let out = vm.normalize_exception(msg);
+        assert!(matches!(out, Value::Str(_)));
+    }
+
+    #[test]
+    fn normalize_exception_class_returns_empty_instance() {
+        let mut vm = mk_vm();
+        let cls = mk_class("MyError", None);
+        let v = Value::Class(cls.clone());
+        let out = vm.normalize_exception(v);
+        let id = match out {
+            Value::Object(id) => id,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        assert!(Rc::ptr_eq(&vm.heap.class_of(id), &cls));
+        // `@message` is NOT set (no arg).
+        let msg_sym = vm.interner.intern("@message");
+        assert!(!vm.heap.instance(id).ivars.contains_key(&msg_sym));
+    }
+
+    #[test]
+    fn trap_to_exception_returns_none_for_resource_exhausted() {
+        let mut vm = mk_vm();
+        let trap = Trap::new(RubyError::ResourceExhausted { msg: "fuel".into() });
+        assert!(vm.trap_to_exception(&trap).is_none());
+    }
+
+    #[test]
+    fn trap_to_exception_returns_none_for_uncaught() {
+        let mut vm = mk_vm();
+        let trap = Trap::new(RubyError::Uncaught {
+            class_name: "X".into(),
+            message: "y".into(),
+        });
+        assert!(vm.trap_to_exception(&trap).is_none());
+    }
+
+    #[test]
+    fn trap_to_exception_returns_none_for_syntax_error() {
+        let mut vm = mk_vm();
+        let trap = Trap::new(RubyError::SyntaxError { msg: "bad".into() });
+        assert!(vm.trap_to_exception(&trap).is_none());
+    }
+
+    #[test]
+    fn trap_to_exception_returns_none_when_class_missing() {
+        // ArgumentError isn't routed to None by the variant filter,
+        // but with no `ArgumentError` class registered the
+        // `self.classes.get(&cls_id).cloned()?` propagates None.
+        let mut vm = mk_vm();
+        let trap = Trap::new(RubyError::ArgumentError { msg: "bad".into() });
+        assert!(vm.trap_to_exception(&trap).is_none());
+    }
+
+    #[test]
+    fn trap_to_exception_builds_exception_for_registered_class() {
+        let mut vm = mk_vm();
+        let cls = mk_class("ArgumentError", None);
+        let cls_id = vm.interner.intern("ArgumentError");
+        vm.classes.insert(cls_id, cls.clone());
+
+        let trap = Trap::new(RubyError::ArgumentError { msg: "bad arg".into() });
+        let out = vm.trap_to_exception(&trap).expect("class is registered");
+        let id = match out {
+            Value::Object(id) => id,
+            other => panic!("expected Object, got {other:?}"),
+        };
+        assert!(Rc::ptr_eq(&vm.heap.class_of(id), &cls));
+
+        let msg_sym = vm.interner.intern("@message");
+        let stored = vm.heap.instance(id).ivars.get(&msg_sym).cloned()
+            .expect("@message ivar should be set");
+        // The message string carries the trap's message.
+        let s = stored.to_display(&vm.heap, &vm.interner);
+        assert_eq!(s, "bad arg");
+    }
+}
+
