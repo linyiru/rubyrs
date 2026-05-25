@@ -32,7 +32,13 @@ describe "String#gsub with pattern and replacement" do
   end
 
   it "ignores a block if a replacement string is supplied" do
-    assert_eq("food".gsub(/f/, "g") { "w" }, "good")
+    # Mirror sub_spec's pattern: observable side effect proves
+    # the block was actually skipped, not silently discarded
+    # after running.
+    ran = false
+    out = "food".gsub(/f/, "g") { ran = true; "w" }
+    assert_eq(out, "good")
+    assert_eq(ran, false)
   end
 
   it "doesn't interpret regexp metacharacters when pattern is a String" do

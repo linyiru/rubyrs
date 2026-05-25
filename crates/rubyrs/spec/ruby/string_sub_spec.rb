@@ -27,8 +27,14 @@ describe "String#sub with pattern, replacement" do
   end
 
   it "ignores a block if a replacement string is supplied" do
-    # The replacement string wins; the block never runs.
-    assert_eq("food".sub(/f/, "g") { "w" }, "good")
+    # The replacement string wins; the block never runs. An
+    # observable side effect proves the block was actually
+    # skipped — a return-value-only assertion would still pass
+    # if the block ran and was silently discarded.
+    ran = false
+    out = "food".sub(/f/, "g") { ran = true; "w" }
+    assert_eq(out, "good")
+    assert_eq(ran, false)
   end
 
   it "doesn't interpret regexp metacharacters when pattern is a String" do

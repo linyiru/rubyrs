@@ -77,8 +77,10 @@ far:
   metacharacter interpretation): `"\\d".sub('\\d', 'a')` → `"a"`
 
 Not yet shipped on `sub` / `gsub` (each will land in its own
-PR; specs in `spec/ruby/string_*_spec.rb` skip the upstream
-blocks that exercise them, with a `#` comment naming the gap):
+PR; specs in
+[`crates/rubyrs/spec/ruby/string_*_spec.rb`](../crates/rubyrs/spec/ruby/)
+skip the upstream blocks that exercise them, with a `#`
+comment naming the gap):
 
 - `/i` case-insensitive Regex flag. `"Hello".sub(/h/i, "j")`
   currently returns `"Hello"` (no match), upstream expects
@@ -102,9 +104,10 @@ multi-line input. `"Text\nFoo".gsub(/^/, ' ')` returns
 `" Text\nFoo"` (one anchor); CRuby returns `" Text\n Foo"` (one
 per line). Tracked as a separate engine upgrade. The upstream
 ruby/spec `it` block covering this is skipped in
-`spec/ruby/string_gsub_spec.rb` with a comment naming the
-upstream expectation and pointing back at this section; the
-skip un-resolves once per-line anchoring lands.
+[`crates/rubyrs/spec/ruby/string_gsub_spec.rb`](../crates/rubyrs/spec/ruby/string_gsub_spec.rb)
+with a comment naming the upstream expectation and pointing
+back at this section; the skip un-resolves once per-line
+anchoring lands.
 
 ### Metaprogramming (PoC)
 - `alias_method :new, :old` — resolves the source method by walking

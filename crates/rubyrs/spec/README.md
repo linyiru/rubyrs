@@ -153,11 +153,14 @@ case with a `#` comment naming the upstream source line.
    `instance_method`, mock objects.
 3. Use named classes inside `it` blocks (`class MyTest1; ...; end`).
 4. Run `cargo test -p rubyrs --test ruby_spec` and iterate.
-
-When you find a divergence that's intentional (documented in
-SUBSET.md), don't smuggle it into the spec — write the spec to
-match rubyrs's documented behaviour and add a comment pointing
-at SUBSET.md.
+5. For intentional rubyrs/CRuby divergences, follow the
+   convention from the "Translation conventions" section above:
+   document the divergence in `docs/SUBSET.md` and skip the
+   upstream `it` block with a `#` comment naming the
+   upstream source line — do NOT rewrite the assertion to
+   match rubyrs's narrower behaviour. Earlier versions of this
+   README told contributors to do the rewrite; that was wrong
+   for a spec set whose purpose is to mirror upstream.
 
 ## What this gates against (vs. `tests/embed.rs`)
 
