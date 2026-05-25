@@ -213,7 +213,7 @@ impl Vm {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
             }
-            Value::Block(_) => matches!(name, "call"),
+            Value::Block(_) => matches!(name, "call" | "[]" | "()" | "curry" | ">>" | "<<"),
             Value::Regex(_) => matches!(name, "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"),
             Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry"),
             Value::UnboundMethod(_) => matches!(name, "bind" | "arity" | "parameters" | "=="),

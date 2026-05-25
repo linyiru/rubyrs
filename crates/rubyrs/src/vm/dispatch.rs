@@ -758,7 +758,7 @@ impl Vm {
         // `.call` invocations until `target_arity` is reached, then
         // invokes the underlying with the full arg list. `class_of`
         // reports CurriedProc as `Proc`, matching CRuby.
-        if let Value::BoundMethod(_) = &recv
+        if matches!(&recv, Value::BoundMethod(_) | Value::Block(_))
             && &*name == "curry" && args.len() <= 1 {
                 let target_arity: u16 = if let Some(Value::Int(n)) = args.first() {
                     if *n < 0 {
@@ -772,10 +772,9 @@ impl Vm {
                         }));
                     }
                     *n as u16
-                } else {
-                    let bid = match &recv { Value::BoundMethod(b) => *b, _ => unreachable!() };
+                } else if let Value::BoundMethod(bid) = &recv {
                     let (bm_recv, m_name_id) = {
-                        let (r, n) = self.heap.bound_method(bid);
+                        let (r, n) = self.heap.bound_method(*bid);
                         (r.clone(), n)
                     };
                     let class = match self.class_of(&bm_recv) {
@@ -790,6 +789,21 @@ impl Vm {
                             msg: "cannot curry a method with unknown arity (builtin)".into(),
                         })),
                     }
+                } else if let Value::Block(bid) = &recv {
+                    // Proc#curry — derive arity from the underlying
+                    // proto's required-positional count. Rest / kw
+                    // are not supported as auto-arity for curry; user
+                    // can still pass an explicit arity hint above.
+                    let bh = self.heap.block(*bid);
+                    let proto = &self.protos[bh.proto_idx];
+                    if bh.rest_slot.is_some() && proto.n_required_positional == 0 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "cannot curry a proc with only rest params (pass explicit arity)".into(),
+                        }));
+                    }
+                    proto.n_required_positional
+                } else {
+                    unreachable!()
                 };
                 self.maybe_gc();
                 self.check_alloc()?;

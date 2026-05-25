@@ -1070,7 +1070,7 @@ fn literal_to_value(e: &Expr, interner: &mut Interner) -> Value {
 /// caller to encode into the `CreateBlock` op. `rest_slot`
 /// is `u16::MAX` when the block has no `*rest` parameter.
 pub(crate) fn compile_block(
-    parent: &ProtoBuilder, block_params: &[BlockParam], body: &[SExpr],
+    parent: &mut ProtoBuilder, block_params: &[BlockParam], body: &[SExpr],
     protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> (usize, u16, u16, u16) {
     let mut b = ProtoBuilder {
@@ -1243,6 +1243,17 @@ pub(crate) fn compile_block(
     let idx = protos.len();
     // Blocks don't use the default-arg prologue (no defaults
     // syntax in our block params), so every slot is required.
+    // Propagate the block's slot reservations back to the parent
+    // so subsequent outer-scope local allocations (`x = 99` after
+    // `f = ->(a,b) { ... }`) don't reuse the block's param /
+    // body slots and clobber them on each invocation. The
+    // captured Rc is shared, so writes to the block's slots
+    // are visible (and DESTRUCTIVE) to anything the parent
+    // happens to bind into the same index later.
+    let block_n_locals = b.n_locals;
     protos.push(b.build("<block>".into(), proto_params, proto_param_count as u16));
+    if parent.n_locals < block_n_locals {
+        parent.n_locals = block_n_locals;
+    }
     (idx, param_start, n_params, rest_slot)
 }
