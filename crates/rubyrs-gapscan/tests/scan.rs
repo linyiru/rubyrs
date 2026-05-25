@@ -123,18 +123,16 @@ fn fixture_exercises_exact_missing_class_set() {
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    // Exact set, exact counts. With Module + extend + Regex now
-    // Supported on master, the Missing exemplars shifted again:
-    // NumberedReferenceReadNode (`->` lambdas) and ConstantPathWriteNode
-    // (`Foo::Bar = ...`). Both have no Missing children — clean
-    // tripwires (unlike `case/when` which used to pull WhenNode
-    // along with it).
+    // Exact set, exact counts. ConstantWriteNode landed (top-level
+    // `FOO = expr`), so the fixture swapped it for AliasMethodNode
+    // (`alias new old`) — same shape of tripwire, no Missing
+    // children, distinct from the other two exemplars.
     let expected: std::collections::BTreeSet<&str> =
-        ["NumberedReferenceReadNode", "ConstantWriteNode", "ConstantPathWriteNode"]
+        ["NumberedReferenceReadNode", "AliasMethodNode", "ConstantPathWriteNode"]
             .into_iter()
             .collect();
     assert_eq!(names, expected, "Missing-class set drifted");
-    for cls in ["NumberedReferenceReadNode", "ConstantWriteNode", "ConstantPathWriteNode"] {
+    for cls in ["NumberedReferenceReadNode", "AliasMethodNode", "ConstantPathWriteNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
