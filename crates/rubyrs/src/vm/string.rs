@@ -63,6 +63,68 @@ pub(crate) fn string_call(
         (Value::Str(a), "succ", []) | (Value::Str(a), "next", []) => {
             Some(Value::new_str(str_succ(&a.borrow())))
         }
+        // `center` / `ljust` / `rjust` — pad to `width` with the
+        // optional pad-string (default " "). The pad cycles when
+        // multichar. If `width` is ≤ receiver length, the receiver
+        // is returned unchanged. Empty pad raises ArgumentError
+        // (caught by the early arg-shape guard via `pad_len == 0`).
+        // CRuby: when `center` produces odd-total padding, the
+        // extra char goes on the RIGHT.
+        (Value::Str(a), "center" | "ljust" | "rjust", pad_args)
+            if matches!(pad_args.first(), Some(Value::Int(_)))
+                && (pad_args.len() == 1
+                    || (pad_args.len() == 2 && matches!(pad_args[1], Value::Str(_)))) => {
+            let width = match &pad_args[0] {
+                Value::Int(w) => *w,
+                _ => unreachable!(),
+            };
+            let pad: String = match pad_args.get(1) {
+                None => " ".to_string(),
+                Some(Value::Str(s)) => s.borrow().clone(),
+                _ => unreachable!(),
+            };
+            if pad.is_empty() {
+                return Err(RubyError::ArgumentError {
+                    msg: "zero width padding".into(),
+                });
+            }
+            let a_ref = a.borrow();
+            let recv_chars: Vec<char> = a_ref.chars().collect();
+            let recv_len = recv_chars.len() as i64;
+            if width <= recv_len {
+                return Ok(Some(Value::Str(a.clone())));
+            }
+            let pad_chars: Vec<char> = pad.chars().collect();
+            let total_pad = (width - recv_len) as usize;
+            let take_from_pad = |n: usize| -> String {
+                let mut out = String::with_capacity(n);
+                for i in 0..n { out.push(pad_chars[i % pad_chars.len()]); }
+                out
+            };
+            let result: String = match name {
+                "ljust" => {
+                    let mut s = a_ref.clone();
+                    s.push_str(&take_from_pad(total_pad));
+                    s
+                }
+                "rjust" => {
+                    let mut s = take_from_pad(total_pad);
+                    s.push_str(&a_ref);
+                    s
+                }
+                "center" => {
+                    let left = total_pad / 2;
+                    let right = total_pad - left;
+                    let mut s = take_from_pad(left);
+                    s.push_str(&a_ref);
+                    s.push_str(&take_from_pad(right));
+                    s
+                }
+                _ => unreachable!(),
+            };
+            check(result.len())?;
+            Some(Value::new_str(result))
+        }
         (Value::Str(a), "strip", []) => Some(Value::new_str(a.borrow().trim().to_string())),
         (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.borrow().trim_start().to_string())),
         (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.borrow().trim_end().to_string())),

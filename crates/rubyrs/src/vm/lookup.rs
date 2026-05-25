@@ -154,6 +154,7 @@ impl Vm {
                 "length" | "size" | "empty?" |
                 "upcase" | "downcase" | "reverse" |
                 "strip" | "lstrip" | "rstrip" |
+                "center" | "ljust" | "rjust" |
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
