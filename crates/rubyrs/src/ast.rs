@@ -717,34 +717,56 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // ConstantPath op-writes — `Foo::Bar += 1`. Target is a
     // ConstantPathNode; flatten via the same helper used by
     // ConstantPathWriteNode. Dynamic-head paths
-    // (`obj.const::Bar += 1`) fall through unsupported.
+    // (`obj.const::Bar += 1`) fall back to trailing-name-only,
+    // mirroring the existing ConstantPathRead / ConstantPathWrite
+    // arms — keeps op-write behaviour consistent with the base
+    // read/write so `obj.foo::BAR += 1` doesn't silently become
+    // an unsupported-node error while `obj.foo::BAR = 1` works.
     if let Some(n) = node.as_constant_path_operator_write_node() {
-        let target = n.target().as_node();
-        if let Some(joined) = flatten_constant_path(&target) {
-            let op = cid_to_string(n.binary_operator());
-            let read = sp(node, Expr::ConstRead(joined.clone()));
+        let target = n.target();
+        let op = cid_to_string(n.binary_operator());
+        let make = |name: String| {
+            let read = sp(node, Expr::ConstRead(name.clone()));
             let rhs = sp(node, Expr::Call {
                 receiver: Some(Box::new(read)),
-                name: op,
+                name: op.clone(),
                 args: vec![tr(&n.value())],
             });
-            return sp(node, Expr::ConstWrite(joined, Box::new(rhs)));
+            sp(node, Expr::ConstWrite(name, Box::new(rhs)))
+        };
+        if let Some(joined) = flatten_constant_path(&target.as_node()) {
+            return make(joined);
+        }
+        if let Some(name_id) = target.name() {
+            return make(cid_to_string(name_id));
         }
     }
     if let Some(n) = node.as_constant_path_or_write_node() {
-        let target = n.target().as_node();
-        if let Some(joined) = flatten_constant_path(&target) {
-            let read = sp(node, Expr::ConstRead(joined.clone()));
-            let write = sp(node, Expr::ConstWrite(joined, Box::new(tr(&n.value()))));
-            return sp(node, Expr::Or(Box::new(read), Box::new(write)));
+        let target = n.target();
+        let make = |name: String| {
+            let read = sp(node, Expr::ConstRead(name.clone()));
+            let write = sp(node, Expr::ConstWrite(name, Box::new(tr(&n.value()))));
+            sp(node, Expr::Or(Box::new(read), Box::new(write)))
+        };
+        if let Some(joined) = flatten_constant_path(&target.as_node()) {
+            return make(joined);
+        }
+        if let Some(name_id) = target.name() {
+            return make(cid_to_string(name_id));
         }
     }
     if let Some(n) = node.as_constant_path_and_write_node() {
-        let target = n.target().as_node();
-        if let Some(joined) = flatten_constant_path(&target) {
-            let read = sp(node, Expr::ConstRead(joined.clone()));
-            let write = sp(node, Expr::ConstWrite(joined, Box::new(tr(&n.value()))));
-            return sp(node, Expr::And(Box::new(read), Box::new(write)));
+        let target = n.target();
+        let make = |name: String| {
+            let read = sp(node, Expr::ConstRead(name.clone()));
+            let write = sp(node, Expr::ConstWrite(name, Box::new(tr(&n.value()))));
+            sp(node, Expr::And(Box::new(read), Box::new(write)))
+        };
+        if let Some(joined) = flatten_constant_path(&target.as_node()) {
+            return make(joined);
+        }
+        if let Some(name_id) = target.name() {
+            return make(cid_to_string(name_id));
         }
     }
     if let Some(n) = node.as_multi_write_node() {
