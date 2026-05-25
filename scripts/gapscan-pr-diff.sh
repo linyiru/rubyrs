@@ -48,7 +48,10 @@ TARGETS=(
 # --- config -------------------------------------------------------
 CACHE_DIR="${GAPSCAN_CACHE:-/tmp/gapscan-targets}"
 BASE_REF="${GAPSCAN_BASE_REF:-origin/master}"
-GAPSCAN_BIN_HEAD="${GAPSCAN_BIN_HEAD:-./target/release/rubyrs-gapscan}"
+# Honour CARGO_TARGET_DIR if the caller (or a shell-level export)
+# redirects cargo's build output — otherwise the default `./target`
+# matches what `cargo build` produces in this repo's root.
+GAPSCAN_BIN_HEAD="${GAPSCAN_BIN_HEAD:-${CARGO_TARGET_DIR:-./target}/release/rubyrs-gapscan}"
 if [[ -n "${GAPSCAN_WORK:-}" ]]; then
   # Caller manages lifecycle (CI passes a path that participates in
   # actions/cache; we mustn't delete it on exit).
