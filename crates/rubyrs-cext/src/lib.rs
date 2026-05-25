@@ -655,6 +655,16 @@ pub unsafe extern "C" fn rb_funcallv(
 ) -> Value {
     let method = resolve_id(mid)
         .expect("ICE: rb_funcallv with unknown ID; missing rb_intern call?");
+    // `argc` is signed (matches CRuby's `int argc`); a negative
+    // value indicates the C extension is violating the ABI
+    // contract. The previous `if argc > 0 { ... } else { vec![] }`
+    // would silently drop all args for negative argc and dispatch
+    // a wrong-arity call. Refuse to enter that state.
+    assert!(
+        argc >= 0,
+        "rb_funcallv: negative argc {} (C ext ABI violation)",
+        argc
+    );
     let args: Vec<Value> = if argc > 0 {
         assert!(!argv.is_null(), "rb_funcallv: null argv with argc > 0");
         // SAFETY: caller guarantees argv..argv+argc is readable.
