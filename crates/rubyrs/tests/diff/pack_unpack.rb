@@ -37,7 +37,6 @@ puts ["AB"].pack("Z4").bytes.inspect         # [65, 66, 0, 0]
 roundtrip = [1, 2, 3, 4].pack("N*").unpack("N*")
 puts roundtrip.inspect                       # [1, 2, 3, 4]
 
-# 64-bit Q is native (LE). Using a value within Int32 to dodge
-# a pre-existing 64-bit-literal parse limitation (separately
-# tracked).
-puts [65537].pack("Q").bytes.inspect         # [1, 0, 1, 0, 0, 0, 0, 0]
+# 64-bit Q is native (LE).
+puts [0x0102030405060708].pack("Q").bytes.inspect
+# → [8, 7, 6, 5, 4, 3, 2, 1]

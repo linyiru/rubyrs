@@ -206,3 +206,4 @@ fn run_diff(name: &str) {
 #[test] fn method_hash_source() { run_diff("method_hash_source"); }
 #[test] fn string_encoding_stubs() { run_diff("string_encoding_stubs"); }
 #[test] fn pack_unpack() { run_diff("pack_unpack"); }
+#[test] fn integer_literal_i64() { run_diff("integer_literal_i64"); }

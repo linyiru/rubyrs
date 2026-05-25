@@ -364,8 +364,37 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return Spanned::new(span, seq_inner(stmts));
     }
     if let Some(n) = node.as_integer_node() {
-        let v: i32 = n.value().try_into().unwrap_or(0);
-        return sp(node, Expr::IntLit(v as i64));
+        // Prism's `IntegerNode::value()` returns an arbitrary-
+        // precision handle that only exposes `TryInto<i32>` and
+        // `to_u32_digits` (LSB-first u32 chunks + sign). Our
+        // subset is i64-only — build an i64 from the first two
+        // u32 digits (= one u64) and apply sign. Values that
+        // overflow i64 saturate to i64::MIN / i64::MAX, matching
+        // the existing `wrapping_*` arithmetic discipline rather
+        // than promoting to BigInt (BigInt is explicitly out of
+        // scope; see SUBSET.md).
+        let int_value = n.value();
+        let (negative, digits) = int_value.to_u32_digits();
+        let mut magnitude: u64 = 0;
+        let mut overflow = digits.len() > 2;
+        if !overflow {
+            for (i, d) in digits.iter().enumerate() {
+                magnitude |= (*d as u64) << (i * 32);
+            }
+        }
+        let v: i64 = if overflow {
+            if negative { i64::MIN } else { i64::MAX }
+        } else if negative {
+            // u64 → i64 with sign: 2^63 maps to i64::MIN exactly;
+            // anything larger saturates there too.
+            if magnitude >= 1u64 << 63 { i64::MIN }
+            else { -(magnitude as i64) }
+        } else if magnitude > i64::MAX as u64 {
+            i64::MAX
+        } else {
+            magnitude as i64
+        };
+        return sp(node, Expr::IntLit(v));
     }
     if let Some(n) = node.as_float_node() {
         return sp(node, Expr::FloatLit(n.value()));
