@@ -980,6 +980,7 @@ impl Vm {
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(None),
                     includes: RefCell::new(Vec::new()),
+                    cext_alloc_func: std::cell::Cell::new(None),
                 });
                 self.classes.insert(name_sym, new_class);
             }
@@ -1027,6 +1028,21 @@ impl Vm {
                             cext_dispatch(&qualified, func, arity, args, CextSelfHandle::Class(&class_name))
                         }),
                     );
+            }
+
+            // L3-F: install per-class custom allocators. Looks up the
+            // target class by joined name; if found, stash the cext
+            // allocator fn in its `cext_alloc_func` slot so
+            // `Klass.new(args)` routes through the cext-side
+            // allocator before calling `initialize`.
+            for af in state.registered_alloc_funcs {
+                let name_sym = self.interner.intern(&af.class_joined_name);
+                if let Some(cls) = self.classes.get(&name_sym) {
+                    cls.cext_alloc_func.set(Some(af.func));
+                }
+                // else: alloc_func registered for an unknown class —
+                // drop on the floor; cext bug surfaces later as
+                // "bare Instance instead of TypedData" at .new time.
             }
 
             // Level 0: keep the library mapped for the lifetime of the

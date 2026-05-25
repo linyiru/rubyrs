@@ -187,6 +187,7 @@ impl Heap {
             singleton_methods: RefCell::new(HashMap::new()),
             superclass: RefCell::new(Some(original)),
             includes: RefCell::new(Vec::new()),
+            cext_alloc_func: std::cell::Cell::new(None),
         });
         inst.singleton_class = Some(sc.clone());
         sc
