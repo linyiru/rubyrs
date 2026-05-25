@@ -247,7 +247,27 @@ impl Value {
     }
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
-            Value::Str(s) => format!("\"{}\"", s.borrow()),
+            Value::Str(s) => {
+                // Same escape set as String#inspect — keep both
+                // entry points consistent so `puts arr.inspect`
+                // and `arr.map(&:inspect)` agree on output.
+                let raw = s.borrow();
+                let mut out = String::with_capacity(raw.len() + 2);
+                out.push('"');
+                for c in raw.chars() {
+                    match c {
+                        '\\' => out.push_str("\\\\"),
+                        '"'  => out.push_str("\\\""),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        '\0' => out.push_str("\\0"),
+                        _ => out.push(c),
+                    }
+                }
+                out.push('"');
+                out
+            },
             Value::Sym(id) => format!(":{}", interner.resolve(*id)),
             Value::Nil => "nil".into(),
             _ => self.to_display(heap, interner),

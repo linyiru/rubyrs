@@ -356,6 +356,7 @@ impl Vm {
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |
                 "<" | "<=" | ">" | ">=" |
+                "to_s" | "inspect" |
                 "to_i" | "to_f" | "abs" |
                 "zero?" | "positive?" | "negative?" |
                 "nan?" | "infinite?" | "finite?" |
@@ -369,11 +370,12 @@ impl Vm {
                 "strip" | "lstrip" | "rstrip" |
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
+                "to_s" | "inspect" |
                 "sub" | "gsub" | "tr" |
                 "match?" | "scan" | "index" | "rindex" |
                 "[]" | "slice"
             ),
-            Value::Sym(_) => matches!(name, "to_sym"),
+            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect"),
             Value::Array(_) => matches!(name,
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "first" | "last" | "empty?" | "include?" |
@@ -415,7 +417,7 @@ impl Vm {
                 "partition" | "min_by" | "max_by" |
                 "group_by" | "sort_by" | "sort"
             ),
-            Value::Bool(_) | Value::Nil => false,
+            Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect"),
             Value::Class(_) => matches!(name, "new" | "name"),
             Value::Object(id) => {
                 let cls = self.heap.instance(*id).class.clone();
@@ -5166,6 +5168,36 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(a != b)),
         (Value::Nil, "to_s", []) => Some(Value::new_str("")),
         (Value::Nil, "inspect", []) => Some(Value::new_str("nil")),
+        // String#inspect — wrap in double quotes, escape `\`,
+        // `"`, and common control characters. Matches CRuby for
+        // printable ASCII + the standard escape set; exotic
+        // Unicode escapes (`\u{...}`) are out of scope.
+        (Value::Str(s), "inspect", []) => {
+            let raw = s.borrow();
+            let mut out = String::with_capacity(raw.len() + 2);
+            out.push('"');
+            for c in raw.chars() {
+                match c {
+                    '\\' => out.push_str("\\\\"),
+                    '"'  => out.push_str("\\\""),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    '\0' => out.push_str("\\0"),
+                    _ => out.push(c),
+                }
+            }
+            out.push('"');
+            Some(Value::new_str(out))
+        }
+        // Float#inspect — same as to_s for finite/inf/NaN values.
+        (Value::Float(a), "inspect", []) => {
+            Some(Value::new_str(crate::heap::format_float(*a)))
+        }
+        // Bool#inspect — to_s.
+        (Value::Bool(b), "inspect", []) => {
+            Some(Value::new_str(if *b { "true" } else { "false" }))
+        }
         (Value::Nil, "nil?", []) => Some(Value::Bool(true)),
         // Object#nil? is `false` for every non-nil receiver. We
         // implement it here as a generic fallback so e.g.
@@ -5219,6 +5251,10 @@ impl Vm {
     pub(crate) fn sym_primitive(&self, recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
         match (recv, name, args) {
             (Value::Sym(id), "to_s", []) => Some(Value::new_str(self.interner.resolve(*id).to_string())),
+            // Symbol#inspect — `:name` form (prefix with colon).
+            (Value::Sym(id), "inspect", []) => {
+                Some(Value::new_str(format!(":{}", self.interner.resolve(*id))))
+            }
             (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
             // Symbol <=> Symbol compares the interned names
             // lexicographically — matches `value_cmp_v`.
