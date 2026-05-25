@@ -544,20 +544,31 @@ impl Vm {
                 Some(early.unwrap_or(Value::Int(start)))
             }
             (Value::Int(n), "times", []) => {
-                let pre_frames = self.frames.len();
+                // Pin the block: the body may allocate freely (eg.
+                // `N.times { a = [1,2,3] }`) which can trigger GC,
+                // and the block ObjId is no longer on the stack at
+                // this point — without a pin, the block slot gets
+                // swept mid-iteration and the next invoke_block
+                // panics with use-after-free (heap.rs:115).
+                // Matches the pin pattern used by Array#each /
+                // Range#each / map etc.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
                 let mut early = None;
-                for i in 0..*n {
-                    self.invoke_block(block,vec![Value::Int(i)])?;
-                    self.dispatch_until(pre_frames)?;
-                    if self.method_return.is_some() { break; }
-                    let r = self.stack.pop().unwrap_or(Value::Nil);
-                    if self.break_signaled {
-                        self.break_signaled = false;
+                let n_val = *n;
+                for i in 0..n_val {
+                    g.vm.invoke_block(block, vec![Value::Int(i)])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
                         early = Some(r);
                         break;
                     }
                 }
-                Some(early.unwrap_or(Value::Int(*n)))
+                Some(early.unwrap_or(Value::Int(n_val)))
             }
             (Value::Range(id), "each", []) => {
                 // Two endpoint shapes drive iteration: Int+Int (the
