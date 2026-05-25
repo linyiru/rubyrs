@@ -287,7 +287,14 @@ impl<'a> Histogrammer<'a> {
             Ok(s) => s,
             Err(_) => return,
         };
-        let stat = self.calls.entry(name.to_string()).or_default();
+        // Borrowed lookup first to avoid the per-call `to_string()`
+        // that the hot path took before. Only allocate when the
+        // method name is seen for the first time.
+        let stat = if let Some(existing) = self.calls.get_mut(name) {
+            existing
+        } else {
+            self.calls.entry(name.to_owned()).or_default()
+        };
         let is_op = OPERATOR_NAMES.contains(&name);
         if is_op {
             stat.operator += 1;
@@ -299,8 +306,10 @@ impl<'a> Histogrammer<'a> {
     }
 
     /// Called by the generated `impl_full_visit_for!` macro for every
-    /// Prism node visited. `class` is a static name (e.g. `"CallNode"`)
-    /// so we never allocate on the hot path until inserting a new key.
+    /// Prism node visited. `class` is a `&'static str` literal embedded
+    /// in the codegen, so allocation only happens the first time a
+    /// class is seen (insertion + first-example capture) — every
+    /// subsequent node bumps a counter through a borrowed lookup.
     fn record(&mut self, class: &'static str, node: &ruby_prism::Node<'_>) {
         *self.total += 1;
         self.file_stat.total += 1;
@@ -309,24 +318,52 @@ impl<'a> Histogrammer<'a> {
             Classification::RidesAlong => self.file_stat.rides_along += 1,
             Classification::Missing => {
                 self.file_stat.missing += 1;
-                self.file_stat.missing_classes.insert(class.to_string());
+                if !self.file_stat.missing_classes.contains(class) {
+                    self.file_stat.missing_classes.insert(class.to_owned());
+                }
             }
         }
-        let entry = self.histogram.entry(class.to_string()).or_default();
+        let entry = if let Some(existing) = self.histogram.get_mut(class) {
+            existing
+        } else {
+            self.histogram.entry(class.to_owned()).or_default()
+        };
         entry.count += 1;
         if entry.first_example.is_none() {
             let loc = node.location();
             let s = loc.start_offset();
-            let e = loc.end_offset().min(self.src.len());
+            // Cap the slice up front — ProgramNode (and any large
+            // outer node) covers the whole file, and building a
+            // whitespace-collapsed copy of that just to keep 60
+            // chars would dominate scan time on big files.
+            const EXCERPT_BYTES: usize = 240;
+            let e = loc.end_offset().min(self.src.len()).min(s + EXCERPT_BYTES);
             let slice = &self.src[s..e];
-            let excerpt: String = std::str::from_utf8(slice)
-                .unwrap_or("")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(60)
-                .collect();
+            // Whitespace-collapse without intermediate Vec: write
+            // directly into the target string.
+            let mut excerpt = String::new();
+            let mut chars_left = 60usize;
+            let mut prev_was_space = true; // suppress leading spaces
+            for ch in std::str::from_utf8(slice).unwrap_or("").chars() {
+                if chars_left == 0 {
+                    break;
+                }
+                if ch.is_whitespace() {
+                    if !prev_was_space {
+                        excerpt.push(' ');
+                        chars_left -= 1;
+                        prev_was_space = true;
+                    }
+                } else {
+                    excerpt.push(ch);
+                    chars_left -= 1;
+                    prev_was_space = false;
+                }
+            }
+            // Trim trailing space introduced by the cap.
+            if excerpt.ends_with(' ') {
+                excerpt.pop();
+            }
             entry.first_example = Some(excerpt);
             entry.first_file = Some(self.file.to_path_buf());
         }
