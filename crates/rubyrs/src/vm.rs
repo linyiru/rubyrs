@@ -4666,7 +4666,7 @@ fn cext_handle_to_value(
     vm: &mut Vm,
     state: &rubyrs_cext::CExtState,
     h: rubyrs_cext::Value,
-) -> Value {
+) -> Result<Value, Trap> {
     cext_handle_to_value_d(vm, state, h, 0)
 }
 
@@ -4676,25 +4676,22 @@ fn cext_handle_to_value_d(
     state: &rubyrs_cext::CExtState,
     h: rubyrs_cext::Value,
     depth: usize,
-) -> Value {
+) -> Result<Value, Trap> {
     if depth >= CEXT_TRANSLATE_MAX_DEPTH {
-        // Pathological input — cycle or implausibly deep nesting.
-        // Return Nil rather than overflow the host stack. A C ext
-        // that hits this almost certainly has a bug. Emit a stderr
-        // warning so the silent Nil substitution is at least
-        // visible (review #24): proper Trap propagation needs
-        // `cext_handle_to_value` to return `Result<Value, Trap>`,
-        // which cascades into every callsite — tracked as L2.5
-        // follow-up alongside #26 / #27 (check_alloc → Trap).
-        eprintln!(
-            "rubyrs cext: max translation depth {} exceeded \
-             (cycle or deep nesting in C-built Array/Hash); \
-             substituting Nil",
-            CEXT_TRANSLATE_MAX_DEPTH
-        );
-        return Value::Nil;
+        // Pathological input — cycle or implausibly deep nesting in
+        // the C-built Array/Hash. Surface as an ArgumentError Trap
+        // (review #24 follow-up): the previous silent-Nil shape was
+        // hard to debug for a C ext author. The Trap unwinds through
+        // the cext call chain back into Ruby with a clear message.
+        return Err(Trap::new(RubyError::ArgumentError {
+            msg: format!(
+                "C ext result: max translation depth {} exceeded \
+                 (cycle or implausibly deep Array/Hash nesting)",
+                CEXT_TRANSLATE_MAX_DEPTH
+            ),
+        }));
     }
-    match state.resolve(h) {
+    Ok(match state.resolve(h) {
         rubyrs_cext::CValue::Nil => Value::Nil,
         rubyrs_cext::CValue::True => Value::Bool(true),
         rubyrs_cext::CValue::False => Value::Bool(false),
@@ -4719,52 +4716,37 @@ fn cext_handle_to_value_d(
         // children from being collected mid-build when a child's
         // recursive allocation triggers `maybe_gc`.
         rubyrs_cext::CValue::Array(handles) => {
-            // Iterate the handle list borrowed (review #25): `state`
-            // is `&CExtState` (shared), and the recursive
-            // `cext_handle_to_value_d` calls also take it shared, so
-            // the previous `handles.clone()` was an unnecessary O(n)
-            // copy of every C-built Array crossing into Ruby.
-            // PinGuard takes `&mut Vm` (a different object), so the
-            // shared borrow of `state` coexists with it fine.
             let mut g = PinGuard::new(vm);
             let mut elements: Vec<Value> = Vec::with_capacity(handles.len());
             for child in handles {
-                let v = cext_handle_to_value_d(g.vm, state, *child, depth + 1);
+                let v = cext_handle_to_value_d(g.vm, state, *child, depth + 1)?;
                 g.pin(v.clone());
                 elements.push(v);
             }
             g.vm.maybe_gc();
-            // Heap-cap exhaustion → panic (review #26 flags this).
-            // Proper Trap propagation needs `cext_handle_to_value`
-            // to return `Result<Value, Trap>` and the change to
-            // cascade through every callsite (the cext result
-            // handler, rb_funcall*, etc.). Tracked as L2.5 follow-
-            // up alongside #24 and #27.
-            g.vm.check_alloc()
-                .expect("L2-3 spike: heap cap exhausted during cext Array build (review #26: L2.5 → return Trap)");
+            // Heap-cap exhaustion now propagates the original
+            // ResourceExhausted Trap up to Ruby (review #26).
+            g.vm.check_alloc()?;
             let id = g.vm.heap.alloc(HeapObj::Array(elements));
             Value::Array(id)
         }
         rubyrs_cext::CValue::Hash(pairs) => {
-            // Same borrowed-iteration as Array arm (review #25).
             let mut g = PinGuard::new(vm);
             let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
             for (kh, vh) in pairs {
-                let k = cext_handle_to_value_d(g.vm, state, *kh, depth + 1);
+                let k = cext_handle_to_value_d(g.vm, state, *kh, depth + 1)?;
                 g.pin(k.clone());
-                let v = cext_handle_to_value_d(g.vm, state, *vh, depth + 1);
+                let v = cext_handle_to_value_d(g.vm, state, *vh, depth + 1)?;
                 g.pin(v.clone());
                 entries.push((k, v));
             }
             g.vm.maybe_gc();
-            // Same panic-vs-Trap tradeoff as the Array arm above
-            // (review #27).
-            g.vm.check_alloc()
-                .expect("L2-3 spike: heap cap exhausted during cext Hash build (review #27: L2.5 → return Trap)");
+            // Review #27 — same Trap propagation as Array arm above.
+            g.vm.check_alloc()?;
             let id = g.vm.heap.alloc(HeapObj::Hash(entries));
             Value::Hash(id)
         }
-    }
+    })
 }
 
 /// Translate a rubyrs [`Value`] into the corresponding [`rubyrs_cext::CValue`]
@@ -5063,7 +5045,7 @@ fn cext_dispatch(
         // returns need `&mut Vm` to allocate on the heap). Time-
         // disjoint from any earlier &Vm uses in this function.
         let vm: &mut Vm = &mut *vm_ptr;
-        Ok(cext_handle_to_value(vm, &st, ret_handle))
+        cext_handle_to_value(vm, &st, ret_handle)
     }
 }
 
@@ -5114,13 +5096,23 @@ fn cext_funcall_to_vm(
         // block, after the call has returned and the result Value
         // is bound.
         let mut g = PinGuard::new(vm);
-        let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(g.vm, st, recv));
+        // `cext_handle_to_value` now returns Result (L2.5 Trap
+        // propagation). On a translation Trap here — e.g. a cycle
+        // in C-built recv/args, or heap-cap exhaustion mid-build —
+        // we can't unwind into Ruby (this IS a C-ABI callback
+        // entry point), so we collapse to Nil and let the inner
+        // dispatch handle the degenerate input. Surfacing the
+        // Trap via the rb_funcall return value requires `rb_raise`
+        // / longjmp (Level 3).
+        let recv_v = rubyrs_cext::with_state(|st| {
+            cext_handle_to_value(g.vm, st, recv).unwrap_or(Value::Nil)
+        });
         g.pin(recv_v.clone());
         let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
             arg_handles
                 .iter()
                 .map(|h| {
-                    let v = cext_handle_to_value(g.vm, st, *h);
+                    let v = cext_handle_to_value(g.vm, st, *h).unwrap_or(Value::Nil);
                     g.pin(v.clone());
                     v
                 })
