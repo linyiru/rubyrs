@@ -2562,7 +2562,10 @@ impl Vm {
                 self.host_fns.insert(
                     sym,
                     Rc::new(move |args: &[Value]| {
-                        cext_dispatch(&cfn_name, func, arity, args)
+                        // Top-level functions get Qnil as `self`,
+                        // matching CRuby's `rb_define_global_function`
+                        // convention.
+                        cext_dispatch(&cfn_name, func, arity, args, None)
                     }),
                 );
             }
@@ -2585,14 +2588,18 @@ impl Vm {
                 let method_sym = self.interner.intern(&sm.method_name);
                 let func = sm.func;
                 let arity = sm.arity;
-                let qualified = format!("{}.{}", sm.class_joined_name, sm.method_name);
+                let class_name = sm.class_joined_name.clone();
+                let qualified = format!("{}.{}", class_name, sm.method_name);
                 self.cext_class_methods
                     .entry(sm.class_joined_name)
                     .or_default()
                     .insert(
                         method_sym,
                         Rc::new(move |args: &[Value]| {
-                            cext_dispatch(&qualified, func, arity, args)
+                            // Singleton methods get the class itself
+                            // as `self`, matching CRuby's
+                            // `rb_define_singleton_method` contract.
+                            cext_dispatch(&qualified, func, arity, args, Some(&class_name))
                         }),
                     );
             }
@@ -2676,6 +2683,7 @@ fn cext_dispatch(
     func: rubyrs_cext::OpaqueFn,
     arity: i32,
     args: &[Value],
+    self_class: Option<&str>,
 ) -> Result<Value, Trap> {
     let expected_argc = match arity {
         0..=5 => arity as usize,
@@ -2714,6 +2722,23 @@ fn cext_dispatch(
     unsafe {
         rubyrs_cext::enter();
         let ret_handle = with_caught_unwind(|| {
+            // Build the `self` handle:
+            // - For singleton methods (`rb_define_singleton_method`),
+            //   `self_class` is `Some(class_joined_name)`; intern a
+            //   `CValue::Class` handle so the C ext sees its own
+            //   class object as `self`, matching CRuby.
+            // - For top-level functions (`rb_define_global_function`),
+            //   `self_class` is `None`; pass `Qnil`, matching CRuby
+            //   (top-level functions are conceptually attached to
+            //   the main object, but extensions universally treat
+            //   their `self` as opaque-and-unused there).
+            let self_handle = match self_class {
+                Some(cname) => rubyrs_cext::with_state(|st| {
+                    st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
+                }),
+                None => rubyrs_cext::Qnil,
+            };
+
             // Intern args into the now-active state so the C side
             // sees them as valid handles.
             let arg_handles: Vec<rubyrs_cext::Value> = rubyrs_cext::with_state(|st| {
@@ -2723,7 +2748,7 @@ fn cext_dispatch(
                 0 => {
                     type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
                     let f: F = std::mem::transmute(func);
-                    f(rubyrs_cext::Qnil)
+                    f(self_handle)
                 }
                 1 => {
                     type F = unsafe extern "C" fn(
@@ -2731,7 +2756,7 @@ fn cext_dispatch(
                         rubyrs_cext::Value,
                     ) -> rubyrs_cext::Value;
                     let f: F = std::mem::transmute(func);
-                    f(rubyrs_cext::Qnil, arg_handles[0])
+                    f(self_handle, arg_handles[0])
                 }
                 2 => {
                     type F = unsafe extern "C" fn(
@@ -2740,7 +2765,7 @@ fn cext_dispatch(
                         rubyrs_cext::Value,
                     ) -> rubyrs_cext::Value;
                     let f: F = std::mem::transmute(func);
-                    f(rubyrs_cext::Qnil, arg_handles[0], arg_handles[1])
+                    f(self_handle, arg_handles[0], arg_handles[1])
                 }
                 3 => {
                     type F = unsafe extern "C" fn(
@@ -2750,7 +2775,7 @@ fn cext_dispatch(
                         rubyrs_cext::Value,
                     ) -> rubyrs_cext::Value;
                     let f: F = std::mem::transmute(func);
-                    f(rubyrs_cext::Qnil, arg_handles[0], arg_handles[1], arg_handles[2])
+                    f(self_handle, arg_handles[0], arg_handles[1], arg_handles[2])
                 }
                 4 => {
                     type F = unsafe extern "C" fn(
@@ -2762,7 +2787,7 @@ fn cext_dispatch(
                     ) -> rubyrs_cext::Value;
                     let f: F = std::mem::transmute(func);
                     f(
-                        rubyrs_cext::Qnil,
+                        self_handle,
                         arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3],
                     )
                 }
@@ -2777,7 +2802,7 @@ fn cext_dispatch(
                     ) -> rubyrs_cext::Value;
                     let f: F = std::mem::transmute(func);
                     f(
-                        rubyrs_cext::Qnil,
+                        self_handle,
                         arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3], arg_handles[4],
                     )
                 }

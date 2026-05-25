@@ -9,3 +9,6 @@ crates/rubyrs/examples/hello-cext/hello.dll
 crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.so
 crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.bundle
 crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.dll
+crates/rubyrs/examples/self-cext/self_test.so
+crates/rubyrs/examples/self-cext/self_test.bundle
+crates/rubyrs/examples/self-cext/self_test.dll
