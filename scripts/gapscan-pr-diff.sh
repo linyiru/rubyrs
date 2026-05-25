@@ -48,21 +48,44 @@ WORK="${GAPSCAN_WORK:-$(mktemp -d)}"
 
 log() { printf "[gapscan-pr-diff] %s\n" "$*" >&2; }
 
+# Files whose contents determine whether the gapscan classifier
+# produces different output. If nothing in this set differs between
+# BASE and HEAD, the diff is guaranteed empty — we skip the BASE
+# build entirely. Single biggest CI saving.
+CLASSIFIER_PATHS=(
+  "crates/rubyrs/src/ast.rs"
+  "crates/rubyrs/data/supported_prism_nodes.txt"
+  "crates/rubyrs/data/rides_along_prism_nodes.txt"
+  "crates/rubyrs-gapscan/src/"
+  "crates/rubyrs-gapscan/data/"
+  "crates/rubyrs-gapscan/build.rs"
+)
+
+# Returns 0 (true) when there's a difference that could affect
+# classifier output between $BASE_REF and HEAD.
+has_classifier_change() {
+  ! git diff --quiet "$BASE_REF" -- "${CLASSIFIER_PATHS[@]}"
+}
+
 # --- clone or refresh each target into CACHE_DIR ------------------
 ensure_target() {
   local key="$1" repo="$2" sha="$3"
   local dir="$CACHE_DIR/$key"
   if [[ ! -d "$dir/.git" ]]; then
     log "cloning $key from $repo"
-    git clone --quiet --filter=blob:none "$repo" "$dir"
+    # `--filter=blob:none` is treeless; combined with `--no-tags`
+    # this is the minimum needed for a treeless lazy-fetching clone.
+    # We still need full ref history (not `--depth=1`) because the
+    # pinned SHA may not be the tip of any branch.
+    git clone --quiet --filter=blob:none --no-tags "$repo" "$dir"
   fi
-  # Fetch the pinned SHA explicitly (depth=1 from the SHA only).
-  # Some git hosts refuse arbitrary-SHA fetches without protocol v2;
-  # if that happens fall back to a full fetch.
   if ! git -C "$dir" rev-parse --verify --quiet "$sha^{commit}" >/dev/null; then
     log "fetching $sha for $key"
-    git -C "$dir" fetch --quiet origin "$sha" 2>/dev/null \
-      || git -C "$dir" fetch --quiet origin
+    # Fetch only the pinned SHA when the host supports it
+    # (GitHub does, via uploadpack.allowReachableSHA1InWant);
+    # fall back to a full fetch otherwise.
+    git -C "$dir" fetch --quiet --no-tags --filter=blob:none origin "$sha" \
+      || git -C "$dir" fetch --quiet --no-tags --filter=blob:none origin
   fi
   git -C "$dir" -c advice.detachedHead=false checkout --quiet "$sha"
 }
@@ -79,10 +102,20 @@ build_base_gapscan() {
   local base_sha
   base_sha=$(git rev-parse "$BASE_REF")
   log "base ref $BASE_REF resolves to $base_sha"
+  # Handle the "stale registration" case where the prior worktree
+  # directory was removed but git still has it on its list — `add`
+  # will refuse with "missing but already registered". Prune first;
+  # if a directory exists but isn't recognised, force-remove and
+  # recreate.
+  git worktree prune >/dev/null 2>&1 || true
   if [[ ! -d "$wt" ]]; then
     git worktree add --quiet --detach "$wt" "$base_sha"
   else
-    git -C "$wt" -c advice.detachedHead=false checkout --quiet "$base_sha"
+    if ! git -C "$wt" -c advice.detachedHead=false checkout --quiet "$base_sha" 2>/dev/null; then
+      log "stale worktree at $wt, removing and recreating"
+      git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+      git worktree add --quiet --detach "$wt" "$base_sha"
+    fi
   fi
   log "building rubyrs-gapscan from $BASE_REF"
   ( cd "$wt"
@@ -92,9 +125,13 @@ build_base_gapscan() {
 }
 
 # --- scan one (binary, codebase path) into a JSON file ------------
+# Lets stderr pass through so gapscan's own diagnostics
+# (unknown-class warnings, scan-failure messages) survive into the
+# CI log — silencing them was actively unhelpful for debugging
+# (per PR #18 review).
 scan_json() {
   local bin="$1" path="$2" out="$3"
-  "$bin" scan "$path" --format json -o "$out" 2>/dev/null
+  "$bin" scan "$path" --format json -o "$out"
 }
 
 # --- aggregate per-codebase diffs ---------------------------------
@@ -152,17 +189,32 @@ any_change = any(r['supported_delta'] or r['missing_delta']
                  or r['rides_along_delta'] or r['closed'] or r['new']
                  for r in rows)
 
+# Render with absolute GitHub URLs so the links work in a PR
+# comment context (where relative paths resolve against /pull/N/,
+# not the repo root). Fall back to relative paths when not in CI.
+repo = os.environ.get('GITHUB_REPOSITORY', '')
+sha = os.environ.get('GITHUB_SHA', 'master')
+def url(rel):
+    if repo:
+        return f"https://github.com/{repo}/blob/{sha}/{rel}"
+    return rel  # local mode
+
 print("## gapscan PR diff")
 print()
 if not any_change:
     print(f"This PR doesn't change any node-classification across the {len(rows)} canonical scan targets — `rubyrs::SUPPORTED_PRISM_NODES` is unchanged.")
     print()
-    print("_See [docs/gap-reports/](../docs/gap-reports/README.md) for the dataset and methodology._")
+    print(f"_See [docs/gap-reports/]({url('docs/gap-reports/README.md')}) for the dataset and methodology._")
     sys.exit(0)
 
 print(f"vs `{os.environ.get('GAPSCAN_BASE_REF','origin/master')}`, across {len(rows)} canonical scan targets:")
 print()
-print(f"- **Σ Missing → Supported across all targets: {-total_missing:+d}**")
+# Renamed from "Σ Missing → Supported": missing_delta counts any
+# Missing exit (Missing → Supported, Missing → RidesAlong, or
+# Missing-class no-longer-appearing). The "→ Supported" framing
+# overcounted. supported_delta is the strict "now classifies as
+# Supported" view; keep both for transparency.
+print(f"- **Σ Missing delta across all targets: {total_missing:+d}** (lower is better)")
 print(f"- Σ Supported delta: {total_supported:+d}")
 print()
 print("| Codebase | %Sup before → after | Δ Missing | Closed (top 5) | New (top 5) |")
@@ -174,19 +226,36 @@ for r in rows:
     sign = "+" if r['supported_delta'] >= 0 else ""
     print(f"| `{r['key']}` | {arrow} ({sign}{r['supported_delta']}) | {r['missing_delta']:+d} | {closed_s} | {new_s} |")
 print()
-print("Pins live in [`scripts/gapscan-pr-diff.sh`](../scripts/gapscan-pr-diff.sh); bump them when [`docs/gap-reports/`](../docs/gap-reports/) snapshots are regenerated.")
+print(f"Pins live in [`scripts/gapscan-pr-diff.sh`]({url('scripts/gapscan-pr-diff.sh')}); bump them when [`docs/gap-reports/`]({url('docs/gap-reports/')}) snapshots are regenerated.")
 PY
 }
 
 # --- main ---------------------------------------------------------
 mkdir -p "$CACHE_DIR" "$WORK"
+per_target_jsonl="$WORK/agg.jsonl"
+
+# Fast path: if the PR doesn't touch any file that can affect
+# classifier output, the diff is guaranteed empty. Skip both the
+# BASE rubyrs-gapscan build (~37s) and the per-target scans
+# (~16s). Touch the empty jsonl so the renderer takes the
+# "no change" branch.
+if ! has_classifier_change; then
+  log "no diff in classifier-relevant files vs $BASE_REF — skipping base build and scans"
+  : > "$per_target_jsonl"
+  # Emit one empty-but-present row per target so the renderer reports
+  # the right `len(rows)` count in the "no change" message.
+  for target in "${TARGETS[@]}"; do
+    IFS='|' read -r key _ _ _ <<< "$target"
+    printf '{"key":"%s","before_supported_pct":0,"after_supported_pct":0,"supported_delta":0,"rides_along_delta":0,"missing_delta":0,"closed":[],"new":[]}\n' "$key" >> "$per_target_jsonl"
+  done
+  render_markdown "$per_target_jsonl"
+  exit 0
+fi
 
 build_head_gapscan
 build_base_gapscan
 
-per_target_jsonl="$WORK/agg.jsonl"
 : > "$per_target_jsonl"
-
 for target in "${TARGETS[@]}"; do
   IFS='|' read -r key repo sha relpath <<< "$target"
   ensure_target "$key" "$repo" "$sha"
