@@ -75,6 +75,12 @@ pub(crate) enum Expr {
     },
     SelfExpr,
     ConstRead(String),
+    /// Bare constant write `FOO = expr` — appears at top level or
+    /// inside a class/module body; all forms store into the same
+    /// `Vm.constants` table (rubyrs has no real module nesting yet).
+    /// The `Foo::Bar = ...` (ConstantPathWriteNode) path form is a
+    /// separate not-yet-supported case.
+    ConstWrite(String, Box<SExpr>),
     Call {
         receiver: Option<Box<SExpr>>,
         name: String,
@@ -330,6 +336,15 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_instance_variable_write_node() {
         return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+    }
+    // Bare constant assignment: `FOO = expr` (top level or inside a
+    // class/module body). Storage is a separate `Vm.constants` map
+    // keyed by SymId — class names continue to live in `Vm.classes`,
+    // and class lookup wins on read. This is a deliberate rubyrs
+    // divergence from CRuby (CRuby warns "already initialized" and
+    // reassigns); see `Vm::constants` for the precedence rationale.
+    if let Some(n) = node.as_constant_write_node() {
+        return sp(node, Expr::ConstWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
     // Op-assign desugaring: `a += b` is translated to
     // `a = a + b`. The receiver / index path is re-evaluated,

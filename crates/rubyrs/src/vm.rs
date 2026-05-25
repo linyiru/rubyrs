@@ -133,6 +133,14 @@ pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     pub(crate) interner: Interner,
     pub(crate) classes: HashMap<SymId, Rc<Class>>,
+    /// Bare constant assignments (`FOO = expr`), kept in a separate
+    /// table from `classes` so `class Foo` and `Foo = 42` can coexist
+    /// without collision. `Op::LoadConst` resolves classes first,
+    /// then this table, then the `ENV` special-case — chosen for
+    /// implementation simplicity, NOT to mirror CRuby (CRuby would
+    /// emit "already initialized constant" and reassign). If you
+    /// need to shadow a class with a constant, pick a different name.
+    pub(crate) constants: HashMap<SymId, Value>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, Rc<HostFn>>,
     /// C-ext singleton-method dispatch table. Indexed by
@@ -221,6 +229,7 @@ impl Vm {
             protos,
             interner,
             classes: HashMap::new(),
+            constants: HashMap::new(),
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
             cext_class_methods: HashMap::new(),

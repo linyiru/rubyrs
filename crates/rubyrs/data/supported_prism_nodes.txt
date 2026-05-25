@@ -18,6 +18,7 @@ CaseNode
 ClassNode
 ConstantPathNode
 ConstantReadNode
+ConstantWriteNode
 DefNode
 DefinedNode
 ElseNode
