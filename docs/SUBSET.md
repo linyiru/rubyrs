@@ -123,6 +123,30 @@ end
 - Tests: `resource_exhausted_cannot_be_swallowed_by_bare_rescue`
   and `resource_exhausted_is_uncatchable_even_with_rescue_exception`.
 
+### `return` from inside a block doesn't unwind the enclosing method
+
+```ruby
+def first_positive(arr)
+  arr.each do |n|
+    return n if n > 0     # CRuby: returns n from first_positive
+  end                     # rubyrs: returns n from the block, loop continues
+  nil
+end
+```
+
+- CRuby's `return` is a non-local jump: from inside a block,
+  it unwinds past the block invocation and pops the enclosing
+  method frame.
+- rubyrs's `Op::Return` pops a single frame. From a block
+  that's the block frame, not the method, so the iterator
+  driver keeps running.
+- Workaround: use `find` / `detect` / a flag, or restructure
+  the method so the `return` is at the top level of the
+  method body.
+- Why deferred: the fix needs a Result-style "method return"
+  signal that propagates through `dispatch_until` and every
+  iterator driver — non-trivial. Tracked.
+
 ### Multi-class `rescue A, B => e`
 
 ```ruby

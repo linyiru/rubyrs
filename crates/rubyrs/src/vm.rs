@@ -322,7 +322,8 @@ impl Vm {
                 "upcase" | "downcase" | "reverse" |
                 "strip" | "lstrip" | "rstrip" |
                 "include?" | "start_with?" | "end_with?" |
-                "to_i" | "to_f" | "chars" | "split" | "to_sym"
+                "to_i" | "to_f" | "chars" | "split" | "to_sym" |
+                "sub" | "gsub" | "tr"
             ),
             Value::Sym(_) => matches!(name, "to_sym"),
             Value::Array(_) => matches!(name,
@@ -2616,6 +2617,73 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Str(a), "lstrip", []) => Some(Value::Str(Rc::from(a.trim_start()))),
         (Value::Str(a), "rstrip", []) => Some(Value::Str(Rc::from(a.trim_end()))),
         (Value::Str(a), "include?", [Value::Str(b)]) => Some(Value::Bool(a.contains(&**b))),
+        // Literal-substring sub/gsub. Regex forms (`gsub(/pat/, ...)`)
+        // are out of scope until we add a regex engine — documented
+        // in SUBSET.md. CRuby's `gsub("", "x")` on a non-empty
+        // string inserts at every character boundary; we replicate
+        // that via `Rust`'s `str::replace` for non-empty patterns
+        // and a hand-rolled walk for the empty-pattern case.
+        (Value::Str(a), "sub", [Value::Str(pat), Value::Str(repl)]) => {
+            let out = if pat.is_empty() {
+                // CRuby: sub("", repl) inserts `repl` at index 0.
+                let mut s = repl.to_string();
+                s.push_str(a);
+                s
+            } else if let Some(idx) = a.find(&**pat) {
+                let mut s = String::with_capacity(a.len() + repl.len());
+                s.push_str(&a[..idx]);
+                s.push_str(repl);
+                s.push_str(&a[idx + pat.len()..]);
+                s
+            } else {
+                a.to_string()
+            };
+            check(out.len())?;
+            Some(Value::Str(Rc::from(out.as_str())))
+        }
+        (Value::Str(a), "gsub", [Value::Str(pat), Value::Str(repl)]) => {
+            let out = if pat.is_empty() {
+                // CRuby: gsub("", repl) wraps `repl` around every
+                // character — `"abc".gsub("", "X") == "XaXbXcX"`.
+                let mut s = repl.to_string();
+                for c in a.chars() {
+                    s.push(c);
+                    s.push_str(repl);
+                }
+                s
+            } else {
+                a.replace(&**pat, repl)
+            };
+            check(out.len())?;
+            Some(Value::Str(Rc::from(out.as_str())))
+        }
+        // String#tr — character-by-character translation. Each
+        // char in `from` maps to the same-index char in `to`; if
+        // `to` is shorter, characters past its length map to its
+        // LAST char (CRuby's "stretch" behaviour). If `to` is
+        // empty, those chars are deleted. Character-range syntax
+        // (`"a-z"`) is intentionally NOT expanded — flagged in
+        // SUBSET.md.
+        (Value::Str(a), "tr", [Value::Str(from), Value::Str(to)]) => {
+            let from_chars: Vec<char> = from.chars().collect();
+            let to_chars: Vec<char> = to.chars().collect();
+            let mut out = String::with_capacity(a.len());
+            for ch in a.chars() {
+                if let Some(idx) = from_chars.iter().position(|c| *c == ch) {
+                    if to_chars.is_empty() {
+                        // Delete: skip this character entirely.
+                    } else if idx < to_chars.len() {
+                        out.push(to_chars[idx]);
+                    } else {
+                        out.push(*to_chars.last().unwrap());
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            check(out.len())?;
+            Some(Value::Str(Rc::from(out.as_str())))
+        }
         (Value::Str(a), "start_with?", [Value::Str(b)]) => Some(Value::Bool(a.starts_with(&**b))),
         (Value::Str(a), "end_with?", [Value::Str(b)]) => Some(Value::Bool(a.ends_with(&**b))),
         (Value::Str(a), "to_i", []) => {

@@ -101,3 +101,4 @@ fn run_diff(name: &str) {
 #[test] fn float_basics() { run_diff("float_basics"); }
 #[test] fn attr_accessor() { run_diff("attr_accessor"); }
 #[test] fn spaceship() { run_diff("spaceship"); }
+#[test] fn string_transform() { run_diff("string_transform"); }

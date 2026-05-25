@@ -7,6 +7,33 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`String#sub` / `#gsub` / `#tr` (literal forms).**
+  Three commonly-needed string transformations. `sub` replaces
+  the first occurrence of the literal pattern; `gsub` replaces
+  every occurrence; `tr` does character-by-character
+  translation with CRuby's "stretch" rule (chars past the end
+  of `to` map to its last char; empty `to` deletes). All three
+  honour `Config::max_value_bytes` on the result. Regex forms
+  (`gsub(/pat/, ...)`) are explicitly out of scope until a
+  regex engine lands. Character ranges in `tr` (`"a-z"`) also
+  deferred — both gaps flagged in `SUBSET.md`. New diff
+  fixture `string_transform.rb` covers happy paths,
+  no-match passthrough, empty-pattern edge cases (CRuby's
+  `gsub("", "X")` per-boundary insertion), composition with
+  default arguments (a `slugify(s, sep = "-")` example), and
+  `respond_to?` reachability. Byte-identical to CRuby.
+
+### Documented
+- **`return` from inside a block does not exit the enclosing
+  method.** CRuby's non-local-return semantics for `return`
+  inside a `do…end` / `{ }` block needs a Result-style
+  signal that propagates through `dispatch_until` and every
+  native iterator driver — non-trivial and deferred.
+  Workaround: `find` / `detect` / a guard flag, or
+  restructure the method so the `return` is at top-level.
+  Added a "Divergences" entry in `docs/SUBSET.md`.
+
+### Added
 - **`<=>` spaceship operator.** Returns `Integer(-1/0/1)`
   ordering or `nil` when the pair isn't comparable. Per-type
   arms in `primitive_call` cover `Int <=> Int`,
