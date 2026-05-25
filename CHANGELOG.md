@@ -7,6 +7,26 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`attr_accessor` / `attr_reader` / `attr_writer`.**
+  Compile-time desugar: a no-receiver call to any of these
+  with all-Symbol-literal args expands into `Op::DefMethod`
+  pairs in place — `attr_accessor :name, :age` becomes
+  `def name; @name; end; def name=(val); @name = val; end;
+  def age; @age; end; def age=(val); @age = val; end`. Used
+  inside a class body, the methods land on the surrounding
+  class via the normal `DefMethod` path; the generated
+  setter returns the assigned value (`x = (c.v = 99)`
+  yields 99) because our `IVarWrite` lowers as `<val>; Dup;
+  StoreIvar`. Synthesised getters/setters interact normally
+  with inheritance, default-arg methods, and method
+  chaining — all covered in the new `attr_accessor.rb` diff
+  fixture. Byte-identical to CRuby.
+- **Universal `!` (unary not) and `!@`.** `Bool#!`,
+  `Nil#!`, and `Foo#!` all needed to work for `!@secret.nil?`-
+  shaped predicates to dispatch. Added as a catch-all
+  primitive arm — `!recv` returns `true` iff `recv` is `nil`
+  or `false`. `!@` is the alternate spelling some metaprogramming
+  uses; both names route to the same arm.
 - **`Float` type (MVP).** `Value::Float(f64)`, literal parsing
   via Prism's `FloatNode`, new `Op::LoadConstFloat(f64)`. Pure
   Float arithmetic (`+ - * / %` and comparisons), mixed

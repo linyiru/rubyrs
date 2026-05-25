@@ -302,6 +302,58 @@ pub(crate) fn compile_expr(
                 b.current_span = prev_span;
                 return;
             }
+            // attr_accessor / attr_reader / attr_writer — compile-time
+            // desugar. Inside a class body these install getter/setter
+            // methods on the surrounding class via the normal
+            // `Op::DefMethod` machinery; outside a class body they
+            // still emit `DefMethod` ops (which target the top-level
+            // method registry) — that's a divergence from CRuby
+            // (where `attr_*` raises NoMethodError at top level) but
+            // harmless and avoids needing a "class-body context" the
+            // compiler doesn't currently track. Each arg must be a
+            // Symbol literal — dynamic forms (`attr_accessor(*xs)`)
+            // pass through as a regular Call and will fail at
+            // dispatch.
+            if receiver.is_none()
+                && (name == "attr_accessor" || name == "attr_reader" || name == "attr_writer")
+                && args.iter().all(|a| matches!(a.node, Expr::SymbolLit(_)))
+            {
+                let do_reader = name != "attr_writer";
+                let do_writer = name != "attr_reader";
+                let prev = b.current_span;
+                for a in args {
+                    let sym_name = if let Expr::SymbolLit(s) = &a.node { s.clone() } else { unreachable!() };
+                    let ivar_name = format!("@{}", sym_name);
+                    if do_reader {
+                        // def <sym>; @<sym>; end
+                        let body = vec![SExpr { span: a.span, node: Expr::IVarRead(ivar_name.clone()) }];
+                        let pidx = compile_proto(
+                            sym_name.clone(), vec![], vec![], &body,
+                            b.filename.clone(), protos, interner, cc,
+                        );
+                        let nid = interner.intern(&sym_name);
+                        b.emit(Op::DefMethod(nid, pidx as u32));
+                    }
+                    if do_writer {
+                        // def <sym>=(val); @<sym> = val; end
+                        let setter_name = format!("{sym_name}=");
+                        let val_read = SExpr { span: a.span, node: Expr::LVarRead("val".into()) };
+                        let body = vec![SExpr {
+                            span: a.span,
+                            node: Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
+                        }];
+                        let pidx = compile_proto(
+                            setter_name.clone(), vec!["val".into()], vec![None], &body,
+                            b.filename.clone(), protos, interner, cc,
+                        );
+                        let nid = interner.intern(&setter_name);
+                        b.emit(Op::DefMethod(nid, pidx as u32));
+                    }
+                }
+                b.emit(Op::LoadNil);
+                b.current_span = prev;
+                return;
+            }
             if receiver.is_none() && name == "raise" {
                 match args.len() {
                     0 => { b.emit(Op::LoadNil); }

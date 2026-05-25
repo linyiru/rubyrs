@@ -294,7 +294,7 @@ impl Vm {
         let name: &str = &self.interner.resolve(name_id).clone();
         // Universal — every receiver responds to these.
         if matches!(name,
-            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!="
+            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@"
         ) {
             return true;
         }
@@ -2658,6 +2658,13 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // implement it here as a generic fallback so e.g.
         // `"abc".nil?` and `5.nil?` work without per-type arms.
         (_, "nil?", []) => Some(Value::Bool(false)),
+        // Unary `!`. CRuby defines `Kernel#!` on every Object —
+        // `!foo` returns `true` iff `foo` is `nil` or `false`,
+        // `false` otherwise. Prism lowers a unary `!` expression
+        // as a call to the `!` method, so this universal arm
+        // covers every receiver. `!@` (the alternate spelling
+        // used by `attr_*` / `define_method`) is the same op.
+        (_, "!", []) | (_, "!@", []) => Some(Value::Bool(!recv.is_truthy())),
         (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::from(if *b { "true" } else { "false" }))),
         (Value::Class(c), "name", []) | (Value::Class(c), "to_s", []) => {
             Some(Value::Str(Rc::from(c.name.as_str())))
