@@ -125,3 +125,4 @@ fn run_diff(name: &str) {
 #[test] fn string_slice() { run_diff("string_slice"); }
 #[test] fn power() { run_diff("power"); }
 #[test] fn block_autosplat() { run_diff("block_autosplat"); }
+#[test] fn unless_until() { run_diff("unless_until"); }

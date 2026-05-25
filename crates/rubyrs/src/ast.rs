@@ -574,6 +574,42 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             .unwrap_or_default();
         return sp(node, Expr::While { cond, body });
     }
+    // `unless cond; then; else else; end` and modifier
+    // `expr unless cond` both desugar to `if cond; else_body;
+    // else then_body; end` — swap the branches. The modifier
+    // form has no else clause; the swap leaves an empty
+    // else (CRuby's behaviour: result is `nil` when the
+    // unless block doesn't run).
+    if let Some(n) = node.as_unless_node() {
+        let cond = Box::new(tr(&n.predicate()));
+        let then_body: Vec<SExpr> = n.statements()
+            .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+            .unwrap_or_default();
+        let else_body: Vec<SExpr> = match n.else_clause() {
+            Some(en) => en.statements()
+                .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                .unwrap_or_default(),
+            None => vec![],
+        };
+        // Swap: if cond runs `else_body`, else runs `then_body`.
+        return sp(node, Expr::If { cond, then_body: else_body, else_body: then_body });
+    }
+    // `until cond; body; end` and modifier `expr until cond`
+    // desugar to `while !cond; body; end`. We synthesise the
+    // negation as a Call to `!` on the original cond — the
+    // Unary-Bang primitive arm handles all value types.
+    if let Some(n) = node.as_until_node() {
+        let raw_cond = tr(&n.predicate());
+        let cond = Box::new(sp(node, Expr::Call {
+            receiver: Some(Box::new(raw_cond)),
+            name: "!".into(),
+            args: vec![],
+        }));
+        let body: Vec<SExpr> = n.statements()
+            .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+            .unwrap_or_default();
+        return sp(node, Expr::While { cond, body });
+    }
     if let Some(n) = node.as_def_node() {
         let name = cid_to_string(n.name());
         let mut params: Vec<String> = Vec::new();
