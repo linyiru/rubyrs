@@ -2,7 +2,11 @@
 
 This document is the inventory and classification of every
 `panic!` / `.unwrap()` / `.expect(...)` call in the rubyrs
-crate. It exists for two reasons:
+crate. (`rubyrs-cext` is intentionally excluded — its panic
+policy is documented in [ADR 0009](adr/0009-cext-panic-policy.md).
+Contract-violation panics on the C ABI surface are accepted as
+abort-on-bug, not converted to error sentinels until `rb_raise`
+integration lands.) It exists for two reasons:
 
 1. **User-reachable panics are bugs.** Embedding APIs that
    panic hand the host a SIGABRT instead of a recoverable
