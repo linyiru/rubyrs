@@ -105,6 +105,13 @@ pub struct BlockHandle {
     pub(crate) self_val: Value,
     pub(crate) param_start: u16,
     pub(crate) n_params: u16,
+    /// `Some(slot)` when the block declares a `*rest` parameter.
+    /// `slot` is the local-slot index where the rest collector
+    /// lives. Filled by `invoke_block` with a fresh Array of any
+    /// args past the last required slot. `None` means no rest —
+    /// overflow args are silently dropped (CRuby behaviour for
+    /// blocks).
+    pub(crate) rest_slot: Option<u16>,
 }
 
 #[derive(Debug)]

@@ -1267,9 +1267,10 @@ impl Vm {
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
         // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
-        let (proto_idx, captured, self_val, param_start, n_params) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(), bh.param_start, bh.n_params)
+            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
+             bh.param_start, bh.n_params, bh.rest_slot)
         };
         // CRuby auto-splat: when a block declared with >1 parameter
         // is called with a single Array argument, the Array's
@@ -1281,13 +1282,31 @@ impl Vm {
         // Hash#each / #map already yield two args directly, so this
         // path doesn't change their behaviour. Single-param blocks
         // also unaffected — they bind the whole Array.
-        let args: Vec<Value> = if n_params > 1 && args.len() == 1 {
+        //
+        // Auto-splat doesn't apply to rest-param blocks — `|*args|`
+        // wants to capture the whole arg list, including a single
+        // Array as-is.
+        let args: Vec<Value> = if n_params > 1 && args.len() == 1 && rest_slot.is_none() {
             match &args[0] {
                 Value::Array(aid) => self.heap.array(*aid).clone(),
                 _ => args,
             }
         } else {
             args
+        };
+        // Build the rest Array (if any) BEFORE taking the locals
+        // borrow — heap.alloc needs &mut self.heap, which conflicts
+        // with the captured.borrow_mut() below.
+        let rest_array_val = if let Some(slot) = rest_slot {
+            let rest_args: Vec<Value> = args.iter().skip(n_params as usize).cloned().collect();
+            // Truncate args to the leading required slots — the
+            // overflow now lives in rest_args.
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(rest_args));
+            Some((slot, Value::Array(id)))
+        } else {
+            None
         };
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
@@ -1296,15 +1315,17 @@ impl Vm {
             if locals.len() < needed {
                 while locals.len() < needed { locals.push(Value::Nil); }
             }
-            // Place args into the block's param slots. CRuby's
-            // arity-mismatch semantics: too few args → leftover
-            // params bind to Nil (not whatever stale value the
-            // shared captured locals held from a previous
-            // iteration). Walk every param slot, picking from
-            // `args` where available and Nil otherwise.
+            // Place args into the block's required param slots.
+            // CRuby's arity-mismatch semantics: too few args →
+            // leftover slots bind to Nil. Overflow past n_params
+            // either flows into the rest slot (handled below) or
+            // is silently dropped (block-arity-permissive default).
             let mut it = args.into_iter();
             for i in 0..n_params as usize {
                 locals[param_start as usize + i] = it.next().unwrap_or(Value::Nil);
+            }
+            if let Some((slot, val)) = rest_array_val {
+                locals[slot as usize] = val;
             }
         }
         self.frames.push(Frame {

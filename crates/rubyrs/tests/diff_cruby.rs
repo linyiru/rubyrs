@@ -172,3 +172,4 @@ fn run_diff(name: &str) {
 #[test] fn protected_method() { run_diff("protected_method"); }
 #[test] fn regex_sub() { run_diff("regex_sub"); }
 #[test] fn method_object() { run_diff("method_object"); }
+#[test] fn vararg_lambda() { run_diff("vararg_lambda"); }

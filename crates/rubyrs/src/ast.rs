@@ -192,7 +192,7 @@ pub(crate) enum Expr {
     /// consumed by a method call. We don't distinguish Lambda
     /// from Proc at runtime; the strict-arity check that CRuby's
     /// Lambda enforces is missing — documented in SUBSET.md.
-    Lambda { params: Vec<String>, body: Vec<SExpr> },
+    Lambda { params: Vec<BlockParam>, body: Vec<SExpr> },
     /// `return [val]` — exits the current method/block frame with `val`.
     Return(Option<Box<SExpr>>),
     /// `next [val]` — exits the current block iteration with `val`.
@@ -233,6 +233,13 @@ pub(crate) enum Expr {
 pub(crate) enum BlockParam {
     Single(String),
     Destructure(Vec<BlockParam>),
+    /// `|*args|` rest parameter — collects all positional args
+    /// past the last `Single` / `Destructure` slot into a fresh
+    /// Array bound to this name. At most one Rest per param list
+    /// (Prism enforces source-level uniqueness). Empty name is
+    /// the anonymous form `|*|` (reserve the slot, drop the
+    /// data — analogous to `**` for kwargs).
+    Rest(String),
 }
 
 #[derive(Debug, Clone)]
@@ -734,9 +741,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     .and_then(|pn| pn.as_block_parameters_node())
                     .and_then(|bp| bp.parameters())
                     .map(|p| {
-                        p.requireds().iter()
+                        let mut out: Vec<BlockParam> = p.requireds().iter()
                             .filter_map(|r| parse_one(&r))
-                            .collect()
+                            .collect();
+                        // `|*rest|` — Prism reports the rest param
+                        // separately from requireds. Append as a
+                        // Rest BlockParam; the compiler's prologue
+                        // will gather overflow args here.
+                        if let Some(rest) = p.rest()
+                            && let Some(rp) = rest.as_rest_parameter_node() {
+                                let name = rp.name().map(cid_to_string).unwrap_or_default();
+                                out.push(BlockParam::Rest(name));
+                            }
+                        out
                     })
                     .unwrap_or_default();
                 let block_body: Vec<SExpr> = match bn.body() {
@@ -877,14 +894,24 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return s("expression");
     }
     if let Some(n) = node.as_lambda_node() {
-        // `->(x, y) { body }` — same param/body extraction as
-        // block literals attached to call nodes.
-        let params: Vec<String> = n.parameters()
+        // `->(x, *rest) { body }` — same param shape as block
+        // literals: requireds + optional rest. Lambda body is
+        // a `Vec<SExpr>` evaluated in the block proto.
+        let params: Vec<BlockParam> = n.parameters()
             .and_then(|pn| pn.as_block_parameters_node())
             .and_then(|bp| bp.parameters())
-            .map(|p| p.requireds().iter()
-                .filter_map(|r| r.as_required_parameter_node().map(|rp| cid_to_string(rp.name())))
-                .collect())
+            .map(|p| {
+                let mut out: Vec<BlockParam> = p.requireds().iter()
+                    .filter_map(|r| r.as_required_parameter_node()
+                        .map(|rp| BlockParam::Single(cid_to_string(rp.name()))))
+                    .collect();
+                if let Some(rest) = p.rest()
+                    && let Some(rp) = rest.as_rest_parameter_node() {
+                        let name = rp.name().map(cid_to_string).unwrap_or_default();
+                        out.push(BlockParam::Rest(name));
+                    }
+                out
+            })
             .unwrap_or_default();
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
