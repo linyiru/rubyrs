@@ -703,8 +703,8 @@ end
 ## the modern branches. RUBY_PLATFORM identifies the host
 ## interpreter — "rubyrs" makes it obvious in any platform-
 ## conditional code that this isn't CRuby.
-RUBY_VERSION = "3.4.0"
-RUBY_PLATFORM = "rubyrs"
+RUBY_VERSION = "3.4.0".freeze
+RUBY_PLATFORM = "rubyrs".freeze
 ## Comparable — a stub class (we don't have Modules in this subset)
 ## that holds the six derived comparison methods plus `between?`
 ## and `clamp`, each defined in terms of `<=>`. `include Comparable`
