@@ -137,9 +137,10 @@ pub(crate) struct Vm {
     /// definitions). Read path: `Op::LoadConst` falls through to
     /// this map after the class registry misses. Distinct table so
     /// `class Foo` (sets `classes[Foo]`) and `Foo = 42` (sets
-    /// `constants[Foo]`) don't collide; class-as-class takes
-    /// precedence on read, matching CRuby's "warning: already
-    /// initialized constant" behaviour silently.
+    /// `constants[Foo]`) don't collide; the class registry wins on
+    /// read so `class Foo` is always findable. (CRuby warns and
+    /// reassigns on this collision; rubyrs is silent and keeps the
+    /// class — pick a different name if you really want to shadow.)
     pub(crate) constants: HashMap<SymId, Value>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, Rc<HostFn>>,

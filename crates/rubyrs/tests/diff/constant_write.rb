@@ -28,7 +28,7 @@ class Box
 end
 puts Box.new.show
 
-# Reading a constant defined later in the program but before this point
+# Re-reading constants from earlier in the program in a compound expression
 puts FOO + FOO2
 
 # Multiple constants in one expression

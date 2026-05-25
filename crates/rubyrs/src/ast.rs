@@ -75,9 +75,11 @@ pub(crate) enum Expr {
     },
     SelfExpr,
     ConstRead(String),
-    /// Top-level `FOO = expr`. Bare constant write only — the
-    /// `Foo::Bar = ...` (ConstantPathWriteNode) form is a separate
-    /// not-yet-supported case.
+    /// Bare constant write `FOO = expr` — appears at top level or
+    /// inside a class/module body; all forms store into the same
+    /// `Vm.constants` table (rubyrs has no real module nesting yet).
+    /// The `Foo::Bar = ...` (ConstantPathWriteNode) path form is a
+    /// separate not-yet-supported case.
     ConstWrite(String, Box<SExpr>),
     Call {
         receiver: Option<Box<SExpr>>,
