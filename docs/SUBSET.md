@@ -66,7 +66,7 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
   defines `method_missing`, missed calls route there with the
   missed name passed as a Symbol. Inherited through the superclass
   chain. Primitives (Int, Str, Sym, …) skip the lookup and raise
-  NoMethodError as before. See [ADR 0009](adr/0010-metaprogramming-poc.md).
+  NoMethodError as before. See [ADR 0010](adr/0010-metaprogramming-poc.md).
 - `define_method(:name) { |args| ... }` — installs the block as a
   method on the surrounding class. The Method shares the block's
   captured-locals `Rc<RefCell<Vec<Value>>>`, so closure semantics
@@ -74,7 +74,7 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
   are visible to the lexical scope (and to other invocations of
   the same method). Compile-time desugar; arg must be a Symbol
   literal. GC walks all installed closure-methods as roots — see
-  [ADR 0009](adr/0010-metaprogramming-poc.md).
+  [ADR 0010](adr/0010-metaprogramming-poc.md).
 
 **Caveats for the PoC**
 - No `*args` splat — `method_missing(name, *args)` and arity-flexible
