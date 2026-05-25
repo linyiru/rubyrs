@@ -294,7 +294,7 @@ impl Vm {
         let name: &str = &self.interner.resolve(name_id).clone();
         // Universal — every receiver responds to these.
         if matches!(name,
-            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@"
+            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>"
         ) {
             return true;
         }
@@ -621,6 +621,24 @@ impl Vm {
             let eq = recv.ruby_eq(&args[0], &self.heap);
             let result = if &*name == "==" { eq } else { !eq };
             self.stack.push(Value::Bool(result));
+            return Ok(());
+        }
+        // `Object#<=>` fallback for `Value::Object` receivers. The
+        // per-type primitive_call arms above handle every built-in
+        // lhs (Int / Float / Str / Bool / Nil — Sym lives in
+        // sym_primitive). When we reach here on `<=>`, the only
+        // remaining lhs shape is `Value::Object` whose class
+        // didn't define `<=>`. CRuby's default `Object#<=>`
+        // returns `0` if the two values are identical (in our
+        // model: same `ObjId`) and `nil` otherwise. User-defined
+        // `<=>` on a class already fired via class-method-lookup
+        // earlier, so we don't shadow.
+        if &*name == "<=>" && args.len() == 1 {
+            let result = match (&recv, &args[0]) {
+                (Value::Object(a), Value::Object(b)) if a == b => Value::Int(0),
+                _ => Value::Nil,
+            };
+            self.stack.push(result);
             return Ok(());
         }
         // `Object#class` — universal, no args. Returns the Class
@@ -2472,6 +2490,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             "<=" => Some(Value::Bool(a <= b)),
             ">"  => Some(Value::Bool(a > b)),
             ">=" => Some(Value::Bool(a >= b)),
+            "<=>" => Some(Value::Int(a.cmp(b) as i64)),
             _ => None,
         },
         (Value::Int(a), "to_s", []) => Some(Value::Str(Rc::from(a.to_string().as_str()))),
@@ -2503,6 +2522,13 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             "<=" => Some(Value::Bool(a <= b)),
             ">"  => Some(Value::Bool(a > b)),
             ">=" => Some(Value::Bool(a >= b)),
+            // `partial_cmp` returns None on NaN-involved
+            // comparisons; CRuby's spec is the same: `(0.0/0.0)
+            // <=> 1.0 == nil`.
+            "<=>" => Some(match a.partial_cmp(b) {
+                Some(o) => Value::Int(o as i64),
+                None => Value::Nil,
+            }),
             _ => None,
         },
         // Mixed Int/Float — CRuby's "Float wins" coercion.
@@ -2520,6 +2546,10 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
                 "<=" => Some(Value::Bool(*a <= b)),
                 ">"  => Some(Value::Bool(*a > b)),
                 ">=" => Some(Value::Bool(*a >= b)),
+                "<=>" => Some(match a.partial_cmp(&b) {
+                    Some(o) => Value::Int(o as i64),
+                    None => Value::Nil,
+                }),
                 _ => None,
             }
         }
@@ -2537,6 +2567,10 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
                 "<=" => Some(Value::Bool(a <= *b)),
                 ">"  => Some(Value::Bool(a > *b)),
                 ">=" => Some(Value::Bool(a >= *b)),
+                "<=>" => Some(match a.partial_cmp(b) {
+                    Some(o) => Value::Int(o as i64),
+                    None => Value::Nil,
+                }),
                 _ => None,
             }
         }
@@ -2648,6 +2682,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(**a < **b)),
         (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(**a <= **b)),
         (Value::Str(a), ">", [Value::Str(b)]) => Some(Value::Bool(**a > **b)),
+        (Value::Str(a), "<=>", [Value::Str(b)]) => Some(Value::Int((**a).cmp(&**b) as i64)),
         (Value::Str(a), ">=", [Value::Str(b)]) => Some(Value::Bool(**a >= **b)),
         (Value::Sym(a), "==", [Value::Sym(b)]) => Some(Value::Bool(a == b)),
         (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(a != b)),
@@ -2666,6 +2701,26 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // used by `attr_*` / `define_method`) is the same op.
         (_, "!", []) | (_, "!@", []) => Some(Value::Bool(!recv.is_truthy())),
         (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::from(if *b { "true" } else { "false" }))),
+        // CRuby's TrueClass / FalseClass don't define `<=>`;
+        // `Object#<=>` falls back to "0 if identical instance
+        // else nil". Booleans are singletons (every `true` is
+        // the same instance) so `true <=> true == 0` and
+        // `true <=> false == nil`. Same shape for Nil.
+        (Value::Bool(a), "<=>", [Value::Bool(b)]) => {
+            Some(if a == b { Value::Int(0) } else { Value::Nil })
+        }
+        (Value::Nil, "<=>", [Value::Nil]) => Some(Value::Int(0)),
+        // Per-built-in-lhs catch-alls: when the rhs type doesn't
+        // match any specific arm above, `<=>` is `nil`, not
+        // NoMethodError. We have to enumerate per-lhs (rather
+        // than a universal `(_, "<=>", _)`) so that user-defined
+        // `<=>` on `Value::Object` still wins via the normal
+        // class-method-lookup path in `do_call`.
+        (Value::Int(_), "<=>", [_]) => Some(Value::Nil),
+        (Value::Float(_), "<=>", [_]) => Some(Value::Nil),
+        (Value::Str(_), "<=>", [_]) => Some(Value::Nil),
+        (Value::Bool(_), "<=>", [_]) => Some(Value::Nil),
+        (Value::Nil, "<=>", [_]) => Some(Value::Nil),
         (Value::Class(c), "name", []) | (Value::Class(c), "to_s", []) => {
             Some(Value::Str(Rc::from(c.name.as_str())))
         }
@@ -2687,6 +2742,15 @@ impl Vm {
         match (recv, name, args) {
             (Value::Sym(id), "to_s", []) => Some(Value::Str(self.interner.resolve(*id).clone())),
             (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
+            // Symbol <=> Symbol compares the interned names
+            // lexicographically — matches `value_cmp_v`.
+            (Value::Sym(a), "<=>", [Value::Sym(b)]) => {
+                let sa = self.interner.resolve(*a);
+                let sb = self.interner.resolve(*b);
+                Some(Value::Int((**sa).cmp(&**sb) as i64))
+            }
+            // Cross-type with Symbol lhs: nil, not NoMethodError.
+            (Value::Sym(_), "<=>", [_]) => Some(Value::Nil),
             _ => None,
         }
     }

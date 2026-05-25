@@ -7,6 +7,27 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`<=>` spaceship operator.** Returns `Integer(-1/0/1)`
+  ordering or `nil` when the pair isn't comparable. Per-type
+  arms in `primitive_call` cover `Int <=> Int`,
+  `Float <=> Float`, `Int <=> Float` / `Float <=> Int`
+  (numeric coercion), `String <=> String`; `sym_primitive`
+  handles `Symbol <=> Symbol` (lexicographic on interned
+  name). `Bool <=> Bool` returns `0` for the same singleton
+  and `nil` otherwise — matching CRuby's default
+  `Object#<=>` because TrueClass/FalseClass don't override
+  it. `nil <=> nil` is `0`. NaN-involved Float comparisons
+  return `nil`. Cross-type returns `nil` via per-built-in-lhs
+  catch-alls. For `Value::Object` receivers, user-defined
+  `<=>` wins via the normal class-method-lookup path; an
+  unhandled `Object` lhs falls through to a `do_call`
+  universal that returns `0` for identical `ObjId` and
+  `nil` otherwise (CRuby's default `Object#<=>`). New diff
+  fixture `spaceship.rb` covers every type combination plus
+  a user-defined `Version#<=>` for a real sort-key idiom.
+  Byte-identical to CRuby.
+
+### Added
 - **`attr_accessor` / `attr_reader` / `attr_writer`.**
   Compile-time desugar: a no-receiver call to any of these
   with all-Symbol-literal args expands into `Op::DefMethod`
