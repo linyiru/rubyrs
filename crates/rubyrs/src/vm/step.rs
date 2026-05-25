@@ -37,12 +37,13 @@ impl Vm {
                 // semantics: `return` wins, the break value is
                 // dropped). Clear the slot so no EndEnsure in a
                 // surviving frame can resume into the now-stale
-                // target IP. (Today's compiler invariant makes
-                // EndEnsure reachable only via unwind_with_exception
-                // which also clears, so this is hygiene rather
-                // than a fix for an observable bug — but the
-                // invariant is delicate enough to be worth
-                // belt-and-braces.)
+                // target IP. EndEnsure is reachable on TWO paths
+                // (exception unwind via `unwind_with_exception`,
+                // AND the loop-transfer walk via
+                // `continue_loop_transfer`), but neither runs
+                // automatically as we pop frames here — so a
+                // stale pending could in principle be consumed
+                // later. This clear closes that window.
                 self.pending_loop_transfer = None;
                 while let Some(f) = self.frames.last() {
                     if !f.is_block { break; }

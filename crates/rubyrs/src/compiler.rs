@@ -1070,7 +1070,10 @@ pub(crate) fn compile_expr(
             }
 
             // Ensure layer (compile body twice — once inline for the normal
-            // path, once for the exception path which ends in Raise).
+            // path, once for the exception / loop-transfer path which
+            // ends in Op::EndEnsure — that terminator routes to either
+            // re-raise the in-flight exception or resume a pending
+            // break/next walk depending on `vm.pending_loop_transfer`).
             if let (Some(eb), Some(pe)) = (ensure.as_ref(), pe) {
                 b.emit(Op::PopEnsure);
                 // Normal path: run ensure body, then jump past handler.
