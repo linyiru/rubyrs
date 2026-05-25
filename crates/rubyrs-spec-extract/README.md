@@ -55,11 +55,11 @@ human polish step.
 | `mock_int(LITERAL_INT)` | `LITERAL_INT` | **v0.3** |
 | (any unrewritten matcher / hook) | passthrough + listed in **skip-log header** comment at top of file | **v0.3** |
 | `require_relative '...'` | (stripped — line filter) | v0.1 |
-| *`after :each / :all`* | *passthrough + skip-log entry* | v0.4 |
-| *`before :all`* | *passthrough + skip-log entry* | v0.4 |
-| *`context "..." do ... end`* | *passthrough + skip-log entry* | v0.4 |
-| *`it_behaves_like :shared, ...`* | *passthrough + skip-log entry* | v0.4 |
-| *`should_receive` / `mock(...)` / `mock_int(dynamic)`* | *passthrough + skip-log entry* | (no mock lib in micro-runner; hand-translate) |
+| *`after :each / :all`* | *passthrough + skip-log entry (full rewrite v0.4)* | logged v0.3, rewritten v0.4 |
+| *`before :all`* | *passthrough + skip-log entry (full rewrite v0.4)* | logged v0.3, rewritten v0.4 |
+| *`context "..." do ... end`* | *passthrough + skip-log entry (full rewrite v0.4)* | logged v0.3, rewritten v0.4 |
+| *`it_behaves_like :shared, ...`* | *passthrough + skip-log entry (full rewrite v0.4)* | logged v0.3, rewritten v0.4 |
+| *`should_receive` / `mock(...)` / `mock_int(dynamic)`* | *passthrough + skip-log entry* | logged v0.3; no mock lib in micro-runner — always hand-translate |
 
 For the `should ==` / `should_not ==` / predicate-matcher
 rewrites, `expr`, `val`, and `args` come from the original

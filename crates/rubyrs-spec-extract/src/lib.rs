@@ -73,7 +73,22 @@ pub fn extract(source: &str) -> String {
     lifter.visit(&root);
     let consumed = lifter.consumed_before_ranges;
 
-    let mut all_subs = collector.substitutions;
+    // Drop recogniser substitutions that fall inside a lifter
+    // delete range. The bytes they target are about to be wiped
+    // by the delete; applying them first would mutate `out` with
+    // original offsets, then the delete would use those same
+    // original offsets against a now-shifted string and either
+    // panic (range past end) or corrupt the output. Recogniser
+    // subs INSIDE a before block that's about to be deleted are
+    // moot anyway — that's exactly the cluster E "nested args
+    // aren't re-rewritten" caveat for the lifted copies.
+    let mut all_subs: Vec<Substitution> = collector
+        .substitutions
+        .into_iter()
+        .filter(|s| !consumed.iter().any(|(dstart, dend)| {
+            s.start >= *dstart && s.end <= *dend
+        }))
+        .collect();
     all_subs.extend(lifter.substitutions);
 
     let rewritten = apply_substitutions(source, all_subs);
@@ -414,8 +429,18 @@ fn slice(source: &str, node: &Node<'_>) -> String {
 
 /// Apply substitutions in reverse byte order so earlier offsets
 /// stay valid as later edits rewrite the tail of the string.
+///
+/// Tiebreaker on equal `start`: apply longer ranges before
+/// zero-length insertions at the same point. v0.3 introduced
+/// zero-length inserts (lifter prepending body to `it` blocks)
+/// that can land at the same offset as a recogniser substitution
+/// (which has start < end). Without the secondary `Reverse(end)`
+/// key, sort would be unstable on ties and the order could go
+/// either way — applying the insert first means the recogniser
+/// range then lands BEFORE the inserted prefix, doubling /
+/// corrupting bytes.
 fn apply_substitutions(source: &str, mut subs: Vec<Substitution>) -> String {
-    subs.sort_by_key(|s| std::cmp::Reverse(s.start));
+    subs.sort_by_key(|s| (std::cmp::Reverse(s.start), std::cmp::Reverse(s.end)));
     let mut out = source.to_string();
     for sub in subs {
         out.replace_range(sub.start..sub.end, &sub.replacement);
