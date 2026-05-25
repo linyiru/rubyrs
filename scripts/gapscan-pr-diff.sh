@@ -279,9 +279,14 @@ any_change = any(r['supported_delta'] or r['missing_delta']
 repo = os.environ.get('GITHUB_REPOSITORY', '')
 sha = os.environ.get('GAPSCAN_COMMIT_SHA') or os.environ.get('GITHUB_SHA', 'master')
 def url(rel):
-    if repo:
-        return f"https://github.com/{repo}/blob/{sha}/{rel}"
-    return rel  # local mode
+    if not repo:
+        return rel  # local mode
+    # GitHub URL routing differs by target type: blobs (files) live
+    # under /blob/<sha>/, directories under /tree/<sha>/. Hitting
+    # /blob/<sha>/<dir>/ returns 404. Trailing-slash is our
+    # in-script convention for "this is a directory".
+    kind = "tree" if rel.endswith("/") else "blob"
+    return f"https://github.com/{repo}/{kind}/{sha}/{rel.rstrip('/')}"
 
 print("## gapscan PR diff")
 print()
