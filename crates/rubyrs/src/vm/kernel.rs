@@ -88,6 +88,20 @@ impl Vm {
                 };
                 Some(Ok(result))
             }
+            "block_given?" => {
+                // CRuby semantics: walks past block frames to the
+                // enclosing method frame, then reports whether that
+                // method was called with a block. Inside an iterator
+                // block (`each { block_given? }`), reads the
+                // surrounding method's block-arg, not the block's
+                // own slot. Toplevel `<main>` answers false (no
+                // method context, no block to inherit).
+                let has_block = self.frames.iter().rev()
+                    .find(|f| !f.is_block && !f.is_class_body)
+                    .map(|f| f.block_arg.is_some())
+                    .unwrap_or(false);
+                Some(Ok(Value::Bool(has_block)))
+            }
             // `defined?` plumbing: three runtime checks that
             // resolve against `self` (ivars), the class chain
             // (methods), and the constant table. AST translation

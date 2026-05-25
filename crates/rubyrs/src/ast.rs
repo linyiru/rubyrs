@@ -131,6 +131,12 @@ pub(crate) enum Expr {
         /// kw-rest capture; trailing-Hash callers with
         /// unrecognised keys raise ArgumentError.
         kw_rest: Option<String>,
+        /// `Some(name)` for `def foo(&blk)` — the block-as-data
+        /// parameter. Captures the BlockHandle the caller passed
+        /// (or nil if no block) into a local of this name. `None`
+        /// for plain `def foo`. Lives after kw_rest in the slot
+        /// layout (see Proto.block_param).
+        block_param: Option<String>,
         /// `def receiver.name; ...; end` — singleton method
         /// definition. `Some(SelfExpr)` is the class-body
         /// `def self.foo` form (compiles to
@@ -1146,7 +1152,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let mut rest: Option<String> = None;
         let mut kw_params: Vec<(String, Option<SExpr>)> = Vec::new();
         let mut kw_rest: Option<String> = None;
+        let mut block_param: Option<String> = None;
         if let Some(p) = n.parameters() {
+            if let Some(b) = p.block() {
+                // `def foo(&blk)`: capture the caller's block into
+                // the named slot. Anonymous form `def foo(&)` would
+                // have `b.name() == None`; CRuby uses it for
+                // forward-the-block-only, which we don't model yet
+                // — treat as no-name (skip the bind). Prism returns
+                // `BlockParameterNode` directly from `p.block()`
+                // (it's an alternation node, not a generic Node);
+                // no `as_*_node` cast needed.
+                block_param = b.name().map(cid_to_string);
+            }
             if let Some(r) = p.rest()
                 && let Some(rp) = r.as_rest_parameter_node() {
                     rest = rp.name().map(|n| cid_to_string(n));
@@ -1215,7 +1233,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // any other expression (instance-level singleton on a
         // Value::Object) at compile time.
         let receiver = n.receiver().map(|r| Box::new(tr(&r)));
-        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, kw_rest, receiver, body });
+        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;
