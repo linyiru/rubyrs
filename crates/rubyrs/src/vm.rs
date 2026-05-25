@@ -4247,6 +4247,87 @@ impl Vm {
                 };
                 Some(Ok(result))
             }
+            // `Integer(x)` / `Float(x)` / `String(x)` — strict
+            // conversion functions. Unlike `to_i` / `to_f` (which
+            // are lenient — `"abc".to_i` returns 0), these raise
+            // ArgumentError on input that can't be cleanly parsed.
+            // The canonical Ruby idiom for "convert or fail loudly",
+            // typically wrapped in an inline rescue:
+            //   port = Integer(ENV['PORT']) rescue 8080
+            "Integer" => {
+                if args.len() != 1 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                    })));
+                }
+                let result = match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(*n)),
+                    Value::Float(f) => {
+                        if !f.is_finite() {
+                            Err(RubyError::TypeError {
+                                msg: format!("can't convert {} into Integer", crate::heap::format_float(*f)),
+                            })
+                        } else { Ok(Value::Int(*f as i64)) }
+                    }
+                    Value::Str(s) => {
+                        let raw = s.borrow();
+                        let trimmed = raw.trim();
+                        match trimmed.parse::<i64>() {
+                            Ok(n) => Ok(Value::Int(n)),
+                            Err(_) => Err(RubyError::ArgumentError {
+                                msg: format!("invalid value for Integer(): \"{}\"", raw),
+                            }),
+                        }
+                    }
+                    Value::Nil => Err(RubyError::TypeError {
+                        msg: "can't convert nil into Integer".into(),
+                    }),
+                    other => Err(RubyError::TypeError {
+                        msg: format!("can't convert {} into Integer", other.type_name()),
+                    }),
+                };
+                Some(result.map_err(|e| self.trap(e)))
+            }
+            "Float" => {
+                if args.len() != 1 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                    })));
+                }
+                let result = match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(*f)),
+                    Value::Int(n) => Ok(Value::Float(*n as f64)),
+                    Value::Str(s) => {
+                        let raw = s.borrow();
+                        let trimmed = raw.trim();
+                        match trimmed.parse::<f64>() {
+                            Ok(f) => Ok(Value::Float(f)),
+                            Err(_) => Err(RubyError::ArgumentError {
+                                msg: format!("invalid value for Float(): \"{}\"", raw),
+                            }),
+                        }
+                    }
+                    Value::Nil => Err(RubyError::TypeError {
+                        msg: "can't convert nil into Float".into(),
+                    }),
+                    other => Err(RubyError::TypeError {
+                        msg: format!("can't convert {} into Float", other.type_name()),
+                    }),
+                };
+                Some(result.map_err(|e| self.trap(e)))
+            }
+            // `String(x)` — calls `to_s` for any value. Lenient (it
+            // doesn't raise on weird input — to_s should always
+            // succeed for our built-in types).
+            "String" => {
+                if args.len() != 1 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                    })));
+                }
+                let s = args[0].to_display(&self.heap, &self.interner);
+                Some(Ok(Value::new_str(s)))
+            }
             "print" => {
                 for a in args {
                     let s = a.to_display(&self.heap, &self.interner);
