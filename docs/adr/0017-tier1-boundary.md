@@ -100,7 +100,7 @@ scope for rubyrs."
 | `ObjectSpace`, `GC.start`-style reflection | 4 (`mri-compat`) | Violates rule 4 (introspects shared global state); needed only for CRuby-shape parity. |
 | `Time` (wall-clock) | 2 with capability injection from host | Rule 1; a `Time.now` host fn is the supported way. |
 | `Random`, `SecureRandom` | 2 with seeded mode in tier 1 | Rule 1; deterministic seeded `Random.new(seed)` is fine, system-entropy `Random.new` belongs out. |
-| `ENV` direct read | Capability-gated even in Tier 1 | Rule 1+2; `Config::env` host-injected map is the supported shape (TBD API). |
+| `ENV[…]` reading host-process env vars | 2 (host-injected map only) | Rule 1+2. Direct host-process env reads are out (non-deterministic + capability leak); the supported Tier-1 shape is `Config::env`-injected map exposed under the `ENV` name (TBD API). |
 | C extension ABI (`require 'foo.so'`) | 4 (`mri-compat`, **already gated** per PR #73) | Whole-tier-4 surface. |
 | Bundler / RubyGems / Gemfile resolution | 4 (out-of-tree; this is `rubund`'s job) | Not interpreter scope. |
 | Rails, ActiveRecord, ActionPack | 4 (multi-year bet) | Roadmap-level; not a tier-1 commitment. |
@@ -140,7 +140,8 @@ scope for rubyrs."
   Tier 2 will surface as parse errors in real-world Ruby
   snippets. The diagnostic needs to point at the `regex` feature
   rather than say "not supported". This is the same UX we landed
-  for `require` without `cext` in PR #75.
+  for `require` without `cext` in
+  [PR #75](https://github.com/linyiru/rubyrs/pull/75).
 
 ### What we explicitly accept trading away
 
@@ -178,7 +179,8 @@ scope for rubyrs."
 4. **Per-target tier defaults** (e.g. wasi defaults to tier 1
    only). Rejected pragmatically: Cargo does not support
    target-specific default features, and the build.rs panic
-   approach (used for `cext` + wasi in PR #75) does not
+   approach (used for `cext` + wasi in
+   [PR #75](https://github.com/linyiru/rubyrs/pull/75)) does not
    generalise to "the whole tier matrix." Targets opt into
    tiers explicitly via `--features`.
 
@@ -232,3 +234,8 @@ to become.
 - [PR #73](https://github.com/linyiru/rubyrs/pull/73) — empirical
   validation that one tier boundary (`cext`) is achievable
   through Cargo features + cfg gates.
+- [PR #75](https://github.com/linyiru/rubyrs/pull/75) — post-PoC
+  hardening of the `cext` feature gate; the place this ADR
+  cites for the diagnostic-message UX (`require` without the
+  feature) and for the `build.rs` panic precedent (rejecting
+  the wasi+cext combination loudly).
