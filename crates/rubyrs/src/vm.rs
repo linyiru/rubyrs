@@ -294,7 +294,7 @@ impl Vm {
         let name: &str = &self.interner.resolve(name_id).clone();
         // Universal — every receiver responds to these.
         if matches!(name,
-            "nil?" | "to_s" | "respond_to?" | "==" | "!="
+            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!="
         ) {
             return true;
         }
@@ -348,12 +348,41 @@ impl Vm {
                 "any?" | "all?" | "none?"
             ),
             Value::Bool(_) | Value::Nil => false,
-            Value::Class(_) => name == "new",
+            Value::Class(_) => matches!(name, "new" | "name"),
             Value::Object(id) => {
                 let cls = self.heap.instance(*id).class.clone();
                 self.lookup_method_uncached(&cls, name_id).is_some()
             }
             Value::Block(_) => matches!(name, "call"),
+        }
+    }
+
+    /// `Object#class` — returns the Class associated with a value.
+    /// For user-defined instances that's the stored class; for
+    /// built-in types we look up the corresponding stub class
+    /// (`Integer`, `String`, ...) installed by the preamble. If
+    /// the lookup misses (preamble bug or a user evaling
+    /// `Integer.class.superclass` games on a stripped runtime),
+    /// returns `Value::Nil` rather than panicking.
+    pub(crate) fn class_of(&mut self, recv: &Value) -> Value {
+        let name: &'static str = match recv {
+            Value::Int(_) => "Integer",
+            Value::Str(_) => "String",
+            Value::Sym(_) => "Symbol",
+            Value::Array(_) => "Array",
+            Value::Hash(_) => "Hash",
+            Value::Range(_) => "Range",
+            Value::Bool(true) => "TrueClass",
+            Value::Bool(false) => "FalseClass",
+            Value::Nil => "NilClass",
+            Value::Block(_) => "Proc",
+            Value::Class(_) => "Class",
+            Value::Object(id) => return Value::Class(self.heap.instance(*id).class.clone()),
+        };
+        let sym = self.interner.intern(name);
+        match self.classes.get(&sym) {
+            Some(c) => Value::Class(c.clone()),
+            None => Value::Nil,
         }
     }
 }
@@ -566,6 +595,15 @@ impl Vm {
         }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
+            return Ok(());
+        }
+        // `Object#class` — universal, no args. Returns the Class
+        // associated with the receiver. For built-in types it's
+        // the stub class registered by the preamble; for user
+        // instances it's the instance's stored class.
+        if &*name == "class" && args.is_empty() {
+            let c = self.class_of(&recv);
+            self.stack.push(c);
             return Ok(());
         }
         // `Object#respond_to?(name)` — pure feature detection, no
@@ -2480,6 +2518,16 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // `"abc".nil?` and `5.nil?` work without per-type arms.
         (_, "nil?", []) => Some(Value::Bool(false)),
         (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::from(if *b { "true" } else { "false" }))),
+        (Value::Class(c), "name", []) | (Value::Class(c), "to_s", []) => {
+            Some(Value::Str(Rc::from(c.name.as_str())))
+        }
+        // Class identity is `Rc::ptr_eq` — two `Value::Class` refer
+        // to the same class iff they point at the same `Rc<Class>`.
+        // Reopened classes share the same Rc by virtue of the
+        // class-table lookup in `Op::DefClass`, so
+        // `class Foo; end; class Foo; end; Foo == Foo` is `true`.
+        (Value::Class(a), "==", [Value::Class(b)]) => Some(Value::Bool(Rc::ptr_eq(a, b))),
+        (Value::Class(a), "!=", [Value::Class(b)]) => Some(Value::Bool(!Rc::ptr_eq(a, b))),
         _ => None,
     })
 }

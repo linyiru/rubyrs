@@ -165,6 +165,35 @@ end
 ## See docs/adr/0008-resource-caps-for-untrusted-scripts.md.
 class ResourceExhausted < Exception
 end
+## Stub classes for built-in types. Without these, `5.class` and
+## friends have nothing to return; the bodies stay empty because
+## built-in method dispatch goes through `primitive_call` /
+## `collection_call` before any class-table lookup. Re-opening
+## these from user code does work (`class Integer; def foo; end`)
+## but adding methods that way won't shadow the primitive arms —
+## see docs/SUBSET.md.
+class Integer
+end
+class String
+end
+class Symbol
+end
+class Array
+end
+class Hash
+end
+class Range
+end
+class TrueClass
+end
+class FalseClass
+end
+class NilClass
+end
+class Proc
+end
+class Class
+end
 "#;
         self.eval(PREAMBLE, "<rubyrs:preamble>")
             .expect("ICE: failed to load built-in exception preamble");

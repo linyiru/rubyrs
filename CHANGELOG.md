@@ -7,7 +7,27 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
-- **`Object#respond_to?(name)`** for duck-typed feature
+- **`Object#class`, `Class#name` / `#to_s` / `#==` / `#!=`**.
+  `obj.class` returns the Class associated with any receiver —
+  for user instances it's the instance's stored class; for
+  built-in types the preamble now installs stub classes
+  (`Integer`, `String`, `Symbol`, `Array`, `Hash`, `Range`,
+  `TrueClass`, `FalseClass`, `NilClass`, `Proc`, `Class`)
+  that `class_of` looks up via the class table. The stub
+  bodies are empty — built-in method dispatch still goes
+  through `primitive_call` / `collection_call` before any
+  class-table lookup, so re-opening these from user code
+  doesn't shadow the primitive arms (documented in
+  SUBSET.md, follow-up). `Class#name` and `#to_s` return the
+  name as a String. `Class#==` and `#!=` use `Rc::ptr_eq` —
+  reopened classes share their `Rc<Class>` via the class
+  table, so identity is the right semantics. Unblocks the
+  `e.class.name == "MyError"` and `obj.class == MyClass`
+  idioms ubiquitous in exception-handling and pattern-matching
+  code. New diff fixture `object_class.rb` covers built-in
+  types, user-class identity, name lookup, the meta level
+  (`Animal.class == Class`), and class-name dispatch inside a
+  rescue handler. Byte-identical to CRuby.
   detection. Accepts either a `Symbol` (`:length`) or a
   `String` (`"length"`). For `Value::Object` receivers walks
   the class chain via `lookup_method_uncached` — the precise

@@ -96,3 +96,4 @@ fn run_diff(name: &str) {
 #[test] fn rescue_by_class() { run_diff("rescue_by_class"); }
 #[test] fn default_args() { run_diff("default_args"); }
 #[test] fn respond_to() { run_diff("respond_to"); }
+#[test] fn object_class() { run_diff("object_class"); }
