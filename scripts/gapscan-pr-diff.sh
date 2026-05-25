@@ -28,17 +28,21 @@ set -euo pipefail
 # Keep pins in sync with the SHAs recorded in docs/gap-reports/*.md
 # headers so the per-codebase Δ here lines up with what those reports
 # would change to.
+# Full 40-character SHAs are required: `git fetch origin <abbrev>`
+# is not supported by the protocol — only full hashes (or named
+# refs) work for direct-SHA fetches. Using abbrevs silently falls
+# back to a full `git fetch origin`, defeating the optimization.
 TARGETS=(
-  "jekyll|https://github.com/jekyll/jekyll|202df57|lib"
-  "liquid|https://github.com/Shopify/liquid|742ac3d|lib"
-  "sinatra|https://github.com/sinatra/sinatra|5236d34|lib"
-  "dry-struct|https://github.com/dry-rb/dry-struct|26eb60f|lib"
-  "rake|https://github.com/ruby/rake|5cea175|lib"
-  "bundler|https://github.com/rubygems/rubygems|5c535b0|bundler/lib"
-  "tilt|https://github.com/jeremyevans/tilt|6a0dae1|lib"
-  "stdlib-set|https://github.com/ruby/ruby|48d4efc|lib/set.rb"
-  "stdlib-optparse|https://github.com/ruby/ruby|48d4efc|lib/optparse.rb"
-  "stdlib-uri|https://github.com/ruby/ruby|48d4efc|lib/uri"
+  "jekyll|https://github.com/jekyll/jekyll|202df571314ba1d18e9fccd81d12aaad4a703c38|lib"
+  "liquid|https://github.com/Shopify/liquid|742ac3dbf5432c6c2689ea00da604d7379f73799|lib"
+  "sinatra|https://github.com/sinatra/sinatra|5236d3459b8b9015e5ce21ddd0c6beb0db4081d4|lib"
+  "dry-struct|https://github.com/dry-rb/dry-struct|26eb60f8e320f8e0717d92f9bf6bb0ea98eb3f7b|lib"
+  "rake|https://github.com/ruby/rake|5cea175679e5b692d5fc35255548c297d56b35d2|lib"
+  "bundler|https://github.com/rubygems/rubygems|5c535b050b0f528d21569302026d7bb1bdcfb668|bundler/lib"
+  "tilt|https://github.com/jeremyevans/tilt|6a0dae17cdeaab877339d475cf075618ad9250d1|lib"
+  "stdlib-set|https://github.com/ruby/ruby|48d4efcb85000e1ebae42004e963b5d0cedddcf2|lib/set.rb"
+  "stdlib-optparse|https://github.com/ruby/ruby|48d4efcb85000e1ebae42004e963b5d0cedddcf2|lib/optparse.rb"
+  "stdlib-uri|https://github.com/ruby/ruby|48d4efcb85000e1ebae42004e963b5d0cedddcf2|lib/uri"
 )
 
 # --- config -------------------------------------------------------
@@ -201,8 +205,15 @@ any_change = any(r['supported_delta'] or r['missing_delta']
 # Render with absolute GitHub URLs so the links work in a PR
 # comment context (where relative paths resolve against /pull/N/,
 # not the repo root). Fall back to relative paths when not in CI.
+#
+# On `pull_request` events GitHub sets GITHUB_SHA to the synthetic
+# merge commit (refs/pull/N/merge), not the PR head. Links built
+# from that point at a tree the reader didn't intend. The workflow
+# passes the actual head SHA via GAPSCAN_COMMIT_SHA; prefer it,
+# fall through to GITHUB_SHA (e.g. push events) and finally to
+# 'master' for local renders.
 repo = os.environ.get('GITHUB_REPOSITORY', '')
-sha = os.environ.get('GITHUB_SHA', 'master')
+sha = os.environ.get('GAPSCAN_COMMIT_SHA') or os.environ.get('GITHUB_SHA', 'master')
 def url(rel):
     if repo:
         return f"https://github.com/{repo}/blob/{sha}/{rel}"

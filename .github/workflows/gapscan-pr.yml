@@ -119,6 +119,11 @@ jobs:
         env:
           GAPSCAN_BASE_REF: origin/${{ github.event.pull_request.base.ref }}
           GAPSCAN_WORK: /tmp/gapscan-work
+          # Pass the actual PR head SHA explicitly. On pull_request
+          # events GITHUB_SHA is the synthetic merge ref; using it
+          # for blob URLs sends readers to a tree they didn't
+          # intend. The script prefers GAPSCAN_COMMIT_SHA when set.
+          GAPSCAN_COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           mkdir -p /tmp/gapscan-work
           ./scripts/gapscan-pr-diff.sh > /tmp/gapscan-comment.md
