@@ -155,6 +155,13 @@ impl Heap {
     /// HeapObj variant — the caller must have proven the type
     /// via `rb_check_typeddata` (or equivalent) at the cext boundary
     /// before reaching this accessor.
+    ///
+    /// `#[allow(dead_code)]`: only called from the cext bridge,
+    /// which is `#[cfg(not(target_os = "wasi"))]`. On wasi the
+    /// cext path is stubbed so this accessor has no callers and
+    /// `-D warnings` would flag it as dead. Same rationale as the
+    /// `#[allow]` on `HeapObj::TypedData` itself.
+    #[allow(dead_code)]
     pub(crate) fn typed_data(&self, id: ObjId) -> &TypedDataObj {
         if let HeapObj::TypedData(d) = self.get(id) { d }
         else { panic!("ICE: heap slot is not a TypedData") }
