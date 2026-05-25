@@ -114,15 +114,15 @@ fn brewfile_example_is_fully_inside_subset() {
 #[test]
 fn fixture_exercises_three_missing_classes() {
     let report = scan_path(fixture("missing_features.rb"));
-    let names: Vec<&String> = report
+    let names: Vec<&str> = report
         .missing_sorted()
         .iter()
-        .map(|(k, _)| *k)
+        .map(|(k, _)| k.as_str())
         .collect();
     // Exact set, exact counts.
-    assert!(names.contains(&&"ModuleNode".to_string()), "got {names:?}");
-    assert!(names.contains(&&"ConstantWriteNode".to_string()), "got {names:?}");
-    assert!(names.contains(&&"UnlessNode".to_string()), "got {names:?}");
+    assert!(names.contains(&"ModuleNode"), "got {names:?}");
+    assert!(names.contains(&"ConstantWriteNode"), "got {names:?}");
+    assert!(names.contains(&"UnlessNode"), "got {names:?}");
     for cls in ["ModuleNode", "ConstantWriteNode", "UnlessNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
