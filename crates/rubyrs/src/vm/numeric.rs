@@ -89,6 +89,17 @@ pub(crate) fn numeric_call(
         (Value::Int(a), "zero?", []) => Some(Value::Bool(*a == 0)),
         (Value::Int(a), "positive?", []) => Some(Value::Bool(*a > 0)),
         (Value::Int(a), "negative?", []) => Some(Value::Bool(*a < 0)),
+        // `Integer#bit_length` — number of bits required to
+        // represent the magnitude. For negatives, CRuby uses
+        // two's-complement semantics: bit_length(-1) = 0,
+        // bit_length(-256) = 8. Equivalent to `bit_length(~n)`
+        // for negative `n`. For non-negatives, it's the position
+        // of the most-significant 1 bit.
+        (Value::Int(a), "bit_length", []) => {
+            let magnitude: u64 = if *a >= 0 { *a as u64 } else { !(*a as u64) };
+            let bits = 64 - magnitude.leading_zeros();
+            Some(Value::Int(bits as i64))
+        }
         (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => Some(Value::Int(a.wrapping_add(1))),
         (Value::Int(a), "pred", []) => Some(Value::Int(a.wrapping_sub(1))),
         (Value::Int(a), "to_f", []) => Some(Value::Float(*a as f64)),

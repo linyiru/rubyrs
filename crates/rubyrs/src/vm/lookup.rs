@@ -136,7 +136,8 @@ impl Vm {
                 "to_i" | "to_f" | "abs" | "even?" | "odd?" |
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
-                "times" | "upto" | "downto"
+                "times" | "upto" | "downto" |
+                "digits" | "bit_length"
             ),
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |

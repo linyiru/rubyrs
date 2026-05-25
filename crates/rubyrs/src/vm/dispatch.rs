@@ -1189,6 +1189,44 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // `Integer#digits([base])` — LSB-first digit Array. Default
+        // base 10; custom base must be >= 2. Negative receivers
+        // raise (CRuby raises Math::DomainError; subset uses
+        // ArgumentError since Math::DomainError isn't modelled).
+        if let Value::Int(n) = &recv && &*name == "digits" && args.len() <= 1 {
+            let base: i64 = match args.first() {
+                None => 10,
+                Some(Value::Int(b)) => *b,
+                Some(other) => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                })),
+            };
+            if base < 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("invalid radix {}", base),
+                }));
+            }
+            if *n < 0 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "numerical argument is out of domain - \"digits\"".into(),
+                }));
+            }
+            let mut elems: Vec<Value> = Vec::new();
+            let mut m = *n;
+            if m == 0 {
+                elems.push(Value::Int(0));
+            } else {
+                while m > 0 {
+                    elems.push(Value::Int(m % base));
+                    m /= base;
+                }
+            }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(elems));
+            self.stack.push(Value::Array(id));
+            return Ok(());
+        }
         // `Object#equal?` — identity comparison. For heap-managed
         // receivers, same `ObjId`; for inline values, same content.
         // CRuby never overrides this on subclasses, so we always
