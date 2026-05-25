@@ -453,7 +453,6 @@ name = "rubund"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "rubyrs",
  "tar",
  "ureq",
 ]

@@ -1,10 +1,18 @@
 # rubund
 
-> **A high-performance, drop-in Rust replacement for [Bundler](https://bundler.io/).**
+> **A zero-copy `Gemfile.lock` parser in Rust — and the start of a
+> Rust implementation of [Bundler](https://bundler.io/).**
 
-`rubund` lives in the same [Cargo workspace](../../Cargo.toml) as
-[`rubyrs`](../rubyrs/), the embedded Ruby interpreter it uses to
-evaluate `Gemfile` and `*.gemspec` files (both are Ruby DSLs).
+Today rubund ships a real, tested `Gemfile.lock` parser as a library
+crate, plus a few runnable examples (single-gem installer, 16-worker
+parallel installer, C-extension caching). The CLI binary is
+intentionally a placeholder — none of the user-facing Bundler
+commands (`install`, `update`, `exec`, `lock`, `check`) are
+implemented yet. `rubund --help` is currently the most useful thing
+it does.
+
+The library half is what to use today. The CLI half is what's
+under construction.
 
 ---
 
@@ -13,8 +21,7 @@ evaluate `Gemfile` and `*.gemspec` files (both are Ruby DSLs).
 | What | Why it matters |
 | :--- | :--- |
 | **Zero-copy lockfile parser** | Parses `Gemfile.lock` by borrowing directly into the input buffer — zero heap allocations for string tokens. A 1,379-line production lockfile is parsed in **~147 µs**. |
-| **Bounded parallel installer** | 16-worker thread pool over `std::sync::mpsc` — saturates network I/O without hitting macOS file-descriptor limits. |
-| **Embedded Ruby evaluation** | Uses `rubyrs::Runtime` to evaluate real `Gemfile` DSLs, so the dependency specification is never "approximated" — it's the same Ruby code Bundler would run. |
+| **Bounded parallel installer (example)** | The `manekineko_install` example drives a 16-worker thread pool over `std::sync::mpsc` to saturate network I/O without tripping macOS file-descriptor limits. Not yet a CLI command. |
 | **Single static binary** | No Ruby runtime required at the target machine. Ship one binary. |
 
 ---
@@ -26,9 +33,13 @@ Measured against the real-world **manekineko** project (196 gems, 1,379-line loc
 | Phase | Bundler (Ruby) | rubund (Rust) | Speedup |
 | :--- | ---: | ---: | ---: |
 | Lockfile parse | ~150–300 ms | **0.147 ms** | **~1,000–2,000×** |
-| Gemfile eval | ~150 ms | **0.507 ms** | **~300×** |
-| Hot-cache relink | ~1,200 ms | **382 ms** | **~3×** |
-| Cold install | ~40 s | **7.4 s** | **~5×** |
+| Hot-cache relink (example) | ~1,200 ms | **382 ms** | **~3×** |
+| Cold install (example) | ~40 s | **7.4 s** | **~5×** |
+
+The lockfile parse number is from the `lockfile_parser` integration
+test on a 1,379-line production lockfile. The install numbers come
+from the `manekineko_install` example fetching the same project's
+196 gems; they are not yet driven by a `rubund install` command.
 
 ---
 
@@ -38,9 +49,11 @@ Measured against the real-world **manekineko** project (196 gems, 1,379-line loc
 # Build (requires Rust ≥ 1.95)
 cargo build -p rubund --release
 
-# Run the placeholder CLI
-cargo run -p rubund -- --demo
-# => rubund 6 — the interpreter is wired up.
+# CLI today only prints version / help — the real value is the library.
+cargo run -p rubund -- --help
+
+# Run the lockfile parser against the bundled test vectors.
+cargo run -p rubund --example lockfile_parser
 ```
 
 ---
@@ -95,9 +108,14 @@ The [`examples/`](examples/) directory contains runnable demonstrations:
 | Example | Description | Command |
 | :--- | :--- | :--- |
 | [`lockfile_parser`](examples/lockfile_parser.rs) | Parse & pretty-print a production `Gemfile.lock` with timing | `cargo run -p rubund --example lockfile_parser` |
-| [`manekineko_install`](examples/manekineko_install.rs) | Full parallel download + extract of 196 gems | `cargo run --release -p rubund --example manekineko_install -- <path/to/Gemfile>` |
-| [`real_install`](examples/real_install.rs) | Single-gem fetch + extract flow | `cargo run -p rubund --example real_install` |
 | [`c_ext_cache`](examples/c_ext_cache.rs) | Gem with C extension + binary caching | `cargo run -p rubund --example c_ext_cache` |
+
+Two further examples (`real_install`, `manekineko_install`) bridge
+into an embedded Ruby interpreter (`rubyrs`) to evaluate real
+`Gemfile` DSLs end-to-end. They live at
+[`examples-rubyrs-deferred/`](examples-rubyrs-deferred/) for this
+release because their dep (`rubyrs`) is not yet on crates.io. They
+return as first-class examples once that dep ships.
 
 ---
 
@@ -126,7 +144,7 @@ to ensure parsing fidelity.
 ```
 crates/rubund/
 ├── src/
-│   ├── main.rs       # CLI entry point (--version, --help, --demo)
+│   ├── main.rs       # CLI entry point (--version, --help — placeholder)
 │   ├── lib.rs        # Library root — re-exports parser module
 │   └── parser.rs     # Zero-copy state-machine Gemfile.lock parser
 ├── tests/
@@ -159,25 +177,26 @@ in a single pass. Key design decisions:
 
 ## Why In-Tree?
 
-`rubund` is the first non-test consumer of `rubyrs`'s embedding API
-(`Runtime`, `register_fn`, `set_stdout`, `eval`). Keeping it in the
-same workspace means every breaking change to that API surfaces
-immediately as a build failure — turning the question *"will anyone
-actually use this?"* into a daily yes/no signal.
+`rubund` is developed in-tree with [`rubyrs`](../rubyrs/), an
+embeddable Ruby-subset interpreter. `Gemfile` and `*.gemspec` files
+are Ruby DSLs, so `Gemfile` evaluation will eventually be driven by
+that interpreter — `rubund` is its first non-test embedder. Keeping
+both crates in the same workspace turns every breaking change in the
+embedding API into a same-day build failure.
 
-The strategy is **dogfooding**: `rubyrs` needs a real driver to expose
-gaps in its language subset; `rubund` needs an embedded Ruby evaluator
-to make sense as a Rust binary at all.
+(For this first crates.io release the `rubyrs` dependency is
+temporarily lifted — `rubyrs` is not yet published — so the bridge
+that the CLI's `--demo` flag previously exercised is on hold. It
+returns once `rubyrs`, or its eventual successor name, ships.)
 
 ---
 
 ## Roadmap
 
-- [x] Workspace wiring + embedded `rubyrs` demo
 - [x] Zero-copy `Gemfile.lock` parser with full section coverage
 - [x] Integration test suite with official Bundler RSpec vectors
-- [x] Bounded 16-worker parallel gem installer
-- [ ] `Gemfile` DSL evaluation via `rubyrs::Runtime`
+- [x] Bounded 16-worker parallel gem installer (example only)
+- [ ] `Gemfile` DSL evaluation (returns when `rubyrs` is on crates.io)
 - [ ] `bundle check` — read-only lockfile ↔ dependency verification
 - [ ] Dependency resolver (version-selection algorithm)
 - [ ] `bundle install` — full fetch + install with lockfile generation
