@@ -2,11 +2,16 @@
 # perf/check.sh — Per-workload peak-RSS + wall-time regression check.
 #
 # For each row in perf/baselines.tsv: run the workload through the
-# release rubyrs binary three times under `/usr/bin/time`, take the
-# MIN of peak-RSS and wall-time, and fail if either exceeds the
-# row's `max_rss_kb` / `max_wall_ms`. A `max_wall_ms` of `0`
-# disables the wall check for that workload (sub-100ms scripts
-# where measurement noise dominates the signal).
+# release rubyrs binary three times under `/usr/bin/time`, take
+# the min wall-time and min peak-RSS *independently* across those
+# runs, and fail if either exceeds the row's `max_rss_kb` /
+# `max_wall_ms`. (Independently: the reported pair may not come
+# from the same run — e.g. run 1 had the lowest wall, run 2 had
+# the lowest RSS. That's intentional, we want each metric's floor
+# as the most stable estimate of its underlying cost.) A
+# `max_wall_ms` of `0` disables the wall check for that workload
+# (sub-100ms scripts where measurement noise dominates the
+# signal).
 #
 # Both budgets are absolute baselines committed to source — same
 # ratchet pattern as the panic budget. We deliberately don't
@@ -161,8 +166,8 @@ measure_min() {
 budget_fail=0   # at least one workload exceeded its budget → exit 1
 setup_fail=0    # at least one row in baselines.tsv is malformed → exit 2
 total=0
-printf "%-58s %-11s %-9s %-12s %-9s %s\n" "WORKLOAD" "RSS_MIN" "RSS_MAX" "WALL_MIN_MS" "WALL_MAX" "STATUS"
-printf "%-58s %-11s %-9s %-12s %-9s %s\n" "--------" "-------" "-------" "-----------" "--------" "------"
+printf "%-58s %-11s %-11s %-12s %-12s %s\n" "WORKLOAD" "RSS_MIN_KB" "RSS_MAX_KB" "WALL_MIN_MS" "WALL_MAX_MS" "STATUS"
+printf "%-58s %-11s %-11s %-12s %-12s %s\n" "--------" "----------" "----------" "-----------" "-----------" "------"
 
 while IFS=$'\t' read -r workload rss_max wall_max _note; do
   # Skip comments + blank lines.
@@ -204,7 +209,7 @@ while IFS=$'\t' read -r workload rss_max wall_max _note; do
   # message inside measure_once; route to setup_fail and skip the
   # arithmetic comparison (which would die on non-numeric input).
   if [[ "$ms" == "ERR" || "$kb" == "ERR" ]]; then
-    printf "%-58s %-11s %-9s %-12s %-9s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
+    printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
     setup_fail=1
     continue
   fi
@@ -218,7 +223,7 @@ while IFS=$'\t' read -r workload rss_max wall_max _note; do
     status=$([[ "$status" == "ok" ]] && echo "WALL-OVER" || echo "$status+WALL")
     budget_fail=1
   fi
-  printf "%-58s %-11s %-9s %-12s %-9s %s\n" "$workload" "$kb" "$rss_max" "$ms" "$local_wall_display" "$status"
+  printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "$kb" "$rss_max" "$ms" "$local_wall_display" "$status"
 done < "$BASELINES"
 
 if (( setup_fail != 0 )); then
