@@ -161,7 +161,20 @@ impl Heap {
     }
     pub(crate) fn should_gc(&self) -> bool { self.live_count >= self.next_gc }
 
-    pub(crate) fn collect(&mut self, roots: &[Value]) {
+    /// Run a mark-and-sweep collection.
+    ///
+    /// Returns a list of pending TypedData `dfree` callbacks for
+    /// the caller (typically `Vm::maybe_gc`) to invoke AFTER
+    /// `collect` has returned and the `&mut Heap` borrow is gone
+    /// (review #2 on PR #19). Running `dfree` while still inside
+    /// `collect` would alias the heap with any cext code that
+    /// `dfree` transitively reaches — even though we don't expect
+    /// well-behaved cexts to re-enter the VM from a free callback,
+    /// the conservative shape avoids relying on that contract.
+    pub(crate) fn collect(
+        &mut self,
+        roots: &[Value],
+    ) -> Vec<(unsafe extern "C" fn(*mut std::ffi::c_void), *mut std::ffi::c_void)> {
         for m in self.marks.iter_mut() { *m = false; }
         let mut worklist: Vec<ObjId> = Vec::new();
         for v in roots { Heap::visit_value(v, &mut self.marks, &mut worklist); }
@@ -239,11 +252,9 @@ impl Heap {
                 Slot::Dead => {}
             }
         }
-        for (f, p) in pending_frees {
-            unsafe { f(p); }
-        }
         self.live_count = live;
         self.next_gc = (live * 2).max(1024);
+        pending_frees
     }
 
     pub(crate) fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
@@ -298,7 +309,10 @@ impl Value {
             Value::Bool(false) => "false".into(),
             Value::Nil => "".into(),
             Value::Class(c) => c.name.clone(),
-            Value::Object(id) => format!("#<{}>", heap.instance(*id).class.name),
+            // Use class_of so TypedData-backed Objects (L3-B) print
+            // safely too — `heap.instance(*id)` would panic on
+            // those slots (review #1).
+            Value::Object(id) => format!("#<{}>", heap.class_of(*id).name),
             Value::Array(id) => {
                 let a = heap.array(*id);
                 let parts: Vec<String> = a.iter().map(|v| v.to_inspect(heap, interner)).collect();

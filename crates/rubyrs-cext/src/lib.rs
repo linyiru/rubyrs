@@ -1021,6 +1021,10 @@ pub unsafe extern "C" fn rb_funcallv(
 /// holding Ruby refs is L3-B.1 follow-up — requires stable handle
 /// space + a GC mark-worklist hook). `dsize` is parsed but unused
 /// (used by ObjectSpace memory accounting in CRuby; not load-bearing).
+// Names match `ruby.h` exactly so cexts written against CRuby
+// don't need a layer of `typedef` aliases. `non_camel_case_types`
+// would otherwise fail `-D warnings` (review #4).
+#[allow(non_camel_case_types)]
 #[repr(C)]
 pub struct rb_data_type_function_t {
     pub dmark: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
@@ -1046,6 +1050,7 @@ pub struct rb_data_type_function_t {
 /// The host treats descriptor identity (pointer equality) as the
 /// type check — same as CRuby. Subtype-via-`parent` isn't honoured
 /// in the spike; mismatch panics rather than walks the parent chain.
+#[allow(non_camel_case_types)]
 #[repr(C)]
 pub struct rb_data_type_t {
     pub wrap_struct_name: *const std::ffi::c_char,

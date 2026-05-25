@@ -2623,7 +2623,8 @@ impl Vm {
                 // `RubyError::Uncaught { class_name, message }` and
                 // decide what to do.
                 let class_name = match &exc {
-                    Value::Object(id) => self.heap.instance(*id).class.name.clone(),
+                    // class_of handles both Instance and TypedData (review #1).
+                    Value::Object(id) => self.heap.class_of(*id).name.clone(),
                     _ => exc.type_name().to_string(),
                 };
                 let message = match &exc {
@@ -2688,7 +2689,20 @@ impl Vm {
                 for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
             }
         }
-        self.heap.collect(&roots);
+        let pending_frees = self.heap.collect(&roots);
+        // Run TypedData dfree callbacks AFTER `collect` has
+        // returned and the &mut Heap borrow is released (review #2
+        // on PR #19). Conservative shape — even though
+        // well-behaved cexts shouldn't re-enter the VM from dfree,
+        // this avoids the aliasing footgun if one ever does.
+        for (f, p) in pending_frees {
+            // SAFETY: `f` and `p` originate from a TypedData slot
+            // we just swept (the slot was unreachable from any GC
+            // root, so the cext can't observe `p` again). The
+            // cext's contract for `dfree` is to release ownership
+            // of `p` — exactly what we want here.
+            unsafe { f(p); }
+        }
     }
 
     pub(crate) fn invoke_method(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>) -> Result<(), Trap> {
@@ -5605,6 +5619,14 @@ fn cext_dispatch(
                         class_name
                     ));
                 vm.maybe_gc();
+                // Respect heap.max_live via the same maybe_gc +
+                // check_alloc pattern as every other allocator
+                // (review #3). On exhaustion this currently
+                // panics; surfacing as a rb_raise(rb_eNoMemError)
+                // would be L3-B.1 follow-up once rb_eNoMemError
+                // lands in the sentinel set.
+                vm.check_alloc()
+                    .expect("L3-B spike: heap cap exhausted during TypedData wrap");
                 let id = vm.heap.alloc(crate::heap::HeapObj::TypedData(
                     crate::heap::TypedDataObj { class, data_ptr, type_ptr, dfree }
                 ));
