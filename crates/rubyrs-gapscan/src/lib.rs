@@ -487,6 +487,149 @@ pub fn render_text(report: &Report, top_missing: usize) -> String {
     s
 }
 
+// ---- Markdown output ----
+
+/// Render a [`Report`] as GitHub-flavoured Markdown — drop straight
+/// into a PR description, ROADMAP entry, or doc.
+pub fn render_markdown(report: &Report, top: usize) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "## gapscan: `{}`\n", report.root.display());
+    let total = report.total_nodes.max(1) as f64;
+    let sup = report.supported_total();
+    let ride = report.rides_along_total();
+    let miss = report.missing_total();
+    let _ = writeln!(s, "| Metric | Value |");
+    let _ = writeln!(s, "|---|---:|");
+    let _ = writeln!(s, "| Files scanned | {} |", report.files_scanned);
+    let _ = writeln!(s, "| Files with parse errors | {} |", report.files_parse_errors.len());
+    let _ = writeln!(s, "| Total AST nodes | {} |", report.total_nodes);
+    let _ = writeln!(s, "| Unique node classes | {} |", report.histogram.len());
+    let _ = writeln!(
+        s,
+        "| Supported | {sup} ({:.2}%) |",
+        100.0 * sup as f64 / total
+    );
+    let _ = writeln!(
+        s,
+        "| RidesAlong | {ride} ({:.2}%) |",
+        100.0 * ride as f64 / total
+    );
+    let _ = writeln!(
+        s,
+        "| Missing | {miss} ({:.2}%) |",
+        100.0 * miss as f64 / total
+    );
+
+    let missing = report.missing_sorted();
+    let _ = writeln!(s, "\n### Missing node classes ({} unique)\n", missing.len());
+    if missing.is_empty() {
+        let _ = writeln!(s, "_None — every node class in this tree is in the rubyrs subset._");
+    } else {
+        let _ = writeln!(s, "| Class | Count | First example |");
+        let _ = writeln!(s, "|---|---:|---|");
+        for (cls, stat) in missing.iter().take(top) {
+            let ex = stat
+                .first_example
+                .as_deref()
+                .unwrap_or("")
+                .replace('|', "\\|");
+            let _ = writeln!(s, "| `{cls}` | {} | `{ex}` |", stat.count);
+        }
+        if missing.len() > top {
+            let _ = writeln!(s, "\n_… {} more, raise `--top` to widen._", missing.len() - top);
+        }
+    }
+
+    let bareword = report.bareword_calls_sorted();
+    let _ = writeln!(s, "\n### Top bareword calls\n");
+    let _ = writeln!(s, "Bareword (no-receiver) calls are the eye-opener — `require`, `attr_*`, `include`, `private`, etc. parse as CallNode and so look syntactically supported, but rubyrs implements none of them.\n");
+    let _ = writeln!(s, "| Method | Count |");
+    let _ = writeln!(s, "|---|---:|");
+    for (n, st) in bareword.iter().take(top) {
+        let _ = writeln!(s, "| `{n}` | {} |", st.bareword);
+    }
+
+    let receiver = report.receiver_calls_sorted();
+    let _ = writeln!(s, "\n### Top receiver-method calls\n");
+    let _ = writeln!(s, "| Method | Count |");
+    let _ = writeln!(s, "|---|---:|");
+    for (n, st) in receiver.iter().take(top) {
+        let _ = writeln!(s, "| `{n}` | {} |", st.receiver);
+    }
+
+    let full = report.files_at_least(1.0, 20);
+    let near = report.files_at_least(0.95, 20);
+    let nontrivial = report.files.iter().filter(|f| f.total >= 20).count();
+    let _ = writeln!(s, "\n### Per-file translatability\n");
+    let _ = writeln!(s, "Counting only files with ≥20 AST nodes ({nontrivial} non-trivial files).\n");
+    let _ = writeln!(s, "- **100% translatable:** {} files", full.len());
+    let _ = writeln!(s, "- **≥95% translatable:** {} files (fixture candidates)\n", near.len());
+    let show = top.min(near.len());
+    if show > 0 {
+        let _ = writeln!(s, "Top {show} candidates:\n");
+        let _ = writeln!(s, "| Ratio | Nodes | File | Blocking classes |");
+        let _ = writeln!(s, "|---:|---:|---|---|");
+        for f in near.iter().take(show) {
+            let blockers = f
+                .missing_classes
+                .iter()
+                .take(6)
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                s,
+                "| {:.2}% | {} | `{}` | {blockers} |",
+                100.0 * f.translatable_ratio(),
+                f.total,
+                f.path.display()
+            );
+        }
+    }
+    s
+}
+
+/// Render a [`ReportDiff`] as Markdown.
+pub fn render_markdown_diff(d: &ReportDiff, top: usize) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "## gapscan diff\n");
+    let _ = writeln!(s, "- **before:** `{}`", d.before_root.display());
+    let _ = writeln!(s, "- **after:**  `{}`\n", d.after_root.display());
+    let _ = writeln!(s, "| Metric | Delta |");
+    let _ = writeln!(s, "|---|---:|");
+    let _ = writeln!(s, "| Total nodes | {:+} |", d.total_nodes_delta);
+    let _ = writeln!(s, "| Supported | {:+} |", d.supported_delta);
+    let _ = writeln!(s, "| RidesAlong | {:+} |", d.rides_along_delta);
+    let _ = writeln!(s, "| Missing | {:+} |", d.missing_delta);
+    if !d.closed_missing_classes.is_empty() {
+        let _ = writeln!(s, "\n### Closed gaps\n");
+        let _ = writeln!(s, "| Class | Was |");
+        let _ = writeln!(s, "|---|---:|");
+        for (c, w) in d.closed_missing_classes.iter().take(top) {
+            let _ = writeln!(s, "| `{c}` | {w} |");
+        }
+    }
+    if !d.new_missing_classes.is_empty() {
+        let _ = writeln!(s, "\n### Newly-appearing missing classes\n");
+        let _ = writeln!(s, "| Class | Count |");
+        let _ = writeln!(s, "|---|---:|");
+        for (c, n) in d.new_missing_classes.iter().take(top) {
+            let _ = writeln!(s, "| `{c}` | {n} |");
+        }
+    }
+    if !d.bareword_call_changes.is_empty() {
+        let _ = writeln!(s, "\n### Bareword-call changes\n");
+        let _ = writeln!(s, "| Method | Before | After | Delta |");
+        let _ = writeln!(s, "|---|---:|---:|---:|");
+        for (n, b, a, dl) in d.bareword_call_changes.iter().take(top) {
+            let _ = writeln!(s, "| `{n}` | {b} | {a} | {dl:+} |");
+        }
+    }
+    s
+}
+
 // ---- JSON I/O ----
 
 /// Serialise a [`Report`] to JSON. Hand-built with `serde_json::Value`

@@ -10,18 +10,20 @@ const USAGE: &str = "\
 rubyrs-gapscan — scan a Ruby codebase for features outside the rubyrs subset
 
 USAGE:
-    rubyrs-gapscan scan <path> [--include-tests] [--top N] [--format text|json] [-o FILE]
-    rubyrs-gapscan diff <before.json> <after.json> [--top N]
+    rubyrs-gapscan scan <path> [--include-tests] [--top N] [--format text|json|md] [-o FILE]
+    rubyrs-gapscan diff <before.json> <after.json> [--top N] [--format text|md]
 
 SCAN OPTIONS:
     --include-tests   Don't skip spec/ and test/ directories
     --top N           Show top N items per section (default 40)
-    --format FORMAT   Output format: text (default) or json
+    --format FORMAT   Output format: text (default), json, or md
     -o, --output FILE Write to FILE instead of stdout
     -h, --help        Print this help
 
 DIFF OPTIONS:
     --top N           Show top N entries per section (default 20)
+    --format FORMAT   Output format: text (default) or md
+    -o, --output FILE Write to FILE instead of stdout
 
 EXAMPLES:
     rubyrs-gapscan scan ~/code/jekyll/lib
@@ -51,6 +53,7 @@ fn main() -> ExitCode {
 enum Format {
     Text,
     Json,
+    Markdown,
 }
 
 fn parse_top(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<usize, ExitCode> {
@@ -90,8 +93,9 @@ fn run_scan(args: Vec<String>) -> ExitCode {
             "--format" => match it.next().as_deref() {
                 Some("text") => format = Format::Text,
                 Some("json") => format = Format::Json,
+                Some("md" | "markdown") => format = Format::Markdown,
                 Some(other) => {
-                    eprintln!("--format: unknown value `{other}` (text|json)");
+                    eprintln!("--format: unknown value `{other}` (text|json|md)");
                     return ExitCode::from(2);
                 }
                 None => {
@@ -149,6 +153,7 @@ fn run_scan(args: Vec<String>) -> ExitCode {
             j.push('\n');
             j
         }
+        Format::Markdown => rubyrs_gapscan::render_markdown(&report, top),
     };
     if let Err(e) = write_output(&body, output.as_ref()) {
         eprintln!("output failed: {e}");
@@ -160,12 +165,37 @@ fn run_scan(args: Vec<String>) -> ExitCode {
 fn run_diff(args: Vec<String>) -> ExitCode {
     let mut positional: Vec<PathBuf> = Vec::new();
     let mut top: usize = 20;
+    let mut format = Format::Text;
+    let mut output: Option<PathBuf> = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--top" => match parse_top(&mut it, "--top") {
                 Ok(n) => top = n,
                 Err(c) => return c,
+            },
+            "--format" => match it.next().as_deref() {
+                Some("text") => format = Format::Text,
+                Some("md" | "markdown") => format = Format::Markdown,
+                Some("json") => {
+                    eprintln!("diff: --format json is not supported (diff is presentational)");
+                    return ExitCode::from(2);
+                }
+                Some(other) => {
+                    eprintln!("--format: unknown value `{other}` (text|md)");
+                    return ExitCode::from(2);
+                }
+                None => {
+                    eprintln!("--format requires a value");
+                    return ExitCode::from(2);
+                }
+            },
+            "-o" | "--output" => match it.next() {
+                Some(p) => output = Some(PathBuf::from(p)),
+                None => {
+                    eprintln!("{a} requires a path");
+                    return ExitCode::from(2);
+                }
             },
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -202,6 +232,14 @@ fn run_diff(args: Vec<String>) -> ExitCode {
         }
     };
     let d = rubyrs_gapscan::diff(&before, &after);
-    print!("{}", rubyrs_gapscan::render_text_diff(&d, top));
+    let body = match format {
+        Format::Text => rubyrs_gapscan::render_text_diff(&d, top),
+        Format::Markdown => rubyrs_gapscan::render_markdown_diff(&d, top),
+        Format::Json => unreachable!("diff rejects json above"),
+    };
+    if let Err(e) = write_output(&body, output.as_ref()) {
+        eprintln!("output failed: {e}");
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
