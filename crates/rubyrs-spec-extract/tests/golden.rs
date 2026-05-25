@@ -48,6 +48,21 @@ fn golden_v0_2_guards() {
     run_golden("v0_2_guards");
 }
 
+#[test]
+fn golden_before_each_lift() {
+    run_golden("before_each_lift");
+}
+
+#[test]
+fn golden_mock_int_substitute() {
+    run_golden("mock_int_substitute");
+}
+
+#[test]
+fn golden_skip_log_header() {
+    run_golden("skip_log_header");
+}
+
 fn run_golden(name: &str) {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let input_path = base.join(format!("{name}.input.rb"));

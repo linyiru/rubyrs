@@ -62,8 +62,32 @@ pub fn extract(source: &str) -> String {
         substitutions: Vec::new(),
     };
     collector.visit(&root);
-    let rewritten = apply_substitutions(source, collector.substitutions);
-    strip_require_relative(&rewritten)
+    // v0.3: lift `before :each do BODY end` into each sibling
+    // `it` block's body. Adds insertion subs for the it bodies
+    // and a delete sub for the before call itself.
+    let mut lifter = BeforeEachLifter {
+        source,
+        substitutions: Vec::new(),
+        consumed_before_ranges: Vec::new(),
+    };
+    lifter.visit(&root);
+    let consumed = lifter.consumed_before_ranges;
+
+    let mut all_subs = collector.substitutions;
+    all_subs.extend(lifter.substitutions);
+
+    let rewritten = apply_substitutions(source, all_subs);
+    let stripped = strip_require_relative(&rewritten);
+
+    // v0.3: prepend a header listing patterns the extractor saw
+    // but didn't rewrite. Skips entries the lifter consumed —
+    // those ARE handled, just by a different code path.
+    let unhandled = collect_unhandled(source, &consumed);
+    if unhandled.is_empty() {
+        stripped
+    } else {
+        format!("{}{stripped}", render_skip_header(&unhandled))
+    }
 }
 
 /// Returns the parse-error messages reported by `ruby_prism` for
@@ -125,6 +149,7 @@ impl<'pr> Visit<'pr> for SubstitutionCollector<'_> {
             .or_else(|| try_should_not_eq(self.source, node))
             .or_else(|| try_lambda_raise(self.source, node))
             .or_else(|| try_predicate_matcher(self.source, node))
+            .or_else(|| try_mock_int(self.source, node))
         {
             self.substitutions.push(sub);
             return;
@@ -334,6 +359,37 @@ fn try_predicate_matcher(source: &str, node: &ruby_prism::CallNode<'_>) -> Optio
     })
 }
 
+/// `mock_int(N)` → `N` (v0.3). mspec's `mock_int` constructs a
+/// fake object that responds to `to_int` with `N`. For
+/// rubyrs's micro-runner there's no mock library AND the
+/// places upstream uses `mock_int` (e.g. `digits(mock_int(2))`)
+/// just want an Integer at the call site — substituting the
+/// literal value gets us the same effective test in one line.
+///
+/// Restricted to a single Integer-literal argument. Anything
+/// else (`mock_int(some_var)`, multi-arg, no-arg) falls
+/// through so the skip log picks it up.
+fn try_mock_int(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
+    if !name_is(node.name(), b"mock_int") {
+        return None;
+    }
+    let mut args_iter = node.arguments()?.arguments().iter();
+    let arg = args_iter.next()?;
+    if args_iter.next().is_some() {
+        return None;
+    }
+    // Restrict to integer-literal arg — anything dynamic
+    // (variable, method call) would silently produce a wrong
+    // test by losing the mocked-out coercion intent.
+    arg.as_integer_node()?;
+    let loc = node.location();
+    Some(Substitution {
+        start: loc.start_offset(),
+        end: loc.end_offset(),
+        replacement: slice(source, &arg),
+    })
+}
+
 /// Alloc-free name comparison: each recogniser compares the
 /// call's `name()` against fixed byte literals (b"==",
 /// b"should", etc), avoiding the per-`CallNode` String alloc
@@ -364,5 +420,218 @@ fn apply_substitutions(source: &str, mut subs: Vec<Substitution>) -> String {
     for sub in subs {
         out.replace_range(sub.start..sub.end, &sub.replacement);
     }
+    out
+}
+
+// === v0.3 — `before :each` body lift ===================================
+
+/// Walks the AST looking for `describe ... do ... end` blocks.
+/// For each describe that contains a `before :each do BODY end`
+/// followed by one or more `it "..." do IT_BODY end` siblings,
+/// emits substitutions to:
+///   - delete the `before` call itself, and
+///   - prepend `BODY` to each sibling `it`'s body.
+///
+/// Only handles the FLAT case (before + its as direct children of
+/// the describe's block). Nested `describe`s, `context` blocks,
+/// `before :all`, and `after :*` are passthrough — their
+/// presence shows up in the skip log instead.
+struct BeforeEachLifter<'a> {
+    source: &'a str,
+    substitutions: Vec<Substitution>,
+    /// Byte ranges of `before :each` calls the lifter consumed.
+    /// `collect_unhandled` filters these out when scanning so the
+    /// skip log doesn't double-flag what's already handled.
+    consumed_before_ranges: Vec<(usize, usize)>,
+}
+
+impl<'pr> Visit<'pr> for BeforeEachLifter<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if name_is(node.name(), b"describe") {
+            self.process_describe(node);
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+impl BeforeEachLifter<'_> {
+    fn process_describe(&mut self, node: &ruby_prism::CallNode<'_>) -> Option<()> {
+        let block_node = node.block()?;
+        let block = block_node.as_block_node()?;
+        let body = block.body()?;
+        let stmts = body.as_statements_node()?;
+
+        // First pass over direct children: capture `before :each`
+        // body text and the call's byte range.
+        let mut lifted_body_text: Option<String> = None;
+        let mut before_call_range: Option<(usize, usize)> = None;
+
+        for stmt in stmts.body().iter() {
+            let Some(call) = stmt.as_call_node() else { continue };
+            if !name_is(call.name(), b"before") { continue }
+            let Some(args) = call.arguments() else { continue };
+            let mut a = args.arguments().iter();
+            let Some(first) = a.next() else { continue };
+            // First arg must be exactly `:each`. Slice the source
+            // verbatim — saves us figuring out prism's symbol-node
+            // unescaping; the literal `:each` is unambiguous.
+            if slice(self.source, &first) != ":each" { continue }
+            let Some(b_block_node) = call.block() else { continue };
+            let Some(b_block) = b_block_node.as_block_node() else { continue };
+            let Some(b_body) = b_block.body() else { continue };
+            lifted_body_text = Some(slice(self.source, &b_body));
+            before_call_range = Some((
+                call.location().start_offset(),
+                call.location().end_offset(),
+            ));
+            break;
+        }
+
+        let lifted = lifted_body_text?;
+        let (start, end) = before_call_range?;
+
+        // Second pass: gather all `it` body insertion points.
+        let mut insertion_points: Vec<usize> = Vec::new();
+        for stmt in stmts.body().iter() {
+            let Some(call) = stmt.as_call_node() else { continue };
+            if !name_is(call.name(), b"it") { continue }
+            let Some(it_block_node) = call.block() else { continue };
+            let Some(it_block) = it_block_node.as_block_node() else { continue };
+            let Some(it_body) = it_block.body() else { continue };
+            insertion_points.push(it_body.location().start_offset());
+        }
+        if insertion_points.is_empty() {
+            // No it blocks → no point lifting; leave the before
+            // call alone (will land in the skip log).
+            return None;
+        }
+
+        // Emit substitutions.
+        // 1. Delete the before call itself. Replacement is empty
+        //    string — leaves a blank line in the output, which we
+        //    consider acceptable formatting cost.
+        self.substitutions.push(Substitution {
+            start,
+            end,
+            replacement: String::new(),
+        });
+        // 2. Insert the lifted body at the start of each `it` body.
+        //    The lifted text already carries its source-position
+        //    indentation; we append a newline + 4-space indent so
+        //    the original `it` body's first statement keeps its
+        //    column. Indent mismatches a couple of columns under
+        //    pathological nesting but the output still parses.
+        for insert_at in insertion_points {
+            self.substitutions.push(Substitution {
+                start: insert_at,
+                end: insert_at,
+                replacement: format!("{lifted}\n    "),
+            });
+        }
+        self.consumed_before_ranges.push((start, end));
+        Some(())
+    }
+}
+
+// === v0.3 — skip-log header ============================================
+
+/// One pattern the extractor saw but didn't rewrite. Surfaced as a
+/// bullet in the output's header so a human reviewer doesn't have
+/// to grep for what's left.
+struct UnhandledPattern {
+    line: usize,
+    name: String,
+    detail: &'static str,
+}
+
+fn collect_unhandled(source: &str, consumed: &[(usize, usize)]) -> Vec<UnhandledPattern> {
+    let parsed = ruby_prism::parse(source.as_bytes());
+    let root = parsed.node();
+    let mut visitor = UnhandledCollector {
+        source,
+        patterns: Vec::new(),
+        consumed,
+    };
+    visitor.visit(&root);
+    visitor.patterns
+}
+
+struct UnhandledCollector<'a> {
+    source: &'a str,
+    patterns: Vec<UnhandledPattern>,
+    consumed: &'a [(usize, usize)],
+}
+
+impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        let loc = node.location();
+        let start = loc.start_offset();
+        let was_consumed = self.consumed.iter().any(|(s, _)| *s == start);
+        if !was_consumed {
+            let name_bytes = node.name().as_slice();
+            // For mock_int, mirror try_mock_int's gate: if the call
+            // would be substituted by the recogniser, don't flag it
+            // as unhandled. Match the same shape (single Integer-
+            // literal arg) so the skip log and the rewrite stay
+            // consistent without extra state-threading.
+            let mock_int_substitutable = name_bytes == b"mock_int"
+                && {
+                    let args = node.arguments();
+                    if let Some(args) = args {
+                        let mut iter = args.arguments().iter();
+                        let first = iter.next();
+                        let second = iter.next();
+                        match (first, second) {
+                            (Some(a), None) => a.as_integer_node().is_some(),
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                };
+            let detail: Option<&'static str> = match name_bytes {
+                b"before" => Some("only `before :each` is lifted in v0.3"),
+                b"after" => Some("not lifted; inline cleanup or skip the block"),
+                b"context" => Some("micro-runner treats as describe; if you use `before :all` here it won't lift"),
+                b"it_behaves_like" => Some("shared-example inlining is v0.4"),
+                b"mock" => Some("no mock library in the micro-runner; hand-translate"),
+                b"mock_int" if !mock_int_substitutable => Some("only int-literal arg is substituted in v0.3; dynamic arg passes through"),
+                b"should_receive" => Some("mock expectations; hand-translate"),
+                _ => None,
+            };
+            if let Some(detail) = detail {
+                let line = line_number(self.source, start);
+                self.patterns.push(UnhandledPattern {
+                    line,
+                    name: String::from_utf8_lossy(name_bytes).into_owned(),
+                    detail,
+                });
+            }
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+/// 1-based line number for a byte offset. Counts newlines before
+/// the offset.
+fn line_number(source: &str, byte_offset: usize) -> usize {
+    let upto = source.get(..byte_offset).unwrap_or("");
+    upto.matches('\n').count() + 1
+}
+
+/// Render the bullet list as a Ruby block comment to prepend to
+/// the extractor output.
+fn render_skip_header(patterns: &[UnhandledPattern]) -> String {
+    let mut out = String::new();
+    out.push_str("# rubyrs-spec-extract v0.3: ");
+    out.push_str(&format!("{} pattern(s) left for hand polish.\n", patterns.len()));
+    out.push_str("# Each entry names the upstream line + reason. Address each\n");
+    out.push_str("# (comment out, inline, or wait for a later extractor version)\n");
+    out.push_str("# before the file is consumable by the micro-runner.\n");
+    out.push_str("#\n");
+    for p in patterns {
+        out.push_str(&format!("#   - L{}: `{}` — {}\n", p.line, p.name, p.detail));
+    }
+    out.push('\n');
     out
 }
