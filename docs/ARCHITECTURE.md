@@ -1,7 +1,10 @@
 # Architecture
 
-A ~1900-line interpreter across nine focused modules, plus a thin CLI and
-a public `lib.rs`. The pipeline:
+A ~11k-line interpreter, organised as a Cargo workspace
+(`crates/rubyrs` core + `crates/rubund` runner + `crates/rubyrs-cext`
+opaque-handle bridge + `crates/rubyrs-gapscan` tooling). Inside the
+core crate the VM is split CRuby-style across 17 `vm/*.rs` submodules,
+each mirroring a CRuby compilation unit. The pipeline:
 
 ```
 .rb source bytes
@@ -33,18 +36,48 @@ Three reasons this structure is the way it is:
 
 ## Modules
 
+### Top-level (parsing → compilation → public API)
+
 | File | Lines (~) | Role |
 |------|-----------|------|
-| `src/ast.rs` | 270 | `Expr` enum, `Spanned<T>`, `tr()`: walk Prism `Node<'pr>`, drop the parser lifetime, attach byte-offset spans |
-| `src/value.rs` | 55 | `Value`, `Class`, `Instance`, `Method`, `BlockHandle`, `ObjId` |
-| `src/intern.rs` | 40 | `SymId(u32)` + `Interner`: dedup of method names, ivar names, class names, string literals |
-| `src/heap.rs` | 200 | `Heap`, `HeapObj`, `Slot`, mark-sweep; `impl Value` for display / equality (needs `&Heap` and `&Interner`) |
-| `src/bytecode.rs` | 90 | `Op` enum (Copy), `BinOpKind`, `Proto` (with `op_spans` and `filename`) |
-| `src/compiler.rs` | 290 | `ProtoBuilder`, `compile_expr`, `compile_proto`, `compile_block`; threads `&mut Interner` through |
-| `src/error.rs` | 90 | `Span`, `RubyError`, `Trap`, `TrapFrame`, `line_col` |
-| `src/vm.rs` | 720 | `Vm` (incl. `stdout`, `host_fns`, `fuel`, `max_frames`, `pinned`), `Frame`, `RescueHandler`, `step()`, dispatch loop, `primitive_call`, `collection_call_block`, builtins |
-| `src/lib.rs` | 130 | Public embedding API: `Runtime`, `Config`, re-exports of `Value`/`Trap`/`RubyError` etc. |
+| `src/ast.rs` | 1100 | `Expr` enum, `Spanned<T>`, `tr()`: walk Prism `Node<'pr>`, drop the parser lifetime, attach byte-offset spans |
+| `src/value.rs` | 155 | `Value`, `Class`, `Instance`, `Method`, `BlockHandle`, `ObjId` |
+| `src/intern.rs` | 50 | `SymId(u32)` + `Interner`: dedup of method names, ivar names, class names, string literals |
+| `src/heap.rs` | 450 | `Heap`, `HeapObj`, `Slot`, mark-sweep; `impl Value` for display / equality (needs `&Heap` and `&Interner`) |
+| `src/bytecode.rs` | 200 | `Op` enum (Copy), `BinOpKind`, `Proto` (with `op_spans` and `filename`) |
+| `src/compiler.rs` | 930 | `ProtoBuilder`, `compile_expr`, `compile_proto`, `compile_block`; threads `&mut Interner` through |
+| `src/error.rs` | 175 | `Span`, `RubyError`, `Trap`, `TrapFrame`, `line_col`; `RubyError::is(class_name)` helper |
+| `src/lib.rs` | 645 | Public embedding API: `Runtime`, `Config`, `format_trap`, re-exports of `Value`/`Trap`/`RubyError` etc. |
 | `src/main.rs` | 30 | CLI entry: argv + env vars → `Config` → `Runtime::eval_file` |
+
+### `vm/` submodules (CRuby-mirrored layout)
+
+The VM itself is split across 17 files. Each mirrors a CRuby
+compilation unit so the question "where would CRuby put this?"
+maps to the same intuition here. `vm.rs` holds only the `Vm`
+struct, `Frame`, `PinGuard`, `RescueHandler`, and the cext
+re-entrance thread-local; everything else lives in `vm/*.rs`.
+
+| File | Lines (~) | CRuby analogue | Role |
+|------|-----------|----------------|------|
+| `src/vm.rs` | 440 | (struct definitions in `vm_core.h` / `vm_eval.c`) | `Vm`, `Frame`, `PinGuard`, `RescueHandler`, `HostFn`, `CURRENT_VM_PTR` |
+| `vm/dispatch.rs` | 960 | `vm_eval.c` / `vm_insnhelper.c` | `do_call`, `do_call_block`, `invoke_method`, `invoke_method_with_block`, `invoke_block`, `cext_invoke_method`, `try_method_missing` |
+| `vm/step.rs` | 750 | `vm_exec.c` | `dispatch` / `dispatch_until` outer drivers + per-opcode `step` |
+| `vm/cext.rs` | 860 | `internal/value.h` + `vm_eval.c` | rb_funcallv callback installation, handle ↔ Value translation, `cext_dispatch`, `cext_require` |
+| `vm/iter.rs` | 1220 | `enum.c` | block-form Enumerable filter/aggregation family (`iter_*_filter`, `collection_call_block`) |
+| `vm/string.rs` | 690 | `string.c` | String primitives + Regex shims |
+| `vm/array.rs` | 550 | `array.c` | no-block Array methods |
+| `vm/hash.rs` | 230 | `hash.c` | Hash primitives |
+| `vm/range.rs` | 150 | `range.c` | Range primitives |
+| `vm/numeric.rs` | 200 | `numeric.c` | Int/Float primitives |
+| `vm/kernel.rs` | 265 | `object.c` (Kernel) | `puts` / `p` / `Integer()` / `Float()` / … |
+| `vm/fileops.rs` | 110 | `file.c` | `File.read` / `File.exist?` … |
+| `vm/raise.rs` | 200 | `eval.c` / `eval_error.c` | `normalize_exception`, `trap_to_exception`, `unwind_with_exception` |
+| `vm/lookup.rs` | 270 | `vm_method.c` + `class.c` | `CallCache`, `lookup_method_cached/uncached`, `responds_to`, `class_of`, `class_is_a`, `sym_primitive` |
+| `vm/gc.rs` | 175 | `gc.c` + `thread.c` + `vm.c` | `Vm::run`, `check_fuel`/`alloc`/`frames`, `trap`, `maybe_gc` |
+| `vm/primitive.rs` | 100 | (per-class C function tables) | `primitive_call` — typed fast-path dispatch for Int/Float/String/Symbol/Bool/Nil |
+| `vm/sprintf.rs` | 240 | `sprintf.c` | `ruby_sprintf` + width/prec parser |
+| `vm/util.rs` | 45 | (cross-cutting) | `value_cmp_v`, `vec_nil`, `visibility_from_name` |
 
 Cross-module dependency is acyclic. `ast` and `bytecode` and `intern`
 have no inter-module deps; `value` depends on `intern`; `heap` and
@@ -64,7 +97,12 @@ enum Value {
     Object(ObjId),     // on Heap, GC-managed
     Array(ObjId),      // on Heap
     Hash(ObjId),       // on Heap
-    Block(Rc<BlockHandle>),  // can capture cycles via captured locals (GC visits)
+    Float(f64),        // unboxed (since P2 numeric)
+    Object(ObjId),     // user instances, on Heap
+    Array(ObjId), Hash(ObjId), Range(ObjId), Block(ObjId),
+                       // all heap-managed; Block moved off Rc in P2-13
+                       // because captured-cycle blocks could form Rc
+                       // cycles the mark-sweep collector couldn't break.
 }
 ```
 
@@ -133,8 +171,11 @@ Every method call passes through `Vm::do_call(name_id: SymId, argc, no_recv)`:
 
 Method dispatch hashes on `SymId` (a `u32`) instead of bytes since
 [ADR 0006](adr/0006-global-string-intern.md). A per-call-site inline
-cache is on the roadmap; the `BinOp` fast path was the bigger near-term
-win for arithmetic-heavy workloads.
+cache (P1-B upgrade) lives in `Vm.call_caches: Vec<CallCache>`; every
+`Op::Call*` carries a `u16` slot id assigned at compile time, and
+`Vm::lookup_method_cached` (in `vm/lookup.rs`) skips the
+`HashMap<SymId, _>::get` on monomorphic sites. Invalidation: any
+`Op::DefMethod` / `Op::DefClass` bumps `Vm.method_gen`.
 
 ### Resource caps
 
@@ -168,8 +209,19 @@ end:
 to bind the exception value to (if `rescue => e`). On unwind we truncate the
 stack to that depth and jump.
 
-If unwind reaches an empty frame stack, we print `uncaught exception: ...`
-and `exit(1)`. Class-body frames pop their `class_stack` entry on the way.
+If unwind reaches an empty frame stack, the exception is wrapped as
+`RubyError::Uncaught { class_name, message }` and propagated through
+the normal `Trap` path — the host (CLI or embedder) decides whether
+to print, retry, or carry on. Earlier revisions called
+`std::process::exit(1)` directly; that was fatal for embedded hosts
+and was retired as part of the P2-15 hardening pass (see
+[docs/SECURITY.md](SECURITY.md)). Class-body frames pop their
+`class_stack` entry on the way down.
+
+The rescue / unwind machinery itself lives in `vm/raise.rs`
+(`normalize_exception`, `trap_to_exception`, `unwind_with_exception`).
+Rescue-by-class filtering walks the superclass chain via `class_is_a`
+in `vm/lookup.rs`.
 
 ## Public embedding API
 
@@ -208,3 +260,27 @@ between P0 (correctness) and P1 (structure) milestones for three reasons:
 
 The split was a move-only refactor: stdout was bit-identical to the
 pre-split binary across all fixtures. No logic moved between sections.
+
+### Second split: `vm.rs` → `vm/*.rs` (CRuby-mirrored layout)
+
+The same ceiling argument repeated once `vm.rs` reached ~6.6k lines.
+A second move-only refactor pass split it into 17 `vm/*.rs`
+submodules, each named after the CRuby file with the same role
+(`string.c` → `vm/string.rs`, `array.c` → `vm/array.rs`, …). The
+mapping is documented in the [Modules](#modules) table above.
+Reasoning:
+
+1. **Locating code** — "where would CRuby put this?" now answers
+   "where rubyrs puts this", which is the lowest-friction
+   navigation rule for anyone reading both codebases.
+2. **PR seam isolation** — features that touch only one type
+   (Array extras, Hash extras, the `String#sub`/`gsub`/`tr` batch,
+   etc.) land in a single submodule instead of patching a 6k-line
+   match.
+3. **Behaviour preservation** — each extraction was its own
+   atomic commit, gated on the 79-test `diff_cruby` suite staying
+   byte-identical to CRuby.
+
+`vm.rs` is now 440 lines, holding only the `Vm` struct, the
+per-frame and per-rescue records, the pin-stack RAII guard, and the
+thread-local pointer the cext re-entrance machinery needs.
