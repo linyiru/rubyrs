@@ -378,6 +378,7 @@ impl Vm {
                 "each_with_index" | "sort_by" |
                 "min_by" | "max_by" | "group_by" |
                 "each_with_object" | "partition" |
+                "zip" |
                 "inspect"
             ),
             Value::Hash(_) => matches!(name,
@@ -1158,6 +1159,52 @@ impl Vm {
                     ("drop", [Value::Int(n)]) => {
                         let n = (*n).max(0) as usize;
                         let out: Vec<Value> = self.heap.array(id).iter().skip(n).cloned().collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
+                    // `zip` — pairs each element of `self` with the
+                    // same-index element of each Array argument.
+                    // Result length is the receiver's length. Shorter
+                    // arguments pad with `nil`; longer arguments are
+                    // truncated. Block form (`zip { ... }` for side
+                    // effects, returning nil) is not supported — use
+                    // `.zip(...).each` instead.
+                    ("zip", rest) => {
+                        let mut others: Vec<Vec<Value>> = Vec::with_capacity(rest.len());
+                        for a in rest {
+                            match a {
+                                Value::Array(oid) => others.push(self.heap.array(*oid).clone()),
+                                _ => return Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "wrong argument type {} (must respond to :to_ary)",
+                                        a.type_name(),
+                                    ),
+                                })),
+                            }
+                        }
+                        let base = self.heap.array(id).clone();
+                        let row_width = 1 + others.len();
+                        if let Some(max) = self.max_value_bytes {
+                            let projected = base.len()
+                                .saturating_mul(row_width)
+                                .saturating_mul(std::mem::size_of::<Value>());
+                            if projected > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array#zip would exceed {max} bytes"),
+                                }));
+                            }
+                        }
+                        let mut out: Vec<Value> = Vec::with_capacity(base.len());
+                        for (i, v) in base.iter().enumerate() {
+                            let mut row: Vec<Value> = Vec::with_capacity(row_width);
+                            row.push(v.clone());
+                            for o in &others {
+                                row.push(o.get(i).cloned().unwrap_or(Value::Nil));
+                            }
+                            let rid = self.heap.alloc(HeapObj::Array(row));
+                            out.push(Value::Array(rid));
+                        }
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
