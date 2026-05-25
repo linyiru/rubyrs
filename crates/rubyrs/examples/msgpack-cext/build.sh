@@ -28,19 +28,22 @@ OUT="$SCRIPT_DIR/msgpack.$EXT"
 # and a parallel `dlopen` could see a half-written Mach-O
 # ("file too short" / "invalid mach-o").
 #
-# Two layers of defense:
-#   1. Optional flock-based MUTUAL EXCLUSION: if `flock(1)` is
+# Two layers, with non-overlapping jobs:
+#   1. Always-on: link to `$TMP` then `mv -f` into `$OUT`. POSIX
+#      rename(2) is atomic on the same filesystem, so a parallel
+#      `dlopen` sees either the OLD bundle or the COMPLETE new
+#      one — never a half-written/truncated file. This alone
+#      guarantees correctness regardless of how many concurrent
+#      builders fire.
+#   2. Optional flock-based MUTUAL EXCLUSION: if `flock(1)` is
 #      installed (default on Linux util-linux, absent on macOS
-#      unless brewed), serialise concurrent runs. Both callers
-#      still compile (so this is serialisation, not deduplication
-#      — the work is duplicated but each cc finishes safely
-#      under its own lock-section).
-#   2. Always: link to `$TMP` then `mv -f` into `$OUT`. POSIX
-#      rename(2) is atomic on the same filesystem, so a reader
-#      either dlopens the OLD bundle or the COMPLETE new one,
-#      never a partial. Without flock a parallel dlopen could
-#      see the writer's truncate-and-write window; with flock
-#      that window is also gone.
+#      unless brewed), serialise concurrent runs so only one
+#      `cc` invocation is in flight at a time. Both callers
+#      still ultimately compile (serialisation, not deduplication),
+#      but the cumulative CPU stays linear instead of N callers
+#      × full compile in parallel. Pure performance — has no
+#      effect on output correctness, which layer 1 already
+#      guarantees.
 if command -v flock >/dev/null 2>&1; then
     exec 9>"$OUT.lock"
     flock 9
