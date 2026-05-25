@@ -26,13 +26,12 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
     // the discipline (P2-14c) for future arms and satisfies
     // `-D unused-variables`.
     let _check = |new_len: usize| -> Result<(), RubyError> {
-        if let Some(max) = max_value_bytes {
-            if new_len > max {
+        if let Some(max) = max_value_bytes
+            && new_len > max {
                 return Err(RubyError::ResourceExhausted {
                     msg: format!("value size {new_len} bytes > cap {max}"),
                 });
             }
-        }
         Ok(())
     };
     // Per-type sub-dispatchers (mirror CRuby's split). Each

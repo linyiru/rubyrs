@@ -34,13 +34,12 @@ impl Vm {
                         // cap. We size in bytes-of-Value because that's
                         // what the host actually pays for in RAM.
                         let new_len = self.heap.array(id).len().saturating_add(1);
-                        if let Some(max) = self.max_value_bytes {
-                            if new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                        if let Some(max) = self.max_value_bytes
+                            && new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("Array.push would exceed {max} bytes"),
                                 }));
                             }
-                        }
                         self.heap.array_mut(id).push(v.clone());
                         Some(Value::Array(id))
                     }
@@ -70,13 +69,12 @@ impl Vm {
                         let slice_len = (len - s - p).max(0) as usize;
                         let s = s as usize;
                         let slice: Vec<Value> = a[s..s + slice_len].to_vec();
-                        if let Some(max) = self.max_value_bytes {
-                            if slice.len().saturating_mul(std::mem::size_of::<Value>()) > max {
+                        if let Some(max) = self.max_value_bytes
+                            && slice.len().saturating_mul(std::mem::size_of::<Value>()) > max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("multi-write splat would exceed {max} bytes"),
                                 }));
                             }
-                        }
                         self.maybe_gc();
                         let new_id = self.heap.alloc(HeapObj::Array(slice));
                         Some(Value::Array(new_id))
@@ -112,13 +110,12 @@ impl Vm {
                         // end pads with `nil` and so can grow the
                         // backing Vec without bound.
                         let needed_len = idx.saturating_add(1).max(a.len());
-                        if let Some(max) = self.max_value_bytes {
-                            if needed_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                        if let Some(max) = self.max_value_bytes
+                            && needed_len.saturating_mul(std::mem::size_of::<Value>()) > max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("Array []= would exceed {max} bytes"),
                                 }));
                             }
-                        }
                         let a = self.heap.array_mut(id);
                         while a.len() <= idx { a.push(Value::Nil); }
                         a[idx] = v.clone();

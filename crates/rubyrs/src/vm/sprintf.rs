@@ -150,8 +150,8 @@ pub(crate) fn ruby_sprintf(
         };
         // Apply width / padding. Precision was already applied
         // per-spec (d uses leading zeros to `precision`; s truncates).
-        if let Some(w) = width {
-            if body.chars().count() < w {
+        if let Some(w) = width
+            && body.chars().count() < w {
                 let pad_n = w - body.chars().count();
                 let pad_char = if flag_zero && !flag_minus && precision.is_none()
                     && matches!(spec, 'd' | 'i' | 'x' | 'X' | 'o' | 'b' | 'B' | 'f') {
@@ -159,7 +159,7 @@ pub(crate) fn ruby_sprintf(
                 } else {
                     ' '
                 };
-                let pad: String = std::iter::repeat(pad_char).take(pad_n).collect();
+                let pad: String = std::iter::repeat_n(pad_char, pad_n).collect();
                 if flag_minus {
                     body.push_str(&pad);
                 } else if pad_char == '0' {
@@ -176,7 +176,6 @@ pub(crate) fn ruby_sprintf(
                     body = format!("{pad}{body}");
                 }
             }
-        }
         out.push_str(&body);
     }
     Ok(out)
@@ -214,7 +213,8 @@ fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {
     let prefix: &str = if !alt { "" } else {
         match radix { 16 => if upper { "0X" } else { "0x" }, 8 => "0", 2 => if upper { "0B" } else { "0b" }, _ => "" }
     };
-    let body = if n < 0 {
+    
+    if n < 0 {
         // CRuby: %x on a negative int produces a two's-complement
         // representation prefixed with "..f" (an infinite ones).
         // We render just `-<unsigned digits>` which is close
@@ -237,6 +237,5 @@ fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {
         };
         let mag = if upper { mag.to_uppercase() } else { mag };
         format!("{prefix}{mag}")
-    };
-    body
+    }
 }

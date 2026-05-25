@@ -161,8 +161,8 @@ impl Vm {
             // class, name resolves with no receiver. Mirrors the
             // explicit-receiver branch below; see the comment
             // there for the copy semantics.
-            if (&*name == "include" || &*name == "extend") && !args.is_empty() {
-                if let Value::Class(target) = &self_val {
+            if (&*name == "include" || &*name == "extend") && !args.is_empty()
+                && let Value::Class(target) = &self_val {
                     for a in &args {
                         let src = match a {
                             Value::Class(c) => c.clone(),
@@ -182,7 +182,6 @@ impl Vm {
                     self.stack.push(self_val.clone());
                     return Ok(());
                 }
-            }
             // `private` / `protected` / `public` inside a class
             // body. With no args, switch the current visibility
             // mode for any subsequent `def`s. With Symbol or
@@ -204,11 +203,10 @@ impl Vm {
                                 Value::Str(s) => Some(self.interner.intern(&s.borrow())),
                                 _ => None,
                             };
-                            if let Some(mid) = key {
-                                if let Some(m) = methods.get(&mid) {
+                            if let Some(mid) = key
+                                && let Some(m) = methods.get(&mid) {
                                     m.visibility.set(vis);
                                 }
-                            }
                         }
                     }
                     self.stack.push(Value::Nil);
@@ -249,8 +247,8 @@ impl Vm {
         }
 
         let new_id = self.interner.intern("new");
-        if name_id == new_id {
-            if let Value::Class(cls) = &recv {
+        if name_id == new_id
+            && let Value::Class(cls) = &recv {
                 // `args` and `recv` were popped off the operand stack by
                 // do_call's setup; while we're about to trigger GC via
                 // `maybe_gc`, they exist only as Rust locals. Pin any
@@ -270,7 +268,7 @@ impl Vm {
                 };
                 let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
-                if let Some(m) = self.lookup_method_uncached(&cls, init_id) {
+                if let Some(m) = self.lookup_method_uncached(cls, init_id) {
                     self.invoke_method(m, obj.clone(), args)?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
@@ -278,7 +276,6 @@ impl Vm {
                 }
                 return Ok(());
             }
-        }
 
         if let Value::Object(id) = &recv {
             let cls = self.heap.class_of(*id);
@@ -312,14 +309,13 @@ impl Vm {
         // surface OS errors as a generic RuntimeError so scripts
         // can `rescue` them.
         if let Value::Class(cls) = &recv {
-            if &*cls.name == "File" {
-                if let Some(v) = self.file_class_dispatch(&name, &args)? {
+            if &*cls.name == "File"
+                && let Some(v) = self.file_class_dispatch(&name, &args)? {
                     self.stack.push(v);
                     return Ok(());
                 }
-            }
-            if let Some(table) = self.cext_class_methods.get(&cls.name) {
-                if let Some(host) = table.get(&name_id).cloned() {
+            if let Some(table) = self.cext_class_methods.get(&cls.name)
+                && let Some(host) = table.get(&name_id).cloned() {
                     // Stash Vm pointer for the singleton-method's
                     // C body — same rationale as the top-level
                     // host_fns dispatch above.
@@ -333,7 +329,6 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
-            }
         }
         // `include Mod` — without real Modules in the subset, we
         // approximate by copying the source class's method table
@@ -349,8 +344,8 @@ impl Vm {
         // drivers' invoke_block + dispatch_until pattern, but
         // accessible from script code (rather than only from
         // builtin iterators).
-        if let Value::Block(bid) = &recv {
-            if &*name == "call" {
+        if let Value::Block(bid) = &recv
+            && &*name == "call" {
                 let pre_frames = self.frames.len();
                 self.invoke_block(*bid, args)?;
                 self.dispatch_until(pre_frames)?;
@@ -358,9 +353,8 @@ impl Vm {
                 // return. Nothing more to do.
                 return Ok(());
             }
-        }
-        if let Value::Class(target) = &recv {
-            if (&*name == "include" || &*name == "extend") && !args.is_empty() {
+        if let Value::Class(target) = &recv
+            && (&*name == "include" || &*name == "extend") && !args.is_empty() {
                 for a in &args {
                     let src = match a {
                         Value::Class(c) => c.clone(),
@@ -380,7 +374,6 @@ impl Vm {
                 self.stack.push(recv.clone());
                 return Ok(());
             }
-        }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());
@@ -450,7 +443,8 @@ impl Vm {
                         }
                     }
                     let excl = r.exclusive;
-                    let in_r = match (to_f64(&r.begin), to_f64(&r.end), to_f64(arg)) {
+                    
+                    match (to_f64(&r.begin), to_f64(&r.end), to_f64(arg)) {
                         (Some(b), Some(e), Some(v)) => {
                             if excl { v >= b && v < e }
                             else { v >= b && v <= e }
@@ -471,8 +465,7 @@ impl Vm {
                             };
                             ge_lo && le_hi
                         }
-                    };
-                    in_r
+                    }
                 }
                 Value::Class(target) => {
                     // Walk the argument's class chain looking for
@@ -870,12 +863,11 @@ impl Vm {
         // path on the no_recv / Object-recv branches doesn't
         // trigger GC before installing the block as the frame's
         // `block_arg`, so the gap is safe there too.
-        if let Some(r) = &recv {
-            if let Some(v) = self.collection_call_block(r, &name, &args, block)? {
+        if let Some(r) = &recv
+            && let Some(v) = self.collection_call_block(r, &name, &args, block)? {
                 self.stack.push(v);
                 return Ok(());
             }
-        }
 
         if no_recv {
             if let Some(res) = self.builtin_call(&name, &args) { self.stack.push(res?); return Ok(()); }
@@ -913,8 +905,8 @@ impl Vm {
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
         let new_id = self.interner.intern("new");
-        if name_id == new_id {
-            if let Value::Class(cls) = &recv {
+        if name_id == new_id
+            && let Value::Class(cls) = &recv {
                 // Pin args during the alloc window — see the matching
                 // comment in `do_call`'s new-branch for the rationale.
                 let id = {
@@ -928,7 +920,7 @@ impl Vm {
                 };
                 let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
-                if let Some(m) = self.lookup_method_uncached(&cls, init_id) {
+                if let Some(m) = self.lookup_method_uncached(cls, init_id) {
                     self.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
@@ -936,7 +928,6 @@ impl Vm {
                 }
                 return Ok(());
             }
-        }
         if let Value::Object(id) = &recv {
             let cls = self.heap.class_of(*id);
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {

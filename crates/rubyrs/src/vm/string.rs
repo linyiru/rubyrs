@@ -30,13 +30,12 @@ pub(crate) fn string_call(
     // string-growing arm. Returns Err if the projected size
     // would exceed the cap; callers wrap it in `Trap`.
     let check = |new_len: usize| -> Result<(), RubyError> {
-        if let Some(max) = max_value_bytes {
-            if new_len > max {
+        if let Some(max) = max_value_bytes
+            && new_len > max {
                 return Err(RubyError::ResourceExhausted {
                     msg: format!("value size {new_len} bytes > cap {max}"),
                 });
             }
-        }
         Ok(())
     };
     Ok(match (recv, name, args) {
@@ -586,7 +585,7 @@ impl Vm {
                         // splits on runs of whitespace, drops the
                         // leading empty token.
                         let elems: Vec<Value> = s.borrow().split_whitespace()
-                            .map(|t| Value::new_str(t))
+                            .map(Value::new_str)
                             .collect();
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
@@ -597,7 +596,7 @@ impl Vm {
                             // CRuby: empty-sep split returns each character.
                             s.borrow().chars().map(|c| Value::new_str(c.to_string())).collect()
                         } else {
-                            s.borrow().split(&*sep.borrow()).map(|t| Value::new_str(t)).collect()
+                            s.borrow().split(&*sep.borrow()).map(Value::new_str).collect()
                         };
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
@@ -619,13 +618,12 @@ impl Vm {
                         };
                         let out = ruby_sprintf(&s.borrow(), fmt_args, &self.heap, &self.interner)
                             .map_err(|e| self.trap(e))?;
-                        if let Some(max) = self.max_value_bytes {
-                            if out.len() > max {
+                        if let Some(max) = self.max_value_bytes
+                            && out.len() > max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("String#% would exceed {max} bytes"),
                                 }));
                             }
-                        }
                         Some(Value::new_str(out))
                     }
                     // Literal-substring `scan` — returns a fresh
@@ -670,13 +668,12 @@ impl Vm {
                         // can quietly grow it without bound. Existing
                         // symbols always re-resolve; only fresh strings
                         // count against the cap.
-                        if let Some(max) = self.max_symbols {
-                            if !self.interner.contains(&s.borrow()) && self.interner.len() >= max {
+                        if let Some(max) = self.max_symbols
+                            && !self.interner.contains(&s.borrow()) && self.interner.len() >= max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("interner exhausted: {} symbols", max),
                                 }));
                             }
-                        }
                         let sym = self.interner.intern(&s.borrow());
                         Some(Value::Sym(sym))
                     }

@@ -139,7 +139,7 @@ impl Vm {
                     } else if let Some(filter) = &h.filter_class {
                         // explicit class filter (including bare
                         // `rescue` which compiles to StandardError).
-                        exc_class.as_ref().map_or(false, |cls| class_is_a(cls, filter))
+                        exc_class.as_ref().is_some_and(|cls| class_is_a(cls, filter))
                     } else {
                         // Non-ensure handler with no resolved filter
                         // class means the source said `rescue Foo`

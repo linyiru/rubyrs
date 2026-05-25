@@ -259,11 +259,10 @@ impl Heap {
                 Slot::Live(_) => {
                     if self.marks[i] { live += 1; }
                     else {
-                        if let Slot::Live(HeapObj::TypedData(d)) = &self.slots[i] {
-                            if let Some(f) = d.dfree {
+                        if let Slot::Live(HeapObj::TypedData(d)) = &self.slots[i]
+                            && let Some(f) = d.dfree {
                                 pending_frees.push((f, d.data_ptr));
                             }
-                        }
                         self.slots[i] = Slot::Dead;
                         self.free.push(i as u32);
                     }

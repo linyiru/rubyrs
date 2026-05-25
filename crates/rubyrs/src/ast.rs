@@ -297,7 +297,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // under the joined name for this lookup to find them.
         // Real module scope resolution lands when we add the
         // `module` keyword to the language.
-        if let Some(joined) = flatten_constant_path(&node) {
+        if let Some(joined) = flatten_constant_path(node) {
             return sp(node, Expr::ConstRead(joined));
         }
         // Dynamic path (rare): trailing-name fallback, matches the
@@ -526,17 +526,15 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             .arguments()
             .map(|a| a.arguments().iter().collect::<Vec<_>>())
             .unwrap_or_default();
-        if arg_nodes.len() == 1 {
-            if let Some(sn) = arg_nodes[0].as_splat_node() {
-                if let Some(splat_expr) = sn.expression() {
+        if arg_nodes.len() == 1
+            && let Some(sn) = arg_nodes[0].as_splat_node()
+                && let Some(splat_expr) = sn.expression() {
                     return sp(node, Expr::Apply {
                         receiver,
                         name,
                         splat: Box::new(tr(&splat_expr)),
                     });
                 }
-            }
-        }
         // KeywordHashNode at the tail of an argument list — Prism
         // emits this for the `name: value, ...` sugar at call
         // sites. Translate to a HashLit so the callee receives
@@ -581,9 +579,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             //
             // `&proc_var` (binding an existing Proc) is a separate
             // form and not yet supported — only `&:sym` here.
-            if let Some(ba) = bnode.as_block_argument_node() {
-                if let Some(expr) = ba.expression() {
-                    if let Some(sn) = expr.as_symbol_node() {
+            if let Some(ba) = bnode.as_block_argument_node()
+                && let Some(expr) = ba.expression()
+                    && let Some(sn) = expr.as_symbol_node() {
                         let method_name: String = String::from_utf8_lossy(sn.unescaped()).into_owned();
                         let param_name = "__sp_x".to_string();
                         let body_call = sp(node, Expr::Call {
@@ -597,8 +595,6 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                             block_body: vec![body_call],
                         });
                     }
-                }
-            }
         }
         return sp(node, Expr::Call { receiver, name, args });
     }
@@ -737,7 +733,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::If { cond, then_body, else_body });
     }
-    if let Some(_) = node.as_forwarding_super_node() {
+    if node.as_forwarding_super_node().is_some() {
         // Bare `super` — forwards all of the enclosing method's
         // args. The arg list is filled in at compile time by
         // emitting LoadLocal for each param slot, so the AST
@@ -889,11 +885,10 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let mut rest: Option<String> = None;
         let mut kw_params: Vec<(String, Option<SExpr>)> = Vec::new();
         if let Some(p) = n.parameters() {
-            if let Some(r) = p.rest() {
-                if let Some(rp) = r.as_rest_parameter_node() {
+            if let Some(r) = p.rest()
+                && let Some(rp) = r.as_rest_parameter_node() {
                     rest = rp.name().map(|n| cid_to_string(n));
                 }
-            }
             for kw in p.keywords().iter() {
                 if let Some(rk) = kw.as_required_keyword_parameter_node() {
                     kw_params.push((cid_to_string(rk.name()), None));

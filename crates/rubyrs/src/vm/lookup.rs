@@ -22,15 +22,13 @@ use super::Vm;
 
 /// One entry in the per-call-site inline cache.
 #[derive(Clone)]
+#[derive(Default)]
 pub(crate) struct CallCache {
     pub(crate) class_ptr: usize, // 0 = empty
     pub(crate) generation: u32,
     pub(crate) method: Option<Rc<Method>>,
 }
 
-impl Default for CallCache {
-    fn default() -> Self { CallCache { class_ptr: 0, generation: 0, method: None } }
-}
 
 impl Vm {
     /// Make sure `call_caches` has at least `n` entries (one per

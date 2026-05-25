@@ -38,13 +38,12 @@ impl Vm {
                         // of an existing key is free (size-wise).
                         if pos.is_none() {
                             let new_len = self.heap.hash(id).len().saturating_add(1);
-                            if let Some(max) = self.max_value_bytes {
-                                if new_len.saturating_mul(std::mem::size_of::<(Value, Value)>()) > max {
+                            if let Some(max) = self.max_value_bytes
+                                && new_len.saturating_mul(std::mem::size_of::<(Value, Value)>()) > max {
                                     return Err(self.trap(RubyError::ResourceExhausted {
                                         msg: format!("Hash []= would exceed {max} bytes"),
                                     }));
                                 }
-                            }
                         }
                         let h = self.heap.hash_mut(id);
                         if let Some(p) = pos {

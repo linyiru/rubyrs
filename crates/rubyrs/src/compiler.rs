@@ -124,18 +124,15 @@ fn compile_stmt(
     b.current_span = e.span;
     match &e.node {
         Expr::LVarWrite(name, val) => {
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node {
-                if op == "+" && args.len() == 1 {
-                    if let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node) {
-                        if rn == name {
+            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+                && op == "+" && args.len() == 1
+                    && let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
+                        && rn == name {
                             let slot = b.local_slot(name);
                             b.emit(Op::IncLocalNoPush(slot));
                             b.current_span = prev_span;
                             return;
                         }
-                    }
-                }
-            }
             // Allocate the LHS slot BEFORE compiling the RHS so a
             // lambda inside the RHS (whose param_start snapshots
             // parent.n_locals) doesn't accidentally overlap this
@@ -147,18 +144,15 @@ fn compile_stmt(
             b.emit(Op::StoreLocal(slot));
         }
         Expr::IVarWrite(name, val) => {
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node {
-                if op == "+" && args.len() == 1 {
-                    if let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node) {
-                        if rn == name {
+            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+                && op == "+" && args.len() == 1
+                    && let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
+                        && rn == name {
                             let id = interner.intern(name);
                             b.emit(Op::IncIvarNoPush(id));
                             b.current_span = prev_span;
                             return;
                         }
-                    }
-                }
-            }
             compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
             b.emit(Op::StoreIvar(id));
@@ -216,18 +210,15 @@ pub(crate) fn compile_expr(
             // Fast path: `name = name + 1` — extremely common in `while i < N`
             // counters and `each` accumulators. Compile to a single `IncLocal`
             // that does the read-modify-write in place.
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node {
-                if op == "+" && args.len() == 1 {
-                    if let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node) {
-                        if rn == name {
+            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+                && op == "+" && args.len() == 1
+                    && let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
+                        && rn == name {
                             let slot = b.local_slot(name);
                             b.emit(Op::IncLocal(slot));
                             b.current_span = prev_span;
                             return;
                         }
-                    }
-                }
-            }
             // See note in compile_stmt's LVarWrite arm: pre-allocate
             // the LHS slot so a closure-creating RHS (lambda, proc)
             // doesn't take this slot as its param_start.
@@ -242,18 +233,15 @@ pub(crate) fn compile_expr(
         }
         Expr::IVarWrite(name, val) => {
             // Fast path: @name = @name + 1
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node {
-                if op == "+" && args.len() == 1 {
-                    if let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node) {
-                        if rn == name {
+            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+                && op == "+" && args.len() == 1
+                    && let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
+                        && rn == name {
                             let id = interner.intern(name);
                             b.emit(Op::IncIvar(id));
                             b.current_span = prev_span;
                             return;
                         }
-                    }
-                }
-            }
             compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
             b.emit(Op::Dup);

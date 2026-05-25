@@ -54,15 +54,13 @@ impl Vm {
         // increment per op. The op_counter is intentionally `u32`
         // (wraps freely) — we never read its absolute value.
         self.op_counter = self.op_counter.wrapping_add(1);
-        if self.op_counter & 1023 == 0 {
-            if let Some(at) = self.deadline_at {
-                if std::time::Instant::now() >= at {
+        if self.op_counter & 1023 == 0
+            && let Some(at) = self.deadline_at
+                && std::time::Instant::now() >= at {
                     return Err(self.trap(RubyError::ResourceExhausted {
                         msg: "wall-clock deadline exceeded".to_string(),
                     }));
                 }
-            }
-        }
         Ok(())
     }
 
@@ -70,26 +68,24 @@ impl Vm {
     /// (so the limit applies to *live* objects, not transient garbage).
     #[inline]
     pub(crate) fn check_alloc(&self) -> Result<(), Trap> {
-        if let Some(max) = self.heap.max_live {
-            if self.heap.live_count >= max {
+        if let Some(max) = self.heap.max_live
+            && self.heap.live_count >= max {
                 return Err(self.trap(RubyError::ResourceExhausted {
                     msg: format!("heap exhausted: {} live objects (max {})", self.heap.live_count, max),
                 }));
             }
-        }
         Ok(())
     }
 
     /// Check the frame stack can accept another frame.
     #[inline]
     pub(crate) fn check_frames(&self) -> Result<(), Trap> {
-        if let Some(max) = self.max_frames {
-            if self.frames.len() >= max {
+        if let Some(max) = self.max_frames
+            && self.frames.len() >= max {
                 return Err(self.trap(RubyError::ResourceExhausted {
                     msg: format!("stack level too deep ({} frames, max {})", self.frames.len(), max),
                 }));
             }
-        }
         Ok(())
     }
 
