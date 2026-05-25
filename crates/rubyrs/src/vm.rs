@@ -133,6 +133,14 @@ pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     pub(crate) interner: Interner,
     pub(crate) classes: HashMap<SymId, Rc<Class>>,
+    /// Top-level constants set via bare `FOO = expr` (not class
+    /// definitions). Read path: `Op::LoadConst` falls through to
+    /// this map after the class registry misses. Distinct table so
+    /// `class Foo` (sets `classes[Foo]`) and `Foo = 42` (sets
+    /// `constants[Foo]`) don't collide; class-as-class takes
+    /// precedence on read, matching CRuby's "warning: already
+    /// initialized constant" behaviour silently.
+    pub(crate) constants: HashMap<SymId, Value>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, Rc<HostFn>>,
     /// C-ext singleton-method dispatch table. Indexed by
@@ -221,6 +229,7 @@ impl Vm {
             protos,
             interner,
             classes: HashMap::new(),
+            constants: HashMap::new(),
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
             cext_class_methods: HashMap::new(),

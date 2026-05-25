@@ -316,9 +316,18 @@ impl Vm {
                     self.do_call(plus_id, 1, false, u16::MAX)?;
                 }
             }
+            Op::StoreConst(name_id) => {
+                // `FOO = expr` — compiler emitted Dup before this so
+                // the assigned value also remains on the stack as
+                // the expression's result (CRuby semantics).
+                let v = self.stack.pop().expect("ICE: StoreConst stack underflow");
+                self.constants.insert(name_id, v);
+            }
             Op::LoadConst(name_id) => {
                 let v = if let Some(c) = self.classes.get(&name_id).cloned() {
                     Value::Class(c)
+                } else if let Some(v) = self.constants.get(&name_id).cloned() {
+                    v
                 } else if &**self.interner.resolve(name_id) == "ENV" {
                     // Lazy-build ENV as a regular String-keyed Hash
                     // snapshotted from the process environment. Cached

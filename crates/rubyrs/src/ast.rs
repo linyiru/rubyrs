@@ -75,6 +75,10 @@ pub(crate) enum Expr {
     },
     SelfExpr,
     ConstRead(String),
+    /// Top-level `FOO = expr`. Bare constant write only — the
+    /// `Foo::Bar = ...` (ConstantPathWriteNode) form is a separate
+    /// not-yet-supported case.
+    ConstWrite(String, Box<SExpr>),
     Call {
         receiver: Option<Box<SExpr>>,
         name: String,
@@ -330,6 +334,14 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_instance_variable_write_node() {
         return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+    }
+    // Top-level constant assignment: `FOO = expr`. Storage is a
+    // separate `Vm.constants` map keyed by SymId — class names
+    // continue to live in `Vm.classes`, so `class Foo` and
+    // `Foo = SomeOther` can coexist (class lookup wins per
+    // CRuby).
+    if let Some(n) = node.as_constant_write_node() {
+        return sp(node, Expr::ConstWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
     // Op-assign desugaring: `a += b` is translated to
     // `a = a + b`. The receiver / index path is re-evaluated,

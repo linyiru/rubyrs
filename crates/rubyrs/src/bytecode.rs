@@ -49,6 +49,11 @@ pub(crate) enum Op {
     /// Same as `IncIvar` but does *not* push the resulting value.
     IncIvarNoPush(SymId),
     LoadConst(SymId),
+    /// Pop top of stack, store as the value of constant `SymId`.
+    /// Caller is responsible for emitting `Dup` first when the
+    /// expression's value should also remain on the stack (CRuby's
+    /// `FOO = 42` evaluates to 42).
+    StoreConst(SymId),
     Jump(i32),
     JumpIfFalse(i32),
     /// Args: name SymId, argc, per-call-site inline-cache slot id.

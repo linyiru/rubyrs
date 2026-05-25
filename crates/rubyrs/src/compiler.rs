@@ -251,6 +251,16 @@ pub(crate) fn compile_expr(
             let id = interner.intern(name);
             b.emit(Op::LoadConst(id));
         }
+        Expr::ConstWrite(name, val) => {
+            // CRuby: a constant assignment leaves the assigned value
+            // on the stack as the expression's result. Same pattern
+            // as IVarWrite above (Dup so the value survives the
+            // store).
+            compile_expr(b, val, protos, interner, cc);
+            let id = interner.intern(name);
+            b.emit(Op::Dup);
+            b.emit(Op::StoreConst(id));
+        }
         Expr::MultiWrite { targets, value } => {
             // Compile the RHS once, leave it on the stack. Without a
             // splat: dup-and-index each target by positive index;
