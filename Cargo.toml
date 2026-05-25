@@ -4,6 +4,7 @@ members = [
     "crates/rubyrs",
     "crates/rubyrs-cext",
     "crates/rubund",
+    "crates/rubyrs-gapscan",
 ]
 
 # Shared metadata — individual crates pick these up with
