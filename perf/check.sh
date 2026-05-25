@@ -182,11 +182,22 @@ printf "%-58s %-11s %-11s %-12s %-12s %s\n" "--------" "----------" "----------"
 while IFS=$'\t' read -r workload rss_max wall_max _note; do
   # Skip comments + blank lines.
   case "$workload" in ''|\#*) continue ;; esac
+  # Display "-" instead of "0" when the wall check is disabled —
+  # easier to read in the result table than a literal 0 budget.
+  # Compute here so every row (happy, SETUP, malformed) renders
+  # the same way. For malformed `wall_max` (e.g. "abc") the raw
+  # value passes through so the SETUP row shows the bad input.
+  local_wall_display="$wall_max"
+  [[ "$wall_max" == "0" ]] && local_wall_display="-"
   # Validate both numeric columns. A malformed value would blow up
   # the `(( … > … ))` tests as a bash arithmetic error — route to
-  # setup_fail to keep the 0/1/2 exit-code contract honest.
+  # setup_fail to keep the 0/1/2 exit-code contract honest. Each
+  # validation arm also emits a `SETUP` row in the result table so
+  # CI logs always show one of the documented STATUS values per
+  # baseline row, matching `perf/README.md`'s status semantics.
   if [[ ! "$rss_max" =~ ^[0-9]+$ ]]; then
     echo "perf/check: row '$workload' has invalid max_rss_kb '$rss_max' (expected non-negative integer)" >&2
+    printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
     setup_fail=1
     continue
   fi
@@ -194,6 +205,7 @@ while IFS=$'\t' read -r workload rss_max wall_max _note; do
   # sentinel for tiny workloads (sub-100ms noise floor).
   if [[ ! "$wall_max" =~ ^[0-9]+$ ]]; then
     echo "perf/check: row '$workload' has invalid max_wall_ms '$wall_max' (expected non-negative integer; 0 disables)" >&2
+    printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
     setup_fail=1
     continue
   fi
@@ -202,17 +214,14 @@ while IFS=$'\t' read -r workload rss_max wall_max _note; do
   # exit-code contract (0/1/2) actually matches what we emit.
   if [[ ! -f "$workload" ]]; then
     echo "perf/check: workload not found: $workload" >&2
+    printf "%-58s %-11s %-11s %-12s %-12s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
     setup_fail=1
     continue
   fi
   total=$((total + 1))
-  # Display "-" instead of "0" when the wall check is disabled —
-  # easier to read in the result table than a literal 0 budget.
-  # Compute once, use in both the OK row and the SETUP row so the
-  # "disabled" rendering is consistent regardless of measurement
-  # outcome.
-  local_wall_display="$wall_max"
-  [[ "$wall_max" == "0" ]] && local_wall_display="-"
+  # `local_wall_display` was already computed near the top of the
+  # loop so all SETUP rows (malformed/missing/measurement-fail)
+  # render consistently; reuse the same value here.
   read -r ms kb <<<"$(measure_min "$workload")"
   # measure_min emits "ERR ERR" when /usr/bin/time itself failed
   # or the output didn't parse. Already logged a workload-specific
