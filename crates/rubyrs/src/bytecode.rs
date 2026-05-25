@@ -56,6 +56,14 @@ pub(crate) enum Op {
     StoreConst(SymId),
     Jump(i32),
     JumpIfFalse(i32),
+    /// Default-arg prologue helper. If positional `slot` was
+    /// supplied by the caller (i.e. `slot < frame.n_given_positional`),
+    /// jump by `off` to skip the default-eval body. Otherwise
+    /// fall through — the subsequent ops compute the default
+    /// expression and `StoreLocal(slot)`. One per optional
+    /// positional param; emitted at the very top of the method
+    /// body by the compiler.
+    JumpIfArgGiven(u16, i32),
     /// Args: name SymId, argc, per-call-site inline-cache slot id.
     Call(SymId, u8, u16),
     CallNoRecv(SymId, u8, u16),
@@ -214,14 +222,17 @@ impl BinOpKind {
 pub(crate) struct Proto {
     pub(crate) name: String,
     pub(crate) params: Vec<String>,
-    /// Parallel to `params`. `None` for required params; `Some(v)`
-    /// for optionals — at invocation time, slots that the caller
-    /// didn't fill get the corresponding `Some(v)` clone. The
-    /// AST translator restricts defaults to literal Values, so
-    /// `Vec<Option<Value>>` is enough — no bytecode prologue
-    /// needed. Required params always come before optionals in
-    /// source order, so `defaults` has the shape `[None…, Some…]`.
-    pub(crate) defaults: Vec<Option<Value>>,
+    /// Count of leading required positional params. `params[0..n]`
+    /// must be supplied by the caller; `params[n..positional_max]`
+    /// are optionals whose defaults are evaluated by the method
+    /// body's entry prologue (a sequence of `Op::JumpIfArgGiven`
+    /// + default-expr + `Op::StoreLocal` per optional slot, emitted
+    /// by the compiler). Required params always come before
+    /// optionals in source order. Defaults can be arbitrary
+    /// expressions (`def f(a, b=a+1)`, `def f(level=Logger::INFO)`)
+    /// because the prologue runs after positional slots are
+    /// bound — there's no compile-time-literal restriction.
+    pub(crate) n_required_positional: u16,
     /// `Some(name)` for `def foo(*args)` — the rest-parameter
     /// name. At call time, args past the last positional slot
     /// gather into a fresh Array stored in the local named here.

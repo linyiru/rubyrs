@@ -86,12 +86,13 @@ impl ProtoBuilder {
         match &mut self.code[at] {
             Op::Jump(o) => *o = off,
             Op::JumpIfFalse(o) => *o = off,
+            Op::JumpIfArgGiven(_, o) => *o = off,
             _ => panic!("ICE: patch_jump on non-jump op at {}", at),
         }
     }
-    pub(crate) fn build(self, name: String, params: Vec<String>, defaults: Vec<Option<Value>>) -> Proto {
+    pub(crate) fn build(self, name: String, params: Vec<String>, n_required_positional: u16) -> Proto {
         Proto {
-            name, params, defaults,
+            name, params, n_required_positional,
             rest_param: None,
             kw_param_defaults: vec![],
             kw_rest_param: None,
@@ -471,7 +472,7 @@ pub(crate) fn compile_expr(
                         // def <sym>; @<sym>; end
                         let body = vec![SExpr { span: a.span, node: Expr::IVarRead(ivar_name.clone()) }];
                         let pidx = compile_proto(
-                            sym_name.clone(), vec![], vec![], &body,
+                            sym_name.clone(), vec![], &body,
                             b.filename.clone(), protos, interner, cc,
                         );
                         let nid = interner.intern(&sym_name);
@@ -486,7 +487,7 @@ pub(crate) fn compile_expr(
                             node: Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
                         }];
                         let pidx = compile_proto(
-                            setter_name.clone(), vec!["val".into()], vec![None], &body,
+                            setter_name.clone(), vec!["val".into()], &body,
                             b.filename.clone(), protos, interner, cc,
                         );
                         let nid = interner.intern(&setter_name);
@@ -584,9 +585,15 @@ pub(crate) fn compile_expr(
             }
         }
         Expr::Def { name, params, defaults, rest, kw_params, kw_rest, receiver, body } => {
-            let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
-                d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
-            }).collect();
+            // `defaults` is parallel to `params`: leading `None`s are
+            // required positionals, trailing `Some(expr)`s are
+            // optionals. The compile_proto_kind helper emits a
+            // per-optional `Op::JumpIfArgGiven(slot, skip) + <expr>
+            // + StoreLocal(slot)` prologue at the top of the body
+            // so non-literal defaults (`level = Logger::INFO`,
+            // `b = a + 1`) work — slot is bound before the prologue
+            // runs, so `a` is already readable.
+            let n_required_positional = defaults.iter().take_while(|d| d.is_none()).count() as u16;
             // Param layout in slot order: positional, then rest
             // (if any), then keyword params (in source order).
             // ProtoBuilder allocates slots in that sequence; the
@@ -615,7 +622,7 @@ pub(crate) fn compile_expr(
                 d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
             let proto_idx = compile_proto_kind(
-                name.clone(), effective_params, lit_defaults, body,
+                name.clone(), effective_params, n_required_positional, defaults.clone(), body,
                 b.filename.clone(), protos, interner, cc, /*is_method=*/true,
             );
             if let Some(rname) = rest {
@@ -681,7 +688,7 @@ pub(crate) fn compile_expr(
             b.emit(Op::Super(name_id, argc));
         }
         Expr::Class { name, superclass, body } => {
-            let proto_idx = compile_proto(format!("<class:{}>", name), vec![], vec![], body, b.filename.clone(), protos, interner, cc);
+            let proto_idx = compile_proto(format!("<class:{}>", name), vec![], body, b.filename.clone(), protos, interner, cc);
             // Push the superclass (or Nil for "default to Object") for DefClass to pop.
             if let Some(parent) = superclass {
                 let parent_id = interner.intern(parent);
@@ -937,17 +944,19 @@ pub(crate) fn compile_expr(
     b.current_span = prev_span;
 }
 
-// Eight positional args is past clippy's default cap, but every one
-// is load-bearing: the proto name + the four shape inputs (params,
-// defaults, body, filename) + the three target sinks the compiler
-// mutates (protos vec, interner, call-cache counter). Bundling into
-// a builder struct doesn't reduce the surface; it just renames it.
+// Many positional args is past clippy's default cap, but every one
+// is load-bearing: the proto name + the shape inputs (params,
+// required-count, default exprs, body, filename) + the three target
+// sinks the compiler mutates (protos vec, interner, call-cache
+// counter). Bundling into a builder struct doesn't reduce the
+// surface; it just renames it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_proto(
-    name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
+    name: String, params: Vec<String>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> usize {
-    compile_proto_kind(name, params, defaults, body, filename, protos, interner, cc, /*is_method=*/false)
+    let n_req = params.len() as u16;
+    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false)
 }
 
 /// Same as `compile_proto` but tags the resulting builder as a
@@ -955,9 +964,16 @@ pub(crate) fn compile_proto(
 /// `super` knows what to forward. Called by `Expr::Def`'s
 /// compile path. Class bodies and the toplevel `<main>` proto
 /// stay non-method.
+///
+/// `default_exprs` is parallel to the *positional* part of `params`:
+/// `None` for required slots, `Some(expr)` for optionals. When
+/// non-empty, a per-optional `JumpIfArgGiven(slot, skip)
+/// + <default expr> + StoreLocal(slot)` prologue is emitted before
+/// the body so non-literal defaults work.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_proto_kind(
-    name: String, params: Vec<String>, defaults: Vec<Option<Value>>, body: &[SExpr],
+    name: String, params: Vec<String>, n_required_positional: u16,
+    default_exprs: Vec<Option<SExpr>>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
     is_method: bool,
 ) -> usize {
@@ -967,10 +983,25 @@ pub(crate) fn compile_proto_kind(
         b.method_param_count = params.len() as u16;
         b.is_method_body = true;
     }
+    // Default-arg prologue. For each optional positional slot:
+    // skip to `skip:` if the caller supplied it; otherwise eval
+    // the default expression and store into the slot. Earlier
+    // positional slots are already bound by frame setup, so a
+    // later default may reference an earlier param (`def f(a, b=a+1)`).
+    for (i, d) in default_exprs.iter().enumerate() {
+        if let Some(def_expr) = d {
+            let slot = i as u16;
+            let jmp = b.emit(Op::JumpIfArgGiven(slot, 0));
+            compile_expr(&mut b, def_expr, protos, interner, cc);
+            b.emit(Op::StoreLocal(slot));
+            let skip = b.pos();
+            b.patch_jump(jmp, skip);
+        }
+    }
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     let idx = protos.len();
-    protos.push(b.build(name, params, defaults));
+    protos.push(b.build(name, params, n_required_positional));
     idx
 }
 
@@ -1134,6 +1165,8 @@ pub(crate) fn compile_block(
     }).collect();
     let proto_param_count = proto_params.len();
     let idx = protos.len();
-    protos.push(b.build("<block>".into(), proto_params, vec![None; proto_param_count]));
+    // Blocks don't use the default-arg prologue (no defaults
+    // syntax in our block params), so every slot is required.
+    protos.push(b.build("<block>".into(), proto_params, proto_param_count as u16));
     (idx, param_start, n_params)
 }

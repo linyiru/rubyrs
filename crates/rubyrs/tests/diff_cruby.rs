@@ -165,3 +165,4 @@ fn run_diff(name: &str) {
 #[test] fn block_destructure_mixed() { run_diff("block_destructure_mixed"); }
 #[test] fn block_destructure_nested() { run_diff("block_destructure_nested"); }
 #[test] fn module_include() { run_diff("module_include"); }
+#[test] fn default_args_exprs() { run_diff("default_args_exprs"); }

@@ -364,6 +364,12 @@ impl Vm {
                     f.ip = (f.ip as i32 + off) as usize;
                 }
             }
+            Op::JumpIfArgGiven(slot, off) => {
+                let f = self.frames.last_mut().expect("ICE: JumpIfArgGiven no frame");
+                if (slot as u16) < f.n_given_positional {
+                    f.ip = (f.ip as i32 + off) as usize;
+                }
+            }
             Op::Call(name_id, argc, cache_id) => {
                 self.do_call(name_id, argc as usize, false, cache_id)?;
             }
@@ -726,7 +732,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, rescues: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![],
                 });
             }
             Op::NewArray(n) => {

@@ -1046,25 +1046,14 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             for o in p.optionals().iter() {
                 if let Some(op) = o.as_optional_parameter_node() {
                     params.push(cid_to_string(op.name()));
-                    let val = tr(&op.value());
-                    // Restrict defaults to literal values. Anything
-                    // else (a method call, a reference to an earlier
-                    // param, etc.) needs a per-callsite prologue we
-                    // don't generate yet — surface as a SyntaxError
-                    // via the AST_ERRORS thread-local rather than
-                    // silently miscompiling.
-                    match &val.node {
-                        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StrLit(_) | Expr::SymbolLit(_)
-                        | Expr::BoolLit(_) | Expr::Nil => {
-                            defaults.push(Some(val));
-                        }
-                        _ => {
-                            AST_ERRORS.with(|cell| cell.borrow_mut().push(
-                                format!("default value for parameter `{}` must be a literal (Int/Str/Sym/true/false/nil)", cid_to_string(op.name()))
-                            ));
-                            defaults.push(Some(sp(&o, Expr::Nil)));
-                        }
-                    }
+                    // Any expression is allowed as a positional
+                    // default — the compiler emits a per-optional
+                    // entry prologue (`Op::JumpIfArgGiven(slot, skip)
+                    // + <expr> + Op::StoreLocal(slot)`) that runs
+                    // before the body, so the default can reference
+                    // earlier params, call methods, look up
+                    // constants, etc.
+                    defaults.push(Some(tr(&op.value())));
                 }
             }
         }
