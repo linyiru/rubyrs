@@ -1,5 +1,4 @@
 describe "Hash#except" do
-  
 
   it "returns a duplicate without arguments" do
     @hash = { a: 1, b: 2, c: 3 }

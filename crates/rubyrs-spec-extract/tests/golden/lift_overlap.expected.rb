@@ -14,7 +14,6 @@
 #    (recogniser) first, then the zero-length insertion.
 
 describe "overlap edges" do
-  
 
   it "first stmt is should ==" do
     @hash = { a: 1 }.length.should == 1

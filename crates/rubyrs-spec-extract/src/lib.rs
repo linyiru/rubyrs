@@ -96,13 +96,65 @@ pub fn extract(source: &str) -> String {
 
     // v0.3: prepend a header listing patterns the extractor saw
     // but didn't rewrite. Skips entries the lifter consumed —
-    // those ARE handled, just by a different code path.
-    let unhandled = collect_unhandled(source, &consumed);
+    // those ARE handled, just by a different code path. Reuses
+    // the existing parse rather than re-running prism over the
+    // source.
+    let unhandled = collect_unhandled(source, &root, &consumed);
     if unhandled.is_empty() {
         stripped
     } else {
-        format!("{}{stripped}", render_skip_header(&unhandled))
+        insert_skip_header(&stripped, &render_skip_header(&unhandled))
     }
+}
+
+/// Insert the skip header after any leading shebang and magic
+/// comments (`# encoding:`, `# frozen_string_literal:`, etc.) so
+/// Ruby's parser still picks those up. Without this, prepending
+/// at byte 0 would push magic comments off line 1-2 — Ruby looks
+/// for them ONLY in that position, so they'd silently stop
+/// working.
+fn insert_skip_header(source: &str, header: &str) -> String {
+    let mut byte_cursor = 0usize;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        // Shebang only on line 1 — but split_inclusive doesn't
+        // expose line number directly; the loop just keeps
+        // skipping while the line "looks like" something we
+        // want to keep above the header. A non-line-1 shebang
+        // wouldn't be honoured by Ruby anyway, so skipping is
+        // still correct.
+        let keep_above_header = trimmed.starts_with("#!")
+            || is_magic_comment(trimmed)
+            || trimmed.is_empty();
+        if !keep_above_header {
+            break;
+        }
+        byte_cursor += line.len();
+    }
+    let (prefix, rest) = source.split_at(byte_cursor);
+    format!("{prefix}{header}{rest}")
+}
+
+/// Recognise the comment lines Ruby's parser treats as magic
+/// comments. Conservative: only flags forms we're sure about so
+/// regular `# ...` comments don't get pushed above the header.
+fn is_magic_comment(trimmed: &str) -> bool {
+    if !trimmed.starts_with('#') {
+        return false;
+    }
+    let body = trimmed[1..].trim_start();
+    // The `-*- encoding: utf-8 -*-` and `coding:` forms can also
+    // appear inside a `-*-` wrap; the patterns below match the
+    // declarations themselves either way.
+    body.starts_with("encoding:")
+        || body.starts_with("encoding ")
+        || body.starts_with("coding:")
+        || body.starts_with("coding ")
+        || body.starts_with("frozen_string_literal:")
+        || body.starts_with("warn_indent:")
+        || body.starts_with("shareable_constant_value:")
+        || body.contains("-*- encoding")
+        || body.contains("-*- coding")
 }
 
 /// Returns the parse-error messages reported by `ruby_prism` for
@@ -388,6 +440,14 @@ fn try_mock_int(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substit
     if !name_is(node.name(), b"mock_int") {
         return None;
     }
+    // mspec's `mock_int` is a top-level helper — always called
+    // with no receiver. Bail when a receiver is present so
+    // user code like `obj.mock_int(2)` (a method named the same
+    // on someone's class) doesn't get its receiver silently
+    // stripped.
+    if node.receiver().is_some() {
+        return None;
+    }
     let mut args_iter = node.arguments()?.arguments().iter();
     let arg = args_iter.next()?;
     if args_iter.next().is_some() {
@@ -505,10 +565,22 @@ impl BeforeEachLifter<'_> {
             let Some(b_block) = b_block_node.as_block_node() else { continue };
             let Some(b_body) = b_block.body() else { continue };
             lifted_body_text = Some(slice(self.source, &b_body));
-            before_call_range = Some((
-                call.location().start_offset(),
-                call.location().end_offset(),
-            ));
+            // Expand the delete range to include leading
+            // whitespace on the `before`'s line and one trailing
+            // newline. Without this, deletion leaves a
+            // whitespace-only blank line that looks like an
+            // editing artefact in the output.
+            let raw_start = call.location().start_offset();
+            let raw_end = call.location().end_offset();
+            let bytes = self.source.as_bytes();
+            let mut s = raw_start;
+            while s > 0 {
+                let b = bytes[s - 1];
+                if b == b' ' || b == b'\t' { s -= 1; } else { break; }
+            }
+            let mut e = raw_end;
+            if e < bytes.len() && bytes[e] == b'\n' { e += 1; }
+            before_call_range = Some((s, e));
             break;
         }
 
@@ -569,15 +641,17 @@ struct UnhandledPattern {
     detail: &'static str,
 }
 
-fn collect_unhandled(source: &str, consumed: &[(usize, usize)]) -> Vec<UnhandledPattern> {
-    let parsed = ruby_prism::parse(source.as_bytes());
-    let root = parsed.node();
+fn collect_unhandled<'pr>(
+    source: &str,
+    root: &Node<'pr>,
+    consumed: &[(usize, usize)],
+) -> Vec<UnhandledPattern> {
     let mut visitor = UnhandledCollector {
         source,
         patterns: Vec::new(),
         consumed,
     };
-    visitor.visit(&root);
+    visitor.visit(root);
     visitor.patterns
 }
 
@@ -591,7 +665,12 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let loc = node.location();
         let start = loc.start_offset();
-        let was_consumed = self.consumed.iter().any(|(s, _)| *s == start);
+        // "Inside any consumed range" rather than "start matches
+        // exactly" — the lifter expands its consumed range to
+        // swallow leading whitespace + trailing newline, so the
+        // call's raw start is now strictly INSIDE that range,
+        // not equal to its start.
+        let was_consumed = self.consumed.iter().any(|(s, e)| start >= *s && start < *e);
         if !was_consumed {
             let name_bytes = node.name().as_slice();
             // For mock_int, mirror try_mock_int's gate: if the call
