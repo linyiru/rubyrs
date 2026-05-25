@@ -1,0 +1,30 @@
+# Per-workload peak-RSS baselines (KB).
+#
+# Format: <workload-path>\t<max_rss_kb>\t<note>
+# Workload paths are relative to the repository root. Lines starting
+# with `#` are ignored.
+#
+# Wall-time is NOT enforced here — too noisy across CI runners — but
+# `perf/check.sh` prints it for visibility. The "rubyrs is ~5× lighter
+# than CRuby on the same workload" story rests on RSS, so RSS is the
+# defended metric.
+#
+# Bumping a threshold up means rubyrs allocates more memory than
+# before. ALWAYS add a comment line above the row explaining what
+# allocation grew and whether it's an explicit design choice or
+# regression that needs a separate fix. Same etiquette as the panic
+# budget in .github/workflows/ci.yml.
+#
+# Initial measurements (local M-series Mac, release build):
+#   fizzbuzz                    ~2.6 MB
+#   mm_bench / dm_bench         ~2.6-2.7 MB
+#   static_bench                ~2.6 MB
+#
+# Headroom on first commit is ~2× to absorb CI-runner variance while
+# we calibrate. Expect a tightening PR after a couple of green CI
+# runs establish the real ceiling on GitHub-hosted runners.
+
+crates/rubyrs/tests/fixtures/fizzbuzz.rb	8192	tiny script, sanity baseline
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	8192	2M method_missing dispatch
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	8192	2M define_method dispatch (closure-method)
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	8192	2M def+ivar (control for the metaprog comparisons)
