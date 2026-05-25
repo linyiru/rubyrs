@@ -464,6 +464,15 @@ pub unsafe extern "C" fn rb_str_new(ptr: *const c_char, len: c_long) -> Value {
 /// Real-bcrypt thread-safety logic uses this to snapshot password /
 /// salt args defensively; in our single-threaded host that's
 /// already-safe-by-construction.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_str_new_frozen(v: Value) -> Value {
     v
@@ -478,6 +487,13 @@ pub unsafe extern "C" fn rb_str_new_frozen(v: Value) -> Value {
 /// `rb_funcall(v, "to_str", 0)`-style call backs from C. The NUL
 /// termination is honoured because [`CValue::Str`] always stores a
 /// sentinel `\0` past the logical end.
+///
+/// # Safety
+///
+/// In addition to the trusted-loader handle contract used by every
+/// `rb_*` entry: `v` must point at an aligned, valid, writable
+/// `Value` for the duration of the call. CRuby's macro callers
+/// pass `&local_value`, which satisfies this trivially.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_string_value_cstr(v: *mut Value) -> *const c_char {
     assert!(!v.is_null(), "rb_string_value_cstr: null VALUE pointer");
@@ -492,6 +508,13 @@ pub unsafe extern "C" fn rb_string_value_cstr(v: *mut Value) -> *const c_char {
 /// [`rb_string_value_cstr`] today since both extract the underlying
 /// byte pointer — diverges once we track NUL-termination separately
 /// for `b"\0"`-containing strings.
+///
+/// # Safety
+///
+/// In addition to the trusted-loader handle contract used by every
+/// `rb_*` entry: `v` must point at an aligned, valid, writable
+/// `Value` for the duration of the call. CRuby's macro callers
+/// pass `&local_value`, which satisfies this trivially.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_string_value_ptr(v: *mut Value) -> *const c_char {
     unsafe { rb_string_value_cstr(v) }
@@ -502,6 +525,15 @@ pub unsafe extern "C" fn rb_string_value_ptr(v: *mut Value) -> *const c_char {
 /// Spike scope: pointer is borrowed from the per-call `STATE`, so
 /// it's only valid for the rest of the current C function. NOT
 /// NUL-terminated; callers must use [`RSTRING_LEN`].
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn RSTRING_PTR(v: Value) -> *const c_char {
@@ -513,6 +545,15 @@ pub unsafe extern "C" fn RSTRING_PTR(v: Value) -> *const c_char {
 
 /// Length of a String VALUE, in bytes — NOT including the sentinel
 /// trailing NUL that [`CValue::Str`] stores past the logical end.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn RSTRING_LEN(v: Value) -> c_long {
@@ -530,6 +571,15 @@ pub unsafe extern "C" fn RSTRING_LEN(v: Value) -> c_long {
 // Fixnum (tagged in VALUE) from Bignum (heap-allocated); we don't.
 
 /// Convert a C `long` to a Ruby Integer VALUE.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_long2num(n: c_long) -> Value {
     with_state(|st| st.intern(CValue::Int(n as i64)))
@@ -537,6 +587,15 @@ pub unsafe extern "C" fn rb_long2num(n: c_long) -> Value {
 
 /// Convert a Ruby Integer VALUE to a C `long`. Range overflow
 /// truncates silently — spike scope.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_num2long(v: Value) -> c_long {
     with_state(|st| match st.resolve(v) {
@@ -547,6 +606,15 @@ pub unsafe extern "C" fn rb_num2long(v: Value) -> c_long {
 
 /// Convert a Ruby Integer VALUE to a C `unsigned long`. Negative
 /// values wrap (CRuby raises `RangeError`; spike just casts).
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_num2ulong(v: Value) -> c_ulong {
     with_state(|st| match st.resolve(v) {
@@ -556,12 +624,30 @@ pub unsafe extern "C" fn rb_num2ulong(v: Value) -> c_ulong {
 }
 
 /// Convert a C `int` to a Ruby Integer VALUE.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_int2num(n: c_int) -> Value {
     with_state(|st| st.intern(CValue::Int(n as i64)))
 }
 
 /// Convert a Ruby Integer VALUE to a C `int`.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_num2int(v: Value) -> c_int {
     with_state(|st| match st.resolve(v) {
@@ -709,6 +795,15 @@ pub unsafe extern "C" fn rb_define_singleton_method(
 // ===== Array C ABI (Level 2-3) =====
 
 /// Allocate an empty Array and return its handle.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_ary_new() -> Value {
     with_state(|st| st.intern(CValue::Array(Vec::new())))
@@ -724,6 +819,15 @@ pub unsafe extern "C" fn rb_ary_new() -> Value {
 /// from a buggy C extension. Honestly ignoring the value matches
 /// the existing doc-comment intent and is forward-compatible with
 /// a future productionising pass that DOES pre-reserve.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_ary_new_capa(_capa: c_long) -> Value {
     with_state(|st| st.intern(CValue::Array(Vec::new())))
@@ -731,6 +835,15 @@ pub unsafe extern "C" fn rb_ary_new_capa(_capa: c_long) -> Value {
 
 /// Append `v` to the Array `ary`. Returns `ary` for chaining,
 /// matching CRuby.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_ary_push(ary: Value, v: Value) -> Value {
     with_state(|st| match st.resolve_mut(ary) {
@@ -747,6 +860,15 @@ pub unsafe extern "C" fn rb_ary_push(ary: Value, v: Value) -> Value {
 
 /// Read element at index `idx`. Negative indices count from the end
 /// (CRuby semantics). Returns [`Qnil`] for out-of-range.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_ary_entry(ary: Value, idx: c_long) -> Value {
     with_state(|st| match st.resolve(ary) {
@@ -775,6 +897,15 @@ pub unsafe extern "C" fn rb_ary_entry(ary: Value, idx: c_long) -> Value {
 }
 
 /// Length of the Array in elements.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn RARRAY_LEN(ary: Value) -> c_long {
@@ -787,6 +918,15 @@ pub unsafe extern "C" fn RARRAY_LEN(ary: Value) -> c_long {
 // ===== Hash C ABI (Level 2-3) =====
 
 /// Allocate an empty Hash and return its handle.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_hash_new() -> Value {
     with_state(|st| st.intern(CValue::Hash(Vec::new())))
@@ -794,6 +934,15 @@ pub unsafe extern "C" fn rb_hash_new() -> Value {
 
 /// Set `h[key] = value`. If `key` is already present, replace its
 /// value (matching CRuby Hash semantics). Returns `value`.
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_hash_aset(h: Value, key: Value, value: Value) -> Value {
     with_state(|st| {
@@ -824,6 +973,15 @@ pub unsafe extern "C" fn rb_hash_aset(h: Value, key: Value, value: Value) -> Val
 
 /// Get `h[key]`. Returns [`Qnil`] for missing keys (CRuby returns
 /// the Hash's default; spike just uses Nil).
+///
+/// # Safety
+///
+/// Trusted-loader contract: handle integrity is the dlopen'd C
+/// extension's responsibility. Forged `Value` handles either
+/// resolve to a no-op or return [`Qnil`] (range-checked inside
+/// `with_state`); no path here dereferences a raw Rust reference
+/// derived from a handle, so a bad value yields wrong results
+/// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_hash_aref(h: Value, key: Value) -> Value {
     with_state(|st| {
@@ -1102,6 +1260,13 @@ pub unsafe extern "C" fn rb_data_typed_object_wrap(
 /// The CRuby-shape `TypedData_Get_Struct` macro in `ruby.h`
 /// wraps this and casts the returned pointer to the C ext's
 /// concrete struct type.
+///
+/// # Safety
+///
+/// `type_ptr` must be either null or a valid pointer to an
+/// `rb_data_type_t` whose lifetime covers the call. CRuby's
+/// `TypedData_Get_Struct` macro always passes a file-scope
+/// `&dtype_static`, satisfying the lifetime requirement trivially.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_check_typeddata(
     obj: Value,
