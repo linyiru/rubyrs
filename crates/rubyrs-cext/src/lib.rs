@@ -431,6 +431,21 @@ pub fn enter() {
     ACTIVE_DEPTH.with(|d| d.set(d.get() + 1));
 }
 
+/// PR #60 review #14: reset the per-thread state. Required when
+/// transitioning between `Runtime`/`Vm` instances on the same
+/// thread. The `values` table can hold `CValue::HeapRef(ObjId)`
+/// pointing into a specific Vm's heap — without reset, those
+/// handles from a previous Vm would resolve to unrelated objects
+/// (or panic on out-of-range ObjId) in the new Vm.
+///
+/// `Runtime::new()` and `Runtime::drop()` call this; callers
+/// embedding rubyrs at the FFI level (without using `Runtime`)
+/// must call it themselves to switch Vms safely.
+pub fn reset_state() {
+    STATE.with(|s| *s.borrow_mut() = None);
+    ACTIVE_DEPTH.with(|d| d.set(0));
+}
+
 /// Pop the active enter; drain `registered_*` into the returned
 /// CExtState. PR #60 review #5: this no longer clones `values` —
 /// the host now uses `with_state` (via `cext_handle_to_value`) to

@@ -84,16 +84,23 @@ pub enum Raised {
 /// transitively) is caught and returned as [`Raised::Raised`]
 /// instead of longjmp-ing past arbitrary frames.
 ///
-/// `args` must have length `arity + 1` — args[0] is the `self`
-/// handle, args[1..] are the call arguments.
+/// `args` layout depends on `arity` (PR #60 review #13 — same
+/// post-L3-H contract as the inner shim):
+///   - fixed 0..=5: length is exactly `arity + 1`. args[0] is
+///     `self`; args[1..] are the fixed call arguments, one per
+///     arity slot.
+///   - variadic -1: length is `>= 1`. args[0] is `self`; the
+///     remaining slots form argv (argc = args.len() - 1).
 ///
 /// # Safety
 ///
 /// The caller must guarantee:
-///   - `func` is a valid function pointer of an arity that matches
-///     `arity` (caller validates against the registered arity from
-///     `rb_define_*_function`).
-///   - `args` is a valid pointer to `arity + 1` `Value`s.
+///   - `func` is a valid function pointer whose C signature
+///     matches `arity`'s convention (fixed 0..=5: VALUE func(VALUE
+///     self, VALUE arg0, ...); variadic -1: VALUE func(int argc,
+///     const VALUE *argv, VALUE self)). Caller validates against
+///     the arity captured at `rb_define_*_function`.
+///   - `args` is a valid pointer to the count documented above.
 ///   - No Rust RAII guards held by the caller cross the call: the
 ///     host's `cext_dispatch` keeps them on its own frame, OUTSIDE
 ///     this call. (The previous design had a Rust trampoline frame
