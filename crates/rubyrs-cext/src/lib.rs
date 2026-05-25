@@ -243,11 +243,31 @@ impl CExtState {
             // `rb_define_class_under(parent, name, rb_cObject)` accepts
             // its third argument. Superclass is ignored at the spike
             // level — flat namespace only.
+            // Sentinel handles 0-19 are reserved for the static
+            // singletons exported as `pub static rb_*: Value = N`
+            // — see the block of `#[used] #[no_mangle] pub static`
+            // declarations further down. Must be kept in sync.
             values: vec![
-                CValue::Nil,
-                CValue::True,
-                CValue::False,
-                CValue::Class(String::from("Object")),
+                CValue::Nil,                                 // 0  Qnil
+                CValue::True,                                // 1  Qtrue
+                CValue::False,                               // 2  Qfalse
+                CValue::Class(String::from("Object")),       // 3  rb_cObject
+                CValue::Class(String::from("String")),       // 4  rb_cString
+                CValue::Class(String::from("Array")),        // 5  rb_cArray
+                CValue::Class(String::from("Hash")),         // 6  rb_cHash
+                CValue::Class(String::from("Float")),        // 7  rb_cFloat
+                CValue::Class(String::from("Integer")),      // 8  rb_cInteger
+                CValue::Class(String::from("Numeric")),      // 9  rb_cNumeric
+                CValue::Class(String::from("Symbol")),       // 10 rb_cSymbol
+                CValue::Class(String::from("TrueClass")),    // 11 rb_cTrueClass
+                CValue::Class(String::from("FalseClass")),   // 12 rb_cFalseClass
+                CValue::Class(String::from("NilClass")),     // 13 rb_cNilClass
+                CValue::Class(String::from("BasicObject")),  // 14 rb_cBasicObject
+                CValue::Class(String::from("Module")),       // 15 rb_cModule
+                CValue::Class(String::from("Class")),        // 16 rb_cClass
+                CValue::Class(String::from("Kernel")),       // 17 rb_mKernel
+                CValue::Class(String::from("Comparable")),   // 18 rb_mComparable
+                CValue::Class(String::from("Enumerable")),   // 19 rb_mEnumerable
             ],
             registered_fns: Vec::new(),
             registered_classes: Vec::new(),
@@ -458,6 +478,33 @@ pub static Qfalse: Value = 2;
 #[used]
 #[unsafe(no_mangle)]
 pub static rb_cObject: Value = 3;
+
+// Class / module sentinels 4-19. CRuby exposes each as
+// `extern VALUE rb_c<Name>`; flori/json (and most non-trivial
+// cexts) use them as comparison targets in fast type dispatch
+// (`if (RBASIC_CLASS(obj) == rb_cString) {...}`). rubyrs's
+// `rb_basic_class` maps each `CValue` variant to the matching
+// sentinel — so `RBASIC_CLASS(rb_str_new(...))` returns
+// `rb_cString` by pointer identity, matching the C ext's
+// expectation.
+//
+// Numbers must match `CExtState::new`'s seeded `values` vec.
+#[used] #[unsafe(no_mangle)] pub static rb_cString: Value = 4;
+#[used] #[unsafe(no_mangle)] pub static rb_cArray: Value = 5;
+#[used] #[unsafe(no_mangle)] pub static rb_cHash: Value = 6;
+#[used] #[unsafe(no_mangle)] pub static rb_cFloat: Value = 7;
+#[used] #[unsafe(no_mangle)] pub static rb_cInteger: Value = 8;
+#[used] #[unsafe(no_mangle)] pub static rb_cNumeric: Value = 9;
+#[used] #[unsafe(no_mangle)] pub static rb_cSymbol: Value = 10;
+#[used] #[unsafe(no_mangle)] pub static rb_cTrueClass: Value = 11;
+#[used] #[unsafe(no_mangle)] pub static rb_cFalseClass: Value = 12;
+#[used] #[unsafe(no_mangle)] pub static rb_cNilClass: Value = 13;
+#[used] #[unsafe(no_mangle)] pub static rb_cBasicObject: Value = 14;
+#[used] #[unsafe(no_mangle)] pub static rb_cModule: Value = 15;
+#[used] #[unsafe(no_mangle)] pub static rb_cClass: Value = 16;
+#[used] #[unsafe(no_mangle)] pub static rb_mKernel: Value = 17;
+#[used] #[unsafe(no_mangle)] pub static rb_mComparable: Value = 18;
+#[used] #[unsafe(no_mangle)] pub static rb_mEnumerable: Value = 19;
 
 /// # Safety
 ///
