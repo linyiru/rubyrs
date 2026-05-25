@@ -27,10 +27,10 @@ like `pg` or `nokogiri` — that's a separate, much larger surface.
 | `rb_raise` / `longjmp` protection across the FFI boundary | Full exception object model |
 | Thread-local `CExtState` push/pop (`enter` / `leave`) | GC-integrated handle lifetimes |
 
-See [`docs/CEXT_SAFETY.md`](../../docs/CEXT_SAFETY.md) for the
-consolidated safety contract and
-[ADR 0009](../../docs/adr/0009-cext-panic-policy.md) for the
-panic policy.
+See [`docs/CEXT_SAFETY.md`](https://github.com/linyiru/rubyrs/blob/master/docs/CEXT_SAFETY.md)
+for the consolidated safety contract and
+[ADR 0009](https://github.com/linyiru/rubyrs/blob/master/docs/adr/0009-cext-panic-policy.md)
+for the panic policy.
 
 ## How it links
 
@@ -42,8 +42,8 @@ panic policy.
 > against. They would never see each other's `enter` / `leave`.
 
 Instead, the rubyrs binary exports the `rb_*` symbols from its
-own image (via `crates/rubyrs/build.rs`), and C extensions link
-with `-undefined dynamic_lookup` (macOS) or
+own image (via the `build.rs` in the `rubyrs` crate), and C
+extensions link with `-undefined dynamic_lookup` (macOS) or
 `--unresolved-symbols=ignore-all` (Linux). The symbols resolve
 against the host process at `dlopen` time. Single image, single
 `STATE`.
@@ -60,10 +60,12 @@ Use it only if you're:
   — you `#include <ruby.h>` and let the dlopen-time symbol
   resolution wire you up).
 
-See the parent [`rubyrs`](../rubyrs/) crate for the embeddable
-interpreter that consumes this.
+See the parent [`rubyrs`](https://crates.io/crates/rubyrs) crate
+for the embeddable interpreter that consumes this.
 
 ## License
 
-Dual-licensed under [MIT](../../LICENSE-MIT) or
-[Apache-2.0](../../LICENSE-APACHE) at your option.
+Dual-licensed under
+[MIT](https://github.com/linyiru/rubyrs/blob/master/LICENSE-MIT) or
+[Apache-2.0](https://github.com/linyiru/rubyrs/blob/master/LICENSE-APACHE)
+at your option.
