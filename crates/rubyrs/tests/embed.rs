@@ -1153,7 +1153,13 @@ fn gemfile_dsl_real_hosting_end_to_end() {
     struct State {
         source: Option<String>,
         ruby_version: Option<String>,
-        gems: Vec<(String, Vec<String>, Vec<String>)>, // name, reqs, groups
+        // name, reqs, groups, require_kw, platforms_kw — the
+        // last two are what the prelude pulls out of the
+        // trailing `**opts` hash. Capturing them here means a
+        // regression in `**kwargs` unpacking (Hash receive,
+        // Symbol-key access, `.to_s` round-trip) actually fails
+        // the test rather than landing in unused `_` bindings.
+        gems: Vec<(String, Vec<String>, Vec<String>, String, String)>,
         group_stack: Vec<String>,
     }
     let state = Rc::new(RefCell::new(State::default()));
@@ -1180,7 +1186,7 @@ fn gemfile_dsl_real_hosting_end_to_end() {
     {
         let st = state.clone();
         rt.register_fn("__gemfile_gem", move |args| {
-            if let [name, reqs, _req_kw, _plat_kw] = args {
+            if let [name, reqs, req_kw, plat_kw] = args {
                 let mut sm = st.borrow_mut();
                 let groups: Vec<String> = sm.group_stack.last()
                     .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
@@ -1191,7 +1197,7 @@ fn gemfile_dsl_real_hosting_end_to_end() {
                 } else {
                     req_str.split('|').map(String::from).collect()
                 };
-                sm.gems.push((s(name), reqs_vec, groups));
+                sm.gems.push((s(name), reqs_vec, groups, s(req_kw), s(plat_kw)));
             }
             Ok(Value::Nil)
         });
@@ -1240,17 +1246,42 @@ fn gemfile_dsl_real_hosting_end_to_end() {
 
     // Spot-check the splat-receive case: rack should have 2
     // version constraints, not 1.
-    let rack = st.gems.iter().find(|(n, _, _)| n == "rack").expect("rack missing");
+    let rack = st.gems.iter().find(|g| g.0 == "rack").expect("rack missing");
     assert_eq!(rack.1, vec![">= 3.0", "< 4.0"]);
 
     // Spot-check the multi-group block: rspec-rails should be
     // tagged with BOTH `:development` and `:test`.
-    let rspec = st.gems.iter().find(|(n, _, _)| n == "rspec-rails").expect("rspec missing");
+    let rspec = st.gems.iter().find(|g| g.0 == "rspec-rails").expect("rspec missing");
     assert_eq!(rspec.2, vec!["development", "test"]);
 
     // Spot-check the conditional: `csv` lives behind
     // `if RUBY_VERSION >= "3.4.0"`. With prelude setting
     // RUBY_VERSION = "3.4.0" it should be present.
-    assert!(st.gems.iter().any(|(n, _, _)| n == "csv"),
+    assert!(st.gems.iter().any(|g| g.0 == "csv"),
         "csv should be present when RUBY_VERSION >= 3.4.0");
+
+    // Spot-check `**kwargs` Hash unpacking: the prelude's
+    // `def gem(name, *requirements, **opts)` should produce a
+    // `require:` / `platforms:` round-trip into our captured
+    // (require_kw, platforms_kw) tuple slots. Without these
+    // assertions the kwargs path could regress to empty
+    // strings (Hash receive broken, Symbol-key lookup broken,
+    // `.to_s` returning the wrong shape) and the test would
+    // still pass on the positional-only fields above.
+    let puma = st.gems.iter().find(|g| g.0 == "puma").expect("puma missing");
+    assert_eq!(puma.3, "false", "puma's require: false should round-trip");
+    assert_eq!(puma.4, "", "puma has no platforms: kwarg");
+
+    let sidekiq = st.gems.iter().find(|g| g.0 == "sidekiq").expect("sidekiq missing");
+    assert_eq!(sidekiq.3, "sidekiq", "sidekiq's require: 'sidekiq' should round-trip");
+    assert_eq!(sidekiq.4, "mri", "sidekiq's platforms: :mri should round-trip");
+
+    let pry = st.gems.iter().find(|g| g.0 == "pry-byebug").expect("pry-byebug missing");
+    assert_eq!(pry.3, "pry-byebug");
+    assert_eq!(pry.4, "mri");
+
+    // Bare gem — no kwargs, both slots empty.
+    let rake = st.gems.iter().find(|g| g.0 == "rake").expect("rake missing");
+    assert_eq!(rake.3, "");
+    assert_eq!(rake.4, "");
 }
