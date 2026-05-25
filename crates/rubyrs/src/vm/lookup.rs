@@ -146,7 +146,7 @@ impl Vm {
                 "to_i" | "to_f" | "abs" |
                 "zero?" | "positive?" | "negative?" |
                 "nan?" | "infinite?" | "finite?" |
-                "floor" | "ceil" | "round" |
+                "floor" | "ceil" | "round" | "truncate" |
                 "-@" | "+@"
             ),
             Value::Str(_) => matches!(name,
