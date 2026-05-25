@@ -1302,6 +1302,14 @@ impl Vm {
                         Some(v.clone())
                     }
                     ("first", []) => Some(self.heap.array(id).first().cloned().unwrap_or(Value::Nil)),
+                    ("dig", keys) if !keys.is_empty() => {
+                        let mut cur = Value::Array(id);
+                        for key in keys {
+                            cur = self.dig_step(&cur, key)?;
+                            if matches!(cur, Value::Nil) { break; }
+                        }
+                        Some(cur)
+                    }
                     ("last", []) => Some(self.heap.array(id).last().cloned().unwrap_or(Value::Nil)),
                     ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
                     ("include?", [needle]) => {
@@ -1751,6 +1759,19 @@ impl Vm {
                         Some(v.clone())
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.hash(id).is_empty())),
+                    ("dig", keys) if !keys.is_empty() => {
+                        // Walk the keys/indices, looking up at each
+                        // step. Nil at any level short-circuits.
+                        // Type-dispatch per step: Hash → ruby_eq
+                        // lookup, Array → integer index. Other types
+                        // would need `dig` defined; treat as nil.
+                        let mut cur = Value::Hash(id);
+                        for key in keys {
+                            cur = self.dig_step(&cur, key)?;
+                            if matches!(cur, Value::Nil) { break; }
+                        }
+                        Some(cur)
+                    }
                     ("fetch", [k]) => {
                         // 1-arg fetch: return value or raise KeyError.
                         // The Trap is routed through the rescue
@@ -2683,6 +2704,32 @@ impl Vm {
     /// via `include Comparable`) sort sensibly. Synchronously
     /// dispatches the user method by pushing a frame and running
     /// `dispatch_until` — the same pattern iterator drivers use.
+    /// One step of nested lookup for `Hash#dig` / `Array#dig`.
+    /// Hash receivers use `ruby_eq` key lookup; Array uses Int
+    /// index (negative wraps from end). Anything else → nil so
+    /// the caller can short-circuit cleanly.
+    pub(crate) fn dig_step(&self, recv: &Value, key: &Value) -> Result<Value, Trap> {
+        Ok(match recv {
+            Value::Hash(id) => {
+                let h = self.heap.hash(*id);
+                h.iter()
+                    .find(|(k, _)| k.ruby_eq(key, &self.heap))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or(Value::Nil)
+            }
+            Value::Array(id) => {
+                if let Value::Int(i) = key {
+                    let a = self.heap.array(*id);
+                    let idx = if *i < 0 { a.len() as i64 + *i } else { *i };
+                    a.get(idx as usize).cloned().unwrap_or(Value::Nil)
+                } else {
+                    Value::Nil
+                }
+            }
+            _ => Value::Nil,
+        })
+    }
+
     pub(crate) fn user_cmp(&mut self, a: &Value, b: &Value) -> Result<Option<std::cmp::Ordering>, Trap> {
         if let Some(ord) = value_cmp_v(a, b, &self.interner) {
             return Ok(Some(ord));
