@@ -1345,34 +1345,67 @@ fn gemfile_dsl_real_hosting_end_to_end() {
         });
     }
     // v2 form — mirrors examples/gemfile.rs::__gemfile_gem_v2.
-    // The prelude passes the splat as Array and the kwargs as a
-    // String→String Hash; we unpack via HostCtx and capture into
-    // the typed `Gem` struct. This is the integration-test
-    // counterpart of the demo binary — they share prelude + Gemfile
-    // so any regression in the v2 path (HostCtx::resolve_array /
-    // resolve_hash, slice lifetime, GC interaction with held
-    // borrows) shows up here.
+    // Fail-fast shape validation: matches the demo's pattern and
+    // the earlier register_fn_v2_reads_* unit tests. A regression
+    // in the prelude (sending the wrong shape) surfaces as an
+    // ArgumentError here, not as a silent partial GemfileState
+    // that fails 200 lines later in `.gems.len() != 18`.
     {
         let st = state.clone();
         rt.register_fn_v2("__gemfile_gem_v2", move |ctx, args| {
-            let [name, requirements, opts] = args else { return Ok(Value::Nil); };
-            let reqs_slice = ctx.resolve_array(requirements).unwrap_or(&[]);
-            let opts_slice = ctx.resolve_hash(opts).unwrap_or(&[]);
+            let [name, requirements, opts] = args else {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: format!("__gemfile_gem_v2: expected 3 args, got {}", args.len()),
+                    },
+                    backtrace: vec![],
+                });
+            };
+            let name = if let Value::Str(rs) = name {
+                rs.borrow().clone()
+            } else {
+                return Err(Trap {
+                    err: RubyError::ArgumentError { msg: "name must be a String".into() },
+                    backtrace: vec![],
+                });
+            };
+            let reqs_slice = ctx.resolve_array(requirements).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "requirements must be an Array".into() },
+                backtrace: vec![],
+            })?;
+            let opts_slice = ctx.resolve_hash(opts).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "opts must be a Hash".into() },
+                backtrace: vec![],
+            })?;
 
             let reqs_vec: Vec<String> = reqs_slice.iter()
-                .filter_map(|v| if let Value::Str(rs) = v {
-                    Some(rs.borrow().clone())
-                } else { None })
-                .collect();
+                .map(|v| if let Value::Str(rs) = v {
+                    Ok(rs.borrow().clone())
+                } else {
+                    Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: "requirements element must be a String".into(),
+                        },
+                        backtrace: vec![],
+                    })
+                })
+                .collect::<Result<_, _>>()?;
             let mut require_kw = String::new();
             let mut platforms_kw = String::new();
             for (k, v) in opts_slice {
-                if let (Value::Str(ks), Value::Str(vs)) = (k, v) {
-                    match ks.borrow().as_str() {
-                        "require"   => require_kw   = vs.borrow().clone(),
-                        "platforms" => platforms_kw = vs.borrow().clone(),
-                        _ => {}
-                    }
+                let (ks, vs) = match (k, v) {
+                    (Value::Str(ks), Value::Str(vs)) => (ks.borrow().clone(), vs.borrow().clone()),
+                    _ => return Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: "opts must have String keys and values".into(),
+                        },
+                        backtrace: vec![],
+                    }),
+                };
+                match ks.as_str() {
+                    "require"   => require_kw   = vs,
+                    "platforms" => platforms_kw = vs,
+                    _ => {}
                 }
             }
 
@@ -1385,7 +1418,7 @@ fn gemfile_dsl_real_hosting_end_to_end() {
                 .unwrap_or_default();
             let source_override = sm.source_stack.last().cloned();
             sm.gems.push(Gem {
-                name: s(name),
+                name,
                 reqs: reqs_vec,
                 groups,
                 require_kw,

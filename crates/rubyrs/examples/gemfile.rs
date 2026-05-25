@@ -67,7 +67,16 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
-use rubyrs::{HostCtx, Runtime, Value};
+use rubyrs::{HostCtx, RubyError, Runtime, Trap, Value};
+
+/// Build an `ArgumentError` trap so v2 shape mismatches fail fast
+/// rather than silently producing partial state. Demo-quality
+/// pattern — embedders copying this should follow the same shape:
+/// validate the heap-y arg type, validate every element/entry,
+/// fail with a concrete error message.
+fn arg_err(msg: impl Into<String>) -> Trap {
+    Trap { err: RubyError::ArgumentError { msg: msg.into() }, backtrace: vec![] }
+}
 
 /// A single gem declaration captured from the Gemfile.
 #[derive(Debug, Clone)]
@@ -232,25 +241,47 @@ fn main() {
     {
         let st = state.clone();
         rt.register_fn_v2("__gemfile_gem_v2", move |ctx: &HostCtx, args| {
-            let [name, requirements, opts] = args else { return Ok(Value::Nil); };
-            let reqs_slice = ctx.resolve_array(requirements).unwrap_or(&[]);
-            let opts_slice = ctx.resolve_hash(opts).unwrap_or(&[]);
+            let [name, requirements, opts] = args else {
+                return Err(arg_err(format!(
+                    "__gemfile_gem_v2: expected 3 args (name, requirements, opts), got {}",
+                    args.len()
+                )));
+            };
+            let name = if let Value::Str(rs) = name {
+                rs.borrow().clone()
+            } else {
+                return Err(arg_err("__gemfile_gem_v2: name must be a String"));
+            };
+            let reqs_slice = ctx.resolve_array(requirements)
+                .ok_or_else(|| arg_err("__gemfile_gem_v2: requirements must be an Array"))?;
+            let opts_slice = ctx.resolve_hash(opts)
+                .ok_or_else(|| arg_err("__gemfile_gem_v2: opts must be a Hash"))?;
 
+            // Every requirement element must be a String — `gem "rack", ">= 3.0"`
+            // could only come through the prelude as a String, so a non-Str
+            // element means the prelude regressed.
             let requirements: Vec<String> = reqs_slice.iter()
-                .filter_map(|v| if let Value::Str(rs) = v {
-                    Some(rs.borrow().clone())
-                } else { None })
-                .collect();
+                .map(|v| if let Value::Str(rs) = v {
+                    Ok(rs.borrow().clone())
+                } else {
+                    Err(arg_err("__gemfile_gem_v2: requirements element must be a String"))
+                })
+                .collect::<Result<_, _>>()?;
 
+            // The prelude's `opts.each { |k,v| out[k.to_s] = v.to_s }` rebuild
+            // guarantees String → String. A non-String key/value here means
+            // the prelude was bypassed.
             let mut require_kw = String::new();
             let mut platforms_kw = String::new();
             for (k, v) in opts_slice {
-                if let (Value::Str(ks), Value::Str(vs)) = (k, v) {
-                    match ks.borrow().as_str() {
-                        "require"   => require_kw   = vs.borrow().clone(),
-                        "platforms" => platforms_kw = vs.borrow().clone(),
-                        _ => {}
-                    }
+                let (ks, vs) = match (k, v) {
+                    (Value::Str(ks), Value::Str(vs)) => (ks.borrow().clone(), vs.borrow().clone()),
+                    _ => return Err(arg_err("__gemfile_gem_v2: opts must have String keys and values")),
+                };
+                match ks.as_str() {
+                    "require"   => require_kw   = vs,
+                    "platforms" => platforms_kw = vs,
+                    _ => {} // unknown kwargs ignored — Bundler accepts many we don't model
                 }
             }
 
@@ -259,7 +290,7 @@ fn main() {
             let platforms_scope = state_mut.active_platforms();
             let source_override = state_mut.active_source_override();
             state_mut.gems.push(GemDecl {
-                name: s(name),
+                name,
                 requirements,
                 groups,
                 platforms_scope,

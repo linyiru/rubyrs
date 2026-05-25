@@ -122,10 +122,19 @@ lives in typed Rust:
 
 ```rust
 rt.register_fn_v2("__gemfile_gem_v2", move |ctx: &HostCtx, args| {
-    let [name, requirements, opts] = args else { return Ok(Value::Nil); };
-    let reqs_slice = ctx.resolve_array(requirements).unwrap_or(&[]);
-    let opts_slice = ctx.resolve_hash(opts).unwrap_or(&[]);
-    // ... iterate, match on Value::Str, populate GemDecl
+    let [name, requirements, opts] = args else {
+        return Err(arg_err("expected 3 args"));
+    };
+    // Fail fast on wrong shapes — never copy-paste `unwrap_or(&[])`
+    // here. A prelude regression sending a non-Array/Hash should
+    // surface as ArgumentError immediately, not as silent partial
+    // state collected several gem decls later.
+    let reqs_slice = ctx.resolve_array(requirements)
+        .ok_or_else(|| arg_err("requirements must be an Array"))?;
+    let opts_slice = ctx.resolve_hash(opts)
+        .ok_or_else(|| arg_err("opts must be a Hash"))?;
+    // ... iterate, validate every element/entry is Value::Str,
+    //     populate GemDecl. See `gemfile.rs` for the full pattern.
 });
 ```
 
