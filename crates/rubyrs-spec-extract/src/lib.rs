@@ -178,12 +178,16 @@ fn match_eq_against<'pr>(
     if recv_call.arguments().is_some() {
         return None;
     }
-    let args = node.arguments()?;
-    let arg_list: Vec<_> = args.arguments().iter().collect();
-    if arg_list.len() != 1 {
+    // Allocation-free `== 1` check: take the first arg, then
+    // confirm there's no second. Avoids one Vec per CallNode
+    // visit which adds up over large spec files (thousands of
+    // CallNodes per file in upstream `core/*`).
+    let mut args_iter = node.arguments()?.arguments().iter();
+    let first = args_iter.next()?;
+    if args_iter.next().is_some() {
         return None;
     }
-    Some(arg_list.into_iter().next().unwrap())
+    Some(first)
 }
 
 /// `-> { BODY }.should.raise(CLASS)` →
@@ -208,12 +212,13 @@ fn try_lambda_raise(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Sub
     }
     let lambda_node = should_call.receiver()?;
     let lambda = lambda_node.as_lambda_node()?;
-    let args = node.arguments()?;
-    let arg_list: Vec<_> = args.arguments().iter().collect();
-    if arg_list.len() != 1 {
+    // Same allocation-free `== 1` check as `match_eq_against`.
+    let mut args_iter = node.arguments()?.arguments().iter();
+    let class_node = args_iter.next()?;
+    if args_iter.next().is_some() {
         return None;
     }
-    let class_text = slice(source, &arg_list[0]);
+    let class_text = slice(source, &class_node);
     let body_text = lambda
         .body()
         .map(|b| slice(source, &b))
