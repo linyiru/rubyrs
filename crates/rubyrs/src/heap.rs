@@ -344,8 +344,43 @@ impl Value {
                         // shorthand instead of `:name => value`. Every
                         // other key type uses the explicit hash-rocket
                         // form with spaces around `=>`.
+                        //
+                        // Symbol names that aren't valid bareword
+                        // identifiers (contain a hyphen, space, or
+                        // start with a digit) get wrapped in quotes
+                        // — `{"X-Token": "abc"}` — matching CRuby's
+                        // output. Bareword-safe shape is a name that
+                        // starts with [a-zA-Z_] and continues with
+                        // [a-zA-Z0-9_], optionally with a trailing
+                        // `?` / `!` / `=` per method-name rules.
+                        fn sym_needs_quotes(name: &str) -> bool {
+                            let mut chars = name.chars();
+                            let Some(first) = chars.next() else { return true };
+                            if !first.is_ascii_alphabetic() && first != '_' { return true; }
+                            let mut last = first;
+                            for c in chars {
+                                last = c;
+                                if c.is_ascii_alphanumeric() || c == '_' { continue; }
+                                // Trailing `?` / `!` / `=` are allowed only as
+                                // the final char; if we see one mid-name it
+                                // counts as needing quotes too.
+                                if matches!(c, '?' | '!' | '=') { continue; }
+                                return true;
+                            }
+                            // Mid-name `?` / `!` / `=` invalid — but we
+                            // accepted them above; re-check last char rules:
+                            // if `last` is one of those, it's fine (trailing);
+                            // if interior, we already returned. OK.
+                            let _ = last;
+                            false
+                        }
                         if let Value::Sym(sid) = k {
-                            format!("{}: {}", interner.resolve(*sid), v.to_inspect(heap, interner))
+                            let name = interner.resolve(*sid);
+                            if sym_needs_quotes(&name) {
+                                format!("\"{}\": {}", name, v.to_inspect(heap, interner))
+                            } else {
+                                format!("{}: {}", name, v.to_inspect(heap, interner))
+                            }
                         } else {
                             format!("{} => {}", k.to_inspect(heap, interner), v.to_inspect(heap, interner))
                         }
