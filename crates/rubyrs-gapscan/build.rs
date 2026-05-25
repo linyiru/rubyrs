@@ -81,7 +81,8 @@ fn main() {
 /// time, with the still-Missing candidate list — instead of waiting
 /// for the runtime test to fail with a less actionable message.
 ///
-/// Annotation contract (must match the regex):
+/// Annotation contract (must match `extract_annotated_classes`'s
+/// hand-rolled parser):
 ///     <anything>  # <CamelCaseNode> (× <count>)
 /// — trailing `(× N)` is required, hence trips on stray comments
 /// that mention a Node name in prose without being a real annotation.
@@ -100,7 +101,7 @@ fn validate_fixture_annotations(
         panic!(
             "rubyrs-gapscan build.rs: {} has no `# ClassName (× N)` annotations — \
              either someone removed them all (the tripwire test won't catch drift any \
-             more) or the regex needs updating",
+             more) or `extract_annotated_classes`'s parser needs updating",
             fixture.display()
         );
     }
