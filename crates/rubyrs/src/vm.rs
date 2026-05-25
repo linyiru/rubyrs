@@ -397,6 +397,7 @@ impl Vm {
                 "min_by" | "max_by" | "group_by" |
                 "each_with_object" | "partition" |
                 "zip" |
+                "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
                 "inspect"
             ),
             Value::Hash(_) => matches!(name,
@@ -1417,6 +1418,83 @@ impl Vm {
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
+                    }
+                    // In-place bang variants. Mutate the receiver
+                    // and return either self (always for `sort!`)
+                    // or self/nil depending on whether anything
+                    // actually changed (matching CRuby for
+                    // `uniq!` / `compact!` / `flatten!`).
+                    ("sort!", []) => {
+                        let mut copy = self.heap.array(id).clone();
+                        let n = copy.len();
+                        for i in 1..n {
+                            let mut j = i;
+                            while j > 0 {
+                                let ord = self.user_cmp(&copy[j - 1], &copy[j])?;
+                                match ord {
+                                    None => return Ok(None),
+                                    Some(std::cmp::Ordering::Greater) => {
+                                        copy.swap(j - 1, j);
+                                        j -= 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                        }
+                        *self.heap.array_mut(id) = copy;
+                        Some(Value::Array(id))
+                    }
+                    ("uniq!", []) => {
+                        let src = self.heap.array(id).clone();
+                        let mut out: Vec<Value> = Vec::with_capacity(src.len());
+                        for v in &src {
+                            if !out.iter().any(|x| x.ruby_eq(v, &self.heap)) {
+                                out.push(v.clone());
+                            }
+                        }
+                        if out.len() == src.len() {
+                            // Nothing deduped — CRuby returns nil.
+                            Some(Value::Nil)
+                        } else {
+                            *self.heap.array_mut(id) = out;
+                            Some(Value::Array(id))
+                        }
+                    }
+                    ("compact!", []) => {
+                        let src = self.heap.array(id).clone();
+                        let out: Vec<Value> = src.iter()
+                            .filter(|v| !matches!(v, Value::Nil))
+                            .cloned()
+                            .collect();
+                        if out.len() == src.len() {
+                            Some(Value::Nil)
+                        } else {
+                            *self.heap.array_mut(id) = out;
+                            Some(Value::Array(id))
+                        }
+                    }
+                    ("flatten!", []) => {
+                        let src = self.heap.array(id).clone();
+                        let mut out: Vec<Value> = Vec::with_capacity(src.len());
+                        let mut changed = false;
+                        for v in &src {
+                            if let Value::Array(inner) = v {
+                                changed = true;
+                                for x in self.heap.array(*inner) { out.push(x.clone()); }
+                            } else {
+                                out.push(v.clone());
+                            }
+                        }
+                        if !changed {
+                            Some(Value::Nil)
+                        } else {
+                            *self.heap.array_mut(id) = out;
+                            Some(Value::Array(id))
+                        }
+                    }
+                    ("reverse!", []) => {
+                        self.heap.array_mut(id).reverse();
+                        Some(Value::Array(id))
                     }
                     ("flatten", []) => {
                         // Depth-1 flatten — same as CRuby's default `flatten(1)`
