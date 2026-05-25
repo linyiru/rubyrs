@@ -2304,6 +2304,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             Some(Value::Str(Rc::from(s.as_str())))
         }
         (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(**a == **b)),
+        (Value::Str(a), "!=", [Value::Str(b)]) => Some(Value::Bool(**a != **b)),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
         (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => Some(Value::Int(a.chars().count() as i64)),
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.is_empty())),

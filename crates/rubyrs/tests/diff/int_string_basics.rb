@@ -67,6 +67,8 @@ puts "abc" * 0
 puts "apple" < "banana"
 puts "banana" > "apple"
 puts "apple" == "apple"
+puts "apple" != "banana"
+puts "apple" != "apple"
 
 # String#to_i
 puts "42".to_i
