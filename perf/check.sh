@@ -97,15 +97,19 @@ measure_once() {
       echo "ERR ERR"
       return
     fi
-    # Round UP on the bytes-to-KB conversion so the budget check is
-    # conservative — a script using 4 MB + 1 byte should report as
-    # 4097 KB rather than be rounded down to 4096 and slip past a
-    # tight budget. Ceiling is the right semantic for a regression
-    # gate; truncation could let sub-KB overruns past.
+    # Round UP both conversions so budget checks stay
+    # conservative — a script using 4 MB + 1 byte should report
+    # as 4097 KB rather than 4096, and 0.4565 seconds should
+    # report as 457 ms rather than 456. Truncation could let
+    # sub-unit overruns past a tight budget. Same conservatism
+    # principle as the RSS ceiling.
     awk -v s="$secs" -v b="$rss_b" 'BEGIN {
       kb = int(b / 1024);
       if (b % 1024 != 0) kb = kb + 1;
-      printf "%d %d\n", s*1000, kb;
+      ms_f = s * 1000;
+      ms = int(ms_f);
+      if (ms_f > ms) ms = ms + 1;
+      printf "%d %d\n", ms, kb;
     }'
   else
     # Force `C` locale — see the macOS arm for rationale. GNU
@@ -131,13 +135,19 @@ measure_once() {
       echo "ERR ERR"
       return
     fi
-    # Parse `m:ss.ss` (or `h:mm:ss.ss`) into ms.
+    # Parse `m:ss.ss` (or `h:mm:ss.ss`) into ms. Round UP to keep
+    # budget checks conservative — same rationale as the macOS
+    # arm above: a sub-ms overrun shouldn't slip past a tight
+    # max_wall_ms.
     local ms
     ms=$(awk -v w="$wall" 'BEGIN {
       n = split(w, parts, ":");
       total = 0;
       for (i = 1; i <= n; i++) total = total * 60 + parts[i];
-      printf "%d", total * 1000;
+      ms_f = total * 1000;
+      ms = int(ms_f);
+      if (ms_f > ms) ms = ms + 1;
+      printf "%d", ms;
     }')
     echo "$ms $rss_kb"
   fi
