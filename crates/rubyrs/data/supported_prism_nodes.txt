@@ -9,6 +9,7 @@ AndNode
 ArrayNode
 AssocNode
 BeginNode
+BlockArgumentNode
 BlockNode
 BlockParametersNode
 BreakNode

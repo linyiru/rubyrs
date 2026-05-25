@@ -130,3 +130,4 @@ fn run_diff(name: &str) {
 #[test] fn inline_rescue() { run_diff("inline_rescue"); }
 #[test] fn method_name() { run_diff("method_name"); }
 #[test] fn inspect_orphans() { run_diff("inspect_orphans"); }
+#[test] fn symbol_to_proc() { run_diff("symbol_to_proc"); }

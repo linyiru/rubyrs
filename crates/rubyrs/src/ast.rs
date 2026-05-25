@@ -504,6 +504,32 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 };
                 return sp(node, Expr::CallWithBlock { receiver, name, args, block_params, block_body });
             }
+            // `&:method` — symbol-to-proc. Synthesize a one-arg
+            // block `{ |__sp_x| __sp_x.method_name }`. The
+            // canonical CRuby idiom drives `arr.map(&:to_s)`,
+            // `arr.sort_by(&:length)`, etc. Block param name is
+            // namespaced to avoid clashing with any user local.
+            //
+            // `&proc_var` (binding an existing Proc) is a separate
+            // form and not yet supported — only `&:sym` here.
+            if let Some(ba) = bnode.as_block_argument_node() {
+                if let Some(expr) = ba.expression() {
+                    if let Some(sn) = expr.as_symbol_node() {
+                        let method_name: String = String::from_utf8_lossy(sn.unescaped()).into_owned();
+                        let param_name = "__sp_x".to_string();
+                        let body_call = sp(node, Expr::Call {
+                            receiver: Some(Box::new(sp(node, Expr::LVarRead(param_name.clone())))),
+                            name: method_name,
+                            args: vec![],
+                        });
+                        return sp(node, Expr::CallWithBlock {
+                            receiver, name, args,
+                            block_params: vec![param_name],
+                            block_body: vec![body_call],
+                        });
+                    }
+                }
+            }
         }
         return sp(node, Expr::Call { receiver, name, args });
     }
