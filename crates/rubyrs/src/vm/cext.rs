@@ -480,26 +480,31 @@ pub(crate) fn cext_dispatch(
     args: &[Value],
     self_handle: CextSelfHandle<'_>,
 ) -> Result<Value, Trap> {
-    let expected_argc = match arity {
-        0..=5 => arity as usize,
+    // L3-H: arity -1 means variadic (`func(int argc, VALUE *argv,
+    // VALUE self)`); the setjmp shim handles it as a separate case.
+    // Any args.len() is permitted for -1. Fixed arity 0..=5 still
+    // requires exact match.
+    match arity {
+        -1 => {}  // variadic — no args.len() check
+        0..=5 => {
+            let expected_argc = arity as usize;
+            if args.len() != expected_argc {
+                return Err(Trap::new(RubyError::ArgumentError {
+                    msg: format!(
+                        "C ext `{}': expected {} args, got {}",
+                        name, expected_argc, args.len()
+                    ),
+                }));
+            }
+        }
         _ => {
             return Err(Trap::new(RubyError::ArgumentError {
                 msg: format!(
-                    "C ext `{}': spike dispatches arity 0..=5 (got arity {})",
+                    "C ext `{}': spike dispatches arity -1 and 0..=5 (got arity {})",
                     name, arity
                 ),
             }));
         }
-    };
-    if args.len() != expected_argc {
-        return Err(Trap::new(RubyError::ArgumentError {
-            msg: format!(
-                "C ext `{}': expected {} args, got {}",
-                name,
-                expected_argc,
-                args.len()
-            ),
-        }));
     }
 
     // SAFETY: `current_vm_ptr()` returns the same Vm pointer that

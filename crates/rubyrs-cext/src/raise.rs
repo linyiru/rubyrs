@@ -49,6 +49,7 @@ unsafe extern "C" {
     fn rubyrs_jmp_invoke(
         func: super::OpaqueFn,
         arity: std::ffi::c_int,
+        nargs: std::ffi::c_int,
         args: *const u64,
         out_raised_class: *mut u64,
         out_raised_msg: *mut *mut c_char,
@@ -99,10 +100,13 @@ pub unsafe fn invoke_with_raise(
     arity: i32,
     args: &[super::Value],
 ) -> Raised {
-    debug_assert_eq!(
-        args.len(),
-        (arity as usize) + 1,
-        "invoke_with_raise: args length must be arity + 1 (self + call args)"
+    // For fixed arity 0..=5, length is exactly arity + 1 (self +
+    // arity args). For variadic (-1), length is at least 1 (self)
+    // and the trailing slots are forwarded as argc + argv to the
+    // cext function via the C shim's case -1.
+    debug_assert!(
+        if arity == -1 { !args.is_empty() } else { args.len() == (arity as usize) + 1 },
+        "invoke_with_raise: args length mismatch (arity={}, got {})", arity, args.len()
     );
     let mut out_class: u64 = 0;
     let mut out_msg: *mut c_char = std::ptr::null_mut();
@@ -110,6 +114,7 @@ pub unsafe fn invoke_with_raise(
         rubyrs_jmp_invoke(
             func,
             arity as std::ffi::c_int,
+            args.len() as std::ffi::c_int,
             args.as_ptr(),
             &mut out_class as *mut u64,
             &mut out_msg as *mut *mut c_char,

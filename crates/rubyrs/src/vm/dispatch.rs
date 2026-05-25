@@ -428,7 +428,11 @@ impl Vm {
                         let cext_init_reg = g.vm.cext_instance_methods
                             .get(&cls.name)
                             .and_then(|t| t.get(&init_id).cloned())
-                            .filter(|reg| (0..=5).contains(&reg.arity) && reg.arity as usize == args.len());
+                            // L3-H: also accept variadic arity (-1)
+                            // — setjmp shim now dispatches it.
+                            .filter(|reg| reg.arity == -1
+                                || ((0..=5).contains(&reg.arity)
+                                    && reg.arity as usize == args.len()));
                         if let Some(reg) = cext_init_reg {
                             let qualified = reg.qualified_name.clone();
                             let func = reg.func;
