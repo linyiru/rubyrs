@@ -753,6 +753,17 @@ impl Vm {
             self.stack.push(Value::BoundMethod(id));
             return Ok(());
         }
+        // `m.to_proc` — explicit conversion to a Proc. Equivalent
+        // to the implicit `&m` coercion: routes through the same
+        // `coerce_bound_method_to_block` forwarder so calling the
+        // resulting Proc splats its args back into `bm.call(...)`.
+        if let Value::BoundMethod(bid) = &recv
+            && &*name == "to_proc" && args.is_empty() {
+                let bm_id = *bid;
+                let id = self.coerce_bound_method_to_block(bm_id)?;
+                self.stack.push(Value::Block(id));
+                return Ok(());
+            }
         // `m.curry` / `m.curry(n)` — host-side partial application.
         // Returns a CurriedProc that gathers args across successive
         // `.call` invocations until `target_arity` is reached, then
