@@ -15,6 +15,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 #[test]
 fn hello_cext_round_trip() {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -35,14 +37,7 @@ fn hello_cext_round_trip() {
     );
 
     // 2. Locate the produced artefact, host-aware.
-    let ext = if cfg!(target_os = "macos") {
-        "bundle"
-    } else if cfg!(windows) {
-        "dll"
-    } else {
-        "so"
-    };
-    let bundle = example_dir.join(format!("hello.{}", ext));
+    let bundle = example_dir.join(format!("hello.{}", common::DYLIB_EXT));
     assert!(
         bundle.exists(),
         "build.sh did not produce {}",

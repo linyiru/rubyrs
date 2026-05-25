@@ -24,6 +24,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 #[test]
 fn cext_self_is_class_for_singletons_qnil_for_globals() {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -42,14 +44,7 @@ fn cext_self_is_class_for_singletons_qnil_for_globals() {
         String::from_utf8_lossy(&build.stderr),
     );
 
-    let ext = if cfg!(target_os = "macos") {
-        "bundle"
-    } else if cfg!(windows) {
-        "dll"
-    } else {
-        "so"
-    };
-    let bundle = example_dir.join(format!("self_test.{}", ext));
+    let bundle = example_dir.join(format!("self_test.{}", common::DYLIB_EXT));
     assert!(
         bundle.exists(),
         "build.sh did not produce {}",
