@@ -140,3 +140,4 @@ fn run_diff(name: &str) {
 #[test] fn string_mutation() { run_diff("string_mutation"); }
 #[test] fn defined() { run_diff("defined"); }
 #[test] fn array_bang() { run_diff("array_bang"); }
+#[test] fn percent_literals() { run_diff("percent_literals"); }
