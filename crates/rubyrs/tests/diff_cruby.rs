@@ -203,3 +203,4 @@ fn run_diff(name: &str) {
 #[test] fn range_cover_step() { run_diff("range_cover_step"); }
 #[test] fn object_reflection() { run_diff("object_reflection"); }
 #[test] fn constant_path_write() { run_diff("constant_path_write"); }
+#[test] fn method_hash_source() { run_diff("method_hash_source"); }

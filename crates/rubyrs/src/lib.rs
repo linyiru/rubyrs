@@ -784,7 +784,12 @@ end
     /// statements with no return value.
     pub fn eval(&mut self, source: &str, filename: &str) -> Result<Value, Trap> {
         let filename_rc: Rc<str> = Rc::from(filename);
-        self.sources.insert(filename_rc.clone(), Rc::from(source));
+        let source_rc: Rc<str> = Rc::from(source);
+        self.sources.insert(filename_rc.clone(), source_rc.clone());
+        // Mirror into the Vm so dispatch-time helpers (e.g.
+        // `Method#source_location`) can resolve byte offsets to
+        // line numbers without going back through Runtime.
+        self.vm.sources.insert(filename_rc.clone(), source_rc);
 
         let parse_result = ruby_prism::parse(source.as_bytes());
         let errors: Vec<_> = parse_result.errors().collect();

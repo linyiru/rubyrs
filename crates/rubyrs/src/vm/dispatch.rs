@@ -900,6 +900,68 @@ impl Vm {
                 self.stack.push(Value::Block(id));
                 return Ok(());
             }
+        // `m.hash` — Integer hash derived from receiver identity
+        // (ObjId / value / Rc-ptr address) + name_id. Two
+        // BoundMethods compared equal under `Method#==` must
+        // collide; that's the only invariant CRuby promises. The
+        // mix below is wrapping_add + wrapping_mul to be cheap
+        // and avoid raising.
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && &*name == "hash" && args.is_empty() {
+                let h: i64 = match &recv {
+                    Value::BoundMethod(bid) => {
+                        let (r, n) = self.heap.bound_method(*bid);
+                        let recv_h = method_recv_hash(r);
+                        recv_h.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
+                    }
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n) = self.heap.unbound_method(*uid);
+                        let cls_h = std::rc::Rc::as_ptr(&cls) as i64;
+                        cls_h.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
+                    }
+                    _ => unreachable!(),
+                };
+                self.stack.push(Value::Int(h));
+                return Ok(());
+            }
+        // `m.source_location` — `[filename, lineno]` for user-
+        // defined methods; `nil` for builtins (no Method record
+        // in any class). Lineno is computed from the proto's
+        // first op_span via the Vm-side `sources` mirror; falls
+        // back to 0 if the source text isn't available (rare —
+        // synthesised protos for forwarders / preamble eval).
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && &*name == "source_location" && args.is_empty() {
+                let (class, m_name_id) = match &recv {
+                    Value::BoundMethod(bid) => {
+                        let (r, n) = self.heap.bound_method(*bid);
+                        let r = r.clone();
+                        let cls = match self.class_of(&r) {
+                            Value::Class(c) => c,
+                            _ => { self.stack.push(Value::Nil); return Ok(()); }
+                        };
+                        (cls, n)
+                    }
+                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    _ => unreachable!(),
+                };
+                let m = match self.lookup_method_uncached(&class, m_name_id) {
+                    Some(m) => m,
+                    None => { self.stack.push(Value::Nil); return Ok(()); }
+                };
+                let proto = &self.protos[m.proto_idx];
+                let filename = proto.filename.clone();
+                let first_offset = proto.op_spans.first().map(|s| s.byte_offset).unwrap_or(0);
+                let line: u32 = self.sources.get(&*filename)
+                    .map(|src| crate::error::line_col(src, first_offset).0)
+                    .unwrap_or(0);
+                let filename_str = Value::new_str(filename.to_string());
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(line as i64)]));
+                self.stack.push(Value::Array(id));
+                return Ok(());
+            }
         // `m.owner` — the class that defined the resolved Method
         // (CRuby's `Method#owner` / `UnboundMethod#owner`). Walks
         // the ancestor chain to find where the method actually
@@ -2343,5 +2405,25 @@ fn method_recv_identity(a: &Value, b: &Value) -> bool {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Nil, Value::Nil) => true,
         _ => false,
+    }
+}
+
+/// Hash a Method receiver consistently with `method_recv_identity`.
+/// Two receivers that compare equal via `method_recv_identity`
+/// must collide here.
+fn method_recv_hash(v: &Value) -> i64 {
+    match v {
+        Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id)
+        | Value::Block(id) | Value::BoundMethod(id) | Value::UnboundMethod(id)
+        | Value::CurriedProc(id) => id.0 as i64,
+        Value::Class(c) => Rc::as_ptr(c) as i64,
+        Value::Str(s) => Rc::as_ptr(s) as i64,
+        Value::Int(n) => *n,
+        Value::Float(f) => f.to_bits() as i64,
+        Value::Sym(s) => s.0 as i64,
+        Value::Bool(true) => 1,
+        Value::Bool(false) => 0,
+        Value::Nil => 0xDEAD_BEEF,
+        Value::Regex(r) => Rc::as_ptr(r) as i64,
     }
 }

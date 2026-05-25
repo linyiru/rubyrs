@@ -281,6 +281,13 @@ pub(crate) struct Vm {
     /// sites — same amortisation rationale as the bound-method
     /// forwarder above.
     pub(crate) method_compose_forwarder_proto: Option<usize>,
+    /// Filename → source-text map, populated by Runtime before
+    /// each `eval`. Used by `Method#source_location` (and any
+    /// future Vm-side line-resolution) to convert a Span's
+    /// byte offset back to a 1-based line number. Vm-only
+    /// readers; Runtime owns the canonical map and clones the
+    /// `Rc<str>` source bodies in (cheap, share-pointer).
+    pub(crate) sources: std::collections::HashMap<std::rc::Rc<str>, std::rc::Rc<str>>,
 }
 
 
@@ -317,6 +324,7 @@ impl Vm {
             break_signaled: false,
             bound_method_forwarder_proto: None,
             method_compose_forwarder_proto: None,
+            sources: HashMap::new(),
             method_return: None,
         }
     }
