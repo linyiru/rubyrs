@@ -204,13 +204,15 @@ pub(crate) enum Expr {
 
 /// One top-level block parameter as seen at the block-call ABI.
 /// `|a, (b, c)|` produces two `BlockParam`s: `Single("a")` and
-/// `Destructure(["b", "c"])`. The destructure stores its inner
-/// names alongside an anonymous receiving slot the compile path
-/// reads from to populate the named inner slots via a prologue.
+/// `Destructure([Single("b"), Single("c")])`. The destructure
+/// stores its inner params (which may themselves be nested
+/// destructures, supporting `|((a, b), c)|` and deeper) alongside
+/// an anonymous receiving slot the compile path reads from to
+/// populate the named inner slots via a prologue.
 #[derive(Debug, Clone)]
 pub(crate) enum BlockParam {
     Single(String),
-    Destructure(Vec<String>),
+    Destructure(Vec<BlockParam>),
 }
 
 #[derive(Debug, Clone)]
@@ -608,32 +610,31 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         if let Some(bnode) = n.block() {
             if let Some(bn) = bnode.as_block_node() {
                 // Block params. Each top-level param becomes a
-                // `BlockParam`:
-                //   - `RequiredParameterNode` → `Single(name)`.
-                //   - `MultiTargetNode` → `Destructure(inner names)`.
-                //     Block call binds the Array arg to a synthetic
-                //     anonymous slot, then a compile-time prologue
-                //     copies elements into the named inner locals.
-                //     Nested destructure (`|((a, b), c)|`) currently
-                //     flattens via `.lefts()` one level deep; deeper
-                //     nesting is a follow-up.
+                // `BlockParam`, recursively for nested destructures.
+                // `RequiredParameterNode` → `Single(name)`;
+                // `MultiTargetNode` → `Destructure(inner params)`
+                // where each inner is itself parsed via the same
+                // recursion. Supports `|a, (b, c)|`, `|((a, b), c)|`,
+                // and deeper nestings.
+                fn parse_one(n: &ruby_prism::Node<'_>) -> Option<BlockParam> {
+                    if let Some(rp) = n.as_required_parameter_node() {
+                        return Some(BlockParam::Single(cid_to_string(rp.name())));
+                    }
+                    if let Some(mt) = n.as_multi_target_node() {
+                        let inners: Vec<BlockParam> = mt.lefts().iter()
+                            .filter_map(|inner| parse_one(&inner))
+                            .collect();
+                        return Some(BlockParam::Destructure(inners));
+                    }
+                    None
+                }
                 let block_params: Vec<BlockParam> = bn.parameters()
                     .and_then(|pn| pn.as_block_parameters_node())
                     .and_then(|bp| bp.parameters())
                     .map(|p| {
-                        let mut out: Vec<BlockParam> = Vec::new();
-                        for r in p.requireds().iter() {
-                            if let Some(rp) = r.as_required_parameter_node() {
-                                out.push(BlockParam::Single(cid_to_string(rp.name())));
-                            } else if let Some(mt) = r.as_multi_target_node() {
-                                let inners: Vec<String> = mt.lefts().iter()
-                                    .filter_map(|inner| inner.as_required_parameter_node()
-                                        .map(|ip| cid_to_string(ip.name())))
-                                    .collect();
-                                out.push(BlockParam::Destructure(inners));
-                            }
-                        }
-                        out
+                        p.requireds().iter()
+                            .filter_map(|r| parse_one(&r))
+                            .collect()
                     })
                     .unwrap_or_default();
                 let block_body: Vec<SExpr> = match bn.body() {

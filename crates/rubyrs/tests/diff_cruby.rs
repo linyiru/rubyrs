@@ -163,3 +163,4 @@ fn run_diff(name: &str) {
 #[test] fn hash_inspect_quotes() { run_diff("hash_inspect_quotes"); }
 #[test] fn anon_kwrest() { run_diff("anon_kwrest"); }
 #[test] fn block_destructure_mixed() { run_diff("block_destructure_mixed"); }
+#[test] fn block_destructure_nested() { run_diff("block_destructure_nested"); }

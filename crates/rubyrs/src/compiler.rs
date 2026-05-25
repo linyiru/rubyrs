@@ -1024,35 +1024,77 @@ pub(crate) fn compile_block(
     //      BlockParam — contiguous from param_start, so the
     //      invoke_block arg-binding loop fills them in order.
     //   2. After every call-interface slot is reserved, allocate
-    //      the destructure inner names. They sit AFTER the call
-    //      interface so a Single param following a Destructure
-    //      doesn't land at an inner-name index (which was the
-    //      bug pre-fix: `|(a, b), i|` had `i` claiming the
-    //      `a` slot).
-    // The prologue (below) reads from each Destructure's anon
-    // slot and copies into its inner slots.
-    let mut destructure_jobs: Vec<(u16, Vec<String>)> = Vec::new();
+    //      the destructure inner slots (recursively for nested
+    //      destructures). They sit AFTER the call interface so
+    //      a Single param following a Destructure doesn't land at
+    //      an inner-name index.
+    // A "destructure job" pairs the source slot (the anon
+    // receiving slot for the top-level destructure, or a parent
+    // anon slot for a nested destructure) with the child slots
+    // to populate. Order matters: parent jobs run before nested
+    // children that read from them, which the post-order
+    // allocation below preserves naturally.
+    enum Job { Job(u16, Vec<u16>) }
+    let mut jobs: Vec<Job> = Vec::new();
+
+    // Recursive helper: allocates inner slots for a Destructure
+    // and pushes a Job describing the unpack. For nested
+    // destructures, allocates an anon slot to receive the child
+    // Array and recurses into it.
+    fn alloc_inner(
+        b: &mut ProtoBuilder,
+        parent_slot: u16,
+        inners: &[BlockParam],
+        jobs: &mut Vec<Job>,
+        depth_tag: &str,
+    ) {
+        let mut child_slots: Vec<u16> = Vec::with_capacity(inners.len());
+        let mut nested: Vec<(u16, &[BlockParam], String)> = Vec::new();
+        for (j, inner) in inners.iter().enumerate() {
+            match inner {
+                BlockParam::Single(name) => {
+                    child_slots.push(b.define_local_slot(name));
+                }
+                BlockParam::Destructure(deeper) => {
+                    let anon = format!("{depth_tag}_{j}");
+                    let anon_slot = b.define_local_slot(&anon);
+                    child_slots.push(anon_slot);
+                    nested.push((anon_slot, deeper, anon));
+                }
+            }
+        }
+        jobs.push(Job::Job(parent_slot, child_slots));
+        // Recurse for each nested destructure now that its parent
+        // job is queued (parent runs first, so the anon slot is
+        // populated before the nested unpack reads it).
+        for (anon_slot, deeper, anon_name) in nested {
+            alloc_inner(b, anon_slot, deeper, jobs, &anon_name);
+        }
+    }
+
+    // Phase 1: top-level call-interface slots.
+    let mut top_destructures: Vec<(u16, &[BlockParam], String)> = Vec::new();
     for (i, p) in block_params.iter().enumerate() {
         match p {
             BlockParam::Single(name) => {
                 b.define_local_slot(name);
             }
-            BlockParam::Destructure(names) => {
+            BlockParam::Destructure(inners) => {
                 let anon = format!("__destruct_{i}");
                 let anon_slot = b.define_local_slot(&anon);
-                destructure_jobs.push((anon_slot, names.clone()));
+                top_destructures.push((anon_slot, inners, anon));
             }
         }
     }
     let n_params = block_params.len() as u16;
-    // Now reserve inner-name slots for every destructure job.
-    let destructure_jobs: Vec<(u16, Vec<u16>)> = destructure_jobs.into_iter()
-        .map(|(anon_slot, names)| {
-            let inner_slots: Vec<u16> = names.iter()
-                .map(|n| b.define_local_slot(n))
-                .collect();
-            (anon_slot, inner_slots)
-        })
+    // Phase 2: walk every top-level destructure's children.
+    for (anon_slot, inners, anon_name) in top_destructures {
+        alloc_inner(&mut b, anon_slot, inners, &mut jobs, &anon_name);
+    }
+    // Compatibility shim: collapse Jobs into the existing
+    // (anon_slot, inner_slots) shape the prologue loop walks.
+    let destructure_jobs: Vec<(u16, Vec<u16>)> = jobs.into_iter()
+        .map(|Job::Job(p, c)| (p, c))
         .collect();
 
     // Prologue: for each destructure param, read element i from
