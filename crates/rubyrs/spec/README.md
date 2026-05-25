@@ -45,17 +45,20 @@ spec/
     │
     ├── unbound_method_equal_spec.rb # core/unboundmethod subset
     │
-    └── integer_digits_spec.rb     # core/integer subset
-                                   # (FIRST landed extractor
-                                   # output — see "Extractor
-                                   # workflow" section below)
+    ├── integer_digits_spec.rb     # core/integer subset
+    │                              # — extractor v0.2 output
+    │                              # (re-extracted from PR #61's
+    │                              # v0.1 + hand polish)
+    │
+    └── array_count_spec.rb        # core/array subset
+                                   # — extractor v0.2 output
 ```
 
 The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **115 examples across 20
+"Future work" below). Current total: **118 examples across 21
 files**, all passing.
 
 ## DSL the helper provides
