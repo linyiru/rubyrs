@@ -18,6 +18,10 @@ Documentation lives next to the code, organised by audience.
   add a new built-in or AST node.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — how the runtime is laid out:
   Prism → IR → bytecode → VM, the heap, the dispatch loop.
+- **[MUTABLE_LAYERS.md](MUTABLE_LAYERS.md)** — the interior-mutability
+  graph the metaprog PoC (ADR 0010) put down: class method tables,
+  closure-captured locals, per-Instance eigenclasses. Read this
+  before touching `Class`, `Method`, `Instance`, or the GC root walk.
 - **[TESTING.md](TESTING.md)** — the testing philosophy and the ruby/spec
   ingestion plan. **Important**: this is how we keep ourselves honest.
 - **[ROADMAP.md](ROADMAP.md)** — what we are working on next and why.

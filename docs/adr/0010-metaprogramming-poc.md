@@ -132,6 +132,9 @@ What gets harder:
   is interior-mutable. When singleton classes arrive and introduce a
   *third* RefCell layer (per-Instance method table), the borrow-rules
   picture needs a doc — currently each layer is fine on its own.
+  *(Update: both have shipped — singleton class in PR #31, the
+  doc as [`docs/MUTABLE_LAYERS.md`](../MUTABLE_LAYERS.md). The
+  paragraph stays as the original PoC-era hazard analysis.)*
 - GC root walking is no longer O(stack + frames). For programs that
   install many `define_method`s, it's O(stack + frames + total
   installed closure-methods). A counter on `Vm` of how many
@@ -148,6 +151,9 @@ Explicitly accepted trade-offs:
 - **No spec coverage from `ruby/spec` yet.** Eight ad-hoc tests in
   `tests/embed.rs` lock the PoC behaviour in; a `ruby/spec` runner
   is its own RFC.
+  *(Update: superseded by PR #23 — `crates/rubyrs/spec/` now
+  runs 30 examples across 6 files. Left as-is to preserve the
+  PoC-era reasoning.)*
 - **`alias_method` / `define_method` outside a class body silently
   install into `toplevel_methods`** instead of raising. The
   compile-time intercept doesn't track class-body context, matching
@@ -157,33 +163,133 @@ Explicitly accepted trade-offs:
   the same time, rather than diverging behaviour across the
   intercept set.
 
-## Follow-ups
+## Follow-ups — final status
 
-Tracked separately so they don't bloat this PR:
-- ✅ Performance regression CI (PR #11 + PR #17 — per-workload
-  RSS + wall-time ratchet under `perf/`).
-- ✅ `ruby/spec` micro-runner — landed in `crates/rubyrs/spec/`,
-  see `crates/rubyrs/spec/README.md`. 13 examples across
-  `alias_method`, `define_method`, `method_missing` specs.
-  Tag-file mechanism deferred (current shape is "every example
-  must pass"); adopt when we start vendoring upstream files
-  unmodified.
-- ✅ `*args` splat (master `a24d7cb`; rest-param GC root hole
-  widened in PR #15).
-- ✅ `RubyError::is(class_name)` helper (PR #20).
-- ✅ `class_eval` / `instance_eval` / `module_eval` (PR #28).
-- ✅ Singleton class: `def obj.foo` + `define_singleton_method`
-  — landed via lazy `Instance.singleton_class: Option<Rc<Class>>`
-  whose `superclass` is the original class, so method lookup
-  is a single chain walk and `Object#class` uses a separate
-  `Heap::real_class_of` to skip the eigenclass.
-- "Mutable layers" doc — still pending; now writable since
-  singleton class is in place. Adds a third interior-mutable
-  layer (per-Instance singleton-class method table) on top of
-  the existing two (`Class.methods` + `MethodClosure.captured`).
-- `instance_eval { def name; ... }` routing to the receiver's
-  singleton class (currently falls through to toplevel; the
-  building blocks exist, just not wired). Same shape as the
-  `attr_*` / `alias_method` outside-class-body divergence
-  documented in SUBSET.md — a single class-body-context
-  tracking fix would close all of them.
+All concrete metaprog follow-ups have shipped:
+
+- ✅ **Performance regression CI** — PR #11 (RSS-only first
+  cut + per-workload `STATUS` contract) + PR #17 (tightened
+  budgets + added wall-time gate with absolute baselines).
+  Went through 5+ review rounds reaching a stable shape;
+  retrospective in PR #17 body for the design pivot away
+  from master-relative gating.
+- ✅ **`ruby/spec` micro-runner** — PR #23 introduced
+  `crates/rubyrs/spec/` with hand-written DSL (`describe` /
+  `it` / `assert_eq` / `assert_raises`) instead of porting
+  MSpec. Started with 3 files / 13 examples; grew to
+  **6 files / 30 examples** through PRs #28 (class_eval +
+  instance_eval) and #31 (singleton method). Tag-file
+  mechanism still deferred — current shape is "every example
+  must pass"; adopt when we vendor upstream files unmodified.
+- ✅ **`*args` splat** in method params — master `a24d7cb`
+  shipped the feature; PR #15 widened the GC-root-hole fix
+  for the rest-Array allocation window.
+- ✅ **`RubyError::is(class_name)` helper** — PR #20.
+  Collapses the two-shape pattern-match (direct variant vs
+  `Uncaught { class_name }`) every embed test was doing.
+- ✅ **`class_eval` / `instance_eval` / `module_eval`** — PR #28.
+  Re-uses the existing `is_class_body` machinery (frame flag
+  triggers class_stack / visibility_stack pop on return),
+  with two documented divergences:
+  * `class_eval { 99 }` returns the class, not 99 (because
+    of the `is_class_body` Return arm's value semantics);
+    locked by `class_eval_spec::returns_the_class_for_now`.
+  * `instance_eval { def name; … }` lands on
+    `toplevel_methods` rather than the receiver's eigenclass.
+    Still observable on master — singleton class shipped in
+    PR #31 but the `instance_eval` block-frame doesn't push
+    the eigenclass onto `class_stack`. Tracked as a soft
+    item below.
+- ✅ **Singleton class — `def obj.foo` +
+  `define_singleton_method`** — PR #31. Lazy
+  `Instance.singleton_class: Option<Rc<Class>>` whose
+  `superclass` is the user-declared class, so dispatch is a
+  single chain walk through the existing
+  `lookup_method_uncached`. `Object#class` script semantics
+  use a separate `Heap::real_class_of` to skip the eigenclass
+  (CRuby behaviour). **Surprise caught in review**: storing
+  `Rc<Class>` in `Method.defining_class` formed a strong
+  cycle (sc → method → defining_class → sc); for regular
+  classes this was masked by `Vm.classes` pinning every
+  class forever, but eigenclasses leak per-instance. Fixed
+  by switching `Method.defining_class` to
+  `Option<Weak<Class>>`. See [MUTABLE_LAYERS.md](../MUTABLE_LAYERS.md)
+  for the full ownership graph.
+- ✅ **"Mutable layers" doc** — [docs/MUTABLE_LAYERS.md](../MUTABLE_LAYERS.md).
+  Three layers of interior mutability that metaprog added
+  (Class methods tables, MethodClosure.captured, Instance
+  eigenclass), with ownership graph, Weak-rationale, borrow
+  hazards, and GC-root-walk responsibilities.
+
+Soft items remaining (not blocking):
+
+- **`instance_eval { def name; ... }` auto-routing to the
+  receiver's singleton class.** Currently falls through to
+  `toplevel_methods` — same shape as the
+  `attr_*` / `alias_method` outside-class-body divergence in
+  SUBSET.md. Singleton class is in place now (PR #31), so
+  this is purely about wiring the class_stack push to use
+  the eigenclass during `instance_eval`'s frame entry.
+  Estimated ~1 day.
+- **Per-primitive `method_missing`** — currently only fires
+  for `Value::Object` recv. Int / Str / Sym / Array / Hash
+  receivers raise NoMethodError directly. Master has primitive
+  class stubs in the preamble now; wiring lookup through
+  them is straightforward but each primitive needs its own
+  test surface.
+
+## Retrospective — what we learned
+
+Worth recording for the next architectural-PoC sequence:
+
+1. **The prerequisites were paid by unrelated work.** PR #8
+   shipped in 250 lines because the architecture had already
+   accumulated the pieces it needed: reopenable classes had
+   moved `Class.methods` to `RefCell<HashMap>`, `method_gen`
+   was already the IC invalidation counter, block was already
+   heap-resident (P2-13), and `defining_class` was already on
+   Method (for `super`, ADR 0004). Future ADRs should write
+   a "what does this incidentally unlock" coda — three
+   quarters of metaprog's landing cost was already paid by
+   features that didn't advertise it.
+
+2. **Bench numbers were inversed from intuition.** ADR 0010
+   started thinking "metaprog would be slow." Reality
+   (`examples/metaprog_bench/`): `define_method` is *faster*
+   than `def + @ivar` in rubyrs because captured-locals are
+   slot-indexed and ivars hit a HashMap. The bottleneck
+   wasn't metaprog at all — it was the dispatch loop. We
+   should have run the bench earlier; instead we wrote the
+   PoC, then measured, then realised the prior was wrong.
+
+3. **Type-driven discipline catches what comments can't.**
+   The Method ↔ eigenclass cycle (caught in PR #31 review)
+   wasn't visible at code-review time because everyone
+   reading `Rc<Class>` in `Method.defining_class` was right
+   for the regular-class case. The cycle only matters for
+   eigenclasses, and only matters *after* the Instance is
+   collected. The reviewer reasoned through the graph and
+   found it; we then switched to `Weak<Class>` so the type
+   signature itself enforces the discipline. Lesson:
+   architectural changes that move data from "rooted
+   forever" to "rooted per-object" need a fresh
+   ownership-graph pass, not just a code review.
+
+4. **Review reviewers as carefully as you review code.**
+   The 5-round perf-CI review on PR #17, the 5-round
+   ruby-spec-runner review on PR #23, and the singleton-
+   class cycle review on PR #31 each surfaced material
+   improvements. The cost of running a thorough review pass
+   per PR was high (review fatigue is real) but the cost of
+   shipping each PR without that pass would have been
+   higher.
+
+5. **Master moved faster than expected.** Three PRs got
+   superseded mid-flight by independent master work:
+   `splat in method params` (PR #12 closed; master shipped
+   `a24d7cb`), `def self.method` (master `844530f` collided
+   on `Op::DefSingletonMethod` name during PR #31 rebase),
+   and `**kwargs` (master `98abea1` added a Def field
+   between rebases). The "fetch master before opening a PR"
+   habit needs to be tighter; for long-running branches,
+   rebase weekly or split into smaller PRs.
