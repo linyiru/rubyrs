@@ -43,6 +43,11 @@ fn golden_lambda_raise() {
     run_golden("lambda_raise");
 }
 
+#[test]
+fn golden_v0_2_guards() {
+    run_golden("v0_2_guards");
+}
+
 fn run_golden(name: &str) {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let input_path = base.join(format!("{name}.input.rb"));

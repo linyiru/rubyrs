@@ -127,14 +127,34 @@ impl<'pr> Visit<'pr> for SubstitutionCollector<'_> {
             .or_else(|| try_predicate_matcher(self.source, node))
         {
             self.substitutions.push(sub);
-            // Don't recurse — we've consumed the whole subtree.
-            // Recursing would re-visit the inner `.should` call
-            // and trigger spurious nested rewrites.
             return;
         }
-        // No pattern matched — keep visiting children so
-        // patterns nested in arguments / blocks still fire.
-        ruby_prism::visit_call_node(self, node);
+        // No pattern matched. We DELIBERATELY do NOT recurse
+        // into the receiver chain — only into arguments and
+        // block. Reason: if the outer call (just visited) is
+        // unmatched but its receiver chain contains a CallNode
+        // that WOULD match a recogniser, rewriting the receiver
+        // would orphan the outer call. Source like
+        // `arr.should.first.frozen?` would otherwise become
+        // `assert(arr.first).frozen?` — the `.frozen?` chains
+        // off the assert's return value (nil from __spec_*),
+        // raising NoMethodError at run-time. Args / block are
+        // independent expressions whose rewrites don't interfere
+        // with the outer chain, so they keep the default walk.
+        if let Some(args) = node.arguments() {
+            ruby_prism::visit_arguments_node(self, &args);
+        }
+        if let Some(block) = node.block() {
+            // `block` may be a BlockNode (do/end / { } body) or
+            // a BlockArgumentNode (`&proc`). Dispatch by
+            // concrete type since Node doesn't have a generic
+            // visit method.
+            if let Some(b) = block.as_block_node() {
+                ruby_prism::visit_block_node(self, &b);
+            } else if let Some(b) = block.as_block_argument_node() {
+                ruby_prism::visit_block_argument_node(self, &b);
+            }
+        }
     }
 }
 
@@ -218,6 +238,19 @@ fn try_lambda_raise(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Sub
     if args_iter.next().is_some() {
         return None;
     }
+    // Gate: only accept a ConstantReadNode (`ArgumentError`)
+    // or ConstantPathNode (`Math::DomainError`). Anything else
+    // — a string literal (`raise("FrozenError")`), a method
+    // call (`raise(some_var.class)`), a local variable
+    // (`raise(error_class)`) — would slice into the class_text
+    // literally and produce an `assert_raises("<text>")` that
+    // can never match `e.class.to_s`, silently always-failing.
+    // Falling through to passthrough lets a human polish.
+    if class_node.as_constant_read_node().is_none()
+        && class_node.as_constant_path_node().is_none()
+    {
+        return None;
+    }
     let class_text = slice(source, &class_node);
     let body_text = lambda
         .body()
@@ -240,9 +273,15 @@ fn try_lambda_raise(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Sub
 /// shapes: `should.empty?`, `should.equal?(other)`,
 /// `should.instance_of?(Class)`.
 fn try_predicate_matcher(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
-    // `==` and `raise` are caught by their dedicated
-    // recognisers; bail so we don't also match here.
-    if name_is(node.name(), b"==") || name_is(node.name(), b"raise") {
+    // Gate: predicate methods end in `?` (`empty?`, `frozen?`,
+    // `equal?`, `kind_of?`, `instance_of?`, `include?`,
+    // `start_with?`, `end_with?`, etc — the entire mspec
+    // predicate-matcher convention). Non-`?` method names like
+    // `.should.first` aren't part of the mspec matcher set and
+    // shouldn't get an `assert(...)` wrap that would mask intent.
+    // This also implicitly excludes `==` and `raise` (neither
+    // ends in `?`), which are caught by their own recognisers.
+    if node.name().as_slice().last() != Some(&b'?') {
         return None;
     }
     let recv_call = node.receiver()?.as_call_node()?;

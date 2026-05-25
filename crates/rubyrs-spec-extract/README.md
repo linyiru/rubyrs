@@ -66,6 +66,55 @@ is re-emitted inside a `do ... end` block, so indentation
 shifts (the body's own multi-statement structure stays
 intact, just under different leading whitespace).
 
+## Known limitations of v0.2 (post-/code-review hardening)
+
+These aren't bugs — they're deliberate trade-offs the
+`/code-review` pass surfaced and we documented rather than
+fixed in v0.2. Each is single-PR-shaped follow-up work.
+
+1. **Receiver chains are not recursed into.** When the
+   extractor visits an outer CallNode that doesn't match any
+   recogniser, it walks the call's arguments and block but
+   NOT its receiver. Rewriting inside a receiver chain would
+   orphan the outer call: source like `arr.should.first.frozen?`
+   would otherwise become `assert(arr.first).frozen?`, where
+   the `.frozen?` chains off the assert's return (Nil)
+   instead of the original `arr.should.first` value. The
+   safer rule is "leave the whole chain alone." Cost: a
+   `should ==` or predicate matcher buried INSIDE another
+   call's receiver chain is no longer rewritten — but those
+   shapes don't appear in real upstream specs.
+
+2. **Class arg to `should.raise` must be a constant.** Only
+   `ConstantReadNode` (`ArgumentError`) and `ConstantPathNode`
+   (`Math::DomainError`) are accepted. String-literal arguments
+   (`should.raise("FrozenError")`) or dynamic ones
+   (`should.raise(some_var.class)`) fall through to passthrough.
+   Otherwise the extractor would emit `assert_raises("<text>")`
+   with the source slice verbatim, which never matches
+   `e.class.to_s` at runtime (always-failing test).
+
+3. **Predicate matcher requires a `?` suffix.** Only methods
+   whose name ends in `?` are eligible for the
+   `.should.PRED?` → `assert(lhs.PRED?)` rewrite. Mspec's
+   predicate-matcher convention is `?`-suffixed; non-`?`
+   forms (`.should.first`, `.should.size`) aren't matchers
+   and would be silently wrapped in an `assert(...)` that
+   evaluates truthiness incorrectly. Real upstream doesn't
+   use them, but the gate is defensive.
+
+4. **Nested-args rewriting is not chained.** A pattern
+   buried in the argument list of a matched outer call —
+   e.g. `arr.should.include?(other.should == 3)` — is NOT
+   recursively rewritten today. The outer match consumes the
+   whole subtree and we substitute it; the inner `should ==`
+   stays as-is in the substituted text. The downstream output
+   has a leftover `should` call that the micro-runner can't
+   resolve. This is a real limitation rather than a guard;
+   a future PR could recursively `extract()` argument text
+   before splicing it into the replacement. Not common in
+   upstream `core/*` specs (nested `should` is unusual style).
+
 ## What's deliberately deferred (v0.3+)
 
 - **Shared examples** (`it_behaves_like :shared, ...`) — needs cross-file inlining of the shared `describe` block.
