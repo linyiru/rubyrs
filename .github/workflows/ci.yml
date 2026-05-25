@@ -192,7 +192,14 @@ jobs:
           # check of the popped Value. Both are bytecode-invariant
           # asserts (the preceding `Op::CreateBlock` always pushes a
           # `Value::Block`); not user-reachable.
-          check crates/rubyrs/src/vm.rs       70
+          #
+          # Ratcheted 70 → 68 by Spike L2.5: cext_handle_to_value(_d)
+          # now returns `Result<Value, Trap>`. The two heap-cap
+          # `.expect(...)` sites become `?` (Copilot reviews #26 /
+          # #27), and the depth-limit silent `Value::Nil` substitution
+          # becomes `Err(ArgumentError)` (review #24). Net -2 on the
+          # budget; ratchet locks the +0 against pre-PR#8 in.
+          check crates/rubyrs/src/vm.rs       68
           check crates/rubyrs/src/heap.rs     10
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
