@@ -8,8 +8,6 @@ use std::collections::HashMap;
 use std::env;
 use std::rc::Rc;
 
-use std::io::Write;
-
 use crate::bytecode::{BinOpKind, Op, Proto};
 use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::heap::{Heap, HeapObj};
@@ -4585,37 +4583,16 @@ fn cext_funcall_to_vm(
     })
 }
 
-// `file_class_dispatch` moved to `vm/fileops.rs`. The
-// `with_caught_unwind` helper below stays here because it's
-// part of the cext-bridge plumbing wired into the same compile
-// unit as `cext_*` callbacks.
-
-/// Run `f`, catching any Rust panic that escapes from our own
-/// argument-interning / handle-management code wrapping the C call.
-///
-/// **What this catches**: panics raised in Rust code that runs around
-/// the `extern "C"` call — `state.intern`, our `Vec` building, any
-/// `expect("ICE: ...")` in `rubyrs_cext::with_state`.
-///
-/// **What this does NOT catch**: panics raised inside the C function
-/// itself. The C side cannot raise a Rust panic; if one of OUR
-/// `rb_*` ABI functions panics from inside the C call, the process
-/// aborts under `panic = abort` semantics (the default for `extern "C"`
-/// since Rust 2018+). The cext ABI surface is documented as
-/// abort-on-contract-violation in docs/PANIC_AUDIT.md — conversion to
-/// error sentinels is Level 3+ work tied to `rb_raise` integration.
-#[cfg(not(target_os = "wasi"))]
-fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
-        if let Some(s) = p.downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = p.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "non-string panic payload".to_string()
-        }
-    })
-}
+// `file_class_dispatch` moved to `vm/fileops.rs`.
+//
+// (The `with_caught_unwind` helper that used to live here was
+// removed in Spike L3-A — once the cext call routes through the
+// pure-C `rubyrs_jmp_invoke`, there's no Rust frame between
+// setjmp and the cext fn that a catch_unwind could meaningfully
+// cover. Re-introducing it on master appears to have been an
+// accidental revert in the kernel.rs extraction refactor; this
+// branch drops it again to keep the panic-budget honest and
+// -D warnings green.)
 
 
 fn visibility_from_name(name: &str) -> Option<Visibility> {
