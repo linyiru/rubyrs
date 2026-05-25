@@ -118,10 +118,16 @@ impl Vm {
     /// Invoke a registered host fn (either v1 or v2 slot).
     ///
     /// V1 stashes `*mut Vm` via `with_vm_ptr_set` so a cext-style
-    /// re-entrant `rb_funcall` can find the running VM (ADR 0013).
-    /// V1 closures hold no Rust borrow of `self` during the call, so
-    /// the raw-ptr reborrow inside cext is the only access path and
-    /// aliasing is well-defined.
+    /// re-entrant `rb_funcall` can find the running VM (ADR 0013) —
+    /// but only on builds where that re-entry channel actually
+    /// exists, i.e. `all(feature = "cext", not(target_os = "wasi"))`.
+    /// With `--no-default-features` (or on wasi) `with_vm_ptr_set`
+    /// itself lives inside the cfg'd-off `mod cext`, so the V1 arm
+    /// just calls `host(args)` directly; see the in-fn comment for
+    /// the migration site if a non-cext V1 host ever needs TLS-Vm
+    /// access. V1 closures hold no Rust borrow of `self` during the
+    /// call, so the raw-ptr reborrow inside cext is the only access
+    /// path and aliasing is well-defined.
     ///
     /// V2 deliberately does NOT call `with_vm_ptr_set`. The V2
     /// closure holds a `HostCtx` that borrows `&self.heap` for the
@@ -370,6 +376,21 @@ impl Vm {
                 // PinGuard fix in L3-D).
                 let mut g = PinGuard::new(self);
                 for a in &args { g.pin(a.clone()); }
+                // Default Instance allocator — used by every branch of
+                // the cext-selection cascade below that doesn't go
+                // through `rb_define_alloc_func`. Extracted so the
+                // three call sites (cext non-wasi else arm, cext wasi
+                // fallback, no-cext arm) can't drift out of sync.
+                let alloc_instance = |g: &mut PinGuard, cls: &Rc<Class>| -> Result<Value, Trap> {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
+                        class: cls.clone(),
+                        ivars: HashMap::new(),
+                        singleton_class: None,
+                    }));
+                    Ok(Value::Object(id))
+                };
                 // Allocator selection. With `cext`, the class may carry
                 // an `rb_define_alloc_func`-registered allocator that
                 // must run instead of the default Instance allocation.
@@ -432,39 +453,16 @@ impl Vm {
                         // target (no cext_dispatch to forward it to);
                         // marker reference keeps -D warnings happy.
                         let _ = alloc_func;
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
-                            class: cls.clone(),
-                            ivars: HashMap::new(),
-                            singleton_class: None,
-                        }));
-                        Value::Object(id)
+                        alloc_instance(&mut g, cls)?
                     }
                 } else {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
-                        class: cls.clone(),
-                        ivars: HashMap::new(),
-                        singleton_class: None,
-                    }));
-                    Value::Object(id)
+                    alloc_instance(&mut g, cls)?
                 };
                 #[cfg(not(feature = "cext"))]
                 let obj = {
-                    // No cext_alloc_func field exists in this build; the
-                    // class always allocates a plain Instance. Mirror of
-                    // the `else` arm above so the two cfg paths produce
-                    // identically-typed `Value`.
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
-                        class: cls.clone(),
-                        ivars: HashMap::new(),
-                        singleton_class: None,
-                    }));
-                    Value::Object(id)
+                    // No cext_alloc_func field exists in this build;
+                    // the class always allocates a plain Instance.
+                    alloc_instance(&mut g, cls)?
                 };
                 // Pin the freshly-allocated obj across initialize so
                 // a maybe_gc inside the (cext-defined or Ruby-defined)
