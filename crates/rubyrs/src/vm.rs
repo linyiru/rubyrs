@@ -2963,40 +2963,36 @@ impl Vm {
                 Some(Value::Hash(result_id))
             }
             (Value::Array(id), "sort_by", []) => {
-                // Compute the sort key for every element by calling
-                // the block once, then insertion-sort the (key, val)
-                // pairs by key using `user_cmp`. The block is run
-                // exactly N times (one key per element); the sort
-                // itself does O(n²) comparisons but each is a host-
-                // side dispatch into the user `<=>` (or value_cmp_v
-                // for built-ins), not another block call.
-                let snapshot: Vec<(Value, Value)> = {
-                    let mut g = PinGuard::new(self);
-                    g.pin(Value::Array(*id));
-                    g.pin(Value::Block(block));
-                    let arr = g.vm.heap.array(*id).clone();
-                    let pre_frames = g.vm.frames.len();
-                    let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
-                    let mut early: Option<Value> = None;
-                    for v in arr {
-                        g.vm.invoke_block(block, vec![v.clone()])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        if g.vm.method_return.is_some() { break; }
-                        let key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        if g.vm.break_signaled {
-                            g.vm.break_signaled = false;
-                            early = Some(key);
-                            break;
-                        }
-                        pairs.push((key, v));
+                // PinGuard wraps the entire impl — the previous code
+                // dropped the guard after the key-collection loop,
+                // leaving `pairs` (a Rust local) to carry ObjId-
+                // bearing element Values through `user_cmp` insertion
+                // sort and the trailing `maybe_gc()` with no GC root.
+                // Symptom: `.to_a.sort_by` chains where the receiver
+                // Array of pairs has no other anchor → pair Arrays
+                // swept → dangling slots in the result.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let arr = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+                let mut early: Option<Value> = None;
+                for v in arr {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
                     }
-                    if let Some(e) = early {
-                        drop(g);
-                        return Ok(Some(e));
-                    }
-                    pairs
-                };
-                let mut pairs = snapshot;
+                    g.pin(key.clone());
+                    g.pin(v.clone());
+                    pairs.push((key, v));
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
                 let n = pairs.len();
                 for i in 1..n {
                     let mut j = i;
@@ -3005,7 +3001,7 @@ impl Vm {
                             let (a, b) = pairs.split_at(j);
                             (a[j - 1].0.clone(), b[0].0.clone())
                         };
-                        let ord = self.user_cmp(&k_prev, &k_curr)?;
+                        let ord = g.vm.user_cmp(&k_prev, &k_curr)?;
                         match ord {
                             None => return Ok(None),
                             Some(std::cmp::Ordering::Greater) => {
@@ -3017,9 +3013,9 @@ impl Vm {
                     }
                 }
                 let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
-                self.maybe_gc();
-                self.check_alloc()?;
-                let nid = self.heap.alloc(HeapObj::Array(sorted));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let nid = g.vm.heap.alloc(HeapObj::Array(sorted));
                 Some(Value::Array(nid))
             }
             (Value::Array(id), "inject", []) | (Value::Array(id), "reduce", []) => {
