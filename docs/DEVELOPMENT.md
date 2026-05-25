@@ -6,12 +6,33 @@
 - A C compiler (clang/gcc). Required by `ruby-prism-sys` to build the
   vendored Prism parser.
 
+## Workspace layout
+
+rubyrs is a Cargo workspace with four crates under `crates/`:
+
+| Crate | Role |
+|---|---|
+| `crates/rubyrs` | Core interpreter — parser bridge, compiler, VM, embedding API |
+| `crates/rubyrs-cext` | C ABI bridge — `rb_*` FFI entry points C extensions call |
+| `crates/rubund` | Bundler/Gemfile-aware runner (DSL hosting demo) |
+| `crates/rubyrs-gapscan` | Subset-coverage scanner over real Ruby corpora |
+
+`cargo build` from the repository root builds the whole workspace.
+The CLI binary `rubyrs` lives in `crates/rubyrs` and lands at
+`target/release/rubyrs`.
+
 ## Build and run
 
 ```bash
 cargo build --release
 ./target/release/rubyrs path/to/script.rb
 ```
+
+The release profile pins `lto = "thin"` (see `Cargo.toml`) to keep
+cross-module inlining alive after the `vm/*.rs` split — see
+[BENCHMARKS.md](BENCHMARKS.md) for the regression-and-recovery
+record. Adds ~3s to release-build wall time; dev/test builds
+unaffected.
 
 Debug + safety flags via environment variables:
 
@@ -32,22 +53,63 @@ to library users.
 ## Tests
 
 ```bash
-cargo test --release
+cargo test --release            # whole workspace
+cargo test --release --test diff_cruby  # the byte-compare suite vs CRuby
 ```
 
-To add a new fixture:
+The `diff_cruby` harness runs each `crates/rubyrs/tests/diff/*.rb`
+file through both rubyrs and the system `ruby` binary and asserts
+stdout matches byte-for-byte. Currently 79 fixtures; every PR is
+gated on it staying green.
+
+To add a new diff fixture:
 
 ```bash
-echo 'puts 42' > tests/fixtures/example.rb
-UPDATE_EXPECTED=1 cargo test --release example  # generates .expected
-# Inspect generated file, commit both .rb and .expected.
+echo 'puts 42' > crates/rubyrs/tests/diff/example.rb
+cargo test --release --test diff_cruby example
 ```
 
-Then register the test in `tests/integration.rs`:
+The harness auto-discovers `.rb` files; no separate registration
+step.
+
+For the older fixture/expected style (`crates/rubyrs/tests/fixtures/`):
+
+```bash
+echo 'puts 42' > crates/rubyrs/tests/fixtures/example.rb
+UPDATE_EXPECTED=1 cargo test --release example
+```
+
+Register in `crates/rubyrs/tests/integration.rs`:
 
 ```rust
 #[test] fn example() { run_fixture("example"); }
 ```
+
+The embedding-API surface is pinned by `crates/rubyrs/tests/embed.rs`.
+
+## CI gates
+
+- **`diff_cruby`** — 79 fixtures, byte-identical stdout to CRuby.
+- **`panic-budget`** — counts `panic!` / `unwrap` / `expect` per
+  file; one-way ratchet down. Bumps require an explicit comment
+  in `docs/PANIC_AUDIT.md`.
+- **`perf/check.sh`** — peak-RSS + wall-time ratchet over
+  `perf/baselines.tsv`. Run locally with `bash perf/check.sh`.
+- **`STRESS_GC=1`** — second test job collects on every GC point.
+- **`gapscan`** — per-PR diff comment summarising subset-coverage
+  changes against real Ruby corpora (via the GitHub Actions
+  workflow).
+
+## Clippy
+
+The workspace is currently at zero clippy warnings:
+
+```bash
+cargo clippy --release --all -- -D warnings
+```
+
+`#[allow(clippy::xxx)]` annotations carry a rationale comment.
+The mechanical-fixes pass uses `cargo clippy --fix --allow-dirty`.
 
 ## WebAssembly target
 
@@ -89,20 +151,26 @@ Notes:
 
 # Wall-clock comparisons:
 hyperfine --warmup 2 \
-  './target/release/rubyrs script.rb' \
-  'ruby --disable=yjit script.rb' \
-  'ruby --yjit script.rb'
+  './target/release/rubyrs crates/rubyrs/benches/fizzbuzz_1m.rb' \
+  'ruby --disable=yjit crates/rubyrs/benches/fizzbuzz_1m.rb' \
+  'ruby --yjit crates/rubyrs/benches/fizzbuzz_1m.rb'
+
+# CI-gated workloads:
+bash perf/check.sh
 ```
 
-See [BENCHMARKS.md](BENCHMARKS.md) for the canonical numbers and
-methodology.
+The checked-in microbench is `crates/rubyrs/benches/fizzbuzz_1m.rb`
+(used as the headline arithmetic/dispatch benchmark). See
+[BENCHMARKS.md](BENCHMARKS.md) for canonical numbers and
+methodology, and `perf/README.md` for the budget format.
 
 ## Embedding
 
 rubyrs ships as both a binary and a library. See
 [ARCHITECTURE.md § Public embedding API](ARCHITECTURE.md#public-embedding-api)
-for the surface, [`examples/embed.rs`](../examples/embed.rs) for a
-worked example, and `tests/embed.rs` for the pinned semantics.
+for the surface, [`crates/rubyrs/examples/embed.rs`](../crates/rubyrs/examples/embed.rs)
+for a worked example, and `crates/rubyrs/tests/embed.rs` for the
+pinned semantics.
 
 Add to `Cargo.toml`:
 
@@ -130,36 +198,61 @@ rt.eval(r#"puts "ok at #{now_ms}""#, "snippet")?;
 
 ```
 rubyrs/
-├── Cargo.toml
-├── build.rs                  # WASI stub linker shim
-├── src/
-│   ├── lib.rs                # Public API (Runtime, Config, re-exports)
-│   ├── main.rs               # CLI shim around Runtime
-│   ├── ast.rs                # Expr IR + Prism→Expr translation
-│   ├── value.rs              # Value enum + heap-object structs
-│   ├── intern.rs             # SymId + Interner
-│   ├── heap.rs               # Mark-sweep GC heap
-│   ├── bytecode.rs           # Op + Proto
-│   ├── compiler.rs           # Expr → bytecode
-│   ├── error.rs              # Span, RubyError, Trap
-│   └── vm.rs                 # Vm, dispatch, builtins, host fn dispatch
-├── examples/
-│   └── embed.rs              # Worked embedding example
-├── tests/
-│   ├── integration.rs        # Fixture-based golden harness (stdout)
-│   ├── embed.rs              # Public API smoke tests
-│   └── fixtures/             # .rb + .expected pairs, plus errors/
+├── Cargo.toml                       # workspace root (members + thin LTO)
+├── crates/
+│   ├── rubyrs/                      # core interpreter crate
+│   │   ├── build.rs                 # WASI stub linker shim
+│   │   ├── benches/
+│   │   │   └── fizzbuzz_1m.rb       # checked-in microbench
+│   │   ├── examples/                # brewfile DSL, cext demos, etc.
+│   │   ├── src/
+│   │   │   ├── lib.rs               # public API (Runtime, Config, ...)
+│   │   │   ├── main.rs              # CLI shim around Runtime
+│   │   │   ├── ast.rs               # Expr IR + Prism→Expr translation
+│   │   │   ├── value.rs             # Value enum + heap-object structs
+│   │   │   ├── intern.rs            # SymId + Interner
+│   │   │   ├── heap.rs              # mark-sweep GC heap
+│   │   │   ├── bytecode.rs          # Op + Proto
+│   │   │   ├── compiler.rs          # Expr → bytecode
+│   │   │   ├── error.rs             # Span, RubyError, Trap
+│   │   │   ├── vm.rs                # Vm struct + shared scaffolding (~380 lines)
+│   │   │   └── vm/                  # 17 per-type submodules — see VM_MODULE_MAP.md
+│   │   │       ├── dispatch.rs      # do_call / invoke_method ...
+│   │   │       ├── step.rs          # opcode interpreter loop
+│   │   │       ├── cext.rs          # C ext loader + handle bridge
+│   │   │       ├── iter.rs          # block-form Enumerable
+│   │   │       ├── string.rs / array.rs / hash.rs / range.rs / numeric.rs
+│   │   │       ├── kernel.rs / fileops.rs / raise.rs
+│   │   │       ├── lookup.rs        # method resolution + class checks
+│   │   │       ├── gc.rs            # GC trigger + resource caps
+│   │   │       ├── primitive.rs     # typed fast-path dispatch table
+│   │   │       ├── sprintf.rs
+│   │   │       └── util.rs          # cross-cutting helpers
+│   │   ├── spec/                    # ruby/spec subset runner
+│   │   └── tests/
+│   │       ├── integration.rs       # golden-stdout fixtures
+│   │       ├── embed.rs             # public API smoke tests
+│   │       ├── diff_cruby.rs        # 79-fixture byte-compare vs CRuby
+│   │       ├── diff/                # diff_cruby fixtures (*.rb)
+│   │       └── fixtures/            # legacy .rb + .expected pairs
+│   ├── rubyrs-cext/                 # C ABI shims (~40 unsafe extern "C")
+│   ├── rubund/                      # Bundler/Gemfile runner
+│   └── rubyrs-gapscan/              # subset-coverage scanner
+├── perf/
+│   ├── baselines.tsv                # CI-enforced perf budget
+│   ├── check.sh                     # runs each baseline workload
+│   └── README.md
 ├── docs/
-│   ├── ARCHITECTURE.md       # How it works internally
-│   ├── ROADMAP.md            # What's done + what's next
-│   ├── TESTING.md            # ruby/spec ingestion strategy
-│   ├── SUBSET.md             # What we do / don't support
-│   ├── BENCHMARKS.md         # Performance numbers + how to reproduce
-│   ├── DEVELOPMENT.md        # This file
-│   └── adr/                  # Architecture Decision Records (8 so far)
-├── README.md                 # Drive-by visitor pitch
-├── CHANGELOG.md              # Per-version user-facing changes
-└── CONTRIBUTING.md           # PR flow
+│   ├── ARCHITECTURE.md              # how it works internally
+│   ├── VM_MODULE_MAP.md             # per-vm-submodule navigation guide
+│   ├── CEXT_SAFETY.md               # FFI safety contracts (3 classes)
+│   ├── SECURITY.md                  # trust model
+│   ├── ROADMAP.md / SUBSET.md / TESTING.md / BENCHMARKS.md /
+│   ├── DEVELOPMENT.md               # this file
+│   ├── PANIC_AUDIT.md               # panic-budget breakdown
+│   └── adr/                         # ADRs (10+ so far)
+├── README.md / CHANGELOG.md / CONTRIBUTING.md / LICENSE-*
+└── .github/workflows/               # ci.yml, gapscan-pr.yml, etc.
 ```
 
 ## Common pitfalls
