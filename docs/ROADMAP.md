@@ -13,6 +13,35 @@ See [TESTING.md](TESTING.md) for the ingestion pipeline. We do not ship a
 new feature without spec coverage that demonstrates we got the semantics
 right.
 
+## Tooling
+
+- **`rubyrs-gapscan`** — workspace crate that scans a Ruby codebase
+  with Prism and classifies every AST node as Supported / RidesAlong /
+  Missing against the rubyrs subset. Three layers of compile-time
+  drift protection keep its classification in lockstep with `ast.rs`
+  and Prism's node universe. Used to produce the gap reports below
+  and to measure the delta after each gap-closing feature PR.
+  See `crates/rubyrs-gapscan/`.
+
+## Real-world gap data
+
+Snapshots of `rubyrs-gapscan` against canonical Ruby projects —
+these drive which "Near term" items below to attack first. Full
+reports: [`docs/gap-reports/`](gap-reports/README.md).
+
+| Codebase | % Supported (AST) | #1 missing | #2 missing | #3 missing |
+|---|---:|---|---|---|
+| Jekyll `lib/` (89 files) | **81.65%** | `ModuleNode` (×145) | `InstanceVariableOrWriteNode` (×136) | `UnlessNode` (×112) |
+| Liquid `lib/` (64 files) | **81.16%** | `ConstantWriteNode` (×141) | `ModuleNode` (×74) | `UnlessNode` (×72) |
+
+**Headline:** both Jekyll and Liquid sit just over 81% inside the
+subset at AST level. Adding `ModuleNode` alone (Near term #4 below)
+would unlock 55 Jekyll files to ≥95% translatability. Caveat: the
+AST view *under*-states the gap — many runtime features
+(`require`, `attr_accessor`, `include`, `private`) parse as
+`CallNode` and so look Supported. See each report's "Top bareword
+calls" section for the semantic-gap view.
+
 ## Done
 
 These are landed and locked down by tests:
