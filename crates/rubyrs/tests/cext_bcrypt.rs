@@ -35,6 +35,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 /// Openwall bcrypt test vectors. Format: `(password, salt-with-cost-prefix, expected-hash)`.
 ///
 /// Source: bcrypt reference test data shipped with openwall
@@ -78,14 +80,7 @@ fn bcrypt_reference_vectors_round_trip() {
     );
 
     // 2. Locate artefact.
-    let ext = if cfg!(target_os = "macos") {
-        "bundle"
-    } else if cfg!(windows) {
-        "dll"
-    } else {
-        "so"
-    };
-    let bundle = example_dir.join(format!("bcrypt_ext.{}", ext));
+    let bundle = example_dir.join(format!("bcrypt_ext.{}", common::RUBY_DLEXT));
     assert!(
         bundle.exists(),
         "build.sh did not produce {}",

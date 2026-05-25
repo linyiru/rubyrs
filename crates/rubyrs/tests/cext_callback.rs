@@ -28,6 +28,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
+mod common;
+
 /// Build the callback-cext bundle exactly once per test process.
 ///
 /// `cargo test` runs integration tests in parallel by default. The
@@ -62,14 +64,7 @@ fn ensure_callback_bundle_built() -> PathBuf {
                 String::from_utf8_lossy(&build.stdout),
                 String::from_utf8_lossy(&build.stderr),
             );
-            let ext = if cfg!(target_os = "macos") {
-                "bundle"
-            } else if cfg!(windows) {
-                "dll"
-            } else {
-                "so"
-            };
-            let bundle = example_dir.join(format!("callback_ext.{}", ext));
+            let bundle = example_dir.join(format!("callback_ext.{}", common::RUBY_DLEXT));
             assert!(
                 bundle.exists(),
                 "build.sh did not produce {}",

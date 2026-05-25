@@ -33,6 +33,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
+mod common;
+
 fn ensure_counter_bundle_built() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
@@ -58,14 +60,7 @@ fn ensure_counter_bundle_built() -> PathBuf {
                 String::from_utf8_lossy(&build.stdout),
                 String::from_utf8_lossy(&build.stderr),
             );
-            let ext = if cfg!(target_os = "macos") {
-                "bundle"
-            } else if cfg!(windows) {
-                "dll"
-            } else {
-                "so"
-            };
-            let bundle = example_dir.join(format!("counter_ext.{}", ext));
+            let bundle = example_dir.join(format!("counter_ext.{}", common::RUBY_DLEXT));
             // Sanity-check the bundle actually got produced (review #5).
             assert!(
                 bundle.exists(),
