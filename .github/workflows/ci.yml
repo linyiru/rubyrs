@@ -161,13 +161,23 @@ jobs:
           fail=0
           check() {
             local file="$1" budget="$2"
+            # Strip lines from the first `#[cfg(test)]` onward —
+            # in-tree unit tests routinely call `.unwrap()` /
+            # `.expect(...)` / `panic!(...)` for fixture assertions,
+            # and counting those flips the budget into "ICE-class
+            # production sites + arbitrary test churn", which is not
+            # what we want to ratchet. The convention here is
+            # `#[cfg(test)] mod tests { ... }` at the bottom of each
+            # file, so stripping at the first occurrence is safe.
             # Strip leading whitespace before grepping for comment
             # markers so indented doc lines (rare but real) are
             # also excluded.
+            local prod
+            prod=$(awk '/^#\[cfg\(test\)\]/ {exit} {print}' "$file")
             local count
-            count=$(grep -cE 'panic!|\.unwrap\(\)|\.expect\(' "$file" || true)
+            count=$(printf '%s\n' "$prod" | grep -cE 'panic!|\.unwrap\(\)|\.expect\(' || true)
             local doc
-            doc=$(grep -E '^[[:space:]]*(///|//!)' "$file" | grep -cE 'panic!|\.unwrap\(\)|\.expect\(' || true)
+            doc=$(printf '%s\n' "$prod" | grep -E '^[[:space:]]*(///|//!)' | grep -cE 'panic!|\.unwrap\(\)|\.expect\(' || true)
             count=$((count - doc))
             echo "$file: $count (budget $budget)"
             if [ "$count" -gt "$budget" ]; then
