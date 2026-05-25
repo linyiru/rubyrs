@@ -223,6 +223,24 @@ pub struct CExtInstanceMethod {
     pub arity: i32,
 }
 
+/// L3-F: allocator function registered via `rb_define_alloc_func`.
+/// Drained by the host into the target Class so that `Klass.new(args)`
+/// on the Ruby side routes:
+///
+///   1. host calls `func(klass_handle)` — the cext-side allocator
+///      typically returns a `TypedData_Wrap_Struct`-wrapped Object
+///      whose data slot holds a freshly-malloc'd C struct.
+///   2. host then calls `initialize(args...)` on that Object.
+///
+/// Without this path, msgpack-style instance-pattern gems can't
+/// produce TypedData-wrapped receivers — `.new` falls back to a
+/// bare `Instance` and `TypedData_Get_Struct(self, ...)` in any
+/// instance method then fails the type-check.
+pub struct CExtAllocFunc {
+    pub class_joined_name: String,
+    pub func: OpaqueFn,
+}
+
 /// Per-thread state shared between the host Vm and any active C ext
 /// call. The host swaps this around every C-side entry point so a
 /// fresh handle table is in scope.
@@ -243,6 +261,10 @@ pub struct CExtState {
     /// drains into a parallel per-class table consulted for
     /// `Value::Object` receivers.
     pub registered_methods: Vec<CExtInstanceMethod>,
+    /// L3-F: allocator functions declared via `rb_define_alloc_func`.
+    /// Drained into per-class `cext_alloc_func` slot at the host so
+    /// `Klass.new(args)` can route through the cext's wrapper.
+    pub registered_alloc_funcs: Vec<CExtAllocFunc>,
 }
 
 impl CExtState {
@@ -281,6 +303,7 @@ impl CExtState {
             registered_classes: Vec::new(),
             registered_singletons: Vec::new(),
             registered_methods: Vec::new(),
+            registered_alloc_funcs: Vec::new(),
         }
     }
 
@@ -950,6 +973,40 @@ pub unsafe extern "C" fn rb_define_method(
             method_name,
             func,
             arity,
+        });
+    });
+}
+
+/// L3-F: register a custom allocator for `klass`. When the Ruby side
+/// calls `klass.new(args)`, the host dispatches the call as:
+///
+///   1. Call `func(klass)` — typically returns a `TypedData_Wrap_Struct`-
+///      wrapped Object whose data slot holds a freshly-malloc'd C struct.
+///   2. Call `initialize(args...)` on that Object.
+///
+/// Without this, msgpack-style instance-pattern gems can't produce
+/// TypedData-wrapped receivers — `.new` falls back to a bare
+/// `Instance` and `TypedData_Get_Struct(self, ...)` in any subsequent
+/// instance method then fails the type-check.
+///
+/// # Safety
+///
+/// `klass` must resolve to a previously-registered class handle.
+/// `func` will be invoked under cext dispatch context (`enter`/`leave`
+/// pushed by the host).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_define_alloc_func(klass: Value, func: OpaqueFn) {
+    with_state(|st| {
+        let class_name = match st.resolve(klass) {
+            CValue::Class(n) => n.clone(),
+            other => panic!(
+                "rb_define_alloc_func: klass resolved to non-class {:?}",
+                other
+            ),
+        };
+        st.registered_alloc_funcs.push(CExtAllocFunc {
+            class_joined_name: class_name,
+            func,
         });
     });
 }

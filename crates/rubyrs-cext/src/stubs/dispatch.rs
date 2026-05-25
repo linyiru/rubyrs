@@ -65,13 +65,8 @@ pub unsafe extern "C" fn rb_define_alias(
 ) {
 }
 
-// Custom allocator — no-op (rubyrs doesn't model allocator dispatch separately).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_define_alloc_func(
-    _klass: Value,
-    _func: extern "C" fn(Value) -> Value,
-) {
-}
+// rb_define_alloc_func — moved to main lib.rs as a real (non-stub)
+// registration entry point as of L3-F.
 
 // Private method — forward to rb_define_method; private vs public identical at spike scope.
 #[unsafe(no_mangle)]
