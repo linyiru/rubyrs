@@ -16,12 +16,13 @@
 //! Equality is structural (rubyrs's `==` on Hash/Array recurses
 //! into elements; Float vs nil produces a clean fail signal).
 //!
-//! Expected pass rate (as of L3-I CValue::Float + binary File.read): 51/51
-//! 47/51. The 4 failures are all Float entries (indices 27-30),
-//! which collapse to `nil` because rubyrs has no `CValue::Float`
-//! and our `rb_float_new` stub returns Qnil. That's the next
-//! cext follow-up (CValue::Float wave) — this test will then
-//! show 51/51 with no edits.
+//! Expected pass rate (as of L3-I CValue::Float + binary File.read): 51/51.
+//! Pre-L3-I the same corpus showed 47/51 because the 4 Float entries
+//! (indices 27-30: 0.0, -0.0, 1.0, -1.0) collapsed to nil — `CValue::Float`
+//! didn't exist and `rb_float_new` returned Qnil. The L3-I commit in this
+//! PR closes that gap; this floor pins the win so a regression that
+//! reintroduces the collapse trips the assertion with a clear per-case
+//! diff.
 
 use std::fs;
 use std::path::PathBuf;

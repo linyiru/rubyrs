@@ -22,7 +22,6 @@ const T_DATA: c_int = 13;
 
 unsafe extern "C" {
     fn strtoll(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_longlong;
-    fn strtod(s: *const c_char, end: *mut *mut c_char) -> c_double;
 }
 
 /// Map a CValue variant to the matching CRuby T_* tag.
@@ -48,10 +47,13 @@ pub unsafe extern "C" fn rb_value_is_fixnum(v: Value) -> c_int {
     with_state(|st| matches!(st.resolve(v), CValue::Int(_)) as c_int)
 }
 
-/// rubyrs has no Float variant; always 0.
+/// PR #63 review #2: now that CValue::Float is a real variant
+/// (post-L3-I), this should return 1 for Float values so cexts
+/// using FLONUM_P / RB_FLONUM_P see the same answer as
+/// rb_value_type's T_FLOAT branch.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_value_is_flonum(_v: Value) -> c_int {
-    0
+pub unsafe extern "C" fn rb_value_is_flonum(v: Value) -> c_int {
+    with_state(|st| matches!(st.resolve(v), CValue::Float(_)) as c_int)
 }
 
 /// 1 if v is an immediate-like singleton (nil/true/false) or a fixnum.
@@ -89,17 +91,62 @@ pub unsafe extern "C" fn rb_cstr2inum(str: *const c_char, base: c_int) -> Value 
     with_state(|st| st.intern(CValue::Int(n as i64)))
 }
 
-/// Parse a C string to double via libc `strtod`. flori-json calls
-/// this for every float literal it parses (parser.rl:1734). Pre-
-/// L3-I returned 0.0 unconditionally, collapsing all JSON floats.
-/// `badcheck` is CRuby's strict-parse flag (raise on trailing
-/// garbage); we ignore it at spike scope.
+/// Parse a C string to double. flori-json calls this for every
+/// float literal it parses (parser.rl:1734). Pre-L3-I returned
+/// 0.0 unconditionally, collapsing all JSON floats.
+///
+/// PR #63 review #3: libc `strtod` is locale-dependent —
+/// `1.5` parses as `1` (stop at `.`) under e.g. de_DE.UTF-8
+/// where `,` is the decimal separator. JSON and Ruby float
+/// literals are locale-invariant (always `.`). Use Rust's
+/// `str::parse::<f64>` instead, which honours `.` regardless of
+/// the process locale. Trailing garbage parses as 0.0 (matches
+/// CRuby's behaviour with `badcheck=0`); `badcheck=1`'s strict-
+/// error mode is documented as a spike gap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_cstr_to_dbl(str: *const c_char, _badcheck: c_int) -> c_double {
     if str.is_null() {
         return 0.0;
     }
-    unsafe { strtod(str, std::ptr::null_mut()) }
+    let s = unsafe { std::ffi::CStr::from_ptr(str) }
+        .to_str()
+        .unwrap_or("");
+    // CRuby strips leading whitespace before parsing.
+    let s = s.trim_start();
+    // Manually pick the longest valid f64 prefix — Rust's
+    // str::parse::<f64>() requires the WHOLE string to be a
+    // valid number, while strtod stops at the first invalid
+    // char. Walk forward consuming sign/digits/decimal/exponent.
+    let bytes = s.as_bytes();
+    let mut end = 0;
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    let mut seen_exp = false;
+    if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+        end += 1;
+    }
+    while end < bytes.len() {
+        let c = bytes[end];
+        if c.is_ascii_digit() {
+            seen_digit = true;
+            end += 1;
+        } else if c == b'.' && !seen_dot && !seen_exp {
+            seen_dot = true;
+            end += 1;
+        } else if (c == b'e' || c == b'E') && !seen_exp && seen_digit {
+            seen_exp = true;
+            end += 1;
+            if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+                end += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    if !seen_digit {
+        return 0.0;
+    }
+    s[..end].parse::<f64>().unwrap_or(0.0)
 }
 
 /// RFLOAT_VALUE — extract the f64 from a Float VALUE. L3-I: now

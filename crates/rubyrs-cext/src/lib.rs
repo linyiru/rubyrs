@@ -1360,6 +1360,15 @@ fn cvalue_eq_d(st: &CExtState, a: Value, b: Value, depth: usize) -> bool {
         (CValue::False, CValue::False) => true,
         (CValue::Str(x), CValue::Str(y)) => x == y,
         (CValue::Int(x), CValue::Int(y)) => x == y,
+        // PR #63 review #4: Float key equality for Hash lookup
+        // (rb_hash_aref). Uses bitwise IEEE 754 equality, so:
+        //   - 0.0 == 0.0, -0.0 != 0.0 (different bit patterns),
+        //     NaN != NaN (every NaN has a distinct bit pattern)
+        // This matches CRuby's Hash semantics: `{nan => 1}[nan]`
+        // returns nil because the key is hashed/compared by
+        // object identity for NaN, and `-0.0` and `0.0` are
+        // distinct keys.
+        (CValue::Float(x), CValue::Float(y)) => x.to_bits() == y.to_bits(),
         (CValue::Array(x), CValue::Array(y)) => {
             x.len() == y.len()
                 && x.iter()
