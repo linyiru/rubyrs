@@ -7,6 +7,72 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **cext spike: BigInt protocol round-trip via msgpack/bigint.rb
+  (A5 / A6a-A6d).** End-to-end load a real upstream gem-`lib/`
+  Ruby helper and exercise its protocol path byte-identical to
+  MRI. Scope is explicitly *Tier 1 protocol-compat* (per
+  [ADR 0015](docs/adr/0015-concentric-architecture.md)): inputs
+  in i64 range round-trip faithfully; values beyond i64 saturate
+  at the parser, BigInt arithmetic remains Tier 2 deferred work.
+  - **A5 — `require ".rb"` loads Ruby source files.** `require`
+    was an alias for `cext_require` (cext bundles only); now it
+    detects `.rb` extension (or auto-appends `.rb` when the input
+    has none) and routes through a shared
+    `load_ruby_source_from_canon` helper factored out of
+    `require_relative`. Cext path stays as the fallback for
+    native extensions. Resolved cwd-relative; gem-style
+    LOAD_PATH walking still deferred. Acceptance:
+    `tests/require_rb.rs` with four cases (explicit `.rb`, auto
+    append, dedup, RuntimeError fallback).
+  - **A6a — pack/unpack endian modifiers
+    (`L>` / `L<` / `S>` / `S<` / `Q>` / `Q<` / `q>` / `q<`).**
+    Parse the `>` / `<` suffix and normalise to canonical
+    directives (`L>` → `N`, `S<` → `v`, …). `Q>` / `q>` get new
+    internal `J` / `j` sentinels for BE 64-bit since CRuby
+    doesn't expose a single-char form. New diff fixture
+    `pack_endian.rb` byte-identical to MRI across modifiers.
+  - **A6b — `Integer#[]` bit access (single + two-arg).**
+    `n[i]` returns the bit at position `i` as 0/1; `n[offset,
+    length]` extracts a bitfield. Two's-complement semantics
+    for negatives. `length == 64` with negative receiver
+    saturates to -1 (signed all-ones) where CRuby returns
+    unsigned `2^64 - 1` — documented divergence, not in the
+    bigint.rb hot path. New diff fixture `integer_bit_index.rb`.
+  - **A6c — `Class#instance_method` graceful for primitive
+    classes.** `Integer.instance_method(:[])` no longer raises
+    NameError (primitives have no entries in the user-Method
+    table; dispatch happens through `primitive_call`). Synthesise
+    an UnboundMethod for the 14 well-known primitive class names
+    (Integer / Float / String / Symbol / Array / Hash / Range /
+    Regexp / Proc / Method / UnboundMethod / TrueClass /
+    FalseClass / NilClass). Downstream `arity` / `parameters`
+    arms already fall back to the builtin sentinel (-1, `[[:rest]]`)
+    when the Method record is absent. User classes still raise
+    NameError on unknown methods. Diff fixture
+    `class_instance_method_primitive.rb`.
+  - **A6d — msgpack `lib/msgpack/bigint.rb` round-trip.** Vendor
+    upstream's `bigint.rb` at `examples/msgpack-cext/vendor-rb/`
+    (Apache-2.0, unmodified) and exercise it via Rust
+    integration test `cext_msgpack_bigint`. Eight cases across
+    `0` / `±1` / `±i32::MAX` / 64-bit values / `i64::MAX`, all
+    byte-identical to MRI. Skipped: `i64::MIN` (magnitude-take
+    overflows in the `-bigint` step). Test is Rust integration
+    rather than `tests/diff/`-style because CRuby uses proper
+    `MessagePack::Bigint` nested-module lookup; rubyrs Tier 1
+    flattens nested modules to top-level (separate gap,
+    deferred per ADR 0015 Tier 2).
+  - **Small dependencies added along the way:**
+    `Array#shift` / `Array#pop` / `Array#reverse_each` (used by
+    `from_msgpack_ext`); `nil.to_i` / `nil.to_f` (used by
+    `parts.pop.to_i` when the unpack result is empty).
+
+  This sub-wave completes the Tier 1 protocol-compat scope for
+  msgpack: every i64-range value and every standard frame type
+  round-trips byte-identical to MRI, including the BigInt
+  protocol path. True BigInt arithmetic, Time class, nested-
+  module namespacing, and msgpack-ruby's own minitest suite
+  remain Tier 2 work.
+
 - **cext spike: msgpack ext-type chain (L3-J / L3-K / A3 / A4).**
   Four atomic commits that close out the "ship a custom Ruby
   class through msgpack's `register_type` ext-type machinery"

@@ -1,10 +1,45 @@
 # Subset semantics
 
-rubyrs is **not** trying to be CRuby-compatible. It targets the same niche as
-**mruby**: a small, memory-safe, embeddable Ruby-flavored runtime — but
-written in Rust, with the option of compiling to WebAssembly.
+rubyrs is **not** trying to be CRuby-compatible at the language level today.
+It targets the same niche as **mruby**: a small, memory-safe, embeddable
+Ruby-flavored runtime — but written in Rust, with the option of compiling
+to WebAssembly.
 
-If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
+If you need Rails, Sinatra, Bundler, gems, or `eval` today — use CRuby.
+
+## Tier framing — what this document defines
+
+[ADR 0015](adr/0015-concentric-architecture.md) lays out a concentric
+multi-tier architecture: a tight Tier 1 core (the embeddable subset
+described here), with strictly opt-in outer tiers
+(`language` → `stdlib` → `mri-compat`) for everything from Sinatra-class
+Ruby semantics up to eventual CRuby-shaped binary compatibility.
+
+**This document defines Tier 1 only.** Everything below "Supported today"
+or "Divergences from CRuby" is a Tier 1 statement. Items labeled
+"explicitly out of scope" are out of Tier 1; they may land in a higher
+tier later, but committing here is a Tier 1 design statement, not a
+permanent rubyrs-wide "never".
+
+Concretely, the divergences in this file fall into three categories:
+
+1. **Documented Tier 1 semantics.** e.g. integer literals saturate to
+   `i64::MIN` / `i64::MAX` rather than promoting to BigInt; nested
+   `module Foo; module Bar; …; end; end` flattens `Bar` to top-level;
+   `nil.to_i == 0` matches CRuby. These are deliberate Tier 1 choices,
+   not bugs.
+2. **Tier 2 deferred.** Features where the cext / wire-format surface
+   is shipped but the underlying language semantics aren't — e.g.
+   `rb_big2ll` works for any value that fits in i64 (cext ABI is real);
+   true arbitrary-precision arithmetic on `Value::BigInt` is Tier 2
+   work. Same shape for `Time` class (no `Time.now` yet — but
+   user-class ext-type frames work today via `register_type_internal`).
+3. **Out of scope today, candidate later.** Listed at the bottom under
+   "Not supported (today, but candidates for the roadmap)".
+
+When in doubt, the rule from ADR 0015 applies: **"Does this serve
+Tier 1?"** If a proposed change costs Tier 1 size, cold-start, or
+sandbox guarantees, it doesn't go here — it's a Tier 2+ proposal.
 
 ## Supported today
 
@@ -483,37 +518,59 @@ end
 - Most real Bundler / Gemfile uses (`rescue Gem::LoadError`) work
   if the trailing name is defined at the top level.
 
-## Not supported (today, but candidates for the roadmap)
+## Deferred to outer tiers
 
-| Feature | Priority for niche tool? |
-|---------|------------------------|
-| `Range` (`1..10`) | high |
-| More `Enumerable`: `select`, `reject`, `inject`, `find`, `any?`, `all?`, `include?` | high |
-| Additional String methods: `split`, `chomp`, `strip`, `chars` (see "String built-in methods" above for what ships today, including `sub` / `gsub` / `upcase` / `downcase` / `reverse` / `include?` / `empty?`) | high |
-| `Module`, `include`, `extend` | high |
-| Class inheritance (`class Foo < Bar`), `super` | high |
-| `Rational`, `Complex`, big-Integer overflow promotion | low |
-| Exception class hierarchy (`raise SomeError`), `ensure` | medium |
-| `attr_reader / attr_writer / attr_accessor` | medium |
-| Default args, keyword args, splat, block-arg `&blk` | medium |
-| `return`, `break`, `next`, `redo` | medium |
-| Inline cache for method dispatch | low (perf-only) |
+Features whose absence is a tier-assignment decision per
+[ADR 0015](adr/0015-concentric-architecture.md), not a "we'll never do
+this". The table below records *where* each item is expected to land
+and *what's already in place* to make that future work tractable.
 
-## Explicitly out of scope
+| Feature | Target tier | Current Tier 1 state |
+|---------|-------------|----------------------|
+| Arbitrary-precision Integer arithmetic (`2**100`, true Bignum) | Tier 2 (`language`) | i64 saturates at parser; cext ABI surface (`rb_big2ll`, `rb_absint_size`, msgpack bigint.rb wire protocol) works for i64-range — see "What ships today: i64-range BigInt protocol" below. |
+| `Rational`, `Complex`, `BigDecimal` | Tier 2 / Tier 3 | None. |
+| Real nested-module namespacing (`Foo::Bar` after `module Foo; module Bar; end; end`) | Tier 2 | Nested module body executes correctly; constant resolution flattens to top-level — `Bar` is reachable bare, `Foo::Bar` returns `nil`. |
+| `Time` class (`Time.now`, `#to_i`, `#nsec`, `Time.at(sec, nsec, …)`) | Tier 2 | None as a primitive value type. User classes carrying `(sec, nsec)` plus `register_type_internal` already round-trip Time-shaped ext-type frames byte-identical to MRI (see `tests/cext_msgpack_app_ext.rs`). |
+| `Fiber`, `Thread`, `Mutex`, `Ractor` | Tier 2 (`_fiber` / `_thread` / `_ractor` feature gates in ADR 0015) | None — single-threaded at the language level by design. |
+| Full `Module` semantics (real Module type distinct from Class, `include` chain with method-lookup ordering matching CRuby exactly) | Tier 2 | PoC: `include Mod` works via method-table copy; ancestry walks via `class_is_a` + `includes` list. Strict CRuby `ancestors` compatibility deferred. |
+| `eval` (string form), `binding`, `ObjectSpace` | Tier 4 (`mri-compat`) | None — explicitly out of scope for Tier 1's sandbox guarantees. |
+| `require / load / autoload` from LOAD_PATH | Tier 1 (small follow-up) | `require "/abs/path.rb"` and `require "/abs/path"` (auto-`.rb`) work; cwd-relative resolution. LOAD_PATH walking deferred but in Tier 1 scope. |
+| C extension API (CRuby ABI compatibility) | Tier 4 (`mri-compat`) per ADR 0015 | A working partial implementation lives in `crates/rubyrs-cext` as a spike, not as a covenant — see ADR 0015's "C-ext ABI stays out of v1 and v2" rule. Specifically the L3-J/K + A3/A4 work shipped msgpack-shaped FFI that's "real enough to round-trip the wire protocol" but doesn't promise full CRuby C-API equivalence. |
+| Refinements, full pattern matching, full encoding model, `Marshal`, `IO` beyond stdout | Tier 3 / Tier 4 | None. |
+| Inline cache for method dispatch | Tier 1 (perf follow-up) | One generation-gated cache slot per call site shipped (`P1-B`). Per-class IC table is the natural next perf increment. |
 
-These will not be added unless the project changes direction:
+### What ships today: i64-range BigInt protocol
 
-- `eval` (string form), `binding`, `ObjectSpace`
-- (`define_method` / `method_missing` / `alias_method` /
-  `instance_eval` / `class_eval` / `def obj.foo` /
-  `define_singleton_method` are now in the supported set as a
-  PoC — see above. The remaining items stay out of scope.)
-- `Fiber`, `Thread`, `Mutex`, `Ractor`
-- `require / load / autoload`, gems, Bundler
-- C extension API
-- File / Socket I/O beyond stdout
-- Refinements, pattern matching
-- Encodings beyond a UTF-8 byte view
-- Frozen strings as a language-level constraint
+The msgpack BigInt wire protocol round-trips byte-identical to MRI for
+any value in `i64` range:
 
-If you need any of these, use CRuby.
+```ruby
+require ".../msgpack/bigint.rb"
+n = 0x123456789ABCDEF0
+bytes = Bigint.to_msgpack_ext(n)
+# => [0, 154, 188, 222, 240, 18, 52, 86, 120]   ← matches MRI byte-for-byte
+Bigint.from_msgpack_ext(bytes) == n  # => true
+```
+
+For embedded host scenarios — passing 64-bit timestamps, counters,
+hash-low-words, or any value the host produced as `i64` — this is
+the contract. Inputs whose Ruby literal exceeds `i64::MAX` /
+`i64::MIN` (e.g. `2**100`) saturate at the parser before bigint.rb
+sees them; that's a Tier 2 boundary, not a Tier 1 bug.
+
+See [`tests/cext_msgpack_bigint.rs`](../crates/rubyrs/tests/cext_msgpack_bigint.rs)
+for the eight-case acceptance suite.
+
+## Permanently out of scope at every tier
+
+Nothing in rubyrs is "permanently out of scope" by design — ADR 0015's
+tier system explicitly leaves the door open through Tier 4
+(`mri-compat`) as a research bet. The items below are *not currently
+planned* for any tier:
+
+- Replacing the parser (Prism is fixed per [ADR 0001](adr/0001-prism-as-parser.md))
+- Adding a JIT (the bytecode VM is fixed per [ADR 0002](adr/0002-bytecode-vm-not-jit.md))
+- Pluggable VM backends (no mruby-fallback, no Truffle interop, one core layered outward — see ADR 0015's "What this is not")
+
+If you need a JIT or a parser-pluggable Ruby today, use CRuby (for
+YJIT) or TruffleRuby.
