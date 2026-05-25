@@ -182,6 +182,7 @@ impl Heap {
             // dispatch sites that walk the chain don't break.
             singleton_methods: RefCell::new(HashMap::new()),
             superclass: RefCell::new(Some(original)),
+            includes: RefCell::new(Vec::new()),
         });
         inst.singleton_class = Some(sc.clone());
         sc

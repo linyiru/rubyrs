@@ -706,6 +706,7 @@ impl Vm {
                     methods: RefCell::new(HashMap::new()),
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(parent.clone()),
+                    includes: RefCell::new(Vec::new()),
                 })).clone();
                 // If the class already existed (reopened) and the user specified a parent
                 // this time, update it (only if it wasn't already set to something else).

@@ -69,11 +69,32 @@ impl Vm {
     /// Plain method lookup walking the class chain, with no cache touch.
     /// Used for paths that don't benefit from caching (e.g. `initialize`
     /// resolution during `Class.new`).
+    ///
+    /// Lookup order at each class in the chain: own methods → included
+    /// modules (recursively, depth-first; a module's own includes are
+    /// part of the walk) → superclass. Mirrors CRuby's ancestor walk
+    /// where `Person.ancestors == [Person, IncludedB, IncludedA, Object,
+    /// Kernel, BasicObject]` and `include` chains compose transitively
+    /// (`module M; include N; end; class C; include M; end` ⇒ C
+    /// resolves N's methods).
     #[inline]
     pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+        // Recursive helper that walks one node's own methods + its
+        // includes (transitively). Returns `Some` on the first hit.
+        fn walk_module(m: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+            if let Some(found) = m.methods.borrow().get(&name_id).cloned() {
+                return Some(found);
+            }
+            for inc in m.includes.borrow().iter() {
+                if let Some(found) = walk_module(inc, name_id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
         let mut current = cls.clone();
         loop {
-            if let Some(m) = current.methods.borrow().get(&name_id).cloned() {
+            if let Some(m) = walk_module(&current, name_id) {
                 return Some(m);
             }
             let parent = current.superclass.borrow().clone();
@@ -237,9 +258,20 @@ impl Vm {
 /// superclass chain (or `child == ancestor`).
 #[allow(dead_code)] // wired up in the next commit (rescue ClassName filter)
 pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
+    fn walks_through(node: &Rc<Class>, target: &Rc<Class>) -> bool {
+        if Rc::ptr_eq(node, target) { return true; }
+        for inc in node.includes.borrow().iter() {
+            if walks_through(inc, target) { return true; }
+        }
+        false
+    }
     let mut current = child.clone();
     loop {
-        if Rc::ptr_eq(&current, ancestor) { return true; }
+        // Recursively walk included modules so transitive includes
+        // (`include M; M includes N` ⇒ `class_is_a(C, N) == true`)
+        // resolve. Matches CRuby's rescue-filter behaviour and the
+        // `is_a?` / `kind_of?` predicates.
+        if walks_through(&current, ancestor) { return true; }
         let parent = current.superclass.borrow().clone();
         match parent {
             Some(p) => current = p,
@@ -300,6 +332,7 @@ mod tests {
             name: name.to_string(),
             methods: RefCell::new(HashMap::new()),
             singleton_methods: RefCell::new(HashMap::new()),
+            includes: RefCell::new(Vec::new()),
             superclass: RefCell::new(superclass),
         })
     }

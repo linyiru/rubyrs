@@ -158,9 +158,12 @@ impl Vm {
                 return Ok(());
             }
             // `include Mod` inside a class body — `self` is the
-            // class, name resolves with no receiver. Mirrors the
-            // explicit-receiver branch below; see the comment
-            // there for the copy semantics.
+            // class, name resolves with no receiver. Pushes the
+            // source onto the target's `includes` chain (instead
+            // of copying methods); `lookup_method_uncached` then
+            // walks the chain at dispatch time. Bumps method_gen
+            // so any monomorphic inline cache entry that thought
+            // the class lacked the included methods invalidates.
             if (&*name == "include" || &*name == "extend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
                     for a in &args {
@@ -173,12 +176,15 @@ impl Vm {
                                 ),
                             })),
                         };
-                        let src_methods = src.methods.borrow();
-                        let mut tgt_methods = target.methods.borrow_mut();
-                        for (mid, m) in src_methods.iter() {
-                            tgt_methods.entry(*mid).or_insert_with(|| m.clone());
+                        // CRuby last-included-wins: push to the
+                        // front so it's checked first by the lookup
+                        // walk (which goes head-to-tail).
+                        let mut chain = target.includes.borrow_mut();
+                        if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
+                            chain.insert(0, src);
                         }
                     }
+                    self.method_gen = self.method_gen.wrapping_add(1);
                     self.stack.push(self_val.clone());
                     return Ok(());
                 }
@@ -384,6 +390,9 @@ impl Vm {
             }
         if let Value::Class(target) = &recv
             && (&*name == "include" || &*name == "extend") && !args.is_empty() {
+                // Explicit-receiver form: `MyClass.include(Mod)`.
+                // Same chain-push semantics as the no-receiver
+                // form above — see that comment for the rationale.
                 for a in &args {
                     let src = match a {
                         Value::Class(c) => c.clone(),
@@ -394,15 +403,70 @@ impl Vm {
                             ),
                         })),
                     };
-                    let src_methods = src.methods.borrow();
-                    let mut tgt_methods = target.methods.borrow_mut();
-                    for (mid, m) in src_methods.iter() {
-                        tgt_methods.entry(*mid).or_insert_with(|| m.clone());
+                    let mut chain = target.includes.borrow_mut();
+                    if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
+                        chain.insert(0, src);
                     }
                 }
+                self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(recv.clone());
                 return Ok(());
             }
+        // Universal class predicates: `is_a?` / `kind_of?` walk
+        // the ancestor chain (own class + includes + superclass);
+        // `instance_of?` is exact-class only. CRuby exposes both
+        // on `Object`, so they apply to every receiver — for
+        // primitives (Int / Str / Sym / ...) we resolve their
+        // class via `class_of`.
+        if matches!(&*name, "is_a?" | "kind_of?" | "instance_of?") && args.len() == 1
+            && let Value::Class(target) = &args[0] {
+                let recv_class_v = self.class_of(&recv);
+                let recv_class = if let Value::Class(c) = recv_class_v { c } else {
+                    self.stack.push(Value::Bool(false));
+                    return Ok(());
+                };
+                let result = if &*name == "instance_of?" {
+                    Rc::ptr_eq(&recv_class, target)
+                } else {
+                    super::class_is_a(&recv_class, target)
+                };
+                self.stack.push(Value::Bool(result));
+                return Ok(());
+            }
+        // Class introspection: `ancestors` / `include?`. Walks the
+        // chain via `class_is_a` (covers superclass + includes).
+        // Returned Array is freshly allocated, so the path needs
+        // heap access — kept here rather than in `primitive_call`.
+        if let Value::Class(cls) = &recv {
+            match (&*name, args.as_slice()) {
+                ("ancestors", []) => {
+                    let mut chain: Vec<Value> = Vec::new();
+                    let mut current = cls.clone();
+                    loop {
+                        chain.push(Value::Class(current.clone()));
+                        for inc in current.includes.borrow().iter() {
+                            chain.push(Value::Class(inc.clone()));
+                        }
+                        let parent = current.superclass.borrow().clone();
+                        match parent {
+                            Some(p) => current = p,
+                            None => break,
+                        }
+                    }
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::Array(chain));
+                    self.stack.push(Value::Array(id));
+                    return Ok(());
+                }
+                ("include?", [Value::Class(m)]) => {
+                    let included = super::class_is_a(cls, m);
+                    self.stack.push(Value::Bool(included));
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());

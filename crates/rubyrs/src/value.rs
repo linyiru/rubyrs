@@ -118,6 +118,13 @@ pub struct Class {
     /// (Object); every user-defined class has a superclass (defaulting to
     /// Object if not specified).
     pub(crate) superclass: RefCell<Option<Rc<Class>>>,
+    /// Modules included into this class via `include Mod`. Stored in
+    /// reverse-include order (last-included first), matching CRuby's
+    /// "most recently included wins" lookup sequence. Method dispatch
+    /// in `lookup_method_uncached` walks them after the class's own
+    /// methods but before the superclass chain. `Class#ancestors`
+    /// renders them between the class itself and its superclass.
+    pub(crate) includes: RefCell<Vec<Rc<Class>>>,
 }
 
 #[derive(Debug)]

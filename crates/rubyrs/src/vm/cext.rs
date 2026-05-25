@@ -875,6 +875,7 @@ impl Vm {
                     methods: RefCell::new(HashMap::new()),
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(None),
+                    includes: RefCell::new(Vec::new()),
                 });
                 self.classes.insert(name_sym, new_class);
             }
