@@ -151,6 +151,14 @@ pub struct Class {
     /// methods but before the superclass chain. `Class#ancestors`
     /// renders them between the class itself and its superclass.
     pub(crate) includes: RefCell<Vec<Rc<Class>>>,
+    /// L3-F: optional cext-side allocator. When `Klass.new(args)` is
+    /// dispatched and this is `Some(fn)`, the host calls `fn(klass)`
+    /// to produce the instance handle (typically a
+    /// `TypedData_Wrap_Struct`-wrapped Object) instead of allocating
+    /// a bare `Instance`. `initialize` is then called on the
+    /// returned handle. Set only via cext-side `rb_define_alloc_func`
+    /// drained by `Vm::cext_require`.
+    pub(crate) cext_alloc_func: Cell<Option<rubyrs_cext::OpaqueFn>>,
 }
 
 #[derive(Debug)]

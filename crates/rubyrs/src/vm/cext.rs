@@ -980,6 +980,7 @@ impl Vm {
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(None),
                     includes: RefCell::new(Vec::new()),
+                    cext_alloc_func: std::cell::Cell::new(None),
                 });
                 self.classes.insert(name_sym, new_class);
             }
@@ -1027,6 +1028,34 @@ impl Vm {
                             cext_dispatch(&qualified, func, arity, args, CextSelfHandle::Class(&class_name))
                         }),
                     );
+            }
+
+            // L3-F: install per-class custom allocators. Looks up the
+            // target class by joined name; if found, stash the cext
+            // allocator fn in its `cext_alloc_func` slot so
+            // `Klass.new(args)` routes through the cext-side
+            // allocator before calling `initialize`.
+            //
+            // PR #50 review #4: registered_classes is drained BEFORE
+            // alloc_funcs (a few blocks up), so by this point every
+            // class the cext declared is in self.classes. An alloc_func
+            // pointing at an unknown class means the cext called
+            // rb_define_alloc_func without a prior rb_define_class_under
+            // — a contract violation that would silently produce bare
+            // Instance receivers at .new time, leading to confusing
+            // TypeError far from the cause. Panic instead so cext
+            // authors find the bug immediately.
+            for af in state.registered_alloc_funcs {
+                let name_sym = self.interner.intern(&af.class_joined_name);
+                let cls = self.classes.get(&name_sym).unwrap_or_else(|| {
+                    panic!(
+                        "ICE: rb_define_alloc_func for unregistered class {:?} \
+                         — cext called rb_define_alloc_func before (or instead of) \
+                         rb_define_class_under",
+                        af.class_joined_name
+                    )
+                });
+                cls.cext_alloc_func.set(Some(af.func));
             }
 
             // Level 0: keep the library mapped for the lifetime of the

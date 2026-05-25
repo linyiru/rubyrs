@@ -715,6 +715,7 @@ impl Vm {
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(parent.clone()),
                     includes: RefCell::new(Vec::new()),
+                    cext_alloc_func: std::cell::Cell::new(None),
                 })).clone();
                 // If the class already existed (reopened) and the user specified a parent
                 // this time, update it (only if it wasn't already set to something else).

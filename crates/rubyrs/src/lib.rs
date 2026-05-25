@@ -322,7 +322,9 @@ mod _cext_l3d_exports {
     #[used] static D4: unsafe extern "C" fn(Value, Value) -> c_int = rb_obj_is_kind_of;
     #[used] static D5: unsafe extern "C" fn(Value, ID) -> c_int = rb_respond_to;
     #[used] static D6: unsafe extern "C" fn(Value, *const c_char, *const c_char) = rb_define_alias;
-    #[used] static D7: unsafe extern "C" fn(Value, extern "C" fn(Value) -> Value) = rb_define_alloc_func;
+    // L3-F: rb_define_alloc_func now lives in main lib.rs (was stub) —
+    // signature uses OpaqueFn since the cext side stores it that way.
+    #[used] static D7: unsafe extern "C" fn(Value, rubyrs_cext::OpaqueFn) = rubyrs_cext::rb_define_alloc_func;
     #[used] static D8: unsafe extern "C" fn(Value, *const c_char, rubyrs_cext::OpaqueFn, c_int) = rb_define_private_method;
     #[used] static D9: unsafe extern "C" fn(Value, *const c_char) -> Value = rb_define_module_under;
     #[used] static D10: unsafe extern "C" fn(Value, ID) -> Value = rb_const_get;
