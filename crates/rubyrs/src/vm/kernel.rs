@@ -485,28 +485,88 @@ impl Vm {
             n_given_positional: 0,
             rescues: vec![],
         });
-        // Roll the loaded-features mark back on error or non-local
-        // return so a retry can attempt the load again — matches
-        // CRuby semantics (a failed require/require_relative does
-        // NOT leave the feature marked as loaded). The mid-
-        // execution mark is still needed for circular-require
-        // correctness; we just can't leave it in place if the body
-        // bailed out.
-        if let Err(trap) = self.dispatch_until(depth_before) {
-            self.loaded_features.remove(&canon);
-            return Err(trap);
+        // Dispatch loop. We can't just call `dispatch_until` and
+        // bail on the first method_return: a non-local `return`
+        // INSIDE the required file (e.g. `def helper;
+        // arr.each { return }; end; helper`) targets a method
+        // defined WITHIN the file and should unwind locally,
+        // letting the rest of the file keep loading. Only escape
+        // when the unwind would pop our pushed <main> frame.
+        //
+        // Structure mirrors `Vm::dispatch`'s loop body around the
+        // method_return arm, but with a depth cap so we stop at
+        // `depth_before` instead of `frames.is_empty()`.
+        loop {
+            // Step until method_return fires or we drop to
+            // depth_before (normal completion / outer rescue
+            // unwound past us).
+            if let Err(trap) = self.dispatch_until(depth_before) {
+                self.loaded_features.remove(&canon);
+                return Err(trap);
+            }
+            if self.method_return.is_none() {
+                // Either Op::Return on our <main> (frames at
+                // depth_before with value on stack), or outer
+                // rescue unwound below (frames < depth_before).
+                // The stack-length check below distinguishes.
+                break;
+            }
+            // method_return is set; mimic dispatch's unwind. If it
+            // stays within the required file (frames > depth_before
+            // after unwind), continue dispatching. If the unwind
+            // would pop OUR <main> frame or beyond, the return
+            // escapes — bail with suppress flag.
+            let val = self.method_return.take().unwrap();
+            // Pop block frames (handling class_eval block + class
+            // body bookkeeping).
+            while let Some(f) = self.frames.last() {
+                if !f.is_block { break; }
+                if self.frames.len() <= depth_before + 1 {
+                    // Next pop would be our <main> — escape.
+                    break;
+                }
+                let f = self.frames.pop().unwrap();
+                self.stack.truncate(f.base_sp);
+                if f.is_class_body {
+                    let _cls = self.class_stack.pop()
+                        .expect("ICE: class_stack empty unwinding through class_eval (require_relative)");
+                    self.class_visibility_stack.pop();
+                }
+            }
+            if self.frames.len() <= depth_before + 1 {
+                // The next pop would be our <main>, meaning the
+                // non-local return targets either our <main> itself
+                // (treat as file-return-with-value) or something
+                // above it (escapes). Either way, restore the
+                // method_return signal and exit the loop — the
+                // post-loop bookkeeping decides between
+                // "successful load with this value as result" and
+                // "outer unwind takes over".
+                self.method_return = Some(val);
+                break;
+            }
+            // Pop the enclosing method frame, mirroring dispatch.
+            let f = self.frames.pop().unwrap();
+            self.stack.truncate(f.base_sp);
+            if f.is_class_body {
+                let cls = self.class_stack.pop()
+                    .expect("ICE: class_stack empty on method-return (require_relative)");
+                self.class_visibility_stack.pop();
+                self.stack.push(Value::Class(cls));
+            } else if let Some(r) = f.swap_return {
+                self.stack.push(r);
+            } else {
+                self.stack.push(val);
+            }
+            // Continue dispatching at the method's caller (still
+            // inside required file body since we capped at
+            // depth_before + 1).
         }
-        // `dispatch_until` returns `Ok(())` early when
-        // `method_return` is set (a non-local `return` from inside
-        // a block propagating up); the frames stack hasn't unwound
-        // to `depth_before` yet — the outer dispatch loop will
-        // finish the unwind. In that state we must NOT claim a
-        // successful load: roll back the feature mark, skip the
-        // stack pop (there's no clean return value at the top), and
-        // return a placeholder Nil that the outer unwind will
-        // discard along with everything else.
+        // If method_return is still set, the unwind targeted our
+        // <main> or above — let the outer dispatch finish it.
         if self.method_return.is_some() {
             self.loaded_features.remove(&canon);
+            self.suppress_call_result_push = true;
             return Ok(Value::Nil);
         }
         // Outer-rescue-unwound-past-us case. When an exception

@@ -11,6 +11,14 @@ puts greet("Mochi")
 # Top-level constant from the loaded file is reachable.
 puts SHARED
 
+# PROBED was set by a method that does a non-local return from
+# inside a block during the file's loading. Verifies the
+# require_relative dispatch loop handles the method_return
+# unwind LOCALLY (within the required file) instead of bailing
+# at the first signal — earlier rounds did the latter and SHARED
+# above would never have been defined.
+puts PROBED
+
 # A class defined in the loaded file works the same as one
 # defined inline.
 g = Greeter.new("hi")
