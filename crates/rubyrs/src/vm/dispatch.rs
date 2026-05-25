@@ -554,6 +554,44 @@ impl Vm {
                 self.dispatch_until(pre_frames)?;
                 return Ok(());
             }
+        // `Object#method(:name)` — capture (recv, name_id) into a
+        // BoundMethod heap object. Returned Value can be `.call`'d
+        // (handled in the next arm) or stored. Args must be a
+        // single Symbol; CRuby also accepts String but we keep
+        // the subset narrow for now.
+        if &*name == "method" && args.len() == 1
+            && let Value::Sym(bound_name_id) = &args[0] {
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::BoundMethod {
+                    recv: recv.clone(),
+                    name_id: *bound_name_id,
+                });
+                self.stack.push(Value::BoundMethod(id));
+                return Ok(());
+            }
+        // `bm.call(args)` / `bm.()` / `bm[args]` — dispatch the
+        // captured method on the captured receiver. We re-enter
+        // `do_call` recursively with the bound recv pushed below
+        // the args, the captured name interned, and the original
+        // argc.
+        if let Value::BoundMethod(bid) = &recv
+            && matches!(&*name, "call" | "[]" | "()") {
+                let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
+                    HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+                    _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
+                };
+                let argc = args.len();
+                self.stack.push(bm_recv);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call(
+                    bm_name_id, argc,
+                    /* no_recv = */ false,
+                    /* cache_id = */ u16::MAX,
+                );
+            }
         if let Value::Class(target) = &recv
             && (&*name == "include" || &*name == "extend") && !args.is_empty() {
                 // Explicit-receiver form: `MyClass.include(Mod)`.

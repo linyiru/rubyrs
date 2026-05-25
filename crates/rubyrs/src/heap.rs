@@ -40,6 +40,10 @@ pub(crate) enum HeapObj {
     /// catch accidental loss of callers — review #1 on PR #22.
     #[cfg_attr(target_os = "wasi", allow(dead_code))]
     TypedData(TypedDataObj),
+    /// `Object#method(:name)` result. `recv` is any Value the GC
+    /// must walk; `name_id` is the captured method name. `.call`
+    /// dispatches the captured method on the captured receiver.
+    BoundMethod { recv: Value, name_id: crate::intern::SymId },
 }
 
 /// Heap representation of a CRuby-shape TypedData object. See
@@ -318,6 +322,12 @@ impl Heap {
                     drop(captured);
                     Heap::visit_value(&bh.self_val, &mut self.marks, &mut worklist);
                 }
+                Slot::Live(HeapObj::BoundMethod { recv, .. }) => {
+                    // Walk the captured receiver. The method name
+                    // is a SymId (not heap-managed) so no further
+                    // visit is needed.
+                    Heap::visit_value(recv, &mut self.marks, &mut worklist);
+                }
                 _ => {}
             }
         }
@@ -393,6 +403,7 @@ impl Value {
             Value::Range(_) => "Range",
             Value::Block(_) => "Proc", // block lives in heap now (P2-13); type name unchanged
             Value::Regex(_) => "Regexp",
+            Value::BoundMethod(_) => "Method",
         }
     }
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
@@ -477,6 +488,7 @@ impl Value {
             }
             Value::Block(_) => "#<Proc>".into(),
             Value::Regex(r) => format!("(?-mix:{})", r.as_str()),
+            Value::BoundMethod(_) => "#<Method>".into(),
         }
     }
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {

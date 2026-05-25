@@ -171,3 +171,4 @@ fn run_diff(name: &str) {
 #[test] fn mixed_splat_call() { run_diff("mixed_splat_call"); }
 #[test] fn protected_method() { run_diff("protected_method"); }
 #[test] fn regex_sub() { run_diff("regex_sub"); }
+#[test] fn method_object() { run_diff("method_object"); }

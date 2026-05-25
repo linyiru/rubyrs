@@ -83,6 +83,12 @@ pub enum Value {
     /// `\k<name>` backrefs, look-around in some forms) are
     /// documented in SUBSET.md.
     Regex(std::rc::Rc<regex::Regex>),
+    /// `Object#method(:foo)` result — a captured (receiver,
+    /// method-name) pair. Heap-managed so the GC walks the
+    /// inner receiver (it can hold any other Value, including
+    /// other heap references). `.call(args)` / `.()` / `[args]`
+    /// dispatches the captured method on the captured receiver.
+    BoundMethod(ObjId),
 }
 
 #[derive(Debug)]
