@@ -225,10 +225,10 @@ pub(crate) struct Proto {
     /// Count of leading required positional params. `params[0..n]`
     /// must be supplied by the caller; `params[n..positional_max]`
     /// are optionals whose defaults are evaluated by the method
-    /// body's entry prologue (a sequence of `Op::JumpIfArgGiven`
-    /// + default-expr + `Op::StoreLocal` per optional slot, emitted
-    /// by the compiler). Required params always come before
-    /// optionals in source order. Defaults can be arbitrary
+    /// body's entry prologue (`JumpIfArgGiven` then the default
+    /// expression then `StoreLocal`, one triple per optional slot,
+    /// emitted by the compiler). Required params always come
+    /// before optionals in source order. Defaults can be arbitrary
     /// expressions (`def f(a, b=a+1)`, `def f(level=Logger::INFO)`)
     /// because the prologue runs after positional slots are
     /// bound — there's no compile-time-literal restriction.
