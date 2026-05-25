@@ -63,3 +63,40 @@ while m < 3
   m = m + 1
 end
 puts "5: m=#{m} hits=#{hits}"
+
+# 6. Post-condition `begin...end while cond` form. Reviewer
+#    (Angle A) flagged the post arm of the while codegen as
+#    untested — same EnterLoop/ExitLoop wrapping but
+#    body-then-cond order, so a stack-balance regression there
+#    would slip past the pre-form cases.
+n = 0
+v6 = begin
+  n = n + 1
+  break "done at #{n}" if n == 3
+  "loop"
+end while n < 100
+puts "6: n=#{n} v=#{v6.inspect}"
+
+# 7. raise out of inner while caught by outer-while-surrounding
+#    rescue → the outer's loop_rescue_depths must not retain an
+#    orphan entry. Reviewer (Angle A/C) reproduced via a
+#    constructed scenario; this minimal version exercises the
+#    same path: outer while encloses a begin/rescue that wraps
+#    an inner while which raises. After the rescue runs, the
+#    outer continues; its `break` must read the outer's depth,
+#    not a leaked inner-loop entry. Without the unwind-side
+#    truncate this `break` would pop the wrong handler count
+#    and the assertion below would diverge.
+outer = 0
+while outer < 5
+  begin
+    while true
+      raise "inner-raise"
+    end
+  rescue => e
+    # nothing; just consume the exception
+  end
+  outer = outer + 1
+  break if outer == 3
+end
+puts "7: outer=#{outer}"

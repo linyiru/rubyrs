@@ -3,3 +3,5 @@
 3: k=7
 4: v=42
 5: m=3 hits=6
+6: n=3 v="loop"
+7: outer=3

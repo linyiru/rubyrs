@@ -770,7 +770,9 @@ impl Vm {
                 self.stack.push(Value::Hash(id));
             }
             Op::PushRescue(off, slot, bind, filter_sym) => {
-                let ip = self.frames.last().expect("ICE: PushRescue no frame").ip;
+                let f = self.frames.last().expect("ICE: PushRescue no frame");
+                let ip = f.ip;
+                let loop_depth = f.loop_rescue_depths.len();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
@@ -785,19 +787,22 @@ impl Vm {
                 let filter = self.classes.get(&filter_sym).cloned();
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
-                    filter_class: filter,
+                    filter_class: filter, loop_depth_at_push: loop_depth,
                 });
             }
             Op::PopRescue => {
                 self.frames.last_mut().expect("ICE: PopRescue no frame").rescues.pop();
             }
             Op::PushEnsure(off) => {
-                let ip = self.frames.last().expect("ICE: PushEnsure no frame").ip;
+                let f = self.frames.last().expect("ICE: PushEnsure no frame");
+                let ip = f.ip;
+                let loop_depth = f.loop_rescue_depths.len();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 self.frames.last_mut().expect("ICE: PushEnsure no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
                     filter_class: None, // ensure is unconditional
+                    loop_depth_at_push: loop_depth,
                 });
             }
             Op::PopEnsure => {
@@ -837,6 +842,25 @@ impl Vm {
                 let f = self.frames.last_mut().expect("ICE: BreakLoop no frame");
                 let target_depth = *f.loop_rescue_depths.last()
                     .expect("ICE: BreakLoop outside a while loop");
+                // Detect `break` that would skip an `ensure` body. In
+                // CRuby, `break` inside a `begin … ensure … end`
+                // inside a `while` MUST run the ensure block before
+                // exiting the loop; carrying the break value through
+                // ensure-unwind needs a break-aware Trap variant and
+                // a corresponding hook in `Op::Raise`, which is too
+                // large to land in the same PR as the basic break
+                // semantics fix. For now, refuse the case cleanly
+                // (Trap::RuntimeError) instead of silently dropping
+                // the ensure body — see SUBSET.md and the
+                // `break_through_ensure_not_yet_supported` test.
+                let has_pending_ensure = f.rescues[target_depth..]
+                    .iter().any(|h| h.is_ensure);
+                if has_pending_ensure {
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: "break inside `ensure` of a while loop is not yet supported \
+                              (would skip the ensure body). Track at SUBSET.md.".to_string(),
+                    }));
+                }
                 while f.rescues.len() > target_depth { f.rescues.pop(); }
                 // Same jump arithmetic as `Op::Jump` — dispatch has
                 // already advanced `f.ip` past this BreakLoop, so the

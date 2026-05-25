@@ -162,6 +162,14 @@ impl Vm {
                 self.stack.truncate(h.stack_depth);
                 let f = self.frames.last_mut().expect("ICE: frames disappeared");
                 f.ip = h.handler_ip;
+                // Truncate `loop_rescue_depths` to the snapshot taken
+                // when this handler was pushed: any `while` loops the
+                // exception is unwinding OUT of had their `EnterLoop`
+                // entries leak on the stack (we jumped to the handler
+                // without their `ExitLoop` running). Without this fix
+                // a later `BreakLoop` in this frame reads an orphan
+                // entry and pops the wrong handler depth.
+                f.loop_rescue_depths.truncate(h.loop_depth_at_push);
                 if h.is_ensure {
                     // ensure handler: push the exception onto the operand
                     // stack; the handler's compiled code ends in `Op::Raise`
