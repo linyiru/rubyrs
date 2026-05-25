@@ -57,7 +57,7 @@ describe "Array#take" do
   # exercised by other ruby/spec files we may ingest
   # later.
   #
-  # it 'returns a Array instance for Array subclasses' do
+  # it 'returns an Array instance for Array subclasses' do
   #   assert(ArraySpecs::MyArray[1, 2, 3, 4, 5].take(1).instance_of?(Array))
   # end
 end
