@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["ruby", "rubyspec", "testing", "rewriter", "prism"]
+categories = ["development-tools::testing", "command-line-utilities"]
 
 [[bin]]
 name = "rubyrs-spec-extract"

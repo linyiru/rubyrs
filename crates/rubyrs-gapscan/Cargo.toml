@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["ruby", "ast", "coverage", "prism", "rubyrs"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "rubyrs-gapscan"
@@ -17,5 +20,5 @@ path = "src/lib.rs"
 
 [dependencies]
 ruby-prism.workspace = true
-rubyrs = { path = "../rubyrs" }
+rubyrs = { path = "../rubyrs", version = "0.1.0" }
 serde_json.workspace = true

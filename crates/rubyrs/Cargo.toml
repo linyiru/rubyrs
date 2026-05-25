@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["ruby", "interpreter", "prism", "dsl", "embedded"]
+categories = ["compilers", "wasm", "command-line-utilities"]
 
 [dependencies]
 ruby-prism.workspace = true
@@ -20,7 +23,7 @@ regex = "1"
 # symbols stay in the binary on wasi too (the `#[used]` exports in
 # `src/lib.rs` are valid on every target) — they're just unreachable
 # without a working `require`-cext path.
-rubyrs-cext = { path = "../rubyrs-cext" }
+rubyrs-cext = { path = "../rubyrs-cext", version = "0.1.0" }
 
 # `libloading` is only meaningful where there's a dynamic loader.
 # wasm32-wasip1 has no `dlopen`; gating the dep here lets the WASI
