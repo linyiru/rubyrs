@@ -670,7 +670,10 @@ pub fn render_markdown(report: &Report, top: usize) -> String {
 
     let bareword = report.bareword_calls_sorted();
     let _ = writeln!(s, "\n### Top bareword calls\n");
-    let _ = writeln!(s, "Bareword (no-receiver) calls are the eye-opener — `require`, `attr_*`, `include`, `private`, etc. parse as CallNode and so look syntactically supported, but rubyrs implements none of them.\n");
+    let _ = writeln!(
+        s,
+        "Bareword (no-receiver) calls mix genuine built-ins (`raise`, `puts`, `Integer` — implemented) with hidden gaps (`require`, `attr_*`, `include`, `private` — parse as CallNode so look Supported, but aren't). Scan the list for known-unsupported names; the count column alone won't tell you which is which.\n"
+    );
     let _ = writeln!(s, "| Method | Count |");
     let _ = writeln!(s, "|---|---:|");
     for (n, st) in bareword.iter().take(top) {

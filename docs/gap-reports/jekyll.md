@@ -55,7 +55,7 @@
 
 ### Top bareword calls
 
-Bareword (no-receiver) calls are the eye-opener — `require`, `attr_*`, `include`, `private`, etc. parse as CallNode and so look syntactically supported, but rubyrs implements none of them.
+Bareword (no-receiver) calls mix genuine built-ins (`raise`, `puts`, `Integer` — implemented) with hidden gaps (`require`, `attr_*`, `include`, `private` — parse as CallNode so look Supported, but aren't). Scan the list for known-unsupported names; the count column alone won't tell you which is which.
 
 | Method | Count |
 |---|---:|
