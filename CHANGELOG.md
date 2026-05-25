@@ -6,6 +6,40 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Internal
+- **CRuby-mirrored `vm.rs` split.** The 6593-line `vm.rs` is
+  split into per-type submodules under `crates/rubyrs/src/vm/`,
+  mirroring CRuby's file layout so "where does method X live?"
+  follows the same intuition as `string.c` / `array.c` / `hash.c`.
+  Behaviour-preserving moves only; every step kept the 79
+  `diff_cruby` fixtures byte-identical to CRuby. Modules now in
+  place (with their CRuby analogue):
+    - `vm/sprintf.rs` — sprintf.c (`ruby_sprintf` + width/prec parser)
+    - `vm/numeric.rs` — numeric.c (Int/Float primitives)
+    - `vm/string.rs` — string.c (String primitives, Regex shims)
+    - `vm/array.rs` — array.c (no-block Array methods)
+    - `vm/hash.rs` + `vm/range.rs` — hash.c / range.c
+    - `vm/iter.rs` — enum.c (block-form Enumerable filter family,
+      `iter_*_filter`, `collection_call_block`)
+    - `vm/kernel.rs` — object.c Kernel arms (`puts` / `p` /
+      `Integer()` / `Float()` / …)
+    - `vm/fileops.rs` — file.c (`File.read` / `File.exist?` …)
+    - `vm/raise.rs` — eval.c / eval_error.c (`normalize_exception`,
+      `trap_to_exception`, `unwind_with_exception`)
+    - `vm/cext.rs` — internal/value.h + vm_eval.c
+      (rb_funcallv callback installation, handle ↔ Value
+      translation, `cext_dispatch`)
+    - `vm/dispatch.rs` — vm_eval.c / vm_insnhelper.c (`do_call`,
+      `do_call_block`, `invoke_method`, `invoke_method_with_block`,
+      `invoke_block`, `cext_invoke_method`, `try_method_missing`)
+    - `vm/step.rs` — vm_exec.c (`dispatch`, `dispatch_until`,
+      the per-opcode `step` match)
+  Net effect: `vm.rs` from 6593 → ~1090 lines (Vm struct +
+  Frame/PinGuard/RescueHandler + cross-module helpers and
+  thread-local cext-reentrance machinery). No
+  perf regression; fizzbuzz 1M and Counter.inc 1M benchmarks
+  unchanged within noise.
+
 ### Added
 - **`String#sub` / `#gsub` / `#tr` (literal forms).**
   Three commonly-needed string transformations. `sub` replaces
