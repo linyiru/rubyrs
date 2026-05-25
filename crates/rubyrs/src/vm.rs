@@ -1,9 +1,4 @@
 use std::cell::RefCell;
-// `Cell` is only used by the cext-reentrance machinery (CURRENT_VM_PTR),
-// itself wasi-stubbed; gate the import so the wasi build doesn't see
-// it as unused under `-D warnings`.
-#[cfg(not(target_os = "wasi"))]
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::env;
 use std::rc::Rc;
@@ -31,6 +26,8 @@ mod sprintf;
 mod step;
 mod string;
 mod util;
+#[cfg(not(target_os = "wasi"))]
+pub(crate) use cext::with_vm_ptr_set;
 pub(crate) use lookup::{class_is_a, CallCache};
 pub(crate) use primitive::primitive_call;
 pub(crate) use sprintf::ruby_sprintf;
@@ -362,66 +359,8 @@ impl Vm {
     }
 }
 
-// Thread-local raw pointer to the currently-active Vm during a
-// host-fn call. Set by `do_call` (via `with_vm_ptr_set`) before
-// invoking entries from `host_fns` / `cext_class_methods`, cleared
-// after. Read by `cext_dispatch` when installing the `rb_funcallv`
-// callback so re-entrant C-to-Ruby calls dispatch on the right Vm.
-//
-// SAFETY / BORROW ALIASING NOTE — this deliberately routes around
-// Rust's borrow checker. When `do_call` invokes a host fn, `&mut
-// self` is held for the duration of that call. If the host fn
-// re-enters the Vm via `rb_funcallv`, the callback dereferences
-// this raw pointer to obtain a fresh `&mut Vm`, aliasing the outer
-// borrow. Stacked Borrows considers this UB; Tree Borrows is more
-// permissive. In practice the two `&mut`s are time-disjoint (only
-// one is used at any instant). Documented here so a future
-// contributor doesn't "fix" it by sprinkling `&mut self` borrows
-// that violate the invariant. See ADR (forthcoming) for the
-// safer-but-bigger refactor that would move Vm into an
-// `UnsafeCell`-flavoured container.
-//
-// Wasi-gated for the same reason `cext_dispatch` is: the cext path
-// is unreachable when there's no dynamic loader.
-#[cfg(not(target_os = "wasi"))]
-thread_local! {
-    pub(crate) static CURRENT_VM_PTR: Cell<*mut Vm> = const { Cell::new(std::ptr::null_mut()) };
-}
-
-/// RAII guard that restores [`CURRENT_VM_PTR`] to its previous value
-/// when dropped — runs the restore on **every** scope exit, including
-/// panic unwinding. Without this guard, a panic inside the host fn
-/// (e.g. from arg interning before `cext_dispatch` installs its
-/// `with_caught_unwind` boundary) would leave a stale Vm pointer in
-/// `CURRENT_VM_PTR`; a subsequent host-fn call would then dereference
-/// it as a fresh `*mut Vm`, hitting use-after-free or worse.
-#[cfg(not(target_os = "wasi"))]
-struct VmPtrGuard {
-    prev: *mut Vm,
-}
-
-#[cfg(not(target_os = "wasi"))]
-impl Drop for VmPtrGuard {
-    fn drop(&mut self) {
-        CURRENT_VM_PTR.with(|c| c.set(self.prev));
-    }
-}
-
-/// Run `f` with [`CURRENT_VM_PTR`] set to `vm_ptr`, restoring the
-/// previous value (likely null) on **all** exit paths — normal return
-/// or panic unwinding — via [`VmPtrGuard`]. Save/restore lets nested
-/// cext calls (rb_funcallv → another host fn) work without the inner
-/// call clobbering the outer's pointer.
-#[cfg(not(target_os = "wasi"))]
-pub(crate) fn with_vm_ptr_set<R>(vm_ptr: *mut Vm, f: impl FnOnce() -> R) -> R {
-    let prev = CURRENT_VM_PTR.with(|c| c.replace(vm_ptr));
-    let _guard = VmPtrGuard { prev };
-    f()
-}
-
-// `current_vm_ptr` + `CExtStateGuard` + `FuncallCallbackGuard` +
-// `TypedDataCallbackGuard` moved to `vm/cext.rs`.
-
+// cext-reentrance machinery (CURRENT_VM_PTR + VmPtrGuard + with_vm_ptr_set)
+// moved to `vm/cext.rs`.
 // `file_class_dispatch` moved to `vm/fileops.rs`.
 //
 // (The `with_caught_unwind` helper that used to live here was

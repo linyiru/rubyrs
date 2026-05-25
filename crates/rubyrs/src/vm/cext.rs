@@ -20,7 +20,7 @@
 
 #![cfg(not(target_os = "wasi"))]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -28,7 +28,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{Class, Value};
 
-use super::{PinGuard, Vm, CURRENT_VM_PTR};
+use super::{PinGuard, Vm};
 
 fn current_vm_ptr() -> *mut Vm {
     CURRENT_VM_PTR.with(|c| c.get())
@@ -121,6 +121,61 @@ impl Drop for TypedDataCallbackGuard {
         rubyrs_cext::pop_typed_data_wrap_callback();
     }
 }
+
+
+// Thread-local raw pointer to the currently-active Vm during a
+// host-fn call. Set by `do_call` (via `with_vm_ptr_set`) before
+// invoking entries from `host_fns` / `cext_class_methods`, cleared
+// after. Read by `cext_dispatch` when installing the `rb_funcallv`
+// callback so re-entrant C-to-Ruby calls dispatch on the right Vm.
+//
+// SAFETY / BORROW ALIASING NOTE — this deliberately routes around
+// Rust's borrow checker. When `do_call` invokes a host fn, `&mut
+// self` is held for the duration of that call. If the host fn
+// re-enters the Vm via `rb_funcallv`, the callback dereferences
+// this raw pointer to obtain a fresh `&mut Vm`, aliasing the outer
+// borrow. Stacked Borrows considers this UB; Tree Borrows is more
+// permissive. In practice the two `&mut`s are time-disjoint (only
+// one is used at any instant). Documented here so a future
+// contributor doesn't "fix" it by sprinkling `&mut self` borrows
+// that violate the invariant. See ADR (forthcoming) for the
+// safer-but-bigger refactor that would move Vm into an
+// `UnsafeCell`-flavoured container.
+//
+// Wasi-gated for the same reason `cext_dispatch` is: the cext path
+// is unreachable when there's no dynamic loader.
+thread_local! {
+    pub(crate) static CURRENT_VM_PTR: Cell<*mut Vm> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// RAII guard that restores [`CURRENT_VM_PTR`] to its previous value
+/// when dropped — runs the restore on **every** scope exit, including
+/// panic unwinding. Without this guard, a panic inside the host fn
+/// (e.g. from arg interning before `cext_dispatch` installs its
+/// `with_caught_unwind` boundary) would leave a stale Vm pointer in
+/// `CURRENT_VM_PTR`; a subsequent host-fn call would then dereference
+/// it as a fresh `*mut Vm`, hitting use-after-free or worse.
+struct VmPtrGuard {
+    prev: *mut Vm,
+}
+
+impl Drop for VmPtrGuard {
+    fn drop(&mut self) {
+        CURRENT_VM_PTR.with(|c| c.set(self.prev));
+    }
+}
+
+/// Run `f` with [`CURRENT_VM_PTR`] set to `vm_ptr`, restoring the
+/// previous value (likely null) on **all** exit paths — normal return
+/// or panic unwinding — via [`VmPtrGuard`]. Save/restore lets nested
+/// cext calls (rb_funcallv → another host fn) work without the inner
+/// call clobbering the outer's pointer.
+pub(crate) fn with_vm_ptr_set<R>(vm_ptr: *mut Vm, f: impl FnOnce() -> R) -> R {
+    let prev = CURRENT_VM_PTR.with(|c| c.replace(vm_ptr));
+    let _guard = VmPtrGuard { prev };
+    f()
+}
+
 
 
 /// Translate a C-side opaque handle back into a `Value`. Currently
