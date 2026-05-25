@@ -187,3 +187,4 @@ fn run_diff(name: &str) {
 #[test] fn string_squeeze() { run_diff("string_squeeze"); }
 #[test] fn string_scan() { run_diff("string_scan"); }
 #[test] fn array_chunk_while() { run_diff("array_chunk_while"); }
+#[test] fn min_max_by_n() { run_diff("min_max_by_n"); }

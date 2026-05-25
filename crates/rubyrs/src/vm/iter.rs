@@ -860,6 +860,71 @@ impl Vm {
                 }
                 Some(Value::Array(result_id))
             }
+            // `arr.min_by(n) { |x| key(x) }` / `arr.max_by(n) { ... }`
+            // — top-n form. Returns an Array of `n` extremes
+            // sorted by key (ascending for min_by, descending for
+            // max_by). `n <= 0` yields `[]`; `n > len` yields all
+            // elements sorted. Uses a full sort_by then truncate,
+            // not a heap — O(n log n) is fine at the input sizes
+            // we see in our niche.
+            (Value::Array(id), "min_by", [Value::Int(n)])
+            | (Value::Array(id), "max_by", [Value::Int(n)]) => {
+                let want_min = name == "min_by";
+                if *n < 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("negative size ({})", n),
+                    }));
+                }
+                let n_take = *n as usize;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                if n_take == 0 || snapshot.is_empty() {
+                    return Ok(Some(Value::Array(result_id)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+                let mut early: Option<Value> = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
+                    }
+                    pairs.push((key, v));
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                let interner = &g.vm.interner;
+                // CRuby treats incomparable keys here as an error;
+                // we keep the same shape as sort_by — return None
+                // and let the caller surface NoMethodError.
+                let mut incomparable = false;
+                pairs.sort_by(|(ka, _), (kb, _)| {
+                    match value_cmp_v(ka, kb, interner) {
+                        Some(o) => o,
+                        None => { incomparable = true; std::cmp::Ordering::Equal }
+                    }
+                });
+                if incomparable { return Ok(None); }
+                let take = n_take.min(pairs.len());
+                let result_vec: Vec<Value> = if want_min {
+                    pairs.into_iter().take(take).map(|(_, v)| v).collect()
+                } else {
+                    // Largest n: reverse-sorted prefix.
+                    pairs.into_iter().rev().take(take).map(|(_, v)| v).collect()
+                };
+                *g.vm.heap.array_mut(result_id) = result_vec;
+                Some(Value::Array(result_id))
+            }
             (Value::Array(id), "min_by", []) | (Value::Array(id), "max_by", []) => {
                 // For each element, call the block once to produce a
                 // key. Track the running winner. Returns nil for an
