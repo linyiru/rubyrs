@@ -251,8 +251,10 @@ or instance-attached methods installed by a C extension live in
 independent dispatch tables and are NOT affected by this call."
 
 If a future ADR introduces v2-flavoured class methods, the
-dispatch sites in `vm/dispatch.rs` (currently lines ~349 and
-~474) will need parallel slot enums. None of that work is
+two dispatch sites in `vm/dispatch.rs` that consult
+`cext_instance_methods` (in the `Value::Object` receiver path)
+and `cext_class_methods` (in the `Value::Class` receiver
+path) will need parallel slot enums. None of that work is
 gated by 0014.
 
 ### Interner widening costs nothing today, but pins the API
