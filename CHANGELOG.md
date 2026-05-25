@@ -7,6 +7,89 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **cext spike: msgpack ext-type chain (L3-J / L3-K / A3 / A4).**
+  Four atomic commits that close out the "ship a custom Ruby
+  class through msgpack's `register_type` ext-type machinery"
+  use case end-to-end. The deliverables:
+  - **L3-J — `CValue::Symbol(String)` crosses the cext FFI.**
+    Adds the variant and wires the Vm ↔ cext translator both
+    directions (`Value::Sym(id) ↔ CValue::Symbol(name)` through
+    `vm.interner`). Upgrades the previously-stubbed
+    `rb_id2sym` / `rb_sym2id` / `rb_sym2str` from "rubyrs has
+    no Symbol CValue" placeholders to real implementations
+    over the existing thread-local intern table. `rb_value_type`
+    returns `T_SYMBOL` (9). Acceptance test
+    `cext_msgpack_symbol` exercises five Symbol literals
+    across the fixstr/str8 boundary; all five `Packer#write(:sym)`
+    → `Unpacker.read` round-trip byte-identical to MRI's
+    no-registration default behaviour.
+  - **L3-K — Proc/Block crosses the cext FFI.** Adds
+    `CValue::BlockRef(u32)` carrying `Value::Block(ObjId).0`;
+    new `rb_proc_call_with_block(proc, argc, argv, block)`
+    stub forwards through `rb_funcallv(proc, :call, argv)` so
+    msgpack's `protected_proc_call_safe` reaches Vm dispatch's
+    Block.call arm. `rb_cProc` sentinel handle (20). Surfaced
+    and fixed three pre-existing gaps along the way:
+      - `OBJ_FROZEN(v)` was hard-coded to `1` —
+        every cext mutation path that gates on `if (OBJ_FROZEN
+        (self)) rb_raise(FrozenError, …)` was firing. Flipped
+        to `0`.
+      - `rb_ary_new3(n, ...)` was returning an empty Array
+        because stable Rust can't take extern "C" variadics —
+        msgpack's ext-type registries stored
+        `[ext_module, proc, flags]` triples that emerged
+        empty, so every unpack-time lookup returned `Qnil` and
+        the proc never fired. Replaced with a header variadic
+        macro that counts `__VA_ARGS__` and dispatches to
+        arity-specialised non-variadic helpers
+        (`rubyrs_ary_new3_1` / `_2` / `_3`).
+      - The new helpers needed `#[used]` static references in
+        the rubyrs binary or the linker stripped them — bundle
+        dlopen'd cleanly but dlsym returned NULL and the first
+        call segfaulted. Added the same `#[used]`-static
+        pattern the rest of `crates/rubyrs/src/lib.rs` uses.
+    Acceptance test `cext_msgpack_proc` registers a Proc for
+    ext-type 0x07, feeds pre-built ext8 bytes, verifies the
+    Proc was invoked back through cext → Vm.
+  - **A3 — Class handle dedup against sentinels for full
+    Symbol round-trip.** `CExtState::intern(CValue::Class(name))`
+    now collapses to the seeded sentinel handle when the name
+    matches one of the 21-slot prelude (covering `rb_cObject`,
+    `rb_cString`, `rb_cSymbol`, `rb_cProc`, etc.). Without
+    this, a Vm-side `Value::Class(Symbol)` interned at a fresh
+    handle distinct from `rb_cSymbol = 10`, and msgpack's
+    `if (ext_module == rb_cSymbol) has_symbol_ext_type = true`
+    branch silently didn't fire — Symbol values then packed as
+    fixstr instead of ext-type 0x00. With the dedup
+    `Packer#write(:foo)` (after `register_type_internal(0x00,
+    Symbol, proc)`) emits `c7 03 00 66 6f 6f` matching MRI
+    byte-for-byte; `Unpacker.read` restores the Symbol type
+    through the registered `to_sym`-shaped proc. Acceptance
+    test `cext_msgpack_symbol_ext`. User classes (names not in
+    the sentinel set) still intern fresh; the dedup is bounded
+    by a new `SENTINEL_COUNT = 21` const with a
+    `debug_assert_eq!` keeping the seed list and constant
+    aligned.
+  - **A4 — application-defined ext-types.** Pins the general
+    "register custom ext-type for a user class" mechanism via
+    `register_type_internal`. Two cases in
+    `cext_msgpack_app_ext`: a `Color` user class round-trips
+    through ext-type `0x10` with a 3-byte payload; a `Stamp`
+    class round-trips through ext-type `-1` (the same id
+    msgpack-ruby's `lib/msgpack/time.rb` reserves for `Time`)
+    with an 8-byte `[sec, nsec].pack("NN")` payload. Both
+    byte-identical to MRI. Mixed-frame coverage (Int + Color +
+    String in the same buffer) verifies ext frames coexist
+    with normal frames without disturbing adjacent reads. Real
+    `Time` support is a separate subset addition (no `Time.now`
+    / `#to_i` / `#nsec` / `Time.at(sec, nsec, :nsec)` yet);
+    when it lands, the same Proc shape applies unchanged —
+    only the class arg changes.
+
+  Net effect of this cext sub-wave: 20 cext tests across 13
+  files all green; perf budgets within 35-50% headroom; Miri
+  (SB + TB) clean.
+
 - **Method / UnboundMethod / Proc reflection chain.** Full
   surface for the captured-method object family, in atomic
   commits:
