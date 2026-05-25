@@ -1,8 +1,23 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::intern::SymId;
+
+/// Method visibility. Default is `Public`; `private` / `protected`
+/// inside a class body changes the mode for subsequent `def`s and
+/// `private :sym` retroactively flips already-defined methods.
+/// `Protected` is enforced identically to `Public` for now (same-
+/// instance / same-class check is more invasive than the subset
+/// warrants) and `Private` blocks any call with an explicit
+/// receiver — `obj.priv_method` raises NoMethodError; `priv_method`
+/// (no receiver, implicit self) is allowed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Protected,
+    Private,
+}
 
 // ---------- Values ----------
 
@@ -78,4 +93,8 @@ pub struct Method {
     /// `<main>`, not inside any class body) have `None`; calling
     /// `super` from there raises NoMethodError.
     pub(crate) defining_class: Option<Rc<Class>>,
+    /// Method visibility. Set at `def` time from the surrounding
+    /// class body's current visibility mode, but mutable post-hoc
+    /// via `private :sym` / `public :sym` / `protected :sym`.
+    pub(crate) visibility: Cell<Visibility>,
 }

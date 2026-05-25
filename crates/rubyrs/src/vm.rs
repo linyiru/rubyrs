@@ -14,7 +14,7 @@ use crate::bytecode::{BinOpKind, Op, Proto};
 use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::heap::{Heap, HeapObj};
 use crate::intern::{Interner, SymId};
-use crate::value::{BlockHandle, Class, Instance, Method, ObjId, Value};
+use crate::value::{BlockHandle, Class, Instance, Method, ObjId, Value, Visibility};
 
 // ---------- VM ----------
 
@@ -162,6 +162,12 @@ pub(crate) struct Vm {
     /// the receiver is `Value::Class(c)`.
     pub(crate) cext_class_methods: HashMap<String, HashMap<SymId, Rc<HostFn>>>,
     pub(crate) class_stack: Vec<Rc<Class>>,
+    /// Per-class-body visibility mode, parallel to `class_stack`.
+    /// Pushed `Public` on `Op::DefClass` and popped when the class
+    /// body returns. Read by `Op::DefMethod` to stamp new methods
+    /// with the current visibility, and mutated by the no-arg
+    /// `private` / `protected` / `public` calls.
+    pub(crate) class_visibility_stack: Vec<Visibility>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -241,6 +247,7 @@ impl Vm {
             host_fns: HashMap::new(),
             cext_class_methods: HashMap::new(),
             class_stack: vec![],
+            class_visibility_stack: vec![],
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),
@@ -498,6 +505,7 @@ impl Vm {
                     if f.is_class_body {
                         let cls = self.class_stack.pop()
                             .expect("ICE: class_stack empty on method-return");
+                        self.class_visibility_stack.pop();
                         self.stack.push(Value::Class(cls));
                     } else if let Some(replacement) = f.swap_return {
                         self.stack.push(replacement);
@@ -742,6 +750,48 @@ impl Vm {
                     return Ok(());
                 }
             }
+            // `private` / `protected` / `public` inside a class
+            // body. With no args, switch the current visibility
+            // mode for any subsequent `def`s. With Symbol or
+            // String args, retroactively flip the visibility of
+            // the listed methods on the current class. Outside a
+            // class body these are no-ops returning nil — same
+            // shape as CRuby's Module#private at the toplevel.
+            if let Some(vis) = visibility_from_name(&name) {
+                if let Value::Class(cls) = &self_val {
+                    if args.is_empty() {
+                        if let Some(top) = self.class_visibility_stack.last_mut() {
+                            *top = vis;
+                        }
+                    } else {
+                        let methods = cls.methods.borrow();
+                        for a in &args {
+                            let key: Option<SymId> = match a {
+                                Value::Sym(s) => Some(*s),
+                                Value::Str(s) => Some(self.interner.intern(s)),
+                                _ => None,
+                            };
+                            if let Some(mid) = key {
+                                if let Some(m) = methods.get(&mid) {
+                                    m.visibility.set(vis);
+                                }
+                            }
+                        }
+                    }
+                    self.stack.push(Value::Nil);
+                    return Ok(());
+                }
+                // Toplevel `private` / `protected` / `public` —
+                // CRuby treats these as visibility modifiers on
+                // Object's singleton class. We don't model
+                // toplevel methods as Object instance methods, so
+                // the call has no observable effect; accept it as
+                // a no-op rather than NoMethodError to keep
+                // common preamble patterns (`private; def helper;`
+                // at the toplevel) parseable.
+                self.stack.push(Value::Nil);
+                return Ok(());
+            }
             return Err(self.trap(RubyError::NoMethodError {
                 method: name.to_string(), recv_type: self_val.type_name(),
             }));
@@ -794,6 +844,20 @@ impl Vm {
         if let Value::Object(id) = &recv {
             let cls = self.heap.instance(*id).class.clone();
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+                // Private methods cannot be invoked with an
+                // explicit receiver. CRuby additionally allows
+                // `self.foo` for some private writers; we keep
+                // the simpler "any explicit receiver = denied"
+                // rule. Protected is enforced as Public here —
+                // a real same-instance / same-class check would
+                // need to walk the caller's frame, which is
+                // beyond this subset's scope.
+                if m.visibility.get() == Visibility::Private {
+                    return Err(self.trap(RubyError::NoMethodError {
+                        method: format!("private method '{name}' called"),
+                        recv_type: recv.type_name(),
+                    }));
+                }
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
             }
@@ -1766,7 +1830,10 @@ impl Vm {
             // No matching handler in this frame — pop it and try the caller.
             let f = self.frames.pop().expect("ICE: unwind pop empty");
             self.stack.truncate(f.base_sp);
-            if f.is_class_body { self.class_stack.pop(); }
+            if f.is_class_body {
+                self.class_stack.pop();
+                self.class_visibility_stack.pop();
+            }
             if self.frames.is_empty() {
                 // No rescue clause anywhere — surface the exception
                 // to the host as a Trap instead of terminating the
@@ -3158,10 +3225,12 @@ impl Vm {
                 // so `super` later starts its lookup from the
                 // right place. `None` for toplevel defs.
                 let defining_class = self.class_stack.last().cloned();
+                let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
                 let m = Rc::new(Method {
                     params: proto.params.clone(),
                     proto_idx: p_idx as usize,
                     defining_class,
+                    visibility: std::cell::Cell::new(vis),
                 });
                 if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
@@ -3193,6 +3262,7 @@ impl Vm {
                 }
                 self.method_gen = self.method_gen.wrapping_add(1); // class structure changed
                 self.class_stack.push(cls.clone());
+                self.class_visibility_stack.push(Visibility::Public);
                 let proto = &self.protos[p_idx as usize];
                 let n_locals = proto.n_locals as usize;
                 self.frames.push(Frame {
@@ -3338,6 +3408,7 @@ impl Vm {
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
                     let cls = self.class_stack.pop().expect("ICE: class_stack empty on class-body return");
+                    self.class_visibility_stack.pop();
                     self.stack.push(Value::Class(cls));
                 } else if let Some(replacement) = f.swap_return {
                     self.stack.push(replacement);
@@ -4033,6 +4104,15 @@ fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
             "non-string panic payload".to_string()
         }
     })
+}
+
+fn visibility_from_name(name: &str) -> Option<Visibility> {
+    match name {
+        "private" => Some(Visibility::Private),
+        "protected" => Some(Visibility::Protected),
+        "public" => Some(Visibility::Public),
+        _ => None,
+    }
 }
 
 /// Minimal printf-style formatter used by `String#%`. Supports the
