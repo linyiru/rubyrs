@@ -443,6 +443,18 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // `Vm.constants` table (StoreConst opcode). No real module
     // nesting; the assignment binds the joined name, and a later
     // `Foo::Bar` read picks it up via `ConstRead("Foo::Bar")`.
+    //
+    // Two known CRuby divergences inherited from this spike-scope
+    // model (symmetric with the way ConstantPathNode read also
+    // skips module-nesting validation):
+    //   - `Missing::X = 1` succeeds silently here; CRuby raises
+    //     `NameError: uninitialized constant Missing`.
+    //   - `Foo = 1; Foo::X = 2` succeeds here; CRuby raises
+    //     `TypeError: Foo is not a class/module`.
+    // A future PR would walk each prefix segment via the existing
+    // class/constants lookup and require Class/Module — and the
+    // same fix would apply to the READ side. Out of this PR's
+    // scope (the AST translation alone can't see runtime types).
     if let Some(n) = node.as_constant_path_write_node() {
         let target = n.target();
         // target is a ConstantPathNode; flatten via the same helper
