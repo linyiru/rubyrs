@@ -65,8 +65,8 @@ capability, not a parse node. Its landing here is observable
 in the data — Cat C dropped to 0, the file it gated shifted
 into Cat D (next blocker is back to AST).
 
-Confirms: **the AST-frontier wins now require multi-step
-investment**. Each "stacked" file needs (in this case) at
+Confirms: **winning at the AST frontier now requires
+multi-step investment**. Each "stacked" file needs (in this case) at
 least three independent capabilities — bare ConstantWrite
 (#30), default args (#34), `require_relative` (#66) — before
 its NEXT (AST) blocker surfaces. tilt/string.rb is now at the
@@ -209,8 +209,9 @@ that the gap reports were generated against):
 > after PR #66 landed `require_relative` and exposed its next
 > AST blocker, `class << self`). Category E = 0
 > (PR #34 default-args-any-expression). Category C = 0
-> (PR #66 require_relative). "Phase 3 step 1"
-> ConstantPathWriteNode landed in PR #59. Pass count flat at
+> (PR #66 require_relative). The "Phase 3 step 1"
+> ConstantPathWriteNode half of the original plan has also
+> landed since the first pass was written. Pass count flat at
 > 5/12 across four passes — the stacked-blockers pattern means
 > each unlock just exposes the next layer.
 
