@@ -335,23 +335,49 @@ impl Vm {
                         // use-after-free in the cext body. Same
                         // shape as the L1.5 P0-A pattern.
                         //
-                        // Manual push/truncate instead of PinGuard
-                        // because `vm_ptr: *mut Vm = self` aliases
-                        // PinGuard's `&mut Vm`. Stacked Borrows
-                        // would flag the resulting raw deref inside
-                        // `cext_dispatch`'s rb_funcall reentrance —
-                        // same gotcha L3-A review #15 (PR #6) hit
-                        // in `cext_funcall_to_vm`. On the `?`
-                        // early-return path the truncate still
-                        // runs (it precedes the `?`); on a Rust
-                        // panic the leak is acceptable since cext
-                        // panics already abort under nounwind.
+                        // RAII guard holding only a `*mut Vec<Value>`
+                        // (not `&mut Vm`) so it doesn't conflict with
+                        // the `vm_ptr: *mut Vm` we hand to
+                        // `with_vm_ptr_set` — PinGuard's `&mut Vm`
+                        // would alias under Stacked Borrows when
+                        // cext_dispatch's rb_funcall reentrance
+                        // re-derefs the raw pointer (same gotcha L3-A
+                        // review #15 / PR #6 hit). The narrower
+                        // pointer is sound because it borrows only
+                        // the field, not the whole Vm.
+                        //
+                        // Truncate runs on Drop, so a panic from
+                        // `with_vm_ptr_set` / `cext_dispatch` (or
+                        // the trailing `?`) doesn't leak pinned
+                        // entries — fixes review #11 on PR #27,
+                        // where the prior manual push/truncate
+                        // skipped truncate on the unwind path.
+                        struct PinTruncateGuard {
+                            pinned: *mut Vec<Value>,
+                            saved_depth: usize,
+                        }
+                        impl Drop for PinTruncateGuard {
+                            fn drop(&mut self) {
+                                // SAFETY: `pinned` was taken from
+                                // `&mut self.pinned` in the
+                                // enclosing scope; the guard is
+                                // dropped before that borrow could
+                                // be used elsewhere, and no other
+                                // Rust code mutates `pinned` while
+                                // the cext call is on the stack.
+                                unsafe { (*self.pinned).truncate(self.saved_depth); }
+                            }
+                        }
                         let saved_pin_depth = self.pinned.len();
                         self.pinned.push(recv.clone());
                         for a in &args { self.pinned.push(a.clone()); }
+                        let _pin_guard = PinTruncateGuard {
+                            pinned: &raw mut self.pinned,
+                            saved_depth: saved_pin_depth,
+                        };
                         let vm_ptr: *mut Vm = self;
                         let recv_clone = recv.clone();
-                        let dispatch_result = with_vm_ptr_set(vm_ptr, || {
+                        let v = with_vm_ptr_set(vm_ptr, || {
                             crate::vm::cext::cext_dispatch(
                                 &reg.qualified_name,
                                 reg.func,
@@ -359,9 +385,11 @@ impl Vm {
                                 &args,
                                 crate::vm::cext::CextSelfHandle::Object(recv_clone),
                             )
-                        });
-                        self.pinned.truncate(saved_pin_depth);
-                        let v = dispatch_result?;
+                        })?;
+                        // Explicit drop here is documentation, not
+                        // necessity — `_pin_guard` drops at scope
+                        // end either way.
+                        drop(_pin_guard);
                         self.stack.push(v);
                         return Ok(());
                     }

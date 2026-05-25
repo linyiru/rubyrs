@@ -217,17 +217,29 @@ static VALUE mj_gen(VALUE v) {
     if (v == Qfalse) return rb_str_new_cstr("false");
 
     /* Probe class.name to dispatch on type. Avoids needing
-     * TYPE() macros, which our cext header doesn't have yet. */
+     * TYPE() macros, which our cext header doesn't have yet.
+     *
+     * Compare via (length + memcmp) instead of strcmp (review
+     * #13 on PR #27). The rubyrs ABI does append a sentinel NUL
+     * to CValue::Str so strcmp WOULD be safe here, but the
+     * defensive shape lets this code double as a reference for
+     * extension authors whose host may not provide the same
+     * guarantee. Macro packages the literal length to keep the
+     * arms terse. */
     VALUE cname_str = class_name_of(v);
     const char *cname = RSTRING_PTR(cname_str);
+    long cname_len = RSTRING_LEN(cname_str);
+    #define IS_CLASS(lit) \
+        (cname_len == (long)(sizeof(lit) - 1) && \
+         memcmp(cname, (lit), sizeof(lit) - 1) == 0)
 
-    if (strcmp(cname, "Integer") == 0) {
+    if (IS_CLASS("Integer")) {
         long n = NUM2LONG(v);
         char buf[32];
         snprintf(buf, sizeof(buf), "%ld", n);
         return rb_str_new_cstr(buf);
     }
-    if (strcmp(cname, "String") == 0) {
+    if (IS_CLASS("String")) {
         /* Naive escaping: just wrap in quotes. Acceptance test
          * uses non-special chars; full escape handling is L3-D
          * vendoring of real flori/json.
@@ -255,7 +267,7 @@ static VALUE mj_gen(VALUE v) {
         free(buf);
         return out;
     }
-    if (strcmp(cname, "Array") == 0) {
+    if (IS_CLASS("Array")) {
         long n = RARRAY_LEN(v);
         /* Build "[e1,e2,e3]" by concatenating piece by piece. */
         VALUE out = rb_str_new_cstr("[");
@@ -271,7 +283,7 @@ static VALUE mj_gen(VALUE v) {
         out = rb_funcall(out, id_plus, 1, close);
         return out;
     }
-    if (strcmp(cname, "Hash") == 0) {
+    if (IS_CLASS("Hash")) {
         /* Hash iteration: use each_pair via rb_funcall ... but
          * we'd need block dispatch (rb_yield) which the wedge
          * doesn't have. Instead lean on Ruby-side to_a then
