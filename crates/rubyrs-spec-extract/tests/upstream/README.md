@@ -5,11 +5,27 @@ Unmodified fragments of upstream
 input fixtures for the extractor's end-to-end tests
 (`crates/rubyrs-spec-extract/tests/upstream.rs`).
 
-| File | Source path | Snapshot date |
+## Provenance
+
+Vendored from `ruby/spec` at upstream commit
+[`448cb34000b160396d6292af77a319f3a600b7ce`](https://github.com/ruby/spec/tree/448cb34000b160396d6292af77a319f3a600b7ce)
+(master HEAD on 2026-05-25).
+
+| File | Upstream path | Blob SHA |
 |---|---|---|
-| `string_empty_spec.rb` | `core/string/empty_spec.rb` | 2026-05 |
-| `string_length_spec.rb` | `core/string/length_spec.rb` | 2026-05 |
-| `string_reverse_spec.rb` | `core/string/reverse_spec.rb` | 2026-05 |
+| `string_empty_spec.rb` | [`core/string/empty_spec.rb`](https://github.com/ruby/spec/blob/448cb34000b160396d6292af77a319f3a600b7ce/core/string/empty_spec.rb) | `8e53a16a` |
+| `string_length_spec.rb` | [`core/string/length_spec.rb`](https://github.com/ruby/spec/blob/448cb34000b160396d6292af77a319f3a600b7ce/core/string/length_spec.rb) | `98cee1f0` |
+| `string_reverse_spec.rb` | [`core/string/reverse_spec.rb`](https://github.com/ruby/spec/blob/448cb34000b160396d6292af77a319f3a600b7ce/core/string/reverse_spec.rb) | `e37c1125` |
+
+## License
+
+`ruby/spec` carries the
+[MIT-style permission notice in its repo root LICENSE file](https://github.com/ruby/spec/blob/master/LICENSE)
+(Copyright © 2008 Engine Yard, Inc.). The files vendored here
+retain that license; their copyright belongs to the upstream
+contributors, not this project. We commit them verbatim
+specifically so the extractor has a stable input to test
+against and so the diff against upstream is readable.
 
 **Do not edit** the `*.rb` files — they're the upstream source
 of record. The matching `*.expected.rb` files capture what the

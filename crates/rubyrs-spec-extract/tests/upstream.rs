@@ -32,6 +32,17 @@
 
 use std::path::PathBuf;
 
+/// Single source of truth for the vendored fixture set. Used
+/// both by the parse-validity loop below and by per-fixture
+/// tests; the per-fixture tests stay separately named so a
+/// failure shows up as e.g. `upstream_string_reverse` rather
+/// than a single batch test that hides which file diverged.
+const UPSTREAM_FIXTURES: &[&str] = &[
+    "string_empty_spec",
+    "string_length_spec",
+    "string_reverse_spec",
+];
+
 #[test]
 fn upstream_string_reverse() {
     run_upstream("string_reverse_spec");
@@ -55,17 +66,16 @@ fn upstream_outputs_parse_as_valid_ruby() {
     // missing a closing paren would surface here without
     // depending on the golden text.
     let base = upstream_dir();
-    for name in ["string_reverse_spec", "string_empty_spec", "string_length_spec"] {
+    for name in UPSTREAM_FIXTURES {
         let path = base.join(format!("{name}.rb"));
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {path:?}: {e}"));
         let output = rubyrs_spec_extract::extract(&source);
-        let parsed = ruby_prism::parse(output.as_bytes());
-        let errors: Vec<_> = parsed.errors().collect();
+        let parse_errors = rubyrs_spec_extract::parse_errors(&output);
         assert!(
-            errors.is_empty(),
-            "extractor output for {name} did not parse cleanly: {} error(s)",
-            errors.len()
+            parse_errors.is_empty(),
+            "extractor output for {name} did not parse cleanly:\n  - {}",
+            parse_errors.join("\n  - "),
         );
     }
 }
