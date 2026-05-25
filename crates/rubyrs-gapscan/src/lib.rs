@@ -6,8 +6,9 @@
 //! Missing using the manifests rubyrs publishes
 //! ([`rubyrs::SUPPORTED_PRISM_NODES`], [`rubyrs::RIDES_ALONG_PRISM_NODES`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 /// How a Prism node class relates to the rubyrs subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,11 +22,45 @@ pub enum Classification {
     Missing,
 }
 
-// `pub fn classify(name: &str) -> Classification`, `ALL_PRISM_NODES`,
-// and the `impl_full_visit_for!` macro all come from here. See
-// build.rs — the codegen reads rubyrs/data/*.txt so the runtime
-// classifier stays in lockstep with the published manifests.
+// `ALL_PRISM_NODES` and the `impl_full_visit_for!` macro come from
+// here. See build.rs — both are derived from THIS crate's own
+// `data/prism_node_classes.txt` (no cross-crate file reads).
 include!(concat!(env!("OUT_DIR"), "/prism_codegen.rs"));
+
+// Classification uses the manifests rubyrs publishes
+// (`pub const SUPPORTED_PRISM_NODES`, `pub const RIDES_ALONG_PRISM_NODES`)
+// — we materialise them into `HashSet`s once via `LazyLock` for O(1)
+// lookup. The previous approach was a 151-arm `match` codegen'd by
+// build.rs from rubyrs's data files; that broke `cargo publish` for
+// this crate because sibling-crate file paths do not survive the
+// tarball boundary. Reading the consts at runtime keeps a single
+// source of truth (rubyrs's data files via rubyrs's build.rs) and
+// uses only std + Cargo's normal dependency resolution.
+//
+// Init cost is ~10µs for both sets combined, paid once per process
+// on first `classify()` call. For a 25k-node Jekyll-scale scan this
+// is ~0.04% of total work; for short tools that classify only a
+// handful of nodes it is still well under any human-perceptible
+// threshold.
+static SUPPORTED_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    rubyrs::SUPPORTED_PRISM_NODES.iter().copied().collect()
+});
+
+static RIDES_ALONG_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    rubyrs::RIDES_ALONG_PRISM_NODES.iter().copied().collect()
+});
+
+/// Classify a Prism node class name by membership in the manifests
+/// rubyrs publishes. O(1) HashSet lookup after first-call init.
+pub fn classify(name: &str) -> Classification {
+    if SUPPORTED_SET.contains(name) {
+        Classification::Supported
+    } else if RIDES_ALONG_SET.contains(name) {
+        Classification::RidesAlong
+    } else {
+        Classification::Missing
+    }
+}
 
 /// Per-class histogram entry.
 #[derive(Debug, Default, Clone)]
