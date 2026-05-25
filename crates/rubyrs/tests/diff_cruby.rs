@@ -148,3 +148,4 @@ fn run_diff(name: &str) {
 #[test] fn match_data() { run_diff("match_data"); }
 #[test] fn file_io() { run_diff("file_io"); }
 #[test] fn range_extras() { run_diff("range_extras"); }
+#[test] fn tap_then() { run_diff("tap_then"); }

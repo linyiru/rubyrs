@@ -3190,6 +3190,21 @@ impl Vm {
     }
 
     pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId) -> Result<Option<Value>, Trap> {
+        // Object#tap / #then / #yield_self — universal block
+        // helpers. Yield `self` to the block; `tap` discards the
+        // result and returns self (debug-style fluent chain),
+        // `then` (and its `yield_self` alias) returns whatever
+        // the block returned (Kleisli-style transform).
+        if args.is_empty() && matches!(name, "tap" | "then" | "yield_self") {
+            let pre_frames = self.frames.len();
+            let mut g = PinGuard::new(self);
+            g.pin(recv.clone());
+            g.pin(Value::Block(block));
+            g.vm.invoke_block(block, vec![recv.clone()])?;
+            g.vm.dispatch_until(pre_frames)?;
+            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+            return Ok(Some(if name == "tap" { recv.clone() } else { r }));
+        }
         Ok(match (recv, name, args) {
             (Value::Array(id), "each", []) => {
                 let mut g = PinGuard::new(self);
