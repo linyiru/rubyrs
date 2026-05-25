@@ -117,8 +117,11 @@ Covered: `obj.method(:name)` capture (including implicit-self
 arity mismatch), `Method#curry` (including the explicit-arity
 form), `Method#>>` / `Method#<<` composition (with another
 Method or any Proc on the RHS), `Method#==` /
-`UnboundMethod#==`, `&proc`-style forwarding
-(`arr.map(&doubler_method)`).
+`UnboundMethod#==`, `Method#owner` (the class/module that
+defined the method, walking through inheritance and through
+`alias_method`), `Method#receiver` (the bound object, by
+identity), `Method#to_proc` (both explicit `.to_proc` and the
+implicit `&meth` forwarding path).
 
 Divergence from CRuby on `Method#==` for aliased methods:
 
