@@ -252,6 +252,42 @@ VALUE rb_hash_aset(VALUE h, VALUE key, VALUE value);
  * Hash default proc / value). */
 VALUE rb_hash_aref(VALUE h, VALUE key);
 
+/* Register an instance method on a class or module.
+ *
+ * Spike L3-C. Mirrors CRuby's rb_define_method (defined in
+ * ruby/intern.h). `klass` must be a class/module handle returned
+ * by `rb_define_class_under` OR `rb_define_module` (both produce
+ * CValue::Class handles internally — review #8 on PR #27); `name`
+ * is a NUL-terminated method name; `func` is the C entry point
+ * (transmuted at dispatch time according to `arity`); `arity`
+ * is 0..5 in the spike.
+ *
+ * At call time, the receiver is passed as the FIRST argument
+ * (CRuby convention: `static VALUE my_method(VALUE self, VALUE
+ * arg1, ...)`). The cext typically extracts the wrapped data
+ * pointer via `TypedData_Get_Struct(self, MyStruct, &my_type,
+ * my_struct_ptr)`.
+ *
+ * Method-lookup priority on a Value::Object receiver:
+ *   1. Script-defined methods on the class (a `def foo` wins).
+ *   2. cext-registered methods (this surface) as fallback.
+ *   3. NoMethodError otherwise.
+ * Matches CRuby's "user override wins" semantics.
+ *
+ * IMPORTANT: VALUE handles are per-call, NOT process-stable.
+ * Unlike CRuby where a VALUE is a pointer/tag valid for the
+ * object's lifetime, rubyrs-cext indexes into the topmost per-
+ * call CExtState which is pushed at every cext entry and popped
+ * on return. A `klass` handle stashed in a C `static` from a
+ * prior Init_/call IS NOT VALID later — the index points into a
+ * popped state's value table.
+ *
+ * Practical rule: register the class AND its methods in the same
+ * Init pass. Don't cache the VALUE returned by
+ * rb_define_class_under / rb_define_module across calls. */
+void rb_define_method(VALUE klass, const char *name,
+                      VALUE (*func)(ANYARGS), int arity);
+
 /* ===== Exception raising (Level 3-A) ===== */
 
 /* Well-known exception class handles. Like CRuby, these are

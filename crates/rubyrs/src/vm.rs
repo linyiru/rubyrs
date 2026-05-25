@@ -149,6 +149,15 @@ pub(crate) struct Vm {
     /// `rb_define_singleton_method`; consulted by `do_call` when
     /// the receiver is `Value::Class(c)`.
     pub(crate) cext_class_methods: HashMap<String, HashMap<SymId, Rc<HostFn>>>,
+    /// L3-C: instance-method dispatch table for cext-registered
+    /// methods (`rb_define_method`). Mirrors `cext_class_methods`'s
+    /// shape but consulted when the receiver is `Value::Object(id)`
+    /// whose class joined-name matches. Stores raw registration
+    /// data instead of a HostFn closure because the receiver isn't
+    /// known at registration time; the dispatch site assembles
+    /// `cext_dispatch(..., CextSelfHandle::Object(recv))` inline.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) cext_instance_methods: HashMap<String, HashMap<SymId, crate::vm::cext::CextMethodReg>>,
     pub(crate) class_stack: Vec<Rc<Class>>,
     /// Per-class-body visibility mode, parallel to `class_stack`.
     /// Pushed `Public` on `Op::DefClass` and popped when the class
@@ -233,6 +242,8 @@ impl Vm {
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
             cext_class_methods: HashMap::new(),
+            #[cfg(not(target_os = "wasi"))]
+            cext_instance_methods: HashMap::new(),
             class_stack: vec![],
             class_visibility_stack: vec![],
             regex_cache: HashMap::new(),

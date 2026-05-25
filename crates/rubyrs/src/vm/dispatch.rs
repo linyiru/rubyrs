@@ -304,6 +304,97 @@ impl Vm {
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
             }
+            // L3-C: cext-registered instance method
+            // (`rb_define_method`). Looked up AFTER script-defined
+            // methods so a Ruby-side override wins for
+            // concrete-class methods.
+            //
+            // **Known limitation** (review #1 on PR #27): the
+            // current shape walks the script-method ancestor chain
+            // via lookup_method_cached, THEN checks cext methods
+            // only on the receiver's own class. So a Ruby method
+            // on a superclass shadows a cext method on the
+            // subclass, and a cext method on a superclass is
+            // invisible to subclass instances. A complete fix
+            // would interleave cext lookup INSIDE the per-class
+            // walk in lookup_method_cached — out of L3-C wedge
+            // scope. Real-world impact is small: the common pattern
+            // is `class Foo; end` + `rb_define_method(Foo, ...)`
+            // on the same class, which works correctly.
+            #[cfg(not(target_os = "wasi"))]
+            {
+                if let Some(table) = self.cext_instance_methods.get(&cls.name) {
+                    if let Some(reg) = table.get(&name_id).cloned() {
+                        // Pin recv + args across the cext call
+                        // (review #4 on PR #27). cext_dispatch may
+                        // run maybe_gc during arg translation /
+                        // TypedData wrapping / result translation;
+                        // recv was popped from vm.stack before we
+                        // got here, so without pinning a STRESS_GC
+                        // sweep can reclaim it mid-call →
+                        // use-after-free in the cext body. Same
+                        // shape as the L1.5 P0-A pattern.
+                        //
+                        // RAII guard holding only a `*mut Vec<Value>`
+                        // (not `&mut Vm`) so it doesn't conflict with
+                        // the `vm_ptr: *mut Vm` we hand to
+                        // `with_vm_ptr_set` — PinGuard's `&mut Vm`
+                        // would alias under Stacked Borrows when
+                        // cext_dispatch's rb_funcall reentrance
+                        // re-derefs the raw pointer (same gotcha L3-A
+                        // review #15 / PR #6 hit). The narrower
+                        // pointer is sound because it borrows only
+                        // the field, not the whole Vm.
+                        //
+                        // Truncate runs on Drop, so a panic from
+                        // `with_vm_ptr_set` / `cext_dispatch` (or
+                        // the trailing `?`) doesn't leak pinned
+                        // entries — fixes review #11 on PR #27,
+                        // where the prior manual push/truncate
+                        // skipped truncate on the unwind path.
+                        struct PinTruncateGuard {
+                            pinned: *mut Vec<Value>,
+                            saved_depth: usize,
+                        }
+                        impl Drop for PinTruncateGuard {
+                            fn drop(&mut self) {
+                                // SAFETY: `pinned` was taken from
+                                // `&mut self.pinned` in the
+                                // enclosing scope; the guard is
+                                // dropped before that borrow could
+                                // be used elsewhere, and no other
+                                // Rust code mutates `pinned` while
+                                // the cext call is on the stack.
+                                unsafe { (*self.pinned).truncate(self.saved_depth); }
+                            }
+                        }
+                        let saved_pin_depth = self.pinned.len();
+                        self.pinned.push(recv.clone());
+                        for a in &args { self.pinned.push(a.clone()); }
+                        let _pin_guard = PinTruncateGuard {
+                            pinned: &raw mut self.pinned,
+                            saved_depth: saved_pin_depth,
+                        };
+                        let vm_ptr: *mut Vm = self;
+                        let recv_clone = recv.clone();
+                        let v = with_vm_ptr_set(vm_ptr, || {
+                            crate::vm::cext::cext_dispatch(
+                                &reg.qualified_name,
+                                reg.func,
+                                reg.arity,
+                                &args,
+                                crate::vm::cext::CextSelfHandle::Object(recv_clone),
+                            )
+                        })?;
+                        // Explicit drop here is documentation, not
+                        // necessity — `_pin_guard` drops at scope
+                        // end either way.
+                        drop(_pin_guard);
+                        self.stack.push(v);
+                        return Ok(());
+                    }
+                }
+            }
         }
         // C-ext singleton dispatch: `BCrypt::Engine.__bc_crypt(args)`
         // arrives here with recv = Value::Class(c). Look up the
@@ -887,9 +978,38 @@ impl Vm {
                     .collect(),
                 None => Vec::new(),
             };
-            self.maybe_gc();
-            self.check_alloc()?;
-            let hid = self.heap.alloc(HeapObj::Hash(leftover));
+            // Same GC root-hole pattern as the rest-arg path above
+            // (and the master Array#zip / Hash#sort_by chain fixed
+            // in earlier PRs): `locals` / `self_val` / `block` /
+            // `kw_hash` / `leftover` are Rust locals, NOT on
+            // vm.stack / pinned, so the explicit `maybe_gc()` here
+            // sweeps any heap-backed values they reference. Pin
+            // everything participating in the new Hash alloc + the
+            // already-bound locals through the alloc point.
+            //
+            // Master shipped the kw_rest code without this guard
+            // (commits 680dbef "Module include chain + is_a?" /
+            // ed0b872 "nested block destructure"); STRESS_GC tests
+            // `anon_kwrest` and `kwrest_args` were the canary.
+            let hid = {
+                let mut g = PinGuard::new(self);
+                for v in &locals { g.pin(v.clone()); }
+                g.pin(self_val.clone());
+                if let Some(id) = block { g.pin(Value::Block(id)); }
+                if let Some(kw) = &kw_hash {
+                    for (k, v) in kw {
+                        g.pin(k.clone());
+                        g.pin(v.clone());
+                    }
+                }
+                for (k, v) in &leftover {
+                    g.pin(k.clone());
+                    g.pin(v.clone());
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                g.vm.heap.alloc(HeapObj::Hash(leftover))
+            };
             locals[kw_rest_slot] = Value::Hash(hid);
         }
         self.frames.push(Frame {

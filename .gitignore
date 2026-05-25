@@ -21,3 +21,6 @@ crates/rubyrs/examples/raise-cext/raise_ext.dll
 crates/rubyrs/examples/counter-cext/counter_ext.so
 crates/rubyrs/examples/counter-cext/counter_ext.bundle
 crates/rubyrs/examples/counter-cext/counter_ext.dll
+crates/rubyrs/examples/mini-json-cext/mini_json.so
+crates/rubyrs/examples/mini-json-cext/mini_json.bundle
+crates/rubyrs/examples/mini-json-cext/mini_json.dll

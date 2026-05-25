@@ -21,11 +21,21 @@
  *                              ran the dfree callback when an
  *                              unreferenced Counter was collected.
  *
- * NOTE on API shape: we use singleton-only methods here (not
- * `c.inc` instance dispatch) because `rb_define_method` isn't
- * wired in the spike — that's a small follow-up commit. The point
- * being proved is the dfree + TypedData mechanism, not method
- * dispatch sugar.
+ * API shape: L3-B shipped singleton-only methods (`Counter.inc(c)`)
+ * because `rb_define_method` wasn't wired yet. L3-C added it; this
+ * file now exposes BOTH:
+ *
+ *   Singleton (kept for the original L3-B acceptance test):
+ *     Counter.create  / Counter.inc(c)  / Counter.value(c)
+ *
+ *   Instance methods (new in L3-C — exercised by
+ *   tests/cext_instance_method.rs):
+ *     c.bump   — instance-side equivalent of Counter.inc(c)
+ *     c.peek   — instance-side equivalent of Counter.value(c)
+ *
+ * Different names so the existing L3-B acceptance test continues
+ * to assert what it was meant to assert, without ambiguity over
+ * which dispatch path it's actually exercising.
  */
 
 #include <stdlib.h>
@@ -92,13 +102,38 @@ static VALUE counter_free_count(VALUE self) {
     return rb_long2num(g_free_count);
 }
 
+/* === L3-C: instance methods (rb_define_method dispatch path) ===
+ *
+ * Same TypedData backing as counter_inc/counter_value above, but
+ * `self` IS the receiver (already a Counter Object), not a
+ * separately-passed arg. The cext_instance_methods dispatch table
+ * in vm/dispatch.rs routes c.bump / c.peek through these. */
+static VALUE counter_bump(VALUE self) {
+    Counter *c;
+    TypedData_Get_Struct(self, Counter, &counter_type, c);
+    c->count += 1;
+    return rb_long2num(c->count);
+}
+
+static VALUE counter_peek(VALUE self) {
+    Counter *c;
+    TypedData_Get_Struct(self, Counter, &counter_type, c);
+    return rb_long2num(c->count);
+}
+
 void Init_counter_ext(void) {
     VALUE klass = rb_define_class_under(rb_cObject, "Counter", rb_cObject);
     rb_define_singleton_method(klass, "create",     RUBY_METHOD_FUNC(counter_create),     0);
     rb_define_singleton_method(klass, "inc",        RUBY_METHOD_FUNC(counter_inc),        1);
     rb_define_singleton_method(klass, "value",      RUBY_METHOD_FUNC(counter_value),      1);
     rb_define_singleton_method(klass, "free_count", RUBY_METHOD_FUNC(counter_free_count), 0);
+
+    /* L3-C: instance methods. Dispatched via vm/dispatch.rs's
+     * Value::Object arm consulting cext_instance_methods. */
+    rb_define_method(klass, "bump", RUBY_METHOD_FUNC(counter_bump), 0);
+    rb_define_method(klass, "peek", RUBY_METHOD_FUNC(counter_peek), 0);
+
     /* `klass` falls out of scope with the Init_ frame; no global
-     * cache needed — `self` parameter on each singleton method
-     * gives us a fresh handle to the same class. */
+     * cache needed — `self` parameter on each method gives us a
+     * fresh handle to the same class. */
 }

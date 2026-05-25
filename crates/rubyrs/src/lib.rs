@@ -103,6 +103,14 @@ static _RB_DEFINE_SINGLETON_METHOD: unsafe extern "C" fn(
     rubyrs_cext::OpaqueFn,
     std::ffi::c_int,
 ) = rubyrs_cext::rb_define_singleton_method;
+// L3-C: instance-method registration. Same signature as singleton.
+#[used]
+static _RB_DEFINE_METHOD: unsafe extern "C" fn(
+    rubyrs_cext::Value,
+    *const std::ffi::c_char,
+    rubyrs_cext::OpaqueFn,
+    std::ffi::c_int,
+) = rubyrs_cext::rb_define_method;
 #[used]
 static _RB_INTERN: unsafe extern "C" fn(*const std::ffi::c_char) -> rubyrs_cext::ID =
     rubyrs_cext::rb_intern;

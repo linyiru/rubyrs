@@ -30,6 +30,16 @@ use crate::value::{Class, Value};
 
 use super::{PinGuard, Vm};
 
+// `rubyrs_jmp_raise` from c/setjmp_shim.c. Used by the
+// rb_check_typeddata callback to convert a slot-type mismatch
+// (review finding #1 on PR #27) into a Ruby-catchable
+// rb_eTypeError instead of panicking the process. The
+// `noreturn` lifetime contract matches the C side: it longjmps
+// to the topmost setjmp installed by `rubyrs_jmp_invoke`.
+unsafe extern "C" {
+    fn rubyrs_jmp_raise(class_id: u64, msg: *const std::ffi::c_char) -> !;
+}
+
 fn current_vm_ptr() -> *mut Vm {
     CURRENT_VM_PTR.with(|c| c.get())
 }
@@ -237,12 +247,32 @@ fn cext_handle_to_value_d(
             Value::new_str(String::from_utf8_lossy(logical))
         }
         rubyrs_cext::CValue::Int(n) => Value::Int(*n),
-        // Class handles are returned from `rb_define_module` /
-        // `rb_define_class_under`; bcrypt's wrappers don't return
-        // them as plain values to Ruby, but if a future ext does,
-        // surface as Nil for now (no Class lookup from raw name
-        // outside the rubyrs::classes registry yet).
-        rubyrs_cext::CValue::Class(_) => Value::Nil,
+        // L3-C: a CValue::Class handle resolves to the actual Vm
+        // Class object via vm.classes lookup. Used when a cext does
+        // `obj.class` mid-call via rb_funcall — the returned handle
+        // stores the class name, and the next rb_funcall on it
+        // (e.g. `.name`) needs to find the real Class. Falling
+        // back to Nil here (the old L0 behaviour) made any
+        // subsequent method call on the class handle segfault.
+        rubyrs_cext::CValue::Class(name) => {
+            let sym = vm.interner.intern(name);
+            // Class handles are produced by rb_define_class_under
+            // / rb_define_module which both register into
+            // vm.classes at drain time. A handle pointing to an
+            // unregistered class is an ICE — fall-back-to-Nil
+            // (the L0 default) would just mask the bug and surface
+            // later as a confusing NoMethodError far from the
+            // root cause. Review #5 on PR #27.
+            match vm.classes.get(&sym).cloned() {
+                Some(c) => Value::Class(c),
+                None => panic!(
+                    "ICE: cext_handle_to_value: CValue::Class({:?}) \
+                     not registered in vm.classes — should have been \
+                     drained by cext_require",
+                    name
+                ),
+            }
+        }
         // Recursive translation: an Array/Hash CValue is a vector of
         // C-side handles; build a Vec<Value> by recursing on each,
         // then allocate on the Vm heap. PinGuard protects the
@@ -346,6 +376,12 @@ fn cext_value_to_cvalue_d(
         // know which type it expects (via the rb_data_type_t
         // pointer-identity check in rb_check_typeddata).
         Value::Object(id) => rubyrs_cext::CValue::HeapRef(id.0),
+        // L3-C: Value::Class crossing Ruby → C as a CValue::Class
+        // handle. Needed when a cext does `obj.class` from inside
+        // an rb_funcall, then operates on the returned class
+        // handle (typical pattern: `cls.name` to dispatch-by-type
+        // — exactly what mini-json's generator does).
+        Value::Class(c) => rubyrs_cext::CValue::Class(c.name.clone()),
         // Array/Hash crossing Ruby → C: build a CValue::Array/Hash
         // whose elements are FRESH handles interned into `st`.
         // Recurses on contained Values, interning each child into
@@ -411,12 +447,36 @@ fn cext_value_to_cvalue_d(
 /// loudly at invocation rather than at register-time so the failure is
 /// clearly attributable to the call site, not Init.
 #[cfg(not(target_os = "wasi"))]
+/// L3-C: data needed to dispatch a single cext-registered instance
+/// method at call time. See `Vm::cext_instance_methods`.
+#[derive(Clone)]
+pub(crate) struct CextMethodReg {
+    pub(crate) qualified_name: String,
+    pub(crate) func: rubyrs_cext::OpaqueFn,
+    pub(crate) arity: i32,
+}
+
+/// Self handle for a cext call. Distinguishes the three dispatch
+/// shapes (L3-C broadened from the earlier `Option<&str>`):
+///
+///   - `Global`     — rb_define_global_function: `self` is Qnil.
+///   - `Class(name)` — rb_define_singleton_method: `self` is the
+///     class itself, interned as `CValue::Class`.
+///   - `Object(v)`  — rb_define_method instance call: `self` is
+///     the receiver, interned as `CValue::HeapRef` over its ObjId.
+///     The C ext uses `TypedData_Get_Struct(self, ...)` to unwrap.
+pub(crate) enum CextSelfHandle<'a> {
+    Global,
+    Class(&'a str),
+    Object(Value),
+}
+
 pub(crate) fn cext_dispatch(
     name: &str,
     func: rubyrs_cext::OpaqueFn,
     arity: i32,
     args: &[Value],
-    self_class: Option<&str>,
+    self_handle: CextSelfHandle<'_>,
 ) -> Result<Value, Trap> {
     let expected_argc = match arity {
         0..=5 => arity as usize,
@@ -529,25 +589,54 @@ pub(crate) fn cext_dispatch(
                     st.intern(rubyrs_cext::CValue::HeapRef(id.0))
                 })
             }),
-            Box::new(move |obj_h, expected_type| {
+            std::rc::Rc::new(move |obj_h, expected_type| {
                 // SAFETY: same vm_ptr as above; immutable read here.
                 let vm: &Vm = &*vm_ptr;
-                // Resolve handle → HeapRef ObjId → typed_data slot.
-                // Pointer-identity check on type descriptor; mismatch
-                // is a programmer error in the cext (wrong descriptor
-                // passed to TypedData_Get_Struct). Spike collapses to
-                // panic; converting to a rb_eTypeError raise is
-                // straightforward L3-B.1 follow-up once we wire it.
+                //
+                // Three failure shapes, all surfaced as a Ruby-catchable
+                // TypeError via rb_raise → longjmp (closes review #1
+                // on PR #27 — the previous panicking shape aborted the
+                // process when user Ruby did `Counter.new.bump`, i.e.
+                // got a non-TypedData receiver to a method that
+                // expected one):
+                //
+                //   1. Handle doesn't refer to an Object at all (e.g.
+                //      a Nil / Int / Str crossed the boundary as the
+                //      receiver — should be impossible from dispatch.rs
+                //      but the FFI surface accepts arbitrary u64s).
+                //   2. ObjId resolves to a non-TypedData slot — this is
+                //      the `Counter.new.bump` case: generic .new
+                //      allocates HeapObj::Instance; user expected
+                //      HeapObj::TypedData.
+                //   3. ObjId resolves to TypedData but the descriptor
+                //      pointer doesn't match — wrong cext type passed
+                //      to TypedData_Get_Struct.
                 let cvalue = rubyrs_cext::with_state(|st| st.resolve(obj_h).clone());
                 let id = match cvalue {
                     rubyrs_cext::CValue::HeapRef(n) => crate::value::ObjId(n),
-                    other => panic!(
-                        "ICE: rb_check_typeddata: handle does not refer \
-                         to a TypedData (got {:?})",
-                        other
-                    ),
+                    _ => {
+                        // Static C string (no allocation needed); raise
+                        // via the longjmp shim. The msg matches CRuby's
+                        // wording for the same condition. The enclosing
+                        // closure is defined inside cext_dispatch's
+                        // outer `unsafe` block, so the deref doesn't
+                        // need its own (Rust rule for closure-local
+                        // unsafe inheritance).
+                        rubyrs_jmp_raise(
+                            rubyrs_cext::raise::rb_eTypeError,
+                            b"wrong argument type (expected wrapped object)\0".as_ptr() as *const std::ffi::c_char,
+                        );
+                    }
                 };
-                let td = vm.heap.typed_data(id);
+                let td = match vm.heap.try_typed_data(id) {
+                    Some(td) => td,
+                    None => {
+                        rubyrs_jmp_raise(
+                            rubyrs_cext::raise::rb_eTypeError,
+                            b"wrong argument type (object is not wrapped TypedData)\0".as_ptr() as *const std::ffi::c_char,
+                        );
+                    }
+                };
                 if td.type_ptr != expected_type {
                     panic!(
                         "ICE: rb_check_typeddata: type descriptor mismatch \
@@ -603,11 +692,26 @@ pub(crate) fn cext_dispatch(
         // Their `PinGuard`s' `Drop` never runs → vm.pinned grows.
         // Harmless for non-pathological loads; cleanup protocol is
         // the next spike step.
-        let self_handle = match self_class {
-            Some(cname) => rubyrs_cext::with_state(|st| {
+        let self_handle = match self_handle {
+            CextSelfHandle::Global => rubyrs_cext::Qnil,
+            CextSelfHandle::Class(cname) => rubyrs_cext::with_state(|st| {
                 st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
             }),
-            None => rubyrs_cext::Qnil,
+            // L3-C: instance method dispatch — pass the receiver as
+            // self via HeapRef. The cext typically extracts its
+            // backing data with TypedData_Get_Struct(self, ...).
+            CextSelfHandle::Object(Value::Object(id)) => rubyrs_cext::with_state(|st| {
+                st.intern(rubyrs_cext::CValue::HeapRef(id.0))
+            }),
+            CextSelfHandle::Object(other) => {
+                return Err(Trap::new(RubyError::TypeError {
+                    msg: format!(
+                        "C ext `{}': instance method dispatch with non-Object receiver {}",
+                        name,
+                        other.type_name()
+                    ),
+                }));
+            }
         };
         // C helper expects [self, arg0, arg1, ...]; pre-allocate
         // with capacity to keep the hot path branch-free.
@@ -861,7 +965,7 @@ impl Vm {
                         // Top-level functions get Qnil as `self`,
                         // matching CRuby's `rb_define_global_function`
                         // convention.
-                        cext_dispatch(&cfn_name, func, arity, args, None)
+                        cext_dispatch(&cfn_name, func, arity, args, CextSelfHandle::Global)
                     }),
                 );
             }
@@ -878,6 +982,29 @@ impl Vm {
                     includes: RefCell::new(Vec::new()),
                 });
                 self.classes.insert(name_sym, new_class);
+            }
+
+            // L3-C: instance methods → per-class dispatch table
+            // consulted from `do_call`'s Value::Object arm. Stored
+            // as plain registration data (qualified name + OpaqueFn
+            // + arity) rather than a HostFn closure because the
+            // receiver isn't known at registration time and HostFn
+            // has no room for a self-Value param without widening
+            // every call site.
+            for im in state.registered_methods {
+                let method_sym = self.interner.intern(&im.method_name);
+                let qualified = format!("{}#{}", im.class_joined_name, im.method_name);
+                self.cext_instance_methods
+                    .entry(im.class_joined_name)
+                    .or_default()
+                    .insert(
+                        method_sym,
+                        CextMethodReg {
+                            qualified_name: qualified,
+                            func: im.func,
+                            arity: im.arity,
+                        },
+                    );
             }
 
             // Register every singleton method into the per-class
@@ -897,7 +1024,7 @@ impl Vm {
                             // Singleton methods get the class itself
                             // as `self`, matching CRuby's
                             // `rb_define_singleton_method` contract.
-                            cext_dispatch(&qualified, func, arity, args, Some(&class_name))
+                            cext_dispatch(&qualified, func, arity, args, CextSelfHandle::Class(&class_name))
                         }),
                     );
             }
