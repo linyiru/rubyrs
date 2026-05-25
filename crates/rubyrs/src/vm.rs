@@ -1,4 +1,9 @@
 use std::cell::RefCell;
+// `Cell` is only used by the cext-reentrance machinery (CURRENT_VM_PTR),
+// itself wasi-stubbed; gate the import so the wasi build doesn't see
+// it as unused under `-D warnings`.
+#[cfg(not(target_os = "wasi"))]
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::env;
 use std::rc::Rc;
@@ -616,6 +621,52 @@ impl Vm {
         Trap { err, backtrace: bt }
     }
 
+    /// Re-entrant dispatch entry for C extensions calling back into
+    /// Ruby via `rb_funcall*`. Invokes `recv.method(args)` through
+    /// the normal `do_call` path, leaving the result on the stack
+    /// where the caller can pop it.
+    ///
+    /// Setup mirrors what the compiler emits for a Ruby-side
+    /// `recv.method(args)`: push the receiver, then each argument,
+    /// then call `do_call` with `no_recv = false`. After `do_call`
+    /// the result sits on top of the operand stack — pop and return.
+    ///
+    /// `cache_id = u16::MAX` is a sentinel that
+    /// `lookup_method_cached` treats as "no cache slot": the
+    /// `idx < call_caches.len()` guard naturally fails (the table
+    /// is bounded by the number of compiled `Op::Call` instructions
+    /// — nowhere near 65535 in any realistic program), so both the
+    /// read and writeback paths short-circuit. Without this sentinel
+    /// a hard-coded `cache_id = 0` would poison whichever compiled
+    /// call site got slot 0 — that site would silently dispatch
+    /// whatever class/method the C ext last invoked. Future work:
+    /// allocate a per-`(recv-class, method)` cache for cext calls
+    /// if profiling shows the uncached path matters.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn cext_invoke_method(
+        &mut self,
+        recv: Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, Trap> {
+        let name_id = self.interner.intern(method);
+        let argc = args.len();
+        self.stack.push(recv);
+        for a in args {
+            self.stack.push(a);
+        }
+        self.do_call(
+            name_id,
+            argc,
+            /* no_recv = */ false,
+            /* cache_id = */ u16::MAX,
+        )?;
+        Ok(self
+            .stack
+            .pop()
+            .expect("ICE: cext_invoke_method: do_call produced no result"))
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
@@ -632,6 +683,17 @@ impl Vm {
                 return Ok(());
             }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
+                // Stash this Vm pointer for the duration of the host
+                // call so `cext_dispatch` (if the host fn is a cext
+                // closure) can install a `rb_funcallv` callback that
+                // re-enters this Vm. See CURRENT_VM_PTR for the
+                // borrow-aliasing discussion.
+                #[cfg(not(target_os = "wasi"))]
+                let v = {
+                    let vm_ptr: *mut Vm = self;
+                    with_vm_ptr_set(vm_ptr, || host(&args))?
+                };
+                #[cfg(target_os = "wasi")]
                 let v = host(&args)?;
                 self.stack.push(v);
                 return Ok(());
@@ -711,6 +773,15 @@ impl Vm {
         if let Value::Class(cls) = &recv {
             if let Some(table) = self.cext_class_methods.get(&cls.name) {
                 if let Some(host) = table.get(&name_id).cloned() {
+                    // Stash Vm pointer for the singleton-method's
+                    // C body — same rationale as the top-level
+                    // host_fns dispatch above.
+                    #[cfg(not(target_os = "wasi"))]
+                    let v = {
+                        let vm_ptr: *mut Vm = self;
+                        with_vm_ptr_set(vm_ptr, || host(&args))?
+                    };
+                    #[cfg(target_os = "wasi")]
                     let v = host(&args)?;
                     self.stack.push(v);
                     return Ok(());
@@ -1639,6 +1710,12 @@ impl Vm {
         if no_recv {
             if let Some(res) = self.builtin_call(&name, &args) { self.stack.push(res?); return Ok(()); }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
+                #[cfg(not(target_os = "wasi"))]
+                let v = {
+                    let vm_ptr: *mut Vm = self;
+                    with_vm_ptr_set(vm_ptr, || host(&args))?
+                };
+                #[cfg(target_os = "wasi")]
                 let v = host(&args)?;
                 self.stack.push(v);
                 return Ok(());
@@ -3248,6 +3325,130 @@ impl Vm {
     }
 }
 
+// Thread-local raw pointer to the currently-active Vm during a
+// host-fn call. Set by `do_call` (via `with_vm_ptr_set`) before
+// invoking entries from `host_fns` / `cext_class_methods`, cleared
+// after. Read by `cext_dispatch` when installing the `rb_funcallv`
+// callback so re-entrant C-to-Ruby calls dispatch on the right Vm.
+//
+// SAFETY / BORROW ALIASING NOTE — this deliberately routes around
+// Rust's borrow checker. When `do_call` invokes a host fn, `&mut
+// self` is held for the duration of that call. If the host fn
+// re-enters the Vm via `rb_funcallv`, the callback dereferences
+// this raw pointer to obtain a fresh `&mut Vm`, aliasing the outer
+// borrow. Stacked Borrows considers this UB; Tree Borrows is more
+// permissive. In practice the two `&mut`s are time-disjoint (only
+// one is used at any instant). Documented here so a future
+// contributor doesn't "fix" it by sprinkling `&mut self` borrows
+// that violate the invariant. See ADR (forthcoming) for the
+// safer-but-bigger refactor that would move Vm into an
+// `UnsafeCell`-flavoured container.
+//
+// Wasi-gated for the same reason `cext_dispatch` is: the cext path
+// is unreachable when there's no dynamic loader.
+#[cfg(not(target_os = "wasi"))]
+thread_local! {
+    static CURRENT_VM_PTR: Cell<*mut Vm> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// RAII guard that restores [`CURRENT_VM_PTR`] to its previous value
+/// when dropped — runs the restore on **every** scope exit, including
+/// panic unwinding. Without this guard, a panic inside the host fn
+/// (e.g. from arg interning before `cext_dispatch` installs its
+/// `with_caught_unwind` boundary) would leave a stale Vm pointer in
+/// `CURRENT_VM_PTR`; a subsequent host-fn call would then dereference
+/// it as a fresh `*mut Vm`, hitting use-after-free or worse.
+#[cfg(not(target_os = "wasi"))]
+struct VmPtrGuard {
+    prev: *mut Vm,
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl Drop for VmPtrGuard {
+    fn drop(&mut self) {
+        CURRENT_VM_PTR.with(|c| c.set(self.prev));
+    }
+}
+
+/// Run `f` with [`CURRENT_VM_PTR`] set to `vm_ptr`, restoring the
+/// previous value (likely null) on **all** exit paths — normal return
+/// or panic unwinding — via [`VmPtrGuard`]. Save/restore lets nested
+/// cext calls (rb_funcallv → another host fn) work without the inner
+/// call clobbering the outer's pointer.
+#[cfg(not(target_os = "wasi"))]
+fn with_vm_ptr_set<R>(vm_ptr: *mut Vm, f: impl FnOnce() -> R) -> R {
+    let prev = CURRENT_VM_PTR.with(|c| c.replace(vm_ptr));
+    let _guard = VmPtrGuard { prev };
+    f()
+}
+
+/// Read the currently-active Vm pointer. Returns null if not inside
+/// a host-fn invocation; callers that hit null have an ICE.
+#[cfg(not(target_os = "wasi"))]
+fn current_vm_ptr() -> *mut Vm {
+    CURRENT_VM_PTR.with(|c| c.get())
+}
+
+/// RAII guard around `rubyrs_cext::enter()` / `leave()`. Normal path
+/// calls [`Self::into_state`] to consume the guard and receive the
+/// drained `CExtState`. Panic path runs `Drop`, which discards the
+/// state but always pops the stack — so a panic between `enter()`
+/// and the matching pop doesn't leave a leaked CExtState on the
+/// thread-local stack to corrupt subsequent cext calls.
+#[cfg(not(target_os = "wasi"))]
+struct CExtStateGuard {
+    /// True until `into_state` consumes the guard. Tracks whether
+    /// `Drop` should still pop (only on the panic path).
+    active: bool,
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl CExtStateGuard {
+    fn enter() -> Self {
+        rubyrs_cext::enter();
+        Self { active: true }
+    }
+
+    /// Consume the guard on the normal path, returning the drained
+    /// `CExtState` for handle translation. Suppresses the `Drop`
+    /// pop because the caller has already taken responsibility.
+    fn into_state(mut self) -> rubyrs_cext::CExtState {
+        self.active = false;
+        rubyrs_cext::leave()
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl Drop for CExtStateGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = rubyrs_cext::leave();
+        }
+    }
+}
+
+/// RAII guard around `push_funcall_callback` / `pop_funcall_callback`.
+/// Always pops on `Drop`, whether normal scope exit or panic unwinding.
+/// Without this guard, a panic after the callback push but before the
+/// matching pop would leak the callback into the next cext call.
+#[cfg(not(target_os = "wasi"))]
+struct FuncallCallbackGuard;
+
+#[cfg(not(target_os = "wasi"))]
+impl FuncallCallbackGuard {
+    fn install(cb: rubyrs_cext::FuncallCallback) -> Self {
+        rubyrs_cext::push_funcall_callback(cb);
+        Self
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl Drop for FuncallCallbackGuard {
+    fn drop(&mut self) {
+        rubyrs_cext::pop_funcall_callback();
+    }
+}
+
 /// Translate a C-side opaque handle back into a `Value`. Currently
 /// covers exactly the `CValue` variants the spike supports.
 ///
@@ -3361,7 +3562,33 @@ fn cext_dispatch(
     // registered with that exact signature by the C ext; we just
     // recovered it through the `ANYARGS` convention.
     unsafe {
-        rubyrs_cext::enter();
+        // SAFETY: `current_vm_ptr()` returns the same Vm pointer that
+        // `do_call` stashed before invoking us; it stays valid until
+        // `do_call` returns. The closure captures the pointer by
+        // value so subsequent host_fn invocations don't have to
+        // re-stash it (they will anyway, with the same value).
+        //
+        // Check the invariant BEFORE pushing any cext state on the
+        // thread-local stacks — if this assert ever fires, no STATE
+        // or callback gets leaked to corrupt the next cext call.
+        let vm_ptr = current_vm_ptr();
+        assert!(
+            !vm_ptr.is_null(),
+            "ICE: cext_dispatch reached with null CURRENT_VM_PTR; \
+             host did not set it before calling host fn"
+        );
+
+        // From here on, every push has a matching RAII guard. A panic
+        // (or any future early-return) will unwind through these and
+        // pop both stacks in LIFO order, leaving thread-local state
+        // exactly as we found it.
+        let state_guard = CExtStateGuard::enter();
+        let _cb_guard = FuncallCallbackGuard::install(Box::new(
+            move |recv_h, method_name, arg_hs| {
+                cext_funcall_to_vm(vm_ptr, recv_h, method_name, arg_hs)
+            },
+        ));
+
         let ret_handle = with_caught_unwind(|| {
             // Build the `self` handle:
             // - For singleton methods (`rb_define_singleton_method`),
@@ -3450,7 +3677,12 @@ fn cext_dispatch(
                 _ => unreachable!("arity validated above"),
             }
         });
-        let st = rubyrs_cext::leave();
+        // Normal-exit cleanup. `_cb_guard` drops at end of `unsafe`
+        // block (LIFO with state_guard), so we consume the state
+        // guard here to extract the drained `CExtState` for handle
+        // translation. `_cb_guard` then pops the callback when the
+        // block ends. Both happen via `Drop` on the panic path too.
+        let st = state_guard.into_state();
         let ret_handle = ret_handle.map_err(|panic_msg| {
             Trap::new(RubyError::RuntimeError {
                 msg: format!("C ext `{}' panicked: {}", name, panic_msg),
@@ -3458,6 +3690,56 @@ fn cext_dispatch(
         })?;
         Ok(cext_handle_to_value(&st, ret_handle))
     }
+}
+
+/// Bridge a `rubyrs_cext::FuncallCallback` invocation to
+/// [`Vm::cext_invoke_method`]. Used as the body of the closure
+/// installed by [`cext_dispatch`].
+///
+/// # Safety
+///
+/// `vm_ptr` must be a valid pointer to a [`Vm`] for the duration of
+/// this call. The caller (`cext_dispatch`) guarantees this by only
+/// installing the callback while the corresponding `do_call` frame
+/// is on the host's Rust stack — see [`CURRENT_VM_PTR`] for the
+/// borrow-aliasing discussion.
+#[cfg(not(target_os = "wasi"))]
+fn cext_funcall_to_vm(
+    vm_ptr: *mut Vm,
+    recv: rubyrs_cext::Value,
+    method: &str,
+    arg_handles: &[rubyrs_cext::Value],
+) -> rubyrs_cext::Value {
+    // Translate handles → Values via the topmost CExtState.
+    let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(st, recv));
+    let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
+        arg_handles
+            .iter()
+            .map(|h| cext_handle_to_value(st, *h))
+            .collect()
+    });
+
+    // SAFETY: see CURRENT_VM_PTR doc — vm_ptr is valid for the life
+    // of the surrounding cext_dispatch call.
+    let result = unsafe {
+        let vm = &mut *vm_ptr;
+        match vm.cext_invoke_method(recv_v, method, arg_vs) {
+            Ok(v) => v,
+            // Spike: propagating Trap back through the C-ABI boundary
+            // needs `rb_raise` / longjmp coordination (Level 3+).
+            // For now collapse to Nil so the C side gets a defined
+            // return without aborting.
+            Err(_trap) => Value::Nil,
+        }
+    };
+
+    // Translate result back to a handle in the topmost CExtState.
+    rubyrs_cext::with_state(|st| {
+        match cext_value_to_cvalue("rb_funcallv:result", 0, &result) {
+            Ok(cv) => st.intern(cv),
+            Err(_) => rubyrs_cext::Qnil,
+        }
+    })
 }
 
 /// Run `f`, catching any Rust panic that escapes from our own

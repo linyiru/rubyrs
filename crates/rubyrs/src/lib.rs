@@ -103,6 +103,16 @@ static _RB_DEFINE_SINGLETON_METHOD: unsafe extern "C" fn(
     rubyrs_cext::OpaqueFn,
     std::ffi::c_int,
 ) = rubyrs_cext::rb_define_singleton_method;
+#[used]
+static _RB_INTERN: unsafe extern "C" fn(*const std::ffi::c_char) -> rubyrs_cext::ID =
+    rubyrs_cext::rb_intern;
+#[used]
+static _RB_FUNCALLV: unsafe extern "C" fn(
+    rubyrs_cext::Value,
+    rubyrs_cext::ID,
+    std::ffi::c_int,
+    *const rubyrs_cext::Value,
+) -> rubyrs_cext::Value = rubyrs_cext::rb_funcallv;
 
 /// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
 /// untrusted scripts.

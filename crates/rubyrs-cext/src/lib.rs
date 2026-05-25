@@ -28,11 +28,81 @@
 //! critical path for the Level 0 hypothesis we're testing.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 
 /// Opaque token the C side sees as `VALUE`. Numerically an index
 /// into [`CExtState::values`]; semantically meaningless to C code.
 pub type Value = u64;
+
+/// CRuby's `ID` type — opaque identifier for an interned name
+/// (method, symbol, class name, etc.). Returned by `rb_intern`;
+/// consumed by `rb_funcall`, `rb_funcallv`, `rb_define_method`'s
+/// future variants, etc. Stable across per-call `CExtState`
+/// lifecycles — that's why it lives in its own intern table,
+/// separate from `CExtState`'s ephemeral handle table.
+///
+/// **Threading scope**: the table is `thread_local!`, not a true
+/// process-wide global. Given rubyrs's current single-threaded
+/// cext execution model (no Ractor parallelism reaches the C
+/// boundary; embedders run one [`crate::Runtime`] per thread), a
+/// thread-local table is effectively process-wide. If a future
+/// level adds true threaded cext dispatch, this becomes a
+/// `OnceLock<Mutex<InternTable>>` — at that point the locking
+/// overhead is justified by the actual sharing requirement, and
+/// not before.
+///
+/// `0` is reserved as "no ID" / `Qundef`-ish.
+pub type ID = u64;
+
+/// Intern table for [`ID`]s. C extensions call `rb_intern("name")`
+/// and stash the result in static globals (`static ID id_foo;`);
+/// those IDs must remain valid across every subsequent C ext call
+/// regardless of which per-call `CExtState` is active. This table
+/// is the only piece of cext state that outlives a single
+/// `enter`/`leave` cycle — see [`ID`]'s threading-scope note for
+/// why "thread-local" is the right shape here.
+struct InternTable {
+    /// 0-based; ID is index + 1 so we can reserve 0 as "no such ID".
+    names: Vec<String>,
+    map: HashMap<String, ID>,
+}
+
+impl InternTable {
+    fn new() -> Self {
+        Self { names: Vec::new(), map: HashMap::new() }
+    }
+
+    fn intern(&mut self, name: &str) -> ID {
+        if let Some(&id) = self.map.get(name) {
+            return id;
+        }
+        let id = self.names.len() as ID + 1;
+        self.names.push(name.to_string());
+        self.map.insert(name.to_string(), id);
+        id
+    }
+
+    fn resolve(&self, id: ID) -> Option<&str> {
+        if id == 0 {
+            return None;
+        }
+        self.names.get((id - 1) as usize).map(String::as_str)
+    }
+}
+
+thread_local! {
+    // Not `const { ... }` because HashMap::new is not const-fn.
+    static INTERN: RefCell<InternTable> = RefCell::new(InternTable::new());
+}
+
+/// Resolve a previously-interned [`ID`] back to its name. Used by
+/// the host VM when `rb_funcallv` lands and needs to look up the
+/// method by its symbolic name. Returns `None` for `ID(0)` or any
+/// ID that wasn't issued by this process's [`rb_intern`] calls.
+pub fn resolve_id(id: ID) -> Option<String> {
+    INTERN.with(|t| t.borrow().resolve(id).map(String::from))
+}
 
 /// Mirror of the subset of `rubyrs::Value` that crosses the C ABI.
 /// Kept independent so this crate doesn't pull in the whole
@@ -167,42 +237,80 @@ impl Default for CExtState {
 }
 
 thread_local! {
-    static STATE: RefCell<Option<CExtState>> = const { RefCell::new(None) };
+    // Stack of nested cext states. Level 0/1/1.5 only ever had one
+    // active call at a time (no callbacks back into Ruby from C), so
+    // `Option` was enough. Level 2's `rb_funcallv` can cause a C ext
+    // call to re-enter the Vm, which can in turn dispatch another C
+    // ext call — that needs a fresh state on top while the outer
+    // state stays preserved underneath. Hence Vec.
+    static STATE: RefCell<Vec<CExtState>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Run `f` with mutable access to the active [`CExtState`]. Panics
-/// if called from a thread that hasn't been wrapped in [`enter`] /
-/// [`leave`] — that always indicates a host-side bug.
+/// Run `f` with mutable access to the topmost (innermost) active
+/// [`CExtState`]. Panics if called from a thread that has no active
+/// state — that always indicates a host-side bug.
 pub fn with_state<R>(f: impl FnOnce(&mut CExtState) -> R) -> R {
     STATE.with(|s| {
         let mut b = s.borrow_mut();
         let st = b
-            .as_mut()
-            .expect("ICE: rubyrs-cext STATE not initialised; host must call enter() first");
+            .last_mut()
+            .expect("ICE: rubyrs-cext STATE empty; host must call enter() first");
         f(st)
     })
 }
 
-/// Push a fresh [`CExtState`] onto the current thread. Pair with
-/// [`leave`].
+/// Push a fresh [`CExtState`] onto the active stack. Pair with
+/// [`leave`]. Nests cleanly: each `enter` adds a new state; the
+/// matching `leave` pops it and reveals whatever was underneath.
 pub fn enter() {
-    STATE.with(|s| {
-        let mut b = s.borrow_mut();
-        assert!(
-            b.is_none(),
-            "ICE: nested rubyrs-cext enter() without intervening leave()"
-        );
-        *b = Some(CExtState::new());
-    });
+    STATE.with(|s| s.borrow_mut().push(CExtState::new()));
 }
 
-/// Pop the active [`CExtState`] and return ownership to the host.
+/// Pop the topmost [`CExtState`] and return ownership to the host.
 pub fn leave() -> CExtState {
     STATE.with(|s| {
         s.borrow_mut()
-            .take()
+            .pop()
             .expect("ICE: rubyrs-cext leave() without matching enter()")
     })
+}
+
+// ===== Funcall callback infrastructure (Level 2) =====
+//
+// `rb_funcallv` from C needs to re-enter the host Vm to dispatch a
+// Ruby method. rubyrs-cext can't directly depend on the Vm type
+// (separate crate), so we expose a callback channel: the host
+// installs a closure that knows how to invoke `recv.method(args)`
+// on its Vm before transferring control to the C function, and
+// `rb_funcallv` looks up the topmost installed callback.
+//
+// Stack semantics mirror STATE — nested cext calls each install
+// their own callback (capturing their own Vm pointer), and the
+// topmost wins.
+
+/// Callback signature: receiver handle (Value), method name (str),
+/// arg handles (slice of Value). Returns a new handle for the
+/// result, interned into the topmost CExtState.
+pub type FuncallCallback = Box<dyn Fn(Value, &str, &[Value]) -> Value>;
+
+thread_local! {
+    static FUNCALL_CB: RefCell<Vec<FuncallCallback>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Install a funcall callback for the duration of the next C call.
+/// The host (`Vm::cext_dispatch`) pushes one before invoking C and
+/// pops the same one after C returns.
+pub fn push_funcall_callback(cb: FuncallCallback) {
+    FUNCALL_CB.with(|c| c.borrow_mut().push(cb));
+}
+
+/// Remove the topmost funcall callback.
+pub fn pop_funcall_callback() {
+    FUNCALL_CB.with(|c| {
+        let _ = c.borrow_mut()
+            .pop()
+            .expect("ICE: pop_funcall_callback without matching push");
+    });
 }
 
 // ===== Exported C ABI =====
@@ -502,4 +610,106 @@ pub unsafe extern "C" fn rb_define_singleton_method(
             arity: arity as i32,
         });
     });
+}
+
+// ===== Intern table for ID (thread-local; see `pub type ID` docs) =====
+
+/// Look up or create the [`ID`] for `name`. CRuby C extensions cache
+/// the returned `ID` in static globals at `Init_` time:
+///
+/// ```c
+/// static ID id_to_s;
+/// void Init_foo(void) {
+///     id_to_s = rb_intern("to_s");
+///     ...
+/// }
+/// ```
+///
+/// Those cached `ID`s are then passed to `rb_funcall` / `rb_funcallv`
+/// to dispatch named methods. Process-wide stability is the contract
+/// — the `ID` for a given name must compare equal across every C ext
+/// call in the same process, regardless of which per-call
+/// [`CExtState`] is active.
+///
+/// # Safety
+///
+/// `name` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_intern(name: *const c_char) -> ID {
+    assert!(!name.is_null(), "rb_intern: null name");
+    let s = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    INTERN.with(|t| t.borrow_mut().intern(&s))
+}
+
+/// Dispatch a Ruby method from C: invoke `recv.<id>(argv[..argc])`
+/// on the host Vm and return a handle to the result.
+///
+/// Looks up the topmost [`FuncallCallback`] (installed by the host
+/// before transferring control to the C extension) and delegates.
+///
+/// # Panic policy
+///
+/// Three contract-violation conditions `assert!` / `expect!` and
+/// abort the process under Rust's default `extern "C"` `nounwind`
+/// semantics (Rust 2018+):
+///
+/// - `mid` not previously interned via `rb_intern` (unknown ID)
+/// - `argc < 0` (signed-int ABI contract violation)
+/// - no [`FuncallCallback`] installed (called from outside an
+///   active cext dispatch, e.g. from `Init_<name>` or a thread the
+///   host didn't set up)
+///
+/// All three are programmer-error / C-ABI-contract violations, not
+/// runtime conditions arising from valid input. Aborting loudly
+/// is intentional, defined behaviour — **not** UB despite the
+/// `extern "C"` boundary. See
+/// [ADR 0009](../../docs/adr/0009-cext-panic-policy.md) for the
+/// full rationale (and the forward path: once `rb_raise` /
+/// longjmp-coordinated exception propagation lands, these convert
+/// to catchable Ruby exceptions, and ADR 0009 supersedes).
+///
+/// Ruby-level errors from the dispatched method itself do NOT
+/// panic — the host-side `FuncallCallback` catches `Trap` and
+/// collapses to `Qnil` (a spike-level concession also noted in
+/// ADR 0009's forward path).
+///
+/// # Safety
+///
+/// `argv` must be valid for reads of `argc` `VALUE`s when `argc > 0`.
+/// When `argc == 0`, `argv` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_funcallv(
+    recv: Value,
+    mid: ID,
+    argc: c_int,
+    argv: *const Value,
+) -> Value {
+    let method = resolve_id(mid)
+        .expect("ICE: rb_funcallv with unknown ID; missing rb_intern call?");
+    // `argc` is signed (matches CRuby's `int argc`); a negative
+    // value indicates the C extension is violating the ABI
+    // contract. The previous `if argc > 0 { ... } else { vec![] }`
+    // would silently drop all args for negative argc and dispatch
+    // a wrong-arity call. Refuse to enter that state.
+    assert!(
+        argc >= 0,
+        "rb_funcallv: negative argc {} (C ext ABI violation)",
+        argc
+    );
+    let args: Vec<Value> = if argc > 0 {
+        assert!(!argv.is_null(), "rb_funcallv: null argv with argc > 0");
+        // SAFETY: caller guarantees argv..argv+argc is readable.
+        unsafe { std::slice::from_raw_parts(argv, argc as usize).to_vec() }
+    } else {
+        Vec::new()
+    };
+    FUNCALL_CB.with(|c| {
+        let cb = c.borrow();
+        let cb = cb
+            .last()
+            .expect("ICE: rb_funcallv called outside an active cext dispatch");
+        cb(recv, &method, &args)
+    })
 }

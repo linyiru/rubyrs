@@ -16,7 +16,9 @@
 /* CRuby's ruby.h transitively pulls in the C stdlib basics that most
  * extensions assume are available (NULL, free, size_t, memcpy, etc).
  * Mirror that so unmodified CRuby C extensions compile against us
- * without needing to add their own #include lines. */
+ * without needing to add their own #include lines.
+ * `<stdarg.h>` is for the `rb_funcall` static-inline wrapper. */
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -162,6 +164,58 @@ void rb_define_singleton_method(VALUE klass,
                                 const char *name,
                                 VALUE (*func)(ANYARGS),
                                 int arity);
+
+/* CRuby's `ID` — opaque identifier for an interned name (method,
+ * symbol, class name). Stable across the process. C extensions
+ * cache `rb_intern` results in static globals at `Init_` time and
+ * pass them to `rb_funcall*`. */
+typedef uint64_t ID;
+
+/* Intern `name` to an [`ID`]. Idempotent: repeated calls with the
+ * same name return the same `ID`. Stable across the per-call cext
+ * state being reset. Backed by a thread-local table inside rubyrs
+ * — effectively process-wide given rubyrs's current single-thread
+ * cext model. See `pub type ID` in rubyrs-cext for the threading
+ * scope rationale. */
+ID rb_intern(const char *name);
+
+/* Dispatch a Ruby method from C. Calls `recv.<id>(argv[..argc])`
+ * on the host VM, returns the result as a fresh VALUE handle.
+ *
+ * Spike scope: returning value types are limited to what the host
+ * cext FFI currently models (Nil / Bool / Str / Int / Class).
+ * Exceptions raised from the Ruby side currently collapse to Nil
+ * — proper `rb_raise`-style propagation lands when the C ABI gets
+ * an exception machinery (Level 3+).
+ *
+ * Re-entrancy: the C extension is free to call `rb_funcallv`
+ * arbitrarily many times nested; the host pushes a fresh cext
+ * state on each dispatch and pops on return. */
+VALUE rb_funcallv(VALUE recv, ID mid, int argc, const VALUE *argv);
+
+/* Convenience wrapper for the CRuby-style `rb_funcall(recv, id, n,
+ * arg1, arg2, ...)`. Implemented as a `static inline` C function
+ * (not a macro) because CRuby C extensions universally write
+ * `rb_funcall(obj, id, 0)` for no-arg dispatch — a macro built on
+ * `(VALUE[]){ __VA_ARGS__ }` produces an empty compound-literal
+ * initializer for that case, which ISO C rejects and modern
+ * gcc/clang warn on. A real variadic function handles n == 0
+ * cleanly.
+ *
+ * Variable-length stack allocation via `__builtin_alloca`
+ * (available on gcc + clang, no header needed). The buffer lives
+ * until the enclosing C-ext function returns, freed automatically
+ * — `rb_funcallv` reads the bytes synchronously so the lifetime
+ * is plenty. No fixed cap, no silent truncation. */
+static inline VALUE rb_funcall(VALUE recv, ID mid, int n, ...) {
+    VALUE *argv = NULL;
+    if (n > 0) argv = (VALUE *)__builtin_alloca((size_t)n * sizeof(VALUE));
+    va_list ap;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) argv[i] = va_arg(ap, VALUE);
+    va_end(ap);
+    return rb_funcallv(recv, mid, n, argv);
+}
 
 #ifdef __cplusplus
 }
