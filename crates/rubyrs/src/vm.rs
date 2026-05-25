@@ -133,14 +133,13 @@ pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     pub(crate) interner: Interner,
     pub(crate) classes: HashMap<SymId, Rc<Class>>,
-    /// Top-level constants set via bare `FOO = expr` (not class
-    /// definitions). Read path: `Op::LoadConst` falls through to
-    /// this map after the class registry misses. Distinct table so
-    /// `class Foo` (sets `classes[Foo]`) and `Foo = 42` (sets
-    /// `constants[Foo]`) don't collide; the class registry wins on
-    /// read so `class Foo` is always findable. (CRuby warns and
-    /// reassigns on this collision; rubyrs is silent and keeps the
-    /// class — pick a different name if you really want to shadow.)
+    /// Bare constant assignments (`FOO = expr`), kept in a separate
+    /// table from `classes` so `class Foo` and `Foo = 42` can coexist
+    /// without collision. `Op::LoadConst` resolves classes first,
+    /// then this table, then the `ENV` special-case — chosen for
+    /// implementation simplicity, NOT to mirror CRuby (CRuby would
+    /// emit "already initialized constant" and reassign). If you
+    /// need to shadow a class with a constant, pick a different name.
     pub(crate) constants: HashMap<SymId, Value>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, Rc<HostFn>>,

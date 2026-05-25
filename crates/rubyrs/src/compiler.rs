@@ -157,6 +157,15 @@ fn compile_stmt(
             let id = interner.intern(name);
             b.emit(Op::StoreIvar(id));
         }
+        Expr::ConstWrite(name, val) => {
+            // Statement-position const write: skip the Dup the
+            // expression form needs, matching the LVarWrite /
+            // IVarWrite arms above. Saves `Dup + Pop` per top-level
+            // `FOO = ...` line.
+            compile_expr(b, val, protos, interner, cc);
+            let id = interner.intern(name);
+            b.emit(Op::StoreConst(id));
+        }
         _ => {
             compile_expr(b, e, protos, interner, cc);
             b.emit(Op::Pop);

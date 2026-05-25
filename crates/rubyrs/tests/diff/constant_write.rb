@@ -46,3 +46,10 @@ puts LIST.first
 MAP = { a: 1, b: 2 }
 puts MAP[:a]
 puts MAP[:b]
+
+# User constants take precedence over rubyrs's built-in ENV
+# special-case. CRuby emits a "already initialized constant ENV"
+# warning to stderr but the reassigned value wins on stdout —
+# rubyrs matches the stdout-visible behaviour silently.
+ENV = 1
+puts ENV

@@ -337,11 +337,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_instance_variable_write_node() {
         return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
-    // Top-level constant assignment: `FOO = expr`. Storage is a
-    // separate `Vm.constants` map keyed by SymId — class names
-    // continue to live in `Vm.classes`, so `class Foo` and
-    // `Foo = SomeOther` can coexist (class lookup wins per
-    // CRuby).
+    // Bare constant assignment: `FOO = expr` (top level or inside a
+    // class/module body). Storage is a separate `Vm.constants` map
+    // keyed by SymId — class names continue to live in `Vm.classes`,
+    // and class lookup wins on read. This is a deliberate rubyrs
+    // divergence from CRuby (CRuby warns "already initialized" and
+    // reassigns); see `Vm::constants` for the precedence rationale.
     if let Some(n) = node.as_constant_write_node() {
         return sp(node, Expr::ConstWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
