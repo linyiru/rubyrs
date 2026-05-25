@@ -37,7 +37,8 @@ SRCS=(
 
 cc "${LDFLAGS[@]}" \
    -fPIC -fno-strict-aliasing \
-   -DHAVE_STDBOOL_H -DHAVE_STRNLEN -DHAVE_RB_HASH_NEW_CAPA \
+   -DHAVE_STDBOOL_H -DHAVE_STRNLEN \
+   -DHAVE_RB_HASH_NEW_CAPA -DHAVE_RB_ENC_INTERNED_STR \
    -I "$WORKSPACE_ROOT/crates/rubyrs-cext/include" \
    -I "$SCRIPT_DIR/vendor/msgpack" \
    "${SRCS[@]}" \
