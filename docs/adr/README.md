@@ -65,3 +65,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0013 — CURRENT_VM_PTR borrow-aliasing policy](0013-current-vm-ptr-aliasing.md)
 - [0014 — Embed API v2 — `HostCtx` for heap-y arg reads](0014-embed-api-v2-host-ctx.md)
 - [0015 — Concentric architecture via tiered Cargo features](0015-concentric-architecture.md)
+- [0016 — Method-object reflection chain](0016-method-reflection-chain.md)
