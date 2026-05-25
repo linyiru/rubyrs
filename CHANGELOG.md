@@ -6,6 +6,25 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Fixed
+- **Cross-type `==` / `!=` no longer raises NoMethodError.**
+  `"x" == nil`, `nil == :foo`, `5 == "5"`, `[] == ""` — every
+  cross-type compare used to crash with `undefined method '==`
+  for String` because `primitive_call` only had same-type arms.
+  CRuby's `Object#==` defaults to identity (returning false
+  for any cross-type pair); we now do the same via a universal
+  fallback in `do_call`: after all the type-specific arms
+  declined, the dispatcher answers `==` / `!=` via the
+  existing `ruby_eq` helper, which returns false for any pair
+  whose types don't match. As a side-benefit, `Hash == Hash`
+  and `Range == Range` now work — `ruby_eq` gained
+  order-insensitive Hash equality (O(n*m); good enough until
+  P3-class hash-keying lands) and Range equality
+  (begin/end/exclusive triple). New diff fixture
+  `cross_type_eq.rb` covers cross-type, same-type
+  value-equality, and a `v == "ready"` guard idiom.
+  Byte-identical to CRuby.
+
 ### Added
 - **`Object#class`, `Class#name` / `#to_s` / `#==` / `#!=`**.
   `obj.class` returns the Class associated with any receiver —

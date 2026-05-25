@@ -247,6 +247,25 @@ impl Value {
                 let x = heap.array(*a); let y = heap.array(*b);
                 x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| p.ruby_eq(q, heap))
             }
+            (Value::Hash(a), Value::Hash(b)) => {
+                if a == b { return true; }
+                let x = heap.hash(*a); let y = heap.hash(*b);
+                if x.len() != y.len() { return false; }
+                // Order-insensitive: for each (k, v) in `x`, find a
+                // matching key in `y` with equal value. O(n*m) but
+                // the lookup is unavoidable until we hash keys
+                // properly (P3-class follow-up).
+                x.iter().all(|(k, v)| {
+                    y.iter().any(|(k2, v2)| k.ruby_eq(k2, heap) && v.ruby_eq(v2, heap))
+                })
+            }
+            (Value::Range(a), Value::Range(b)) => {
+                if a == b { return true; }
+                let x = heap.range(*a); let y = heap.range(*b);
+                x.exclusive == y.exclusive
+                    && x.begin.ruby_eq(&y.begin, heap)
+                    && x.end.ruby_eq(&y.end, heap)
+            }
             (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }

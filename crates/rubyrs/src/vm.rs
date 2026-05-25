@@ -597,6 +597,22 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // `Object#==` / `Object#!=` cross-type fallback. The
+        // per-type primitive arms (`String == String`,
+        // `Sym == Sym`, `Class == Class`, etc.) all fired earlier
+        // in this dispatch. Anything that reaches here is a
+        // cross-type comparison (`"x" == nil`, `nil == :foo`,
+        // `[] == ""`) — those return `false` in CRuby, not
+        // NoMethodError. Same-type comparisons that we don't
+        // have per-type arms for (e.g. `Array == Array`) get
+        // value-equality via `ruby_eq`. Universal fallback —
+        // never raises — so it must go before NoMethodError.
+        if args.len() == 1 && (&*name == "==" || &*name == "!=") {
+            let eq = recv.ruby_eq(&args[0], &self.heap);
+            let result = if &*name == "==" { eq } else { !eq };
+            self.stack.push(Value::Bool(result));
+            return Ok(());
+        }
         // `Object#class` — universal, no args. Returns the Class
         // associated with the receiver. For built-in types it's
         // the stub class registered by the preamble; for user
