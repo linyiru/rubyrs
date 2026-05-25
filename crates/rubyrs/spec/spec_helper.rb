@@ -71,6 +71,18 @@ def assert_eq(actual, expected)
   end
 end
 
+# Inequality assertion — the negative form of assert_eq.
+# Used by the extractor's `should_not == val` rewrite (v0.2);
+# failure message names both sides so the divergence is
+# immediately legible without re-running.
+def assert_neq(actual, expected)
+  if actual != expected
+    __spec_pass("neq")
+  else
+    __spec_fail("expected #{actual.inspect} to NOT equal #{expected.inspect}")
+  end
+end
+
 # Verify the block raises an exception whose class name (CRuby's
 # `e.class.to_s`) matches `class_name`. Used for "should raise X"
 # patterns in the upstream specs.

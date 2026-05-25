@@ -1,28 +1,46 @@
 # A spec file mixing recognised and unrecognised patterns.
-# v0.1 rewrites only `expr.should == val`; everything else
-# passes through verbatim — comments included — so a human
-# review can see what's still hand-translation territory.
+# After v0.2 the recognised set covers: `expr.should == val`,
+# `expr.should_not == val`, predicate matchers
+# (`.should.foo?` / `.should_not.foo?`) and lambda-raise
+# (`-> { ... }.should.raise(X)`). Anything that still passes
+# through is mock-style, shared-examples, or fixtures —
+# v0.3+ work.
 
 describe "Mixed" do
   it "covers a recognised pattern" do
     assert_eq([1, 2, 3].length, 3)
   end
 
-  it "leaves should_not alone" do
-    [].should_not.empty?
+  it "v0.2 should_not == val" do
+    assert_neq([1, 2, 3].length, 99)
   end
 
-  it "leaves raise matchers alone" do
-    -> { raise "boom" }.should.raise(RuntimeError)
+  it "v0.2 lambda-raise" do
+    assert_raises("RuntimeError") do
+      raise "boom"
+    end
   end
 
-  it "leaves predicate matchers alone" do
-    "abc".should.frozen?
+  it "v0.2 predicate matcher (should)" do
+    assert("abc".frozen?)
   end
 
-  it "still rewrites the simple cases mixed with skipped ones" do
+  it "v0.2 predicate matcher (should_not)" do
+    assert(![].empty?)
+  end
+
+  it "v0.2 mixed in one block" do
     val = 1 + 2
     assert_eq(val, 3)
-    [].should_not.include?(7)
+    assert(![].include?(7))
+  end
+
+  it "still skips mocks (v0.3 territory)" do
+    obj = mock("thing")
+    obj.should_receive(:name).and_return("hi")
+  end
+
+  it "still skips shared examples (v0.4 territory)" do
+    it_behaves_like :some_shared, :method_name
   end
 end

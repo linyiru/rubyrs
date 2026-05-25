@@ -116,41 +116,165 @@ struct SubstitutionCollector<'a> {
 
 impl<'pr> Visit<'pr> for SubstitutionCollector<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        // Look for `lhs.should == rhs`:
-        //   outer: CallNode { name=:==, receiver=should_call, args=[rhs] }
-        //   should_call: CallNode { name=:should, receiver=lhs, args=None }
-        let name = cid_to_string(node.name());
-        if name == "=="
-            && let Some(should_call_node) = node.receiver()
-            && let Some(should_call) = should_call_node.as_call_node()
-            && cid_to_string(should_call.name()) == "should"
-            && should_call.arguments().is_none()
-            && let Some(lhs) = should_call.receiver()
-            && let Some(args) = node.arguments()
+        // Try each recogniser in turn; first one that matches
+        // consumes the subtree (we return without recursing).
+        // Order matters when patterns could overlap — `raise`
+        // is also a method name so `try_lambda_raise` runs
+        // before the generic predicate-matcher recogniser.
+        if let Some(sub) = try_should_eq(self.source, node)
+            .or_else(|| try_should_not_eq(self.source, node))
+            .or_else(|| try_lambda_raise(self.source, node))
+            .or_else(|| try_predicate_matcher(self.source, node))
         {
-            let arg_list: Vec<_> = args.arguments().iter().collect();
-            if arg_list.len() == 1 {
-                let rhs = &arg_list[0];
-                let outer_loc = node.location();
-                let lhs_text = slice(self.source, &lhs);
-                let rhs_text = slice(self.source, rhs);
-                self.substitutions.push(Substitution {
-                    start: outer_loc.start_offset(),
-                    end: outer_loc.end_offset(),
-                    replacement: format!("assert_eq({}, {})", lhs_text, rhs_text),
-                });
-                // Don't recurse — we've consumed the whole
-                // `lhs.should == rhs` subtree. Recursing would
-                // re-visit the inner `.should` call and possibly
-                // trigger spurious nested rewrites if a future
-                // pattern overlaps.
-                return;
-            }
+            self.substitutions.push(sub);
+            // Don't recurse — we've consumed the whole subtree.
+            // Recursing would re-visit the inner `.should` call
+            // and trigger spurious nested rewrites.
+            return;
         }
-        // Default recursion — keep visiting children to find
-        // patterns nested inside arguments, blocks, etc.
+        // No pattern matched — keep visiting children so
+        // patterns nested in arguments / blocks still fire.
         ruby_prism::visit_call_node(self, node);
     }
+}
+
+/// `lhs.should == rhs` → `assert_eq(lhs, rhs)` (v0.1).
+fn try_should_eq(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
+    let rhs = match_eq_against(node, "should")?;
+    let lhs = node.receiver()?.as_call_node()?.receiver()?;
+    Some(Substitution {
+        start: node.location().start_offset(),
+        end: node.location().end_offset(),
+        replacement: format!("assert_eq({}, {})", slice(source, &lhs), slice(source, &rhs)),
+    })
+}
+
+/// `lhs.should_not == rhs` → `assert_neq(lhs, rhs)` (v0.2).
+fn try_should_not_eq(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
+    let rhs = match_eq_against(node, "should_not")?;
+    let lhs = node.receiver()?.as_call_node()?.receiver()?;
+    Some(Substitution {
+        start: node.location().start_offset(),
+        end: node.location().end_offset(),
+        replacement: format!("assert_neq({}, {})", slice(source, &lhs), slice(source, &rhs)),
+    })
+}
+
+/// Shared shape-match for `lhs.RECV_NAME == rhs`: confirms the
+/// outer call is `==`, the receiver is a no-arg call with the
+/// requested name (`should` or `should_not`), and there's
+/// exactly one RHS arg. Returns the RHS node on match.
+fn match_eq_against<'pr>(
+    node: &ruby_prism::CallNode<'pr>,
+    recv_name: &str,
+) -> Option<Node<'pr>> {
+    if cid_to_string(node.name()) != "==" {
+        return None;
+    }
+    let recv_call = node.receiver()?.as_call_node()?;
+    if cid_to_string(recv_call.name()) != recv_name {
+        return None;
+    }
+    if recv_call.arguments().is_some() {
+        return None;
+    }
+    let args = node.arguments()?;
+    let arg_list: Vec<_> = args.arguments().iter().collect();
+    if arg_list.len() != 1 {
+        return None;
+    }
+    Some(arg_list.into_iter().next().unwrap())
+}
+
+/// `-> { BODY }.should.raise(CLASS)` →
+/// `assert_raises("CLASS") do BODY end` (v0.2).
+///
+/// Class name is the source text of the outer call's first
+/// argument — covers `ArgumentError`, `Math::DomainError`, etc.
+/// Lambda body comes from the LambdaNode's body location, or
+/// the lambda's text minus the `-> {` / `}` wrappers as a
+/// fallback.
+fn try_lambda_raise(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
+    if cid_to_string(node.name()) != "raise" {
+        return None;
+    }
+    let should_call = node.receiver()?.as_call_node()?;
+    if cid_to_string(should_call.name()) != "should" {
+        return None;
+    }
+    if should_call.arguments().is_some() {
+        return None;
+    }
+    let lambda_node = should_call.receiver()?;
+    let lambda = lambda_node.as_lambda_node()?;
+    let args = node.arguments()?;
+    let arg_list: Vec<_> = args.arguments().iter().collect();
+    if arg_list.len() != 1 {
+        return None;
+    }
+    let class_text = slice(source, &arg_list[0]);
+    let body_text = lambda
+        .body()
+        .map(|b| slice(source, &b))
+        .unwrap_or_default();
+    Some(Substitution {
+        start: node.location().start_offset(),
+        end: node.location().end_offset(),
+        replacement: format!(
+            "assert_raises(\"{class_text}\") do\n      {body_text}\n    end"
+        ),
+    })
+}
+
+/// `lhs.should.NAME(args)` → `assert(lhs.NAME(args))`
+/// `lhs.should_not.NAME(args)` → `assert(!lhs.NAME(args))`
+///
+/// `NAME` is any method other than `==` / `raise` — those are
+/// handled by dedicated recognisers above. Common upstream
+/// shapes: `should.empty?`, `should.equal?(other)`,
+/// `should.instance_of?(Class)`.
+fn try_predicate_matcher(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
+    let outer_name = cid_to_string(node.name());
+    // `==` and `raise` are caught by their dedicated
+    // recognisers; bail so we don't also match here.
+    if outer_name == "==" || outer_name == "raise" {
+        return None;
+    }
+    let recv_call = node.receiver()?.as_call_node()?;
+    let recv_name = cid_to_string(recv_call.name());
+    let (negate, expect) = match recv_name.as_str() {
+        "should" => (false, "should"),
+        "should_not" => (true, "should_not"),
+        _ => return None,
+    };
+    let _ = expect; // silence unused — kept for symmetry / future
+    if recv_call.arguments().is_some() {
+        return None;
+    }
+    let lhs = recv_call.receiver()?;
+
+    let lhs_text = slice(source, &lhs);
+    // Build `.NAME(args)` from the outer call: take the source
+    // from the start of the message (the method name) through
+    // the end of the outer call. This preserves any args
+    // syntax (parens, no parens, block) verbatim.
+    let outer_loc = node.location();
+    let message_loc = node.message_loc()?;
+    let suffix_start = message_loc.start_offset();
+    let suffix_end = outer_loc.end_offset();
+    let suffix_text = source.get(suffix_start..suffix_end)?;
+
+    let inner = format!("{lhs_text}.{suffix_text}");
+    let replacement = if negate {
+        format!("assert(!{inner})")
+    } else {
+        format!("assert({inner})")
+    };
+    Some(Substitution {
+        start: outer_loc.start_offset(),
+        end: outer_loc.end_offset(),
+        replacement,
+    })
 }
 
 fn cid_to_string(id: ruby_prism::ConstantId<'_>) -> String {

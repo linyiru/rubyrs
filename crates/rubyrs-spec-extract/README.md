@@ -36,32 +36,37 @@ cargo run --release -p rubyrs-spec-extract \
 cargo test -p rubyrs --test ruby_spec
 ```
 
-## What v0.1 recognises
+## What the extractor recognises (current: v0.2)
 
-Exactly this shape:
+The recogniser shipped incrementally. Patterns in italics
+are passthrough — extractor leaves them verbatim for a
+human polish step.
 
-```ruby
-expr.should == val
-# →
-assert_eq(expr, val)
-```
+| Upstream pattern | Rewrites to | Since |
+|---|---|---|
+| `expr.should == val` | `assert_eq(expr, val)` | v0.1 |
+| `expr.should_not == val` | `assert_neq(expr, val)` | v0.2 |
+| `expr.should.foo?` | `assert(expr.foo?)` | v0.2 |
+| `expr.should.foo?(args)` | `assert(expr.foo?(args))` | v0.2 |
+| `expr.should_not.foo?` | `assert(!expr.foo?)` | v0.2 |
+| `expr.should_not.foo?(args)` | `assert(!expr.foo?(args))` | v0.2 |
+| `-> { BODY }.should.raise(CLASS)` | `assert_raises("CLASS") do BODY end` | v0.2 |
+| `-> { BODY }.should.raise(M::Cls)` | `assert_raises("M::Cls") do BODY end` | v0.2 |
+| `require_relative '...'` | (stripped — line filter) | v0.1 |
+| *`it_behaves_like :shared, ...`* | *passthrough* | v0.3+ |
+| *`should_receive` / `mock(...)`* | *passthrough* | (no mock lib in micro-runner; hand-translate) |
 
-`expr` and `val` are taken verbatim from the source, so
-regex literals, escapes, multi-line method chains, and inline
-blocks all preserve their original formatting.
+`expr`, `val`, `args`, and `BODY` come from the original
+source verbatim, so regex literals, escapes, multi-line
+method chains, multibyte characters, and inline blocks all
+preserve their original formatting.
 
-## What v0.1 deliberately doesn't do
+## What's deliberately deferred (v0.3+)
 
-Each of these passes through verbatim, so a human reviewer
-can see what's still hand-translation territory:
-
-| Upstream pattern | What's needed to recognise |
-|---|---|
-| `expr.should_not == val` | `assert_neq` helper in `spec_helper.rb` |
-| `expr.should.foo?` (predicate matcher) | Per-predicate knowledge or a generic `assert(expr.foo?)` |
-| `-> { ... }.should.raise(X)` | Parse the lambda + matcher class; lower to `assert_raises("X") { ... }` |
-| `it_behaves_like :shared, ...` | Inline shared examples; needs cross-file resolution |
-| `should_receive` / mocks | We have no mock library — skip and hand-translate |
+- **Shared examples** (`it_behaves_like :shared, ...`) — needs cross-file inlining of the shared `describe` block.
+- **Mocks / `should_receive`** — micro-runner has no mock library; these always need hand-translation.
+- **mspec helpers** (`mock_int(...)`, `mock(...)`, `bignum_value`, `fixnum_max`) — passthrough; needs lookup table or per-helper fixture.
+- **`SpecEvaluate.desc` heredoc form** (used in `core/integer/arity_spec.rb`) — uses Ruby heredoc to embed evaluated code; not modelled.
 
 Dropping fixtures-only `describe` blocks (`UnboundMethodSpecs::*`,
 `MethodSpecs::*` etc) is also pending — those classes are
@@ -116,22 +121,32 @@ Regenerate `.expected.rb` files after an intentional change:
 UPDATE_EXPECTED=1 cargo test -p rubyrs-spec-extract
 ```
 
-## v0.1 real-world result
+## Real-world result (v0.2)
 
 Run against the three vendored fixtures:
 
-| Upstream file | What v0.1 produces |
+| Upstream file | What v0.2 produces |
 |---|---|
-| `core/string/reverse_spec.rb` | 6 of ~10 `it` blocks lower cleanly to `assert_eq` calls; predicate / lambda / `should.equal?` blocks pass through unchanged |
-| `core/string/empty_spec.rb` | only `require_relative` lines stripped — file body is all predicate matchers, nothing to rewrite yet |
-| `core/string/length_spec.rb` | only `require_relative` lines stripped — the single `it_behaves_like` redirect is untouched |
+| `core/string/reverse_spec.rb` | both `describe` blocks lower fully — all `should ==`, `.should.equal?`, `.should.instance_of?(...)`, `.should.raise(FrozenError)` blocks auto-extract. Only the `MyString` subclass fixture remains as a hand-translation item (no rubyrs equivalent). |
+| `core/string/empty_spec.rb` | `should.empty?` / `should_not.empty?` predicate matchers now auto-extract; the `StringSpecs::MyString.new("")` fixture line is the only hand-translation work left. |
+| `core/string/length_spec.rb` | only `require_relative` stripped — the `it_behaves_like :string_length, :length` redirect is v0.3+ territory. |
 
-In other words, v0.1 is a STARTER that mechanises the most
-common pattern. Files that mix matchers still need a human
-finish; the extracted file is the right starting point for
-that finish. v0.2 (`should_not`, predicate matchers,
-`should.raise`) will close the gap for the predicate-heavy
-files; v0.4 (shared examples) for the `it_behaves_like` ones.
+v0.1 mechanised the most common shape; v0.2 closes the
+predicate + raise gap. After v0.2 the typical
+predicate-heavy upstream file goes from "extractor produces
+a couple of lines" to "extractor produces a file that runs
+end to end with minor fixture-skip polish."
+
+What still needs a human:
+
+- Files that use fixtures (`StringSpecs::MyString`,
+  `MethodSpecs::Methods`) — extractor doesn't know which
+  fixture classes exist or how to inline them.
+- Files that use mspec helpers (`mock_int`, `bignum_value`).
+- Files where rubyrs intentionally diverges from CRuby
+  (e.g. `Math::DomainError` vs `ArgumentError`) — the
+  extracted assertion runs but fails; the human polishes by
+  commenting out + cross-linking `docs/SUBSET.md`.
 
 ## Approach (for future contributors)
 
