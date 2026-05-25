@@ -191,6 +191,7 @@ impl Vm {
                 let s = self.interner.resolve(id).clone();
                 self.stack.push(Value::new_str(s.to_string()));
             }
+            #[cfg(feature = "regex")]
             Op::LoadRegex(id) => {
                 let regex_rc = if let Some(r) = self.regex_cache.get(&id) {
                     r.clone()

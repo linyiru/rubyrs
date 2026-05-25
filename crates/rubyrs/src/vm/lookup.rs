@@ -247,6 +247,7 @@ impl Vm {
                 self.lookup_method_uncached(&cls, name_id).is_some()
             }
             Value::Block(_) => matches!(name, "call" | "[]" | "()" | "curry" | ">>" | "<<"),
+            #[cfg(feature = "regex")]
             Value::Regex(_) => matches!(name, "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"),
             Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "hash" | "source_location"),
             Value::UnboundMethod(_) => matches!(name, "bind" | "arity" | "parameters" | "==" | "owner" | "hash" | "source_location"),
@@ -275,6 +276,7 @@ impl Vm {
             Value::Nil => "NilClass",
             Value::Block(_) => "Proc",
             Value::Class(_) => "Class",
+            #[cfg(feature = "regex")]
             Value::Regex(_) => "Regexp",
             Value::BoundMethod(_) => "Method",
             Value::UnboundMethod(_) => "UnboundMethod",

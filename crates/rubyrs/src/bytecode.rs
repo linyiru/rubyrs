@@ -24,7 +24,11 @@ pub(crate) enum Op {
     /// `regex_cache`, compiling it from the interned source the
     /// first time. A compile-time bad pattern surfaces as a
     /// SyntaxError trap at run-time (not at parse-time, since
-    /// we lazy-compile).
+    /// we lazy-compile). Cfg-gated on the `regex` feature
+    /// (ADR 0017 Rule 3) — with the feature off the variant
+    /// disappears, AST translation rejects `/.../` literals,
+    /// and `Expr::RegexLit` never reaches the compiler arm.
+    #[cfg(feature = "regex")]
     LoadRegex(SymId),
     LoadSymbol(SymId),
     LoadNil,

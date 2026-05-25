@@ -52,7 +52,11 @@ pub(crate) enum Expr {
     StrLit(String),
     /// `/pattern/` literal — Ruby regular expression. Source is
     /// kept as a String for interning; compilation happens at the
-    /// VM layer (with caching).
+    /// VM layer (with caching). Cfg-gated on the `regex` feature
+    /// (ADR 0017 Rule 3) — when the feature is off, AST
+    /// translation emits a clear "regex feature not enabled"
+    /// error instead of producing this variant.
+    #[cfg(feature = "regex")]
     RegexLit(String),
     SymbolLit(String),
     InterpolatedStr(Vec<SExpr>),
@@ -418,8 +422,30 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_symbol_node() {
         return sp(node, Expr::SymbolLit(String::from_utf8_lossy(n.unescaped()).into_owned()));
     }
-    if let Some(n) = node.as_regular_expression_node() {
-        return sp(node, Expr::RegexLit(String::from_utf8_lossy(n.unescaped()).into_owned()));
+    if let Some(_n) = node.as_regular_expression_node() {
+        #[cfg(feature = "regex")]
+        {
+            return sp(node, Expr::RegexLit(String::from_utf8_lossy(_n.unescaped()).into_owned()));
+        }
+        #[cfg(not(feature = "regex"))]
+        {
+            // ADR 0017 Rule 3: regex moves to the `regex` Cargo
+            // feature. Without it, `/pattern/` literals reject at
+            // AST-translation time with a clear pointer at the
+            // feature flag. AST_ERRORS is the standard channel for
+            // unsupported nodes; the bare `Expr::Nil` placeholder
+            // keeps downstream compilation walking even though the
+            // collected error will trap before any compiled body
+            // runs.
+            AST_ERRORS.with(|cell| {
+                cell.borrow_mut().push(
+                    "/pattern/ regex literal: rubyrs was built without the \
+                     `regex` Cargo feature; rebuild with --features regex to \
+                     enable Regexp support (ADR 0017 Rule 3 / Tier 2)".to_string(),
+                );
+            });
+            return sp(node, Expr::Nil);
+        }
     }
     if let Some(n) = node.as_interpolated_string_node() {
         let parts: Vec<SExpr> = n.parts().iter().map(|p| {

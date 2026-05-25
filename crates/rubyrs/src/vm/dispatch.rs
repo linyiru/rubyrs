@@ -1615,6 +1615,7 @@ impl Vm {
                     }
                     hit
                 }
+                #[cfg(feature = "regex")]
                 Value::Regex(re) => match arg {
                     Value::Str(s) => s.with_str_lossy(|s| re.is_match(s)),
                     _ => false,
@@ -1630,6 +1631,7 @@ impl Vm {
         // captures are accessed via `#match` only.
         if &*name == "=~" && args.len() == 1 {
             let result = match (&recv, &args[0]) {
+                #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
                     let bound = s.to_string_lossy();
                     match re.find(&bound) {
@@ -2552,6 +2554,7 @@ fn method_recv_hash(v: &Value) -> i64 {
         Value::Bool(true) => 1,
         Value::Bool(false) => 0,
         Value::Nil => 0xDEAD_BEEF,
+        #[cfg(feature = "regex")]
         Value::Regex(r) => Rc::as_ptr(r) as i64,
     }
 }

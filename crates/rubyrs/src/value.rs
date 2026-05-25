@@ -114,6 +114,13 @@ pub enum Value {
     /// (CRuby's engine); the gaps (possessive quantifiers,
     /// `\k<name>` backrefs, look-around in some forms) are
     /// documented in SUBSET.md.
+    ///
+    /// Cfg-gated on the `regex` feature (per ADR 0017 Rule 3
+    /// regex is a Tier-2 feature). With `--no-default-features`
+    /// the variant disappears; AST translation rejects `/.../`
+    /// literals with a clear trap; every dispatch arm matching
+    /// `Value::Regex(_)` cfg's out.
+    #[cfg(feature = "regex")]
     Regex(std::rc::Rc<regex::Regex>),
     /// `Object#method(:foo)` result — a captured (receiver,
     /// method-name) pair. Heap-managed so the GC walks the
