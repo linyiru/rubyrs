@@ -24,10 +24,10 @@ is a meaningful follow-up. Not done in this first cut.
 
 | Workload | What it stresses |
 |---|---|
-| `tests/fixtures/fizzbuzz.rb` | Tiny script — RSS floor of the interpreter |
-| `examples/metaprog_bench/mm_bench.rb` | 2M `method_missing` dispatches; closure-allocator load |
-| `examples/metaprog_bench/dm_bench.rb` | 2M calls into a `define_method`-installed closure-method |
-| `examples/metaprog_bench/static_bench.rb` | 2M `def`+`@ivar` calls — control for the metaprog comparisons |
+| `crates/rubyrs/tests/fixtures/fizzbuzz.rb` | Tiny script — RSS floor of the interpreter |
+| `crates/rubyrs/examples/metaprog_bench/mm_bench.rb` | 2M `method_missing` dispatches; closure-allocator load |
+| `crates/rubyrs/examples/metaprog_bench/dm_bench.rb` | 2M calls into a `define_method`-installed closure-method |
+| `crates/rubyrs/examples/metaprog_bench/static_bench.rb` | 2M `def`+`@ivar` calls — control for the metaprog comparisons |
 
 The three metaprog workloads are deliberate: they exercise different
 allocation patterns (instance-method dispatch frames, closure
