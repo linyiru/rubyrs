@@ -1,0 +1,72 @@
+name: gapscan PR diff
+
+on:
+  pull_request:
+    branches: [master]
+
+# Cancel any older runs for the same PR — only the latest commit's
+# diff is useful as a sticky comment.
+concurrency:
+  group: gapscan-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  diff:
+    name: Render gapscan diff comment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (PR head + master)
+        uses: actions/checkout@v4
+        with:
+          # Need the full history so the script can build the base
+          # commit in a separate worktree.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base branch
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + base/head target dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            /tmp/gapscan-work/base-target
+          key: gapscan-pr-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: gapscan-pr-${{ runner.os }}-
+
+      - name: Cache scanned target codebases
+        uses: actions/cache@v4
+        with:
+          # The pins are inlined in the script; refreshing the cache
+          # on script changes catches pin bumps.
+          key: gapscan-targets-${{ hashFiles('scripts/gapscan-pr-diff.sh') }}
+          path: /tmp/gapscan-targets
+
+      - name: Run gapscan diff
+        env:
+          GAPSCAN_BASE_REF: origin/${{ github.event.pull_request.base.ref }}
+          GAPSCAN_WORK: /tmp/gapscan-work
+        run: |
+          mkdir -p /tmp/gapscan-work
+          ./scripts/gapscan-pr-diff.sh > /tmp/gapscan-comment.md
+          echo "--- comment preview ---"
+          cat /tmp/gapscan-comment.md
+
+      - name: Post or update sticky comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          # The header marker uniquely identifies this comment so
+          # subsequent runs update it in place instead of stacking.
+          header: gapscan-pr-diff
+          path: /tmp/gapscan-comment.md
