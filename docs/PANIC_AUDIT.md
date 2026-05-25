@@ -41,7 +41,7 @@ owns the change.
 | File | Count | Class |
 |---|---|---|
 | `crates/rubyrs/src/vm.rs` | 0 | — |
-| `crates/rubyrs/src/vm/dispatch.rs` | 13 | 🟢 |
+| `crates/rubyrs/src/vm/dispatch.rs` | 14 | 🟢 |
 | `crates/rubyrs/src/vm/step.rs` | 52 | 🟢 |
 | `crates/rubyrs/src/vm/iter.rs` | 10 | 🟢 |
 | `crates/rubyrs/src/vm/cext.rs` | 5 | 🟡 |
@@ -53,9 +53,9 @@ owns the change.
 | `crates/rubyrs/src/ast.rs` | 8 | 🟢 / 🔴 |
 | `crates/rubyrs/src/lib.rs` | 1 | 🟢 (bootstrap) |
 | `crates/rubyrs/src/compiler.rs` | 2 | 🟢 |
-| **Total (excl. doc comments)** | **111** | |
+| **Total (excl. doc comments)** | **112** | |
 
-The 111 total is +35 vs the pre-split 76, accounted for by:
+The 112 total is +36 vs the pre-split 76, accounted for by:
 - B/F feature work (B6 non-local return, F4 destructure prologue,
   F6 module-include chain) adding new ICE-class invariants in
   dispatch + step.
