@@ -28,6 +28,22 @@ impl Vm {
         Ok(
                 match (name, args) {
                     ("length", []) | ("size", []) => Some(Value::Int(self.heap.array(id).len() as i64)),
+                    // `Array#shift` — remove and return the first
+                    // element; `nil` if empty. In-place mutation.
+                    ("shift", []) => {
+                        let a = self.heap.array_mut(id);
+                        if a.is_empty() {
+                            Some(Value::Nil)
+                        } else {
+                            Some(a.remove(0))
+                        }
+                    }
+                    // `Array#pop` — remove and return the last
+                    // element; `nil` if empty. In-place mutation.
+                    ("pop", []) => {
+                        let a = self.heap.array_mut(id);
+                        Some(a.pop().unwrap_or(Value::Nil))
+                    }
                     ("push", [v]) | ("<<", [v]) => {
                         // P2-14c: refuse a push that would make this
                         // Array's storage exceed the per-value byte

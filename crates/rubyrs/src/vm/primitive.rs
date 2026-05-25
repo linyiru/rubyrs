@@ -49,6 +49,8 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(a != b)),
         (Value::Nil, "to_s", []) => Some(Value::new_str("")),
         (Value::Nil, "inspect", []) => Some(Value::new_str("nil")),
+        (Value::Nil, "to_i", []) => Some(Value::Int(0)),
+        (Value::Nil, "to_f", []) => Some(Value::Float(0.0)),
         // Bool#inspect — to_s.
         (Value::Bool(b), "inspect", []) => {
             Some(Value::new_str(if *b { "true" } else { "false" }))

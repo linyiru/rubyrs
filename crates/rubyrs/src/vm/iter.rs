@@ -358,6 +358,31 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
             }
+            // `arr.reverse_each { |v| … }` — `each` walking the
+            // snapshot in reverse order. Returns the receiver.
+            // Used by msgpack/bigint.rb's `from_msgpack_ext` to
+            // accumulate the limb chunks back into a single integer
+            // (LSB-first storage; reverse_each visits MSB-first).
+            (Value::Array(id), "reverse_each", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot.into_iter().rev() {
+                    g.vm.invoke_block(block, vec![v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(*id)))
+            }
             (Value::Array(id), "map", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
