@@ -76,6 +76,58 @@ fn host_fn_can_propagate_trap() {
 }
 
 #[test]
+fn singleton_class_closures_do_not_cycle_leak() {
+    // Regression for PR #31 review (vm/step.rs:521): Method's
+    // `defining_class` used to be `Rc<Class>`. For singleton
+    // methods that pointed back at the eigenclass, which held
+    // the Method in its `methods` table — a strong cycle. For
+    // regular classes the cycle is masked because `Vm.classes`
+    // pins every class for the program's lifetime; for
+    // eigenclasses there's no such anchor, so each short-lived
+    // object with a singleton method would leak its eigenclass
+    // + the Method + the Method's captured Rc → forever.
+    //
+    // The fix downgraded `Method.defining_class` to `Weak<Class>`
+    // (Frame upgrades at frame push, keeping the eigenclass
+    // alive for the duration of the call). This test creates
+    // 1000 short-lived objects, each receiving a fresh
+    // `define_singleton_method` closure that captures an Array
+    // — so a per-Instance leak would retain 1000 Arrays plus
+    // their inner Hashes in the heap. The tight `max_heap_objects`
+    // cap (200) would trigger ResourceExhausted under the old
+    // (Rc-cycle) shape; under the fixed shape, GC reclaims the
+    // closures as Instances are swept, and the program runs
+    // to completion.
+    let mut rt = Runtime::with_config(Config {
+        max_heap_objects: Some(200),
+        stress_gc: true,
+        ..Default::default()
+    });
+    let res = rt.eval(r#"
+        class Container
+        end
+        i = 0
+        while i < 1000
+          obj = Container.new
+          # Each call captures a fresh Array literal via the
+          # block's closure. If the singleton method keeps the
+          # eigenclass + Method + captured-Rc alive past the
+          # object's lifetime, this loop grows unboundedly.
+          obj.define_singleton_method(:carry) { [i, i + 1, i + 2] }
+          i = i + 1
+        end
+        "done"
+    "#, "t.rb");
+    match res {
+        Ok(_) => {}
+        Err(trap) => panic!(
+            "expected loop to complete; got {:?} — likely the Method/eigenclass cycle leak regressed",
+            trap.err,
+        ),
+    }
+}
+
+#[test]
 fn ruby_error_is_normalises_direct_and_uncaught_shapes() {
     // The `is(&str)` helper matches the bare Ruby class name
     // regardless of whether the variant is a direct host-side

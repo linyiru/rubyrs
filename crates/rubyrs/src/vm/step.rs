@@ -475,7 +475,8 @@ impl Vm {
                 // when we're inside `class Foo; def bar; end; end`)
                 // so `super` later starts its lookup from the
                 // right place. `None` for toplevel defs.
-                let defining_class = self.class_stack.last().cloned();
+                // Stored as Weak — see Method.defining_class docs.
+                let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
                 let m = Rc::new(Method {
                     params: proto.params.clone(),
@@ -499,7 +500,7 @@ impl Vm {
                 // (toplevel singleton has no well-defined target)
                 // we fall back to installing on `toplevel_methods`.
                 let proto = &self.protos[p_idx as usize];
-                let defining_class = self.class_stack.last().cloned();
+                let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
                 let m = Rc::new(Method {
                     params: proto.params.clone(),
@@ -543,15 +544,15 @@ impl Vm {
                 let proto = &self.protos[p_idx as usize];
                 // `defining_class` points at the eigenclass so
                 // `super` from inside walks the eigenclass's
-                // superclass chain (which falls through to the
-                // original class), matching CRuby's "module of
-                // definition" rule. (Strong-ref cycle here is
-                // fixed to `Weak` in the follow-up commit; see
-                // PR #31 review for the analysis.)
+                // superclass chain (= original class), matching
+                // CRuby's "module of definition" rule. Stored
+                // as `Weak` so the (sc ↔ Method) cycle doesn't
+                // pin the eigenclass past the receiver's
+                // lifetime — see PR #31 review for the analysis.
                 let m = Rc::new(Method {
                     params: proto.params.clone(),
                     proto_idx: p_idx as usize,
-                    defining_class: Some(sc.clone()),
+                    defining_class: Some(Rc::downgrade(&sc)),
                     visibility: std::cell::Cell::new(Visibility::Public),
                     closure: None,
                 });
@@ -630,7 +631,7 @@ impl Vm {
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
-                let defining_class = self.class_stack.last().cloned();
+                let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(crate::value::Visibility::Public);
                 let m = Rc::new(Method {
                     params,
@@ -683,7 +684,8 @@ impl Vm {
                 let m = Rc::new(Method {
                     params,
                     proto_idx,
-                    defining_class: Some(sc.clone()),
+                    // Weak — same cycle break as DefSingletonMethod.
+                    defining_class: Some(Rc::downgrade(&sc)),
                     visibility: std::cell::Cell::new(Visibility::Public),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                 });

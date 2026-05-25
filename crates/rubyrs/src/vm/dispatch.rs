@@ -636,7 +636,7 @@ impl Vm {
                 locals: cl.captured.clone(),
                 self_val,
                 base_sp: self.stack.len(),
-                is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.clone(), is_block: false, rescues: vec![],
+                is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false, rescues: vec![],
             });
             return Ok(());
         }
@@ -829,7 +829,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(locals)),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.clone(), is_block: false, rescues: vec![],
+            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), is_block: false, rescues: vec![],
         });
         Ok(())
     }

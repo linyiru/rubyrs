@@ -153,7 +153,17 @@ pub struct Method {
     /// definition" rule. Methods defined at the toplevel (in
     /// `<main>`, not inside any class body) have `None`; calling
     /// `super` from there raises NoMethodError.
-    pub(crate) defining_class: Option<Rc<Class>>,
+    /// Weak ref so singleton-class methods don't form a strong
+    /// cycle: an eigenclass is held only by its `Instance`'s
+    /// `singleton_class` field, and each Method inside that
+    /// eigenclass would otherwise pin the eigenclass back via
+    /// `defining_class`. With Weak, sweeping the Instance drops
+    /// the eigenclass, which drops all its Methods. Regular
+    /// classes (held by `Vm.classes` for the program's lifetime)
+    /// also use Weak here — the upgrade always succeeds in the
+    /// regular case because `Vm.classes` keeps the strong ref.
+    /// See PR #31 review for the cycle analysis.
+    pub(crate) defining_class: Option<std::rc::Weak<Class>>,
     /// Method visibility. Set at `def` time from the surrounding
     /// class body's current visibility mode, but mutable post-hoc
     /// via `private :sym` / `public :sym` / `protected :sym`.
