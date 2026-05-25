@@ -97,14 +97,7 @@ fn run_error_fixture(name: &str) {
 // pins that message so a future regression that re-silences the
 // case (or, conversely, the proper fix that removes the trap) shows
 // up as a test diff.
-#[test] fn err_break_through_ensure() { run_error_fixture("break_through_ensure"); }
-// Variant: outer `begin/rescue` around the offending loop. The
-// defensive trap is `Uncaught` (intentionally non-rescuable), so
-// the outer rescue must NOT silently catch it — that would mask
-// the limitation and diverge from CRuby (where `break` is a
-// structured transfer that never triggers `rescue`). If a future
-// refactor routes through a rescuable variant, this test goes red.
-#[test] fn err_break_through_ensure_outer_rescue() { run_error_fixture("break_through_ensure_outer_rescue"); }
-// Sibling defense for `next` — same shape, same Uncaught
-// NotImplementedError until the proper semantics land.
-#[test] fn err_next_through_ensure() { run_error_fixture("next_through_ensure"); }
+// Note: the previous `err_break_through_ensure*` / `err_next_through_ensure`
+// defensive-trap tests were removed when proper semantics landed. The
+// equivalent positive coverage now lives in
+// `tests/diff/break_next_ensure.rb` (diff_cruby against CRuby oracle).

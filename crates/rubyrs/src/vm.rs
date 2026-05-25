@@ -93,6 +93,28 @@ pub(crate) struct Frame {
     pub(crate) loop_rescue_depths: Vec<usize>,
 }
 
+/// In-flight structured `break`/`next` walking through an
+/// `ensure` chain. The `kind` carries the break value (or `Next`
+/// for `next`); `target_ip` is the instruction the transfer
+/// lands at once every intervening `is_ensure` handler has run;
+/// `target_loop_depth` is the `loop_rescue_depths` length the
+/// frame should have after the transfer (entries pushed by
+/// `EnterLoop`s the transfer is escaping out of get truncated).
+/// One slot per VM is enough — break/next transfers are single-
+/// frame and complete (or get superseded by a real raise)
+/// before any new one can start.
+pub(crate) struct LoopTransfer {
+    pub(crate) kind: LoopTransferKind,
+    pub(crate) target_ip: usize,
+    pub(crate) target_rescues_len: usize,
+    pub(crate) target_loop_depth: usize,
+}
+
+pub(crate) enum LoopTransferKind {
+    Break { value: Value },
+    Next,
+}
+
 /// RAII guard for `Vm.pinned`. Native-side code that needs heap
 /// values to survive an intervening `maybe_gc` / `?` early-return
 /// constructs one of these, calls `.pin(v)` for every value it
@@ -302,6 +324,18 @@ pub(crate) struct Vm {
     /// semantics: `return` inside a `do…end` exits the enclosing
     /// method, not just the block.
     pub(crate) method_return: Option<Value>,
+    /// In-flight `break`/`next` through `ensure` chain. Set by
+    /// `Op::BreakLoop`/`Op::NextLoop` when an `is_ensure` handler
+    /// sits between the source and the target; cleared once the
+    /// transfer lands at its target loop label. `Op::EndEnsure`
+    /// (emitted at the tail of every ensure handler body) reads
+    /// this field to decide whether to keep walking the rescue
+    /// chain or fall back to normal end-of-ensure exception
+    /// re-raise. `unwind_with_exception` clears this field
+    /// whenever a real exception starts unwinding — matching
+    /// CRuby semantics where a `raise` inside an ensure body
+    /// silently drops a pending break/next.
+    pub(crate) pending_loop_transfer: Option<LoopTransfer>,
     /// One-shot flag set by a builtin that detected its caller was
     /// unwound past its own call-site (e.g. `require_relative` saw
     /// `unwind_with_exception` route control to an outer
@@ -373,6 +407,7 @@ impl Vm {
             method_compose_forwarder_proto: None,
             sources: HashMap::new(),
             method_return: None,
+            pending_loop_transfer: None,
             suppress_call_result_push: false,
         }
     }

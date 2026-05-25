@@ -19,7 +19,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{BlockHandle, Class, Method, Value, Visibility};
 
-use super::{primitive_call, vec_nil, Frame, RescueHandler, Vm};
+use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm};
 
 impl Vm {
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
@@ -832,93 +832,46 @@ impl Vm {
                     .expect("ICE: ExitLoop with empty loop_rescue_depths");
             }
             Op::BreakLoop(off) => {
-                // Pop dynamic rescue/ensure handlers back down to the
-                // depth recorded at `Op::EnterLoop`. This is the
-                // load-bearing step for `break` inside a `begin`
-                // body where some `PushRescue` is still installed,
-                // and for `break` inside a partially-unwound rescue
-                // chain — using the dynamic `rescues.len()` rather
-                // than a compile-time count lets the same op work
-                // regardless of which rescue clause caught.
-                let f = self.frames.last_mut().expect("ICE: BreakLoop no frame");
+                // Compute the loop-target IP at the source site (the
+                // dispatcher has already advanced f.ip past this op,
+                // so the patched offset lands on the loop's join).
+                let f = self.frames.last().expect("ICE: BreakLoop no frame");
                 let target_depth = *f.loop_rescue_depths.last()
                     .expect("ICE: BreakLoop outside a while loop");
-                // CRuby semantics for `break` inside a `begin …
-                // ensure … end` inside a `while`: the ensure body
-                // runs, the loop exits cleanly carrying the break
-                // VALUE (no exception involved). Carrying the value
-                // through the ensure-unwind chain needs a break-
-                // aware Trap variant plus an `Op::Raise` hook — too
-                // large to land alongside the basic break-in-while
-                // fix.
-                //
-                // Defensive interim: refuse the case via `Uncaught`
-                // so the script aborts non-zero with a clear error
-                // rather than silently diverging. Two tradeoffs the
-                // reviewer should know:
-                //   1. `Uncaught` is intentionally NON-rescuable
-                //      (raise.rs trap_to_exception bypass list).
-                //      Routing through a rescuable variant like
-                //      `RuntimeError` would let an outer `rescue
-                //      => e` silently swallow the limitation marker
-                //      while CRuby treats `break` as a structured
-                //      transfer that NEVER triggers `rescue` — that
-                //      false-positive rescue catch is worse than a
-                //      clean abort.
-                //   2. With `Uncaught` the ensure body's side
-                //      effects ARE skipped (the trap doesn't go
-                //      through unwind_with_exception). CRuby runs
-                //      them. We accept this regression for the
-                //      narrow defensive window; the proper fix
-                //      restores both ensure side effects AND the
-                //      break value.
-                // See SUBSET.md and tests/fixtures/errors/break_through_ensure.
-                let has_pending_ensure = f.rescues[target_depth..]
-                    .iter().any(|h| h.is_ensure);
-                if has_pending_ensure {
-                    return Err(self.trap(RubyError::Uncaught {
-                        class_name: "NotImplementedError".to_string(),
-                        message: "break inside `ensure` of a while loop is not yet supported \
-                                  (CRuby runs ensure then exits with the break value; \
-                                  rubyrs aborts here so an outer rescue cannot mask the gap). \
-                                  Track at SUBSET.md.".to_string(),
-                    }));
-                }
-                while f.rescues.len() > target_depth { f.rescues.pop(); }
-                // Same jump arithmetic as `Op::Jump` — dispatch has
-                // already advanced `f.ip` past this BreakLoop, so the
-                // patched offset reaches the loop's join label.
-                f.ip = (f.ip as i32 + off) as usize;
+                let target_ip = (f.ip as i32 + off) as usize;
+                // Break value was pushed by the compiler immediately
+                // before this op. Take it off so it doesn't pollute
+                // the ensure-body stack we may be about to enter,
+                // and so we can re-push it once the transfer lands.
+                let value = self.stack.pop().expect("ICE: BreakLoop with no value on stack");
+                self.begin_loop_transfer(LoopTransferKind::Break { value }, target_ip, target_depth)?;
             }
             Op::NextLoop(off) => {
-                // Symmetric to BreakLoop: pop dynamic handlers down
-                // to the EnterLoop snapshot, then jump. Target is
-                // the loop's iter-check label (patched by while
-                // codegen) rather than the join, so the loop re-
-                // evaluates its condition and either continues or
-                // falls through to the natural exit.
-                let f = self.frames.last_mut().expect("ICE: NextLoop no frame");
+                // Symmetric to BreakLoop: jumps to iter-check instead
+                // of join; no value to carry (while has no iteration
+                // value).
+                let f = self.frames.last().expect("ICE: NextLoop no frame");
                 let target_depth = *f.loop_rescue_depths.last()
                     .expect("ICE: NextLoop outside a while loop");
-                // Same `ensure` defense as BreakLoop. CRuby runs
-                // the ensure body and continues with the next
-                // iteration; doing this correctly needs a next-
-                // aware Trap variant + Op::Raise hook. Until then,
-                // abort with a non-rescuable Uncaught so an outer
-                // `rescue` cannot mask the gap.
-                let has_pending_ensure = f.rescues[target_depth..]
-                    .iter().any(|h| h.is_ensure);
-                if has_pending_ensure {
-                    return Err(self.trap(RubyError::Uncaught {
-                        class_name: "NotImplementedError".to_string(),
-                        message: "next inside `ensure` of a while loop is not yet supported \
-                                  (CRuby runs ensure then re-checks the loop guard; \
-                                  rubyrs aborts here so an outer rescue cannot mask the gap). \
-                                  Track at SUBSET.md.".to_string(),
-                    }));
+                let target_ip = (f.ip as i32 + off) as usize;
+                self.begin_loop_transfer(LoopTransferKind::Next, target_ip, target_depth)?;
+            }
+            Op::EndEnsure => {
+                // Tail of an ensure handler body. Two paths:
+                //   - Loop-transfer in flight: `pending_loop_transfer`
+                //     is Some because BreakLoop/NextLoop kicked off a
+                //     walk through this ensure. Resume the walk.
+                //   - Normal exception unwind: the ensure was entered
+                //     by `unwind_with_exception` which pushed the
+                //     exception onto the operand stack. Pop and
+                //     re-raise so unwind continues.
+                if self.pending_loop_transfer.is_some() {
+                    self.continue_loop_transfer()?;
+                } else {
+                    let v = self.stack.pop().unwrap_or(Value::Nil);
+                    let exc = self.normalize_exception(v);
+                    self.unwind_with_exception(exc)?;
                 }
-                while f.rescues.len() > target_depth { f.rescues.pop(); }
-                f.ip = (f.ip as i32 + off) as usize;
             }
             Op::BinOpInt(kind, rhs) => {
                 let a = self.stack.pop().expect("ICE: BinOpInt lhs underflow");

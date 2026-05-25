@@ -1,1 +1,0 @@
-tests/fixtures/errors/next_through_ensure.rb:6:in `<main>': next inside `ensure` of a while loop is not yet supported (CRuby runs ensure then re-checks the loop guard; rubyrs aborts here so an outer rescue cannot mask the gap). Track at SUBSET.md. (NotImplementedError)

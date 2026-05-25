@@ -1077,13 +1077,17 @@ pub(crate) fn compile_expr(
                 for stmt in eb { compile_stmt(b, stmt, protos, interner, cc); }
                 let je = b.emit(Op::Jump(0));
                 // Exception path: PushEnsure target. Exception value is on
-                // top of stack; ensure body must not touch the stack (we
-                // call compile_stmt which preserves it); then Raise re-throws.
+                // top of stack (only when entered via exception unwind);
+                // for `break`/`next` walking through ensures the stack
+                // is NOT pushed-to on entry and `vm.pending_loop_transfer`
+                // is set instead. `Op::EndEnsure` at the tail handles
+                // both cases — exception → pop + re-raise; transfer →
+                // resume walk to the loop target.
                 let handler_start = b.pos();
                 let off = handler_start as i32 - pe as i32 - 1;
                 if let Op::PushEnsure(o) = &mut b.code[pe] { *o = off; }
                 for stmt in eb { compile_stmt(b, stmt, protos, interner, cc); }
-                b.emit(Op::Raise);
+                b.emit(Op::EndEnsure);
                 let end = b.pos();
                 b.patch_jump(je, end);
             }
