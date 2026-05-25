@@ -841,12 +841,28 @@ pub unsafe extern "C" fn rb_define_singleton_method(
 /// # Safety
 ///
 /// `klass` must be a class/module handle returned by
-/// `rb_define_class_under` OR `rb_define_module` in the same
-/// CExtState — both produce a `CValue::Class` handle and the
+/// `rb_define_class_under` OR `rb_define_module` in the **same
+/// CExtState** — both produce a `CValue::Class` handle and the
 /// dispatch path doesn't distinguish (matches CRuby's
-/// "methods on modules" support). `name` must be a NUL-terminated
-/// C string. `func` must be callable with the registered arity
-/// (the host transmutes per-call based on `arity`).
+/// "methods on modules" support).
+///
+/// **VALUE handles are per-call, not process-stable** — unlike
+/// CRuby where a `VALUE` is a pointer/tag that stays valid for
+/// the object's lifetime, rubyrs-cext indexes into the topmost
+/// `CExtState` which is pushed at every cext entry and popped on
+/// return. Calling `rb_define_method` with a `klass` handle
+/// stashed in a C `static` from a prior `Init_<name>` call (or
+/// any prior dispatch) panics: the index points into a popped
+/// state's value table.
+///
+/// Practical rule: register classes/modules AND their methods in
+/// a single Init pass. To define methods later, look the class
+/// up by name (e.g. through `rb_funcall(rb_cObject, "const_get",
+/// ...)` once that's wired) — don't cache the VALUE.
+///
+/// `name` must be a NUL-terminated C string. `func` must be
+/// callable with the registered arity (the host transmutes
+/// per-call based on `arity`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_define_method(
     klass: Value,

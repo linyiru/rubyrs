@@ -272,7 +272,19 @@ VALUE rb_hash_aref(VALUE h, VALUE key);
  *   1. Script-defined methods on the class (a `def foo` wins).
  *   2. cext-registered methods (this surface) as fallback.
  *   3. NoMethodError otherwise.
- * Matches CRuby's "user override wins" semantics. */
+ * Matches CRuby's "user override wins" semantics.
+ *
+ * IMPORTANT: VALUE handles are per-call, NOT process-stable.
+ * Unlike CRuby where a VALUE is a pointer/tag valid for the
+ * object's lifetime, rubyrs-cext indexes into the topmost per-
+ * call CExtState which is pushed at every cext entry and popped
+ * on return. A `klass` handle stashed in a C `static` from a
+ * prior Init_/call IS NOT VALID later — the index points into a
+ * popped state's value table.
+ *
+ * Practical rule: register the class AND its methods in the same
+ * Init pass. Don't cache the VALUE returned by
+ * rb_define_class_under / rb_define_module across calls. */
 void rb_define_method(VALUE klass, const char *name,
                       VALUE (*func)(ANYARGS), int arity);
 
