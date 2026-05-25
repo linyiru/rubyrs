@@ -4,19 +4,18 @@ Mechanically rewrites upstream [ruby/spec](https://github.com/ruby/spec)
 files into the `assert_eq` / `assert_raises` shape that rubyrs's
 micro-runner consumes (`crates/rubyrs/spec/`).
 
-This is the v0.1 implementation of Layer 4 of the testing
-strategy
+This crate implements Layer 4 of the testing strategy
 ([`docs/TESTING.md`](https://github.com/linyiru/rubyrs/blob/master/docs/TESTING.md)).
-v0.1 recognises a single pattern — `expr.should == val` — which is
-the bulk of the equality-style `it` blocks in upstream
-`core/string`, `core/method`, and similar simple files. The
-hand-translated specs in
+The current release is v0.2 — see the "What the extractor
+recognises" table below for the exact pattern set, and
+"Known limitations of v0.2" for the documented trade-offs.
+The hand-translated specs in
 [`crates/rubyrs/spec/ruby/`](https://github.com/linyiru/rubyrs/tree/master/crates/rubyrs/spec/ruby)
-(from PRs #48 / #52 / #55) are the reference shape — running the
-extractor on the same upstream sources should produce
-similar output, with the leftover patterns (negation,
-predicate matchers, `raise` matchers) showing up unchanged
-for a human to translate.
+(from PRs #48 / #52 / #55) remain the reference shape;
+running the extractor against the same upstream sources
+should reproduce that shape for the patterns the extractor
+recognises, leaving the rest as passthrough for a human to
+polish.
 
 ## Usage
 
@@ -36,32 +35,91 @@ cargo run --release -p rubyrs-spec-extract \
 cargo test -p rubyrs --test ruby_spec
 ```
 
-## What v0.1 recognises
+## What the extractor recognises (current: v0.2)
 
-Exactly this shape:
+The recogniser shipped incrementally. Patterns in italics
+are passthrough — extractor leaves them verbatim for a
+human polish step.
 
-```ruby
-expr.should == val
-# →
-assert_eq(expr, val)
-```
+| Upstream pattern | Rewrites to | Since |
+|---|---|---|
+| `expr.should == val` | `assert_eq(expr, val)` | v0.1 |
+| `expr.should_not == val` | `assert_neq(expr, val)` | v0.2 |
+| `expr.should.foo?` | `assert(expr.foo?)` | v0.2 |
+| `expr.should.foo?(args)` | `assert(expr.foo?(args))` | v0.2 |
+| `expr.should_not.foo?` | `assert(!expr.foo?)` | v0.2 |
+| `expr.should_not.foo?(args)` | `assert(!expr.foo?(args))` | v0.2 |
+| `-> { BODY }.should.raise(CLASS)` | `assert_raises("CLASS") do BODY end` | v0.2 |
+| `-> { BODY }.should.raise(M::Cls)` | `assert_raises("M::Cls") do BODY end` | v0.2 |
+| `require_relative '...'` | (stripped — line filter) | v0.1 |
+| *`it_behaves_like :shared, ...`* | *passthrough* | v0.3+ |
+| *`should_receive` / `mock(...)`* | *passthrough* | (no mock lib in micro-runner; hand-translate) |
 
-`expr` and `val` are taken verbatim from the source, so
-regex literals, escapes, multi-line method chains, and inline
-blocks all preserve their original formatting.
+For the `should ==` / `should_not ==` / predicate-matcher
+rewrites, `expr`, `val`, and `args` come from the original
+source verbatim — regex literals, escapes, multi-line method
+chains, multibyte characters, and inline blocks all preserve
+their formatting exactly. The lambda-raise rewrite is the
+exception: the `-> { BODY }` shape is unwrapped and the body
+is re-emitted inside a `do ... end` block, so indentation
+shifts (the body's own multi-statement structure stays
+intact, just under different leading whitespace).
 
-## What v0.1 deliberately doesn't do
+## Known limitations of v0.2 (post-/code-review hardening)
 
-Each of these passes through verbatim, so a human reviewer
-can see what's still hand-translation territory:
+These aren't bugs — they're deliberate trade-offs the
+`/code-review` pass surfaced and we documented rather than
+fixed in v0.2. Each is single-PR-shaped follow-up work.
 
-| Upstream pattern | What's needed to recognise |
-|---|---|
-| `expr.should_not == val` | `assert_neq` helper in `spec_helper.rb` |
-| `expr.should.foo?` (predicate matcher) | Per-predicate knowledge or a generic `assert(expr.foo?)` |
-| `-> { ... }.should.raise(X)` | Parse the lambda + matcher class; lower to `assert_raises("X") { ... }` |
-| `it_behaves_like :shared, ...` | Inline shared examples; needs cross-file resolution |
-| `should_receive` / mocks | We have no mock library — skip and hand-translate |
+1. **Receiver chains are not recursed into.** When the
+   extractor visits an outer CallNode that doesn't match any
+   recogniser, it walks the call's arguments and block but
+   NOT its receiver. Rewriting inside a receiver chain would
+   orphan the outer call: source like `arr.should.first.frozen?`
+   would otherwise become `assert(arr.first).frozen?`, where
+   the `.frozen?` chains off the assert's return (Nil)
+   instead of the original `arr.should.first` value. The
+   safer rule is "leave the whole chain alone." Cost: a
+   `should ==` or predicate matcher buried INSIDE another
+   call's receiver chain is no longer rewritten — but those
+   shapes don't appear in real upstream specs.
+
+2. **Class arg to `should.raise` must be a constant.** Only
+   `ConstantReadNode` (`ArgumentError`) and `ConstantPathNode`
+   (`Math::DomainError`) are accepted. String-literal arguments
+   (`should.raise("FrozenError")`) or dynamic ones
+   (`should.raise(some_var.class)`) fall through to passthrough.
+   Otherwise the extractor would emit `assert_raises("<text>")`
+   with the source slice verbatim, which never matches
+   `e.class.to_s` at runtime (always-failing test).
+
+3. **Predicate matcher requires a `?` suffix.** Only methods
+   whose name ends in `?` are eligible for the
+   `.should.PRED?` → `assert(lhs.PRED?)` rewrite. Mspec's
+   predicate-matcher convention is `?`-suffixed; non-`?`
+   forms (`.should.first`, `.should.size`) aren't matchers
+   and would be silently wrapped in an `assert(...)` that
+   evaluates truthiness incorrectly. Real upstream doesn't
+   use them, but the gate is defensive.
+
+4. **Nested-args rewriting is not chained.** A pattern
+   buried in the argument list of a matched outer call —
+   e.g. `arr.should.include?(other.should == 3)` — is NOT
+   recursively rewritten today. The outer match consumes the
+   whole subtree and we substitute it; the inner `should ==`
+   stays as-is in the substituted text. The downstream output
+   has a leftover `should` call that the micro-runner can't
+   resolve. This is a real limitation rather than a guard;
+   a future PR could recursively `extract()` argument text
+   before splicing it into the replacement. Not common in
+   upstream `core/*` specs (nested `should` is unusual style).
+
+## What's deliberately deferred (v0.3+)
+
+- **Shared examples** (`it_behaves_like :shared, ...`) — needs cross-file inlining of the shared `describe` block.
+- **Mocks / `should_receive`** — micro-runner has no mock library; these always need hand-translation.
+- **mspec helpers** (`mock_int(...)`, `mock(...)`, `bignum_value`, `fixnum_max`) — passthrough; needs lookup table or per-helper fixture.
+- **`SpecEvaluate.desc` heredoc form** (used in `core/integer/arity_spec.rb`) — uses Ruby heredoc to embed evaluated code; not modelled.
 
 Dropping fixtures-only `describe` blocks (`UnboundMethodSpecs::*`,
 `MethodSpecs::*` etc) is also pending — those classes are
@@ -116,22 +174,32 @@ Regenerate `.expected.rb` files after an intentional change:
 UPDATE_EXPECTED=1 cargo test -p rubyrs-spec-extract
 ```
 
-## v0.1 real-world result
+## Real-world result (v0.2)
 
 Run against the three vendored fixtures:
 
-| Upstream file | What v0.1 produces |
+| Upstream file | What v0.2 produces |
 |---|---|
-| `core/string/reverse_spec.rb` | 6 of ~10 `it` blocks lower cleanly to `assert_eq` calls; predicate / lambda / `should.equal?` blocks pass through unchanged |
-| `core/string/empty_spec.rb` | only `require_relative` lines stripped — file body is all predicate matchers, nothing to rewrite yet |
-| `core/string/length_spec.rb` | only `require_relative` lines stripped — the single `it_behaves_like` redirect is untouched |
+| `core/string/reverse_spec.rb` | both `describe` blocks lower fully — all `should ==`, `.should.equal?`, `.should.instance_of?(...)`, `.should.raise(FrozenError)` blocks auto-extract. Only the `MyString` subclass fixture remains as a hand-translation item (no rubyrs equivalent). |
+| `core/string/empty_spec.rb` | `should.empty?` / `should_not.empty?` predicate matchers now auto-extract; the `StringSpecs::MyString.new("")` fixture line is the only hand-translation work left. |
+| `core/string/length_spec.rb` | only `require_relative` stripped — the `it_behaves_like :string_length, :length` redirect is v0.3+ territory. |
 
-In other words, v0.1 is a STARTER that mechanises the most
-common pattern. Files that mix matchers still need a human
-finish; the extracted file is the right starting point for
-that finish. v0.2 (`should_not`, predicate matchers,
-`should.raise`) will close the gap for the predicate-heavy
-files; v0.4 (shared examples) for the `it_behaves_like` ones.
+v0.1 mechanised the most common shape; v0.2 closes the
+predicate + raise gap. After v0.2 the typical
+predicate-heavy upstream file goes from "extractor produces
+a couple of lines" to "extractor produces a file that runs
+end to end with minor fixture-skip polish."
+
+What still needs a human:
+
+- Files that use fixtures (`StringSpecs::MyString`,
+  `MethodSpecs::Methods`) — extractor doesn't know which
+  fixture classes exist or how to inline them.
+- Files that use mspec helpers (`mock_int`, `bignum_value`).
+- Files where rubyrs intentionally diverges from CRuby
+  (e.g. `Math::DomainError` vs `ArgumentError`) — the
+  extracted assertion runs but fails; the human polishes by
+  commenting out + cross-linking `docs/SUBSET.md`.
 
 ## Approach (for future contributors)
 

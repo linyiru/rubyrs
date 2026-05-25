@@ -95,17 +95,20 @@ pattern as a version increment:
 
 | Version | Recognises | Estimated reach | Status |
 |---------|------------|----------------|--------|
-| v0.1 | `expr.should == val` | ~10–20% of spec files | **shipped** |
-| v0.2 | `.should be_xxx` predicates, `raise_error(...)` / `.should.raise(...)`, `should_not == val` | +10% | pending |
-| v0.3 | `-> { ... }`, `before / after` hooks | +10% | pending |
-| v0.4 | `shared_examples`, `include / extend` | +20% | pending |
+| v0.1 | `expr.should == val`, `require_relative` strip | ~10–20% of spec files | **shipped** |
+| v0.2 | `should_not == val`, predicate matchers (`.should.foo?` / `.should_not.foo?`), `-> { ... }.should.raise(X)` lambda lowering (incl. `M::Cls` class paths) | +20–25% | **shipped** |
+| v0.3 | `before / after` hooks (skip + inline-state lift), mock helpers (`mock_int`, `bignum_value` lookup) | +10% | pending |
+| v0.4 | `shared_examples` / `it_behaves_like` cross-file inline | +20% | pending |
 | ... | ... approaching mspec full | ... | |
 
-Anything it doesn't recognise passes through unchanged in v0.1; the
-human reviewer sees what's still hand-translation territory. A
-"skipped and logged" report (per the original ingestion plan) lands
-in v0.2 alongside the predicate-matcher recogniser, when there's
-enough surface to make the log useful.
+Anything the extractor doesn't recognise — at any version — passes
+through unchanged; the human reviewer sees what's still
+hand-translation territory in the diff against upstream. A
+"skipped and logged" report (per the original ingestion plan) is
+deferred to v0.3 alongside the `before` / `after` hook handling,
+where the cost-to-write-the-log starts paying off (predicate-heavy
+v0.1 / v0.2 files extract mostly cleanly, so a per-line skip log
+adds little signal there).
 
 ## Current state — manual translation baseline (2026-05)
 

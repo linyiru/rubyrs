@@ -71,6 +71,26 @@ def assert_eq(actual, expected)
   end
 end
 
+# Inequality assertion — the negative form of assert_eq.
+# Used by the extractor's `should_not == val` rewrite (v0.2);
+# failure message names both sides so the divergence is
+# immediately legible without re-running.
+def assert_neq(actual, expected)
+  # Use `!(actual == expected)` rather than `actual != expected`.
+  # In Ruby `#!=` can be overridden independently of `#==`, so
+  # the two operators can disagree on user-defined classes.
+  # Upstream `should_not == val` is strictly "the `==` check
+  # failed," which is what `!(actual == expected)` captures.
+  if !(actual == expected)
+    __spec_pass("neq")
+  else
+    # Mirror assert_eq's `expected ..., got ...` ordering so
+    # the two helpers' failure output reads the same way in
+    # scanning. "expected not X" is the natural English form.
+    __spec_fail("expected not #{expected.inspect}, got #{actual.inspect}")
+  end
+end
+
 # Verify the block raises an exception whose class name (CRuby's
 # `e.class.to_s`) matches `class_name`. Used for "should raise X"
 # patterns in the upstream specs.

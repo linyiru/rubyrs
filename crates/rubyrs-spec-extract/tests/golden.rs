@@ -28,6 +28,26 @@ fn golden_strip_require_relative() {
     run_golden("strip_require_relative");
 }
 
+#[test]
+fn golden_should_not_eq() {
+    run_golden("should_not_eq");
+}
+
+#[test]
+fn golden_predicate_matchers() {
+    run_golden("predicate_matchers");
+}
+
+#[test]
+fn golden_lambda_raise() {
+    run_golden("lambda_raise");
+}
+
+#[test]
+fn golden_v0_2_guards() {
+    run_golden("v0_2_guards");
+}
+
 fn run_golden(name: &str) {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let input_path = base.join(format!("{name}.input.rb"));

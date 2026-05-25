@@ -1,10 +1,10 @@
 
 describe "String#empty?" do
   it "returns true if the string has a length of zero" do
-    "hello".should_not.empty?
-    " ".should_not.empty?
-    "\x00".should_not.empty?
-    "".should.empty?
-    StringSpecs::MyString.new("").should.empty?
+    assert(!"hello".empty?)
+    assert(!" ".empty?)
+    assert(!"\x00".empty?)
+    assert("".empty?)
+    assert(StringSpecs::MyString.new("").empty?)
   end
 end

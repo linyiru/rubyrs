@@ -10,9 +10,9 @@ describe "String#reverse" do
   end
 
   it "returns String instances when called on a subclass" do
-    StringSpecs::MyString.new("stressed").reverse.should.instance_of?(String)
-    StringSpecs::MyString.new("m").reverse.should.instance_of?(String)
-    StringSpecs::MyString.new("").reverse.should.instance_of?(String)
+    assert(StringSpecs::MyString.new("stressed").reverse.instance_of?(String))
+    assert(StringSpecs::MyString.new("m").reverse.instance_of?(String))
+    assert(StringSpecs::MyString.new("").reverse.instance_of?(String))
   end
 
   it "reverses a string with multi byte characters" do
@@ -35,20 +35,26 @@ end
 describe "String#reverse!" do
   it "reverses self in place and always returns self" do
     a = "stressed"
-    a.reverse!.should.equal?(a)
+    assert(a.reverse!.equal?(a))
     assert_eq(a, "desserts")
 
     assert_eq("".reverse!, "")
   end
 
   it "raises a FrozenError on a frozen instance that is modified" do
-    -> { "anna".freeze.reverse!  }.should.raise(FrozenError)
-    -> { "hello".freeze.reverse! }.should.raise(FrozenError)
+    assert_raises("FrozenError") do
+      "anna".freeze.reverse!
+    end
+    assert_raises("FrozenError") do
+      "hello".freeze.reverse!
+    end
   end
 
   # see [ruby-core:23666]
   it "raises a FrozenError on a frozen instance that would not be modified" do
-    -> { "".freeze.reverse! }.should.raise(FrozenError)
+    assert_raises("FrozenError") do
+      "".freeze.reverse!
+    end
   end
 
   it "reverses a string with multi byte characters" do
