@@ -620,7 +620,7 @@ fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     // arbitrary third-party Ruby — that's a denial-of-service waiting
     // to happen.
     //
-    // `@@var = 1` (ClassVariableWriteNode) is currently outside
+    // `@@count = 0` (ClassVariableWriteNode) is currently outside
     // the supported subset and reaches the unsupported-node
     // fallback. We expect a SyntaxError Trap back, not a SIGABRT.
     // (Previous canaries: `case`, then `Foo::Bar = 1` — both

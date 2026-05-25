@@ -75,11 +75,14 @@ pub(crate) enum Expr {
     },
     SelfExpr,
     ConstRead(String),
-    /// Bare constant write `FOO = expr` — appears at top level or
-    /// inside a class/module body; all forms store into the same
-    /// `Vm.constants` table (rubyrs has no real module nesting yet).
-    /// The `Foo::Bar = ...` (ConstantPathWriteNode) path form is a
-    /// separate not-yet-supported case.
+    /// Constant write — covers both the bare `FOO = expr`
+    /// (ConstantWriteNode) and the path form `Foo::Bar = expr`
+    /// (ConstantPathWriteNode). Both flatten into a single
+    /// "A::B::C"-joined name and store into the same
+    /// `Vm.constants` table (rubyrs has no real module nesting
+    /// yet — the path form's segment-validation divergences from
+    /// CRuby are noted at the ConstantPathWriteNode translation
+    /// site below).
     ConstWrite(String, Box<SExpr>),
     Call {
         receiver: Option<Box<SExpr>>,
