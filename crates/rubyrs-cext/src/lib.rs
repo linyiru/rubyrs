@@ -636,15 +636,19 @@ pub unsafe extern "C" fn rb_ary_new() -> Value {
     with_state(|st| st.intern(CValue::Array(Vec::new())))
 }
 
-/// Allocate an empty Array with a capacity hint. We ignore the hint
-/// in spike scope (the underlying `Vec` will grow on its own); the
-/// signature is provided so C extensions using `rb_ary_new_capa` /
-/// `rb_ary_new2` compile unchanged.
+/// Allocate an empty Array, ignoring the capacity hint. CRuby's
+/// `rb_ary_new_capa` pre-reserves storage; we don't — `Vec` grows
+/// on its own and a wrong hint hurts more than it helps. In
+/// particular, the previous `Vec::with_capacity(capa.max(0) as
+/// usize)` would attempt a giant allocation (or panic on overflow,
+/// which in an `extern "C"` boundary translates to a process
+/// abort) when given `c_long::MAX` or any large positive hint
+/// from a buggy C extension. Honestly ignoring the value matches
+/// the existing doc-comment intent and is forward-compatible with
+/// a future productionising pass that DOES pre-reserve.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_ary_new_capa(capa: c_long) -> Value {
-    with_state(|st| {
-        st.intern(CValue::Array(Vec::with_capacity(capa.max(0) as usize)))
-    })
+pub unsafe extern "C" fn rb_ary_new_capa(_capa: c_long) -> Value {
+    with_state(|st| st.intern(CValue::Array(Vec::new())))
 }
 
 /// Append `v` to the Array `ary`. Returns `ary` for chaining,
