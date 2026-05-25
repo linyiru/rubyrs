@@ -76,7 +76,12 @@ end
 # failure message names both sides so the divergence is
 # immediately legible without re-running.
 def assert_neq(actual, expected)
-  if actual != expected
+  # Use `!(actual == expected)` rather than `actual != expected`.
+  # In Ruby `#!=` can be overridden independently of `#==`, so
+  # the two operators can disagree on user-defined classes.
+  # Upstream `should_not == val` is strictly "the `==` check
+  # failed," which is what `!(actual == expected)` captures.
+  if !(actual == expected)
     __spec_pass("neq")
   else
     # Mirror assert_eq's `expected ..., got ...` ordering so
