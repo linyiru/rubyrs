@@ -4444,19 +4444,27 @@ fn cext_value_to_cvalue(
         // pushed yet (top-level cext call), and corrupting on
         // nesting.
         Value::Array(id) => {
-            let elements = vm.heap.array(*id).clone();
+            // Borrow the backing Vec<Value> directly — no clone.
+            // The recursive `cext_value_to_cvalue` takes `&Vm` (the
+            // function's `vm` param), so the heap borrow + each
+            // recursive call are both immutable borrows of `vm`;
+            // multiple immutable borrows are allowed. Drops the
+            // O(n) memcpy the previous `.clone()` paid on every
+            // collection crossing.
+            let elements = vm.heap.array(*id);
             let mut handles: Vec<rubyrs_cext::Value> = Vec::with_capacity(elements.len());
-            for elem in &elements {
+            for elem in elements {
                 let cv = cext_value_to_cvalue(vm, st, name, idx, elem)?;
                 handles.push(st.intern(cv));
             }
             rubyrs_cext::CValue::Array(handles)
         }
         Value::Hash(id) => {
-            let pairs = vm.heap.hash(*id).clone();
+            // Same borrow-no-clone treatment for Hash.
+            let pairs = vm.heap.hash(*id);
             let mut pairs_out: Vec<(rubyrs_cext::Value, rubyrs_cext::Value)> =
                 Vec::with_capacity(pairs.len());
-            for (k, v) in &pairs {
+            for (k, v) in pairs {
                 let kc = cext_value_to_cvalue(vm, st, name, idx, k)?;
                 let kh = st.intern(kc);
                 let vc = cext_value_to_cvalue(vm, st, name, idx, v)?;
