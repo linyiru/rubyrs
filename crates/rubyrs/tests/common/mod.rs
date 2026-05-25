@@ -26,15 +26,18 @@ pub const RUBY_DLEXT: &str = std::cfg_select! {
 ///
 /// Each test file wraps this in a thin `OnceLock` so the build runs
 /// at most once per test binary (cargo invokes each integration test
-/// in its own process). Some of the `examples/*/build.sh` scripts
-/// (currently `msgpack-cext`) add their own `flock`-based serialisation
-/// for the cross-process race when multiple test binaries share the
-/// same artifact path; the others rely on the OnceLock alone, which
-/// is sufficient because no two test binaries write to the same
-/// bundle file. Centralising the build steps + assertions here means
-/// the existence checks, error messages, and `RUBY_DLEXT` computation
-/// only have to be maintained in one place — previously 12 sibling
-/// test files had inline copies.
+/// in its own process). For examples whose bundle path is shared by
+/// more than one test binary, `build.sh` adds its own `flock` +
+/// atomic-tmpfile-rename serialisation so parallel `cargo test`
+/// runs can't race on a half-written `.bundle`/`.so`. Currently
+/// applies to `msgpack-cext` (7 consumers) and `counter-cext`
+/// (2 consumers). The other examples are single-consumer today;
+/// any future test that points a second binary at one of them
+/// should add the same `flock` + atomic-rename pattern to that
+/// `build.sh` before relying on it. Centralising the build steps
+/// + assertions here means the existence checks, error messages,
+/// and `RUBY_DLEXT` computation only have to be maintained in
+/// one place — previously 12 sibling test files had inline copies.
 ///
 /// Panics with a clear message at each failure point:
 ///   - `build.sh` not found at the expected path
