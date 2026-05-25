@@ -1344,34 +1344,55 @@ fn gemfile_dsl_real_hosting_end_to_end() {
             Ok(Value::Nil)
         });
     }
+    // v2 form — mirrors examples/gemfile.rs::__gemfile_gem_v2.
+    // The prelude passes the splat as Array and the kwargs as a
+    // String→String Hash; we unpack via HostCtx and capture into
+    // the typed `Gem` struct. This is the integration-test
+    // counterpart of the demo binary — they share prelude + Gemfile
+    // so any regression in the v2 path (HostCtx::resolve_array /
+    // resolve_hash, slice lifetime, GC interaction with held
+    // borrows) shows up here.
     {
         let st = state.clone();
-        rt.register_fn("__gemfile_gem", move |args| {
-            if let [name, reqs, req_kw, plat_kw] = args {
-                let mut sm = st.borrow_mut();
-                let groups: Vec<String> = sm.group_stack.last()
-                    .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
-                    .unwrap_or_default();
-                let platforms_scope: Vec<String> = sm.platforms_stack.last()
-                    .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
-                    .unwrap_or_default();
-                let source_override = sm.source_stack.last().cloned();
-                let req_str = s(reqs);
-                let reqs_vec = if req_str.is_empty() {
-                    vec![]
-                } else {
-                    req_str.split('|').map(String::from).collect()
-                };
-                sm.gems.push(Gem {
-                    name: s(name),
-                    reqs: reqs_vec,
-                    groups,
-                    require_kw: s(req_kw),
-                    platforms_kw: s(plat_kw),
-                    platforms_scope,
-                    source_override,
-                });
+        rt.register_fn_v2("__gemfile_gem_v2", move |ctx, args| {
+            let [name, requirements, opts] = args else { return Ok(Value::Nil); };
+            let reqs_slice = ctx.resolve_array(requirements).unwrap_or(&[]);
+            let opts_slice = ctx.resolve_hash(opts).unwrap_or(&[]);
+
+            let reqs_vec: Vec<String> = reqs_slice.iter()
+                .filter_map(|v| if let Value::Str(rs) = v {
+                    Some(rs.borrow().clone())
+                } else { None })
+                .collect();
+            let mut require_kw = String::new();
+            let mut platforms_kw = String::new();
+            for (k, v) in opts_slice {
+                if let (Value::Str(ks), Value::Str(vs)) = (k, v) {
+                    match ks.borrow().as_str() {
+                        "require"   => require_kw   = vs.borrow().clone(),
+                        "platforms" => platforms_kw = vs.borrow().clone(),
+                        _ => {}
+                    }
+                }
             }
+
+            let mut sm = st.borrow_mut();
+            let groups: Vec<String> = sm.group_stack.last()
+                .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+                .unwrap_or_default();
+            let platforms_scope: Vec<String> = sm.platforms_stack.last()
+                .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+                .unwrap_or_default();
+            let source_override = sm.source_stack.last().cloned();
+            sm.gems.push(Gem {
+                name: s(name),
+                reqs: reqs_vec,
+                groups,
+                require_kw,
+                platforms_kw,
+                platforms_scope,
+                source_override,
+            });
             Ok(Value::Nil)
         });
     }

@@ -12,13 +12,22 @@
 //! - `group :a, :b do ... end` blocks (multi-symbol)
 //! - conditional `if RUBY_VERSION >= "..."` at file scope
 //!
-//! The Rust host (this file) registers a small set of String-
-//! only host functions. The Ruby-side prelude
-//! (`examples/gemfile/dsl_prelude.rb`) lifts the
-//! `*splat` / `**kwargs` / block-yielding shapes down to those
-//! plain positionals — the only seam between Bundler's public
-//! DSL and the host's flat-`&[Value]` API. The Gemfile itself
-//! never sees the seam.
+//! The Rust host (this file) registers two flavours of host
+//! function. `__gemfile_gem_v2` uses the v2 API
+//! (`register_fn_v2` paired with `HostCtx`) and reads the splat
+//! as a real Array and kwargs as a real Hash, borrowing directly
+//! from the VM heap with no clone.
+//! The scope-stack helpers (`group` / `platforms` / `git` / `path`
+//! push/pop) stay on the v1 API — they take a single pre-joined
+//! String, which is what the prelude's `ensure`-balanced shims
+//! already produce. The Ruby-side prelude
+//! (`examples/gemfile/dsl_prelude.rb`) does ONE remaining
+//! translation: rebuild the trailing `**opts` Hash with String
+//! keys + String values, because `HostCtx` exposes no interner so
+//! a `:require` Symbol can't be stringified host-side. Everything
+//! else (splat-receive, kwarg unpacking, per-key filtering, value
+//! typing, requirement parsing) lives in typed Rust below. The
+//! Gemfile itself never sees the seam.
 //!
 //! ```text
 //!     cargo run --release --example gemfile
@@ -34,31 +43,31 @@
 //! pops. End-to-end runtime stays in the low-millisecond range
 //! that's been rubyrs's headline number since the README.
 //!
-//! ## Host-fn API takeaway (for future embed work)
+//! ## v1 vs v2 host-fn API in this demo
 //!
-//! `Runtime::register_fn` hands the closure a `&[Value]` and
-//! no `&Heap` reference. That means heap-y argument shapes —
-//! `Value::Array` (from `*splat`), `Value::Hash` (from
-//! `**kwargs`) — can't be unpacked from inside the closure.
-//! The pattern this example uses: do the unpacking in the
-//! Ruby-side prelude (one shim function per public DSL entry)
-//! and pass plain positional String / Int / Bool to the host.
-//! That keeps each host fn ~5 lines and the host doesn't need
-//! intimate `&Heap` access.
+//! This demo originally relied entirely on v1 (`register_fn`),
+//! flattening `*splat` and `**kwargs` to `|`-joined Strings in
+//! the prelude before reaching the host. v2 (`register_fn_v2`
+//! paired with `HostCtx`) closed that gap: the v2 closure receives the
+//! Array and Hash directly and `ctx.resolve_array` /
+//! `ctx.resolve_hash` borrow into the heap. `__gemfile_gem_v2`
+//! below uses v2; the scope-stack helpers stay on v1 because
+//! their natural input is already a single String.
 //!
-//! If the project later wants to make this idiomatic (e.g. to
-//! support truly-arbitrary Ruby DSLs without prelude shims),
-//! the natural extension is a `register_fn_v2` that also takes
-//! a `&Runtime` (so `resolve_array` / `resolve_hash` are
-//! reachable). Out of scope for this example — but the gap is
-//! real and worth noting.
+//! Remaining prelude work: rebuild the trailing `**opts` Hash
+//! with String keys + String values (`opts.each { |k, v|
+//! stringified[k.to_s] = v.to_s }`). `HostCtx` exposes no
+//! interner, so a `:require` Symbol key can't be stringified
+//! host-side — the round-trip to String is forced on the Ruby
+//! side. Closing this fully would require a `HostCtx::resolve_sym`
+//! method (interner widening); deferred.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
-use rubyrs::{Runtime, Value};
+use rubyrs::{HostCtx, Runtime, Value};
 
 /// A single gem declaration captured from the Gemfile.
 #[derive(Debug, Clone)]
@@ -206,30 +215,58 @@ fn main() {
             Ok(Value::Nil)
         });
     }
-    // gem (name, reqs_joined_by_pipe, require_kw, platforms_kw)
+    // gem_v2 (name: Str, requirements: Array<Str>, opts: Hash<Str, Str>)
+    //
+    // v2 form: takes the `*requirements` splat as a real Array and
+    // the `**opts` kwargs as a real Hash, instead of asking the
+    // prelude to flatten everything to Strings. `HostCtx`'s
+    // `resolve_array` / `resolve_hash` borrow directly from the
+    // heap, no clone.
+    //
+    // The prelude still does ONE Ruby-side transform — rebuilding
+    // `opts` with String keys + String values — because `HostCtx`
+    // exposes no interner access, so a `:require` Symbol key can't
+    // be stringified host-side. Everything else (splat-receive,
+    // kwarg unpacking, per-key filtering, value typing) moves down
+    // into typed Rust here.
     {
         let st = state.clone();
-        rt.register_fn("__gemfile_gem", move |args| {
-            if let [name, reqs, require_kw, platforms_kw] = args {
-                let mut state_mut = st.borrow_mut();
-                let groups = state_mut.active_groups();
-                let platforms_scope = state_mut.active_platforms();
-                let source_override = state_mut.active_source_override();
-                let req_str = s(reqs);
-                state_mut.gems.push(GemDecl {
-                    name: s(name),
-                    requirements: if req_str.is_empty() {
-                        vec![]
-                    } else {
-                        req_str.split('|').map(String::from).collect()
-                    },
-                    groups,
-                    platforms_scope,
-                    source_override,
-                    require: s(require_kw),
-                    platforms_kw: s(platforms_kw),
-                });
+        rt.register_fn_v2("__gemfile_gem_v2", move |ctx: &HostCtx, args| {
+            let [name, requirements, opts] = args else { return Ok(Value::Nil); };
+            let reqs_slice = ctx.resolve_array(requirements).unwrap_or(&[]);
+            let opts_slice = ctx.resolve_hash(opts).unwrap_or(&[]);
+
+            let requirements: Vec<String> = reqs_slice.iter()
+                .filter_map(|v| if let Value::Str(rs) = v {
+                    Some(rs.borrow().clone())
+                } else { None })
+                .collect();
+
+            let mut require_kw = String::new();
+            let mut platforms_kw = String::new();
+            for (k, v) in opts_slice {
+                if let (Value::Str(ks), Value::Str(vs)) = (k, v) {
+                    match ks.borrow().as_str() {
+                        "require"   => require_kw   = vs.borrow().clone(),
+                        "platforms" => platforms_kw = vs.borrow().clone(),
+                        _ => {}
+                    }
+                }
             }
+
+            let mut state_mut = st.borrow_mut();
+            let groups = state_mut.active_groups();
+            let platforms_scope = state_mut.active_platforms();
+            let source_override = state_mut.active_source_override();
+            state_mut.gems.push(GemDecl {
+                name: s(name),
+                requirements,
+                groups,
+                platforms_scope,
+                source_override,
+                require: require_kw,
+                platforms_kw,
+            });
             Ok(Value::Nil)
         });
     }
