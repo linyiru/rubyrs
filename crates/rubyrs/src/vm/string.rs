@@ -134,6 +134,20 @@ pub(crate) fn string_call(
             check(result.len())?;
             Some(Value::new_str(result))
         }
+        // `String#encode(target)` / `#force_encoding(target)` —
+        // the subset stores raw bytes with no per-string encoding
+        // tag, so both are near-no-ops. `encode` returns the
+        // receiver (Rc-shared, no copy) for compatibility with
+        // CRuby's "if source encoding == target encoding,
+        // re-encode is the identity" rule. `force_encoding`
+        // similarly returns the receiver. The argument is
+        // accepted as either a String or any value with a `to_s`
+        // already on the Value (we just don't validate it
+        // against the known encoding list). Documented in
+        // SUBSET.md: cross-encoding conversion isn't modelled.
+        (Value::Str(a), "encode", [_]) | (Value::Str(a), "force_encoding", [_]) => {
+            Some(Value::Str(a.clone()))
+        }
         (Value::Str(a), "strip", []) => Some(Value::new_str(a.to_string_lossy().trim().to_string())),
         (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_start().to_string())),
         (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_end().to_string())),

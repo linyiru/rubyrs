@@ -204,3 +204,4 @@ fn run_diff(name: &str) {
 #[test] fn object_reflection() { run_diff("object_reflection"); }
 #[test] fn constant_path_write() { run_diff("constant_path_write"); }
 #[test] fn method_hash_source() { run_diff("method_hash_source"); }
+#[test] fn string_encoding_stubs() { run_diff("string_encoding_stubs"); }

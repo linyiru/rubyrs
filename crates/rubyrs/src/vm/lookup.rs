@@ -159,6 +159,7 @@ impl Vm {
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
                 "sub" | "gsub" | "tr" | "squeeze" |
+                "encode" | "force_encoding" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
