@@ -166,20 +166,16 @@ pub(crate) fn string_call(
         // for our test fixtures) and diverges for multibyte —
         // documented in SUBSET.md.
         (Value::Str(a), "index", [Value::Str(b)]) => {
-            let a_s = a.to_string_lossy();
-            let b_s = b.to_string_lossy();
-            Some(match a_s.find(b_s.as_str()) {
+            Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| match sa.find(sb) {
                 Some(i) => Value::Int(i as i64),
                 None => Value::Nil,
-            })
+            })))
         }
         (Value::Str(a), "rindex", [Value::Str(b)]) => {
-            let a_s = a.to_string_lossy();
-            let b_s = b.to_string_lossy();
-            Some(match a_s.rfind(b_s.as_str()) {
+            Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| match sa.rfind(sb) {
                 Some(i) => Value::Int(i as i64),
                 None => Value::Nil,
-            })
+            })))
         }
         // Literal-substring sub/gsub. Regex forms (`gsub(/pat/, ...)`)
         // are out of scope until we add a regex engine — documented
@@ -308,8 +304,12 @@ pub(crate) fn string_call(
             check(out.len())?;
             Some(Value::new_str(out))
         }
-        (Value::Str(a), "start_with?", [Value::Str(b)]) => Some(Value::Bool(a.to_string_lossy().starts_with(b.to_string_lossy().as_str()))),
-        (Value::Str(a), "end_with?", [Value::Str(b)]) => Some(Value::Bool(a.to_string_lossy().ends_with(b.to_string_lossy().as_str()))),
+        (Value::Str(a), "start_with?", [Value::Str(b)]) => {
+            Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.starts_with(sb)))))
+        }
+        (Value::Str(a), "end_with?", [Value::Str(b)]) => {
+            Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.ends_with(sb)))))
+        }
         (Value::Str(a), "to_i", []) => {
             // CRuby's `String#to_i` is famously lenient: leading
             // whitespace, optional sign, then as many digits as it
