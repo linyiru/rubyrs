@@ -191,13 +191,20 @@ while IFS=$'\t' read -r workload rss_max wall_max _note; do
     continue
   fi
   total=$((total + 1))
+  # Display "-" instead of "0" when the wall check is disabled —
+  # easier to read in the result table than a literal 0 budget.
+  # Compute once, use in both the OK row and the SETUP row so the
+  # "disabled" rendering is consistent regardless of measurement
+  # outcome.
+  local_wall_display="$wall_max"
+  [[ "$wall_max" == "0" ]] && local_wall_display="-"
   read -r ms kb <<<"$(measure_min "$workload")"
   # measure_min emits "ERR ERR" when /usr/bin/time itself failed
   # or the output didn't parse. Already logged a workload-specific
   # message inside measure_once; route to setup_fail and skip the
   # arithmetic comparison (which would die on non-numeric input).
   if [[ "$ms" == "ERR" || "$kb" == "ERR" ]]; then
-    printf "%-58s %-11s %-9s %-12s %-9s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$wall_max" "SETUP"
+    printf "%-58s %-11s %-9s %-12s %-9s %s\n" "$workload" "ERR" "$rss_max" "ERR" "$local_wall_display" "SETUP"
     setup_fail=1
     continue
   fi
@@ -211,10 +218,6 @@ while IFS=$'\t' read -r workload rss_max wall_max _note; do
     status=$([[ "$status" == "ok" ]] && echo "WALL-OVER" || echo "$status+WALL")
     budget_fail=1
   fi
-  # Display "-" instead of "0" when wall check is disabled — easier
-  # to read than a literal 0 budget.
-  local_wall_display="$wall_max"
-  [[ "$wall_max" == "0" ]] && local_wall_display="-"
   printf "%-58s %-11s %-9s %-12s %-9s %s\n" "$workload" "$kb" "$rss_max" "$ms" "$local_wall_display" "$status"
 done < "$BASELINES"
 
