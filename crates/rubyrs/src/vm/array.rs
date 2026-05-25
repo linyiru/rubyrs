@@ -137,6 +137,28 @@ impl Vm {
                         let hit = a.iter().any(|x| x.ruby_eq(needle, &self.heap));
                         Some(Value::Bool(hit))
                     }
+                    // `arr.tally` — count occurrences into a Hash
+                    // keyed by element value, value=occurrence
+                    // count. Preserves first-appearance insertion
+                    // order. Pure value-equality via `ruby_eq`.
+                    ("tally", []) => {
+                        let snapshot: Vec<Value> = self.heap.array(id).clone();
+                        let mut pairs: Vec<(Value, Value)> = Vec::new();
+                        for v in snapshot {
+                            let pos = pairs.iter()
+                                .position(|(k, _)| k.ruby_eq(&v, &self.heap));
+                            if let Some(p) = pos {
+                                if let Value::Int(n) = pairs[p].1 {
+                                    pairs[p].1 = Value::Int(n + 1);
+                                }
+                            } else {
+                                pairs.push((v, Value::Int(1)));
+                            }
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        Some(Value::Hash(nid))
+                    }
                     ("count", []) => Some(Value::Int(self.heap.array(id).len() as i64)),
                     ("count", [needle]) => {
                         let a = self.heap.array(id);

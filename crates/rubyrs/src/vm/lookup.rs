@@ -168,7 +168,7 @@ impl Vm {
             Value::Array(_) => matches!(name,
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "first" | "last" | "empty?" | "include?" |
-                "count" | "sum" | "min" | "max" | "sort" |
+                "count" | "sum" | "min" | "max" | "sort" | "tally" |
                 "inject" | "reduce" |
                 "to_a" | "reverse" | "uniq" | "compact" |
                 "flatten" | "join" |
