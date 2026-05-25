@@ -1157,12 +1157,31 @@ impl Vm {
                         Some(best)
                     }
                     ("sort", []) => {
+                        // Insertion sort with synchronous dispatch
+                        // through `user_cmp`. O(n²) but correctness-
+                        // critical: we can't use Rust's sort_by here
+                        // because invoking a user method during the
+                        // comparison closure would alias `&mut Vm`
+                        // while the Vec borrow is live. For arrays
+                        // of built-in types the fast path stays
+                        // value_cmp_v; user-classed elements go
+                        // through their `<=>` method via user_cmp.
                         let mut copy: Vec<Value> = self.heap.array(id).clone();
-                        if copy.windows(2).any(|w| value_cmp_v(&w[0], &w[1], &self.interner).is_none()) {
-                            return Ok(None);
+                        let n = copy.len();
+                        for i in 1..n {
+                            let mut j = i;
+                            while j > 0 {
+                                let ord = self.user_cmp(&copy[j - 1], &copy[j])?;
+                                match ord {
+                                    None => return Ok(None),
+                                    Some(std::cmp::Ordering::Greater) => {
+                                        copy.swap(j - 1, j);
+                                        j -= 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
                         }
-                        let interner = &self.interner;
-                        copy.sort_by(|a, b| value_cmp_v(a, b, interner).unwrap_or(std::cmp::Ordering::Equal));
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Array(copy));
                         Some(Value::Array(nid))
@@ -1885,6 +1904,44 @@ impl Vm {
 
     pub(crate) fn invoke_method(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>) -> Result<(), Trap> {
         self.invoke_method_with_block(m, self_val, args, None)
+    }
+
+    /// Compare two values using built-in types first, then falling
+    /// back to invoking the left-hand side's user-defined `<=>`.
+    /// Returns `None` for incomparable pairs (built-in cross-type
+    /// mismatches, or a user `<=>` that returns `nil`). Used by
+    /// `Array#sort` so user classes that define `<=>` (typically
+    /// via `include Comparable`) sort sensibly. Synchronously
+    /// dispatches the user method by pushing a frame and running
+    /// `dispatch_until` — the same pattern iterator drivers use.
+    pub(crate) fn user_cmp(&mut self, a: &Value, b: &Value) -> Result<Option<std::cmp::Ordering>, Trap> {
+        if let Some(ord) = value_cmp_v(a, b, &self.interner) {
+            return Ok(Some(ord));
+        }
+        // Try the receiver's `<=>` method (user-defined). Only
+        // Value::Object can have user methods; other receivers
+        // would have been resolved by value_cmp_v above.
+        if let Value::Object(id) = a {
+            let cls = self.heap.instance(*id).class.clone();
+            let spaceship = self.interner.intern("<=>");
+            if let Some(m) = self.lookup_method_uncached(&cls, spaceship) {
+                let pre_frames = self.frames.len();
+                let mut g = PinGuard::new(self);
+                g.pin(a.clone());
+                g.pin(b.clone());
+                g.vm.invoke_method(m, a.clone(), vec![b.clone()])?;
+                g.vm.dispatch_until(pre_frames)?;
+                let result = g.vm.stack.pop().unwrap_or(Value::Nil);
+                drop(g);
+                return Ok(match result {
+                    Value::Int(n) if n < 0 => Some(std::cmp::Ordering::Less),
+                    Value::Int(0) => Some(std::cmp::Ordering::Equal),
+                    Value::Int(_) => Some(std::cmp::Ordering::Greater),
+                    _ => None,
+                });
+            }
+        }
+        Ok(None)
     }
 
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
@@ -2640,40 +2697,63 @@ impl Vm {
                 Some(Value::Hash(result_id))
             }
             (Value::Array(id), "sort_by", []) => {
-                // Compute the sort key for every element by calling the
-                // block once, then sort element/key pairs by key. The
-                // existing `value_cmp_v` only knows how to compare Ints,
-                // Strs, and Syms, so block-returned keys outside those
-                // types fall through to NoMethodError.
-                let mut g = PinGuard::new(self);
-                g.pin(Value::Array(*id));
-                g.pin(Value::Block(block));
-                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
-                let pre_frames = g.vm.frames.len();
-                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
-                let mut early = None;
-                for v in snapshot {
-                    g.vm.invoke_block(block,vec![v.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(key);
-                        break;
+                // Compute the sort key for every element by calling
+                // the block once, then insertion-sort the (key, val)
+                // pairs by key using `user_cmp`. The block is run
+                // exactly N times (one key per element); the sort
+                // itself does O(n²) comparisons but each is a host-
+                // side dispatch into the user `<=>` (or value_cmp_v
+                // for built-ins), not another block call.
+                let snapshot: Vec<(Value, Value)> = {
+                    let mut g = PinGuard::new(self);
+                    g.pin(Value::Array(*id));
+                    g.pin(Value::Block(block));
+                    let arr = g.vm.heap.array(*id).clone();
+                    let pre_frames = g.vm.frames.len();
+                    let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+                    let mut early: Option<Value> = None;
+                    for v in arr {
+                        g.vm.invoke_block(block, vec![v.clone()])?;
+                        g.vm.dispatch_until(pre_frames)?;
+                        if g.vm.method_return.is_some() { break; }
+                        let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                        if g.vm.break_signaled {
+                            g.vm.break_signaled = false;
+                            early = Some(key);
+                            break;
+                        }
+                        pairs.push((key, v));
                     }
-                    pairs.push((key, v));
+                    if let Some(e) = early {
+                        drop(g);
+                        return Ok(Some(e));
+                    }
+                    pairs
+                };
+                let mut pairs = snapshot;
+                let n = pairs.len();
+                for i in 1..n {
+                    let mut j = i;
+                    while j > 0 {
+                        let (k_prev, k_curr) = {
+                            let (a, b) = pairs.split_at(j);
+                            (a[j - 1].0.clone(), b[0].0.clone())
+                        };
+                        let ord = self.user_cmp(&k_prev, &k_curr)?;
+                        match ord {
+                            None => return Ok(None),
+                            Some(std::cmp::Ordering::Greater) => {
+                                pairs.swap(j - 1, j);
+                                j -= 1;
+                            }
+                            _ => break,
+                        }
+                    }
                 }
-                if let Some(e) = early { return Ok(Some(e)); }
-                if pairs.iter().any(|(k1, _)| pairs.iter().any(|(k2, _)| value_cmp_v(k1, k2, &g.vm.interner).is_none())) {
-                    return Ok(None);
-                }
-                let interner = &g.vm.interner;
-                pairs.sort_by(|a, b| value_cmp_v(&a.0, &b.0, interner).unwrap_or(std::cmp::Ordering::Equal));
                 let sorted: Vec<Value> = pairs.into_iter().map(|(_, v)| v).collect();
-                g.vm.maybe_gc();
-                g.vm.check_alloc()?;
-                let nid = g.vm.heap.alloc(HeapObj::Array(sorted));
+                self.maybe_gc();
+                self.check_alloc()?;
+                let nid = self.heap.alloc(HeapObj::Array(sorted));
                 Some(Value::Array(nid))
             }
             (Value::Array(id), "inject", []) | (Value::Array(id), "reduce", []) => {
