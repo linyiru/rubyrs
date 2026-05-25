@@ -975,6 +975,40 @@ fn splat_rest_inline_receiver_survives_stress_gc() {
 }
 
 #[test]
+fn top_level_constant_array_survives_stress_gc() {
+    // Regression: `Vm.constants` (the `FOO = expr` table) was added
+    // without a corresponding entry in `maybe_gc`'s root walk, so
+    // Array/Hash/Object values stored as constants could be swept
+    // between the assignment and any later LoadConst. Under
+    // STRESS_GC=1 the inner allocations below would trip a sweep
+    // before the final `.length` read, and the dangling ObjId would
+    // either panic or print garbage.
+    let mut rt = Runtime::with_config(Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        LIST = [10, 20, 30]
+        MAP = { a: 1, b: 2 }
+        # Burn allocations so any unrooted ObjId held by LIST/MAP
+        # would be reused by the time we read them back.
+        i = 0
+        while i < 50
+          [i, i + 1]
+          { k: i }
+          i = i + 1
+        end
+        puts LIST.length
+        puts LIST.first
+        puts MAP[:a]
+        puts MAP[:b]
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "3\n10\n1\n2\n");
+}
+
+#[test]
 fn method_missing_inherited_through_superclass() {
     let (mut rt, buf) = rt_with_buf();
     rt.eval(r#"

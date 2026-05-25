@@ -117,6 +117,10 @@ impl Vm {
         // code via the `ENV` constant — pin it so the cache
         // doesn't get swept between LoadConst loads.
         if let Some(id) = self.env_hash { roots.push(Value::Hash(id)); }
+        // Top-level constants (`FOO = expr`) are reachable from any
+        // future LoadConst — root every value so Array/Hash/Object
+        // constants don't get swept between assignment and read.
+        for v in self.constants.values() { roots.push(v.clone()); }
         for f in &self.frames {
             roots.push(f.self_val.clone());
             for v in f.locals.borrow().iter() { roots.push(v.clone()); }
