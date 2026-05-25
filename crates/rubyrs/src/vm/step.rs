@@ -366,7 +366,7 @@ impl Vm {
             }
             Op::JumpIfArgGiven(slot, off) => {
                 let f = self.frames.last_mut().expect("ICE: JumpIfArgGiven no frame");
-                if (slot as u16) < f.n_given_positional {
+                if slot < f.n_given_positional {
                     f.ip = (f.ip as i32 + off) as usize;
                 }
             }
