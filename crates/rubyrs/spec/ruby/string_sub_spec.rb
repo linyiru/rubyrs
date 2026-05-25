@@ -1,10 +1,12 @@
 # Adapted from ruby/spec core/string/sub_spec.rb at 2026-05
 # (subset). Drops upstream's `.should ==` matcher chain for our
 # `assert_eq` shim; drops `.should_not.equal?` for `equal?`
-# inverted manually. Skipped (out of subset / out of master):
+# inverted manually. Skipped (out of subset / out of master);
+# see docs/SUBSET.md → "String built-in methods" for the
+# canonical list of what sub/gsub support today:
 #   - /i case-insensitive flag (not yet implemented; sub fails
-#     to match `Hello` against /h/i — see SUBSET.md)
-#   - \1 / \& backref replacement (separate spec PR)
+#     to match `Hello` against /h/i)
+#   - \1 / \& backref replacement strings
 #   - encoding/Unicode normalisation
 #   - subclass / fixtures-based String specialisations
 
@@ -65,7 +67,8 @@ describe "String#sub with pattern and block" do
     assert_eq("hi".sub(/i/) { "!" }, "h!")
   end
   # Upstream also covers `"hello".sub("world") { ... }` (String
-  # pattern under block form), but rubyrs's primitive_call
-  # currently only routes the block-form sub through the Regex
-  # path. Documented in SUBSET.md; not modelled here.
+  # pattern under block form), but rubyrs currently routes the
+  # block-form sub through the Regex path only — String-pattern
+  # + block raises NoMethodError. See docs/SUBSET.md → "String
+  # built-in methods" for the full gap list.
 end

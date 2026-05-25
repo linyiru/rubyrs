@@ -36,7 +36,7 @@ The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **66 examples across 11
+"Future work" below). Current total: **65 examples across 11
 files**, all passing.
 
 ## DSL the helper provides

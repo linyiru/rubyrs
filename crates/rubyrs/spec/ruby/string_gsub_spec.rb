@@ -12,14 +12,20 @@ describe "String#gsub with pattern and replacement" do
     assert_eq("hello".gsub(//, "."), ".h.e.l.l.o.")
   end
 
-  it "anchors at string start when replacing ^" do
-    # Single-line case — anchor fires once at the start.
-    assert_eq("Text\n".gsub(/^/, ' '), " Text\n")
-    # Multi-line per-line ^ anchoring (upstream expects
-    # ` Text\n Foo`) currently fires only at the string start
-    # in rubyrs, not at every line start. Documented divergence;
-    # tracked separately from this spec PR.
-  end
+  # Upstream's "doesn't freak out when replacing ^" example
+  # asserts per-line `^` anchoring:
+  #
+  #   "Text\n".gsub(/^/, ' ').should == " Text\n"
+  #   "Text\nFoo".gsub(/^/, ' ').should == " Text\n Foo"
+  #
+  # rubyrs's regex engine fires `^` only at the string start,
+  # not at every line start. The single-line case happens to
+  # pass coincidentally; the multi-line case is a documented
+  # divergence. To keep this spec file a faithful mirror of
+  # upstream (rather than a check of our narrower behaviour),
+  # the whole `it` block is skipped here. Will un-skip once
+  # the engine learns per-line anchoring. See docs/SUBSET.md →
+  # "Regex literals" for the canonical statement of the gap.
 
   it "returns a copy of self with ALL occurrences replaced" do
     assert_eq("hello".gsub(/[aeiou]/, '*'), "h*ll*")

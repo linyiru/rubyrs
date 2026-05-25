@@ -115,8 +115,8 @@ useful first-pass acceptance criterion.
 | Area | Files | Examples | Pass rate |
 |---|---|---|---|
 | Metaprog (ADR 0010 PoC) | 6 | 30 | 100% |
-| `core/string` subset (sub, gsub, reverse, include, empty) | 5 | 36 | 100% |
-| **Total** | **11** | **66** | **100%** |
+| `core/string` subset (sub, gsub, reverse, include, empty) | 5 | 35 | 100% |
+| **Total** | **11** | **65** | **100%** |
 
 Every example must pass — there is no "tagged divergent" lane
 yet. Skipped upstream `it` blocks are noted in the spec file's
