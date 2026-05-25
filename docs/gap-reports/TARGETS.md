@@ -27,21 +27,22 @@ a different one:
 | "How much of stdlib is reachable?" | `set`, `csv`, `optparse`, `uri`, `pathname` |
 | "Where does method_missing / define_method bite first?" | Minitest, RSpec-core (stress only) |
 
-## Tier 1 — recommended next batch
+## Tier 1 — done ✅
 
-These give the highest signal-per-scan-minute. All pure Ruby, all
-DSL-shaped or framework-shaped (rubyrs's stated niche), all
-moderate size.
+The original recommended next batch — all three reports are now
+checked in. See [README.md](README.md) for the summary table and
+the cross-codebase observations they produced.
 
-| Target | Repo | Size (lib/) | Why it pays back |
-|---|---|---:|---|
-| **Sinatra** | sinatra/sinatra | ~3K LoC | Web DSL — completely different shape from Jekyll. Heavy `define_method` for routes; exposes the first wall when rubyrs lacks dynamic dispatch. |
-| **dry-struct** | dry-rb/dry-struct | ~1-2K LoC | Modern, *disciplined* Ruby: `attr_*`, `include`, keyword args, almost no metaprogramming. Tightest baseline for "can rubyrs run a contemporary library at all". |
-| **Rake** | ruby/rake | ~5-8K LoC | Task DSL, near-relative of Brewfile/Gemfile but with namespacing, dependencies, `instance_eval` blocks. Validates the DSL niche at the next size up. |
+| Target | Report | What it added vs Jekyll/Liquid |
+|---|---|---|
+| **Sinatra** | [sinatra.md](sinatra.md) | First scan where `ModuleNode` *isn't* the top blocker — exposed the `BlockArgumentNode`/`BlockParameterNode`/`RestParameterNode` family as the dominant DSL-framework gap. |
+| **dry-struct** | [dry-struct.md](dry-struct.md) | "Modern disciplined Ruby" baseline. Smallest gap surface (19 unique missing classes); confirms the AST view is converging across very different codebases. |
+| **Rake** | [rake.md](rake.md) | Larger task-DSL scale. Profile closely matches Jekyll's. `ModuleNode` #1 again. |
 
-After Tier 1 we expect a clear answer to: *which one missing Prism
-node (or built-in method) would close the most gap across multiple
-real codebases at once*. That's the input for the next feature PR.
+**Net conclusion:** ROADMAP Near term #4 (`Module` + `include`)
+is validated as the highest-leverage single feature; the block-
+parameter family (`&block`, `*args`, splat) is the runner-up and
+matters especially for DSL frameworks.
 
 ## Tier 2 — specific-gap probes
 
