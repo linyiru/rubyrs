@@ -231,6 +231,7 @@ pub(crate) fn compile_expr(
         Expr::IntLit(i) => { b.emit(Op::LoadConstInt(*i)); }
         Expr::FloatLit(f) => { b.emit(Op::LoadConstFloat(*f)); }
         Expr::StrLit(s) => { let id = interner.intern(s); b.emit(Op::LoadConstStr(id)); }
+        #[cfg(feature = "regex")]
         Expr::RegexLit(src) => { let id = interner.intern(src); b.emit(Op::LoadRegex(id)); }
         Expr::SymbolLit(s) => { let id = interner.intern(s); b.emit(Op::LoadSymbol(id)); }
         Expr::InterpolatedStr(parts) => {

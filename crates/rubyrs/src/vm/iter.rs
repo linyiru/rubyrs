@@ -224,6 +224,7 @@ impl Vm {
         // text are NOT exposed to the block — only the full match —
         // matching CRuby's "block gets the match string, not the
         // MatchData" convention for the common case.
+        #[cfg(feature = "regex")]
         if let (Value::Str(s), Value::Regex(re), 1) = (recv, args.first().unwrap_or(&Value::Nil), args.len())
             && (name == "gsub" || name == "sub") {
                 let source = s.to_string_lossy();
@@ -263,6 +264,10 @@ impl Vm {
         // Returns the receiver String, matching CRuby.
         if let (Value::Str(s), 1) = (recv, args.len()) && name == "scan" {
             let source: Vec<u8> = s.borrow().clone();
+            // Only the cfg(feature = "regex") arms below consume this
+            // String. Computing it unconditionally would dead-code-
+            // warn under --no-default-features.
+            #[cfg(feature = "regex")]
             let source_str = String::from_utf8_lossy(&source).into_owned();
             let mut g = PinGuard::new(self);
             g.pin(recv.clone());
@@ -270,6 +275,7 @@ impl Vm {
             let pre_frames = g.vm.frames.len();
             let mut early: Option<Value> = None;
             match &args[0] {
+                #[cfg(feature = "regex")]
                 Value::Regex(re) => {
                     let has_groups = re.captures_len() > 1;
                     if has_groups {

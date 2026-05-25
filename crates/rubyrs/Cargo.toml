@@ -41,17 +41,26 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 # stdlib / mri-compat tiers as well — they require larger surgery
 # and are explicitly out of scope for this PoC.)
 [features]
-default = ["cext"]
+default = ["cext", "regex"]
 cext = ["dep:rubyrs-cext", "dep:libloading"]
+# `regex` is the second tier boundary (PoC for ADR 0015 / spec'd
+# by ADR 0017). With this feature off:
+#   - the `regex` crate dependency disappears (~300 KB save)
+#   - `/pattern/` literals raise a clear Trap from the AST
+#     translator with a "regex feature not enabled" message
+#   - `Value::Regex`, `Op::LoadRegex`, `Expr::RegexLit`, and the
+#     `Vm::regex_cache` field all cfg out
+#   - every dispatch arm that matches `Value::Regex` (Regex#match,
+#     String#sub/gsub/match?/scan with regex args, =~, ===) is
+#     cfg-gated and unreachable in this build
+# Per ADR 0017's Rule 3, regex belongs in Tier 2 (this feature).
+# The default keeps it on so today's CLI / embedder behaviour
+# stays identical to pre-PoC.
+regex = ["dep:regex"]
 
 [dependencies]
 ruby-prism.workspace = true
-# `regex` powers `/pattern/` literal support. Ruby uses Onigmo
-# (a different dialect); Rust's regex crate covers most patterns
-# idiomatic Ruby uses. Divergences (possessive quantifiers,
-# named backrefs `\k<name>`, Onigmo-specific shorthand) are
-# documented in SUBSET.md.
-regex = "1"
+regex = { version = "1", optional = true }
 # Optional via the `cext` feature. With cext off, neither dep is
 # pulled into the build.
 rubyrs-cext = { path = "../rubyrs-cext", version = "0.1.0", optional = true }

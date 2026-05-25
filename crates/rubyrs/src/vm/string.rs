@@ -8,12 +8,15 @@
 //! Stateless — no Vm access, just receiver + args + the
 //! resource cap.
 
+#[cfg(feature = "regex")]
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
-use crate::value::{Instance, RStr, Value};
+#[cfg(feature = "regex")]
+use crate::value::Instance;
+use crate::value::{RStr, Value};
 
 use super::{ruby_sprintf, Vm};
 
@@ -169,6 +172,7 @@ pub(crate) fn string_call(
         }
         // String#match? with a Regex — proper regex match. Returns
         // bool without populating any match-data side state.
+        #[cfg(feature = "regex")]
         (Value::Str(a), "match?", [Value::Regex(re)]) => {
             Some(Value::Bool(a.with_str_lossy(|s| re.is_match(s))))
         }
@@ -224,6 +228,7 @@ pub(crate) fn string_call(
         // literal backslash. Block form
         // (`s.sub(/pat/) { |m| ... }`) is the higher-value but
         // separately-dispatched path; not handled here.
+        #[cfg(feature = "regex")]
         (Value::Str(a), "sub", [Value::Regex(re), Value::Str(repl)]) => {
             let a_ref = a.to_string_lossy();
             let repl_ref = repl.to_string_lossy();
@@ -232,6 +237,7 @@ pub(crate) fn string_call(
             check(out.len())?;
             Some(Value::new_str(out))
         }
+        #[cfg(feature = "regex")]
         (Value::Str(a), "gsub", [Value::Regex(re), Value::Str(repl)]) => {
             let a_ref = a.to_string_lossy();
             let repl_ref = repl.to_string_lossy();
@@ -393,12 +399,16 @@ pub(crate) fn string_call(
         (Value::Str(a), "<=>", [Value::Str(b)]) => Some(Value::Int(a.borrow().cmp(&*b.borrow()) as i64)),
         (Value::Str(a), ">=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() >= *b.borrow())),
         // Regex#match? mirror — same semantics either side.
+        #[cfg(feature = "regex")]
         (Value::Regex(re), "match?", [Value::Str(s)]) => {
             Some(Value::Bool(s.with_str_lossy(|s| re.is_match(s))))
         }
         // Regex#source — the raw pattern string.
+        #[cfg(feature = "regex")]
         (Value::Regex(re), "source", []) => Some(Value::new_str(re.as_str().to_string())),
+        #[cfg(feature = "regex")]
         (Value::Regex(re), "to_s", []) => Some(Value::new_str(format!("(?-mix:{})", re.as_str()))),
+        #[cfg(feature = "regex")]
         (Value::Regex(re), "inspect", []) => Some(Value::new_str(format!("/{}/", re.as_str()))),
         // String#inspect — wrap in double quotes, escape `\`,
         // `"`, and common control characters. Matches CRuby for
@@ -577,6 +587,7 @@ impl Vm {
                 // nil if no match. CRuby additionally accepts
                 // a String (interpreted as a literal regex) and
                 // a starting offset; both out of scope here.
+                #[cfg(feature = "regex")]
                 if name == "match" && args.len() == 1 {
                     if let Value::Regex(re) = &args[0] {
                         let bound = s.to_string_lossy();
@@ -816,6 +827,7 @@ impl Vm {
                     // FULL match is dropped and only captures
                     // appear; without groups the full match is
                     // the element.
+                    #[cfg(feature = "regex")]
                     ("scan", [Value::Regex(re)]) => {
                         // regex crate is &str-only; lossy view at
                         // iteration entry (binary input degrades to
@@ -1000,6 +1012,7 @@ pub(crate) fn str_succ(s: &str) -> String {
 ///
 /// Also escapes any literal `$` in the template so the regex
 /// crate doesn't interpret it as its own backref form.
+#[cfg(feature = "regex")]
 pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();

@@ -444,6 +444,7 @@ impl Value {
             Value::Hash(_) => "Hash",
             Value::Range(_) => "Range",
             Value::Block(_) => "Proc", // block lives in heap now (P2-13); type name unchanged
+            #[cfg(feature = "regex")]
             Value::Regex(_) => "Regexp",
             Value::BoundMethod(_) => "Method",
             Value::UnboundMethod(_) => "UnboundMethod",
@@ -531,6 +532,7 @@ impl Value {
                 format!("{}{}{}", r.begin.to_display(heap, interner), sep, r.end.to_display(heap, interner))
             }
             Value::Block(_) => "#<Proc>".into(),
+            #[cfg(feature = "regex")]
             Value::Regex(r) => format!("(?-mix:{})", r.as_str()),
             Value::BoundMethod(_) => "#<Method>".into(),
             Value::UnboundMethod(_) => "#<UnboundMethod>".into(),

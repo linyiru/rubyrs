@@ -296,7 +296,10 @@ pub(crate) struct Vm {
     pub(crate) class_visibility_stack: Vec<Visibility>,
     /// Compiled-regex cache. Keyed by the interned source-string
     /// SymId; first `LoadRegex` for a given pattern compiles and
-    /// caches, subsequent loads return the same Rc.
+    /// caches, subsequent loads return the same Rc. Cfg-gated on
+    /// the `regex` feature (ADR 0017 Rule 3) — disappears with
+    /// `--no-default-features`.
+    #[cfg(feature = "regex")]
     pub(crate) regex_cache: HashMap<SymId, Rc<regex::Regex>>,
     /// Lazily-built ENV Hash, shared across every `ENV`
     /// reference. Set on first `LoadConst("ENV")` and reused
@@ -421,6 +424,7 @@ impl Vm {
             cext_instance_methods: HashMap::new(),
             class_stack: vec![],
             class_visibility_stack: vec![],
+            #[cfg(feature = "regex")]
             regex_cache: HashMap::new(),
             env_hash: None,
             stack: Vec::with_capacity(1024),
