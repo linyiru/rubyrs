@@ -1035,14 +1035,27 @@ impl Vm {
             // allocator fn in its `cext_alloc_func` slot so
             // `Klass.new(args)` routes through the cext-side
             // allocator before calling `initialize`.
+            //
+            // PR #50 review #4: registered_classes is drained BEFORE
+            // alloc_funcs (a few blocks up), so by this point every
+            // class the cext declared is in self.classes. An alloc_func
+            // pointing at an unknown class means the cext called
+            // rb_define_alloc_func without a prior rb_define_class_under
+            // — a contract violation that would silently produce bare
+            // Instance receivers at .new time, leading to confusing
+            // TypeError far from the cause. Panic instead so cext
+            // authors find the bug immediately.
             for af in state.registered_alloc_funcs {
                 let name_sym = self.interner.intern(&af.class_joined_name);
-                if let Some(cls) = self.classes.get(&name_sym) {
-                    cls.cext_alloc_func.set(Some(af.func));
-                }
-                // else: alloc_func registered for an unknown class —
-                // drop on the floor; cext bug surfaces later as
-                // "bare Instance instead of TypedData" at .new time.
+                let cls = self.classes.get(&name_sym).unwrap_or_else(|| {
+                    panic!(
+                        "ICE: rb_define_alloc_func for unregistered class {:?} \
+                         — cext called rb_define_alloc_func before (or instead of) \
+                         rb_define_class_under",
+                        af.class_joined_name
+                    )
+                });
+                cls.cext_alloc_func.set(Some(af.func));
             }
 
             // Level 0: keep the library mapped for the lifetime of the
