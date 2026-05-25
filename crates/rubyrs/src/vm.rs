@@ -598,10 +598,17 @@ impl Vm {
     /// then call `do_call` with `no_recv = false`. After `do_call`
     /// the result sits on top of the operand stack — pop and return.
     ///
-    /// Cache slot 0 every time: there's no static call-site we can
-    /// associate with a stable IC slot since the method name comes
-    /// from C. A spike-level perf hit; future work can thread a
-    /// per-`(class, method)` cache through if it shows up.
+    /// `cache_id = u16::MAX` is a sentinel that
+    /// `lookup_method_cached` treats as "no cache slot": the
+    /// `idx < call_caches.len()` guard naturally fails (the table
+    /// is bounded by the number of compiled `Op::Call` instructions
+    /// — nowhere near 65535 in any realistic program), so both the
+    /// read and writeback paths short-circuit. Without this sentinel
+    /// a hard-coded `cache_id = 0` would poison whichever compiled
+    /// call site got slot 0 — that site would silently dispatch
+    /// whatever class/method the C ext last invoked. Future work:
+    /// allocate a per-`(recv-class, method)` cache for cext calls
+    /// if profiling shows the uncached path matters.
     #[cfg(not(target_os = "wasi"))]
     pub(crate) fn cext_invoke_method(
         &mut self,
@@ -615,7 +622,12 @@ impl Vm {
         for a in args {
             self.stack.push(a);
         }
-        self.do_call(name_id, argc, /* no_recv = */ false, /* cache_id = */ 0)?;
+        self.do_call(
+            name_id,
+            argc,
+            /* no_recv = */ false,
+            /* cache_id = */ u16::MAX,
+        )?;
         Ok(self
             .stack
             .pop()
