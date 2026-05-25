@@ -227,42 +227,80 @@ impl Default for CExtState {
 }
 
 thread_local! {
-    static STATE: RefCell<Option<CExtState>> = const { RefCell::new(None) };
+    // Stack of nested cext states. Level 0/1/1.5 only ever had one
+    // active call at a time (no callbacks back into Ruby from C), so
+    // `Option` was enough. Level 2's `rb_funcallv` can cause a C ext
+    // call to re-enter the Vm, which can in turn dispatch another C
+    // ext call — that needs a fresh state on top while the outer
+    // state stays preserved underneath. Hence Vec.
+    static STATE: RefCell<Vec<CExtState>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Run `f` with mutable access to the active [`CExtState`]. Panics
-/// if called from a thread that hasn't been wrapped in [`enter`] /
-/// [`leave`] — that always indicates a host-side bug.
+/// Run `f` with mutable access to the topmost (innermost) active
+/// [`CExtState`]. Panics if called from a thread that has no active
+/// state — that always indicates a host-side bug.
 pub fn with_state<R>(f: impl FnOnce(&mut CExtState) -> R) -> R {
     STATE.with(|s| {
         let mut b = s.borrow_mut();
         let st = b
-            .as_mut()
-            .expect("ICE: rubyrs-cext STATE not initialised; host must call enter() first");
+            .last_mut()
+            .expect("ICE: rubyrs-cext STATE empty; host must call enter() first");
         f(st)
     })
 }
 
-/// Push a fresh [`CExtState`] onto the current thread. Pair with
-/// [`leave`].
+/// Push a fresh [`CExtState`] onto the active stack. Pair with
+/// [`leave`]. Nests cleanly: each `enter` adds a new state; the
+/// matching `leave` pops it and reveals whatever was underneath.
 pub fn enter() {
-    STATE.with(|s| {
-        let mut b = s.borrow_mut();
-        assert!(
-            b.is_none(),
-            "ICE: nested rubyrs-cext enter() without intervening leave()"
-        );
-        *b = Some(CExtState::new());
-    });
+    STATE.with(|s| s.borrow_mut().push(CExtState::new()));
 }
 
-/// Pop the active [`CExtState`] and return ownership to the host.
+/// Pop the topmost [`CExtState`] and return ownership to the host.
 pub fn leave() -> CExtState {
     STATE.with(|s| {
         s.borrow_mut()
-            .take()
+            .pop()
             .expect("ICE: rubyrs-cext leave() without matching enter()")
     })
+}
+
+// ===== Funcall callback infrastructure (Level 2) =====
+//
+// `rb_funcallv` from C needs to re-enter the host Vm to dispatch a
+// Ruby method. rubyrs-cext can't directly depend on the Vm type
+// (separate crate), so we expose a callback channel: the host
+// installs a closure that knows how to invoke `recv.method(args)`
+// on its Vm before transferring control to the C function, and
+// `rb_funcallv` looks up the topmost installed callback.
+//
+// Stack semantics mirror STATE — nested cext calls each install
+// their own callback (capturing their own Vm pointer), and the
+// topmost wins.
+
+/// Callback signature: receiver handle (Value), method name (str),
+/// arg handles (slice of Value). Returns a new handle for the
+/// result, interned into the topmost CExtState.
+pub type FuncallCallback = Box<dyn Fn(Value, &str, &[Value]) -> Value>;
+
+thread_local! {
+    static FUNCALL_CB: RefCell<Vec<FuncallCallback>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Install a funcall callback for the duration of the next C call.
+/// The host (`Vm::cext_dispatch`) pushes one before invoking C and
+/// pops the same one after C returns.
+pub fn push_funcall_callback(cb: FuncallCallback) {
+    FUNCALL_CB.with(|c| c.borrow_mut().push(cb));
+}
+
+/// Remove the topmost funcall callback.
+pub fn pop_funcall_callback() {
+    FUNCALL_CB.with(|c| {
+        let _ = c.borrow_mut()
+            .pop()
+            .expect("ICE: pop_funcall_callback without matching push");
+    });
 }
 
 // ===== Exported C ABI =====
@@ -593,4 +631,42 @@ pub unsafe extern "C" fn rb_intern(name: *const c_char) -> ID {
         .to_string_lossy()
         .into_owned();
     INTERN.with(|t| t.borrow_mut().intern(&s))
+}
+
+/// Dispatch a Ruby method from C: invoke `recv.<id>(argv[..argc])`
+/// on the host Vm and return a handle to the result.
+///
+/// Looks up the topmost [`FuncallCallback`] (installed by the host
+/// before transferring control to the C extension) and delegates.
+/// Panics if no callback is installed — that would mean the C ext
+/// is calling `rb_funcallv` from outside a host-managed cext call,
+/// which is a programmer error.
+///
+/// # Safety
+///
+/// `argv` must be valid for reads of `argc` `VALUE`s when `argc > 0`.
+/// When `argc == 0`, `argv` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_funcallv(
+    recv: Value,
+    mid: ID,
+    argc: c_int,
+    argv: *const Value,
+) -> Value {
+    let method = resolve_id(mid)
+        .expect("ICE: rb_funcallv with unknown ID; missing rb_intern call?");
+    let args: Vec<Value> = if argc > 0 {
+        assert!(!argv.is_null(), "rb_funcallv: null argv with argc > 0");
+        // SAFETY: caller guarantees argv..argv+argc is readable.
+        unsafe { std::slice::from_raw_parts(argv, argc as usize).to_vec() }
+    } else {
+        Vec::new()
+    };
+    FUNCALL_CB.with(|c| {
+        let cb = c.borrow();
+        let cb = cb
+            .last()
+            .expect("ICE: rb_funcallv called outside an active cext dispatch");
+        cb(recv, &method, &args)
+    })
 }

@@ -174,6 +174,29 @@ typedef uint64_t ID;
  * the per-call cext state being reset. */
 ID rb_intern(const char *name);
 
+/* Dispatch a Ruby method from C. Calls `recv.<id>(argv[..argc])`
+ * on the host VM, returns the result as a fresh VALUE handle.
+ *
+ * Spike scope: returning value types are limited to what the host
+ * cext FFI currently models (Nil / Bool / Str / Int / Class).
+ * Exceptions raised from the Ruby side currently collapse to Nil
+ * — proper `rb_raise`-style propagation lands when the C ABI gets
+ * an exception machinery (Level 3+).
+ *
+ * Re-entrancy: the C extension is free to call `rb_funcallv`
+ * arbitrarily many times nested; the host pushes a fresh cext
+ * state on each dispatch and pops on return. */
+VALUE rb_funcallv(VALUE recv, ID mid, int argc, const VALUE *argv);
+
+/* Convenience macro for the common case `rb_funcall(recv, id, n,
+ * arg1, arg2, ...)`. Uses a C99 compound literal to build an
+ * inline VALUE[] for the variadic args, then forwards to
+ * rb_funcallv. Matches CRuby's source-level signature so most C
+ * extensions compile unchanged. For zero args, prefer the
+ * explicit form `rb_funcallv(recv, id, 0, NULL)`. */
+#define rb_funcall(recv, mid, n, ...) \
+    rb_funcallv((recv), (mid), (n), (VALUE[]){ __VA_ARGS__ })
+
 #ifdef __cplusplus
 }
 #endif
