@@ -64,7 +64,7 @@ fn ensure_callback_bundle_built() -> PathBuf {
                 String::from_utf8_lossy(&build.stdout),
                 String::from_utf8_lossy(&build.stderr),
             );
-            let bundle = example_dir.join(format!("callback_ext.{}", common::DYLIB_EXT));
+            let bundle = example_dir.join(format!("callback_ext.{}", common::RUBY_DLEXT));
             assert!(
                 bundle.exists(),
                 "build.sh did not produce {}",

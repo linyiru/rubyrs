@@ -5,13 +5,13 @@
 
 #![allow(dead_code)]
 
-/// Filename extension for Ruby C extensions on the host platform.
+/// Filename suffix (no leading dot) for Ruby C extensions on the host
+/// platform — Ruby's `RbConfig::CONFIG['DLEXT']` convention.
 ///
-/// Matches Ruby's `RbConfig::CONFIG['DLEXT']` convention rather than
-/// the platform's native dylib suffix — on macOS that means `bundle`,
-/// not `dylib`, which is why `std::env::consts::DLL_SUFFIX` is wrong
-/// here.
-pub const DYLIB_EXT: &str = std::cfg_select! {
+/// On macOS this is `"bundle"`, not `"dylib"`, which is why neither
+/// `std::env::consts::DLL_SUFFIX` (returns `".dylib"`) nor
+/// `libloading::library_filename` is a usable substitute here.
+pub const RUBY_DLEXT: &str = std::cfg_select! {
     target_os = "macos" => "bundle",
     windows => "dll",
     _ => "so",

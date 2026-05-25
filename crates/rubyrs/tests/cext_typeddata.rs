@@ -60,7 +60,7 @@ fn ensure_counter_bundle_built() -> PathBuf {
                 String::from_utf8_lossy(&build.stdout),
                 String::from_utf8_lossy(&build.stderr),
             );
-            let bundle = example_dir.join(format!("counter_ext.{}", common::DYLIB_EXT));
+            let bundle = example_dir.join(format!("counter_ext.{}", common::RUBY_DLEXT));
             // Sanity-check the bundle actually got produced (review #5).
             assert!(
                 bundle.exists(),

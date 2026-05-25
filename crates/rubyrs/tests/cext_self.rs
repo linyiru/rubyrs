@@ -44,7 +44,7 @@ fn cext_self_is_class_for_singletons_qnil_for_globals() {
         String::from_utf8_lossy(&build.stderr),
     );
 
-    let bundle = example_dir.join(format!("self_test.{}", common::DYLIB_EXT));
+    let bundle = example_dir.join(format!("self_test.{}", common::RUBY_DLEXT));
     assert!(
         bundle.exists(),
         "build.sh did not produce {}",

@@ -46,7 +46,7 @@ fn ensure_raise_bundle_built() -> PathBuf {
                 String::from_utf8_lossy(&build.stdout),
                 String::from_utf8_lossy(&build.stderr),
             );
-            let bundle = example_dir.join(format!("raise_ext.{}", common::DYLIB_EXT));
+            let bundle = example_dir.join(format!("raise_ext.{}", common::RUBY_DLEXT));
             assert!(
                 bundle.exists(),
                 "build.sh did not produce {}",

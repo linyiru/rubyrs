@@ -80,7 +80,7 @@ fn bcrypt_reference_vectors_round_trip() {
     );
 
     // 2. Locate artefact.
-    let bundle = example_dir.join(format!("bcrypt_ext.{}", common::DYLIB_EXT));
+    let bundle = example_dir.join(format!("bcrypt_ext.{}", common::RUBY_DLEXT));
     assert!(
         bundle.exists(),
         "build.sh did not produce {}",

@@ -37,7 +37,7 @@ fn hello_cext_round_trip() {
     );
 
     // 2. Locate the produced artefact, host-aware.
-    let bundle = example_dir.join(format!("hello.{}", common::DYLIB_EXT));
+    let bundle = example_dir.join(format!("hello.{}", common::RUBY_DLEXT));
     assert!(
         bundle.exists(),
         "build.sh did not produce {}",
