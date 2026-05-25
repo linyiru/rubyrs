@@ -561,6 +561,10 @@ impl BeforeEachLifter<'_> {
             // verbatim — saves us figuring out prism's symbol-node
             // unescaping; the literal `:each` is unambiguous.
             if slice(self.source, &first) != ":each" { continue }
+            // No additional args — `before :each, :foo do ... end`
+            // (any extension form mspec or a custom DSL adds)
+            // wouldn't have the meaning v0.3 lifts, so we bail.
+            if a.next().is_some() { continue }
             let Some(b_block_node) = call.block() else { continue };
             let Some(b_block) = b_block_node.as_block_node() else { continue };
             let Some(b_body) = b_block.body() else { continue };
@@ -673,12 +677,17 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
         let was_consumed = self.consumed.iter().any(|(s, e)| start >= *s && start < *e);
         if !was_consumed {
             let name_bytes = node.name().as_slice();
-            // For mock_int, mirror try_mock_int's gate: if the call
-            // would be substituted by the recogniser, don't flag it
-            // as unhandled. Match the same shape (single Integer-
-            // literal arg) so the skip log and the rewrite stay
-            // consistent without extra state-threading.
+            // For mock_int, mirror try_mock_int's gate so the skip
+            // log and the rewrite stay consistent. Three checks
+            // in lock-step with try_mock_int:
+            //   1. name == "mock_int"
+            //   2. no receiver (top-level helper only)
+            //   3. exactly one Integer-literal arg
+            // If any check fails we don't claim the call was
+            // substituted — it lands in the skip log so the human
+            // sees it.
             let mock_int_substitutable = name_bytes == b"mock_int"
+                && node.receiver().is_none()
                 && {
                     let args = node.arguments();
                     if let Some(args) = args {

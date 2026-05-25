@@ -68,6 +68,11 @@ fn golden_lift_overlap() {
     run_golden("lift_overlap");
 }
 
+#[test]
+fn golden_v0_3_guards() {
+    run_golden("v0_3_guards");
+}
+
 fn run_golden(name: &str) {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let input_path = base.join(format!("{name}.input.rb"));
