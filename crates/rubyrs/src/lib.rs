@@ -295,29 +295,29 @@ end
 ## `do_call`'s include-intercept). User-defined methods on the
 ## including class take precedence — the copy is non-destructive.
 ##
-## Divergence from CRuby: a non-comparable pair (`<=>` returns
-## nil) yields `nil`/`false` here, not the ArgumentError CRuby
-## raises. Keeping this dependency-free avoids needing the
-## two-arg `raise Klass, "msg"` form across the preamble.
+## On `<=>` returning nil (incomparable pair), the four ordered
+## predicates raise ArgumentError, matching CRuby. `==` returns
+## `false` instead of raising — CRuby's documented exception to
+## the rule (Object equality must never raise).
 class Comparable
   def <(other)
     c = self <=> other
-    return nil if c.nil?
+    raise ArgumentError, "comparison failed" if c.nil?
     c < 0
   end
   def <=(other)
     c = self <=> other
-    return nil if c.nil?
+    raise ArgumentError, "comparison failed" if c.nil?
     c <= 0
   end
   def >(other)
     c = self <=> other
-    return nil if c.nil?
+    raise ArgumentError, "comparison failed" if c.nil?
     c > 0
   end
   def >=(other)
     c = self <=> other
-    return nil if c.nil?
+    raise ArgumentError, "comparison failed" if c.nil?
     c >= 0
   end
   def ==(other)

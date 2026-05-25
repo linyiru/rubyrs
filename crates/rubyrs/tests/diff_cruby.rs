@@ -118,3 +118,4 @@ fn run_diff(name: &str) {
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }
 #[test] fn visibility() { run_diff("visibility"); }
+#[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
