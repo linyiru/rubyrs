@@ -1008,7 +1008,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn unwind_with_exception(&mut self, exc: Value) {
+    pub(crate) fn unwind_with_exception(&mut self, exc: Value) -> Result<(), Trap> {
         // Resolve the raised value's class once up front; the unwind loop
         // may probe many handlers before finding (or not finding) a match.
         let exc_class: Option<Rc<Class>> = match &exc {
@@ -1059,15 +1059,34 @@ impl Vm {
                 } else if let Some(slot) = h.bind_slot {
                     f.locals.borrow_mut()[slot as usize] = exc;
                 }
-                return;
+                return Ok(());
             }
             // No matching handler in this frame — pop it and try the caller.
             let f = self.frames.pop().expect("ICE: unwind pop empty");
             self.stack.truncate(f.base_sp);
             if f.is_class_body { self.class_stack.pop(); }
             if self.frames.is_empty() {
-                eprintln!("uncaught exception: {}", exc.to_display(&self.heap, &self.interner));
-                std::process::exit(1);
+                // No rescue clause anywhere — surface the exception
+                // to the host as a Trap instead of terminating the
+                // process. The CLI catches `Uncaught` and prints
+                // the message; library hosts can pattern-match on
+                // `RubyError::Uncaught { class_name, message }` and
+                // decide what to do.
+                let class_name = match &exc {
+                    Value::Object(id) => self.heap.instance(*id).class.name.clone(),
+                    _ => exc.type_name().to_string(),
+                };
+                let message = match &exc {
+                    Value::Object(id) => {
+                        let msg_sym = self.interner.intern("@message");
+                        match self.heap.instance(*id).ivars.get(&msg_sym).cloned() {
+                            Some(m) => m.to_display(&self.heap, &self.interner),
+                            None => String::new(),
+                        }
+                    }
+                    _ => exc.to_display(&self.heap, &self.interner),
+                };
+                return Err(self.trap(RubyError::Uncaught { class_name, message }));
             }
         }
     }
@@ -2143,7 +2162,7 @@ impl Vm {
             Op::Raise => {
                 let v = self.stack.pop().unwrap_or(Value::Nil);
                 let exc = self.normalize_exception(v);
-                self.unwind_with_exception(exc);
+                self.unwind_with_exception(exc)?;
             }
             Op::Break => {
                 // Mark the surrounding native-driven loop to terminate.

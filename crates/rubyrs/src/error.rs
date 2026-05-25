@@ -45,6 +45,14 @@ pub enum RubyError {
     /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
     /// when a Runtime was configured with caps for untrusted scripts.
     ResourceExhausted { msg: String },
+    /// A Ruby-level `raise` whose exception class wasn't caught by any
+    /// `rescue` clause on the call stack. Carries the script's class
+    /// name and message so the host can log/format whatever it likes,
+    /// then decide to retry, abort, or continue. Before this variant,
+    /// the VM called `std::process::exit(1)` directly — a fatal action
+    /// the host couldn't recover from. See
+    /// [docs/SECURITY.md § known attack surface](../docs/SECURITY.md).
+    Uncaught { class_name: String, message: String },
 }
 
 impl RubyError {
@@ -57,6 +65,11 @@ impl RubyError {
             RubyError::RuntimeError { .. } => "RuntimeError",
             RubyError::NameError { .. } => "NameError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
+            // Uncaught carries the actual class name from the script's
+            // exception object; static-class machinery doesn't apply.
+            // Hosts that want the Ruby-level class name should pattern-
+            // match on `Uncaught { class_name, .. }` directly.
+            RubyError::Uncaught { .. } => "Uncaught",
         }
     }
     pub(crate) fn message(&self) -> String {
@@ -67,6 +80,7 @@ impl RubyError {
             | RubyError::RuntimeError { msg }
             | RubyError::NameError { msg }
             | RubyError::ResourceExhausted { msg } => msg.clone(),
+            RubyError::Uncaught { message, .. } => message.clone(),
             RubyError::NoMethodError { method, recv_type } => {
                 format!("undefined method `{}' for {}", method, recv_type)
             }

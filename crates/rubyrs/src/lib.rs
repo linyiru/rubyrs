@@ -288,7 +288,14 @@ end
         use std::fmt::Write as _;
         let mut out = String::new();
         let frames = &trap.backtrace;
-        let cls = trap.err.class_name();
+        // For an uncaught Ruby exception we surface the script's
+        // exception class name (e.g. `MyError`), not the host-side
+        // "Uncaught" tag. Matches CRuby's
+        // `foo.rb:1: msg (MyError)` style.
+        let cls: String = match &trap.err {
+            RubyError::Uncaught { class_name, .. } => class_name.clone(),
+            other => other.class_name().to_string(),
+        };
         let msg = trap.err.message();
         if let Some(top) = frames.first() {
             let line = self.line_for(&top.filename, top.span.byte_offset);

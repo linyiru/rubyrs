@@ -104,15 +104,7 @@ the host should be aware of.
 | **stdout blocking** | None | If the script `puts`-floods to a `set_stdout(Box::new(slow_writer))`, the writer call blocks `eval`. Use a buffered or back-pressured writer. |
 | **HashMap iteration-order side channel** | None | Our `Hash` iterates in insertion order (matching CRuby). A script can therefore learn the host's `register_fn` registration order via the global function namespace. Treat host-function names as semi-public. |
 | **Symbol name leak via backtraces** | None | `Trap::backtrace` includes user-supplied filenames and method names. Sanitise before logging if those are sensitive. |
-| **`uncaught exception → process::exit(1)`** | **Partial** — see below. | An exception that no rescue clause catches currently exits the host process. **Do not run untrusted scripts without OS-level isolation** until this becomes a `Trap`. Tracked. |
-
-The last row is the most consequential gap. The current
-`unwind_with_exception` calls `std::process::exit(1)` when no
-rescue handler is found in any frame. That's acceptable for the
-CLI but unacceptable for an embedded host that has work to do
-after `eval` returns. Until that path becomes a `Trap`, even
-"trusted" embedding hosts should wrap `eval` in a child
-process for any script they don't fully control.
+| **Uncaught Ruby exception** | `RubyError::Uncaught { class_name, message }` — the host gets a Trap, not a SIGABRT. | Pattern-match `Uncaught` and decide whether to retry / continue / abort. The CLI's `format_trap` prints CRuby-style (`script.rb:line: msg (ClassName)`) before exiting. |
 
 ## Defaults reflect the trusted-script case
 

@@ -600,6 +600,60 @@ fn value_bytes_cap_allows_small_strings_and_arrays() {
 }
 
 #[test]
+fn uncaught_exception_returns_trap_not_process_exit() {
+    // Before this fix the VM called `std::process::exit(1)` from
+    // `unwind_with_exception` when no rescue clause matched — fine
+    // for the CLI, fatal for any embedded host that has work to do
+    // after the script returns. Now an uncaught exception surfaces
+    // as `RubyError::Uncaught { class_name, message }`. The host
+    // can pattern-match, log, retry, or carry on.
+    let mut rt = Runtime::new();
+    let err = rt.eval(
+        r#"
+        class MyError < StandardError; end
+        raise MyError, "boom"
+        "#,
+        "uncaught.rb",
+    ).unwrap_err();
+    match err.err {
+        RubyError::Uncaught { class_name, message } => {
+            assert_eq!(class_name, "MyError");
+            assert_eq!(message, "boom");
+        }
+        other => panic!("expected Uncaught, got {:?}", other),
+    }
+}
+
+#[test]
+fn host_can_continue_after_uncaught_exception() {
+    // Companion to the test above — the *whole point* of the
+    // change. After an uncaught exception, the same Runtime can
+    // still evaluate fresh scripts. eval-after-Trap state reset
+    // (P2-14a side-fix) keeps frames/stack/pinned clean.
+    let mut rt = Runtime::new();
+    let _ = rt.eval(r#"raise "first""#, "first.rb").unwrap_err();
+    rt.eval(r#"puts 1 + 2"#, "second.rb").unwrap();
+}
+
+#[test]
+fn uncaught_exception_format_trap_uses_script_class_name() {
+    // `format_trap` should print the Ruby exception class
+    // (`MyError`), not the host-side `Uncaught` tag.
+    let mut rt = Runtime::new();
+    let err = rt.eval(
+        r#"
+        class MyError < StandardError; end
+        raise MyError, "boom"
+        "#,
+        "fmt.rb",
+    ).unwrap_err();
+    let formatted = rt.format_trap(&err);
+    assert!(formatted.contains("(MyError)"), "got: {formatted}");
+    assert!(formatted.contains("boom"), "got: {formatted}");
+    assert!(!formatted.contains("Uncaught"), "should not leak host tag: {formatted}");
+}
+
+#[test]
 fn frame_cap_traps_deep_recursion() {
     let mut rt = Runtime::with_config(Config { max_frames: Some(20), ..Default::default() });
     let err = rt.eval(

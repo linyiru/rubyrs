@@ -6,6 +6,25 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Fixed
+- **Uncaught Ruby exceptions no longer kill the host process.**
+  `Vm::unwind_with_exception` called `std::process::exit(1)` when
+  no `rescue` handler matched in any frame — fine for the
+  rubyrs CLI, fatal for any embedded host that has work to do
+  after `eval` returns. Now uncaught exceptions surface as
+  `RubyError::Uncaught { class_name, message }` propagated
+  through the normal `Trap` path; embedders can pattern-match,
+  log, retry, or carry on. `format_trap` special-cases
+  `Uncaught` to print the Ruby exception class (e.g.
+  `(MyError)`) instead of the host-side tag, matching CRuby's
+  `script.rb:N:in '<main>': msg (ClassName)` format. The
+  rubyrs binary still prints + exits on `Trap` so CLI
+  behaviour is unchanged. Three new embed.rs tests lock
+  in the new contract: round-trip class_name + message, host
+  continues after Uncaught, format_trap output. Closes the
+  largest residual attack surface called out in
+  `docs/SECURITY.md`.
+
 ### Added
 - **`docs/SECURITY.md`** (P2-15): trust model, configuration
   recipe for the semi-trusted profile, known attack surface
