@@ -552,7 +552,7 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, defaults, rest, kw_params, body } => {
+        Expr::Def { name, params, defaults, rest, kw_params, body, is_singleton } => {
             let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
@@ -580,7 +580,11 @@ pub(crate) fn compile_expr(
             }
             protos[proto_idx].kw_param_defaults = kw_lit_defaults;
             let name_id = interner.intern(name);
-            b.emit(Op::DefMethod(name_id, proto_idx as u32));
+            if *is_singleton {
+                b.emit(Op::DefSingletonMethod(name_id, proto_idx as u32));
+            } else {
+                b.emit(Op::DefMethod(name_id, proto_idx as u32));
+            }
             b.emit(Op::LoadNil);
         }
         Expr::Super(args_opt) => {

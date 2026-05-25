@@ -482,6 +482,34 @@ impl Vm {
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
+            Op::DefSingletonMethod(name_id, p_idx) => {
+                // `def self.foo` inside a class body. Installs `foo`
+                // on the surrounding class's `singleton_methods`
+                // table, dispatched against `Value::Class(c)`
+                // receivers in `do_call`. Outside a class body
+                // (toplevel singleton has no well-defined target)
+                // we fall back to installing on `toplevel_methods`
+                // — matches CRuby's "main object's singleton class
+                // = Object" approximation closely enough for the
+                // subset.
+                let proto = &self.protos[p_idx as usize];
+                let defining_class = self.class_stack.last().cloned();
+                let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
+                let m = Rc::new(Method {
+                    params: proto.params.clone(),
+                    proto_idx: p_idx as usize,
+                    defining_class,
+                    visibility: std::cell::Cell::new(vis),
+                    closure: None,
+                });
+                if let Some(cls) = self.class_stack.last() {
+                    cls.singleton_methods.borrow_mut().insert(name_id, m);
+                } else {
+                    self.toplevel_methods.insert(name_id, m);
+                }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Nil);
+            }
             Op::AliasMethod(new_id, old_id) => {
                 // Resolve `old` along the surrounding class's ancestor
                 // chain (or toplevel) and re-insert the same Rc<Method>
@@ -578,6 +606,7 @@ impl Vm {
                 let cls = self.classes.entry(name_id).or_insert_with(|| Rc::new(Class {
                     name: name_str,
                     methods: RefCell::new(HashMap::new()),
+                    singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(parent.clone()),
                 })).clone();
                 // If the class already existed (reopened) and the user specified a parent

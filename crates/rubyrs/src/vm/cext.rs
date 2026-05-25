@@ -873,6 +873,7 @@ impl Vm {
                 let new_class = Rc::new(Class {
                     name: cls.joined_name.clone(),
                     methods: RefCell::new(HashMap::new()),
+                    singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(None),
                 });
                 self.classes.insert(name_sym, new_class);

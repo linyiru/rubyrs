@@ -295,6 +295,7 @@ mod tests {
         Rc::new(Class {
             name: name.to_string(),
             methods: RefCell::new(HashMap::new()),
+            singleton_methods: RefCell::new(HashMap::new()),
             superclass: RefCell::new(superclass),
         })
     }

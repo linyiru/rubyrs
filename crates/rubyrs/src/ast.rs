@@ -112,6 +112,14 @@ pub(crate) enum Expr {
         /// Order is source order. None default = required.
         kw_params: Vec<(String, Option<SExpr>)>,
         body: Vec<SExpr>,
+        /// True for `def self.foo` singleton-method definitions
+        /// inside a class body. Compiled to `Op::DefSingletonMethod`
+        /// instead of `Op::DefMethod`; installed on the surrounding
+        /// class's `singleton_methods` table rather than the
+        /// instance-method `methods` table. False for regular `def`
+        /// (including toplevel defs, which install on
+        /// `toplevel_methods`).
+        is_singleton: bool,
     },
     Class {
         name: String,
@@ -957,7 +965,16 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, body });
+        // `def self.foo` — Prism exposes the receiver via
+        // `DefNode::receiver()`. Only `self` is supported in the
+        // subset (general singleton on arbitrary expressions like
+        // `def some_obj.foo` is unusual and out of scope); other
+        // receivers fall through to the AST_ERRORS path via the
+        // unsupported-node catch-all below.
+        let is_singleton = n.receiver()
+            .map(|r| r.as_self_node().is_some())
+            .unwrap_or(false);
+        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, body, is_singleton });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;

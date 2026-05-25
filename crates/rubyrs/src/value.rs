@@ -105,6 +105,15 @@ pub struct BlockHandle {
 pub struct Class {
     pub(crate) name: String,
     pub(crate) methods: RefCell<HashMap<SymId, Rc<Method>>>,
+    /// Per-class singleton-method table — `def self.foo; ...; end`
+    /// inside a class body installs `foo` here. Dispatched against
+    /// `Value::Class(c)` receivers in `do_call`. Parallel to
+    /// `cext_class_methods` (which holds C-ext-installed singletons
+    /// keyed by class joined name); this one holds user-Ruby
+    /// singletons keyed by interned method SymId on the Class
+    /// itself, so it survives class re-opening naturally and
+    /// doesn't need a separate generation counter.
+    pub(crate) singleton_methods: RefCell<HashMap<SymId, Rc<Method>>>,
     /// Parent class for method lookup. `None` only for the implicit root
     /// (Object); every user-defined class has a superclass (defaulting to
     /// Object if not specified).

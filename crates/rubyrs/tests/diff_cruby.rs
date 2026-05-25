@@ -152,3 +152,4 @@ fn run_diff(name: &str) {
 #[test] fn enumerable_advanced() { run_diff("enumerable_advanced"); }
 #[test] fn dig() { run_diff("dig"); }
 #[test] fn ternary() { run_diff("ternary"); }
+#[test] fn def_self_method() { run_diff("def_self_method"); }

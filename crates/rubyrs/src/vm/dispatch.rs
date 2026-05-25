@@ -309,6 +309,29 @@ impl Vm {
         // surface OS errors as a generic RuntimeError so scripts
         // can `rescue` them.
         if let Value::Class(cls) = &recv {
+            // User-Ruby `def self.foo` singletons: check the per-class
+            // table populated by `Op::DefSingletonMethod`. Walks the
+            // superclass chain — CRuby's metaclass model has the
+            // singleton class of `Dog < Animal` inherit from the
+            // singleton class of `Animal`, so `Dog.kingdom` finds
+            // `Animal`'s `def self.kingdom`. We approximate the same
+            // shape with a straight superclass walk over the
+            // `singleton_methods` tables.
+            let mut current = cls.clone();
+            let user_singleton = loop {
+                if let Some(m) = current.singleton_methods.borrow().get(&name_id).cloned() {
+                    break Some(m);
+                }
+                let parent = current.superclass.borrow().clone();
+                match parent {
+                    Some(p) => current = p,
+                    None => break None,
+                }
+            };
+            if let Some(m) = user_singleton {
+                let target_self = recv.clone();
+                return self.invoke_method(m, target_self, args);
+            }
             if &*cls.name == "File"
                 && let Some(v) = self.file_class_dispatch(&name, &args)? {
                     self.stack.push(v);

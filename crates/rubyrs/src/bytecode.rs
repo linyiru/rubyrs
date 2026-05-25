@@ -71,6 +71,13 @@ pub(crate) enum Op {
     /// the per-site cache).
     Super(SymId, u8),
     DefMethod(SymId, u32),         // name, proto_idx
+    /// `def self.foo` — install `foo` on the surrounding class's
+    /// `singleton_methods` table instead of the instance-method
+    /// `methods` table. Compiled from `Expr::Def { is_singleton:
+    /// true, .. }`. Outside a class body the emitter falls back
+    /// to a regular DefMethod (toplevel singleton has no
+    /// well-defined target).
+    DefSingletonMethod(SymId, u32),
     /// `alias_method :new, :old`. Resolves `old` by walking the
     /// surrounding class's ancestor chain (or `toplevel_methods` at
     /// the top level) so inherited methods can be aliased; installs
