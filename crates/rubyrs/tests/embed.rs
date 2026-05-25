@@ -76,6 +76,37 @@ fn host_fn_can_propagate_trap() {
 }
 
 #[test]
+fn ruby_error_is_normalises_direct_and_uncaught_shapes() {
+    // The `is(&str)` helper matches the bare Ruby class name
+    // regardless of whether the variant is a direct host-side
+    // `RubyError::Foo` or the script-raised wrapped form
+    // `Uncaught { class_name: "Foo" }`. Locks the API
+    // contract in so embed tests can write
+    // `assert!(err.err.is("X"))` without re-doing the case split.
+
+    // Direct variant via a host-fn-raised trap.
+    let mut rt = Runtime::new();
+    rt.register_fn("boom", |_| Err(rubyrs::Trap {
+        err: RubyError::ArgumentError { msg: "no good".into() },
+        backtrace: vec![],
+    }));
+    let direct = rt.eval(r#"boom"#, "t.rb").unwrap_err();
+    assert!(direct.err.is("ArgumentError"));
+    assert!(!direct.err.is("NoMethodError"));
+
+    // Uncaught wrapped form via a script-raised exception.
+    let wrapped = rt.eval(r#"nil.no_such_method"#, "t.rb").unwrap_err();
+    assert!(wrapped.err.is("NoMethodError"));
+    assert!(!wrapped.err.is("ArgumentError"));
+    // Bare name match — no hierarchy walk. RuntimeError is a
+    // StandardError in CRuby, but `is("StandardError")` returns
+    // false here. Documented behaviour, not a bug.
+    let runtime = rt.eval(r#"raise "boom""#, "t.rb").unwrap_err();
+    assert!(runtime.err.is("RuntimeError"));
+    assert!(!runtime.err.is("StandardError"));
+}
+
+#[test]
 fn definitions_persist_across_eval() {
     let (mut rt, buf) = rt_with_buf();
     rt.eval(
@@ -772,11 +803,7 @@ fn alias_method_raises_name_error_when_source_missing() {
           alias_method :a, :nonexistent
         end
     "#, "t.rb").unwrap_err();
-    match err.err {
-        RubyError::NameError { .. } => {}
-        RubyError::Uncaught { class_name, .. } if class_name == "NameError" => {}
-        other => panic!("expected NameError, got {other:?}"),
-    }
+    assert!(err.err.is("NameError"), "expected NameError, got {:?}", err.err);
 }
 
 #[test]
@@ -970,12 +997,11 @@ fn missing_without_method_missing_still_raises() {
         class Empty; end
         Empty.new.missing_method
     "#, "t.rb").unwrap_err();
-    // At the script boundary, NoMethodError surfaces as
-    // `Uncaught { class_name: "NoMethodError", .. }`.
-    match err.err {
-        RubyError::Uncaught { class_name, .. } => assert_eq!(class_name, "NoMethodError"),
-        other => panic!("expected Uncaught(NoMethodError), got {other:?}"),
-    }
+    assert!(
+        err.err.is("NoMethodError"),
+        "expected NoMethodError (direct or Uncaught-wrapped), got {:?}",
+        err.err
+    );
 }
 
 #[test]
@@ -1019,9 +1045,5 @@ fn define_method_validates_arity() {
         end
         Foo.new.two(1)
     "#, "t.rb").unwrap_err();
-    match err.err {
-        RubyError::ArgumentError { .. } => {}
-        RubyError::Uncaught { class_name, .. } if class_name == "ArgumentError" => {}
-        other => panic!("expected ArgumentError, got {other:?}"),
-    }
+    assert!(err.err.is("ArgumentError"), "expected ArgumentError, got {:?}", err.err);
 }

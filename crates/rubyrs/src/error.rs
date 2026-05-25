@@ -76,6 +76,39 @@ pub enum RubyError {
 }
 
 impl RubyError {
+    /// Does this error correspond to the given Ruby exception class
+    /// name? Handles both the direct host-side variant
+    /// (`RubyError::NoMethodError { .. }`) and the script-raised
+    /// wrapped form (`RubyError::Uncaught { class_name, .. }`) —
+    /// both surface as the same Ruby-level class to the script
+    /// author, so embedding hosts should normally treat them the
+    /// same way.
+    ///
+    /// Before this helper, tests and host code had to write
+    ///
+    /// ```ignore
+    /// match err.err {
+    ///     RubyError::NoMethodError { .. } => { /* ok */ }
+    ///     RubyError::Uncaught { class_name, .. } if class_name == "NoMethodError" => { /* ok */ }
+    ///     other => panic!("expected NoMethodError, got {other:?}"),
+    /// }
+    /// ```
+    ///
+    /// which is now just `err.err.is("NoMethodError")`.
+    ///
+    /// Note: comparison is exact, case-sensitive, and on the
+    /// *bare* class name — passing `"StandardError"` won't match
+    /// a `RuntimeError` even though RuntimeError is a descendant
+    /// in CRuby's class hierarchy. Class-hierarchy awareness is a
+    /// follow-up the runtime hasn't needed yet (rescue handlers
+    /// resolve by SymId equality, not chain walk).
+    pub fn is(&self, class_name: &str) -> bool {
+        match self {
+            RubyError::Uncaught { class_name: cn, .. } => cn == class_name,
+            other => other.class_name() == class_name,
+        }
+    }
+
     pub(crate) fn class_name(&self) -> &'static str {
         match self {
             RubyError::SyntaxError { .. } => "SyntaxError",
