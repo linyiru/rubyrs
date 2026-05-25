@@ -51,9 +51,32 @@ human polish step.
 | `expr.should_not.foo?(args)` | `assert(!expr.foo?(args))` | v0.2 |
 | `-> { BODY }.should.raise(CLASS)` | `assert_raises("CLASS") do BODY end` | v0.2 |
 | `-> { BODY }.should.raise(M::Cls)` | `assert_raises("M::Cls") do BODY end` | v0.2 |
+| `before :each do BODY end` inside describe | BODY lifted into each sibling `it`; `before` call deleted | **v0.3** |
+| `mock_int(LITERAL_INT)` | `LITERAL_INT` | **v0.3** |
+| Patterns the extractor recognises but doesn't rewrite (curated allow-list — see below) | passthrough + listed in **skip-log header** comment at top of file | **v0.3** |
 | `require_relative '...'` | (stripped — line filter) | v0.1 |
-| *`it_behaves_like :shared, ...`* | *passthrough* | v0.3+ |
-| *`should_receive` / `mock(...)`* | *passthrough* | (no mock lib in micro-runner; hand-translate) |
+| *`after :each / :all`* | *passthrough + skip-log entry* | logged v0.3; full rewrite is future work, not yet scheduled |
+| *`before :all`* | *passthrough + skip-log entry* | logged v0.3; full rewrite is future work, not yet scheduled |
+| *`context "..." do ... end`* | *passthrough + skip-log entry* | logged v0.3; the micro-runner doesn't define `context` — must be renamed to `describe` (or removed) during hand-polish, otherwise the file fails at load with NoMethodError on `context` |
+| *`it_behaves_like :shared, ...`* | *passthrough + skip-log entry* | logged v0.3; **shared-example inlining is v0.4 scope** per `docs/TESTING.md` |
+| *`should_receive` / `mock(...)` / `mock_int(dynamic)`* | *passthrough + skip-log entry* | logged v0.3; no mock lib in micro-runner — always hand-translate |
+
+The skip-log header lists a **curated allow-list** of names —
+not every unrewritten call. Current entries:
+
+- `before` (when not v0.3-liftable: `before :all`, multi-arg
+  `before :each, :foo`, before inside a non-flat context)
+- `after`
+- `context`
+- `it_behaves_like`
+- `mock` / `mock_int` (when not v0.3-substitutable) /
+  `should_receive`
+
+Adding a new entry is a one-line match arm in
+`UnhandledCollector::visit_call_node`'s `detail` switch. The
+allow-list approach keeps the header focused on patterns we
+can actually advise on, instead of a wall of every Ruby call
+the extractor saw.
 
 For the `should ==` / `should_not ==` / predicate-matcher
 rewrites, `expr`, `val`, and `args` come from the original
@@ -64,6 +87,39 @@ exception: the `-> { BODY }` shape is unwrapped and the body
 is re-emitted inside a `do ... end` block, so indentation
 shifts (the body's own multi-statement structure stays
 intact, just under different leading whitespace).
+
+## v0.3 highlights
+
+Three additions on top of v0.2's matcher set:
+
+1. **`before :each` body lift** — `before :each do BODY end`
+   nested directly inside a `describe ... do ... end` block
+   has its BODY inserted at the start of each sibling `it`
+   block, and the `before` call itself is deleted from the
+   output. Only handles the flat case (`before :each` + `it`
+   as direct siblings). `before :all`, `after :*`, and
+   `before :each` inside a nested `context` pass through and
+   land in the skip-log header.
+
+2. **`mock_int(LITERAL_INT)` substitution** — `mock_int(2)`
+   becomes `2`. Mspec's `mock_int` wraps an Integer in a fake
+   `to_int` responder; for the micro-runner the literal is
+   the same effective value, so we save a hand-edit. Only
+   the single Integer-literal arg form is substituted; any
+   variable or multi-arg form passes through and is logged.
+
+3. **Skip-log header comment** — when the output still
+   contains patterns the extractor didn't rewrite (every
+   `after`, `it_behaves_like`, `should_receive`, etc.), the
+   extractor prepends a comment block at the top listing
+   each pattern's line number and what it'd take to handle
+   it. A human polish step now has a checklist instead of
+   needing to grep the output.
+
+Caveat — `mock_int` nested inside a `should ==` doesn't
+substitute (the recogniser's outer match consumes the full
+range; v0.2's documented Cluster E limitation). For the
+inside-`should ==` case the human polish step still applies.
 
 ## Known limitations of v0.2 (post-/code-review hardening)
 

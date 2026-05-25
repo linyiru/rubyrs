@@ -1,3 +1,12 @@
+# rubyrs-spec-extract v0.3: 3 pattern(s) left for hand polish.
+# Each entry names the upstream line + reason. Address each
+# (comment out, inline, or wait for a later extractor version)
+# before the file is consumable by the micro-runner.
+#
+#   - L37: `mock` — no mock library in the micro-runner; hand-translate
+#   - L38: `should_receive` — mock expectations; hand-translate
+#   - L42: `it_behaves_like` — shared-example inlining is v0.4
+
 # A spec file mixing recognised and unrecognised patterns.
 # After v0.2 the recognised set covers: `expr.should == val`,
 # `expr.should_not == val`, predicate matchers
