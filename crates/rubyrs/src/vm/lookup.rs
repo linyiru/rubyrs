@@ -189,7 +189,7 @@ impl Vm {
                 "length" | "size" | "[]" | "[]=" | "empty?" |
                 "include?" | "has_key?" | "key?" | "member?" |
                 "keys" | "values" | "to_h" | "to_a" |
-                "merge" | "delete" | "invert" | "store" |
+                "merge" | "delete" | "invert" | "store" | "except" | "slice" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |

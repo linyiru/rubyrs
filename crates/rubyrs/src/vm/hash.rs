@@ -215,6 +215,34 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Hash(out));
                         Some(Value::Hash(nid))
                     }
+                    // `h.except(*keys)` — return a new Hash with the
+                    // listed keys removed. Non-mutating. Keys not
+                    // present in the receiver are silently skipped.
+                    ("except", keys) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).iter()
+                            .filter(|(k, _)| !keys.iter().any(|x| x.ruby_eq(k, &self.heap)))
+                            .cloned()
+                            .collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        Some(Value::Hash(nid))
+                    }
+                    // `h.slice(*keys)` — return a new Hash with only
+                    // the listed keys, in ARGUMENT order (matches
+                    // CRuby — `{a:1,c:3}.slice(:c, :a)` is
+                    // `{c:3, a:1}`). Missing keys are silently skipped.
+                    ("slice", keys) => {
+                        let mut pairs: Vec<(Value, Value)> = Vec::new();
+                        for k in keys {
+                            if let Some(pair) = self.heap.hash(id).iter()
+                                .find(|(hk, _)| hk.ruby_eq(k, &self.heap)) {
+                                pairs.push(pair.clone());
+                            }
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        Some(Value::Hash(nid))
+                    }
                     ("store", [k, v]) => {
                         let pos = self.heap.hash(id).iter()
                             .position(|(key, _)| key.ruby_eq(k, &self.heap));
