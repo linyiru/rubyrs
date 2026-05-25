@@ -31,14 +31,16 @@ pub(crate) enum HeapObj {
     /// resolve to the right user-facing class without needing a
     /// separate per-instance class slot.
     ///
-    /// `cfg_attr` only on wasi: the variant is allocated only
-    /// through the cext bridge, which is
-    /// `#[cfg(not(target_os = "wasi"))]`. On wasi the cext path
-    /// is stubbed and nothing ever constructs this variant, so
-    /// `-D warnings` would flag it as dead. Narrow the allow to
-    /// wasi (rather than unconditional) so non-wasi builds still
-    /// catch accidental loss of callers — review #1 on PR #22.
-    #[cfg_attr(target_os = "wasi", allow(dead_code))]
+    /// `cfg_attr` on (wasi OR cext-off): the variant is allocated
+    /// only through the cext bridge, which is itself gated on
+    /// `cfg(all(feature = "cext", not(target_os = "wasi")))`. In
+    /// either of the suppressed configurations nothing constructs
+    /// the variant, so `-D warnings` would flag it as dead. The
+    /// allow is narrowed to those two configurations (rather than
+    /// unconditional) so native+cext builds still catch accidental
+    /// loss of callers — original spirit: review #1 on PR #22;
+    /// `not(feature = "cext")` arm added by PR #75 review #1.
+    #[cfg_attr(any(target_os = "wasi", not(feature = "cext")), allow(dead_code))]
     TypedData(TypedDataObj),
     /// `Object#method(:name)` result. `recv` is any Value the GC
     /// must walk; `name_id` is the captured method name. `.call`
@@ -61,13 +63,14 @@ pub(crate) enum HeapObj {
 /// Heap representation of a CRuby-shape TypedData object. See
 /// [`HeapObj::TypedData`] for the design context.
 //
-// cfg_attr on wasi only: fields ARE read on non-wasi (`class` by
-// `class_of`, `type_ptr` by the rb_check_typeddata callback). On
-// wasi the whole TypedData path is stubbed so nothing constructs
-// or reads the struct; the conditional allow keeps the wasi
-// build green without silencing real dead-field warnings
-// elsewhere (review #1 on PR #22).
-#[cfg_attr(target_os = "wasi", allow(dead_code))]
+// cfg_attr on (wasi OR cext-off): fields ARE read on native+cext
+// (`class` by `class_of`, `type_ptr` by the rb_check_typeddata
+// callback). In either suppressed configuration the whole
+// TypedData path is stubbed so nothing constructs or reads the
+// struct; the conditional allow keeps those builds green without
+// silencing real dead-field warnings on the live path (original:
+// review #1 on PR #22; cext-off arm: PR #75 review #2).
+#[cfg_attr(any(target_os = "wasi", not(feature = "cext")), allow(dead_code))]
 pub(crate) struct TypedDataObj {
     pub(crate) class: Rc<crate::value::Class>,
     /// Owned C pointer. Treated as opaque by the host.
@@ -244,15 +247,17 @@ impl Heap {
     /// via `rb_check_typeddata` (or equivalent) at the cext boundary
     /// before reaching this accessor.
     ///
-    /// `cfg_attr` only on wasi: only called from the cext bridge,
-    /// which is `#[cfg(not(target_os = "wasi"))]`. On wasi the
-    /// cext path is stubbed so this accessor has no callers and
-    /// `-D warnings` would flag it as dead. Narrow to wasi so
-    /// non-wasi builds still catch accidental loss of callers
-    /// (review #1 on PR #22 — the previous unconditional
-    /// `#[allow(dead_code)]` silenced the warning on every
-    /// target, defeating the panic-budget-style discipline of
-    /// catching dead host code).
+    /// `cfg_attr` on (wasi OR cext-off): only called from the cext
+    /// bridge, which is `#[cfg(all(feature = "cext",
+    /// not(target_os = "wasi")))]`. In either suppressed
+    /// configuration the cext path is stubbed so this accessor has
+    /// no callers and `-D warnings` would flag it as dead. Narrow
+    /// to those two configurations so native+cext builds still
+    /// catch accidental loss of callers (original: review #1 on
+    /// PR #22 — the previous unconditional `#[allow(dead_code)]`
+    /// silenced the warning on every target, defeating the
+    /// panic-budget-style discipline of catching dead host code;
+    /// `not(feature = "cext")` arm added by PR #75 review #3).
     /// Non-panicking TypedData accessor for the rb_check_typeddata
     /// callback path. CRuby's rb_check_typeddata raises TypeError
     /// when the slot isn't TypedData OR the descriptor doesn't
@@ -261,7 +266,7 @@ impl Heap {
     /// closes PR #27 review finding #1 (Counter.new.bump aborting
     /// the process when the C ext expects a TypedData but the
     /// generic `.new` path produced a plain Instance).
-    #[cfg_attr(target_os = "wasi", allow(dead_code))]
+    #[cfg_attr(any(target_os = "wasi", not(feature = "cext")), allow(dead_code))]
     pub(crate) fn try_typed_data(&self, id: ObjId) -> Option<&TypedDataObj> {
         if let HeapObj::TypedData(d) = self.get(id) { Some(d) } else { None }
     }

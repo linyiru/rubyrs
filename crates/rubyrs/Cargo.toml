@@ -20,15 +20,17 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 #     the binary's dynamic symbol table
 #   - drops the `mod cext;` and `cext_*` code paths in the VM
 #
-# Not yet gated by the feature (deliberate PoC scope — followup
-# PRs):
+# Not yet gated by the feature (deliberate scope — followup PR):
 #   - `--export-dynamic` linker arg on ELF targets (still emitted
 #     by build.rs unconditionally; harmless when cext is off
 #     because there are no `rb_*` symbols left to export, but
-#     pedantically still drag).
-#   - A handful of `try_typed_data` / `cext_invoke_method` dead-
-#     code warnings under `--no-default-features` (they reference
-#     only `Value`, not cext types, so they still compile).
+#     pedantically still drags).
+#
+# Wasm32-wasi targets cannot enable `cext` — `dlopen` is
+# unavailable and the cext path cannot succeed. `build.rs` panics
+# loudly if `--features cext --target wasm32-wasi*` is requested,
+# rather than silently producing a stub-only binary that
+# advertises capability the target does not deliver.
 #
 # Default features keep cext on so embedders and the CLI binary
 # behave identically to pre-PoC. Build without:

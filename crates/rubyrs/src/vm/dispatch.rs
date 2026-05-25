@@ -53,7 +53,7 @@ impl Vm {
     /// whatever class/method the C ext last invoked. Future work:
     /// allocate a per-`(recv-class, method)` cache for cext calls
     /// if profiling shows the uncached path matters.
-    #[cfg(not(target_os = "wasi"))]
+    #[cfg(all(feature = "cext", not(target_os = "wasi")))]
     pub(crate) fn cext_invoke_method(
         &mut self,
         recv: Value,
@@ -118,10 +118,16 @@ impl Vm {
     /// Invoke a registered host fn (either v1 or v2 slot).
     ///
     /// V1 stashes `*mut Vm` via `with_vm_ptr_set` so a cext-style
-    /// re-entrant `rb_funcall` can find the running VM (ADR 0013).
-    /// V1 closures hold no Rust borrow of `self` during the call, so
-    /// the raw-ptr reborrow inside cext is the only access path and
-    /// aliasing is well-defined.
+    /// re-entrant `rb_funcall` can find the running VM (ADR 0013) —
+    /// but only on builds where that re-entry channel actually
+    /// exists, i.e. `all(feature = "cext", not(target_os = "wasi"))`.
+    /// With `--no-default-features` (or on wasi) `with_vm_ptr_set`
+    /// itself lives inside the cfg'd-off `mod cext`, so the V1 arm
+    /// just calls `host(args)` directly; see the in-fn comment for
+    /// the migration site if a non-cext V1 host ever needs TLS-Vm
+    /// access. V1 closures hold no Rust borrow of `self` during the
+    /// call, so the raw-ptr reborrow inside cext is the only access
+    /// path and aliasing is well-defined.
     ///
     /// V2 deliberately does NOT call `with_vm_ptr_set`. The V2
     /// closure holds a `HostCtx` that borrows `&self.heap` for the
@@ -147,6 +153,18 @@ impl Vm {
     fn invoke_host_fn(&mut self, slot: HostFnSlot, args: &[Value]) -> Result<Value, Trap> {
         match slot {
             HostFnSlot::V1(host) => {
+                // V1 contract under the `cext` feature gate:
+                // `with_vm_ptr_set` parks the Vm pointer in TLS so a
+                // cext-bridge V1 host can re-enter the VM through
+                // rb_funcallv. With cext off there is no rb_funcall
+                // path to need it and `with_vm_ptr_set` itself lives
+                // inside `mod cext`, so we just call the host body
+                // directly. Today every legitimate V1 caller IS a
+                // cext bridge (see the V1/V2 doc above), so the
+                // contract change is invisible at runtime; if a
+                // future non-cext V1 host needs TLS-Vm access, this
+                // is the site to move `with_vm_ptr_set` out of
+                // `mod cext` and lift the cfg gate.
                 #[cfg(all(feature = "cext", not(target_os = "wasi")))]
                 {
                     let vm_ptr: *mut Vm = self;
@@ -358,14 +376,34 @@ impl Vm {
                 // PinGuard fix in L3-D).
                 let mut g = PinGuard::new(self);
                 for a in &args { g.pin(a.clone()); }
+                // Default Instance allocator — used by every branch of
+                // the cext-selection cascade below that doesn't go
+                // through `rb_define_alloc_func`. Extracted so the
+                // three call sites (cext non-wasi else arm, cext wasi
+                // fallback, no-cext arm) can't drift out of sync.
+                let alloc_instance = |g: &mut PinGuard, cls: &Rc<Class>| -> Result<Value, Trap> {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
+                        class: cls.clone(),
+                        ivars: HashMap::new(),
+                        singleton_class: None,
+                    }));
+                    Ok(Value::Object(id))
+                };
+                // Allocator selection. With `cext`, the class may carry
+                // an `rb_define_alloc_func`-registered allocator that
+                // must run instead of the default Instance allocation.
+                // Without `cext`, there is no path that could set such
+                // a function, so we collapse to the default allocator
+                // unconditionally. Splitting the whole expression by
+                // cfg (instead of the previous `Option<()>` sentinel
+                // trick) keeps both arms well-typed and removes a
+                // brittle `unreachable!()` site that any future
+                // refactor inside the cfg arm could turn into a real
+                // panic.
                 #[cfg(feature = "cext")]
-                let cext_alloc = cls.cext_alloc_func.get();
-                #[cfg(not(feature = "cext"))]
-                let cext_alloc: Option<()> = None;
-                let obj = if let Some(alloc_func) = cext_alloc {
-                    #[cfg(not(feature = "cext"))] { unreachable!("cext_alloc is always None without `cext` feature: {:?}", alloc_func) }
-                    #[cfg(feature = "cext")]
-                    {
+                let obj = if let Some(alloc_func) = cls.cext_alloc_func.get() {
                     #[cfg(not(target_os = "wasi"))]
                     {
                         // arity=0 (self-only) is the alloc_func ABI:
@@ -415,25 +453,16 @@ impl Vm {
                         // target (no cext_dispatch to forward it to);
                         // marker reference keeps -D warnings happy.
                         let _ = alloc_func;
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
-                            class: cls.clone(),
-                            ivars: HashMap::new(),
-                            singleton_class: None,
-                        }));
-                        Value::Object(id)
+                        alloc_instance(&mut g, cls)?
                     }
-                    } // close cfg(feature = "cext")
                 } else {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
-                        class: cls.clone(),
-                        ivars: HashMap::new(),
-                        singleton_class: None,
-                    }));
-                    Value::Object(id)
+                    alloc_instance(&mut g, cls)?
+                };
+                #[cfg(not(feature = "cext"))]
+                let obj = {
+                    // No cext_alloc_func field exists in this build;
+                    // the class always allocates a plain Instance.
+                    alloc_instance(&mut g, cls)?
                 };
                 // Pin the freshly-allocated obj across initialize so
                 // a maybe_gc inside the (cext-defined or Ruby-defined)

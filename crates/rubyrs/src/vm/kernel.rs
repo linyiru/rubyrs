@@ -357,9 +357,17 @@ impl Vm {
                     }
                     #[cfg(target_os = "wasi")]
                     {
-                        let _ = path;
+                        // Preserve the attempted path in the error so a
+                        // script with many `require`s pinpoints which
+                        // one tripped — matches the master non-wasi
+                        // branch's diagnostic shape.
+                        let path = path.to_string_lossy();
                         Some(Err(self.trap(RubyError::RuntimeError {
-                            msg: "require: file I/O not available on wasm32-wasi".into(),
+                            msg: format!(
+                                "require: file I/O not available on \
+                                 wasm32-wasi (attempted to load {})",
+                                path
+                            ),
                         })))
                     }
                 }

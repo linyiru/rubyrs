@@ -128,7 +128,12 @@ Build:
 
 ```bash
 export WASI_SDK_PATH=/opt/wasi-sdk-24.0-arm64-macos
-cargo build --release --target wasm32-wasip1
+# `cext` requires a dynamic loader (libloading + dlopen) that
+# wasm32-wasi does not provide, so the `cext` feature is incompatible
+# with this target. Build with `--no-default-features` for the
+# cext-off subset (the only meaningful wasm32-wasi shape today);
+# omitting it triggers a clear `build.rs` panic per ADR 0015.
+cargo build --release --target wasm32-wasip1 -p rubyrs --no-default-features
 ```
 
 Run (needs wasmtime or equivalent):

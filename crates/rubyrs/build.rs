@@ -4,6 +4,25 @@ use std::path::PathBuf;
 fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
 
+    // The `cext` feature requires a dynamic loader (libloading + dlopen),
+    // which wasm32-wasi does not provide. Without this guard, the build
+    // succeeds (mod cext compiles to empty via vm/cext.rs's file-level
+    // cfg, kernel.rs's cext arm routes into the wasi-only stub at
+    // vm.rs::cext_require), giving the user a binary where the feature
+    // flag advertises capability the target cannot deliver. Fail loudly
+    // instead.
+    if target.starts_with("wasm32-wasi")
+        && std::env::var_os("CARGO_FEATURE_CEXT").is_some()
+    {
+        panic!(
+            "rubyrs: the `cext` feature is not supported on wasm32-wasi \
+             targets — there is no dynamic loader available, so `require` \
+             of a C extension cannot succeed. Build with \
+             `--no-default-features` for the cext-off subset, which is the \
+             only meaningful shape on wasm32-wasi today."
+        );
+    }
+
     // For wasm32-wasip1, Rust std references __wasi_init_tp (thread-pool init)
     // even when we don't use threads. Provide a no-op stub from a tiny C file.
     if target.starts_with("wasm32-wasi") {
