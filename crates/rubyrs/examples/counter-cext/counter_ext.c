@@ -56,16 +56,20 @@ static const rb_data_type_t counter_type = {
     0,                              /* flags */
 };
 
-static VALUE Counter_klass;         /* captured in Init_; used by .create */
-
+/* Counter_klass cache REMOVED (review #6): rubyrs-cext's VALUE is
+ * a per-dispatch handle into the current CExtState, not a stable
+ * class object. Caching one in a C static from Init_ leaves a
+ * stale handle by the time Counter.create runs.
+ *
+ * Use `self` instead — singleton methods receive the class itself
+ * as `self`, freshly interned into the calling CExtState. */
 static VALUE counter_create(VALUE self) {
-    (void)self;
     Counter *c = malloc(sizeof(Counter));
     if (!c) {
         rb_raise(rb_eRuntimeError, "Counter.create: malloc failed");
     }
     c->count = 0;
-    return TypedData_Wrap_Struct(Counter_klass, &counter_type, c);
+    return TypedData_Wrap_Struct(self, &counter_type, c);
 }
 
 static VALUE counter_inc(VALUE self, VALUE obj) {
@@ -89,9 +93,12 @@ static VALUE counter_free_count(VALUE self) {
 }
 
 void Init_counter_ext(void) {
-    Counter_klass = rb_define_class_under(rb_cObject, "Counter", rb_cObject);
-    rb_define_singleton_method(Counter_klass, "create",     RUBY_METHOD_FUNC(counter_create),     0);
-    rb_define_singleton_method(Counter_klass, "inc",        RUBY_METHOD_FUNC(counter_inc),        1);
-    rb_define_singleton_method(Counter_klass, "value",      RUBY_METHOD_FUNC(counter_value),      1);
-    rb_define_singleton_method(Counter_klass, "free_count", RUBY_METHOD_FUNC(counter_free_count), 0);
+    VALUE klass = rb_define_class_under(rb_cObject, "Counter", rb_cObject);
+    rb_define_singleton_method(klass, "create",     RUBY_METHOD_FUNC(counter_create),     0);
+    rb_define_singleton_method(klass, "inc",        RUBY_METHOD_FUNC(counter_inc),        1);
+    rb_define_singleton_method(klass, "value",      RUBY_METHOD_FUNC(counter_value),      1);
+    rb_define_singleton_method(klass, "free_count", RUBY_METHOD_FUNC(counter_free_count), 0);
+    /* `klass` falls out of scope with the Init_ frame; no global
+     * cache needed — `self` parameter on each singleton method
+     * gives us a fresh handle to the same class. */
 }

@@ -40,6 +40,14 @@ fn ensure_counter_bundle_built() -> PathBuf {
             let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             let example_dir = crate_dir.join("examples/counter-cext");
             let build_sh = example_dir.join("build.sh");
+            // Assert build.sh exists so a missing script surfaces as
+            // a targeted failure rather than a dlopen-time NotFound
+            // (review #5; matches the callback-cext pattern).
+            assert!(
+                build_sh.exists(),
+                "missing build.sh at {}",
+                build_sh.display()
+            );
             let build = Command::new("bash")
                 .arg(&build_sh)
                 .output()
@@ -57,7 +65,14 @@ fn ensure_counter_bundle_built() -> PathBuf {
             } else {
                 "so"
             };
-            example_dir.join(format!("counter_ext.{}", ext))
+            let bundle = example_dir.join(format!("counter_ext.{}", ext));
+            // Sanity-check the bundle actually got produced (review #5).
+            assert!(
+                bundle.exists(),
+                "build.sh did not produce {}",
+                bundle.display()
+            );
+            bundle
         })
         .clone()
 }
