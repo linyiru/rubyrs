@@ -617,7 +617,10 @@ pub unsafe extern "C" fn RSTRING_LEN(v: Value) -> c_long {
 /// but never undefined behaviour.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_long2num(n: c_long) -> Value {
-    with_state(|st| st.intern(CValue::Int(n)))
+    // `c_long` is i64 on Linux/macOS but i32 on wasm32-wasip1, so
+    // widen to i64 explicitly. Lossless on every target where
+    // c_long ≤ 64 bits (all rubyrs supports).
+    with_state(|st| st.intern(CValue::Int(n.into())))
 }
 
 /// Convert a Ruby Integer VALUE to a C `long`. Range overflow
