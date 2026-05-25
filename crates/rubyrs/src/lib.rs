@@ -647,6 +647,16 @@ end
 ## Re-entrant `synchronize` "just works" because there's no
 ## real lock state to deadlock against.
 class Mutex
+  # CRuby's Mutex.new takes zero args; defining an explicit
+  # 0-arity initialize delegates arity-checking to the existing
+  # method-call machinery so `Mutex.new(1)` raises ArgumentError
+  # instead of silently dropping the arg.
+  def initialize
+  end
+  # `synchronize` requires a block — CRuby raises ThreadError on
+  # bare call; we raise RuntimeError ("no block given (yield)")
+  # via the bare yield. Different exception class, same fail-loud
+  # semantics; no realistic code depends on the class name here.
   def synchronize
     yield
   end
