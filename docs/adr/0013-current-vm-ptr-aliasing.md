@@ -121,6 +121,44 @@ The risk surface is:
   enabled code paths today; if we did, it'd need
   `-Zmiri-tree-borrows` to pass.
 
+### Miri verification record (2026-05-25)
+
+Ran `cargo +nightly miri test` against every Miri-friendly
+subset of the test suite — both under default Stacked Borrows
+and `-Zmiri-tree-borrows`. Result:
+
+| Subset | Stacked Borrows | Tree Borrows |
+|---|---|---|
+| `vm::lookup` unit tests (9) | ✅ | ✅ |
+| `vm::gc` unit tests (10) | ✅ | ✅ |
+| `vm::raise` unit tests (9) | ✅ | ✅ |
+| `rubyrs-cext` FFI negative tests (19) | ✅ | ✅ |
+| **Total verified** | **47 tests** | **47 tests** |
+
+All 47 tests passed cleanly under both formal models. The
+non-cext `Vm` code path has no Stacked Borrows violations Miri
+can detect.
+
+**Unverifiable under Miri** (documented gap, not a known bug):
+
+- Any test that calls `Runtime::eval` — hits Prism's vendored
+  C parser (`pm_parser_init`) which Miri rejects as "unsupported
+  foreign function on macos".
+- The diff_cruby fixtures — require running the rubyrs binary
+  against the system Ruby for byte-comparison; Miri's harness
+  doesn't expose them.
+- **The actual cext re-entrance path (`cext_funcall_to_vm`)** —
+  reaching it requires `dlopen` of a `.so` (also a foreign
+  call Miri rejects). The unit tests in `rubyrs-cext`
+  exercise the per-fn FFI surface but not the dispatch
+  callback chain that's the subject of this ADR.
+
+The cext path remains the unverified surface area. A
+synthetic Miri test that drives `cext_invoke_method`
+directly (skipping dlopen) is a deferred to-do — it would
+either confirm the time-disjoint argument or pull J4
+(UnsafeCell refactor) into priority.
+
 ## Why we're shipping it anyway
 
 Three reasons:
