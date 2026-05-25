@@ -7,7 +7,6 @@ class Foo                        # ClassNode (supported)
   CONST = 42                     # ConstantWriteNode (× 1)
   Foo::Other = 1                 # ConstantPathWriteNode (× 1)
   def bar
-    fn = ->(x) { x + 1 }         # LambdaNode (× 1)
-    [fn]
+    $1                           # NumberedReferenceReadNode (× 1)
   end
 end

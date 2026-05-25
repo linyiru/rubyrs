@@ -134,8 +134,14 @@ fn compile_stmt(
                     }
                 }
             }
-            compile_expr(b, val, protos, interner, cc);
+            // Allocate the LHS slot BEFORE compiling the RHS so a
+            // lambda inside the RHS (whose param_start snapshots
+            // parent.n_locals) doesn't accidentally overlap this
+            // local. Existing `+= 1` fused path already did this
+            // — uniformity also helps when the RHS is `proc {}` or
+            // any other closure-creating expression.
             let slot = b.local_slot(name);
+            compile_expr(b, val, protos, interner, cc);
             b.emit(Op::StoreLocal(slot));
         }
         Expr::IVarWrite(name, val) => {
@@ -220,8 +226,11 @@ pub(crate) fn compile_expr(
                     }
                 }
             }
-            compile_expr(b, val, protos, interner, cc);
+            // See note in compile_stmt's LVarWrite arm: pre-allocate
+            // the LHS slot so a closure-creating RHS (lambda, proc)
+            // doesn't take this slot as its param_start.
             let slot = b.local_slot(name);
+            compile_expr(b, val, protos, interner, cc);
             b.emit(Op::Dup);
             b.emit(Op::StoreLocal(slot));
         }
@@ -703,6 +712,14 @@ pub(crate) fn compile_expr(
         Expr::Yield(args) => {
             for a in args { compile_expr(b, a, protos, interner, cc); }
             b.emit(Op::Yield(args.len() as u8));
+        }
+        Expr::Lambda { params, body } => {
+            // `->(p) { body }` — compile the body as a block proto
+            // and emit CreateBlock. Result stays on the stack as a
+            // Value::Block (which supports `.call(args)` already).
+            let (block_proto_idx, param_start, n_params) =
+                compile_block(b, params, body, protos, interner, cc);
+            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
         }
         Expr::Begin { body, rescue, ensure } => {
             // Layered: optional outer ensure, zero-or-more inner

@@ -39,6 +39,7 @@ InstanceVariableTargetNode
 InstanceVariableWriteNode
 IntegerNode
 InterpolatedStringNode
+LambdaNode
 LocalVariableAndWriteNode
 LocalVariableOperatorWriteNode
 LocalVariableOrWriteNode

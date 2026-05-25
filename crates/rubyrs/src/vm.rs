@@ -942,6 +942,22 @@ impl Vm {
         // shadow included ones). Defines `include` ad-hoc on
         // Class receivers; the call is a no-op for any other
         // receiver and falls through to NoMethodError.
+        // `proc.call(args)` / `lambda.call(args)` — invoke the
+        // block synchronously and push its result. Sub-frame
+        // runs until it returns; same dispatch shape as iterator
+        // drivers' invoke_block + dispatch_until pattern, but
+        // accessible from script code (rather than only from
+        // builtin iterators).
+        if let Value::Block(bid) = &recv {
+            if &*name == "call" {
+                let pre_frames = self.frames.len();
+                self.invoke_block(*bid, args)?;
+                self.dispatch_until(pre_frames)?;
+                // Result already on stack from the block frame's
+                // return. Nothing more to do.
+                return Ok(());
+            }
+        }
         if let Value::Class(target) = &recv {
             if (&*name == "include" || &*name == "extend") && !args.is_empty() {
                 for a in &args {

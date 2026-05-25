@@ -136,3 +136,4 @@ fn run_diff(name: &str) {
 #[test] fn conversions() { run_diff("conversions"); }
 #[test] fn unless_basics() { run_diff("unless_basics"); }
 #[test] fn regex_minimal() { run_diff("regex_minimal"); }
+#[test] fn lambdas() { run_diff("lambdas"); }

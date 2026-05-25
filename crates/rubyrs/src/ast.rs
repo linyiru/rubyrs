@@ -119,6 +119,13 @@ pub(crate) enum Expr {
         block_body: Vec<SExpr>,
     },
     Yield(Vec<SExpr>),
+    /// `->(params) { body }` — lambda literal. Compiles to the
+    /// same `CreateBlock` opcode as a regular `{ |x| ... }` block,
+    /// but stays on the stack as a Value::Block instead of being
+    /// consumed by a method call. We don't distinguish Lambda
+    /// from Proc at runtime; the strict-arity check that CRuby's
+    /// Lambda enforces is missing — documented in SUBSET.md.
+    Lambda { params: Vec<String>, body: Vec<SExpr> },
     /// `return [val]` — exits the current method/block frame with `val`.
     Return(Option<Box<SExpr>>),
     /// `next [val]` — exits the current block iteration with `val`.
@@ -557,6 +564,26 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             a.arguments().iter().next().map(|first| Box::new(tr(&first)))
         });
         return sp(node, Expr::Break(val));
+    }
+    if let Some(n) = node.as_lambda_node() {
+        // `->(x, y) { body }` — same param/body extraction as
+        // block literals attached to call nodes.
+        let params: Vec<String> = n.parameters()
+            .and_then(|pn| pn.as_block_parameters_node())
+            .and_then(|bp| bp.parameters())
+            .map(|p| p.requireds().iter()
+                .filter_map(|r| r.as_required_parameter_node().map(|rp| cid_to_string(rp.name())))
+                .collect())
+            .unwrap_or_default();
+        let body: Vec<SExpr> = match n.body() {
+            Some(b) => {
+                if let Some(stmts) = b.as_statements_node() {
+                    stmts.body().iter().map(|c| tr(&c)).collect()
+                } else { vec![tr(&b)] }
+            }
+            None => vec![],
+        };
+        return sp(node, Expr::Lambda { params, body });
     }
     if let Some(n) = node.as_yield_node() {
         let args: Vec<SExpr> = n.arguments()

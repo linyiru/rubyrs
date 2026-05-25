@@ -359,11 +359,13 @@ fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     let mut rt = Runtime::new();
     let err = rt.eval(
         r#"
-        # Lambda literal — still unsupported, used here as the
-        # canary for "AST translation cannot handle this node".
-        ->(x) { x + 1 }
+        # Constant-path write `Foo::Bar = 1` — still unsupported,
+        # used as the canary for "AST translation cannot handle
+        # this node".
+        class Foo; end
+        Foo::Bar = 1
         "#,
-        "lambda.rb",
+        "const_path_write.rb",
     ).unwrap_err();
     assert!(
         matches!(err.err, RubyError::SyntaxError { .. }),
