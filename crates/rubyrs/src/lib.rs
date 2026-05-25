@@ -312,6 +312,11 @@ class Proc
 end
 class Class
 end
+## File — class-method dispatch is wired host-side in
+## `Vm::file_class_dispatch`. The class body is intentionally
+## empty; methods are not defined here.
+class File
+end
 ## Comparable — a stub class (we don't have Modules in this subset)
 ## that holds the six derived comparison methods plus `between?`
 ## and `clamp`, each defined in terms of `<=>`. `include Comparable`

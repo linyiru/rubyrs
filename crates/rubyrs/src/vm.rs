@@ -925,7 +925,19 @@ impl Vm {
         // arrives here with recv = Value::Class(c). Look up the
         // method in the per-class cext table populated by
         // `Vm::cext_require` (rb_define_singleton_method).
+        // File class-method shims. CRuby exposes File.read / .write
+        // / .exist? / .open / .basename as class methods; we don't
+        // have a `def self.foo` syntax yet, so the dispatch is a
+        // hand-rolled intercept on the File class. I/O paths
+        // surface OS errors as a generic RuntimeError so scripts
+        // can `rescue` them.
         if let Value::Class(cls) = &recv {
+            if &*cls.name == "File" {
+                if let Some(v) = self.file_class_dispatch(&name, &args)? {
+                    self.stack.push(v);
+                    return Ok(());
+                }
+            }
             if let Some(table) = self.cext_class_methods.get(&cls.name) {
                 if let Some(host) = table.get(&name_id).cloned() {
                     // Stash Vm pointer for the singleton-method's
@@ -5674,6 +5686,101 @@ fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
             "non-string panic payload".to_string()
         }
     })
+}
+
+impl Vm {
+    /// File class-method shims. Implements the half-dozen path-
+    /// based File operations idiomatic Ruby scripts reach for
+    /// (read / write / exist? / size / basename / dirname /
+    /// extname / open-with-block). Returns `Ok(Some(v))` on a
+    /// handled call, `Ok(None)` if the method name isn't in
+    /// our subset so dispatch can keep walking.
+    pub(crate) fn file_class_dispatch(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
+        use std::path::Path;
+        let path_arg = |a: &Value| -> Result<String, Trap> {
+            match a {
+                Value::Str(s) => Ok(s.content.borrow().clone()),
+                _ => Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into String", a.type_name()),
+                })),
+            }
+        };
+        Ok(Some(match (name, args) {
+            ("read", [p]) => {
+                let path = path_arg(p)?;
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => Value::new_str(s),
+                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!("File.read({}): {}", path, e),
+                    })),
+                }
+            }
+            ("write", [p, body]) => {
+                let path = path_arg(p)?;
+                let contents = match body {
+                    Value::Str(s) => s.content.borrow().clone(),
+                    _ => body.to_display(&self.heap, &self.interner),
+                };
+                match std::fs::write(&path, &contents) {
+                    Ok(()) => Value::Int(contents.len() as i64),
+                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!("File.write({}): {}", path, e),
+                    })),
+                }
+            }
+            ("exist?", [p]) | ("exists?", [p]) | ("file?", [p]) => {
+                let path = path_arg(p)?;
+                let exists = std::fs::metadata(&path)
+                    .map(|m| if name == "file?" { m.is_file() } else { true })
+                    .unwrap_or(false);
+                Value::Bool(exists)
+            }
+            ("directory?", [p]) => {
+                let path = path_arg(p)?;
+                let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+                Value::Bool(is_dir)
+            }
+            ("size", [p]) => {
+                let path = path_arg(p)?;
+                match std::fs::metadata(&path) {
+                    Ok(m) => Value::Int(m.len() as i64),
+                    Err(e) => return Err(self.trap(RubyError::RuntimeError {
+                        msg: format!("File.size({}): {}", path, e),
+                    })),
+                }
+            }
+            ("basename", [p]) => {
+                let path = path_arg(p)?;
+                let name = Path::new(&path).file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                Value::new_str(name)
+            }
+            ("dirname", [p]) => {
+                let path = path_arg(p)?;
+                let dir = Path::new(&path).parent()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| ".".to_string());
+                Value::new_str(dir)
+            }
+            ("extname", [p]) => {
+                let path = path_arg(p)?;
+                let p = Path::new(&path);
+                let ext = p.extension()
+                    .map(|s| format!(".{}", s.to_string_lossy()))
+                    .unwrap_or_default();
+                Value::new_str(ext)
+            }
+            ("expand_path", [p]) => {
+                let path = path_arg(p)?;
+                let abs = std::fs::canonicalize(&path)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or(path);
+                Value::new_str(abs)
+            }
+            _ => return Ok(None),
+        }))
+    }
 }
 
 fn visibility_from_name(name: &str) -> Option<Visibility> {
