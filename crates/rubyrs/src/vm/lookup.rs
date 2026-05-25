@@ -179,6 +179,7 @@ impl Vm {
                 "each_with_index" | "sort_by" |
                 "min_by" | "max_by" | "group_by" |
                 "each_with_object" | "partition" | "chunk_while" | "bsearch" |
+                "take_while" | "drop_while" |
                 "zip" |
                 "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
                 "flat_map" | "collect_concat" | "chunk" |

@@ -879,6 +879,62 @@ impl Vm {
                 ]));
                 Some(Value::Array(pair_id))
             }
+            // `arr.take_while { |x| ... }` / `#drop_while` — prefix
+            // partitioning. `take_while` returns the prefix while
+            // the block is truthy and stops at the first falsy
+            // return. `drop_while` skips that prefix and returns
+            // the rest unchanged (block isn't invoked past the
+            // crossing point).
+            (Value::Array(id), "take_while" | "drop_while", []) => {
+                let want_take = name == "take_while";
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early: Option<Value> = None;
+                let mut crossed = false;
+                let mut crossing_idx: Option<usize> = None;
+                for (i, v) in snapshot.iter().enumerate() {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if !r.is_truthy() {
+                        crossed = true;
+                        crossing_idx = Some(i);
+                        break;
+                    }
+                    if want_take {
+                        g.vm.heap.array_mut(result_id).push(v.clone());
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                if !want_take {
+                    // drop_while: copy from the crossing point to
+                    // the end. If we never crossed, drop_while
+                    // returns []; the result_id is already empty.
+                    if let Some(start) = crossing_idx {
+                        for w in &snapshot[start..] {
+                            g.vm.heap.array_mut(result_id).push(w.clone());
+                        }
+                    } else if !crossed {
+                        // Block was truthy for every element →
+                        // drop_while drops the whole array. Already
+                        // empty result_id is correct.
+                    }
+                }
+                Some(Value::Array(result_id))
+            }
             // `arr.bsearch { |x| ... }` — binary search a sorted
             // Array. Two modes, distinguished by the block's return
             // type at runtime:
