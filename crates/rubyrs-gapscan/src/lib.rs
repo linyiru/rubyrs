@@ -226,13 +226,19 @@ impl Default for ScanOptions {
 }
 
 /// Walk `root`, parse every reachable `.rb` file, return a [`Report`].
+///
+/// The root path must exist and be readable — a missing-path or
+/// permission-denied at the entry point propagates as an
+/// `io::Error`, *not* a silently-empty report. (Subdirectory I/O
+/// errors are still swallowed during recursion; we'd rather take a
+/// best-effort partial scan than abort on one weird subdir.)
 pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
     let mut report = Report {
         root: root.to_path_buf(),
         ..Default::default()
     };
     let mut files = Vec::new();
-    collect_ruby_files(root, opts, &mut files)?;
+    collect_ruby_files(root, opts, &mut files, /*is_root=*/ true)?;
     files.sort();
 
     for file in files {
@@ -384,8 +390,20 @@ fn collect_ruby_files(
     dir: &Path,
     opts: &ScanOptions,
     out: &mut Vec<PathBuf>,
+    is_root: bool,
 ) -> std::io::Result<()> {
-    if dir.is_file() {
+    // Single-file root: treat as a one-element scan. Use symlink_metadata so a
+    // dangling symlink given as root surfaces an error rather than appearing
+    // to be a non-file (and silently producing an empty report).
+    if is_root {
+        let meta = std::fs::symlink_metadata(dir)?;
+        if meta.is_file() {
+            if dir.extension().is_some_and(|e| e == "rb") {
+                out.push(dir.to_path_buf());
+            }
+            return Ok(());
+        }
+    } else if dir.is_file() {
         if dir.extension().is_some_and(|e| e == "rb") {
             out.push(dir.to_path_buf());
         }
@@ -393,6 +411,9 @@ fn collect_ruby_files(
     }
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
+        // Root path must exist + be readable. Subdirs we silently skip
+        // (per-dir permission quirks shouldn't abort an otherwise-OK scan).
+        Err(e) if is_root => return Err(e),
         Err(_) => return Ok(()),
     };
     for entry in read.flatten() {
@@ -405,7 +426,7 @@ fn collect_ruby_files(
             if opts.skip_tests && (name == "spec" || name == "test") {
                 continue;
             }
-            collect_ruby_files(&path, opts, out)?;
+            collect_ruby_files(&path, opts, out, /*is_root=*/ false)?;
         } else if path.extension().is_some_and(|e| e == "rb") {
             out.push(path);
         }
@@ -718,9 +739,22 @@ pub fn render_markdown_diff(d: &ReportDiff, top: usize) -> String {
 
 // ---- JSON I/O ----
 
+/// Stable JSON schema version. Bump on any non-additive change to
+/// the schema emitted by [`render_json`] (renames, type changes,
+/// removed fields). [`parse_json`] refuses files whose
+/// `schema_version` is higher than this; lower (older) values are
+/// accepted as long as they describe a strict subset of today's
+/// fields — additive evolution stays back-compat.
+pub const JSON_SCHEMA_VERSION: u64 = 1;
+
+/// Sentinel emitted in the JSON `tool` field and required by
+/// [`parse_json`]. Guards against parsing an unrelated JSON file
+/// that happens to share field names.
+pub const JSON_TOOL_TAG: &str = "rubyrs-gapscan";
+
 /// Serialise a [`Report`] to JSON. Hand-built with `serde_json::Value`
 /// to keep the schema explicit and avoid serde_derive's compile cost.
-/// Schema is stable; bump `schema_version` on breaking changes.
+/// See [`JSON_SCHEMA_VERSION`] for the versioning contract.
 pub fn render_json(report: &Report) -> String {
     use serde_json::{json, Value};
     let totals = json!({
@@ -773,8 +807,8 @@ pub fn render_json(report: &Report) -> String {
         .map(|p| p.display().to_string())
         .collect();
     let doc = json!({
-        "schema_version": 1,
-        "tool": "rubyrs-gapscan",
+        "schema_version": JSON_SCHEMA_VERSION,
+        "tool": JSON_TOOL_TAG,
         "root": report.root.display().to_string(),
         "files_scanned": report.files_scanned,
         "files_with_errors": parse_errors,
@@ -797,10 +831,34 @@ fn classification_str(c: Classification) -> &'static str {
 
 /// Parse a JSON report previously produced by [`render_json`].
 ///
-/// Tolerant: missing optional fields default; we don't validate
-/// histogram classifications since `classify()` rederives them.
+/// Validates the `tool` and `schema_version` envelope so unrelated
+/// JSON (or a forward-incompatible report from a newer gapscan)
+/// fails loudly instead of being silently accepted as an empty
+/// report. Histogram classifications are rederived via `classify()`,
+/// so we deliberately don't validate them.
 pub fn parse_json(text: &str) -> Result<Report, String> {
     let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+
+    // Envelope checks first — fail closed on mismatch.
+    match v["tool"].as_str() {
+        Some(t) if t == JSON_TOOL_TAG => {}
+        Some(other) => {
+            return Err(format!(
+                "not a rubyrs-gapscan report: `tool` field is {other:?}, expected {JSON_TOOL_TAG:?}"
+            ));
+        }
+        None => return Err("missing required `tool` field".into()),
+    }
+    match v["schema_version"].as_u64() {
+        Some(n) if n <= JSON_SCHEMA_VERSION => {}
+        Some(n) => {
+            return Err(format!(
+                "report schema_version {n} is newer than this gapscan supports (max {JSON_SCHEMA_VERSION})"
+            ));
+        }
+        None => return Err("missing required `schema_version` field".into()),
+    }
+
     let mut report = Report::default();
     report.root = PathBuf::from(v["root"].as_str().unwrap_or(""));
     report.files_scanned = v["files_scanned"].as_u64().unwrap_or(0);

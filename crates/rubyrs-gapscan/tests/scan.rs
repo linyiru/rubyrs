@@ -157,6 +157,41 @@ fn diff_detects_closed_and_new_gaps() {
 }
 
 #[test]
+fn scan_propagates_missing_root_path() {
+    // PR #3 review #9: a missing root path used to silently produce
+    // an empty report (exit 0) — both CLI and library callers had no
+    // way to tell scanning didn't happen. Now it surfaces as an
+    // io::Error from the entry point.
+    let bogus = PathBuf::from("/this/path/almost/certainly/does/not/exist/rubyrs-gapscan-test");
+    let err = scan(&bogus, &ScanOptions::default()).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+fn parse_json_rejects_wrong_tool_tag() {
+    let bad = r#"{"tool":"some-other-tool","schema_version":1}"#;
+    let err = parse_json(bad).unwrap_err();
+    assert!(err.contains("rubyrs-gapscan"), "{err}");
+}
+
+#[test]
+fn parse_json_rejects_future_schema_version() {
+    let body = format!(
+        r#"{{"tool":"rubyrs-gapscan","schema_version":{}}}"#,
+        rubyrs_gapscan::JSON_SCHEMA_VERSION + 1
+    );
+    let err = parse_json(&body).unwrap_err();
+    assert!(err.contains("schema_version"), "{err}");
+}
+
+#[test]
+fn parse_json_rejects_missing_envelope() {
+    assert!(parse_json("{}").is_err());
+    assert!(parse_json(r#"{"tool":"rubyrs-gapscan"}"#).is_err());
+    assert!(parse_json(r#"{"schema_version":1}"#).is_err());
+}
+
+#[test]
 fn scan_skips_spec_and_test_dirs_by_default() {
     // Sanity: the same fixture file lives only at tests/fixtures —
     // not under a `spec/` or `test/` dir — so we can't directly
