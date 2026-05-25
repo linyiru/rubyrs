@@ -207,3 +207,4 @@ fn run_diff(name: &str) {
 #[test] fn string_encoding_stubs() { run_diff("string_encoding_stubs"); }
 #[test] fn pack_unpack() { run_diff("pack_unpack"); }
 #[test] fn integer_literal_i64() { run_diff("integer_literal_i64"); }
+#[test] fn lambda_slot_isolation() { run_diff("lambda_slot_isolation"); }
