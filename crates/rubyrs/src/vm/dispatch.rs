@@ -412,17 +412,15 @@ impl Vm {
                     self.invoke_method(m, obj.clone(), args)?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
-                    // L3-F: cext-defined initialize (registered via
-                    // rb_define_method) lives in cext_instance_methods.
-                    // Dispatch through the existing instance-method
-                    // path if present — this picks up arity validation
-                    // and rb_raise handling for free. Skip on
-                    // arity-mismatch (variadic / -1 isn't supported by
-                    // the setjmp shim yet) so allocation still
-                    // succeeds; common case where Packer.new / Parser
-                    // .new is called with no args still works because
-                    // the cext-side state was already zero-init'd in
-                    // the alloc_func.
+                    // L3-F + L3-H: cext-defined initialize (registered
+                    // via rb_define_method) lives in
+                    // cext_instance_methods. Dispatch through the
+                    // existing instance-method path if present — this
+                    // picks up arity validation and rb_raise handling
+                    // for free. Both fixed arity 0..=5 AND variadic
+                    // arity -1 are now dispatchable (L3-H setjmp shim
+                    // supports case -1); the filter below mirrors
+                    // cext_dispatch's accepted-arities rule.
                     #[cfg(not(target_os = "wasi"))]
                     {
                         let cext_init_reg = g.vm.cext_instance_methods

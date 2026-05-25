@@ -102,35 +102,27 @@ fn fixtures() -> &'static [(&'static str, &'static str, &'static str)] {
 fn cext_msgpack_pack_bytes_match_mri() {
     let bundle = ensure_msgpack_bundle_built();
     let bundle_no_ext = bundle.with_extension("");
+    // PR #60 review #1: write fixture output under CARGO_TARGET_TMPDIR
+    // (per-test-target dir) instead of a fixed /tmp path. Survives
+    // parallel test runs, sandboxed CI, non-Linux environments.
+    let tmpdir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
 
     for (name, ruby_lit, mri_hex) in fixtures() {
+        let out_path = tmpdir.join(format!("cext_msgpack_{}.bin", name));
+        // PR #60 review #2: dropped the empty `while i < bytes.length`
+        // loop — it was an aborted hex-dump attempt that did nothing
+        // useful and obscured the actual test step.
         let script = format!(
             r#"require "{}"
 p = MessagePack::Packer.new
 p.write({})
 bytes = p.to_str
-# Hex dump via byte-level access; rubyrs has no String#bytes or
-# String#each_byte at spike scope, so we sprintf each char's int
-# representation. bytes.length is byte count post-L3-G.
-out = ""
-i = 0
-while i < bytes.length
-  c = bytes[i]
-  # c here is a 1-char substring; treat as a String and read its
-  # only byte via the underlying bytesize path. Use String#bytesize
-  # to confirm single byte and then... rubyrs lacks a cheap "first
-  # byte as Int" API. Fall back to the cext: convert the whole
-  # String to a hex via msgpack itself isn't possible; use a
-  # signature: print the LENGTH so the test compares lengths AND
-  # then a separate file-write to compare bytes byte-for-byte.
-  i = i + 1
-end
 puts "len=#{{bytes.length}}"
-File.write("/tmp/cext_msgpack_{}.bin", bytes)
+File.write("{}", bytes)
 "#,
             bundle_no_ext.display(),
             ruby_lit,
-            name,
+            out_path.display(),
         );
         let stdout = run_rubyrs(&script, name);
         // Parse expected hex
@@ -147,8 +139,8 @@ File.write("/tmp/cext_msgpack_{}.bin", bytes)
             "fixture {}: expected len {} not in stdout\nstdout:\n{}",
             name, expected_len, stdout
         );
-        let actual_bytes = fs::read(format!("/tmp/cext_msgpack_{}.bin", name))
-            .unwrap_or_else(|e| panic!("can't read /tmp/cext_msgpack_{}.bin: {}", name, e));
+        let actual_bytes = fs::read(&out_path)
+            .unwrap_or_else(|e| panic!("can't read {}: {}", out_path.display(), e));
         assert_eq!(
             actual_bytes, expected_bytes,
             "fixture {} (Ruby: {}): bytes don't match MRI\n  expected hex: {}\n  got hex:      {}",

@@ -85,8 +85,13 @@ typedef uint64_t (*rubyrs_arity5_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uin
  * and argv are separate from self. Used by any cext with a
  * `def initialize(*args)`-style entry point (msgpack's
  * Unpacker_initialize, flori/json's cParser_initialize, etc.).
- * The `int` is sign-extended to uint64_t for the variadic case in
- * the args array — see invoke's case -1. */
+ *
+ * Calling convention used by case -1 below: invoke receives the
+ * full caller args array as `[self, arg0, arg1, ...]` plus the
+ * length `nargs` (separate parameter). The dispatch computes
+ * argc = nargs - 1 and argv = &args[1], then invokes
+ * `func(argc, argv, self)`. argc is NOT stored inside the args
+ * array. */
 typedef uint64_t (*rubyrs_arityN1_fn)(int, const uint64_t *, uint64_t);
 
 /* Invoke the C extension function under a setjmp protected frame.

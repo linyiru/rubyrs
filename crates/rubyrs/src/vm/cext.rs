@@ -207,16 +207,14 @@ const CEXT_TRANSLATE_MAX_DEPTH: usize = 256;
 #[cfg(not(target_os = "wasi"))]
 fn cext_handle_to_value(
     vm: &mut Vm,
-    state: &rubyrs_cext::CExtState,
     h: rubyrs_cext::Value,
 ) -> Result<Value, Trap> {
-    cext_handle_to_value_d(vm, state, h, 0)
+    cext_handle_to_value_d(vm, h, 0)
 }
 
 #[cfg(not(target_os = "wasi"))]
 fn cext_handle_to_value_d(
     vm: &mut Vm,
-    state: &rubyrs_cext::CExtState,
     h: rubyrs_cext::Value,
     depth: usize,
 ) -> Result<Value, Trap> {
@@ -234,7 +232,15 @@ fn cext_handle_to_value_d(
             ),
         }));
     }
-    Ok(match state.resolve(h) {
+    // PR #60 review #5: read STATE via with_state and clone the
+    // CValue at this level so recursive calls can re-enter
+    // with_state without colliding on the RefCell borrow. Each
+    // level clones one CValue (cheap for Nil/Int/HeapRef;
+    // proportional to payload for Str/Array/Hash). Total cost:
+    // O(result tree size) — way cheaper than the previous
+    // O(entire-table-size) per-leave clone.
+    let cv = rubyrs_cext::with_state(|st| st.resolve(h).clone());
+    Ok(match cv {
         rubyrs_cext::CValue::Nil => Value::Nil,
         rubyrs_cext::CValue::True => Value::Bool(true),
         rubyrs_cext::CValue::False => Value::Bool(false),
@@ -245,10 +251,12 @@ fn cext_handle_to_value_d(
         // pack output (and any other binary-protocol cext) now
         // survives the cext → Vm crossing intact.
         rubyrs_cext::CValue::Str(bytes) => {
-            let logical = &bytes[..bytes.len().saturating_sub(1)];
-            Value::new_str_bytes(logical.to_vec())
+            let logical_len = bytes.len().saturating_sub(1);
+            let mut v = bytes;
+            v.truncate(logical_len);
+            Value::new_str_bytes(v)
         }
-        rubyrs_cext::CValue::Int(n) => Value::Int(*n),
+        rubyrs_cext::CValue::Int(n) => Value::Int(n),
         // L3-C: a CValue::Class handle resolves to the actual Vm
         // Class object via vm.classes lookup. Used when a cext does
         // `obj.class` mid-call via rb_funcall — the returned handle
@@ -257,7 +265,7 @@ fn cext_handle_to_value_d(
         // back to Nil here (the old L0 behaviour) made any
         // subsequent method call on the class handle segfault.
         rubyrs_cext::CValue::Class(name) => {
-            let sym = vm.interner.intern(name);
+            let sym = vm.interner.intern(&name);
             // Class handles are produced by rb_define_class_under
             // / rb_define_module which both register into
             // vm.classes at drain time. A handle pointing to an
@@ -284,7 +292,7 @@ fn cext_handle_to_value_d(
             let mut g = PinGuard::new(vm);
             let mut elements: Vec<Value> = Vec::with_capacity(handles.len());
             for child in handles {
-                let v = cext_handle_to_value_d(g.vm, state, *child, depth + 1)?;
+                let v = cext_handle_to_value_d(g.vm, child, depth + 1)?;
                 g.pin(v.clone());
                 elements.push(v);
             }
@@ -299,9 +307,9 @@ fn cext_handle_to_value_d(
             let mut g = PinGuard::new(vm);
             let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
             for (kh, vh) in pairs {
-                let k = cext_handle_to_value_d(g.vm, state, *kh, depth + 1)?;
+                let k = cext_handle_to_value_d(g.vm, kh, depth + 1)?;
                 g.pin(k.clone());
-                let v = cext_handle_to_value_d(g.vm, state, *vh, depth + 1)?;
+                let v = cext_handle_to_value_d(g.vm, vh, depth + 1)?;
                 g.pin(v.clone());
                 entries.push((k, v));
             }
@@ -316,7 +324,7 @@ fn cext_handle_to_value_d(
         // HeapObj::TypedData on the Vm heap and stashes the ObjId
         // in this CValue, so the translator just turns it back
         // into Value::Object — no second alloc, no copy.
-        rubyrs_cext::CValue::HeapRef(n) => Value::Object(crate::value::ObjId(*n)),
+        rubyrs_cext::CValue::HeapRef(n) => Value::Object(crate::value::ObjId(n)),
     })
 }
 
@@ -760,16 +768,22 @@ pub(crate) fn cext_dispatch(
                 return Err(Trap::new(err));
             }
         };
-        // Normal-exit cleanup. `_cb_guard` drops at end of `unsafe`
-        // block (LIFO with state_guard), so we consume the state
-        // guard here to extract the drained `CExtState` for handle
-        // translation.
-        let st = state_guard.into_state();
+        // PR #60 review #5: translate the result handle BEFORE
+        // leaving so we can read the live STATE via `with_state`
+        // (no full-table clone). cext_handle_to_value now accesses
+        // STATE through with_state internally instead of taking
+        // &CExtState by reference.
+        //
         // Re-deref vm_ptr for the result translation (Array/Hash
         // returns need `&mut Vm` to allocate on the heap). Time-
         // disjoint from any earlier &Vm uses in this function.
         let vm: &mut Vm = &mut *vm_ptr;
-        cext_handle_to_value(vm, &st, ret_handle)
+        let translated = cext_handle_to_value(vm, ret_handle);
+        // Now drain registered_* — the state_guard's into_state
+        // calls leave() which moves them out. `values` is no longer
+        // cloned (PR #60 review #5).
+        let _ = state_guard.into_state();
+        translated
     }
 }
 
@@ -828,20 +842,16 @@ fn cext_funcall_to_vm(
         // dispatch handle the degenerate input. Surfacing the
         // Trap via the rb_funcall return value requires `rb_raise`
         // / longjmp (Level 3).
-        let recv_v = rubyrs_cext::with_state(|st| {
-            cext_handle_to_value(g.vm, st, recv).unwrap_or(Value::Nil)
-        });
+        let recv_v = cext_handle_to_value(g.vm, recv).unwrap_or(Value::Nil);
         g.pin(recv_v.clone());
-        let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
-            arg_handles
-                .iter()
-                .map(|h| {
-                    let v = cext_handle_to_value(g.vm, st, *h).unwrap_or(Value::Nil);
-                    g.pin(v.clone());
-                    v
-                })
-                .collect()
-        });
+        let arg_vs: Vec<Value> = arg_handles
+            .iter()
+            .map(|h| {
+                let v = cext_handle_to_value(g.vm, *h).unwrap_or(Value::Nil);
+                g.pin(v.clone());
+                v
+            })
+            .collect();
         match g.vm.cext_invoke_method(recv_v, method, arg_vs) {
             Ok(v) => v,
             // Spike: propagating Trap back through the C-ABI boundary

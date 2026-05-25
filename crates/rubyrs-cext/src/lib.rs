@@ -36,7 +36,7 @@
 //! to support macros like `FIXNUM_P`. None of that is on the
 //! critical path for the Level 0 hypothesis we're testing.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 
@@ -353,14 +353,18 @@ impl Default for CExtState {
 }
 
 thread_local! {
-    // L3-H: persistent per-Vm CExtState (was: stack of per-call
-    // states). The `values` table now lives across cext calls so
-    // VALUE handles a cext stores internally (e.g., msgpack's
-    // `Unpacker.feed(bytes)` saving a string reference into its
-    // TypedData buffer) still resolve when a later cext call
-    // (`Unpacker.read`) dereferences them. Pre-L3-H each enter
-    // pushed a fresh state and leave dropped it — stored handles
-    // dangled across the boundary.
+    // L3-H: persistent per-thread CExtState. PR #60 review #4:
+    // this is `thread_local`, not per-Vm. If two `Runtime`s exist on
+    // the same thread they share `STATE`. rubyrs's host model assumes
+    // one active Runtime per thread for cext use — multi-Runtime
+    // single-thread setups aren't supported for cext interop.
+    //
+    // The `values` table lives across cext calls so VALUE handles
+    // a cext stores internally (e.g., msgpack's `Unpacker.feed(bytes)`
+    // saving a string reference into its TypedData buffer) still
+    // resolve when a later cext call (`Unpacker.read`) dereferences
+    // them. Pre-L3-H each enter pushed a fresh state and leave
+    // dropped it — stored handles dangled across the boundary.
     //
     // Nested cext calls (rb_funcallv → host method → another cext
     // call) share the same state. Both `registered_*` lists and
@@ -370,24 +374,37 @@ thread_local! {
     //     anything, so nested calls see them already drained.
     //   - `values` IS meant to be shared — that's the whole point.
     static STATE: RefCell<Option<CExtState>> = const { RefCell::new(None) };
+
+    // PR #60 review #7: balance counter for `enter`/`leave` pairs.
+    // Persistent STATE means `with_state`'s "must call enter() first"
+    // check can't rely on STATE being None — it stays Some forever
+    // after first init. Track depth separately so a host bug
+    // (with_state without preceding enter) still trips the assertion.
+    static ACTIVE_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Run `f` with mutable access to the per-Vm [`CExtState`]. Panics
-/// if called from a thread that has no active state — that always
+/// Run `f` with mutable access to the per-thread [`CExtState`].
+/// Panics if called outside an active enter/leave pair — that always
 /// indicates a host-side bug.
 pub fn with_state<R>(f: impl FnOnce(&mut CExtState) -> R) -> R {
+    let depth = ACTIVE_DEPTH.with(|d| d.get());
+    assert!(
+        depth > 0,
+        "ICE: rubyrs-cext with_state outside enter()/leave() pair (depth=0)"
+    );
     STATE.with(|s| {
         let mut b = s.borrow_mut();
         let st = b
             .as_mut()
-            .expect("ICE: rubyrs-cext STATE empty; host must call enter() first");
+            .expect("ICE: rubyrs-cext STATE empty inside active enter; host bug");
         f(st)
     })
 }
 
-/// Initialize the per-Vm state on first call; on subsequent calls,
-/// clear the `registered_*` lists so a new Init pass starts clean.
-/// `values` is NOT cleared — handles persist across calls (L3-H).
+/// Initialize the per-thread state on first call; on each subsequent
+/// `enter`, clear `registered_*` lists so a new Init pass starts
+/// clean. `values` is NOT cleared — handles persist across calls
+/// (L3-H). Increments ACTIVE_DEPTH so nested enters track correctly.
 pub fn enter() {
     STATE.with(|s| {
         let mut b = s.borrow_mut();
@@ -401,27 +418,36 @@ pub fn enter() {
         st.registered_methods.clear();
         st.registered_alloc_funcs.clear();
     });
+    ACTIVE_DEPTH.with(|d| d.set(d.get() + 1));
 }
 
-/// Return a snapshot of the current state for the host to drain
-/// `registered_*` from and to resolve the return-value handle
-/// against. The persistent state KEEPS its `values` so future cext
-/// calls can still resolve handles a cext stored internally; the
-/// returned struct gets a CLONE of `values` for the host's result-
-/// translation phase (which uses `state.resolve(handle)` on its
-/// owned copy).
+/// Pop the active enter; drain `registered_*` into the returned
+/// CExtState. PR #60 review #5: this no longer clones `values` —
+/// the host now uses `with_state` (via `cext_handle_to_value`) to
+/// resolve return handles BEFORE calling leave, eliminating the
+/// O(handle-table-size) deep clone that scaled with total bytes
+/// ever interned. The returned struct's `values` is an empty Vec
+/// sentinel; callers don't read it.
 ///
 /// `registered_*` are moved out of the persistent state (consumed
 /// exactly once per `enter`/`leave` pair) — the host iterates them
 /// to install classes / methods / alloc_funcs into the Vm.
 pub fn leave() -> CExtState {
+    ACTIVE_DEPTH.with(|d| {
+        let prev = d.get();
+        assert!(prev > 0, "ICE: rubyrs-cext leave() without matching enter()");
+        d.set(prev - 1);
+    });
     STATE.with(|s| {
         let mut b = s.borrow_mut();
         let st = b
             .as_mut()
-            .expect("ICE: rubyrs-cext leave() without matching enter()");
+            .expect("ICE: rubyrs-cext leave() with STATE None (init bug)");
         CExtState {
-            values: st.values.clone(),
+            // Sentinel — callers never read `.values` from a leave
+            // result; they use with_state for translation (see
+            // vm/cext.rs::cext_dispatch).
+            values: Vec::new(),
             registered_fns: std::mem::take(&mut st.registered_fns),
             registered_classes: std::mem::take(&mut st.registered_classes),
             registered_singletons: std::mem::take(&mut st.registered_singletons),
