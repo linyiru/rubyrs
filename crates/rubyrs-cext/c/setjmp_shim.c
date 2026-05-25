@@ -80,13 +80,28 @@ typedef uint64_t (*rubyrs_arity2_fn)(uint64_t, uint64_t, uint64_t);
 typedef uint64_t (*rubyrs_arity3_fn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint64_t (*rubyrs_arity4_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint64_t (*rubyrs_arity5_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+/* L3-H: variadic dispatch. CRuby's `rb_define_method(..., -1)` shape
+ * is `VALUE func(int argc, const VALUE *argv, VALUE self)` — argc
+ * and argv are separate from self. Used by any cext with a
+ * `def initialize(*args)`-style entry point (msgpack's
+ * Unpacker_initialize, flori/json's cParser_initialize, etc.).
+ *
+ * Calling convention used by case -1 below: invoke receives the
+ * full caller args array as `[self, arg0, arg1, ...]` plus the
+ * length `nargs` (separate parameter). The dispatch computes
+ * argc = nargs - 1 and argv = &args[1], then invokes
+ * `func(argc, argv, self)`. argc is NOT stored inside the args
+ * array. */
+typedef uint64_t (*rubyrs_arityN1_fn)(int, const uint64_t *, uint64_t);
 
 /* Invoke the C extension function under a setjmp protected frame.
  *
  *   `func`  — the OpaqueFn registered by rb_define_*_function.
- *   `arity` — 0..5 (caller validates).
- *   `args`  — pointer to an array of length `arity + 1`; args[0]
- *             is the `self` handle, args[1..] are the call args.
+ *   `arity` — 0..5 fixed-arity, or -1 for variadic.
+ *   `nargs` — total length of `args` (= fixed-arity + 1, or argc+1
+ *             for variadic).
+ *   `args`  — pointer to an array of length `nargs`; args[0] is the
+ *             `self` handle, args[1..] are the call args.
  *
  * Returns the C function's u64 return value on normal return; on a
  * raised exception writes (class, msg) into the out-params and
@@ -96,6 +111,7 @@ typedef uint64_t (*rubyrs_arity5_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uin
  * frames, so a longjmp from rb_raise never unwinds a Rust frame. */
 uint64_t rubyrs_jmp_invoke(void (*func)(void),
                            int arity,
+                           int nargs,
                            const uint64_t *args,
                            uint64_t *out_raised_class,
                            char **out_raised_msg) {
@@ -127,9 +143,17 @@ uint64_t rubyrs_jmp_invoke(void (*func)(void),
             case 5:
                 result = ((rubyrs_arity5_fn)func)(args[0], args[1], args[2], args[3], args[4], args[5]);
                 break;
+            case -1:
+                /* Variadic: args has length `nargs`. args[0] is self;
+                 * the user args occupy args[1] .. args[nargs - 1]
+                 * (inclusive), i.e. `argc = nargs - 1` slots starting
+                 * at `&args[1]`. */
+                result = ((rubyrs_arityN1_fn)func)(nargs - 1, &args[1], args[0]);
+                break;
             default:
                 /* Caller (Rust cext_dispatch) validates arity before
-                 * reaching us, so anything outside 0..5 is a host bug. */
+                 * reaching us, so anything outside {-1, 0..5} is a
+                 * host bug. */
                 abort();
         }
         /* Normal return — pop the buf and clear the out-params. */

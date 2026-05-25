@@ -508,6 +508,16 @@ impl Runtime {
     }
 
     pub fn with_config(cfg: Config) -> Self {
+        // PR #60 review #14: clear any leftover per-thread cext
+        // STATE before constructing a fresh Vm. The persistent
+        // CExtState (L3-H) lives in a thread_local; without this
+        // reset, a previous Runtime's `values` table — which can
+        // hold `CValue::HeapRef(ObjId)` referencing the OLD Vm's
+        // heap — would dangle into the new Vm and resolve to
+        // unrelated objects (or panic on out-of-range ObjId).
+        #[cfg(not(target_os = "wasi"))]
+        rubyrs_cext::reset_state();
+
         let interner = intern::Interner::new();
         let mut vm = vm::Vm::new(vec![], interner);
         if cfg.stress_gc { vm.stress_gc = true; }
@@ -940,4 +950,18 @@ end
 
 impl Default for Runtime {
     fn default() -> Self { Self::new() }
+}
+
+impl Drop for Runtime {
+    /// PR #60 review #14: defense-in-depth reset of the per-thread
+    /// cext STATE on Vm teardown. Pairs with the reset in
+    /// `with_config` — together they ensure any cext call that
+    /// happens between `drop(this_rt)` and `new(next_rt)` sees a
+    /// clean STATE rather than this Vm's stale handles (calling
+    /// cext fns without an active Runtime is a host-side bug
+    /// anyway, but this keeps the failure mode predictable).
+    fn drop(&mut self) {
+        #[cfg(not(target_os = "wasi"))]
+        rubyrs_cext::reset_state();
+    }
 }
