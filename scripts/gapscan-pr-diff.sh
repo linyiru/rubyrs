@@ -68,6 +68,16 @@ CLASSIFIER_PATHS=(
   "crates/rubyrs-gapscan/src/"
   "crates/rubyrs-gapscan/data/"
   "crates/rubyrs-gapscan/build.rs"
+  # Dependency manifests + lockfile: bumping the `ruby_prism` crate
+  # (which we depend on for AST node discrimination) or changing
+  # its features can shift the universe of node classes — and
+  # therefore the classification — without touching any src/ or
+  # data/ files. Include all Cargo.toml + Cargo.lock so dep-only
+  # PRs don't sneak past the fast-path.
+  "Cargo.toml"
+  "Cargo.lock"
+  "crates/rubyrs/Cargo.toml"
+  "crates/rubyrs-gapscan/Cargo.toml"
 )
 
 # Returns 0 (true) when there's a difference that could affect
@@ -94,7 +104,16 @@ has_classifier_change() {
 # compose `$dir/$relpath` for scanning.
 repo_cache_dir() {
   # Stable, filesystem-safe directory name from the repo URL.
-  printf "%s\n" "$1" | sha1sum | cut -c1-12
+  # `sha1sum` ships with Linux coreutils but not vanilla macOS,
+  # which has `shasum -a 1` instead. Probe at call time so the
+  # script works in both local-dev (macOS) and CI (Linux) contexts.
+  local hasher
+  if command -v sha1sum >/dev/null 2>&1; then
+    hasher="sha1sum"
+  else
+    hasher="shasum -a 1"
+  fi
+  printf "%s\n" "$1" | $hasher | cut -c1-12
 }
 
 ensure_target() {

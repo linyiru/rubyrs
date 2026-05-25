@@ -15,6 +15,14 @@ on:
       - 'crates/rubyrs/data/**'
       - 'crates/rubyrs/build.rs'
       - 'crates/rubyrs-gapscan/**'
+      # Dependency-only PRs (Cargo.toml feature flips, ruby_prism
+      # bumps, etc.) can shift classification too — mirror the
+      # script's CLASSIFIER_PATHS list so they don't skip the
+      # workflow entirely.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/rubyrs/Cargo.toml'
+      - 'crates/rubyrs-gapscan/Cargo.toml'
       - 'scripts/gapscan-pr-diff.sh'
       - '.github/workflows/gapscan-pr.yml'
 
