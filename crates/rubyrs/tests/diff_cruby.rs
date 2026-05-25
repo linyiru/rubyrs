@@ -219,3 +219,4 @@ fn run_diff(name: &str) {
 #[test] fn global_variables() { run_diff("global_variables"); }
 #[test] fn op_assign_extended() { run_diff("op_assign_extended"); }
 #[test] fn mutex_stub() { run_diff("mutex_stub"); }
+#[test] fn kernel_instance_method() { run_diff("kernel_instance_method"); }

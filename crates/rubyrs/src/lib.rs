@@ -676,6 +676,26 @@ class Mutex
     false
   end
 end
+## Kernel — sentinel class (CRuby's Kernel is a Module included in
+## Object). We don't model Modules, but real codebases use
+## `Kernel.instance_method(:class).bind(scope).call` to invoke
+## `scope.class` even if `scope` overrides `class` (tilt does this
+## at template.rb:238). `is_primitive_class_name` lists Kernel so
+## `Class#instance_method` synthesises an UnboundMethod, and
+## UnboundMethod#bind skips its is-a check when the captured class
+## is Kernel — every value is_a Kernel in CRuby semantics, so the
+## downstream `do_call` routes the method name to the receiver's
+## primitive dispatch as if called directly.
+class Kernel
+end
+## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
+## (tilt does at template.rb:239) to pick between bind_call and
+## bind.call paths. We claim a recent CRuby version to opt into
+## the modern branches. RUBY_PLATFORM identifies the host
+## interpreter — "rubyrs" makes it obvious in any platform-
+## conditional code that this isn't CRuby.
+RUBY_VERSION = "3.4.0"
+RUBY_PLATFORM = "rubyrs"
 ## Comparable — a stub class (we don't have Modules in this subset)
 ## that holds the six derived comparison methods plus `between?`
 ## and `clamp`, each defined in terms of `<=>`. `include Comparable`

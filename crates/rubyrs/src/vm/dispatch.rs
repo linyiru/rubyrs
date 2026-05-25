@@ -812,7 +812,14 @@ impl Vm {
                     msg: format!("bind argument must have a class (got {})", target.type_name()),
                 })),
             };
-            if !super::class_is_a(&target_class, &cap_class) {
+            // Kernel is the universally-bindable sentinel — CRuby
+            // models it as a Module included in Object, so every
+            // value is_a Kernel. We don't model Modules; skipping
+            // the is_a check here gives `Kernel.instance_method(:foo)
+            //   .bind(any_value)` the same shape without forcing a
+            // synthetic Kernel-ancestor onto every primitive class.
+            if cap_class.name != "Kernel"
+                && !super::class_is_a(&target_class, &cap_class) {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "bind argument must be an instance of {} (got {})",
@@ -2513,6 +2520,17 @@ fn is_primitive_class_name(name: &str) -> bool {
             | "Regexp" | "Proc"
             | "Method" | "UnboundMethod"
             | "TrueClass" | "FalseClass" | "NilClass"
+            // Kernel — modeled as a sentinel "primitive" so
+            // `Kernel.instance_method(:foo)` resolves without
+            // forcing every Kernel method to live in a class
+            // table. Real CRuby: Kernel is a Module included in
+            // Object, transitively giving every value its method
+            // set. We don't have Modules; this sentinel makes
+            // the lookup succeed and emits an UnboundMethod that
+            // defers resolution to bind+call (where do_call
+            // routes to the receiver's primitive method dispatch
+            // as if the call were direct).
+            | "Kernel"
     )
 }
 
