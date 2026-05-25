@@ -54,6 +54,11 @@ fn ensure_msgpack_bundle_built() -> PathBuf {
             let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             let mp_dir = crate_dir.join("examples/msgpack-cext");
             let mp_build = mp_dir.join("build.sh");
+            assert!(
+                mp_build.exists(),
+                "missing msgpack build.sh at {}",
+                mp_build.display(),
+            );
             let mp_out = Command::new("bash")
                 .arg(&mp_build)
                 .output()
@@ -78,34 +83,37 @@ fn cext_msgpack_int_boundary_round_trip() {
     let driver_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let driver = driver_dir.join("cext_msgpack_int_boundary_driver.rb");
 
-    // (value, expected wire-encoded byte count)
+    // (value, expected wire-encoded byte count).
+    // Boundary values named via constants where possible — i64::MAX
+    // / i64::MIN / u32::MAX / etc. read more obviously as "type
+    // boundary" than 19-digit decimals and remove transcription risk.
     let cases: &[(i64, usize)] = &[
         // fixint range (1 byte each)
         (0, 1),
         (1, 1),
         (-1, 1),
-        (127, 1),        // max positive fixint
-        (-32, 1),        // min negative fixint
+        (127, 1),                        // max positive fixint
+        (-32, 1),                        // min negative fixint
         // u8 / i8 (2 bytes: prefix + 1 byte payload)
-        (128, 2),        // just above fixint -> u8
-        (-33, 2),        // just below fixint -> i8
-        (255, 2),        // u8 max
-        (-128, 2),       // i8 min
+        (128, 2),                        // just above fixint -> u8
+        (-33, 2),                        // just below fixint -> i8
+        (u8::MAX as i64, 2),             // u8 max  (255)
+        (i8::MIN as i64, 2),             // i8 min  (-128)
         // u16 / i16 (3 bytes)
-        (256, 3),
-        (-129, 3),
-        (65535, 3),      // u16 max
-        (-32768, 3),     // i16 min
+        (u8::MAX as i64 + 1, 3),         // 256
+        (i8::MIN as i64 - 1, 3),         // -129
+        (u16::MAX as i64, 3),            // 65535
+        (i16::MIN as i64, 3),            // -32768
         // u32 / i32 (5 bytes)
-        (65536, 5),
-        (-32769, 5),
-        (4294967295, 5), // u32 max
-        (-2147483648, 5),// i32 min
+        (u16::MAX as i64 + 1, 5),        // 65536
+        (i16::MIN as i64 - 1, 5),        // -32769
+        (u32::MAX as i64, 5),            // 4294967295
+        (i32::MIN as i64, 5),            // -2147483648
         // u64 / i64 (9 bytes)
-        (4294967296, 9),
-        (-2147483649, 9),
-        (9223372036854775807, 9),   // i64 max
-        (-9223372036854775808, 9),  // i64 min
+        (u32::MAX as i64 + 1, 9),        // 4294967296
+        (i32::MIN as i64 - 1, 9),        // -2147483649
+        (i64::MAX, 9),                   // 9223372036854775807
+        (i64::MIN, 9),                   // -9223372036854775808
     ];
 
     // Build a Ruby script that round-trips each case and emits
