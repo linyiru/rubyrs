@@ -105,16 +105,29 @@ fn write_full_visit_macro(s: &mut String, all: &BTreeSet<String>) {
     );
     for class in all {
         let snake = camel_to_snake(class);
+        let extra = extra_hook(class).unwrap_or("");
         writeln!(
             s,
             "            fn visit_{snake}(&mut self, node: &ruby_prism::{class}<'pr>) {{\n                \
-                 self.record({class:?}, &node.as_node());\n                \
+                 self.record({class:?}, &node.as_node());\n{extra}                \
                  ruby_prism::visit_{snake}(self, node);\n            \
              }}"
         )
         .unwrap();
     }
     s.push_str("        }\n    };\n}\n");
+}
+
+/// Extra Rust statement(s) to inject into the generated `visit_X_node`
+/// arm, in addition to the standard `record(class, node)` call.
+/// The target type must implement the methods named here. Each
+/// entry must end with a trailing newline so the generated source
+/// stays readable.
+fn extra_hook(class: &str) -> Option<&'static str> {
+    match class {
+        "CallNode" => Some("                self.record_call(node);\n"),
+        _ => None,
+    }
 }
 
 fn camel_to_snake(s: &str) -> String {

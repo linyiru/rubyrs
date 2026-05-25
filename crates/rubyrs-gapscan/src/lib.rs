@@ -44,6 +44,39 @@ pub struct NodeStat {
     pub first_file: Option<PathBuf>,
 }
 
+/// Per-method call counts, split by call shape.
+///
+/// CallNode in Prism covers ordinary method invocation, operators
+/// (`+`, `==`, `[]`), and bareword (implicit-self / top-level) calls
+/// like `require "x"` or `attr_accessor :name`. The split matters
+/// because *bareword* calls hide the gaps that look "supported" at
+/// the syntactic level — `require`, `attr_*`, `include`, etc. all
+/// parse fine and translate to CallNode, but rubyrs doesn't implement
+/// any of them.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CallStat {
+    /// Implicit-self / top-level call (no explicit receiver).
+    pub bareword: u64,
+    /// Explicit receiver: `foo.bar`, `Class.new`, `arr[0]`, etc.
+    pub receiver: u64,
+    /// Operator-like name (`+`, `==`, `<<`, `[]`, ...).
+    pub operator: u64,
+}
+
+impl CallStat {
+    pub fn total(&self) -> u64 {
+        self.bareword + self.receiver + self.operator
+    }
+}
+
+/// Method names treated as operators rather than plain methods. Used
+/// to peel `1 + 2`-shaped calls off the bareword/receiver buckets.
+const OPERATOR_NAMES: &[&str] = &[
+    "+", "-", "*", "/", "%", "**", "==", "!=", "<", "<=", ">", ">=", "<=>",
+    "<<", ">>", "&", "|", "^", "~", "!", "[]", "[]=", "===", "=~", "!~",
+    "+@", "-@",
+];
+
 /// One scan result.
 #[derive(Debug, Default, Clone)]
 pub struct Report {
@@ -52,6 +85,8 @@ pub struct Report {
     pub files_parse_errors: Vec<PathBuf>,
     pub total_nodes: u64,
     pub histogram: BTreeMap<String, NodeStat>,
+    /// Per-method-name CallNode breakdown.
+    pub calls: BTreeMap<String, CallStat>,
 }
 
 impl Report {
@@ -94,6 +129,30 @@ impl Report {
             .filter(|(k, _)| classify(k) == Classification::Supported)
             .collect();
         v.sort_by(|(_, a), (_, b)| b.count.cmp(&a.count));
+        v
+    }
+
+    /// Top-N bareword calls (no explicit receiver). Reveals
+    /// semantically-unsupported builtins that AST-level analysis
+    /// would mis-classify as Supported (require, attr_*, include).
+    pub fn bareword_calls_sorted(&self) -> Vec<(&String, &CallStat)> {
+        let mut v: Vec<_> = self
+            .calls
+            .iter()
+            .filter(|(_, s)| s.bareword > 0)
+            .collect();
+        v.sort_by(|(_, a), (_, b)| b.bareword.cmp(&a.bareword));
+        v
+    }
+    /// Top-N receiver calls. Useful for spotting heavy stdlib reliance
+    /// (File.read, Regexp.quote, etc.).
+    pub fn receiver_calls_sorted(&self) -> Vec<(&String, &CallStat)> {
+        let mut v: Vec<_> = self
+            .calls
+            .iter()
+            .filter(|(_, s)| s.receiver > 0)
+            .collect();
+        v.sort_by(|(_, a), (_, b)| b.receiver.cmp(&a.receiver));
         v
     }
 }
@@ -142,6 +201,7 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
         let mut visitor = Histogrammer {
             histogram: &mut report.histogram,
             total: &mut report.total_nodes,
+            calls: &mut report.calls,
             src: &src,
             file: &rel,
         };
@@ -155,11 +215,32 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
 struct Histogrammer<'a> {
     histogram: &'a mut BTreeMap<String, NodeStat>,
     total: &'a mut u64,
+    calls: &'a mut BTreeMap<String, CallStat>,
     src: &'a [u8],
     file: &'a Path,
 }
 
 impl<'a> Histogrammer<'a> {
+    /// Extra hook the generated macro injects in the `visit_call_node`
+    /// arm. Splits the call into bareword / receiver / operator and
+    /// bumps the per-method counter.
+    fn record_call(&mut self, node: &ruby_prism::CallNode<'_>) {
+        let name_bytes = node.name().as_slice();
+        let name = match std::str::from_utf8(name_bytes) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let stat = self.calls.entry(name.to_string()).or_default();
+        let is_op = OPERATOR_NAMES.contains(&name);
+        if is_op {
+            stat.operator += 1;
+        } else if node.receiver().is_none() {
+            stat.bareword += 1;
+        } else {
+            stat.receiver += 1;
+        }
+    }
+
     /// Called by the generated `impl_full_visit_for!` macro for every
     /// Prism node visited. `class` is a static name (e.g. `"CallNode"`)
     /// so we never allocate on the hot path until inserting a new key.
@@ -264,6 +345,26 @@ pub fn render_text(report: &Report, top_missing: usize) -> String {
     }
     if missing.len() > top_missing {
         let _ = writeln!(s, "  ... {} more (use --top to widen)", missing.len() - top_missing);
+    }
+
+    // Method-call dimension: bareword calls are the eye-opener — many
+    // of them are runtime gaps masquerading as "supported" CallNodes.
+    let bareword = report.bareword_calls_sorted();
+    let receiver = report.receiver_calls_sorted();
+    let _ = writeln!(
+        s,
+        "\n### Top bareword (implicit-self) calls — semantic gaps hide here"
+    );
+    let _ = writeln!(s, "{:<40} {:>10}", "method", "count");
+    let _ = writeln!(s, "{}", "-".repeat(56));
+    for (name, stat) in bareword.iter().take(top_missing) {
+        let _ = writeln!(s, "{name:<40} {:>10}", stat.bareword);
+    }
+    let _ = writeln!(s, "\n### Top receiver method calls");
+    let _ = writeln!(s, "{:<40} {:>10}", "method", "count");
+    let _ = writeln!(s, "{}", "-".repeat(56));
+    for (name, stat) in receiver.iter().take(top_missing) {
+        let _ = writeln!(s, "{name:<40} {:>10}", stat.receiver);
     }
     s
 }
