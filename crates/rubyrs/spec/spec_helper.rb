@@ -63,13 +63,10 @@ end
 # `e.class.to_s`) matches `class_name`. Used for "should raise X"
 # patterns in the upstream specs.
 def assert_raises(class_name)
-  raised = false
   begin
     yield
     __spec_fail("expected #{class_name}, no exception raised")
-    return
   rescue Exception => e
-    raised = true
     # `e.class.name` would be ideal but requires Class#name; fall
     # back to `e.class.to_s`. Class#to_s currently produces the
     # bare class name for user-defined classes, which is what
