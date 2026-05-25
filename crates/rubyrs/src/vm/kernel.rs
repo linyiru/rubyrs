@@ -374,16 +374,23 @@ impl Vm {
     #[cfg(not(target_os = "wasi"))]
     pub(crate) fn require_relative(&mut self, path_str: &str) -> Result<Value, Trap> {
         use std::path::{Path, PathBuf};
-        // Resolve relative to the current file's directory. Walk
-        // frames from the top and read the first non-block,
-        // non-class-body frame's proto.filename. Toplevel `<main>`
-        // qualifies (is_block=false, is_class_body=false), so a
-        // require_relative called at the top level resolves
-        // against the script's directory. No fallback needed —
-        // every require_relative call necessarily runs inside at
-        // least the `<main>` frame.
-        let anchor_filename: Option<String> = self.frames.iter().rev()
-            .find(|f| !f.is_block && !f.is_class_body)
+        // Resolve relative to the CALL SITE's source file. CRuby's
+        // contract is "the file containing the calling code" —
+        // i.e., the source file the `require_relative` token
+        // appears in. Each proto carries its source filename
+        // (compile_proto threads `filename_rc` through), and the
+        // currently-running proto is exactly the top frame's. So
+        // the right anchor is `frames.last().proto.filename`
+        // regardless of is_block / is_class_body.
+        //
+        // (Earlier rounds of this PR skipped block frames thinking
+        // they'd want the enclosing method's file — that's wrong:
+        // a block's proto.filename is the file the BLOCK was
+        // defined in, which is the call-site file for any
+        // `require_relative` lexically inside that block. Methods
+        // called from a different file via `define_method` /
+        // `instance_eval` would otherwise mis-anchor.)
+        let anchor_filename: Option<String> = self.frames.last()
             .map(|f| self.protos[f.proto_idx].filename.to_string());
         let base_dir: PathBuf = match anchor_filename {
             Some(f) => Path::new(&f).parent().map(Path::to_path_buf)
