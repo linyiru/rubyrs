@@ -1,10 +1,13 @@
 # `break` from inside a `while` loop — exits to the statement
 # immediately after the loop. This is a different break-target
 # from `break` inside a block (which signals the iteration
-# driver). The four scenarios below were all previously broken
-# in rubyrs: `break` compiled to `Op::Return`, so it would
-# return from the enclosing method (or the toplevel script),
-# instead of jumping past the `while`.
+# driver). Scenarios 1-4 cover the core fix (`break` used to
+# compile to `Op::Return`, returning from the enclosing method
+# or toplevel instead of jumping past the `while`). Scenarios
+# 5-7 were added by the self-review wave to pin further corners:
+# block-break-vs-while-break, post-condition `begin..end while`
+# codegen, and the raise-out-of-inner-while + loop_rescue_depths
+# truncate path.
 
 # 1. Plain break — should exit the while and run the trailing
 #    `puts`, not silently exit the script.
