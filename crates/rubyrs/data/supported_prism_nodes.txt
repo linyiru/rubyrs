@@ -1,0 +1,51 @@
+# Prism node classes that ast.rs translates directly via an
+# `as_*_node` accessor. Source of truth — build.rs validates this
+# stays exactly in sync with the `as_*_node` calls in src/ast.rs
+# and re-exports it as `rubyrs::SUPPORTED_PRISM_NODES`.
+#
+# Format: one CamelCase name per line, sorted, `#` comments OK.
+
+AndNode
+ArrayNode
+AssocNode
+BeginNode
+BlockNode
+BlockParametersNode
+BreakNode
+CallNode
+ClassNode
+ConstantPathNode
+ConstantReadNode
+DefNode
+ElseNode
+EmbeddedStatementsNode
+EmbeddedVariableNode
+FalseNode
+FloatNode
+ForwardingSuperNode
+HashNode
+IfNode
+InstanceVariableReadNode
+InstanceVariableWriteNode
+IntegerNode
+InterpolatedStringNode
+LocalVariableReadNode
+LocalVariableTargetNode
+LocalVariableWriteNode
+NextNode
+NilNode
+OptionalParameterNode
+OrNode
+ParenthesesNode
+ProgramNode
+RangeNode
+RequiredParameterNode
+ReturnNode
+SelfNode
+StatementsNode
+StringNode
+SuperNode
+SymbolNode
+TrueNode
+WhileNode
+YieldNode
