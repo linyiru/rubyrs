@@ -534,10 +534,14 @@ fn apply_substitutions(source: &str, mut subs: Vec<Substitution>) -> String {
 ///   - delete the `before` call itself, and
 ///   - prepend `BODY` to each sibling `it`'s body.
 ///
-/// Only handles the FLAT case (before + its as direct children of
-/// the describe's block). Nested `describe`s, `context` blocks,
-/// `before :all`, and `after :*` are passthrough — their
-/// presence shows up in the skip log instead.
+/// Scoping rule: a `before :each` is paired only with the `it`
+/// blocks that are DIRECT children of its own `describe`'s
+/// block body. Nested `describe`s get their OWN
+/// process_describe call (the visitor walks every CallNode);
+/// each handles its own direct children independently and the
+/// scoping doesn't compose. `context` blocks, `before :all`,
+/// and `after :*` are passthrough — their presence shows up in
+/// the skip log instead.
 struct BeforeEachLifter<'a> {
     source: &'a str,
     substitutions: Vec<Substitution>,
@@ -712,11 +716,6 @@ fn collect_unhandled<'pr>(
         }
     }
 
-    // `source` parameter unused after switching to line_starts;
-    // keep it on the signature for API parity (caller passes it
-    // anyway, and future skip-log entries may need it for arg
-    // formatting).
-    let _ = source;
     let mut visitor = UnhandledCollector {
         patterns: Vec::new(),
         consumed,
