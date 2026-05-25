@@ -1528,13 +1528,15 @@ impl Vm {
         let proto = &self.protos[m.proto_idx];
         let has_rest = proto.rest_param.is_some();
         let has_kw_rest = proto.kw_rest_param.is_some();
+        let has_block_param = proto.block_param.is_some();
         let kw_count = proto.kw_param_defaults.len();
         // Layout of `m.params` tail:
-        //   [...positional..., rest?, ...kw_params..., kw_rest?]
+        //   [...positional..., rest?, ...kw_params..., kw_rest?, block_param?]
         let positional_max = m.params.len()
             - (if has_rest { 1 } else { 0 })
             - kw_count
-            - (if has_kw_rest { 1 } else { 0 });
+            - (if has_kw_rest { 1 } else { 0 })
+            - (if has_block_param { 1 } else { 0 });
         let required = proto.n_required_positional as usize;
         // Pop trailing Hash arg (if present and we expect kw
         // params) — those entries become keyword bindings, not
@@ -1721,6 +1723,21 @@ impl Vm {
             };
             locals[kw_rest_slot] = Value::Hash(hid);
         }
+        // `&blk` named block param: bind the caller's block (if any)
+        // into the trailing block_param slot as `Value::Block(id)`,
+        // or `Value::Nil` if no block was passed. The slot lives at
+        // the very end of `params` after kw_rest (see Proto.block_param
+        // / compile_proto for layout).
+        if has_block_param {
+            let block_slot = positional_max
+                + if has_rest { 1 } else { 0 }
+                + kw_count
+                + if has_kw_rest { 1 } else { 0 };
+            locals[block_slot] = match block {
+                Some(id) => Value::Block(id),
+                None => Value::Nil,
+            };
+        }
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
@@ -1886,6 +1903,7 @@ impl Vm {
                 rest_param: None,
                 kw_param_defaults: Vec::new(),
                 kw_rest_param: None,
+                block_param: None,
                 n_locals: 2,
                 code: vec![
                     Op::LoadLocal(0),
@@ -1960,6 +1978,7 @@ impl Vm {
                 rest_param: None,
                 kw_param_defaults: Vec::new(),
                 kw_rest_param: None,
+                block_param: None,
                 n_locals: 3,
                 code: vec![
                     Op::LoadLocal(0),                   // [outer]

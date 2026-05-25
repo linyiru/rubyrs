@@ -254,6 +254,14 @@ pub(crate) struct Proto {
     /// (after every kw_param) so the existing kw-binding loop
     /// remains contiguous.
     pub(crate) kw_rest_param: Option<String>,
+    /// `Some(name)` for `def foo(&blk)` — the block-as-data
+    /// parameter name. At call time, the BlockHandle the caller
+    /// passed (the same ObjId held by `frame.block_arg`) is bound
+    /// into the local named here as a `Value::Block`; if the
+    /// caller passed no block the slot gets `Value::Nil`. Lives
+    /// at the very end of `params` (after kw_rest if any) so the
+    /// rest/kw layout stays contiguous.
+    pub(crate) block_param: Option<String>,
     pub(crate) n_locals: u16,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.

@@ -292,7 +292,7 @@ pub(crate) fn string_call(
             let mut prev: Option<char> = None;
             for ch in a_str.chars() {
                 let in_set = match &set {
-                    Some(s) => s.iter().any(|c| *c == ch),
+                    Some(s) => s.contains(&ch),
                     None => true,
                 };
                 if in_set && Some(ch) == prev {

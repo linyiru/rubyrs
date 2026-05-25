@@ -191,3 +191,4 @@ fn run_diff(name: &str) {
 #[test] fn string_pad() { run_diff("string_pad"); }
 #[test] fn array_bsearch() { run_diff("array_bsearch"); }
 #[test] fn hash_transform() { run_diff("hash_transform"); }
+#[test] fn block_param_and_given() { run_diff("block_param_and_given"); }

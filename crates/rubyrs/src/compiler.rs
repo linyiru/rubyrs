@@ -96,6 +96,7 @@ impl ProtoBuilder {
             rest_param: None,
             kw_param_defaults: vec![],
             kw_rest_param: None,
+            block_param: None,
             n_locals: self.n_locals,
             code: self.code,
             op_spans: self.op_spans,
@@ -603,7 +604,7 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, receiver, body } => {
+        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
             // `defaults` is parallel to `params`: leading `None`s are
             // required positionals, trailing `Some(expr)`s are
             // optionals. The compile_proto_kind helper emits a
@@ -637,6 +638,12 @@ pub(crate) fn compile_expr(
                 let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
                 effective_params.push(slot_name);
             }
+            // `&blk` named block param goes at the very end, after
+            // kw_rest if any. Frame setup binds either Value::Block
+            // (if caller passed a block) or Value::Nil into this slot.
+            if let Some(bname) = block_param {
+                effective_params.push(bname.clone());
+            }
             let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
@@ -651,6 +658,9 @@ pub(crate) fn compile_expr(
             if let Some(krname) = kw_rest {
                 let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
                 protos[proto_idx].kw_rest_param = Some(slot_name);
+            }
+            if let Some(bname) = block_param {
+                protos[proto_idx].block_param = Some(bname.clone());
             }
             let name_id = interner.intern(name);
             match receiver {
