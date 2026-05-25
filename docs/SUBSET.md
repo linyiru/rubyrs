@@ -221,6 +221,21 @@ for find-any), `filter_map`, `chunk`, `zip`.
 Mutating bang forms: `sort!`, `uniq!`, `compact!`, `flatten!`,
 `reverse!`.
 
+Divergence from CRuby on `Array#take(negative)`:
+
+```ruby
+[1].take(-3)  # CRuby: raises ArgumentError
+              # rubyrs: returns [] (silent)
+```
+
+Same coalesce-rather-than-raise tendency as
+`Integer#digits(-n)` (raises ArgumentError where CRuby
+raises Math::DomainError — see above). The upstream
+ruby/spec `it` block covering this is skipped in
+[`crates/rubyrs/spec/ruby/array_take_spec.rb`](../crates/rubyrs/spec/ruby/array_take_spec.rb)
+with a comment naming the upstream expectation and pointing
+back here.
+
 ### Hash built-in methods
 
 Insertion-ordered with linear lookup (O(n) on n keys —
