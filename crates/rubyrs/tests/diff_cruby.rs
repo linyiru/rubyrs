@@ -179,3 +179,4 @@ fn run_diff(name: &str) {
 #[test] fn method_equality() { run_diff("method_equality"); }
 #[test] fn method_compose() { run_diff("method_compose"); }
 #[test] fn method_curry() { run_diff("method_curry"); }
+#[test] fn class_instance_method() { run_diff("class_instance_method"); }

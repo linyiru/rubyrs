@@ -1053,6 +1053,26 @@ impl Vm {
                     self.stack.push(Value::Bool(included));
                     return Ok(());
                 }
+                // `Class#instance_method(:sym)` — direct UnboundMethod
+                // construction. Walks the ancestor chain via
+                // `lookup_method_uncached`; NameError if the method
+                // isn't defined anywhere in the chain. Captures the
+                // receiver class (not the *defining* class) — the
+                // same approximation as `Method#unbind`.
+                ("instance_method", [Value::Sym(sid)]) => {
+                    if self.lookup_method_uncached(cls, *sid).is_none() {
+                        let mname = self.interner.resolve(*sid).to_string();
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
+                        }));
+                    }
+                    let cls_owned = cls.clone();
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls_owned, name_id: *sid });
+                    self.stack.push(Value::UnboundMethod(id));
+                    return Ok(());
+                }
                 _ => {}
             }
         }
