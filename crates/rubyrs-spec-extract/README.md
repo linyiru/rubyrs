@@ -56,10 +56,15 @@ human polish step.
 | *`it_behaves_like :shared, ...`* | *passthrough* | v0.3+ |
 | *`should_receive` / `mock(...)`* | *passthrough* | (no mock lib in micro-runner; hand-translate) |
 
-`expr`, `val`, `args`, and `BODY` come from the original
-source verbatim, so regex literals, escapes, multi-line
-method chains, multibyte characters, and inline blocks all
-preserve their original formatting.
+For the `should ==` / `should_not ==` / predicate-matcher
+rewrites, `expr`, `val`, and `args` come from the original
+source verbatim — regex literals, escapes, multi-line method
+chains, multibyte characters, and inline blocks all preserve
+their formatting exactly. The lambda-raise rewrite is the
+exception: the `-> { BODY }` shape is unwrapped and the body
+is re-emitted inside a `do ... end` block, so indentation
+shifts (the body's own multi-statement structure stays
+intact, just under different leading whitespace).
 
 ## What's deliberately deferred (v0.3+)
 

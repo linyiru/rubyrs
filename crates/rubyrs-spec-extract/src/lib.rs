@@ -140,7 +140,7 @@ impl<'pr> Visit<'pr> for SubstitutionCollector<'_> {
 
 /// `lhs.should == rhs` → `assert_eq(lhs, rhs)` (v0.1).
 fn try_should_eq(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
-    let rhs = match_eq_against(node, "should")?;
+    let rhs = match_eq_against(node, b"should")?;
     let lhs = node.receiver()?.as_call_node()?.receiver()?;
     Some(Substitution {
         start: node.location().start_offset(),
@@ -151,7 +151,7 @@ fn try_should_eq(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substi
 
 /// `lhs.should_not == rhs` → `assert_neq(lhs, rhs)` (v0.2).
 fn try_should_not_eq(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
-    let rhs = match_eq_against(node, "should_not")?;
+    let rhs = match_eq_against(node, b"should_not")?;
     let lhs = node.receiver()?.as_call_node()?.receiver()?;
     Some(Substitution {
         start: node.location().start_offset(),
@@ -166,13 +166,13 @@ fn try_should_not_eq(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Su
 /// exactly one RHS arg. Returns the RHS node on match.
 fn match_eq_against<'pr>(
     node: &ruby_prism::CallNode<'pr>,
-    recv_name: &str,
+    recv_name: &[u8],
 ) -> Option<Node<'pr>> {
-    if cid_to_string(node.name()) != "==" {
+    if !name_is(node.name(), b"==") {
         return None;
     }
     let recv_call = node.receiver()?.as_call_node()?;
-    if cid_to_string(recv_call.name()) != recv_name {
+    if !name_is(recv_call.name(), recv_name) {
         return None;
     }
     if recv_call.arguments().is_some() {
@@ -200,11 +200,11 @@ fn match_eq_against<'pr>(
 /// empty lambda (`-> {}.should.raise(X)`) produces an empty
 /// `do ... end` block which is still valid Ruby.
 fn try_lambda_raise(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
-    if cid_to_string(node.name()) != "raise" {
+    if !name_is(node.name(), b"raise") {
         return None;
     }
     let should_call = node.receiver()?.as_call_node()?;
-    if cid_to_string(should_call.name()) != "should" {
+    if !name_is(should_call.name(), b"should") {
         return None;
     }
     if should_call.arguments().is_some() {
@@ -240,17 +240,18 @@ fn try_lambda_raise(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Sub
 /// shapes: `should.empty?`, `should.equal?(other)`,
 /// `should.instance_of?(Class)`.
 fn try_predicate_matcher(source: &str, node: &ruby_prism::CallNode<'_>) -> Option<Substitution> {
-    let outer_name = cid_to_string(node.name());
     // `==` and `raise` are caught by their dedicated
     // recognisers; bail so we don't also match here.
-    if outer_name == "==" || outer_name == "raise" {
+    if name_is(node.name(), b"==") || name_is(node.name(), b"raise") {
         return None;
     }
     let recv_call = node.receiver()?.as_call_node()?;
-    let negate = match cid_to_string(recv_call.name()).as_str() {
-        "should" => false,
-        "should_not" => true,
-        _ => return None,
+    let negate = if name_is(recv_call.name(), b"should") {
+        false
+    } else if name_is(recv_call.name(), b"should_not") {
+        true
+    } else {
+        return None;
     };
     if recv_call.arguments().is_some() {
         return None;
@@ -281,8 +282,16 @@ fn try_predicate_matcher(source: &str, node: &ruby_prism::CallNode<'_>) -> Optio
     })
 }
 
-fn cid_to_string(id: ruby_prism::ConstantId<'_>) -> String {
-    String::from_utf8_lossy(id.as_slice()).into_owned()
+/// Alloc-free name comparison: each recogniser compares the
+/// call's `name()` against fixed byte literals (b"==",
+/// b"should", etc), avoiding the per-`CallNode` String alloc
+/// the previous `cid_to_string`-based approach made. Method
+/// names in Ruby are ASCII-only in practice so byte equality
+/// against UTF-8 literals is sound; a non-ASCII identifier
+/// (e.g. a Japanese-named method) simply won't match and the
+/// recogniser falls through, which is the right behaviour.
+fn name_is(id: ruby_prism::ConstantId<'_>, expected: &[u8]) -> bool {
+    id.as_slice() == expected
 }
 
 fn slice(source: &str, node: &Node<'_>) -> String {

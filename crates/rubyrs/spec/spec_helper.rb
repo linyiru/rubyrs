@@ -79,7 +79,10 @@ def assert_neq(actual, expected)
   if actual != expected
     __spec_pass("neq")
   else
-    __spec_fail("expected #{actual.inspect} to NOT equal #{expected.inspect}")
+    # Mirror assert_eq's `expected ..., got ...` ordering so
+    # the two helpers' failure output reads the same way in
+    # scanning. "expected not X" is the natural English form.
+    __spec_fail("expected not #{expected.inspect}, got #{actual.inspect}")
   end
 end
 
