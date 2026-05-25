@@ -1,6 +1,8 @@
 # method_missing dispatch microbench. Every call goes through the
 # class chain to method_missing, which echoes the symbol name back.
-# 200,000 iterations — CRuby finishes this in ~0.05s without YJIT.
+# 2,000,000 iterations — sized to amortise CRuby's ~50 ms boot so
+# the timing reflects steady-state per-call dispatch cost rather
+# than cold start. See README.md for numbers.
 
 class Ghost
   def method_missing(name)
