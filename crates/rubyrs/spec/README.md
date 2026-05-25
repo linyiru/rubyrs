@@ -31,14 +31,19 @@ spec/
     ├── string_include_spec.rb     # see TESTING.md for the
     ├── string_empty_spec.rb       # ingestion-pipeline roadmap)
     │
-    ├── method_call_spec.rb        # core/method subset
-    ├── method_compose_spec.rb     # (#>> #<< composition,
-    ├── method_curry_spec.rb       #  curry, #==, to_proc,
-    ├── method_equal_spec.rb       #  owner, receiver)
+    │ # core/method subset — each file mirrors the same-named
+    │ # upstream spec; surfaces covered are `Method#call` / `#()`,
+    │ # `#<<` / `#>>` composition, `#curry`, `#==`, `#owner`,
+    │ # `#receiver`, `#to_proc` (explicit + via `&`).
+    ├── method_call_spec.rb
+    ├── method_compose_spec.rb
+    ├── method_curry_spec.rb
+    ├── method_equal_spec.rb
     ├── method_owner_spec.rb
     ├── method_receiver_spec.rb
     ├── method_to_proc_spec.rb
-    └── unbound_method_equal_spec.rb # core/unboundmethod
+    │
+    └── unbound_method_equal_spec.rb # core/unboundmethod subset
 ```
 
 The runner is at
