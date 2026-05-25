@@ -110,7 +110,12 @@ impl FileStat {
 pub struct Report {
     pub root: PathBuf,
     pub files_scanned: u64,
-    pub files_parse_errors: Vec<PathBuf>,
+    /// Files that we could not fully process — either the filesystem
+    /// read failed (`std::fs::read` error) or Prism reported one or
+    /// more syntax errors during parse. Both end up in the same bucket
+    /// since either way the file's AST contribution is incomplete; we
+    /// don't currently distinguish.
+    pub files_with_errors: Vec<PathBuf>,
     pub total_nodes: u64,
     pub histogram: BTreeMap<String, NodeStat>,
     /// Per-method-name CallNode breakdown.
@@ -235,7 +240,7 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
         let src = match std::fs::read(&file) {
             Ok(b) => b,
             Err(_) => {
-                report.files_parse_errors.push(file);
+                report.files_with_errors.push(file);
                 continue;
             }
         };
@@ -245,7 +250,7 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
         // partial tree but record the file if it had any errors.
         let had_errors = parsed.errors().count() > 0;
         if had_errors {
-            report.files_parse_errors.push(file.clone());
+            report.files_with_errors.push(file.clone());
         }
         let rel = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
         let mut file_stat = FileStat {
@@ -416,7 +421,7 @@ pub fn render_text(report: &Report, top_missing: usize) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "## Inventory: {}", report.root.display());
     let _ = writeln!(s, "Files scanned: {}", report.files_scanned);
-    let _ = writeln!(s, "Files with parse errors: {}", report.files_parse_errors.len());
+    let _ = writeln!(s, "Files with read/parse errors: {}", report.files_with_errors.len());
     let _ = writeln!(s, "Total AST nodes: {}", report.total_nodes);
     let _ = writeln!(s, "Unique node classes: {}", report.histogram.len());
     let total = report.total_nodes.max(1) as f64;
@@ -526,6 +531,54 @@ pub fn render_text(report: &Report, top_missing: usize) -> String {
 
 // ---- Markdown output ----
 
+/// Wrap `s` in a CommonMark inline-code span, picking a backtick-run
+/// length that doesn't appear in the content. Falls back to plain
+/// text (with `|` escaped for table-cell safety) when the excerpt
+/// is empty or contains characters that can't survive an inline-code
+/// span — chiefly a literal newline, which CommonMark disallows in
+/// inline code.
+///
+/// Real triggers from existing fixtures: `XStringNode`'s first
+/// example is literally `` `pwd` `` which would close any single-
+/// backtick wrap mid-cell and break the table layout.
+fn md_inline_code(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    if s.contains('\n') || s.contains('\r') {
+        // Can't render multi-line content as inline code at all;
+        // fall back to a `|`-escaped plain cell.
+        return s
+            .replace('\\', "\\\\")
+            .replace('|', "\\|")
+            .replace('\n', " ")
+            .replace('\r', " ");
+    }
+    // Find longest run of backticks in `s`, then use a longer fence.
+    let mut longest_run = 0usize;
+    let mut current = 0usize;
+    for ch in s.chars() {
+        if ch == '`' {
+            current += 1;
+            if current > longest_run {
+                longest_run = current;
+            }
+        } else {
+            current = 0;
+        }
+    }
+    let fence = "`".repeat(longest_run + 1);
+    // Per CommonMark: if the content starts or ends with a backtick
+    // (or a space), pad with a single space on each side.
+    let needs_pad = s.starts_with('`') || s.ends_with('`') || s.starts_with(' ') || s.ends_with(' ');
+    if needs_pad {
+        format!("{fence} {s} {fence}")
+    } else {
+        format!("{fence}{s}{fence}")
+    }
+}
+
+
 /// Render a [`Report`] as GitHub-flavoured Markdown — drop straight
 /// into a PR description, ROADMAP entry, or doc.
 pub fn render_markdown(report: &Report, top: usize) -> String {
@@ -539,7 +592,7 @@ pub fn render_markdown(report: &Report, top: usize) -> String {
     let _ = writeln!(s, "| Metric | Value |");
     let _ = writeln!(s, "|---|---:|");
     let _ = writeln!(s, "| Files scanned | {} |", report.files_scanned);
-    let _ = writeln!(s, "| Files with parse errors | {} |", report.files_parse_errors.len());
+    let _ = writeln!(s, "| Files with read/parse errors | {} |", report.files_with_errors.len());
     let _ = writeln!(s, "| Total AST nodes | {} |", report.total_nodes);
     let _ = writeln!(s, "| Unique node classes | {} |", report.histogram.len());
     let _ = writeln!(
@@ -566,12 +619,8 @@ pub fn render_markdown(report: &Report, top: usize) -> String {
         let _ = writeln!(s, "| Class | Count | First example |");
         let _ = writeln!(s, "|---|---:|---|");
         for (cls, stat) in missing.iter().take(top) {
-            let ex = stat
-                .first_example
-                .as_deref()
-                .unwrap_or("")
-                .replace('|', "\\|");
-            let _ = writeln!(s, "| `{cls}` | {} | `{ex}` |", stat.count);
+            let ex = md_inline_code(stat.first_example.as_deref().unwrap_or(""));
+            let _ = writeln!(s, "| `{cls}` | {} | {ex} |", stat.count);
         }
         if missing.len() > top {
             let _ = writeln!(s, "\n_… {} more, raise `--top` to widen._", missing.len() - top);
@@ -719,7 +768,7 @@ pub fn render_json(report: &Report) -> String {
         })
         .collect();
     let parse_errors: Vec<String> = report
-        .files_parse_errors
+        .files_with_errors
         .iter()
         .map(|p| p.display().to_string())
         .collect();
@@ -728,7 +777,7 @@ pub fn render_json(report: &Report) -> String {
         "tool": "rubyrs-gapscan",
         "root": report.root.display().to_string(),
         "files_scanned": report.files_scanned,
-        "files_with_parse_errors": parse_errors,
+        "files_with_errors": parse_errors,
         "total_nodes": report.total_nodes,
         "totals": totals,
         "histogram": histogram,
@@ -756,10 +805,10 @@ pub fn parse_json(text: &str) -> Result<Report, String> {
     report.root = PathBuf::from(v["root"].as_str().unwrap_or(""));
     report.files_scanned = v["files_scanned"].as_u64().unwrap_or(0);
     report.total_nodes = v["total_nodes"].as_u64().unwrap_or(0);
-    if let Some(arr) = v["files_with_parse_errors"].as_array() {
+    if let Some(arr) = v["files_with_errors"].as_array() {
         for p in arr {
             if let Some(s) = p.as_str() {
-                report.files_parse_errors.push(PathBuf::from(s));
+                report.files_with_errors.push(PathBuf::from(s));
             }
         }
     }
@@ -939,4 +988,40 @@ pub fn unknown_classes_in(report: &Report) -> Vec<String> {
         .filter(|k| !known.contains(k.as_str()))
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod md_tests {
+    use super::md_inline_code;
+
+    #[test]
+    fn plain_excerpt_uses_single_backticks() {
+        assert_eq!(md_inline_code("foo"), "`foo`");
+    }
+
+    #[test]
+    fn excerpt_with_single_backtick_uses_double_fence() {
+        // XStringNode case from Jekyll: literal `pwd` excerpt.
+        // Wrapping in single ` would close the code span on the
+        // first inner backtick and corrupt the table cell.
+        let out = md_inline_code("`pwd`");
+        assert_eq!(out, "`` `pwd` ``");
+    }
+
+    #[test]
+    fn excerpt_with_double_backtick_uses_triple_fence() {
+        let out = md_inline_code("a``b");
+        assert!(out.starts_with("```") && out.ends_with("```"), "got {out}");
+        assert!(out.contains("a``b"));
+    }
+
+    #[test]
+    fn excerpt_with_newline_falls_back_to_escaped_plain() {
+        // Inline code can't contain a literal newline — fallback
+        // produces a plain `|`-escaped cell so the table stays valid.
+        let out = md_inline_code("line1\nline2|x");
+        assert!(!out.contains('`'));
+        assert!(!out.contains('\n'));
+        assert!(out.contains("\\|"));
+    }
 }
