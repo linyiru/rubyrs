@@ -3,8 +3,8 @@
 # spec — produced by `rubyrs-spec-extract` v0.3. 5 of 7
 # upstream `it` blocks ship (byte-identical to extractor
 # output); 2 are commented:
-#   - one fixture-class reference (`MyArray`) the
-#     micro-runner can't resolve;
+#   - one fixture-class reference (`ArraySpecs::MyArray`)
+#     the micro-runner can't resolve;
 #   - one documented divergence — see comment on the
 #     `take(-3)` block below.
 
