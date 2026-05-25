@@ -74,6 +74,14 @@ pub(crate) struct Frame {
     /// chain). `None` for blocks, toplevel `<main>`, class
     /// bodies; only methods set this.
     pub(crate) defining_class: Option<Rc<Class>>,
+    /// True for frames pushed by `Vm::invoke_block` (the frame
+    /// for a `do…end` / `{ … }` body). Used by the non-local
+    /// `return`-from-block path: when `Op::ReturnMethod` sets
+    /// `method_return`, the dispatch loops pop frames while
+    /// `is_block` is true, then pop one more frame to exit the
+    /// enclosing method. Method frames, class bodies, and the
+    /// toplevel `<main>` keep `false`.
+    pub(crate) is_block: bool,
     pub(crate) rescues: Vec<RescueHandler>,
 }
 
@@ -196,6 +204,14 @@ pub(crate) struct Vm {
     pub(crate) method_gen: u32,
     /// `Op::Break` sets this; iteration drivers check and consume.
     pub(crate) break_signaled: bool,
+    /// `Op::ReturnMethod` sets this with the value to return. Both
+    /// `dispatch` and `dispatch_until` check it at the top of every
+    /// iteration: if `Some`, they unwind frames (block frames first,
+    /// then one method frame) and push the value as the method's
+    /// return. This is CRuby's non-local-return-from-block
+    /// semantics: `return` inside a `do…end` exits the enclosing
+    /// method, not just the block.
+    pub(crate) method_return: Option<Value>,
 }
 
 /// One entry in the per-call-site inline cache.
@@ -235,6 +251,7 @@ impl Vm {
             call_caches: Vec::new(),
             method_gen: 0,
             break_signaled: false,
+            method_return: None,
         }
     }
 
@@ -441,7 +458,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(vec_nil(n_locals))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, rescues: vec![],
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, is_block: false, rescues: vec![],
         });
         self.dispatch()?;
         Ok(self.stack.pop().unwrap_or(Value::Nil))
@@ -449,6 +466,35 @@ impl Vm {
 
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
+            // Non-local return unwind. `Op::ReturnMethod` sets
+            // `method_return`; here we honour it by popping any
+            // block frames between us and the enclosing method,
+            // then popping the method frame and pushing the value
+            // as its return. Exit the whole dispatch if we
+            // unwound off the bottom of the frame stack.
+            if let Some(val) = self.method_return.take() {
+                while let Some(f) = self.frames.last() {
+                    if !f.is_block { break; }
+                    let f = self.frames.pop().unwrap();
+                    self.stack.truncate(f.base_sp);
+                }
+                if let Some(f) = self.frames.pop() {
+                    self.stack.truncate(f.base_sp);
+                    if f.is_class_body {
+                        let cls = self.class_stack.pop()
+                            .expect("ICE: class_stack empty on method-return");
+                        self.stack.push(Value::Class(cls));
+                    } else if let Some(replacement) = f.swap_return {
+                        self.stack.push(replacement);
+                    } else {
+                        self.stack.push(val);
+                    }
+                    if self.frames.is_empty() { return Ok(()); }
+                } else {
+                    return Ok(());
+                }
+                continue;
+            }
             let (proto_idx, ip) = {
                 let f = self.frames.last().expect("ICE: dispatch with empty frame stack");
                 (f.proto_idx, f.ip)
@@ -1374,7 +1420,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(locals)),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.clone(), rescues: vec![],
+            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.clone(), is_block: false, rescues: vec![],
         });
         Ok(())
     }
@@ -1408,7 +1454,8 @@ impl Vm {
             locals: captured,
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, rescues: vec![],
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
+            is_block: true, rescues: vec![],
         });
         Ok(())
     }
@@ -1532,6 +1579,7 @@ impl Vm {
         for v in snapshot {
             g.vm.invoke_block(block,vec![v.clone()])?;
             g.vm.dispatch_until(pre_frames)?;
+            if g.vm.method_return.is_some() { break; }
             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
             if g.vm.break_signaled {
                 g.vm.break_signaled = false;
@@ -1579,6 +1627,7 @@ impl Vm {
         for (k, v) in snapshot {
             g.vm.invoke_block(block,vec![k.clone(), v.clone()])?;
             g.vm.dispatch_until(pre_frames)?;
+            if g.vm.method_return.is_some() { break; }
             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
             if g.vm.break_signaled {
                 g.vm.break_signaled = false;
@@ -1639,6 +1688,7 @@ impl Vm {
         while i <= end_inc {
             g.vm.invoke_block(block,vec![Value::Int(i)])?;
             g.vm.dispatch_until(pre_frames)?;
+            if g.vm.method_return.is_some() { break; }
             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
             if g.vm.break_signaled {
                 g.vm.break_signaled = false;
@@ -1676,6 +1726,7 @@ impl Vm {
                 for v in snapshot {
                     g.vm.invoke_block(block,vec![v])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1699,6 +1750,7 @@ impl Vm {
                 for v in snapshot {
                     g.vm.invoke_block(block,vec![v])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1720,6 +1772,7 @@ impl Vm {
                 for (k, v) in snapshot {
                     g.vm.invoke_block(block,vec![k, v])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1738,6 +1791,7 @@ impl Vm {
                 while i <= stop {
                     self.invoke_block(block,vec![Value::Int(i)])?;
                     self.dispatch_until(pre_frames)?;
+                    if self.method_return.is_some() { break; }
                     let r = self.stack.pop().unwrap_or(Value::Nil);
                     if self.break_signaled {
                         self.break_signaled = false;
@@ -1757,6 +1811,7 @@ impl Vm {
                 while i >= stop {
                     self.invoke_block(block,vec![Value::Int(i)])?;
                     self.dispatch_until(pre_frames)?;
+                    if self.method_return.is_some() { break; }
                     let r = self.stack.pop().unwrap_or(Value::Nil);
                     if self.break_signaled {
                         self.break_signaled = false;
@@ -1773,6 +1828,7 @@ impl Vm {
                 for i in 0..*n {
                     self.invoke_block(block,vec![Value::Int(i)])?;
                     self.dispatch_until(pre_frames)?;
+                    if self.method_return.is_some() { break; }
                     let r = self.stack.pop().unwrap_or(Value::Nil);
                     if self.break_signaled {
                         self.break_signaled = false;
@@ -1800,6 +1856,7 @@ impl Vm {
                 while i <= end_inc {
                     g.vm.invoke_block(block,vec![Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1820,6 +1877,7 @@ impl Vm {
                 for (i, v) in snapshot.into_iter().enumerate() {
                     g.vm.invoke_block(block,vec![v, Value::Int(i as i64)])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1848,6 +1906,7 @@ impl Vm {
                 for v in snapshot {
                     g.vm.invoke_block(block, vec![v.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let key = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1887,6 +1946,7 @@ impl Vm {
                 for v in snapshot {
                     g.vm.invoke_block(block, vec![v.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let key = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1926,6 +1986,7 @@ impl Vm {
                 for v in snapshot {
                     g.vm.invoke_block(block,vec![v.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let key = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1958,6 +2019,7 @@ impl Vm {
                 for v in &snapshot[1..] {
                     g.vm.invoke_block(block,vec![acc.clone(), v.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -1979,6 +2041,7 @@ impl Vm {
                 for v in &snapshot {
                     g.vm.invoke_block(block,vec![acc.clone(), v.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -2000,6 +2063,7 @@ impl Vm {
                 for v in snapshot {
                     g.vm.invoke_block(block,vec![v])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -2030,6 +2094,7 @@ impl Vm {
                 while i <= end_inc {
                     g.vm.invoke_block(block,vec![acc.clone(), Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -2060,6 +2125,7 @@ impl Vm {
                 while i <= end_inc {
                     g.vm.invoke_block(block,vec![acc.clone(), Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -2090,6 +2156,7 @@ impl Vm {
                 while i <= end_inc {
                     g.vm.invoke_block(block,vec![Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -2146,6 +2213,7 @@ impl Vm {
                 while i <= end_inc {
                     g.vm.invoke_block(block,vec![Value::Int(i)])?;
                     g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -2164,6 +2232,12 @@ impl Vm {
     /// Run dispatch loop until the frame stack returns to `until_depth`.
     pub(crate) fn dispatch_until(&mut self, until_depth: usize) -> Result<(), Trap> {
         while self.frames.len() > until_depth {
+            // A non-local return signal means we're about to
+            // unwind past `until_depth` anyway. Exit early and
+            // let the iterator driver (our caller) propagate the
+            // signal to its own caller. Running more ops here
+            // would burn fuel inside a frame about to be discarded.
+            if self.method_return.is_some() { return Ok(()); }
             let (proto_idx, ip) = {
                 let f = self.frames.last().expect("ICE: dispatch_until no frame");
                 (f.proto_idx, f.ip)
@@ -2460,7 +2534,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, rescues: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, rescues: vec![],
                 });
             }
             Op::NewArray(n) => {
@@ -2588,6 +2662,16 @@ impl Vm {
                 }
                 if self.frames.is_empty() { return Ok(false); }
             }
+            Op::ReturnMethod => {
+                // Pop the value but don't pop the frame here —
+                // dispatch / dispatch_until's top-of-loop check
+                // sees `method_return` and unwinds the right
+                // number of frames atomically. Doing it here
+                // would skip the block frames between us and the
+                // enclosing method.
+                let v = self.stack.pop().unwrap_or(Value::Nil);
+                self.method_return = Some(v);
+            }
         }
         Ok(true)
     }
@@ -2603,12 +2687,29 @@ impl Vm {
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
         match name {
             "puts" => {
+                // CRuby's `puts` flattens arrays: each element is
+                // printed on its own line, recursively. Empty
+                // string still gets a newline (so `puts ""` and
+                // `puts` look identical). Empty array prints
+                // nothing.
+                fn puts_one(vm: &mut Vm, v: &Value) {
+                    match v {
+                        Value::Array(id) => {
+                            let snapshot: Vec<Value> = vm.heap.array(*id).clone();
+                            for item in &snapshot { puts_one(vm, item); }
+                        }
+                        _ => {
+                            let s = v.to_display(&vm.heap, &vm.interner);
+                            let _ = writeln!(vm.stdout, "{}", s);
+                        }
+                    }
+                }
                 if args.is_empty() {
                     let _ = writeln!(self.stdout);
                 } else {
                     for a in args {
-                        let s = a.to_display(&self.heap, &self.interner);
-                        let _ = writeln!(self.stdout, "{}", s);
+                        let cloned = a.clone();
+                        puts_one(self, &cloned);
                     }
                 }
                 Some(Ok(Value::Nil))

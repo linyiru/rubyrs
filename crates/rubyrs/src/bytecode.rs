@@ -90,6 +90,14 @@ pub(crate) enum Op {
     /// the block frame also pops.
     Break,
     Return,
+    /// Explicit `return val` — non-local. Unlike `Op::Return`
+    /// which pops a single frame, this signals the dispatch
+    /// loop to unwind through block frames until it reaches the
+    /// enclosing method frame, then pop that too. Implemented
+    /// via `Vm.method_return` — the op only sets the signal;
+    /// the unwind itself happens in `dispatch` / `dispatch_until`
+    /// at the top of their next loop iteration.
+    ReturnMethod,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

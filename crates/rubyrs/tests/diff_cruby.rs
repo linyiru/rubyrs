@@ -105,3 +105,4 @@ fn run_diff(name: &str) {
 #[test] fn int_bits() { run_diff("int_bits"); }
 #[test] fn enumerable_by() { run_diff("enumerable_by"); }
 #[test] fn super_call() { run_diff("super_call"); }
+#[test] fn return_nonlocal() { run_diff("return_nonlocal"); }

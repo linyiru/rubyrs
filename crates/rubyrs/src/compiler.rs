@@ -512,10 +512,26 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecvBlock(name_id, argc, cid));
             }
         }
-        Expr::Return(val) | Expr::Next(val) => {
-            // `next` exits the current block iteration; `return` exits the
-            // method/block frame. Both pop the current frame via Op::Return,
-            // which already does the right thing in our subset.
+        Expr::Return(val) => {
+            // Non-local return: unwind through any block frames to
+            // the enclosing method, popping it and using the value
+            // as the method's return. The VM handles the unwind in
+            // its dispatch loop via the `method_return` signal.
+            match val {
+                Some(e) => compile_expr(b, e, protos, interner, cc),
+                None => { b.emit(Op::LoadNil); }
+            }
+            b.emit(Op::ReturnMethod);
+            // Sentinel for stack-balance — unreachable once the
+            // method_return signal fires.
+            b.emit(Op::LoadNil);
+            b.current_span = prev_span;
+            return;
+        }
+        Expr::Next(val) => {
+            // `next [val]` — exits the current block iteration only.
+            // Op::Return pops a single frame, which from inside a
+            // block is exactly the block's frame.
             match val {
                 Some(e) => compile_expr(b, e, protos, interner, cc),
                 None => { b.emit(Op::LoadNil); }
