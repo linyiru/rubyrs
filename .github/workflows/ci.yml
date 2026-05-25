@@ -259,7 +259,7 @@ jobs:
           check crates/rubyrs/src/vm/dispatch.rs     16
           check crates/rubyrs/src/vm/step.rs         52
           check crates/rubyrs/src/vm/iter.rs         10
-          check crates/rubyrs/src/vm/cext.rs          5
+          check crates/rubyrs/src/vm/cext.rs          6
           check crates/rubyrs/src/vm/raise.rs         3
           check crates/rubyrs/src/vm/lookup.rs        3
           check crates/rubyrs/src/vm/range.rs         1

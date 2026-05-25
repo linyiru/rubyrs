@@ -371,7 +371,11 @@ impl Vm {
                     #[cfg(target_os = "wasi")]
                     {
                         // wasi: cext path is stubbed; fall back to
-                        // plain Instance allocation.
+                        // plain Instance allocation. The `alloc_func`
+                        // from the if-let binding is unused on this
+                        // target (no cext_dispatch to forward it to);
+                        // marker reference keeps -D warnings happy.
+                        let _ = alloc_func;
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
                         let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
@@ -816,14 +820,21 @@ impl Vm {
                 } else {
                     unreachable!()
                 };
-                self.maybe_gc();
-                self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::CurriedProc {
+                // Pin `recv` (the underlying BoundMethod / Proc):
+                // it was popped from the operand stack by do_call, so
+                // it has no GC root by the time maybe_gc fires. Same
+                // root-hole shape as the BoundMethod-coerce-to-Block
+                // fix in PR #45 (5874798 / 50867c5).
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(recv.clone());
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let id = g.vm.heap.alloc(HeapObj::CurriedProc {
                     underlying: recv.clone(),
                     gathered: Vec::new(),
                     target_arity,
                 });
-                self.stack.push(Value::CurriedProc(id));
+                g.vm.stack.push(Value::CurriedProc(id));
                 return Ok(());
             }
         // `cp.call(args)` — append to gathered; invoke if arity hit,
@@ -843,14 +854,24 @@ impl Vm {
                     let call_sym = self.interner.intern("call");
                     return self.do_call(call_sym, argc, false, u16::MAX);
                 }
-                self.maybe_gc();
-                self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::CurriedProc {
+                // Same pin-the-underlying pattern as the curry-on-Method
+                // branch above. `combined` may also contain heap-typed
+                // arg values that are only held in this Rust-local Vec;
+                // pinning the underlying alone is enough because the
+                // mark phase walks CurriedProc's contents only after
+                // alloc — but the new alloc's reading the SAME Vec, so
+                // we need both pinned across the maybe_gc call.
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(underlying.clone());
+                for v in &combined { g.pin(v.clone()); }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let id = g.vm.heap.alloc(HeapObj::CurriedProc {
                     underlying,
                     gathered: combined,
                     target_arity: arity,
                 });
-                self.stack.push(Value::CurriedProc(id));
+                g.vm.stack.push(Value::CurriedProc(id));
                 return Ok(());
             }
         // `m >> other` / `m << other` — function composition.
@@ -1018,23 +1039,34 @@ impl Vm {
                 // Build [[kind_sym, name_sym?], ...] array. Anonymous
                 // rest / kw_rest yields a single-element pair, matching
                 // CRuby's `[[:rest]]` / `[[:keyrest]]`.
+                //
+                // PinGuard across the whole loop so the inner-pair
+                // ObjIds in `outer` survive every maybe_gc — without
+                // this, under STRESS_GC each iteration's pair slot
+                // gets swept (no GC root: `outer` is a Rust-local
+                // Vec), the next alloc reuses it, and the final
+                // `heap.alloc(HeapObj::Array(outer))` can land on the
+                // same recycled slot — yielding a self-referencing
+                // Array whose `.inspect` recurses to stack overflow.
+                let mut g = crate::vm::PinGuard::new(self);
                 let mut outer: Vec<Value> = Vec::with_capacity(params_info.len());
                 for (kind, name_opt) in params_info {
-                    let kind_sym = self.interner.intern(kind);
+                    let kind_sym = g.vm.interner.intern(kind);
                     let mut pair = vec![Value::Sym(kind_sym)];
                     if let Some(n) = name_opt {
-                        let nsym = self.interner.intern(&n);
+                        let nsym = g.vm.interner.intern(&n);
                         pair.push(Value::Sym(nsym));
                     }
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let pid = self.heap.alloc(HeapObj::Array(pair));
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pid = g.vm.heap.alloc(HeapObj::Array(pair));
+                    g.pin(Value::Array(pid));
                     outer.push(Value::Array(pid));
                 }
-                self.maybe_gc();
-                self.check_alloc()?;
-                let aid = self.heap.alloc(HeapObj::Array(outer));
-                self.stack.push(Value::Array(aid));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let aid = g.vm.heap.alloc(HeapObj::Array(outer));
+                g.vm.stack.push(Value::Array(aid));
                 return Ok(());
             }
         if let Value::BoundMethod(bid) = &recv
