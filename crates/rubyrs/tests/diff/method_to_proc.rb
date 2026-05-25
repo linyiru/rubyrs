@@ -32,13 +32,11 @@ puts [1, 2, 3, 4].inject(0, &adder)                   # 10
 plus7 = 7.method(:+)
 puts [10, 20, 30].map(&plus7).inspect                  # [17, 27, 37]
 
-# Inside a method body — capture self.method(:foo) and use it.
-# (Explicit `self.method(:foo)` rather than bare `method(:foo)`;
-# bare-form implicit-self for `Object#method` is a deferred case,
-# tracked in SUBSET.md.)
+# Inside a method body — bare `method(:foo)` captures with the
+# surrounding frame's `self` as the receiver (implicit-self).
 class Pipeline
   def transform(arr)
-    arr.map(&self.method(:square))
+    arr.map(&method(:square))
   end
   def square(n); n * n; end
 end

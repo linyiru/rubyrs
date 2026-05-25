@@ -182,7 +182,24 @@ impl Vm {
                 self.stack.push(v);
                 return Ok(());
             }
+            // Bare `method(:foo)` — implicit-self capture. Same
+            // shape as `obj.method(:foo)` (the receiver-form arm
+            // below) but the receiver is the surrounding frame's
+            // `self_val`. Lets `arr.map(&method(:foo))` work from
+            // inside an instance method body without writing
+            // `&self.method(:foo)`.
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
+            if &*name == "method" && args.len() == 1
+                && let Value::Sym(bound_name_id) = &args[0] {
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::BoundMethod {
+                        recv: self_val.clone(),
+                        name_id: *bound_name_id,
+                    });
+                    self.stack.push(Value::BoundMethod(id));
+                    return Ok(());
+                }
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.class_of(*id);
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
