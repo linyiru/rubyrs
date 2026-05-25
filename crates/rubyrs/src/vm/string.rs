@@ -48,7 +48,16 @@ pub(crate) fn string_call(
         (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() == *b.borrow())),
         (Value::Str(a), "!=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() != *b.borrow())),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
-        (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => Some(Value::Int(a.to_string_lossy().chars().count() as i64)),
+        // PR #53 review #1: `length`/`size` return UTF-8 character
+        // count (lossy on invalid UTF-8 — non-UTF-8 bytes count as
+        // one U+FFFD char each). Matches CRuby's "length on a
+        // UTF-8-encoded String" behavior. For raw byte count, use
+        // `bytesize` (added below); for binary protocol gems the
+        // bytesize semantic is the meaningful one.
+        (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => {
+            Some(Value::Int(a.with_str_lossy(|s| s.chars().count()) as i64))
+        }
+        (Value::Str(a), "bytesize", []) => Some(Value::Int(a.borrow().len() as i64)),
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
         (Value::Str(a), "upcase", []) => Some(Value::new_str(a.to_string_lossy().to_uppercase())),
         (Value::Str(a), "downcase", []) => Some(Value::new_str(a.to_string_lossy().to_lowercase())),
@@ -128,13 +137,22 @@ pub(crate) fn string_call(
         (Value::Str(a), "strip", []) => Some(Value::new_str(a.to_string_lossy().trim().to_string())),
         (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_start().to_string())),
         (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_end().to_string())),
-        (Value::Str(a), "include?", [Value::Str(b)]) => Some(Value::Bool(a.to_string_lossy().contains(b.to_string_lossy().as_str()))),
+        // PR #53 review #3: use with_str_lossy (Cow-backed) so the
+        // valid-UTF-8 hot path is zero-alloc — only the invalid-
+        // UTF-8 branch allocates. to_string_lossy() unconditionally
+        // owns the String even when from_utf8_lossy returns
+        // Cow::Borrowed.
+        (Value::Str(a), "include?", [Value::Str(b)]) => {
+            Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.contains(sb)))))
+        }
         // Literal-substring `match?` — true iff the receiver
         // contains the argument as a substring. CRuby additionally
         // accepts a Regexp here; we only handle String, in line
         // with the rest of our regex-free subset. Calls with a
         // non-String argument fall through to NoMethodError.
-        (Value::Str(a), "match?", [Value::Str(b)]) => Some(Value::Bool(a.to_string_lossy().contains(b.to_string_lossy().as_str()))),
+        (Value::Str(a), "match?", [Value::Str(b)]) => {
+            Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.contains(sb)))))
+        }
         // String#match? with a Regex — proper regex match. Returns
         // bool without populating any match-data side state.
         (Value::Str(a), "match?", [Value::Regex(re)]) => {
@@ -658,9 +676,15 @@ impl Vm {
                 // through the Trap-to-rescue path).
                 //
                 // The mutation works because Value::Str holds an
-                // Rc<RefCell<String>>: every clone of this Value
-                // shares the same RefCell, so writes through
-                // `borrow_mut` are visible to all aliases.
+                // Rc<RStr> whose `content` is RefCell<Vec<u8>>:
+                // every clone of this Value shares the same
+                // RefCell, so writes through `borrow_mut` are
+                // visible to all aliases. Char-indexed `[]=` goes
+                // through `to_string_lossy → mutate → into_bytes`,
+                // which scrubs a previously-binary String to
+                // lossy UTF-8 (documented tradeoff — CRuby's
+                // char-index semantics aren't defined for binary
+                // content; use setbyte for byte-level writes).
                 if name == "[]=" && args.len() == 2 {
                     check_unfrozen(self)?;
                     if let (Value::Int(i), Value::Str(repl)) = (&args[0], &args[1]) {
