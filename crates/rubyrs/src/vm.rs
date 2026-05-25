@@ -4317,7 +4317,11 @@ impl Drop for FuncallCallbackGuard {
 /// `Vm::cext_require`) is itself wasi-stubbed. Without the gate the
 /// `-D dead-code` warning fires on the wasi build.
 #[cfg(not(target_os = "wasi"))]
-fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -> Value {
+fn cext_handle_to_value(
+    vm: &mut Vm,
+    state: &rubyrs_cext::CExtState,
+    h: rubyrs_cext::Value,
+) -> Value {
     match state.resolve(h) {
         rubyrs_cext::CValue::Nil => Value::Nil,
         rubyrs_cext::CValue::True => Value::Bool(true),
@@ -4337,6 +4341,49 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
         // surface as Nil for now (no Class lookup from raw name
         // outside the rubyrs::classes registry yet).
         rubyrs_cext::CValue::Class(_) => Value::Nil,
+        // Recursive translation: an Array/Hash CValue is a vector of
+        // C-side handles; build a Vec<Value> by recursing on each,
+        // then allocate on the Vm heap. PinGuard protects the
+        // children from being collected mid-build when a child's
+        // recursive allocation triggers `maybe_gc`.
+        rubyrs_cext::CValue::Array(handles) => {
+            // Snapshot the handle list — recursing borrows `state`
+            // while we mutate vm.
+            let handles = handles.clone();
+            let mut g = PinGuard::new(vm);
+            let mut elements: Vec<Value> = Vec::with_capacity(handles.len());
+            for child in &handles {
+                let v = cext_handle_to_value(g.vm, state, *child);
+                g.pin(v.clone());
+                elements.push(v);
+            }
+            g.vm.maybe_gc();
+            // Heap-cap exhaustion translates to a panic (ICE-class
+            // contract violation at spike scope; proper Trap propagation
+            // is L2.5+ work tied to making `cext_handle_to_value` return
+            // Result).
+            g.vm.check_alloc()
+                .expect("L2-3 spike: heap cap exhausted during cext Array build");
+            let id = g.vm.heap.alloc(HeapObj::Array(elements));
+            Value::Array(id)
+        }
+        rubyrs_cext::CValue::Hash(pairs) => {
+            let pairs = pairs.clone();
+            let mut g = PinGuard::new(vm);
+            let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+            for (kh, vh) in &pairs {
+                let k = cext_handle_to_value(g.vm, state, *kh);
+                g.pin(k.clone());
+                let v = cext_handle_to_value(g.vm, state, *vh);
+                g.pin(v.clone());
+                entries.push((k, v));
+            }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()
+                .expect("L2-3 spike: heap cap exhausted during cext Hash build");
+            let id = g.vm.heap.alloc(HeapObj::Hash(entries));
+            Value::Hash(id)
+        }
     }
 }
 
@@ -4348,13 +4395,43 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
 /// matching ABI surface (`rb_sym_new`, `rb_class_new`, heap-handle
 /// translation) lands.
 #[cfg(not(target_os = "wasi"))]
-fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext::CValue, Trap> {
+fn cext_value_to_cvalue(
+    vm: &Vm,
+    name: &str,
+    idx: usize,
+    v: &Value,
+) -> Result<rubyrs_cext::CValue, Trap> {
     Ok(match v {
         Value::Nil => rubyrs_cext::CValue::Nil,
         Value::Bool(true) => rubyrs_cext::CValue::True,
         Value::Bool(false) => rubyrs_cext::CValue::False,
         Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.borrow().as_bytes()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
+        // Array/Hash crossing Ruby → C: build a CValue::Array/Hash
+        // whose elements are FRESH handles interned into the topmost
+        // CExtState. Recurses on contained Values.
+        Value::Array(id) => {
+            let elements = vm.heap.array(*id).clone();
+            let mut handles: Vec<rubyrs_cext::Value> = Vec::with_capacity(elements.len());
+            for elem in &elements {
+                let cv = cext_value_to_cvalue(vm, name, idx, elem)?;
+                handles.push(rubyrs_cext::with_state(|st| st.intern(cv)));
+            }
+            rubyrs_cext::CValue::Array(handles)
+        }
+        Value::Hash(id) => {
+            let pairs = vm.heap.hash(*id).clone();
+            let mut pairs_out: Vec<(rubyrs_cext::Value, rubyrs_cext::Value)> =
+                Vec::with_capacity(pairs.len());
+            for (k, v) in &pairs {
+                let kc = cext_value_to_cvalue(vm, name, idx, k)?;
+                let vc = cext_value_to_cvalue(vm, name, idx, v)?;
+                let kh = rubyrs_cext::with_state(|st| st.intern(kc));
+                let vh = rubyrs_cext::with_state(|st| st.intern(vc));
+                pairs_out.push((kh, vh));
+            }
+            rubyrs_cext::CValue::Hash(pairs_out)
+        }
         other => {
             return Err(Trap::new(RubyError::ArgumentError {
                 msg: format!(
@@ -4409,34 +4486,41 @@ fn cext_dispatch(
         }));
     }
 
+    // SAFETY: `current_vm_ptr()` returns the same Vm pointer that
+    // `do_call` stashed before invoking us; it stays valid until
+    // `do_call` returns. The closure captures the pointer by value
+    // so subsequent host_fn invocations don't have to re-stash it
+    // (they will anyway, with the same value).
+    //
+    // Check the invariant BEFORE pushing any cext state on the
+    // thread-local stacks — if this assert ever fires, no STATE or
+    // callback gets leaked to corrupt the next cext call. Moved out
+    // of the unsafe block so it sequences before arg translation
+    // (which now needs `&Vm` for Array/Hash heap reads).
+    let vm_ptr = current_vm_ptr();
+    assert!(
+        !vm_ptr.is_null(),
+        "ICE: cext_dispatch reached with null CURRENT_VM_PTR; \
+         host did not set it before calling host fn"
+    );
+
     // Translate args while the *previous* state (if any) is still
     // torn down. Errors must abort before we `enter()` a new state.
-    let cargs: Vec<rubyrs_cext::CValue> = args
-        .iter()
-        .enumerate()
-        .map(|(i, v)| cext_value_to_cvalue(name, i, v))
-        .collect::<Result<_, _>>()?;
+    // SAFETY: vm_ptr was just validated above; the &Vm here is
+    // read-only and time-disjoint from the &mut Vm uses below.
+    let cargs: Vec<rubyrs_cext::CValue> = {
+        let vm: &Vm = unsafe { &*vm_ptr };
+        args.iter()
+            .enumerate()
+            .map(|(i, v)| cext_value_to_cvalue(vm, name, i, v))
+            .collect::<Result<_, _>>()?
+    };
 
     // SAFETY: we transmute `OpaqueFn` (zero-arg) to an arity-specific
     // signature with VALUE-shaped args. The original function was
     // registered with that exact signature by the C ext; we just
     // recovered it through the `ANYARGS` convention.
     unsafe {
-        // SAFETY: `current_vm_ptr()` returns the same Vm pointer that
-        // `do_call` stashed before invoking us; it stays valid until
-        // `do_call` returns. The closure captures the pointer by
-        // value so subsequent host_fn invocations don't have to
-        // re-stash it (they will anyway, with the same value).
-        //
-        // Check the invariant BEFORE pushing any cext state on the
-        // thread-local stacks — if this assert ever fires, no STATE
-        // or callback gets leaked to corrupt the next cext call.
-        let vm_ptr = current_vm_ptr();
-        assert!(
-            !vm_ptr.is_null(),
-            "ICE: cext_dispatch reached with null CURRENT_VM_PTR; \
-             host did not set it before calling host fn"
-        );
 
         // From here on, every push has a matching RAII guard. A panic
         // (or any future early-return) will unwind through these and
@@ -4548,7 +4632,11 @@ fn cext_dispatch(
                 msg: format!("C ext `{}' panicked: {}", name, panic_msg),
             })
         })?;
-        Ok(cext_handle_to_value(&st, ret_handle))
+        // Re-deref vm_ptr for the result translation (Array/Hash
+        // returns need `&mut Vm` to allocate on the heap). Time-
+        // disjoint from any earlier &Vm uses in this function.
+        let vm: &mut Vm = &mut *vm_ptr;
+        Ok(cext_handle_to_value(vm, &st, ret_handle))
     }
 }
 
@@ -4570,32 +4658,38 @@ fn cext_funcall_to_vm(
     method: &str,
     arg_handles: &[rubyrs_cext::Value],
 ) -> rubyrs_cext::Value {
-    // Translate handles → Values via the topmost CExtState.
-    let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(st, recv));
-    let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
-        arg_handles
-            .iter()
-            .map(|h| cext_handle_to_value(st, *h))
-            .collect()
-    });
-
     // SAFETY: see CURRENT_VM_PTR doc — vm_ptr is valid for the life
-    // of the surrounding cext_dispatch call.
-    let result = unsafe {
+    // of the surrounding cext_dispatch call. We deref the same
+    // pointer twice in this function: first as `&mut Vm` for the
+    // recv/arg handle → Value translation (Array/Hash recursion
+    // allocates on the Vm heap) AND the cext_invoke_method call;
+    // then later (after the inner dispatch returns) for the result
+    // Value → handle translation needing `&Vm` for heap reads. The
+    // two are time-disjoint within this function body.
+    let (result, vm_for_result) = unsafe {
         let vm = &mut *vm_ptr;
-        match vm.cext_invoke_method(recv_v, method, arg_vs) {
+        let recv_v = rubyrs_cext::with_state(|st| cext_handle_to_value(vm, st, recv));
+        let arg_vs: Vec<Value> = rubyrs_cext::with_state(|st| {
+            arg_handles
+                .iter()
+                .map(|h| cext_handle_to_value(vm, st, *h))
+                .collect()
+        });
+        let result = match vm.cext_invoke_method(recv_v, method, arg_vs) {
             Ok(v) => v,
             // Spike: propagating Trap back through the C-ABI boundary
             // needs `rb_raise` / longjmp coordination (Level 3+).
             // For now collapse to Nil so the C side gets a defined
             // return without aborting.
             Err(_trap) => Value::Nil,
-        }
+        };
+        (result, &*vm_ptr)
     };
 
     // Translate result back to a handle in the topmost CExtState.
+    // `cext_value_to_cvalue` only needs `&Vm` (read-only heap walk).
     rubyrs_cext::with_state(|st| {
-        match cext_value_to_cvalue("rb_funcallv:result", 0, &result) {
+        match cext_value_to_cvalue(vm_for_result, "rb_funcallv:result", 0, &result) {
             Ok(cv) => st.intern(cv),
             Err(_) => rubyrs_cext::Qnil,
         }

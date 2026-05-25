@@ -217,6 +217,41 @@ static inline VALUE rb_funcall(VALUE recv, ID mid, int n, ...) {
     return rb_funcallv(recv, mid, n, argv);
 }
 
+/* ===== Array C ABI (Level 2-3) ===== */
+
+/* Allocate a new empty Array. */
+VALUE rb_ary_new(void);
+
+/* Allocate a new empty Array with a capacity hint. Hint is advisory;
+ * spike accepts and may pre-reserve internal storage but does not
+ * enforce. CRuby compat: extensions also call `rb_ary_new2`. */
+VALUE rb_ary_new_capa(long capa);
+#define rb_ary_new2 rb_ary_new_capa
+
+/* Append `v` to `ary`. Returns `ary` for chaining. */
+VALUE rb_ary_push(VALUE ary, VALUE v);
+
+/* Read element at signed `idx` (negative = from end). Out-of-range
+ * returns Qnil, matching CRuby's `Array#[]`. */
+VALUE rb_ary_entry(VALUE ary, long idx);
+
+/* Array length in elements. */
+long RARRAY_LEN(VALUE ary);
+
+/* ===== Hash C ABI (Level 2-3) ===== */
+
+/* Allocate a new empty Hash. */
+VALUE rb_hash_new(void);
+
+/* Set `h[key] = value`. Existing key is overwritten; new key is
+ * appended (preserves insertion order, Ruby 1.9+ semantics).
+ * Returns `value`. */
+VALUE rb_hash_aset(VALUE h, VALUE key, VALUE value);
+
+/* Get `h[key]`. Returns Qnil if key is absent (spike: no support for
+ * Hash default proc / value). */
+VALUE rb_hash_aref(VALUE h, VALUE key);
+
 #ifdef __cplusplus
 }
 #endif

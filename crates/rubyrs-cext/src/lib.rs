@@ -127,6 +127,14 @@ pub enum CValue {
     /// from `rb_define_module` / `rb_define_class_under`; consumed
     /// by `rb_define_singleton_method`.
     Class(String),
+    /// An Array of handles. C extensions build these via `rb_ary_new`
+    /// + `rb_ary_push`; the host's `cext_handle_to_value` translates
+    /// recursively into a `Value::Array` on the Vm heap on return.
+    Array(Vec<Value>),
+    /// A Hash of (key handle, value handle) pairs, ordered (Ruby
+    /// semantics since 1.9). Built via `rb_hash_new` + `rb_hash_aset`;
+    /// translated to `Value::Hash` on the Vm heap on return.
+    Hash(Vec<(Value, Value)>),
 }
 
 impl CValue {
@@ -226,6 +234,14 @@ impl CExtState {
     pub fn resolve(&self, h: Value) -> &CValue {
         self.values
             .get(h as usize)
+            .expect("ICE: cext handle out of range; C ext leaked a stale VALUE")
+    }
+
+    /// Mutable resolve, for in-place mutation of `CValue::Array` /
+    /// `CValue::Hash` via `rb_ary_push` / `rb_hash_aset`.
+    pub fn resolve_mut(&mut self, h: Value) -> &mut CValue {
+        self.values
+            .get_mut(h as usize)
             .expect("ICE: cext handle out of range; C ext leaked a stale VALUE")
     }
 }
@@ -610,6 +626,143 @@ pub unsafe extern "C" fn rb_define_singleton_method(
             arity: arity as i32,
         });
     });
+}
+
+// ===== Array C ABI (Level 2-3) =====
+
+/// Allocate an empty Array and return its handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_new() -> Value {
+    with_state(|st| st.intern(CValue::Array(Vec::new())))
+}
+
+/// Allocate an empty Array with a capacity hint. We ignore the hint
+/// in spike scope (the underlying `Vec` will grow on its own); the
+/// signature is provided so C extensions using `rb_ary_new_capa` /
+/// `rb_ary_new2` compile unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_new_capa(capa: c_long) -> Value {
+    with_state(|st| {
+        st.intern(CValue::Array(Vec::with_capacity(capa.max(0) as usize)))
+    })
+}
+
+/// Append `v` to the Array `ary`. Returns `ary` for chaining,
+/// matching CRuby.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_push(ary: Value, v: Value) -> Value {
+    with_state(|st| match st.resolve_mut(ary) {
+        CValue::Array(elems) => {
+            elems.push(v);
+            ary
+        }
+        other => panic!(
+            "ICE: rb_ary_push on non-Array CValue: {:?}",
+            std::mem::discriminant(other)
+        ),
+    })
+}
+
+/// Read element at index `idx`. Negative indices count from the end
+/// (CRuby semantics). Returns [`Qnil`] for out-of-range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_entry(ary: Value, idx: c_long) -> Value {
+    with_state(|st| match st.resolve(ary) {
+        CValue::Array(elems) => {
+            let len = elems.len() as c_long;
+            let resolved = if idx < 0 { idx + len } else { idx };
+            if resolved < 0 || resolved >= len {
+                Qnil
+            } else {
+                elems[resolved as usize]
+            }
+        }
+        _ => Qnil,
+    })
+}
+
+/// Length of the Array in elements.
+#[unsafe(no_mangle)]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn RARRAY_LEN(ary: Value) -> c_long {
+    with_state(|st| match st.resolve(ary) {
+        CValue::Array(elems) => elems.len() as c_long,
+        _ => 0,
+    })
+}
+
+// ===== Hash C ABI (Level 2-3) =====
+
+/// Allocate an empty Hash and return its handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_new() -> Value {
+    with_state(|st| st.intern(CValue::Hash(Vec::new())))
+}
+
+/// Set `h[key] = value`. If `key` is already present, replace its
+/// value (matching CRuby Hash semantics). Returns `value`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_aset(h: Value, key: Value, value: Value) -> Value {
+    with_state(|st| {
+        // Lift the existing-key check out of the borrow so we can mutate.
+        let existing_idx = if let CValue::Hash(pairs) = st.resolve(h) {
+            pairs
+                .iter()
+                .position(|(k, _)| cvalue_eq(st, *k, key))
+        } else {
+            None
+        };
+        match st.resolve_mut(h) {
+            CValue::Hash(pairs) => {
+                if let Some(i) = existing_idx {
+                    pairs[i].1 = value;
+                } else {
+                    pairs.push((key, value));
+                }
+            }
+            other => panic!(
+                "ICE: rb_hash_aset on non-Hash CValue: {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        value
+    })
+}
+
+/// Get `h[key]`. Returns [`Qnil`] for missing keys (CRuby returns
+/// the Hash's default; spike just uses Nil).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_aref(h: Value, key: Value) -> Value {
+    with_state(|st| {
+        if let CValue::Hash(pairs) = st.resolve(h) {
+            for (k, v) in pairs {
+                if cvalue_eq(st, *k, key) {
+                    return *v;
+                }
+            }
+        }
+        Qnil
+    })
+}
+
+/// Shallow CValue equality for Hash key lookup. Compares by handle
+/// identity OR by primitive equality for the variants where two
+/// distinct handles can hold equal values (Nil/Bool/Str/Int).
+/// Class/Array/Hash variants compare by handle only — matching
+/// CRuby's `eql?` for those types being effectively reference
+/// equality unless overridden, which spike doesn't model.
+fn cvalue_eq(st: &CExtState, a: Value, b: Value) -> bool {
+    if a == b {
+        return true;
+    }
+    match (st.resolve(a), st.resolve(b)) {
+        (CValue::Nil, CValue::Nil) => true,
+        (CValue::True, CValue::True) => true,
+        (CValue::False, CValue::False) => true,
+        (CValue::Str(x), CValue::Str(y)) => x == y,
+        (CValue::Int(x), CValue::Int(y)) => x == y,
+        _ => false,
+    }
 }
 
 // ===== Intern table for ID (thread-local; see `pub type ID` docs) =====
