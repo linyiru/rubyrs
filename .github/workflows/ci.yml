@@ -74,12 +74,14 @@ jobs:
           bash crates/rubyrs/examples/self-cext/build.sh
           bash crates/rubyrs/examples/callback-cext/build.sh
           bash crates/rubyrs/examples/raise-cext/build.sh
+          bash crates/rubyrs/examples/counter-cext/build.sh
           ext=$([ "$(uname -s)" = "Darwin" ] && echo bundle || echo so)
           test -f "crates/rubyrs/examples/hello-cext/hello.$ext"
           test -f "crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.$ext"
           test -f "crates/rubyrs/examples/self-cext/self_test.$ext"
           test -f "crates/rubyrs/examples/callback-cext/callback_ext.$ext"
           test -f "crates/rubyrs/examples/raise-cext/raise_ext.$ext"
+          test -f "crates/rubyrs/examples/counter-cext/counter_ext.$ext"
 
   wasm:
     name: Build (wasm32-wasip1)
@@ -207,8 +209,21 @@ jobs:
           # added new ICE-class panics in arg-binding paths. Master
           # shipped these without bumping; PR #14 picks them up via
           # the merge-result count.
-          check crates/rubyrs/src/vm.rs       70
-          check crates/rubyrs/src/heap.rs     10
+          #
+          # Bumped 70 → 76 by master commits between PR #14 merge
+          # and the L3-B rebase point (Hash#dig / Array#dig,
+          # Array#flat_map / each_slice / each_cons / chunk,
+          # Object#tap / #then / #yield_self, kernel.rs extract,
+          # ternary regression coverage). +6 in aggregate, all
+          # ICE-class in dispatch / built-in implementations.
+          # Master shipped red on its own CI without bumping.
+          check crates/rubyrs/src/vm.rs       76
+          # Bumped 10 → 12 by Spike L3-B: heap.rs gains the
+          # `typed_data(id)` and `class_of(id)` accessors that
+          # `panic!("ICE: ...")` on slot-type mismatch — same
+          # ICE-class invariant pattern as the existing
+          # `instance(id)` etc. accessors.
+          check crates/rubyrs/src/heap.rs     12
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-

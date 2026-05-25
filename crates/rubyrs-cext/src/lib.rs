@@ -140,6 +140,15 @@ pub enum CValue {
     /// semantics since 1.9). Built via `rb_hash_new` + `rb_hash_aset`;
     /// translated to `Value::Hash` on the Vm heap on return.
     Hash(Vec<(Value, Value)>),
+    /// Spike L3-B: an already-allocated Vm-heap Object reference.
+    /// Produced by `rb_data_typed_object_wrap`'s callback (which
+    /// allocates `HeapObj::TypedData` eagerly so the C ext can pass
+    /// the handle into nested `rb_funcall` etc. mid-call without
+    /// the cext_handle_to_value translator needing to alloc at
+    /// return time). `inner` is the raw `ObjId.0` (kept as plain
+    /// u32 because rubyrs-cext doesn't import the main crate's
+    /// ObjId type — single source of truth lives on the host side).
+    HeapRef(u32),
 }
 
 impl CValue {
@@ -331,6 +340,58 @@ pub fn pop_funcall_callback() {
         let _ = c.borrow_mut()
             .pop()
             .expect("ICE: pop_funcall_callback without matching push");
+    });
+}
+
+// === Spike L3-B: TypedData callbacks ===
+//
+// `rb_data_typed_object_wrap(klass, data, type)` and
+// `rb_check_typeddata(obj, type)` both need to reach into the host
+// Vm to allocate / look up `HeapObj::TypedData` slots. The cext
+// crate can't depend on vm.rs, so vm::cext_dispatch installs
+// closures here at call entry (mirroring FUNCALL_CB) that close
+// over a `*mut Vm`.
+
+/// Wrap callback. Inputs: klass handle, raw C data pointer, raw
+/// type-descriptor pointer (identity-compared by `rb_check_typeddata`),
+/// optional `dfree` fn pointer extracted from the rb_data_type_t.
+/// Output: a handle interned into the topmost CExtState that
+/// resolves at cext-return time to a Vm `Value::Object(typed_data_id)`.
+pub type TypedDataWrapCallback = Box<dyn Fn(
+    Value,
+    *mut std::ffi::c_void,
+    *const std::ffi::c_void,
+    Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+) -> Value>;
+
+/// Type-check callback. Inputs: the TypedData handle, the type
+/// descriptor the C extension expects. Output: the raw data
+/// pointer (CRuby semantics: pointer-identity check; mismatch
+/// raises TypeError, but the spike collapses to a panic — TypeError
+/// raise wiring is L3-B.1 follow-up).
+pub type TypedDataCheckCallback = Box<dyn Fn(Value, *const std::ffi::c_void) -> *mut std::ffi::c_void>;
+
+thread_local! {
+    static TYPED_DATA_WRAP_CB: RefCell<Vec<TypedDataWrapCallback>> = const { RefCell::new(Vec::new()) };
+    static TYPED_DATA_CHECK_CB: RefCell<Vec<TypedDataCheckCallback>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn push_typed_data_wrap_callback(cb: TypedDataWrapCallback) {
+    TYPED_DATA_WRAP_CB.with(|c| c.borrow_mut().push(cb));
+}
+pub fn pop_typed_data_wrap_callback() {
+    TYPED_DATA_WRAP_CB.with(|c| {
+        let _ = c.borrow_mut().pop()
+            .expect("ICE: pop_typed_data_wrap_callback without matching push");
+    });
+}
+pub fn push_typed_data_check_callback(cb: TypedDataCheckCallback) {
+    TYPED_DATA_CHECK_CB.with(|c| c.borrow_mut().push(cb));
+}
+pub fn pop_typed_data_check_callback() {
+    TYPED_DATA_CHECK_CB.with(|c| {
+        let _ = c.borrow_mut().pop()
+            .expect("ICE: pop_typed_data_check_callback without matching push");
     });
 }
 
@@ -587,7 +648,19 @@ pub unsafe extern "C" fn rb_define_class_under(
                 other
             ),
         };
-        let joined = format!("{}::{}", parent_name, leaf);
+        // CRuby special case: when `parent` is `Object` (the root
+        // class), the new class is registered as a TOP-LEVEL
+        // constant `leaf`, not `Object::leaf`. Real ruby.h does
+        // this via `rb_define_class_under(rb_cObject, ...)` being
+        // semantically `rb_define_class(...)`. Without this, a
+        // cext doing `rb_define_class_under(rb_cObject, "Counter", ...)`
+        // would land as `Object::Counter` and `Counter.foo` from
+        // Ruby would NameError.
+        let joined = if parent_name == "Object" {
+            leaf.clone()
+        } else {
+            format!("{}::{}", parent_name, leaf)
+        };
         st.registered_classes.push(CExtClassReg {
             joined_name: joined.clone(),
         });
@@ -934,5 +1007,111 @@ pub unsafe extern "C" fn rb_funcallv(
             .last()
             .expect("ICE: rb_funcallv called outside an active cext dispatch");
         cb(recv, &method, &args)
+    })
+}
+
+// ===== TypedData ABI (Spike L3-B) =====
+
+/// Function pointers stashed inside `rb_data_type_t::function`.
+/// Matches CRuby's layout one-to-one so a cext written against
+/// ruby.h can declare a static `rb_data_type_t` with no per-host
+/// adjustments.
+///
+/// `dmark` is parsed but unused in the spike (TypedData objects
+/// holding Ruby refs is L3-B.1 follow-up — requires stable handle
+/// space + a GC mark-worklist hook). `dsize` is parsed but unused
+/// (used by ObjectSpace memory accounting in CRuby; not load-bearing).
+// Names match `ruby.h` exactly so cexts written against CRuby
+// don't need a layer of `typedef` aliases. `non_camel_case_types`
+// would otherwise fail `-D warnings` (review #4).
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub struct rb_data_type_function_t {
+    pub dmark: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    pub dfree: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    pub dsize: Option<unsafe extern "C" fn(*const std::ffi::c_void) -> usize>,
+    /// CRuby reserves two slots here for future expansion (dcompact /
+    /// dreference). Match the layout so cexts declaring this struct
+    /// from ruby.h get the right padding.
+    pub reserved: [*const std::ffi::c_void; 2],
+}
+
+/// The TypedData type descriptor. C extensions declare ONE static
+/// instance per wrapped C type, e.g.
+///
+/// ```c
+/// static const rb_data_type_t counter_type = {
+///     "Counter",
+///     { NULL, counter_free, NULL, { NULL, NULL } },
+///     NULL, NULL, 0,
+/// };
+/// ```
+///
+/// The host treats descriptor identity (pointer equality) as the
+/// type check — same as CRuby. Subtype-via-`parent` isn't honoured
+/// in the spike; mismatch panics rather than walks the parent chain.
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub struct rb_data_type_t {
+    pub wrap_struct_name: *const std::ffi::c_char,
+    pub function: rb_data_type_function_t,
+    pub parent: *const rb_data_type_t,
+    pub data: *const std::ffi::c_void,
+    pub flags: Value,
+}
+
+/// Wrap an arbitrary C pointer in a Ruby Object of class `klass`,
+/// using `type_ptr` as the descriptor. The host allocates a fresh
+/// `HeapObj::TypedData` slot whose `dfree` is extracted from
+/// `(*type_ptr).function.dfree`; when the slot is swept, that
+/// dfree fires on the data pointer.
+///
+/// # Safety
+///
+/// `klass` must resolve to a Class handle in the current CExtState
+/// (returned by `rb_define_class_under` etc.). `type_ptr` must be a
+/// valid static `rb_data_type_t` whose pointer remains live for the
+/// lifetime of every wrapped object (CRuby semantics — descriptors
+/// are typically `const static`). `data` ownership transfers to the
+/// host; the dfree callback is what releases it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_data_typed_object_wrap(
+    klass: Value,
+    data: *mut std::ffi::c_void,
+    type_ptr: *const rb_data_type_t,
+) -> Value {
+    let dfree = if type_ptr.is_null() {
+        None
+    } else {
+        // SAFETY: caller's contract — type_ptr is a valid static.
+        unsafe { (*type_ptr).function.dfree }
+    };
+    TYPED_DATA_WRAP_CB.with(|c| {
+        let cb = c.borrow();
+        let cb = cb.last().expect(
+            "ICE: rb_data_typed_object_wrap called outside an active cext dispatch",
+        );
+        cb(klass, data, type_ptr as *const std::ffi::c_void, dfree)
+    })
+}
+
+/// Type-check + extract pattern. Returns the raw data pointer if
+/// `obj` is a TypedData wrapped with EXACTLY `type_ptr` (pointer
+/// identity, mirroring CRuby's check); panics otherwise.
+///
+/// The CRuby-shape `TypedData_Get_Struct` macro in `ruby.h`
+/// wraps this and casts the returned pointer to the C ext's
+/// concrete struct type.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_check_typeddata(
+    obj: Value,
+    type_ptr: *const rb_data_type_t,
+) -> *mut std::ffi::c_void {
+    TYPED_DATA_CHECK_CB.with(|c| {
+        let cb = c.borrow();
+        let cb = cb.last().expect(
+            "ICE: rb_check_typeddata called outside an active cext dispatch",
+        );
+        cb(obj, type_ptr as *const std::ffi::c_void)
     })
 }

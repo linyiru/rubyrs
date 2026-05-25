@@ -8,8 +8,6 @@ use std::collections::HashMap;
 use std::env;
 use std::rc::Rc;
 
-use std::io::Write;
-
 use crate::bytecode::{BinOpKind, Op, Proto};
 use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::heap::{Heap, HeapObj};
@@ -446,7 +444,7 @@ impl Vm {
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect"),
             Value::Class(_) => matches!(name, "new" | "name"),
             Value::Object(id) => {
-                let cls = self.heap.instance(*id).class.clone();
+                let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
             }
             Value::Block(_) => matches!(name, "call"),
@@ -476,7 +474,7 @@ impl Vm {
             Value::Block(_) => "Proc",
             Value::Class(_) => "Class",
             Value::Regex(_) => "Regexp",
-            Value::Object(id) => return Value::Class(self.heap.instance(*id).class.clone()),
+            Value::Object(id) => return Value::Class(self.heap.class_of(*id)),
         };
         let sym = self.interner.intern(name);
         match self.classes.get(&sym) {
@@ -731,7 +729,7 @@ impl Vm {
         block: Option<ObjId>,
     ) -> Result<bool, Trap> {
         let cls = match recv {
-            Value::Object(id) => self.heap.instance(*id).class.clone(),
+            Value::Object(id) => self.heap.class_of(*id),
             _ => return Ok(false),
         };
         let mm_id = self.interner.intern("method_missing");
@@ -779,7 +777,7 @@ impl Vm {
             }
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
             if let Value::Object(id) = &self_val {
-                let cls = self.heap.instance(*id).class.clone();
+                let cls = self.heap.class_of(*id);
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                     self.invoke_method(m, self_val.clone(), args)?;
                     return Ok(());
@@ -913,7 +911,7 @@ impl Vm {
         }
 
         if let Value::Object(id) = &recv {
-            let cls = self.heap.instance(*id).class.clone();
+            let cls = self.heap.class_of(*id);
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 // Private methods cannot be invoked with an
                 // explicit receiver. CRuby additionally allows
@@ -1112,7 +1110,7 @@ impl Vm {
                     // built-in receivers, look up the stub class
                     // by interned type name.
                     let start: Option<Rc<Class>> = match arg {
-                        Value::Object(id) => Some(self.heap.instance(*id).class.clone()),
+                        Value::Object(id) => Some(self.heap.class_of(*id)),
                         _ => {
                             let class_val = self.class_of(arg);
                             if let Value::Class(c) = class_val { Some(c) } else { None }
@@ -1303,7 +1301,7 @@ impl Vm {
         // Resolve the raised value's class once up front; the unwind loop
         // may probe many handlers before finding (or not finding) a match.
         let exc_class: Option<Rc<Class>> = match &exc {
-            Value::Object(id) => Some(self.heap.instance(*id).class.clone()),
+            Value::Object(id) => Some(self.heap.class_of(*id)),
             _ => None,
         };
         loop {
@@ -1367,7 +1365,8 @@ impl Vm {
                 // `RubyError::Uncaught { class_name, message }` and
                 // decide what to do.
                 let class_name = match &exc {
-                    Value::Object(id) => self.heap.instance(*id).class.name.clone(),
+                    // class_of handles both Instance and TypedData (review #1).
+                    Value::Object(id) => self.heap.class_of(*id).name.clone(),
                     _ => exc.type_name().to_string(),
                 };
                 let message = match &exc {
@@ -1432,7 +1431,20 @@ impl Vm {
                 for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
             }
         }
-        self.heap.collect(&roots);
+        let pending_frees = self.heap.collect(&roots);
+        // Run TypedData dfree callbacks AFTER `collect` has
+        // returned and the &mut Heap borrow is released (review #2
+        // on PR #19). Conservative shape — even though
+        // well-behaved cexts shouldn't re-enter the VM from dfree,
+        // this avoids the aliasing footgun if one ever does.
+        for (f, p) in pending_frees {
+            // SAFETY: `f` and `p` originate from a TypedData slot
+            // we just swept (the slot was unreachable from any GC
+            // root, so the cext can't observe `p` again). The
+            // cext's contract for `dfree` is to release ownership
+            // of `p` — exactly what we want here.
+            unsafe { f(p); }
+        }
     }
 
     pub(crate) fn invoke_method(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>) -> Result<(), Trap> {
@@ -1481,7 +1493,7 @@ impl Vm {
         // Value::Object can have user methods; other receivers
         // would have been resolved by value_cmp_v above.
         if let Value::Object(id) = a {
-            let cls = self.heap.instance(*id).class.clone();
+            let cls = self.heap.class_of(*id);
             let spaceship = self.interner.intern("<=>");
             if let Some(m) = self.lookup_method_uncached(&cls, spaceship) {
                 let pre_frames = self.frames.len();
@@ -1810,7 +1822,7 @@ impl Vm {
             }
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             if let Value::Object(id) = &self_val {
-                let cls = self.heap.instance(*id).class.clone();
+                let cls = self.heap.class_of(*id);
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                     self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
                     return Ok(());
@@ -1856,7 +1868,7 @@ impl Vm {
             }
         }
         if let Value::Object(id) = &recv {
-            let cls = self.heap.instance(*id).class.clone();
+            let cls = self.heap.class_of(*id);
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 self.invoke_method_with_block(m, recv.clone(), args, Some(block))?;
                 return Ok(());
@@ -3986,6 +3998,33 @@ impl Drop for FuncallCallbackGuard {
     }
 }
 
+/// L3-B RAII guard around the TypedData wrap + check callbacks.
+/// Always pops both on `Drop` (panic-safe, mirrors
+/// [`FuncallCallbackGuard`]).
+#[cfg(not(target_os = "wasi"))]
+struct TypedDataCallbackGuard;
+
+#[cfg(not(target_os = "wasi"))]
+impl TypedDataCallbackGuard {
+    fn install(
+        wrap: rubyrs_cext::TypedDataWrapCallback,
+        check: rubyrs_cext::TypedDataCheckCallback,
+    ) -> Self {
+        rubyrs_cext::push_typed_data_wrap_callback(wrap);
+        rubyrs_cext::push_typed_data_check_callback(check);
+        Self
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl Drop for TypedDataCallbackGuard {
+    fn drop(&mut self) {
+        // Pop in reverse install order to keep the stacks balanced.
+        rubyrs_cext::pop_typed_data_check_callback();
+        rubyrs_cext::pop_typed_data_wrap_callback();
+    }
+}
+
 /// Translate a C-side opaque handle back into a `Value`. Currently
 /// covers exactly the `CValue` variants the spike supports.
 ///
@@ -4087,6 +4126,12 @@ fn cext_handle_to_value_d(
             let id = g.vm.heap.alloc(HeapObj::Hash(entries));
             Value::Hash(id)
         }
+        // L3-B: an already-allocated Vm-heap Object. The wrap
+        // callback inside cext_dispatch eagerly alloc's
+        // HeapObj::TypedData on the Vm heap and stashes the ObjId
+        // in this CValue, so the translator just turns it back
+        // into Value::Object — no second alloc, no copy.
+        rubyrs_cext::CValue::HeapRef(n) => Value::Object(crate::value::ObjId(*n)),
     })
 }
 
@@ -4139,6 +4184,15 @@ fn cext_value_to_cvalue_d(
         Value::Bool(false) => rubyrs_cext::CValue::False,
         Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.borrow().as_bytes()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
+        // L3-B: a Value::Object handle crossing Ruby → C is
+        // represented as a CValue::HeapRef carrying the raw ObjId.
+        // The cext sees an opaque VALUE handle; rb_check_typeddata
+        // resolves it back via the symmetric translator on the C
+        // → Ruby side. Works for both script-defined Instances and
+        // TypedData-wrapped C state — the C ext is expected to
+        // know which type it expects (via the rb_data_type_t
+        // pointer-identity check in rb_check_typeddata).
+        Value::Object(id) => rubyrs_cext::CValue::HeapRef(id.0),
         // Array/Hash crossing Ruby → C: build a CValue::Array/Hash
         // whose elements are FRESH handles interned into `st`.
         // Recurses on contained Values, interning each child into
@@ -4266,6 +4320,91 @@ fn cext_dispatch(
                 cext_funcall_to_vm(vm_ptr, recv_h, method_name, arg_hs)
             },
         ));
+        // L3-B: install the TypedData wrap + check callbacks for
+        // the duration of this dispatch. The closures capture
+        // `vm_ptr` and do raw heap allocation / lookup on it.
+        //
+        // Wrap callback: resolve the klass handle from the topmost
+        // CExtState (the cext defined it via rb_define_class_under
+        // earlier in Init_/, or in the same dispatch), allocate a
+        // HeapObj::TypedData on the Vm heap, intern a HeapRef
+        // sentinel back into the state so the returned handle
+        // resolves to Value::Object(typed_data_id) at cext-return
+        // time AND while still inside this dispatch (for nested
+        // rb_funcall passes).
+        let _td_guard = TypedDataCallbackGuard::install(
+            Box::new(move |klass_h, data_ptr, type_ptr, dfree| {
+                // SAFETY: vm_ptr is the one the outer dispatch's
+                // unsafe block holds — valid for the dispatch's
+                // lifetime. The closure is defined under that
+                // unsafe block so the deref doesn't need its own.
+                let vm: &mut Vm = &mut *vm_ptr;
+                // Resolve the class name from the klass handle.
+                // Lookup the rubyrs Class by joined name; if the
+                // cext registered it via rb_define_class_under,
+                // it's already in vm.classes.
+                let class_name = rubyrs_cext::with_state(|st| {
+                    match st.resolve(klass_h) {
+                        rubyrs_cext::CValue::Class(n) => n.clone(),
+                        other => panic!(
+                            "ICE: rb_data_typed_object_wrap: klass arg \
+                             is not a Class handle: {:?}",
+                            other
+                        ),
+                    }
+                });
+                let class_id_sym = vm.interner.intern(&class_name);
+                let class = vm.classes.get(&class_id_sym).cloned()
+                    .unwrap_or_else(|| panic!(
+                        "ICE: rb_data_typed_object_wrap: class {:?} \
+                         not registered (rb_define_class_under not called?)",
+                        class_name
+                    ));
+                vm.maybe_gc();
+                // Respect heap.max_live via the same maybe_gc +
+                // check_alloc pattern as every other allocator
+                // (review #3). On exhaustion this currently
+                // panics; surfacing as a rb_raise(rb_eNoMemError)
+                // would be L3-B.1 follow-up once rb_eNoMemError
+                // lands in the sentinel set.
+                vm.check_alloc()
+                    .expect("L3-B spike: heap cap exhausted during TypedData wrap");
+                let id = vm.heap.alloc(crate::heap::HeapObj::TypedData(
+                    crate::heap::TypedDataObj { class, data_ptr, type_ptr, dfree }
+                ));
+                rubyrs_cext::with_state(|st| {
+                    st.intern(rubyrs_cext::CValue::HeapRef(id.0))
+                })
+            }),
+            Box::new(move |obj_h, expected_type| {
+                // SAFETY: same vm_ptr as above; immutable read here.
+                let vm: &Vm = &*vm_ptr;
+                // Resolve handle → HeapRef ObjId → typed_data slot.
+                // Pointer-identity check on type descriptor; mismatch
+                // is a programmer error in the cext (wrong descriptor
+                // passed to TypedData_Get_Struct). Spike collapses to
+                // panic; converting to a rb_eTypeError raise is
+                // straightforward L3-B.1 follow-up once we wire it.
+                let cvalue = rubyrs_cext::with_state(|st| st.resolve(obj_h).clone());
+                let id = match cvalue {
+                    rubyrs_cext::CValue::HeapRef(n) => crate::value::ObjId(n),
+                    other => panic!(
+                        "ICE: rb_check_typeddata: handle does not refer \
+                         to a TypedData (got {:?})",
+                        other
+                    ),
+                };
+                let td = vm.heap.typed_data(id);
+                if td.type_ptr != expected_type {
+                    panic!(
+                        "ICE: rb_check_typeddata: type descriptor mismatch \
+                         (expected {:p}, got {:p}) — L3-B.1 raise wiring TBD",
+                        expected_type, td.type_ptr
+                    );
+                }
+                td.data_ptr
+            }),
+        );
 
         // Translate args INTO the now-active state, interning each
         // (and each child for Array/Hash) directly via the same `st`
@@ -4466,37 +4605,16 @@ fn cext_funcall_to_vm(
     })
 }
 
-// `file_class_dispatch` moved to `vm/fileops.rs`. The
-// `with_caught_unwind` helper below stays here because it's
-// part of the cext-bridge plumbing wired into the same compile
-// unit as `cext_*` callbacks.
-
-/// Run `f`, catching any Rust panic that escapes from our own
-/// argument-interning / handle-management code wrapping the C call.
-///
-/// **What this catches**: panics raised in Rust code that runs around
-/// the `extern "C"` call — `state.intern`, our `Vec` building, any
-/// `expect("ICE: ...")` in `rubyrs_cext::with_state`.
-///
-/// **What this does NOT catch**: panics raised inside the C function
-/// itself. The C side cannot raise a Rust panic; if one of OUR
-/// `rb_*` ABI functions panics from inside the C call, the process
-/// aborts under `panic = abort` semantics (the default for `extern "C"`
-/// since Rust 2018+). The cext ABI surface is documented as
-/// abort-on-contract-violation in docs/PANIC_AUDIT.md — conversion to
-/// error sentinels is Level 3+ work tied to `rb_raise` integration.
-#[cfg(not(target_os = "wasi"))]
-fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
-        if let Some(s) = p.downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = p.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "non-string panic payload".to_string()
-        }
-    })
-}
+// `file_class_dispatch` moved to `vm/fileops.rs`.
+//
+// (The `with_caught_unwind` helper that used to live here was
+// removed in Spike L3-A — once the cext call routes through the
+// pure-C `rubyrs_jmp_invoke`, there's no Rust frame between
+// setjmp and the cext fn that a catch_unwind could meaningfully
+// cover. Re-introducing it on master appears to have been an
+// accidental revert in the kernel.rs extraction refactor; this
+// branch drops it again to keep the panic-budget honest and
+// -D warnings green.)
 
 
 fn visibility_from_name(name: &str) -> Option<Visibility> {

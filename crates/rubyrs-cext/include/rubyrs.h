@@ -283,6 +283,67 @@ extern VALUE rb_eNotImpError;
 __attribute__((noreturn))
 void rb_raise(VALUE exc_class, const char *fmt, ...);
 
+/* ===== TypedData ABI (Level 3-B) ===== */
+
+/* Function-pointer table inside `rb_data_type_t`. Mirrors CRuby's
+ * ruby/ruby.h layout (dmark / dfree / dsize / reserved[2]) so a C
+ * extension can declare a static `rb_data_type_t` against the host
+ * header with no per-host adjustments.
+ *
+ * Spike scope: `dfree` is the only field the host currently calls
+ * (during GC sweep when the wrapping slot is collected). `dmark`
+ * and `dsize` are parsed for ABI compatibility but unused —
+ * Ruby-references-inside-TypedData (the `dmark` use case) is
+ * L3-B.1 follow-up. */
+struct rb_data_type_struct;
+
+typedef struct {
+    void (*dmark)(void *);
+    void (*dfree)(void *);
+    size_t (*dsize)(const void *);
+    void *reserved[2];
+} rb_data_type_function_t;
+
+typedef struct rb_data_type_struct {
+    const char *wrap_struct_name;
+    rb_data_type_function_t function;
+    const struct rb_data_type_struct *parent;
+    const void *data;
+    VALUE flags;
+} rb_data_type_t;
+
+/* Wrap a C pointer in a Ruby Object of class `klass`, using
+ * `type` as the type descriptor. The host allocates a fresh
+ * Object slot whose lifetime is GC-managed; when collected, the
+ * descriptor's `dfree(data)` fires.
+ *
+ * Returns the wrapped VALUE — usable immediately for nested
+ * `rb_funcall` etc. and for return from the calling C function. */
+VALUE rb_data_typed_object_wrap(VALUE klass, void *data, const rb_data_type_t *type);
+
+/* TypedData_Wrap_Struct macro — same convenience wrapper as
+ * CRuby. `klass` is the user-facing class; `type` is the static
+ * `rb_data_type_t`; `data` is the C pointer. */
+#define TypedData_Wrap_Struct(klass, type, data) \
+    rb_data_typed_object_wrap((klass), (data), (type))
+
+/* Type-check + extract. Pointer-identity check on the descriptor;
+ * mismatch is a programmer error and currently panics (TypeError
+ * raise wiring is L3-B.1 follow-up). Returns the data pointer
+ * stashed by the matching `rb_data_typed_object_wrap` call. */
+void *rb_check_typeddata(VALUE obj, const rb_data_type_t *type);
+
+/* TypedData_Get_Struct macro — same shape as CRuby. Casts the
+ * extracted pointer to the user-named C struct type and assigns
+ * to `sval`. Typical use:
+ *
+ *   Counter *c;
+ *   TypedData_Get_Struct(self, Counter, &counter_type, c);
+ *   c->count += 1;
+ */
+#define TypedData_Get_Struct(obj, type, data_type, sval) \
+    ((sval) = (type *)rb_check_typeddata((obj), (data_type)))
+
 #ifdef __cplusplus
 }
 #endif

@@ -14,6 +14,50 @@ pub(crate) enum HeapObj {
     /// participate in mark-sweep — earlier `Rc<BlockHandle>` form
     /// cycled whenever a block's `captured` held the block itself.
     Block(BlockHandle),
+    /// Spike L3-B: a C extension's TypedData object — wraps an
+    /// arbitrary C `void*` plus a CRuby-shape `rb_data_type_t`
+    /// descriptor that tells the GC how to free the native state.
+    /// Used by gems like sqlite3-ruby, redis-client, openssl to
+    /// hold a long-lived native resource (DB handle, socket FD,
+    /// SSL context) that the Ruby script-level object owns.
+    ///
+    /// When the slot is swept, [`Heap::collect`] invokes `dfree`
+    /// on `data_ptr` so the C side can release the resource. Mark-
+    /// phase support for Ruby objects HELD INSIDE the C struct
+    /// (`dmark`) is L3-B.1 follow-up — most real-world wrappers
+    /// only hold native data, so the wedge defers it.
+    ///
+    /// `class` is kept so future `obj.class` / `is_a?` checks
+    /// resolve to the right user-facing class without needing a
+    /// separate per-instance class slot.
+    ///
+    /// `#[allow(dead_code)]`: the variant is allocated only through
+    /// the cext bridge, which is `#[cfg(not(target_os = "wasi"))]`.
+    /// On wasi the cext path is stubbed and nothing ever
+    /// constructs this variant, so `-D warnings` would flag it as
+    /// dead. Explicit allow keeps the wasi build green without
+    /// splitting the enum across targets.
+    #[allow(dead_code)]
+    TypedData(TypedDataObj),
+}
+
+/// Heap representation of a CRuby-shape TypedData object. See
+/// [`HeapObj::TypedData`] for the design context.
+#[allow(dead_code)] // class + type_ptr consumed by rb_check_typeddata (C ABI surface)
+pub(crate) struct TypedDataObj {
+    pub(crate) class: Rc<crate::value::Class>,
+    /// Owned C pointer. Treated as opaque by the host.
+    pub(crate) data_ptr: *mut std::ffi::c_void,
+    /// Optional descriptor pointer — currently used only by
+    /// `rb_check_typeddata` to identity-compare against the type
+    /// the C extension expected. CRuby checks the pointer for
+    /// identity, not the contents, which we mirror.
+    pub(crate) type_ptr: *const std::ffi::c_void,
+    /// Optional free function. Invoked from the sweep phase on
+    /// `data_ptr` when the wrapping slot is collected. Wrapped
+    /// in `Option` because some types are statically allocated
+    /// and don't need cleanup.
+    pub(crate) dfree: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
 }
 
 /// A Ruby Range. For our subset, both endpoints must be `Value::Int`.
@@ -72,6 +116,20 @@ impl Heap {
     pub(crate) fn instance(&self, id: ObjId) -> &Instance {
         if let HeapObj::Instance(i) = self.get(id) { i } else { panic!("ICE: heap slot is not an Instance") }
     }
+
+    /// L3-B: class of any `Value::Object(id)` regardless of whether
+    /// the underlying slot is a plain `Instance` (script-defined
+    /// class) or a `TypedData` (C ext-wrapped state). Use this in
+    /// preference to `instance(id).class` whenever code reaches
+    /// for "what's this Object's class" — TypedData objects don't
+    /// have an Instance struct so the direct accessor panics.
+    pub(crate) fn class_of(&self, id: ObjId) -> Rc<crate::value::Class> {
+        match self.get(id) {
+            HeapObj::Instance(i) => i.class.clone(),
+            HeapObj::TypedData(d) => d.class.clone(),
+            _ => panic!("ICE: class_of called on non-Object slot"),
+        }
+    }
     pub(crate) fn instance_mut(&mut self, id: ObjId) -> &mut Instance {
         if let HeapObj::Instance(i) = self.get_mut(id) { i } else { panic!("ICE: heap slot is not an Instance") }
     }
@@ -93,9 +151,30 @@ impl Heap {
     pub(crate) fn block(&self, id: ObjId) -> &BlockHandle {
         if let HeapObj::Block(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a Block") }
     }
+    /// Read a TypedData slot. Panics if the slot holds a different
+    /// HeapObj variant — the caller must have proven the type
+    /// via `rb_check_typeddata` (or equivalent) at the cext boundary
+    /// before reaching this accessor.
+    pub(crate) fn typed_data(&self, id: ObjId) -> &TypedDataObj {
+        if let HeapObj::TypedData(d) = self.get(id) { d }
+        else { panic!("ICE: heap slot is not a TypedData") }
+    }
     pub(crate) fn should_gc(&self) -> bool { self.live_count >= self.next_gc }
 
-    pub(crate) fn collect(&mut self, roots: &[Value]) {
+    /// Run a mark-and-sweep collection.
+    ///
+    /// Returns a list of pending TypedData `dfree` callbacks for
+    /// the caller (typically `Vm::maybe_gc`) to invoke AFTER
+    /// `collect` has returned and the `&mut Heap` borrow is gone
+    /// (review #2 on PR #19). Running `dfree` while still inside
+    /// `collect` would alias the heap with any cext code that
+    /// `dfree` transitively reaches — even though we don't expect
+    /// well-behaved cexts to re-enter the VM from a free callback,
+    /// the conservative shape avoids relying on that contract.
+    pub(crate) fn collect(
+        &mut self,
+        roots: &[Value],
+    ) -> Vec<(unsafe extern "C" fn(*mut std::ffi::c_void), *mut std::ffi::c_void)> {
         for m in self.marks.iter_mut() { *m = false; }
         let mut worklist: Vec<ObjId> = Vec::new();
         for v in roots { Heap::visit_value(v, &mut self.marks, &mut worklist); }
@@ -145,13 +224,27 @@ impl Heap {
                 _ => {}
             }
         }
-        // Sweep phase: unchanged from before.
+        // Sweep phase: same as before, plus the L3-B `dfree`
+        // callback for TypedData. We pull the function pointer +
+        // data pointer out of the slot BEFORE marking it Dead so
+        // we don't reborrow the slot mid-call. The dfree itself
+        // may transitively re-enter Ruby (rare but legal); the GC
+        // is not re-entrant, so this is documented as a contract
+        // violation if it ever happens — mirrors CRuby's own
+        // gc-during-gc protection model.
         let mut live = 0usize;
+        let mut pending_frees: Vec<(unsafe extern "C" fn(*mut std::ffi::c_void), *mut std::ffi::c_void)> =
+            Vec::new();
         for i in 0..self.slots.len() {
             match &self.slots[i] {
                 Slot::Live(_) => {
                     if self.marks[i] { live += 1; }
                     else {
+                        if let Slot::Live(HeapObj::TypedData(d)) = &self.slots[i] {
+                            if let Some(f) = d.dfree {
+                                pending_frees.push((f, d.data_ptr));
+                            }
+                        }
                         self.slots[i] = Slot::Dead;
                         self.free.push(i as u32);
                     }
@@ -161,6 +254,7 @@ impl Heap {
         }
         self.live_count = live;
         self.next_gc = (live * 2).max(1024);
+        pending_frees
     }
 
     pub(crate) fn visit_value(v: &Value, marks: &mut [bool], worklist: &mut Vec<ObjId>) {
@@ -215,7 +309,10 @@ impl Value {
             Value::Bool(false) => "false".into(),
             Value::Nil => "".into(),
             Value::Class(c) => c.name.clone(),
-            Value::Object(id) => format!("#<{}>", heap.instance(*id).class.name),
+            // Use class_of so TypedData-backed Objects (L3-B) print
+            // safely too — `heap.instance(*id)` would panic on
+            // those slots (review #1).
+            Value::Object(id) => format!("#<{}>", heap.class_of(*id).name),
             Value::Array(id) => {
                 let a = heap.array(*id);
                 let parts: Vec<String> = a.iter().map(|v| v.to_inspect(heap, interner)).collect();
