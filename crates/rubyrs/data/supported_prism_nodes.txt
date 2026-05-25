@@ -18,6 +18,7 @@ CallNode
 CaseNode
 ClassNode
 ConstantPathNode
+ConstantPathWriteNode
 ConstantReadNode
 ConstantWriteNode
 DefNode

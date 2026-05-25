@@ -94,7 +94,7 @@ fn classify_returns_expected_for_known_classes() {
     assert_eq!(classify("ArgumentsNode"), Classification::RidesAlong);
     assert_eq!(classify("RescueNode"), Classification::RidesAlong);
     assert_eq!(classify("NumberedReferenceReadNode"), Classification::Missing);
-    assert_eq!(classify("ConstantPathWriteNode"), Classification::Missing);
+    assert_eq!(classify("ClassVariableWriteNode"), Classification::Missing);
     // Sanity: a name that is not a Prism node at all also lands in
     // Missing (caller's job to validate using `unknown_classes_in`).
     assert_eq!(classify("NotARealNode"), Classification::Missing);
@@ -130,16 +130,17 @@ fn fixture_exercises_exact_missing_class_set() {
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    // Exact set, exact counts. ConstantWriteNode landed (top-level
-    // `FOO = expr`), so the fixture swapped it for AliasMethodNode
-    // (`alias new old`) — same shape of tripwire, no Missing
-    // children, distinct from the other two exemplars.
+    // Exact set, exact counts. ConstantPathWriteNode landed
+    // (`Foo::Bar = expr`), so the fixture swapped it for
+    // ClassVariableWriteNode (`@@count = 0`) — same shape of
+    // tripwire, no Missing children, distinct from the other
+    // two exemplars.
     let expected: std::collections::BTreeSet<&str> =
-        ["NumberedReferenceReadNode", "AliasMethodNode", "ConstantPathWriteNode"]
+        ["NumberedReferenceReadNode", "AliasMethodNode", "ClassVariableWriteNode"]
             .into_iter()
             .collect();
     assert_eq!(names, expected, "Missing-class set drifted");
-    for cls in ["NumberedReferenceReadNode", "AliasMethodNode", "ConstantPathWriteNode"] {
+    for cls in ["NumberedReferenceReadNode", "AliasMethodNode", "ClassVariableWriteNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
@@ -170,7 +171,7 @@ fn json_roundtrip_preserves_essentials() {
 #[test]
 fn diff_detects_closed_and_new_gaps() {
     // Synthetic before/after: before has NumberedReferenceReadNode missing, after
-    // does not — closed gap. After introduces ConstantPathWriteNode
+    // does not — closed gap. After introduces ClassVariableWriteNode
     // — new gap.
     let mut before = Report::default();
     before.total_nodes = 10;
@@ -199,7 +200,7 @@ fn diff_detects_closed_and_new_gaps() {
         },
     );
     after.histogram.insert(
-        "ConstantPathWriteNode".to_string(),
+        "ClassVariableWriteNode".to_string(),
         rubyrs_gapscan::NodeStat {
             count: 2,
             ..Default::default()
@@ -210,7 +211,7 @@ fn diff_detects_closed_and_new_gaps() {
     assert_eq!(d.supported_delta, 5);
     assert_eq!(d.missing_delta, -3);
     assert_eq!(d.closed_missing_classes, vec![("NumberedReferenceReadNode".to_string(), 5)]);
-    assert_eq!(d.new_missing_classes, vec![("ConstantPathWriteNode".to_string(), 2)]);
+    assert_eq!(d.new_missing_classes, vec![("ClassVariableWriteNode".to_string(), 2)]);
 }
 
 #[test]

@@ -1206,7 +1206,7 @@ impl Vm {
                     visited: &mut Vec<*const crate::value::Class>,
                 ) {
                     let ptr = std::rc::Rc::as_ptr(c);
-                    if visited.iter().any(|p| *p == ptr) { return; }
+                    if visited.contains(&ptr) { return; }
                     visited.push(ptr);
                     for k in c.methods.borrow().keys() {
                         if !out.contains(k) { out.push(*k); }
@@ -1220,7 +1220,7 @@ impl Vm {
                 }
                 walk(&cls, &mut names, &mut visited);
                 names.sort_by(|a, b| {
-                    self.interner.resolve(*a).cmp(&self.interner.resolve(*b))
+                    self.interner.resolve(*a).cmp(self.interner.resolve(*b))
                 });
             }
             let elems: Vec<Value> = names.into_iter().map(Value::Sym).collect();

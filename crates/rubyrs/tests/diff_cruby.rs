@@ -202,3 +202,4 @@ fn run_diff(name: &str) {
 #[test] fn array_assoc_rassoc() { run_diff("array_assoc_rassoc"); }
 #[test] fn range_cover_step() { run_diff("range_cover_step"); }
 #[test] fn object_reflection() { run_diff("object_reflection"); }
+#[test] fn constant_path_write() { run_diff("constant_path_write"); }

@@ -9,7 +9,7 @@
 # still-Missing replacement candidates.
 
 class Foo                        # ClassNode (supported)
-  Foo::Other = 1                 # ConstantPathWriteNode (× 1)
+  @@count = 0                    # ClassVariableWriteNode (× 1)
   def bar; end
   alias baz bar                  # AliasMethodNode (× 1)
   def quux

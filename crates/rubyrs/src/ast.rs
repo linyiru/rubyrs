@@ -75,11 +75,14 @@ pub(crate) enum Expr {
     },
     SelfExpr,
     ConstRead(String),
-    /// Bare constant write `FOO = expr` — appears at top level or
-    /// inside a class/module body; all forms store into the same
-    /// `Vm.constants` table (rubyrs has no real module nesting yet).
-    /// The `Foo::Bar = ...` (ConstantPathWriteNode) path form is a
-    /// separate not-yet-supported case.
+    /// Constant write — covers both the bare `FOO = expr`
+    /// (ConstantWriteNode) and the path form `Foo::Bar = expr`
+    /// (ConstantPathWriteNode). Both flatten into a single
+    /// "A::B::C"-joined name and store into the same
+    /// `Vm.constants` table (rubyrs has no real module nesting
+    /// yet — the path form's segment-validation divergences from
+    /// CRuby are noted at the ConstantPathWriteNode translation
+    /// site below).
     ConstWrite(String, Box<SExpr>),
     Call {
         receiver: Option<Box<SExpr>>,
@@ -436,6 +439,37 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // reassigns); see `Vm::constants` for the precedence rationale.
     if let Some(n) = node.as_constant_write_node() {
         return sp(node, Expr::ConstWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+    }
+    // `Foo::Bar = expr` — ConstantPathWriteNode. Same spike-scope
+    // model as ConstantPathNode read: flatten the LHS path into a
+    // joined "A::B::C" name and route through the existing
+    // `Vm.constants` table (StoreConst opcode). No real module
+    // nesting; the assignment binds the joined name, and a later
+    // `Foo::Bar` read picks it up via `ConstRead("Foo::Bar")`.
+    //
+    // Two known CRuby divergences inherited from this spike-scope
+    // model (symmetric with the way ConstantPathNode read also
+    // skips module-nesting validation):
+    //   - `Missing::X = 1` succeeds silently here; CRuby raises
+    //     `NameError: uninitialized constant Missing`.
+    //   - `Foo = 1; Foo::X = 2` succeeds here; CRuby raises
+    //     `TypeError: Foo is not a class/module`.
+    // A future PR would walk each prefix segment via the existing
+    // class/constants lookup and require Class/Module — and the
+    // same fix would apply to the READ side. Out of this PR's
+    // scope (the AST translation alone can't see runtime types).
+    if let Some(n) = node.as_constant_path_write_node() {
+        let target = n.target();
+        // target is a ConstantPathNode; flatten via the same helper
+        // the read path uses.
+        if let Some(joined) = flatten_constant_path(&target.as_node()) {
+            return sp(node, Expr::ConstWrite(joined, Box::new(tr(&n.value()))));
+        }
+        // Dynamic-path fallback (rare): use the trailing name only,
+        // matching the ConstantPathNode read fallback at line ~415.
+        if let Some(name_id) = target.name() {
+            return sp(node, Expr::ConstWrite(cid_to_string(name_id), Box::new(tr(&n.value()))));
+        }
     }
     // Op-assign desugaring: `a += b` is translated to
     // `a = a + b`. The receiver / index path is re-evaluated,
