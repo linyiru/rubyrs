@@ -18,16 +18,26 @@ spec/
 ├── README.md          ← this file
 ├── spec_helper.rb     ← describe / it / assert_eq / assert_raises
 └── ruby/
-    ├── alias_method_spec.rb
+    ├── alias_method_spec.rb       # metaprog set (ADR 0010)
+    ├── class_eval_spec.rb
     ├── define_method_spec.rb
-    └── method_missing_spec.rb
+    ├── instance_eval_spec.rb
+    ├── method_missing_spec.rb
+    ├── singleton_method_spec.rb
+    │
+    ├── string_sub_spec.rb         # core/string subset (manually
+    ├── string_gsub_spec.rb        # translated from upstream
+    ├── string_reverse_spec.rb     # ruby/spec snapshot ~2026-05;
+    ├── string_include_spec.rb     # see TESTING.md for the
+    └── string_empty_spec.rb       # ingestion-pipeline roadmap)
 ```
 
 The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below).
+"Future work" below). Current total: **65 examples across 11
+files**, all passing.
 
 ## DSL the helper provides
 
@@ -92,6 +102,47 @@ outside any `it` block, the runner synthesises a `<file-level>`
 example so the failure shows up in the report rather than
 vanishing into a zero-example file.
 
+## Translation conventions (for the `core/string_*_spec.rb` set)
+
+The metaprog specs were written from scratch against rubyrs's
+documented behaviour. The `string_*_spec.rb` files are
+manually-translated subsets of the corresponding upstream
+ruby/spec files (e.g. `string_sub_spec.rb` ← upstream
+`core/string/sub_spec.rb`). The translation rules are
+deliberately mechanical so a future `tools/spec_extract`
+(see [`docs/TESTING.md`](../../../docs/TESTING.md) — the
+Layer-4 pipeline) can automate the same lift.
+
+Conversions applied:
+
+| Upstream form | Translated to |
+|---|---|
+| `expr.should == val` | `assert_eq(expr, val)` |
+| `expr.should_not.equal?(other)` | `assert_eq(expr.equal?(other), false)` |
+| `-> { ... }.should.raise(ExceptionClass)` | `assert_raises("ExceptionClass") { ... }` |
+| `expr.should.empty?` (predicate matcher) | `assert_eq(expr.empty?, true)` |
+| `expr.should_not.empty?` | `assert_eq(expr.empty?, false)` |
+| `it_behaves_like :shared, ...` | inlined or skipped (shared specs not vendored) |
+
+Whole-block skips per file are noted at the top of each spec
+file with the reason — usually one of:
+
+- **Out of subset** — `force_encoding`, `Class.new { ... }`,
+  mock objects, multibyte / broken encodings, `to_str` coercion
+  protocol via mocks.
+- **Out of master** — a feature rubyrs hasn't shipped yet
+  (e.g. `/i` case-insensitive flag on Regex, `\1`/`\&`
+  backref replacement strings).
+- **Subclass / fixtures** — upstream's `StringSpecs::MyString`
+  fixtures aren't vendored; tests that check subclass identity
+  are dropped.
+
+Don't smuggle a divergence into the spec — write the spec to
+match upstream behaviour. If rubyrs differs intentionally,
+document the divergence in
+[`docs/SUBSET.md`](../../../docs/SUBSET.md) and skip the spec
+case with a `#` comment naming the upstream source line.
+
 ## Adding a new spec
 
 1. Pick the upstream ruby/spec file you want to mirror (e.g.,
@@ -102,11 +153,14 @@ vanishing into a zero-example file.
    `instance_method`, mock objects.
 3. Use named classes inside `it` blocks (`class MyTest1; ...; end`).
 4. Run `cargo test -p rubyrs --test ruby_spec` and iterate.
-
-When you find a divergence that's intentional (documented in
-SUBSET.md), don't smuggle it into the spec — write the spec to
-match rubyrs's documented behaviour and add a comment pointing
-at SUBSET.md.
+5. For intentional rubyrs/CRuby divergences, follow the
+   convention from the "Translation conventions" section above:
+   document the divergence in `docs/SUBSET.md` and skip the
+   upstream `it` block with a `#` comment naming the
+   upstream source line — do NOT rewrite the assertion to
+   match rubyrs's narrower behaviour. Earlier versions of this
+   README told contributors to do the rewrite; that was wrong
+   for a spec set whose purpose is to mirror upstream.
 
 ## What this gates against (vs. `tests/embed.rs`)
 
