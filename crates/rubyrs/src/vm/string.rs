@@ -875,6 +875,40 @@ impl Vm {
                         let id = self.heap.alloc(HeapObj::Array(parts));
                         Some(Value::Array(id))
                     }
+                    // `String#bytes` — Array of byte values (Int
+                    // per byte). Trivially derived from the raw
+                    // backing Vec<u8>. Useful for inspecting
+                    // `Array#pack` output without round-tripping
+                    // through `unpack("C*")`.
+                    ("bytes", []) => {
+                        let elems: Vec<Value> = s.borrow().iter()
+                            .map(|b| Value::Int(*b as i64))
+                            .collect();
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(id))
+                    }
+                    // `String#unpack(format)` — binary unpacking
+                    // with a subset of CRuby's directives. Supported:
+                    //   C / c — 8-bit unsigned/signed byte
+                    //   n / N — 16/32-bit big-endian unsigned
+                    //   v / V — 16/32-bit little-endian unsigned
+                    //   q / Q — 64-bit native (LE on our targets)
+                    //   a / A / Z — strings (raw / trim trailing
+                    //                space+null / null-terminated)
+                    // Counts: digits or `*`. Documented divergence:
+                    // exotic directives (m, U, w, f/d/e/E/g/G, etc.)
+                    // raise ArgumentError instead of CRuby's wider
+                    // table. See SUBSET.md.
+                    ("unpack", [Value::Str(fmt)]) => {
+                        let bytes = s.borrow().clone();
+                        let fmt_str = fmt.to_string_lossy();
+                        let result = unpack_bytes(&bytes, &fmt_str)
+                            .map_err(|m| self.trap(RubyError::ArgumentError { msg: m }))?;
+                        self.maybe_gc();
+                        let id = self.heap.alloc(HeapObj::Array(result));
+                        Some(Value::Array(id))
+                    }
                     ("to_sym", []) => {
                         // P2-14b: cap the interner before a hot loop
                         // (`arr.map { |x| x.to_s.to_sym }` and similar)
@@ -994,4 +1028,214 @@ pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
         }
     }
     out
+}
+
+/// Parse a pack/unpack format directive (single char + optional
+/// count). Returns the directive char and the count (`None` for
+/// `*`, `Some(1)` if no count specified, `Some(n)` otherwise).
+fn parse_directive(it: &mut std::str::Chars<'_>) -> Option<(char, Option<usize>)> {
+    let dir = it.next()?;
+    let mut peek = it.clone();
+    let mut count: Option<usize> = Some(1);
+    let mut consumed = 0usize;
+    match peek.next() {
+        Some('*') => {
+            // `*` sentinel: use Some(usize::MAX) so callers can
+            // branch via `n == usize::MAX` while keeping the
+            // return type a plain `Option<usize>`.
+            count = Some(usize::MAX);
+            consumed = 1;
+        }
+        Some(c) if c.is_ascii_digit() => {
+            let mut n: usize = 0;
+            let mut cur = c;
+            let mut p = peek.clone();
+            loop {
+                if cur.is_ascii_digit() {
+                    n = n.saturating_mul(10).saturating_add((cur as u8 - b'0') as usize);
+                    consumed += 1;
+                    match p.next() { Some(nc) => cur = nc, None => break }
+                } else { break; }
+            }
+            count = Some(n);
+        }
+        _ => {}
+    }
+    for _ in 0..consumed { it.next(); }
+    Some((dir, count))
+}
+
+/// Subset of CRuby's `String#unpack` — see the per-directive
+/// table in the call-site comment. Returns Err with a CRuby-
+/// ish message on unsupported directives or malformed input.
+pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut i = 0usize;
+    let mut it = fmt.chars();
+    while let Some((dir, count)) = parse_directive(&mut it) {
+        // count = Some(usize::MAX) means "*" (rest of input)
+        let n = count.unwrap_or(1);
+        match dir {
+            'C' | 'c' => {
+                let take = if n == usize::MAX { input.len() - i } else { n };
+                for _ in 0..take {
+                    if i >= input.len() { out.push(Value::Nil); continue; }
+                    let b = input[i]; i += 1;
+                    out.push(Value::Int(if dir == 'c' { (b as i8) as i64 } else { b as i64 }));
+                }
+            }
+            'n' | 'v' => {
+                let take = if n == usize::MAX { (input.len() - i) / 2 } else { n };
+                for _ in 0..take {
+                    if i + 2 > input.len() { out.push(Value::Nil); break; }
+                    let v = if dir == 'n' {
+                        u16::from_be_bytes([input[i], input[i+1]])
+                    } else {
+                        u16::from_le_bytes([input[i], input[i+1]])
+                    };
+                    i += 2;
+                    out.push(Value::Int(v as i64));
+                }
+            }
+            'N' | 'V' => {
+                let take = if n == usize::MAX { (input.len() - i) / 4 } else { n };
+                for _ in 0..take {
+                    if i + 4 > input.len() { out.push(Value::Nil); break; }
+                    let v = if dir == 'N' {
+                        u32::from_be_bytes([input[i], input[i+1], input[i+2], input[i+3]])
+                    } else {
+                        u32::from_le_bytes([input[i], input[i+1], input[i+2], input[i+3]])
+                    };
+                    i += 4;
+                    out.push(Value::Int(v as i64));
+                }
+            }
+            'q' | 'Q' => {
+                let take = if n == usize::MAX { (input.len() - i) / 8 } else { n };
+                for _ in 0..take {
+                    if i + 8 > input.len() { out.push(Value::Nil); break; }
+                    let b = [input[i], input[i+1], input[i+2], input[i+3],
+                             input[i+4], input[i+5], input[i+6], input[i+7]];
+                    i += 8;
+                    out.push(Value::Int(if dir == 'q' {
+                        i64::from_le_bytes(b)
+                    } else {
+                        u64::from_le_bytes(b) as i64
+                    }));
+                }
+            }
+            'a' | 'A' | 'Z' => {
+                let take = if n == usize::MAX { input.len() - i } else { n.min(input.len() - i) };
+                let slice = &input[i..i + take];
+                i += take;
+                let s_bytes: Vec<u8> = match dir {
+                    'a' => slice.to_vec(),
+                    'A' => {
+                        // Trim trailing space + null.
+                        let mut end = slice.len();
+                        while end > 0 && matches!(slice[end-1], b' ' | b'\0') { end -= 1; }
+                        slice[..end].to_vec()
+                    }
+                    'Z' => {
+                        // Up to (but excluding) the first null.
+                        let pos = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+                        slice[..pos].to_vec()
+                    }
+                    _ => unreachable!(),
+                };
+                out.push(Value::new_str_bytes(s_bytes));
+            }
+            // Whitespace inside the format is ignored, per CRuby.
+            ' ' | '\t' | '\n' => {}
+            _ => return Err(format!("unsupported pack/unpack directive '{}'", dir)),
+        }
+    }
+    Ok(out)
+}
+
+/// Subset of CRuby's `Array#pack`. Mirror of `unpack_bytes`;
+/// see the call-site comment for the supported directive list.
+pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut vi = 0usize;
+    let mut it = fmt.chars();
+    while let Some((dir, count)) = parse_directive(&mut it) {
+        let n = count.unwrap_or(1);
+        match dir {
+            'C' | 'c' => {
+                let take = if n == usize::MAX { values.len() - vi } else { n };
+                for _ in 0..take {
+                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    vi += 1;
+                    let i = match v {
+                        Value::Int(n) => n,
+                        _ => return Err("pack: expected Integer for C/c".into()),
+                    };
+                    out.push((i & 0xff) as u8);
+                }
+            }
+            'n' | 'v' => {
+                let take = if n == usize::MAX { values.len() - vi } else { n };
+                for _ in 0..take {
+                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    vi += 1;
+                    let i = match v {
+                        Value::Int(n) => n as u16,
+                        _ => return Err("pack: expected Integer for n/v".into()),
+                    };
+                    let b = if dir == 'n' { i.to_be_bytes() } else { i.to_le_bytes() };
+                    out.extend_from_slice(&b);
+                }
+            }
+            'N' | 'V' => {
+                let take = if n == usize::MAX { values.len() - vi } else { n };
+                for _ in 0..take {
+                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    vi += 1;
+                    let i = match v {
+                        Value::Int(n) => n as u32,
+                        _ => return Err("pack: expected Integer for N/V".into()),
+                    };
+                    let b = if dir == 'N' { i.to_be_bytes() } else { i.to_le_bytes() };
+                    out.extend_from_slice(&b);
+                }
+            }
+            'q' | 'Q' => {
+                let take = if n == usize::MAX { values.len() - vi } else { n };
+                for _ in 0..take {
+                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    vi += 1;
+                    let i = match v {
+                        Value::Int(n) => n,
+                        _ => return Err("pack: expected Integer for q/Q".into()),
+                    };
+                    let b = if dir == 'q' {
+                        i.to_le_bytes()
+                    } else {
+                        (i as u64).to_le_bytes()
+                    };
+                    out.extend_from_slice(&b);
+                }
+            }
+            'a' | 'A' | 'Z' => {
+                let v = values.get(vi).cloned().unwrap_or(Value::new_str(""));
+                vi += 1;
+                let bytes: Vec<u8> = match v {
+                    Value::Str(s) => s.borrow().clone(),
+                    _ => return Err("pack: expected String for a/A/Z".into()),
+                };
+                let want = if n == usize::MAX { bytes.len() } else { n };
+                if bytes.len() >= want {
+                    out.extend_from_slice(&bytes[..want]);
+                } else {
+                    out.extend_from_slice(&bytes);
+                    let pad: u8 = if dir == 'A' { b' ' } else { 0 };
+                    out.extend(std::iter::repeat(pad).take(want - bytes.len()));
+                }
+            }
+            ' ' | '\t' | '\n' => {}
+            _ => return Err(format!("unsupported pack/unpack directive '{}'", dir)),
+        }
+    }
+    Ok(out)
 }

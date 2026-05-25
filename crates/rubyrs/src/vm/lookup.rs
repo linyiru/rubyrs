@@ -159,7 +159,7 @@ impl Vm {
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
                 "sub" | "gsub" | "tr" | "squeeze" |
-                "encode" | "force_encoding" |
+                "encode" | "force_encoding" | "unpack" | "bytes" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
@@ -170,7 +170,7 @@ impl Vm {
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "first" | "last" | "empty?" | "include?" |
                 "count" | "sum" | "min" | "max" | "sort" | "tally" |
-                "combination" | "permutation" | "assoc" | "rassoc" |
+                "combination" | "permutation" | "assoc" | "rassoc" | "pack" |
                 "inject" | "reduce" |
                 "to_a" | "reverse" | "uniq" | "compact" |
                 "flatten" | "join" |

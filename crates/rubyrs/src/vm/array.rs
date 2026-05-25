@@ -137,6 +137,18 @@ impl Vm {
                         let hit = a.iter().any(|x| x.ruby_eq(needle, &self.heap));
                         Some(Value::Bool(hit))
                     }
+                    // `arr.pack(format)` — binary packing, inverse
+                    // of `String#unpack`. Same directive subset:
+                    // C/c, n/N, v/V, q/Q, a/A/Z. Documented
+                    // divergence: exotic specs (m, U, w, f/d/e/E)
+                    // raise ArgumentError.
+                    ("pack", [Value::Str(fmt)]) => {
+                        let snapshot: Vec<Value> = self.heap.array(id).clone();
+                        let fmt_str = fmt.to_string_lossy();
+                        let bytes = super::string::pack_values(&snapshot, &fmt_str)
+                            .map_err(|m| self.trap(RubyError::ArgumentError { msg: m }))?;
+                        Some(Value::new_str_bytes(bytes))
+                    }
                     // `arr.assoc(needle)` — first sub-Array whose
                     // `[0]` equals `needle`; nil if none. Sub-Array
                     // is returned by reference (CRuby returns the
