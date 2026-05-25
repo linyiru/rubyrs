@@ -171,6 +171,24 @@ pub(crate) enum Op {
     /// return value. Almost always emitted as `<val>; Break; Return` so
     /// the block frame also pops.
     Break,
+    /// Push the current `rescues.len()` onto the frame's
+    /// `loop_rescue_depths` stack — emitted at the start of a `while`
+    /// expression so a `break` inside the loop body knows how many
+    /// `PushRescue`/`PushEnsure` handlers it needs to discard before
+    /// jumping out. Paired with `Op::ExitLoop` at the loop's natural
+    /// end (which all paths — normal exit AND `break` — converge on).
+    EnterLoop,
+    /// Pop the most-recent entry off `loop_rescue_depths`. Emitted at
+    /// the join point past a `while` expression's body.
+    ExitLoop,
+    /// `break` from a `while` loop. Pops dynamic rescue/ensure handlers
+    /// down to the depth recorded by the matching `Op::EnterLoop`, then
+    /// jumps by `i32` offset (same encoding as `Op::Jump`). The break
+    /// value (or `nil`) is already on the operand stack and stays for
+    /// the post-loop expression value. Distinct from `Op::Break` (which
+    /// signals an iteration driver / block return, NOT a structured
+    /// `while`-loop exit).
+    BreakLoop(i32),
     Return,
     /// Explicit `return val` — non-local. Unlike `Op::Return`
     /// which pops a single frame, this signals the dispatch

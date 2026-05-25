@@ -209,3 +209,4 @@ fn run_diff(name: &str) {
 #[test] fn integer_literal_i64() { run_diff("integer_literal_i64"); }
 #[test] fn lambda_slot_isolation() { run_diff("lambda_slot_isolation"); }
 #[test] fn require_relative_main() { run_diff("require_relative_main"); }
+#[test] fn break_in_while() { run_diff("break_in_while"); }

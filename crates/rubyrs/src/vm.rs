@@ -81,6 +81,15 @@ pub(crate) struct Frame {
     /// model that the prologue op would consult.
     pub(crate) n_given_positional: u16,
     pub(crate) rescues: Vec<RescueHandler>,
+    /// Stack of `rescues.len()` snapshots, one per enclosing
+    /// `while` loop currently active in this frame. `Op::EnterLoop`
+    /// pushes; `Op::ExitLoop` pops. `Op::BreakLoop` reads the top
+    /// to know how many handler entries to discard before jumping
+    /// to the loop's end label. Empty for frames with no active
+    /// loop and for frames where `break` instead signals an
+    /// iteration-driver / block return (the existing `Op::Break`
+    /// path stays untouched).
+    pub(crate) loop_rescue_depths: Vec<usize>,
 }
 
 /// RAII guard for `Vm.pinned`. Native-side code that needs heap

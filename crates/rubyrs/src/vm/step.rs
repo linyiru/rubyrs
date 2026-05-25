@@ -735,7 +735,7 @@ impl Vm {
                     locals: Rc::new(RefCell::new(vec_nil(n_locals))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![],
+                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![],
                 });
             }
             Op::NewArray(n) => {
@@ -814,6 +814,34 @@ impl Vm {
                 // operand stack and rides out with the subsequent
                 // Op::Return; collection_call_block reads it then.
                 self.break_signaled = true;
+            }
+            Op::EnterLoop => {
+                let depth = self.frames.last().expect("ICE: EnterLoop no frame").rescues.len();
+                self.frames.last_mut().expect("ICE: EnterLoop no frame")
+                    .loop_rescue_depths.push(depth);
+            }
+            Op::ExitLoop => {
+                self.frames.last_mut().expect("ICE: ExitLoop no frame")
+                    .loop_rescue_depths.pop()
+                    .expect("ICE: ExitLoop with empty loop_rescue_depths");
+            }
+            Op::BreakLoop(off) => {
+                // Pop dynamic rescue/ensure handlers back down to the
+                // depth recorded at `Op::EnterLoop`. This is the
+                // load-bearing step for `break` inside a `begin`
+                // body where some `PushRescue` is still installed,
+                // and for `break` inside a partially-unwound rescue
+                // chain — using the dynamic `rescues.len()` rather
+                // than a compile-time count lets the same op work
+                // regardless of which rescue clause caught.
+                let f = self.frames.last_mut().expect("ICE: BreakLoop no frame");
+                let target_depth = *f.loop_rescue_depths.last()
+                    .expect("ICE: BreakLoop outside a while loop");
+                while f.rescues.len() > target_depth { f.rescues.pop(); }
+                // Same jump arithmetic as `Op::Jump` — dispatch has
+                // already advanced `f.ip` past this BreakLoop, so the
+                // patched offset reaches the loop's join label.
+                f.ip = (f.ip as i32 + off) as usize;
             }
             Op::BinOpInt(kind, rhs) => {
                 let a = self.stack.pop().expect("ICE: BinOpInt lhs underflow");

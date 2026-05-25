@@ -107,7 +107,6 @@ expected = JSON::Ext::Parser.parse(json_text, {{}})
 u = MessagePack::Unpacker.new
 u.feed(msg_bytes)
 actual = []
-done = false
 loop_count = 0
 last_err_class = nil
 last_err_msg = nil
@@ -120,10 +119,7 @@ last_err_msg = nil
 # class + message so a future regression that raises something
 # unexpected mid-decode shows up in the diagnostic, not buried
 # under "case N: FAIL got=nil" attribution.
-# `break` from inside a `rescue` body doesn't propagate to the
-# enclosing while in rubyrs's current subset (caught while
-# writing this test). Use a flag instead.
-while loop_count < 200 && !done
+while loop_count < 200
   begin
     v = u.read
     actual << v
@@ -131,7 +127,7 @@ while loop_count < 200 && !done
   rescue => e
     last_err_class = e.class.to_s
     last_err_msg = e.message
-    done = true
+    break
   end
 end
 if actual.length < 51
