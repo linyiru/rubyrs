@@ -734,6 +734,31 @@ fn alias_method_copies_method_under_new_name() {
 }
 
 #[test]
+fn alias_method_multiple_per_class_body_stays_stack_balanced() {
+    // Regression for PR #8 review (compiler.rs:486): a stray
+    // `LoadNil` after `Op::AliasMethod` left one Nil on the operand
+    // stack per alias. Three aliases in one body would have
+    // accumulated three leftover Nils that only got swept on class
+    // body return — and would have surfaced as a real imbalance
+    // had the body returned a value. Make sure the body's actual
+    // return value is correct.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class M
+          def a; 1; end
+          def b; 2; end
+          def c; 3; end
+          alias_method :x, :a
+          alias_method :y, :b
+          alias_method :z, :c
+        end
+        m = M.new
+        puts m.x + m.y + m.z
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "6\n");
+}
+
+#[test]
 fn alias_method_shares_super_lookup_chain() {
     let (mut rt, buf) = rt_with_buf();
     // Alias preserves defining_class — `super` from `greet`

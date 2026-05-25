@@ -482,8 +482,15 @@ pub(crate) fn compile_expr(
                 let old_name = if let Expr::SymbolLit(s) = &args[1].node { s.clone() } else { unreachable!() };
                 let nid = interner.intern(&new_name);
                 let oid = interner.intern(&old_name);
+                // `Op::AliasMethod`'s VM handler pushes Nil itself
+                // (matching `Op::DefMethod`'s shape), so the
+                // compiler must NOT emit a trailing `LoadNil` — that
+                // would leave a stray Nil on the operand stack each
+                // alias, which the class-body Return only happens
+                // to swallow because it truncates to `base_sp`.
+                // Inside a loop or with multiple aliases per body
+                // the imbalance accumulates.
                 b.emit(Op::AliasMethod(nid, oid));
-                b.emit(Op::LoadNil);
                 b.current_span = prev_span;
                 return;
             }
