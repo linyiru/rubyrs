@@ -62,9 +62,36 @@ can see what's still hand-translation territory:
 | `it_behaves_like :shared, ...` | Inline shared examples; needs cross-file resolution |
 | `should_receive` / mocks | We have no mock library — skip and hand-translate |
 
-Stripping `require_relative` lines and dropping fixtures-only
-`describe` blocks is also pending; today they pass through
-and either no-op or hand-skip.
+Dropping fixtures-only `describe` blocks (`UnboundMethodSpecs::*`,
+`MethodSpecs::*` etc) is also pending — those classes are
+referenced inside `it` bodies and a future pass will need to
+detect the fixture-only `describe` and emit inline classes.
+
+`require_relative` lines, on the other hand, ARE stripped:
+the micro-runner has no loader, so leaving them in fails the
+whole file at `<file-level>`. The strip is a line-level filter
+(`^\s*require_relative\b.*$`) applied after the AST rewrite,
+so it runs even when prism reports parse errors and the AST
+walk only partially completes.
+
+## Parse errors and exit codes
+
+The CLI runs prism over the source separately and prints any
+parse errors to stderr before emitting the rewrite to stdout.
+Output is best-effort either way — the AST walk visits
+whatever sub-trees prism could build. Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Clean parse + rewrite done |
+| 1 | Failed to read the input file |
+| 2 | No path argument given |
+| 3 | Parse errors found; stdout still has the partial rewrite |
+
+The library's `extract(&str) -> String` is infallible by
+design (always returns a String) so golden tests stay simple.
+A separate `parse_errors(&str) -> Vec<String>` exposes the
+diagnostic surface for callers that care.
 
 ## Golden tests
 

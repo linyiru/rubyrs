@@ -22,6 +22,24 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let errors = rubyrs_spec_extract::parse_errors(&source);
+    if !errors.is_empty() {
+        eprintln!(
+            "rubyrs-spec-extract: {}: {} prism parse error(s); output is best-effort:",
+            path,
+            errors.len()
+        );
+        for e in &errors {
+            eprintln!("  - {e}");
+        }
+    }
     print!("{}", rubyrs_spec_extract::extract(&source));
-    ExitCode::SUCCESS
+    if errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        // Non-zero so a script driving the extractor over a
+        // batch can flag files that need human attention,
+        // without losing the partial rewrite already on stdout.
+        ExitCode::from(3)
+    }
 }

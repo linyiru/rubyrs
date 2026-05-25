@@ -30,18 +30,30 @@
 //!   and the matcher class name.
 //! - `it_behaves_like :shared, ...` — inlining shared examples is
 //!   a separate piece of work.
-//! - Removing `require_relative` lines — those are no-ops in the
-//!   micro-runner but currently pass through harmlessly (each
-//!   raises a NoMethodError that the runner catches). A future
-//!   pass could strip them; not gated.
+//!
+//! ## What v0.1 DOES do beyond the `should ==` rewrite
+//!
+//! - **Strips `require_relative` lines** from the output. The
+//!   micro-runner has no loader, so a stray `require_relative
+//!   '../../spec_helper'` would raise NoMethodError at file scope
+//!   and the runner's `<file-level>` synthetic example would fail
+//!   the whole file. Stripping is a line-level filter
+//!   (`^\s*require_relative\b.*$`) applied after the AST rewrite
+//!   — independent of parse state so even partially-invalid
+//!   source still gets the cleanup.
 
 use ruby_prism::{Node, Visit};
 
 /// Recognise `expr.should == val` and rewrite to
-/// `assert_eq(expr, val)`. Everything else passes through.
+/// `assert_eq(expr, val)`, then strip `require_relative` lines
+/// the micro-runner can't load. Everything else passes through.
 ///
-/// Returns the rewritten source. `extract(s) == s` when nothing
-/// matched.
+/// Returns the rewritten source. `extract(s) == s` only when
+/// nothing matched AND there were no `require_relative` lines.
+///
+/// Parse errors are NOT surfaced here — callers that care
+/// should use [`parse_errors`] alongside this fn. The CLI does
+/// (`main.rs`); golden tests don't need to.
 pub fn extract(source: &str) -> String {
     let parsed = ruby_prism::parse(source.as_bytes());
     let root = parsed.node();
@@ -50,7 +62,44 @@ pub fn extract(source: &str) -> String {
         substitutions: Vec::new(),
     };
     collector.visit(&root);
-    apply_substitutions(source, collector.substitutions)
+    let rewritten = apply_substitutions(source, collector.substitutions);
+    strip_require_relative(&rewritten)
+}
+
+/// Returns the parse-error messages reported by `ruby_prism` for
+/// `source`. Empty Vec means the source parsed cleanly. The
+/// extractor itself runs to completion regardless (best-effort
+/// rewrite of any valid sub-trees), so this is purely for
+/// diagnostic output — the CLI prints these to stderr.
+pub fn parse_errors(source: &str) -> Vec<String> {
+    let parsed = ruby_prism::parse(source.as_bytes());
+    parsed
+        .errors()
+        .map(|d| d.message().to_owned())
+        .collect()
+}
+
+/// Drop lines whose first non-whitespace token is `require_relative`.
+/// The micro-runner has no loader; leaving these in fails the spec
+/// file at `<file-level>`. Cheap line-level filter so the cleanup
+/// runs even when prism reports parse errors and the AST is
+/// partially-broken.
+fn strip_require_relative(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("require_relative")
+            && trimmed[16..]
+                .chars()
+                .next()
+                .map(|c| c.is_whitespace() || c == '(')
+                .unwrap_or(true)
+        {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 /// One byte-range replacement: `source[start..end] = replacement`.
@@ -71,32 +120,31 @@ impl<'pr> Visit<'pr> for SubstitutionCollector<'_> {
         //   outer: CallNode { name=:==, receiver=should_call, args=[rhs] }
         //   should_call: CallNode { name=:should, receiver=lhs, args=None }
         let name = cid_to_string(node.name());
-        if name == "==" {
-            if let Some(should_call_node) = node.receiver()
-                && let Some(should_call) = should_call_node.as_call_node()
-                && cid_to_string(should_call.name()) == "should"
-                && should_call.arguments().is_none()
-                && let Some(lhs) = should_call.receiver()
-                && let Some(args) = node.arguments()
-            {
-                let arg_list: Vec<_> = args.arguments().iter().collect();
-                if arg_list.len() == 1 {
-                    let rhs = &arg_list[0];
-                    let outer_loc = node.location();
-                    let lhs_text = slice(self.source, &lhs);
-                    let rhs_text = slice(self.source, rhs);
-                    self.substitutions.push(Substitution {
-                        start: outer_loc.start_offset(),
-                        end: outer_loc.end_offset(),
-                        replacement: format!("assert_eq({}, {})", lhs_text, rhs_text),
-                    });
-                    // Don't recurse — we've consumed the whole
-                    // `lhs.should == rhs` subtree. Recursing would
-                    // re-visit the inner `.should` call and
-                    // possibly trigger spurious nested rewrites if
-                    // a future pattern overlaps.
-                    return;
-                }
+        if name == "=="
+            && let Some(should_call_node) = node.receiver()
+            && let Some(should_call) = should_call_node.as_call_node()
+            && cid_to_string(should_call.name()) == "should"
+            && should_call.arguments().is_none()
+            && let Some(lhs) = should_call.receiver()
+            && let Some(args) = node.arguments()
+        {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() == 1 {
+                let rhs = &arg_list[0];
+                let outer_loc = node.location();
+                let lhs_text = slice(self.source, &lhs);
+                let rhs_text = slice(self.source, rhs);
+                self.substitutions.push(Substitution {
+                    start: outer_loc.start_offset(),
+                    end: outer_loc.end_offset(),
+                    replacement: format!("assert_eq({}, {})", lhs_text, rhs_text),
+                });
+                // Don't recurse — we've consumed the whole
+                // `lhs.should == rhs` subtree. Recursing would
+                // re-visit the inner `.should` call and possibly
+                // trigger spurious nested rewrites if a future
+                // pattern overlaps.
+                return;
             }
         }
         // Default recursion — keep visiting children to find
@@ -117,7 +165,7 @@ fn slice(source: &str, node: &Node<'_>) -> String {
 /// Apply substitutions in reverse byte order so earlier offsets
 /// stay valid as later edits rewrite the tail of the string.
 fn apply_substitutions(source: &str, mut subs: Vec<Substitution>) -> String {
-    subs.sort_by(|a, b| b.start.cmp(&a.start));
+    subs.sort_by_key(|s| std::cmp::Reverse(s.start));
     let mut out = source.to_string();
     for sub in subs {
         out.replace_range(sub.start..sub.end, &sub.replacement);

@@ -23,6 +23,11 @@ fn golden_skipped_patterns() {
     run_golden("skipped_patterns");
 }
 
+#[test]
+fn golden_strip_require_relative() {
+    run_golden("strip_require_relative");
+}
+
 fn run_golden(name: &str) {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let input_path = base.join(format!("{name}.input.rb"));
