@@ -19,7 +19,7 @@
  *     this, regression in the normal path could pass undetected as
  *     long as the raise tests themselves pass.
  *
- * Every raise message uses a %d / %s format string so the test
+ * Every raise message uses a %s / %ld format string so the test
  * also verifies the vsnprintf path in rb_raise's variadic shim.
  */
 
@@ -42,7 +42,11 @@ static VALUE raise_unless_positive(VALUE self, VALUE n_val) {
     if (n <= 0) {
         rb_raise(rb_eArgumentError, "expected positive, got %ld", n);
     }
-    return rb_int2num((int)n);
+    /* Round-trip via rb_long2num: NUM2LONG returned `long`, so
+     * downcasting to `int` would silently truncate on 64-bit
+     * platforms when the caller passes a value outside int range
+     * (review #3). */
+    return rb_long2num(n);
 }
 
 void Init_raise_ext(void) {

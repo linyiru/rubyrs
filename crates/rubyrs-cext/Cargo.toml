@@ -26,6 +26,6 @@ crate-type = ["rlib"]
 [build-dependencies]
 # Compiles c/setjmp_shim.c for Spike L3-A (rb_raise / longjmp
 # across the FFI boundary). See build.rs for why the shim is in C.
-cc = "1"
+cc.workspace = true
 
 [dependencies]

@@ -5465,12 +5465,32 @@ fn cext_dispatch(
         };
 
         // L3-A: wrap the actual C call in BOTH `with_caught_unwind`
-        // (catches a Rust panic that escapes the trampoline) AND
-        // `call_with_raise` (catches a C-side `rb_raise` longjmp).
-        // The two mechanisms catch disjoint failure modes; only one
-        // fires per call. catch_unwind is on the outside so a panic
-        // inside call_with_raise's trampoline / FnOnce machinery
-        // still converts to a Trap rather than aborting.
+        // and `call_with_raise`. They cover different failure
+        // modes — only one fires per call — but the BOUNDARIES on
+        // what each can catch are narrower than they first look
+        // (review #1 cleaned up an earlier overclaim):
+        //
+        //   - `call_with_raise` catches a C-side `rb_raise` because
+        //     setjmp/longjmp live entirely in C frames — the
+        //     longjmp returns to setjmp inside `rubyrs_jmp_call`,
+        //     which then returns into Rust normally.
+        //
+        //   - `with_caught_unwind` catches a Rust panic from the
+        //     immediate closure body it wraps — i.e. the OUTER
+        //     `|| call_with_raise(...)` (heap-boxing / pointer
+        //     prep). It does NOT catch panics from inside the
+        //     inner closure passed to call_with_raise: those
+        //     propagate through the `extern "C" trampoline` which
+        //     is `nounwind`, so they abort the process before any
+        //     catch_unwind handler runs. Same fundamental limit
+        //     that already applied to panics inside C-ext
+        //     callbacks (`cext_funcall_to_vm` etc.) pre-L3-A.
+        //
+        // Net: the catch_unwind is defensive coverage of a narrow
+        // Rust-only slice. It is NOT a guarantee against C-ext
+        // panic-induced abort. Closing that gap needs the same
+        // per-call setjmp protocol we already use for rb_raise to
+        // also cover panics — out of scope for L3-A.
         //
         // **Known limitation** (L3-A spike): a `rb_raise` from a
         // deeply-nested rb_funcall chain longjmps PAST any

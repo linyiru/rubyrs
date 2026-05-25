@@ -1,4 +1,16 @@
 //! Spike L3-A: `rb_raise` + `longjmp`-based exception propagation
+//! across the C ABI boundary.
+//!
+//! See `c/setjmp_shim.c`'s header for the overall design (why
+//! setjmp lives in C, the nested jmp-buf stack, the pending-
+//! exception slot). This module is the Rust-facing surface:
+//!
+//! - [`call_with_raise`] — wraps a Rust closure in `rubyrs_jmp_call`
+//!   so that any `rb_raise` fired from inside the C call
+//!   (transitively through any `extern "C"` work the closure does)
+//!   is caught, not aborted. Returns the raised class id + message
+//!   instead of the closure's normal `Value`. Used by
+//!   `vm::cext_dispatch`.
 //!
 //! ## Built-in exception class sentinels
 //!
@@ -18,21 +30,6 @@
 //! u64 namespace so they can never collide with a regular
 //! per-`CExtState` handle index (which is bottom-up from 3,
 //! reserving 0/1/2 for Qnil/Qtrue/Qfalse).
-//! across the C ABI boundary.
-//!
-//! See `c/setjmp_shim.c`'s header for the design (why setjmp lives
-//! in C, the nested jmp-buf stack, the pending-exception slot).
-//! This module is just the Rust-facing surface:
-//!
-//! - [`call_with_raise`] — wraps a Rust closure in `rubyrs_jmp_call`
-//!   so that any `rb_raise` from inside the C call (transitively
-//!   through any `extern "C"` work the closure does) is caught,
-//!   not aborted. Returns the raised class id + message instead of
-//!   the closure's normal `Value`. Used by `vm::cext_dispatch`.
-//!
-//! The actual `rb_raise` Rust-side export, plus the
-//! `rb_eArgumentError` etc. class-handle constants, are added in
-//! the next commit alongside the dispatch wire-up.
 
 use std::ffi::{CStr, c_char, c_void};
 
