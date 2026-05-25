@@ -80,6 +80,10 @@ fn scan_path(p: PathBuf) -> Report {
 fn classify_returns_expected_for_known_classes() {
     assert_eq!(classify("CallNode"), Classification::Supported);
     assert_eq!(classify("IfNode"), Classification::Supported);
+    // UnlessNode landed as Supported (syntax sugar for `if !`,
+    // swapped branches inside ast.rs). Pinned here as a regression
+    // guard.
+    assert_eq!(classify("UnlessNode"), Classification::Supported);
     assert_eq!(classify("ArgumentsNode"), Classification::RidesAlong);
     assert_eq!(classify("RescueNode"), Classification::RidesAlong);
     assert_eq!(classify("LambdaNode"), Classification::Missing);
