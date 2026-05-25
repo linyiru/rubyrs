@@ -385,13 +385,16 @@ pub struct Config {
 /// already prevents this, but worth stating).
 pub struct HostCtx<'a> {
     heap: &'a heap::Heap,
+    interner: &'a intern::Interner,
 }
 
 impl<'a> HostCtx<'a> {
-    /// Internal constructor — the dispatch site borrows `&Heap` from
-    /// the VM and hands it to the v2 closure via this ctx.
-    pub(crate) fn new(heap: &'a heap::Heap) -> Self {
-        Self { heap }
+    /// Internal constructor — the dispatch site borrows `&Heap` and
+    /// `&Interner` from the VM and hands them to the v2 closure via
+    /// this ctx. Both borrows are immutable and time-bounded by the
+    /// closure invocation (see `Vm::invoke_host_fn`).
+    pub(crate) fn new(heap: &'a heap::Heap, interner: &'a intern::Interner) -> Self {
+        Self { heap, interner }
     }
 
     /// Borrow the contents of a `Value::Array`. Returns `None` for
@@ -405,12 +408,25 @@ impl<'a> HostCtx<'a> {
         }
     }
 
-    /// Borrow the entries of a `Value::Hash` as a flat slice of
+    /// Borrow the contents of a `Value::Hash` as a flat slice of
     /// `(key, value)` pairs (preserving insertion order). Returns
     /// `None` for any other shape.
     pub fn resolve_hash(&self, val: &Value) -> Option<&[(Value, Value)]> {
         if let Value::Hash(id) = val {
             Some(self.heap.hash(*id).as_slice())
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the interned name of a `Value::Sym`. Returns `None` for
+    /// any other shape. Useful for v2 host fns that receive a
+    /// kwargs `Hash` with Symbol keys (`require:`, `platforms:`, …)
+    /// — the host can branch on the borrowed `&str` directly without
+    /// a Ruby-side `k.to_s` rebuild of the Hash.
+    pub fn resolve_sym(&self, val: &Value) -> Option<&str> {
+        if let Value::Sym(id) = val {
+            Some(self.interner.resolve(*id))
         } else {
             None
         }

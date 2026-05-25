@@ -40,9 +40,9 @@ host is in `dsl_prelude.rb`.
                                     │    git / path block helpers  │
                                     │  - RUBY_VERSION constant     │
                                     └────────────┬─────────────────┘
-                                                 │ rebuilds **opts
-                                                 │ with String keys
-                                                 │ + values; joins
+                                                 │ no kwarg massage —
+                                                 │ host reads Symbols
+                                                 │ directly; joins
                                                  │ block-scope args
                                                  ▼
                                     ┌──────────────────────────────┐
@@ -145,22 +145,20 @@ prelude joins multi-symbol args (`group :a, :b`) into one
 String before pushing, and the host pops one String off the
 stack. No heap shape, no v2 benefit.
 
-### One remaining prelude transform
+### Prelude is now a one-liner
 
-The prelude still does ONE Ruby-side rebuild:
+The prelude's `gem` shim does no Ruby-side translation at all:
 
 ```ruby
 def gem(name, *requirements, **opts)
-  stringified = {}
-  opts.each { |k, v| stringified[k.to_s] = v.to_s }
-  __gemfile_gem_v2(name, requirements, stringified)
+  __gemfile_gem_v2(name, requirements, opts)
 end
 ```
 
-The `opts.each` loop rebuilds the kwargs hash with String
-keys + String values. `HostCtx` borrows the heap but NOT the
-interner, so a `:require` Symbol key has no host-side path to
-its name. Closing this fully would require a
-`HostCtx::resolve_sym(&Value) -> Option<&str>` (interner
-widening); deferred. For most DSLs the one-line `.each`
-rebuild is acceptable.
+`HostCtx` exposes `resolve_array` (for the splat), `resolve_hash`
+(for `**opts`), and `resolve_sym` (for the Symbol keys / Symbol
+values inside `opts`). The host can read `:require => false`,
+`:platforms => :mri`, `:require => "pry-byebug"` without any
+Ruby-side `.to_s` rebuild. See the `value_to_kwarg_string`
+helper in `gemfile.rs` for the per-value-shape match
+(`Value::Bool` / `Value::Str` / `Value::Sym`).

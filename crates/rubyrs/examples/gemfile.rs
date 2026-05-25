@@ -15,19 +15,23 @@
 //! The Rust host (this file) registers two flavours of host
 //! function. `__gemfile_gem_v2` uses the v2 API
 //! (`register_fn_v2` paired with `HostCtx`) and reads the splat
-//! as a real Array and kwargs as a real Hash, borrowing directly
-//! from the VM heap with no clone.
+//! as a real Array, kwargs as a real Hash, and the Symbol keys
+//! inside that Hash via `ctx.resolve_sym`. The HostCtx accessors
+//! return **borrows** into the VM heap / interner — zero-copy
+//! while the v2 closure runs, no Ruby-side stringification on the
+//! input path. (The demo then clones these borrows into
+//! `String`s for the `GemDecl` storage that outlives the
+//! closure; the host has no other choice unless we want to chain
+//! lifetimes through to the global state, which isn't the point
+//! of the example.)
 //! The scope-stack helpers (`group` / `platforms` / `git` / `path`
 //! push/pop) stay on the v1 API — they take a single pre-joined
 //! String, which is what the prelude's `ensure`-balanced shims
 //! already produce. The Ruby-side prelude
-//! (`examples/gemfile/dsl_prelude.rb`) does ONE remaining
-//! translation: rebuild the trailing `**opts` Hash with String
-//! keys + String values, because `HostCtx` exposes no interner so
-//! a `:require` Symbol can't be stringified host-side. Everything
-//! else (splat-receive, kwarg unpacking, per-key filtering, value
-//! typing, requirement parsing) lives in typed Rust below. The
-//! Gemfile itself never sees the seam.
+//! (`examples/gemfile/dsl_prelude.rb`) does no translation at all
+//! on the `gem` shim: `def gem(name, *requirements, **opts)`
+//! becomes a one-line forward to the host. The Gemfile itself
+//! never sees the seam.
 //!
 //! ```text
 //!     cargo run --release --example gemfile
@@ -48,19 +52,18 @@
 //! This demo originally relied entirely on v1 (`register_fn`),
 //! flattening `*splat` and `**kwargs` to `|`-joined Strings in
 //! the prelude before reaching the host. v2 (`register_fn_v2`
-//! paired with `HostCtx`) closed that gap: the v2 closure receives the
-//! Array and Hash directly and `ctx.resolve_array` /
-//! `ctx.resolve_hash` borrow into the heap. `__gemfile_gem_v2`
-//! below uses v2; the scope-stack helpers stay on v1 because
-//! their natural input is already a single String.
+//! paired with `HostCtx`) closed that gap: the v2 closure
+//! receives the Array and Hash directly and `ctx.resolve_array`
+//! / `ctx.resolve_hash` / `ctx.resolve_sym` borrow into the heap
+//! and interner. `__gemfile_gem_v2` below uses v2; the
+//! scope-stack helpers stay on v1 because their natural input is
+//! already a single String.
 //!
-//! Remaining prelude work: rebuild the trailing `**opts` Hash
-//! with String keys + String values (`opts.each { |k, v|
-//! stringified[k.to_s] = v.to_s }`). `HostCtx` exposes no
-//! interner, so a `:require` Symbol key can't be stringified
-//! host-side — the round-trip to String is forced on the Ruby
-//! side. Closing this fully would require a `HostCtx::resolve_sym`
-//! method (interner widening); deferred.
+//! With `resolve_sym` in place (closing the gap PR #40 noted),
+//! the prelude does NO translation on the `gem` shim — the kwarg
+//! Hash reaches the host with its native Symbol keys and mixed
+//! values (Bool / Sym / String), all of which the host handles
+//! by direct match.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -76,6 +79,30 @@ use rubyrs::{HostCtx, RubyError, Runtime, Trap, Value};
 /// fail with a concrete error message.
 fn arg_err(msg: impl Into<String>) -> Trap {
     Trap { err: RubyError::ArgumentError { msg: msg.into() }, backtrace: vec![] }
+}
+
+/// Stringify a kwarg value for the demo's flat `String` storage.
+/// Accepts the three shapes a Bundler-style kwarg actually uses —
+/// Bool (`require: false`), Symbol (`platforms: :mri`), String
+/// (`require: "pry-byebug"`). Returns `None` for anything else so
+/// the caller can `?`-bubble an explicit ArgumentError instead of
+/// silently storing "" — the demo's previous shape silently
+/// dropped non-String values.
+fn value_to_kwarg_string(ctx: &HostCtx, v: &Value) -> Option<String> {
+    match v {
+        Value::Bool(b) => Some(if *b { "true".into() } else { "false".into() }),
+        Value::Str(rs) => Some(rs.borrow().clone()),
+        // The arm already matched `Value::Sym`, so `resolve_sym` is
+        // guaranteed to return Some. `expect` rather than `.map` so a
+        // future interner-contract regression panics loudly instead
+        // of mis-routing through this fn's caller as an ArgumentError
+        // ("must be a Bool, Symbol, or String") — which would be a
+        // misleading message for a value that IS a Symbol.
+        Value::Sym(_) => Some(ctx.resolve_sym(v)
+            .expect("resolve_sym on Value::Sym arm must return Some")
+            .to_string()),
+        _ => None,
+    }
 }
 
 /// A single gem declaration captured from the Gemfile.
@@ -232,12 +259,14 @@ fn main() {
     // `resolve_array` / `resolve_hash` borrow directly from the
     // heap, no clone.
     //
-    // The prelude still does ONE Ruby-side transform — rebuilding
-    // `opts` with String keys + String values — because `HostCtx`
-    // exposes no interner access, so a `:require` Symbol key can't
-    // be stringified host-side. Everything else (splat-receive,
-    // kwarg unpacking, per-key filtering, value typing) moves down
-    // into typed Rust here.
+    // The prelude is a one-liner — `__gemfile_gem_v2(name, requirements,
+    // opts)` — with no Ruby-side massage. `HostCtx::resolve_sym` handles
+    // the `:require` / `:platforms` Symbol keys; the value side accepts
+    // Bool (`require: false`), Sym (`platforms: :mri`), and String
+    // (`require: "pry-byebug"`) by direct match. Bundler's full
+    // kwargs surface is wider — this demo only consumes the two
+    // we care about and silently drops the rest, mirroring how
+    // Bundler tolerates unknown options.
     {
         let st = state.clone();
         rt.register_fn_v2("__gemfile_gem_v2", move |ctx: &HostCtx, args| {
@@ -268,17 +297,22 @@ fn main() {
                 })
                 .collect::<Result<_, _>>()?;
 
-            // The prelude's `opts.each { |k,v| out[k.to_s] = v.to_s }` rebuild
-            // guarantees String → String. A non-String key/value here means
-            // the prelude was bypassed.
+            // Bundler kwargs Hash: keys are Symbols (`:require`,
+            // `:platforms`), values are mixed (Bool, Sym, String).
+            // `ctx.resolve_sym(k)` borrows the interned name; the
+            // value branch covers each shape we accept and errors
+            // explicitly on anything else (e.g. an Integer in
+            // `platforms: 3`) so the demo doesn't silently drop data.
             let mut require_kw = String::new();
             let mut platforms_kw = String::new();
             for (k, v) in opts_slice {
-                let (ks, vs) = match (k, v) {
-                    (Value::Str(ks), Value::Str(vs)) => (ks.borrow().clone(), vs.borrow().clone()),
-                    _ => return Err(arg_err("__gemfile_gem_v2: opts must have String keys and values")),
-                };
-                match ks.as_str() {
+                let key = ctx.resolve_sym(k).ok_or_else(|| arg_err(
+                    "__gemfile_gem_v2: opts keys must be Symbols"
+                ))?;
+                let vs = value_to_kwarg_string(ctx, v).ok_or_else(|| arg_err(
+                    format!("__gemfile_gem_v2: opts[{key}] must be a Bool, Symbol, or String")
+                ))?;
+                match key {
                     "require"   => require_kw   = vs,
                     "platforms" => platforms_kw = vs,
                     _ => {} // unknown kwargs ignored — Bundler accepts many we don't model

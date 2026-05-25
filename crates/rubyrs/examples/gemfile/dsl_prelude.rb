@@ -43,19 +43,14 @@ def ruby(version)
 end
 
 # The workhorse. Bundler accepts `gem "name", *version_specs, **opts`.
-# v2 host fn (`register_fn_v2` + `HostCtx`) lets the Rust side read
-# Array / Hash arguments directly via `ctx.resolve_array` /
-# `ctx.resolve_hash`, so the splat + kwargs are passed through
-# unflattened. The one remaining Ruby-side massage is rebuilding
-# `opts` with String keys + String values — `HostCtx` exposes no
-# interner access, so a `:require` Symbol key can't be stringified
-# host-side. That's the only translation step left; everything
-# else (per-key filtering, value typing, requirement parsing)
-# happens in typed Rust in `gemfile.rs`.
+# v2 host fn (`register_fn_v2` + `HostCtx`) reads the splat as an
+# Array and the kwargs as a Hash directly, with no Ruby-side
+# massage — `HostCtx` exposes `resolve_array`, `resolve_hash`, and
+# `resolve_sym` so Bundler's `:require => false` /
+# `:platforms => :mri` kwargs are unpacked entirely in typed
+# Rust. The Gemfile lines reach the host byte-for-byte unchanged.
 def gem(name, *requirements, **opts)
-  stringified = {}
-  opts.each { |k, v| stringified[k.to_s] = v.to_s }
-  __gemfile_gem_v2(name, requirements, stringified)
+  __gemfile_gem_v2(name, requirements, opts)
 end
 
 # ---------- block-scoping helpers ----------

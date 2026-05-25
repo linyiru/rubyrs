@@ -191,6 +191,41 @@ fn register_fn_v2_reads_hash_arg_via_host_ctx() {
 }
 
 #[test]
+fn register_fn_v2_resolves_sym_arg_via_host_ctx() {
+    // `HostCtx::resolve_sym` lets the host borrow the interned name
+    // of a `Value::Sym` arg without going through the prelude. This
+    // closes the gap PR #40 noted: a Bundler-style kwarg Hash with
+    // Symbol keys (`require:`, `platforms:`) can be consumed
+    // host-side without a Ruby `k.to_s` rebuild.
+    let captured: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![]));
+    let captured_for_fn = captured.clone();
+    let mut rt = Runtime::new();
+    rt.register_fn_v2("sym_names", move |ctx: &HostCtx, args: &[Value]| {
+        let mut out = captured_for_fn.borrow_mut();
+        out.clear();
+        for v in args {
+            let name = ctx.resolve_sym(v).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError {
+                    msg: "expected all args to be Symbols".into(),
+                },
+                backtrace: vec![],
+            })?;
+            out.push(name.to_string());
+        }
+        Ok(Value::Nil)
+    });
+
+    rt.eval(r#"sym_names(:require, :platforms, :mri)"#, "t.rb").unwrap();
+    assert_eq!(&*captured.borrow(), &["require", "platforms", "mri"]);
+
+    // Negative case: a non-Symbol arg surfaces the explicit
+    // ArgumentError, not a silent skip.
+    let err = rt.eval(r#"sym_names(:ok, "not a sym")"#, "t.rb").unwrap_err();
+    assert!(err.err.is("ArgumentError"),
+        "expected ArgumentError on non-Sym arg, got {:?}", err.err);
+}
+
+#[test]
 fn register_fn_v2_replaces_prior_v1_registration() {
     // Re-registering under the same name swaps the slot —
     // pinning this so a future refactor that uses separate v1/v2
@@ -1390,19 +1425,35 @@ fn gemfile_dsl_real_hosting_end_to_end() {
                     })
                 })
                 .collect::<Result<_, _>>()?;
+            // Bundler kwargs Hash: Symbol keys, mixed values (Bool /
+            // Sym / String). Mirrors examples/gemfile.rs.
             let mut require_kw = String::new();
             let mut platforms_kw = String::new();
             for (k, v) in opts_slice {
-                let (ks, vs) = match (k, v) {
-                    (Value::Str(ks), Value::Str(vs)) => (ks.borrow().clone(), vs.borrow().clone()),
+                let key = ctx.resolve_sym(k).ok_or_else(|| Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "opts keys must be Symbols".into(),
+                    },
+                    backtrace: vec![],
+                })?;
+                let vs = match v {
+                    Value::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
+                    Value::Str(rs) => rs.borrow().clone(),
+                    // The outer match already filtered on `Value::Sym`,
+                    // so `resolve_sym` is guaranteed to return Some.
+                    // `expect` rather than `unwrap_or("")` so a future
+                    // interner-contract regression surfaces loudly.
+                    Value::Sym(_) => ctx.resolve_sym(v)
+                        .expect("resolve_sym on Value::Sym arm must return Some")
+                        .to_string(),
                     _ => return Err(Trap {
                         err: RubyError::ArgumentError {
-                            msg: "opts must have String keys and values".into(),
+                            msg: format!("opts[{key}] must be a Bool, Symbol, or String"),
                         },
                         backtrace: vec![],
                     }),
                 };
-                match ks.as_str() {
+                match key {
                     "require"   => require_kw   = vs,
                     "platforms" => platforms_kw = vs,
                     _ => {}
