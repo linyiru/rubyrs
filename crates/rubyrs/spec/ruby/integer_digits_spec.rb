@@ -1,18 +1,25 @@
 # Adapted from ruby/spec core/integer/digits_spec.rb at
-# 2026-05 (upstream commit 448cb340) — FIRST landed extractor
-# output. The bulk of the file came out of
-# `rubyrs-spec-extract` v0.1 in one shot (the `assert_eq(...)`
-# calls below are byte-for-byte what the extractor produced).
-# What v0.1 couldn't yet handle:
-#   - `-> { ... }.should.raise(X)` lambdas (v0.2's job;
-#     hand-translated to `assert_raises("X") { ... }` here)
-#   - `mock_int(2)` (no mock library; the upstream `it` block
-#     is preserved as a comment, not run)
-#   - one Math::DomainError divergence (rubyrs raises
-#     ArgumentError on Integer#digits over a negative
-#     receiver — see docs/SUBSET.md → "Integer built-in
-#     methods"; the `it` block stays as a comment until
-#     alignment lands)
+# upstream commit 448cb340 (2026-05). RE-EXTRACTED with
+# `rubyrs-spec-extract` v0.2; replaces the PR #61 landing
+# (which used v0.1 + hand-translated raise blocks).
+#
+# Diff vs PR #61:
+#   - The `should.raise(ArgumentError)` blocks now come
+#     verbatim from the extractor (v0.2 added lambda-raise
+#     lowering); no more hand polish.
+#   - The two skipped blocks (mock_int / Math::DomainError)
+#     stay commented out for the same reasons as before:
+#       * `mock_int` (digits_spec.rb:12-14) — no mock library
+#         in the micro-runner; coercion via `to_int` is a
+#         separate spec area.
+#       * Math::DomainError on negative receiver
+#         (digits_spec.rb:29-31) — rubyrs raises ArgumentError
+#         instead. See docs/SUBSET.md → "Integer built-in
+#         methods" for the documented divergence.
+#
+# After this update only those two `it` blocks need hand
+# input; everything else is byte-identical to what the
+# extractor produced.
 
 describe "Integer#digits" do
   it "returns an array of place values in base-10 by default" do
@@ -38,10 +45,6 @@ describe "Integer#digits" do
   end
 
   it "raises ArgumentError when calling with a radix less than 2" do
-    # Hand-translated from upstream's
-    # `-> { 12345.digits(1) }.should.raise(ArgumentError)`.
-    # v0.2 of the extractor will produce this form
-    # automatically.
     assert_raises("ArgumentError") do
       12345.digits(1)
     end

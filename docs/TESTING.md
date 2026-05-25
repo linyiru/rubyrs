@@ -130,8 +130,9 @@ useful first-pass acceptance criterion.
 | `core/string` subset (sub, gsub, reverse, include, empty) | 5 | 35 | 100% |
 | `core/method` subset (call, compose, curry, ==, to_proc, owner, receiver) | 7 | 37 | 100% |
 | `core/unboundmethod` subset (==) | 1 | 6 | 100% |
-| `core/integer` subset (digits) — **first extractor-assisted** | 1 | 7 | 100% |
-| **Total** | **20** | **115** | **100%** |
+| `core/integer` subset (digits) — re-extracted with v0.2 (was first extractor-assisted in PR #61) | 1 | 7 | 100% |
+| `core/array` subset (count) — extractor v0.2 output | 1 | 3 | 100% |
+| **Total** | **21** | **118** | **100%** |
 
 Every example must pass — there is no "tagged divergent" lane
 yet. Skipped upstream `it` blocks are noted in the spec file's
