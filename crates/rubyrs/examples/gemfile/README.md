@@ -40,24 +40,27 @@ host is in `dsl_prelude.rb`.
                                     │    git / path block helpers  │
                                     │  - RUBY_VERSION constant     │
                                     └────────────┬─────────────────┘
-                                                 │ unpacks *splat /
-                                                 │ **kwargs / block
-                                                 │ scope down to
-                                                 │ plain Strings
+                                                 │ rebuilds **opts
+                                                 │ with String keys
+                                                 │ + values; joins
+                                                 │ block-scope args
                                                  ▼
                                     ┌──────────────────────────────┐
                                     │ Rust host (gemfile.rs)       │
-                                    │  - __gemfile_source          │
-                                    │  - __gemfile_gem (name,      │
-                                    │      reqs, req_kw, plat_kw)  │
-                                    │  - __gemfile_push_groups …   │
+                                    │  - __gemfile_gem_v2 (v2):    │
+                                    │      name, *reqs Array,      │
+                                    │      **opts Hash             │
+                                    │  - __gemfile_source / _ruby  │
+                                    │      / push_* (v1, String)   │
                                     │  - accumulates GemfileState  │
                                     └──────────────────────────────┘
 ```
 
 The seam between Bundler's public DSL (`gem`, `group`, etc.) and
-the host's flat `&[Value]` API lives entirely in the prelude.
-The Gemfile never sees it.
+the host lives entirely in the prelude. The `gem` shim uses v2
+(Array + Hash flow through unwrapped); the scope-stack shims use
+v1 (single String per push). The Gemfile itself never sees the
+seam.
 
 ## Run it
 
@@ -106,27 +109,58 @@ regression in `*splat` / `**kwargs` / block-yield scope / file-
 scope conditional / String constant comparison fails that test,
 not just the unobservable example binary.
 
-## Host-fn API takeaway (for future embed work)
+## Host-fn API: v1 vs v2 in this demo
 
-This example was originally built against the v1 API
-(`Runtime::register_fn`), which hands the closure only a
-`&[Value]` — no `&Heap` access. Heap-y shapes (`Value::Array`
-from `*splat`, `Value::Hash` from `**kwargs`) can't be read
-from inside a v1 closure because their contents live in the
-heap, which the closure can't reach.
+This example mixes both flavours of the host-fn API. The
+`__gemfile_gem_v2` host fn uses **v2**
+([`register_fn_v2`](../../src/lib.rs) + `HostCtx`), receiving
+the `*splat` as a real Array and `**kwargs` as a real Hash.
+`HostCtx::resolve_array` / `resolve_hash` borrow directly
+from the VM heap with no clone. All splat / kwarg unpacking,
+per-key filtering, value typing, and requirement parsing
+lives in typed Rust:
 
-The workaround this demo uses: **do the unpacking in the Ruby-
-side prelude** (one short shim per public DSL entry) and pass
-plain positional `String` / `Int` / `Bool` to the host. That
-keeps each host fn ~5 lines and avoids needing intimate `Heap`
-access. The prelude is the seam — the Gemfile is unmodified.
+```rust
+rt.register_fn_v2("__gemfile_gem_v2", move |ctx: &HostCtx, args| {
+    let [name, requirements, opts] = args else {
+        return Err(arg_err("expected 3 args"));
+    };
+    // Fail fast on wrong shapes — never copy-paste `unwrap_or(&[])`
+    // here. A prelude regression sending a non-Array/Hash should
+    // surface as ArgumentError immediately, not as silent partial
+    // state collected several gem decls later.
+    let reqs_slice = ctx.resolve_array(requirements)
+        .ok_or_else(|| arg_err("requirements must be an Array"))?;
+    let opts_slice = ctx.resolve_hash(opts)
+        .ok_or_else(|| arg_err("opts must be a Hash"))?;
+    // ... iterate, validate every element/entry is Value::Str,
+    //     populate GemDecl. See `gemfile.rs` for the full pattern.
+});
+```
 
-The follow-up that closed this gap is
-[`Runtime::register_fn_v2`](../../src/lib.rs): the closure
-also receives a `HostCtx` with `resolve_array` /
-`resolve_hash` borrows into the heap. A v2 rewrite of this
-demo could shrink the prelude further (`def gem(name,
-*requirements, **opts); __gemfile_gem_v2(name, requirements,
-opts); end` — host does the unpacking in typed Rust). Not
-done here yet; the prelude-flattening shape still works fine
-and keeps the demo's host-side code straight-line.
+The scope-stack helpers (`group` / `platforms` / `git` /
+`path`) stay on **v1** ([`register_fn`](../../src/lib.rs))
+because their natural input is already a single String — the
+prelude joins multi-symbol args (`group :a, :b`) into one
+String before pushing, and the host pops one String off the
+stack. No heap shape, no v2 benefit.
+
+### One remaining prelude transform
+
+The prelude still does ONE Ruby-side rebuild:
+
+```ruby
+def gem(name, *requirements, **opts)
+  stringified = {}
+  opts.each { |k, v| stringified[k.to_s] = v.to_s }
+  __gemfile_gem_v2(name, requirements, stringified)
+end
+```
+
+The `opts.each` loop rebuilds the kwargs hash with String
+keys + String values. `HostCtx` borrows the heap but NOT the
+interner, so a `:require` Symbol key has no host-side path to
+its name. Closing this fully would require a
+`HostCtx::resolve_sym(&Value) -> Option<&str>` (interner
+widening); deferred. For most DSLs the one-line `.each`
+rebuild is acceptable.

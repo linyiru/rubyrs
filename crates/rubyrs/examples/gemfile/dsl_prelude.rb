@@ -43,17 +43,19 @@ def ruby(version)
 end
 
 # The workhorse. Bundler accepts `gem "name", *version_specs, **opts`.
-# rubyrs's host-fn API gives the closure a `&[Value]`, with no
-# `&Heap` to peer into the trailing Hash or splatted Array. So
-# we unpack here: stringify the requirements with `|` as a
-# separator (no version spec contains `|`), pull the kwargs we
-# care about, then pass everything as plain positionals to the
-# host. The host re-splits and records.
+# v2 host fn (`register_fn_v2` + `HostCtx`) lets the Rust side read
+# Array / Hash arguments directly via `ctx.resolve_array` /
+# `ctx.resolve_hash`, so the splat + kwargs are passed through
+# unflattened. The one remaining Ruby-side massage is rebuilding
+# `opts` with String keys + String values — `HostCtx` exposes no
+# interner access, so a `:require` Symbol key can't be stringified
+# host-side. That's the only translation step left; everything
+# else (per-key filtering, value typing, requirement parsing)
+# happens in typed Rust in `gemfile.rs`.
 def gem(name, *requirements, **opts)
-  reqs = requirements.join("|")
-  require_kw   = opts.key?(:require)   ? opts[:require].to_s   : ""
-  platforms_kw = opts.key?(:platforms) ? opts[:platforms].to_s : ""
-  __gemfile_gem(name, reqs, require_kw, platforms_kw)
+  stringified = {}
+  opts.each { |k, v| stringified[k.to_s] = v.to_s }
+  __gemfile_gem_v2(name, requirements, stringified)
 end
 
 # ---------- block-scoping helpers ----------

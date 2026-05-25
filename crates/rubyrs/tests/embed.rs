@@ -1344,34 +1344,88 @@ fn gemfile_dsl_real_hosting_end_to_end() {
             Ok(Value::Nil)
         });
     }
+    // v2 form — mirrors examples/gemfile.rs::__gemfile_gem_v2.
+    // Fail-fast shape validation: matches the demo's pattern and
+    // the earlier register_fn_v2_reads_* unit tests. A regression
+    // in the prelude (sending the wrong shape) surfaces as an
+    // ArgumentError here, not as a silent partial GemfileState
+    // that fails 200 lines later in `.gems.len() != 18`.
     {
         let st = state.clone();
-        rt.register_fn("__gemfile_gem", move |args| {
-            if let [name, reqs, req_kw, plat_kw] = args {
-                let mut sm = st.borrow_mut();
-                let groups: Vec<String> = sm.group_stack.last()
-                    .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
-                    .unwrap_or_default();
-                let platforms_scope: Vec<String> = sm.platforms_stack.last()
-                    .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
-                    .unwrap_or_default();
-                let source_override = sm.source_stack.last().cloned();
-                let req_str = s(reqs);
-                let reqs_vec = if req_str.is_empty() {
-                    vec![]
-                } else {
-                    req_str.split('|').map(String::from).collect()
-                };
-                sm.gems.push(Gem {
-                    name: s(name),
-                    reqs: reqs_vec,
-                    groups,
-                    require_kw: s(req_kw),
-                    platforms_kw: s(plat_kw),
-                    platforms_scope,
-                    source_override,
+        rt.register_fn_v2("__gemfile_gem_v2", move |ctx, args| {
+            let [name, requirements, opts] = args else {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: format!("__gemfile_gem_v2: expected 3 args, got {}", args.len()),
+                    },
+                    backtrace: vec![],
                 });
+            };
+            let name = if let Value::Str(rs) = name {
+                rs.borrow().clone()
+            } else {
+                return Err(Trap {
+                    err: RubyError::ArgumentError { msg: "name must be a String".into() },
+                    backtrace: vec![],
+                });
+            };
+            let reqs_slice = ctx.resolve_array(requirements).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "requirements must be an Array".into() },
+                backtrace: vec![],
+            })?;
+            let opts_slice = ctx.resolve_hash(opts).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "opts must be a Hash".into() },
+                backtrace: vec![],
+            })?;
+
+            let reqs_vec: Vec<String> = reqs_slice.iter()
+                .map(|v| if let Value::Str(rs) = v {
+                    Ok(rs.borrow().clone())
+                } else {
+                    Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: "requirements element must be a String".into(),
+                        },
+                        backtrace: vec![],
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            let mut require_kw = String::new();
+            let mut platforms_kw = String::new();
+            for (k, v) in opts_slice {
+                let (ks, vs) = match (k, v) {
+                    (Value::Str(ks), Value::Str(vs)) => (ks.borrow().clone(), vs.borrow().clone()),
+                    _ => return Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: "opts must have String keys and values".into(),
+                        },
+                        backtrace: vec![],
+                    }),
+                };
+                match ks.as_str() {
+                    "require"   => require_kw   = vs,
+                    "platforms" => platforms_kw = vs,
+                    _ => {}
+                }
             }
+
+            let mut sm = st.borrow_mut();
+            let groups: Vec<String> = sm.group_stack.last()
+                .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+                .unwrap_or_default();
+            let platforms_scope: Vec<String> = sm.platforms_stack.last()
+                .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+                .unwrap_or_default();
+            let source_override = sm.source_stack.last().cloned();
+            sm.gems.push(Gem {
+                name,
+                reqs: reqs_vec,
+                groups,
+                require_kw,
+                platforms_kw,
+                platforms_scope,
+                source_override,
+            });
             Ok(Value::Nil)
         });
     }
