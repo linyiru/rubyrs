@@ -386,6 +386,37 @@ impl Vm {
             // `flat_map { ... }` = map then flatten(1). Same
             // driver as map, but each block result that's an
             // Array gets spread into the result.
+            // `arr.filter_map { |x| ... }` — map + select in one
+            // pass. Block return is kept iff truthy; nil/false are
+            // dropped (not "false is included" — strict truthiness,
+            // matching CRuby).
+            (Value::Array(id), "filter_map", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() {
+                        g.vm.heap.array_mut(result_id).push(r);
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
             (Value::Array(id), "flat_map", []) | (Value::Array(id), "collect_concat", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
@@ -565,6 +596,38 @@ impl Vm {
             // mapped through the block. Values preserved. On
             // collision (block maps two distinct keys to the same
             // new key), later wins, matching CRuby.
+            // `h.filter_map { |k, v| ... }` — yields each (k, v),
+            // collects truthy block results into a fresh Array.
+            // Like Array#filter_map but on Hash entries; the
+            // result is NOT a Hash (CRuby behaviour).
+            (Value::Hash(id), "filter_map", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.invoke_block(block, vec![k, v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() {
+                        g.vm.heap.array_mut(result_id).push(r);
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
             (Value::Hash(id), "transform_keys", []) => {
                 let id = *id;
                 let mut g = PinGuard::new(self);

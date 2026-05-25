@@ -215,6 +215,27 @@ impl Vm {
                         let nid = self.heap.alloc(HeapObj::Hash(out));
                         Some(Value::Hash(nid))
                     }
+                    // `h.compact` — return a new Hash with nil-value
+                    // entries removed. Non-mutating.
+                    ("compact", []) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).iter()
+                            .filter(|(_, v)| !matches!(v, Value::Nil))
+                            .cloned()
+                            .collect();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        Some(Value::Hash(nid))
+                    }
+                    // `h.compact!` — in-place compaction. Returns
+                    // the receiver if any entries were dropped,
+                    // `nil` if there were no nil-valued entries
+                    // (matches CRuby's "nil unchanged" convention).
+                    ("compact!", []) => {
+                        let before = self.heap.hash(id).len();
+                        self.heap.hash_mut(id).retain(|(_, v)| !matches!(v, Value::Nil));
+                        let after = self.heap.hash(id).len();
+                        Some(if before == after { Value::Nil } else { Value::Hash(id) })
+                    }
                     // `h.except(*keys)` — return a new Hash with the
                     // listed keys removed. Non-mutating. Keys not
                     // present in the receiver are silently skipped.

@@ -197,3 +197,4 @@ fn run_diff(name: &str) {
 #[test] fn array_tally() { run_diff("array_tally"); }
 #[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }
 #[test] fn float_precision() { run_diff("float_precision"); }
+#[test] fn compact_filter_map() { run_diff("compact_filter_map"); }
