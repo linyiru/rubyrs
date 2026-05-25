@@ -98,6 +98,37 @@ pattern as a version increment:
 Anything it doesn't recognise is **skipped and logged** to SPEC_STATUS.md.
 Progress is therefore always measurable and never blocking.
 
+## Current state — manual translation baseline (2026-05)
+
+Before the extractor exists, we maintain a small **manually-
+translated baseline** under
+[`crates/rubyrs/spec/ruby/`](../crates/rubyrs/spec/ruby/) that
+mirrors a subset of upstream ruby/spec using the conventions
+documented in
+[`crates/rubyrs/spec/README.md`](../crates/rubyrs/spec/README.md).
+The translation is deliberately mechanical (a fixed table of
+`expr.should == val` → `assert_eq(expr, val)` rewrites) so the
+v0.1 extractor can be validated against the same files later —
+"does the tool produce the same output as a human did?" is the
+useful first-pass acceptance criterion.
+
+| Area | Files | Examples | Pass rate |
+|---|---|---|---|
+| Metaprog (ADR 0010 PoC) | 6 | 30 | 100% |
+| `core/string` subset (sub, gsub, reverse, include, empty) | 5 | 36 | 100% |
+| **Total** | **11** | **66** | **100%** |
+
+Every example must pass — there is no "tagged divergent" lane
+yet. Skipped upstream `it` blocks are noted in the spec file's
+top-of-file comment with the reason (out of subset / out of
+master / fixtures-dependent). When master lands a feature that
+unblocks a previously-skipped block, the comment becomes the
+ratchet: un-skip and re-test.
+
+Progress beyond this baseline goes either by hand (one PR per
+upstream area) until the v0.1 extractor lands, or by
+extractor-then-curate once it does.
+
 ## Workflow for adding a feature
 
 The intended pull request flow:
