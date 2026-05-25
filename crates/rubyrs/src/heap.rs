@@ -31,19 +31,27 @@ pub(crate) enum HeapObj {
     /// resolve to the right user-facing class without needing a
     /// separate per-instance class slot.
     ///
-    /// `#[allow(dead_code)]`: the variant is allocated only through
-    /// the cext bridge, which is `#[cfg(not(target_os = "wasi"))]`.
-    /// On wasi the cext path is stubbed and nothing ever
-    /// constructs this variant, so `-D warnings` would flag it as
-    /// dead. Explicit allow keeps the wasi build green without
-    /// splitting the enum across targets.
-    #[allow(dead_code)]
+    /// `cfg_attr` only on wasi: the variant is allocated only
+    /// through the cext bridge, which is
+    /// `#[cfg(not(target_os = "wasi"))]`. On wasi the cext path
+    /// is stubbed and nothing ever constructs this variant, so
+    /// `-D warnings` would flag it as dead. Narrow the allow to
+    /// wasi (rather than unconditional) so non-wasi builds still
+    /// catch accidental loss of callers — review #1 on PR #22.
+    #[cfg_attr(target_os = "wasi", allow(dead_code))]
     TypedData(TypedDataObj),
 }
 
 /// Heap representation of a CRuby-shape TypedData object. See
 /// [`HeapObj::TypedData`] for the design context.
-#[allow(dead_code)] // class + type_ptr consumed by rb_check_typeddata (C ABI surface)
+//
+// cfg_attr on wasi only: fields ARE read on non-wasi (`class` by
+// `class_of`, `type_ptr` by the rb_check_typeddata callback). On
+// wasi the whole TypedData path is stubbed so nothing constructs
+// or reads the struct; the conditional allow keeps the wasi
+// build green without silencing real dead-field warnings
+// elsewhere (review #1 on PR #22).
+#[cfg_attr(target_os = "wasi", allow(dead_code))]
 pub(crate) struct TypedDataObj {
     pub(crate) class: Rc<crate::value::Class>,
     /// Owned C pointer. Treated as opaque by the host.
@@ -155,6 +163,17 @@ impl Heap {
     /// HeapObj variant — the caller must have proven the type
     /// via `rb_check_typeddata` (or equivalent) at the cext boundary
     /// before reaching this accessor.
+    ///
+    /// `cfg_attr` only on wasi: only called from the cext bridge,
+    /// which is `#[cfg(not(target_os = "wasi"))]`. On wasi the
+    /// cext path is stubbed so this accessor has no callers and
+    /// `-D warnings` would flag it as dead. Narrow to wasi so
+    /// non-wasi builds still catch accidental loss of callers
+    /// (review #1 on PR #22 — the previous unconditional
+    /// `#[allow(dead_code)]` silenced the warning on every
+    /// target, defeating the panic-budget-style discipline of
+    /// catching dead host code).
+    #[cfg_attr(target_os = "wasi", allow(dead_code))]
     pub(crate) fn typed_data(&self, id: ObjId) -> &TypedDataObj {
         if let HeapObj::TypedData(d) = self.get(id) { d }
         else { panic!("ICE: heap slot is not a TypedData") }

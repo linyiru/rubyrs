@@ -12,9 +12,9 @@
 //!     partition / sort_by / inject / flat_map / chunk / etc.)
 //!     over every receiver type.
 
-use crate::error::{RubyError, Trap};
+use crate::error::Trap;
 use crate::heap::HeapObj;
-use crate::value::{Instance, ObjId, Value};
+use crate::value::{ObjId, Value};
 
 use super::{value_cmp_v, PinGuard, Vm};
 
