@@ -53,6 +53,9 @@ pub enum RubyError {
     /// write; strings don't (at least not without a different
     /// CRuby method), hence the trap.
     IndexError { msg: String },
+    /// Mutating a frozen String (`freeze`d or interned). CRuby's
+    /// FrozenError; rescued by `rescue FrozenError`.
+    FrozenError { msg: String },
     /// Integer `/` or `%` with a zero divisor. CRuby raises
     /// `ZeroDivisionError`; without this variant the Rust
     /// `i64::div` would panic the host process. Float `/ 0.0`
@@ -83,6 +86,7 @@ impl RubyError {
             RubyError::NameError { .. } => "NameError",
             RubyError::KeyError { .. } => "KeyError",
             RubyError::IndexError { .. } => "IndexError",
+            RubyError::FrozenError { .. } => "FrozenError",
             RubyError::ZeroDivisionError { .. } => "ZeroDivisionError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
             // Uncaught carries the actual class name from the script's
@@ -101,6 +105,7 @@ impl RubyError {
             | RubyError::NameError { msg }
             | RubyError::KeyError { msg }
             | RubyError::IndexError { msg }
+            | RubyError::FrozenError { msg }
             | RubyError::ZeroDivisionError { msg }
             | RubyError::ResourceExhausted { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),

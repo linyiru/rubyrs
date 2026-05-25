@@ -4,6 +4,29 @@ use std::rc::Rc;
 
 use crate::intern::SymId;
 
+/// Heap-shared string body with a frozen flag. Wraps a
+/// `RefCell<String>` so that aliases see mutations, and a
+/// `Cell<bool>` so `freeze` / `frozen?` round-trip without
+/// touching the content's borrow. Derefs to the inner RefCell —
+/// existing `.borrow()` / `.borrow_mut()` calls keep their
+/// terse form; the frozen flag rides as a sibling on the Rc.
+#[derive(Debug)]
+pub struct RStr {
+    pub(crate) content: RefCell<String>,
+    pub(crate) frozen: Cell<bool>,
+}
+
+impl RStr {
+    pub fn new(s: String) -> Self {
+        Self { content: RefCell::new(s), frozen: Cell::new(false) }
+    }
+}
+
+impl std::ops::Deref for RStr {
+    type Target = RefCell<String>;
+    fn deref(&self) -> &Self::Target { &self.content }
+}
+
 /// Method visibility. Default is `Public`; `private` / `protected`
 /// inside a class body changes the mode for subsequent `def`s and
 /// `private :sym` retroactively flips already-defined methods.
@@ -31,14 +54,13 @@ pub enum Value {
     /// (CRuby's "Float wins on mix" rule). Equality across the
     /// numeric types coerces too — `5 == 5.0` is `true`.
     Float(f64),
-    /// Mutable string. `Rc<RefCell<String>>` rather than `Rc<str>`
-    /// so that `s[i] = x` and friends can update the underlying
-    /// storage and have every alias of `s` see the change — CRuby
-    /// treats String as a mutable object reference. Every read
-    /// path borrows through `.borrow()`; every mutation goes
-    /// through `.borrow_mut()`. The Rc lets value-clones stay
-    /// O(1) (refcount bump, no String copy).
-    Str(Rc<RefCell<String>>),
+    /// Mutable, optionally-frozen string. `Rc<RStr>` shares one
+    /// content + frozen-flag pair across every Value clone — so
+    /// `s[i] = x` and `s.freeze` both have global-to-aliases
+    /// effect, matching CRuby's mutable-object semantics. `RStr`
+    /// derefs to its inner `RefCell<String>`, so existing
+    /// `.borrow()` / `.borrow_mut()` sites keep working unchanged.
+    Str(Rc<RStr>),
     Sym(SymId),
     Bool(bool),
     Nil,

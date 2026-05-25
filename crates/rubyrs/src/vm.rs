@@ -379,7 +379,8 @@ impl Vm {
                 "sub" | "gsub" | "tr" |
                 "match?" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
-                "<<" | "concat" | "prepend" | "replace"
+                "<<" | "concat" | "prepend" | "replace" |
+                "freeze" | "frozen?" | "dup"
             ),
             Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect"),
             Value::Array(_) => matches!(name,
@@ -998,8 +999,12 @@ impl Vm {
                 (Value::Range(a), Value::Range(b)) => a == b,
                 (Value::Block(a), Value::Block(b)) => a == b,
                 (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
-                // Immediates (Int, Float, Sym, Bool, Nil, Str via
-                // value equality) — fall back on ruby_eq.
+                // String is now Rc-shared and identity-bearing
+                // (frozen flag, aliasing). `equal?` should reflect
+                // Rc-pointer identity, not content equality.
+                (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b),
+                // Immediates (Int, Float, Sym, Bool, Nil) — fall
+                // back on ruby_eq (value equality).
                 _ => recv.ruby_eq(&args[0], &self.heap),
             };
             self.stack.push(Value::Bool(same));
@@ -1839,7 +1844,37 @@ impl Vm {
                 // take *args) doesn't fit the inner-match
                 // `[Value::Str(b)]` pattern; we dispatch by name
                 // first, then validate the args.
+                // freeze / frozen? / dup — the per-string immutability
+                // controls. CRuby raises FrozenError on any mutating
+                // method against a frozen string; we route that
+                // through a Trap so `rescue FrozenError` catches it.
+                if name == "frozen?" && args.is_empty() {
+                    return Ok(Some(Value::Bool(s.frozen.get())));
+                }
+                if name == "freeze" && args.is_empty() {
+                    s.frozen.set(true);
+                    return Ok(Some(Value::Str(s)));
+                }
+                if name == "dup" && args.is_empty() {
+                    // Fresh Rc, fresh RefCell, NOT frozen — `dup`
+                    // copies content but resets the frozen bit.
+                    let copy = s.content.borrow().clone();
+                    return Ok(Some(Value::new_str(copy)));
+                }
+                // Helper closure: bail out of any mutating method
+                // if `s` was frozen. Used by `<<`, `concat`,
+                // `prepend`, `replace`, `[]=`.
+                let check_unfrozen = |vm: &Vm| -> Result<(), Trap> {
+                    if s.frozen.get() {
+                        Err(vm.trap(RubyError::FrozenError {
+                            msg: format!("can't modify frozen String: {:?}", s.content.borrow()),
+                        }))
+                    } else {
+                        Ok(())
+                    }
+                };
                 if name == "<<" && args.len() == 1 {
+                    check_unfrozen(self)?;
                     match &args[0] {
                         Value::Str(other) => {
                             let to_push = other.borrow().clone();
@@ -1865,6 +1900,7 @@ impl Vm {
                     return Ok(Some(Value::Str(s)));
                 }
                 if name == "concat" {
+                    check_unfrozen(self)?;
                     for a in args {
                         match a {
                             Value::Str(o) => {
@@ -1879,6 +1915,7 @@ impl Vm {
                     return Ok(Some(Value::Str(s)));
                 }
                 if name == "prepend" {
+                    check_unfrozen(self)?;
                     // Concatenate args in order, then prepend to
                     // existing content. CRuby's `prepend("a","b")`
                     // results in `"a" + "b" + self`, not the
@@ -1898,6 +1935,7 @@ impl Vm {
                     return Ok(Some(Value::Str(s)));
                 }
                 if name == "replace" && args.len() == 1 {
+                    check_unfrozen(self)?;
                     match &args[0] {
                         Value::Str(o) => {
                             let new_content = o.borrow().clone();
@@ -1991,6 +2029,7 @@ impl Vm {
                 // shares the same RefCell, so writes through
                 // `borrow_mut` are visible to all aliases.
                 if name == "[]=" && args.len() == 2 {
+                    check_unfrozen(self)?;
                     if let (Value::Int(i), Value::Str(repl)) = (&args[0], &args[1]) {
                         let chars: Vec<char> = s.borrow().chars().collect();
                         let len = chars.len() as i64;
@@ -2009,6 +2048,7 @@ impl Vm {
                     return Ok(None);
                 }
                 if name == "[]=" && args.len() == 3 {
+                    check_unfrozen(self)?;
                     if let (Value::Int(i), Value::Int(n), Value::Str(repl)) = (&args[0], &args[1], &args[2]) {
                         let chars: Vec<char> = s.borrow().chars().collect();
                         let len = chars.len() as i64;

@@ -270,6 +270,8 @@ class KeyError < IndexError
 end
 class ZeroDivisionError < StandardError
 end
+class FrozenError < RuntimeError
+end
 ## Intentionally `< Exception`, NOT `< StandardError`. A bare
 ## `rescue => e` clause filters on `StandardError` by default,
 ## so attaching `ResourceExhausted` outside that subtree means

@@ -182,7 +182,7 @@ impl Value {
     /// `Rc<RefCell<String>>` wrap so call sites don't repeat the
     /// boilerplate.
     pub fn new_str(s: impl Into<String>) -> Self {
-        Value::Str(std::rc::Rc::new(std::cell::RefCell::new(s.into())))
+        Value::Str(std::rc::Rc::new(crate::value::RStr::new(s.into())))
     }
 
     pub(crate) fn is_truthy(&self) -> bool {
