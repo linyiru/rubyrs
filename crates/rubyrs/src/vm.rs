@@ -1418,18 +1418,30 @@ impl Vm {
                                 }));
                             }
                         }
-                        let mut out: Vec<Value> = Vec::with_capacity(base.len());
-                        for (i, v) in base.iter().enumerate() {
-                            let mut row: Vec<Value> = Vec::with_capacity(row_width);
-                            row.push(v.clone());
-                            for o in &others {
-                                row.push(o.get(i).cloned().unwrap_or(Value::Nil));
+                        // PinGuard the freshly-alloc'd row Arrays: their
+                        // ObjIds live in a Rust local `out` Vec, NOT on
+                        // `vm.stack` / `vm.pinned`, so the explicit
+                        // `maybe_gc()` after the loop (or a STRESS_GC
+                        // gc on every alloc) would sweep them and the
+                        // outer `heap.alloc(out)` would then panic with
+                        // `ICE: use-after-free`. Same shape as L1.5 P0-A.
+                        let nid = {
+                            let mut g = PinGuard::new(self);
+                            let mut out: Vec<Value> = Vec::with_capacity(base.len());
+                            for (i, v) in base.iter().enumerate() {
+                                let mut row: Vec<Value> = Vec::with_capacity(row_width);
+                                row.push(v.clone());
+                                for o in &others {
+                                    row.push(o.get(i).cloned().unwrap_or(Value::Nil));
+                                }
+                                let rid = g.vm.heap.alloc(HeapObj::Array(row));
+                                let rv = Value::Array(rid);
+                                g.pin(rv.clone());
+                                out.push(rv);
                             }
-                            let rid = self.heap.alloc(HeapObj::Array(row));
-                            out.push(Value::Array(rid));
-                        }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out));
+                            g.vm.maybe_gc();
+                            g.vm.heap.alloc(HeapObj::Array(out))
+                        };
                         Some(Value::Array(nid))
                     }
                     _ => None,
