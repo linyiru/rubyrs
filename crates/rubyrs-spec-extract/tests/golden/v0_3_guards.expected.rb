@@ -1,10 +1,11 @@
-# rubyrs-spec-extract v0.3: 2 pattern(s) left for hand polish.
+# rubyrs-spec-extract v0.3: 3 pattern(s) left for hand polish.
 # Each entry names the upstream line + reason. Address each
 # (comment out, inline, or wait for a later extractor version)
 # before the file is consumable by the micro-runner.
 #
 #   - L10: `before` — only `before :each` is lifted in v0.3
-#   - L25: `mock_int` — only int-literal arg is substituted in v0.3; dynamic arg passes through
+#   - L26: `before` — only `before :each` is lifted in v0.3
+#   - L43: `mock_int` — only int-literal arg is substituted in v0.3; dynamic arg passes through
 
 # Guards added in response to the /code-review pass on
 # v0.3. Each block exercises a defensive case. None should
@@ -22,6 +23,24 @@ describe "before-arg-shape guard" do
   it "doesn't get the lift" do
     @hash
   end
+end
+
+describe "empty-it bailout guard" do
+  # If ANY sibling `it` has an empty body (TODO placeholder
+  # `do end`), the whole lift bails — better to leave the
+  # `before :each` for the human (with a skip-log entry) than
+  # delete it AND lift partially. Without this, the empty it
+  # would run without its setup but its non-empty siblings
+  # would get it, an asymmetry that's surprising at best.
+  before :each do
+    @hash = { a: 1 }
+  end
+
+  it "with body, would get the lift if not for empty sibling" do
+    @hash.length
+  end
+
+  it "empty body — pending"
 end
 
 describe "mock_int receiver guard" do

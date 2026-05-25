@@ -624,25 +624,41 @@ impl BeforeEachLifter<'_> {
         let (start, end) = before_call_range?;
 
         // Second pass: gather all `it` body insertion points.
+        // If ANY sibling `it` has an empty body (`do end` /
+        // `{ }`), bail the entire lift rather than emit a
+        // partial one — without the bail, we'd delete the
+        // `before` and lift into only the non-empty siblings,
+        // leaving the empty-body `it` running without its setup.
+        // The asymmetry would be surprising; passing through
+        // lets the human see the `before :each` via the skip
+        // log and inline manually if they want.
         let mut insertion_points: Vec<usize> = Vec::new();
+        let mut any_it_seen = false;
         for stmt in stmts.body().iter() {
             let Some(call) = stmt.as_call_node() else { continue };
             if !name_is(call.name(), b"it") { continue }
-            let Some(it_block_node) = call.block() else { continue };
-            let Some(it_block) = it_block_node.as_block_node() else { continue };
-            let Some(it_body) = it_block.body() else { continue };
+            any_it_seen = true;
+            let it_block_node = call.block()?;
+            let it_block = it_block_node.as_block_node()?;
+            // Empty-body `it` (`do end` / `{ }`) — `?` returns
+            // None from process_describe, aborting the whole
+            // lift. Comment above explains why we bail rather
+            // than emit a partial substitution.
+            let it_body = it_block.body()?;
             insertion_points.push(it_body.location().start_offset());
         }
-        if insertion_points.is_empty() {
-            // No it blocks → no point lifting; leave the before
-            // call alone (will land in the skip log).
+        if !any_it_seen {
+            // No `it`s at all in this describe → no point lifting;
+            // leave the before call alone (lands in skip log).
             return None;
         }
 
         // Emit substitutions.
-        // 1. Delete the before call itself. Replacement is empty
-        //    string — leaves a blank line in the output, which we
-        //    consider acceptable formatting cost.
+        // 1. Delete the before call. The `(start, end)` range
+        //    was expanded above to swallow the call's leading
+        //    indent and trailing newline, so this removes the
+        //    WHOLE line — the output doesn't carry a
+        //    whitespace-only blank line as an editing artefact.
         self.substitutions.push(Substitution {
             start,
             end,
@@ -682,19 +698,42 @@ fn collect_unhandled<'pr>(
     root: &Node<'pr>,
     consumed: &[(usize, usize)],
 ) -> Vec<UnhandledPattern> {
+    // Precompute line-start byte offsets once. Each visit_call_node
+    // hit then resolves its line number via binary search,
+    // O(log N) vs the previous O(N) scan-from-start per pattern.
+    // Real upstream files have hundreds of CallNodes — the per-
+    // pattern hit count is small but the file size means the
+    // linear scan was O(file_size * patterns).
+    let mut line_starts: Vec<usize> = Vec::with_capacity(source.len() / 32);
+    line_starts.push(0);
+    for (i, b) in source.as_bytes().iter().enumerate() {
+        if *b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+
+    // `source` parameter unused after switching to line_starts;
+    // keep it on the signature for API parity (caller passes it
+    // anyway, and future skip-log entries may need it for arg
+    // formatting).
+    let _ = source;
     let mut visitor = UnhandledCollector {
-        source,
         patterns: Vec::new(),
         consumed,
+        line_starts: &line_starts,
     };
     visitor.visit(root);
     visitor.patterns
 }
 
 struct UnhandledCollector<'a> {
-    source: &'a str,
     patterns: Vec<UnhandledPattern>,
     consumed: &'a [(usize, usize)],
+    /// Sorted byte offsets where each line starts. `line_starts[0]
+    /// == 0`; `line_starts[i]` is the byte index of the first
+    /// character on line `i+1`. Used by `line_at` for O(log N)
+    /// offset-to-line lookups.
+    line_starts: &'a [usize],
 }
 
 impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
@@ -749,7 +788,7 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
                 _ => None,
             };
             if let Some(detail) = detail {
-                let line = line_number(self.source, start);
+                let line = line_at(self.line_starts, start);
                 self.patterns.push(UnhandledPattern {
                     line,
                     name: String::from_utf8_lossy(name_bytes).into_owned(),
@@ -761,11 +800,13 @@ impl<'pr> Visit<'pr> for UnhandledCollector<'_> {
     }
 }
 
-/// 1-based line number for a byte offset. Counts newlines before
-/// the offset.
-fn line_number(source: &str, byte_offset: usize) -> usize {
-    let upto = source.get(..byte_offset).unwrap_or("");
-    upto.matches('\n').count() + 1
+/// 1-based line number for a byte offset, using a precomputed
+/// list of line-start offsets. `line_starts` is sorted ascending
+/// (constructed by walking the source once); `partition_point`
+/// gives us O(log N) lookup vs `line_number`'s O(N)-per-call
+/// scan that the v0.3 round-1 implementation used.
+fn line_at(line_starts: &[usize], byte_offset: usize) -> usize {
+    line_starts.partition_point(|&s| s <= byte_offset)
 }
 
 /// Render the bullet list as a Ruby block comment to prepend to

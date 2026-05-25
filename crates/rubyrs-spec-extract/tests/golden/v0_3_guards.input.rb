@@ -16,6 +16,24 @@ describe "before-arg-shape guard" do
   end
 end
 
+describe "empty-it bailout guard" do
+  # If ANY sibling `it` has an empty body (TODO placeholder
+  # `do end`), the whole lift bails — better to leave the
+  # `before :each` for the human (with a skip-log entry) than
+  # delete it AND lift partially. Without this, the empty it
+  # would run without its setup but its non-empty siblings
+  # would get it, an asymmetry that's surprising at best.
+  before :each do
+    @hash = { a: 1 }
+  end
+
+  it "with body, would get the lift if not for empty sibling" do
+    @hash.length
+  end
+
+  it "empty body — pending"
+end
+
 describe "mock_int receiver guard" do
   # `obj.mock_int(2)` — mspec's `mock_int` is top-level; a
   # method named the same on a user class shouldn't get its
