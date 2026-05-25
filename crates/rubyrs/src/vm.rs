@@ -5464,121 +5464,43 @@ fn cext_dispatch(
             })?
         };
 
-        // L3-A: wrap the actual C call in BOTH `with_caught_unwind`
-        // and `call_with_raise`. They cover different failure
-        // modes — only one fires per call — but the BOUNDARIES on
-        // what each can catch are narrower than they first look
-        // (review #1 cleaned up an earlier overclaim):
+        // L3-A: build the self handle + args array in Rust, then
+        // hand off to `invoke_with_raise` which does the setjmp +
+        // C-side arity dispatch + cext call ENTIRELY in C frames.
+        // There are NO Rust frames between setjmp and the cext fn,
+        // so a longjmp from `rb_raise` never has to unwind a Rust
+        // RAII Drop (closes Copilot reviews #7 / #8 on PR #14 —
+        // the earlier Rust trampoline + FnOnce design WAS letting
+        // longjmp skip Rust frames, which is at-best implementation-
+        // defined).
         //
-        //   - `call_with_raise` catches a C-side `rb_raise` because
-        //     setjmp/longjmp live entirely in C frames — the
-        //     longjmp returns to setjmp inside `rubyrs_jmp_call`,
-        //     which then returns into Rust normally.
-        //
-        //   - `with_caught_unwind` catches a Rust panic from the
-        //     immediate closure body it wraps — i.e. the OUTER
-        //     `|| call_with_raise(...)` (heap-boxing / pointer
-        //     prep). It does NOT catch panics from inside the
-        //     inner closure passed to call_with_raise: those
-        //     propagate through the `extern "C" trampoline` which
-        //     is `nounwind`, so they abort the process before any
-        //     catch_unwind handler runs. Same fundamental limit
-        //     that already applied to panics inside C-ext
-        //     callbacks (`cext_funcall_to_vm` etc.) pre-L3-A.
-        //
-        // Net: the catch_unwind is defensive coverage of a narrow
-        // Rust-only slice. It is NOT a guarantee against C-ext
-        // panic-induced abort. Closing that gap needs the same
-        // per-call setjmp protocol we already use for rb_raise to
-        // also cover panics — out of scope for L3-A.
+        // The earlier `with_caught_unwind` wrapper is gone: it
+        // can't catch panics from inside the cext fn either (they
+        // cross the same C-ABI boundary and abort regardless), and
+        // the previous overclaim about it covering trampoline
+        // panics was already flagged by review #1.
         //
         // **Known limitation** (L3-A spike): a `rb_raise` from a
         // deeply-nested rb_funcall chain longjmps PAST any
-        // intermediate Rust frames (specifically `cext_funcall_to_vm`
-        // bodies). Their `PinGuard`s' `Drop` never runs → vm.pinned
-        // grows. Harmless for non-pathological loads; the cleanup
-        // protocol is the next spike step.
-        let raise_outcome = with_caught_unwind(|| {
-            rubyrs_cext::raise::call_with_raise(|| {
-                let self_handle = match self_class {
-                    Some(cname) => rubyrs_cext::with_state(|st| {
-                        st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
-                    }),
-                    None => rubyrs_cext::Qnil,
-                };
-                match arity {
-                    0 => {
-                        type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
-                        let f: F = std::mem::transmute(func);
-                        f(self_handle)
-                    }
-                    1 => {
-                        type F = unsafe extern "C" fn(
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                        ) -> rubyrs_cext::Value;
-                        let f: F = std::mem::transmute(func);
-                        f(self_handle, arg_handles[0])
-                    }
-                    2 => {
-                        type F = unsafe extern "C" fn(
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                        ) -> rubyrs_cext::Value;
-                        let f: F = std::mem::transmute(func);
-                        f(self_handle, arg_handles[0], arg_handles[1])
-                    }
-                    3 => {
-                        type F = unsafe extern "C" fn(
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                        ) -> rubyrs_cext::Value;
-                        let f: F = std::mem::transmute(func);
-                        f(self_handle, arg_handles[0], arg_handles[1], arg_handles[2])
-                    }
-                    4 => {
-                        type F = unsafe extern "C" fn(
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                        ) -> rubyrs_cext::Value;
-                        let f: F = std::mem::transmute(func);
-                        f(
-                            self_handle,
-                            arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3],
-                        )
-                    }
-                    5 => {
-                        type F = unsafe extern "C" fn(
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                            rubyrs_cext::Value,
-                        ) -> rubyrs_cext::Value;
-                        let f: F = std::mem::transmute(func);
-                        f(
-                            self_handle,
-                            arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3], arg_handles[4],
-                        )
-                    }
-                    _ => unreachable!("arity validated above"),
-                }
-            })
-        });
-        // Unpack two layers: catch_unwind first (Rust panic → Trap),
-        // then call_with_raise's `Raised` (C raise → Trap).
-        let raised = raise_outcome.map_err(|panic_msg| {
-            Trap::new(RubyError::RuntimeError {
-                msg: format!("C ext `{}' panicked: {}", name, panic_msg),
-            })
-        })?;
+        // intermediate Rust frames inside `cext_funcall_to_vm`.
+        // Their `PinGuard`s' `Drop` never runs → vm.pinned grows.
+        // Harmless for non-pathological loads; cleanup protocol is
+        // the next spike step.
+        let self_handle = match self_class {
+            Some(cname) => rubyrs_cext::with_state(|st| {
+                st.intern(rubyrs_cext::CValue::Class(cname.to_string()))
+            }),
+            None => rubyrs_cext::Qnil,
+        };
+        // C helper expects [self, arg0, arg1, ...]; pre-allocate
+        // with capacity to keep the hot path branch-free.
+        let mut invoke_args: Vec<rubyrs_cext::Value> =
+            Vec::with_capacity(arg_handles.len() + 1);
+        invoke_args.push(self_handle);
+        invoke_args.extend_from_slice(&arg_handles);
+        let raised = rubyrs_cext::raise::invoke_with_raise(
+            func, arity, &invoke_args,
+        );
         let ret_handle = match raised {
             rubyrs_cext::raise::Raised::Returned(v) => v,
             rubyrs_cext::raise::Raised::Raised { class, msg } => {
@@ -5715,33 +5637,6 @@ fn cext_funcall_to_vm(
         match cext_value_to_cvalue(vm_for_result, st, "rb_funcallv:result", 0, &result) {
             Ok(cv) => st.intern(cv),
             Err(_) => rubyrs_cext::Qnil,
-        }
-    })
-}
-
-/// Run `f`, catching any Rust panic that escapes from our own
-/// argument-interning / handle-management code wrapping the C call.
-///
-/// **What this catches**: panics raised in Rust code that runs around
-/// the `extern "C"` call — `state.intern`, our `Vec` building, any
-/// `expect("ICE: ...")` in `rubyrs_cext::with_state`.
-///
-/// **What this does NOT catch**: panics raised inside the C function
-/// itself. The C side cannot raise a Rust panic; if one of OUR
-/// `rb_*` ABI functions panics from inside the C call, the process
-/// aborts under `panic = abort` semantics (the default for `extern "C"`
-/// since Rust 2018+). The cext ABI surface is documented as
-/// abort-on-contract-violation in docs/PANIC_AUDIT.md — conversion to
-/// error sentinels is Level 3+ work tied to `rb_raise` integration.
-#[cfg(not(target_os = "wasi"))]
-fn with_caught_unwind<T>(f: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
-        if let Some(s) = p.downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = p.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "non-string panic payload".to_string()
         }
     })
 }

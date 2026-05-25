@@ -34,12 +34,21 @@
 use std::ffi::{CStr, c_char, c_void};
 
 unsafe extern "C" {
-    /// See c/setjmp_shim.c. Returns the closure's u64 on normal
-    /// return; on a raised exception, writes the class id +
-    /// (heap-owned) message into the out-params and returns 0.
-    fn rubyrs_jmp_call(
-        cb: unsafe extern "C" fn(*mut c_void) -> u64,
-        userdata: *mut c_void,
+    /// See c/setjmp_shim.c. Invokes the OpaqueFn under a setjmp
+    /// protected frame using a C-side arity switch — there are NO
+    /// Rust frames between setjmp and the cext call, so a longjmp
+    /// from rb_raise never has to unwind a Rust frame's RAII Drop.
+    ///
+    /// `args` must point to an array of length `arity + 1` (args[0]
+    /// is `self`, args[1..] are the call arguments).
+    ///
+    /// Returns the cext fn's u64 on normal return; on raise, writes
+    /// the class id + heap-owned message into the out-params and
+    /// returns 0 (meaningless — caller checks `*out_raised_class`).
+    fn rubyrs_jmp_invoke(
+        func: super::OpaqueFn,
+        arity: std::ffi::c_int,
+        args: *const u64,
         out_raised_class: *mut u64,
         out_raised_msg: *mut *mut c_char,
     ) -> u64;
@@ -58,44 +67,49 @@ pub enum Raised {
     Raised { class: u64, msg: String },
 }
 
-/// Invoke `f` under a setjmp protected frame. Any `rb_raise` call
-/// that fires while `f` is on the call stack (including
-/// transitively through other C → Ruby → C bridges) will be
-/// caught and surfaced as [`Raised::Raised`] instead of aborting.
+/// Invoke a cext function under setjmp protection. A `rb_raise`
+/// fired from inside `func` (or any nested C ext it calls
+/// transitively) is caught and returned as [`Raised::Raised`]
+/// instead of longjmp-ing past arbitrary frames.
+///
+/// `args` must have length `arity + 1` — args[0] is the `self`
+/// handle, args[1..] are the call arguments.
 ///
 /// # Safety
 ///
-/// `f` must not retain any Rust references to thread-local state
-/// (`STATE` / `FUNCALL_CB` / `CURRENT_VM_PTR` / pending pin set)
-/// across the call — on the raised path, RAII drops of any guards
-/// the *caller* holds across this function ARE skipped (longjmp
-/// fundamentally bypasses Rust's drop machinery). The host's
-/// `cext_dispatch` defends by snapshotting + truncating those
-/// stacks on both the normal and raised return paths, see
-/// vm::cext_dispatch for the cleanup protocol.
-pub fn call_with_raise<F: FnOnce() -> u64>(f: F) -> Raised {
-    // Heap-box the closure so its FnOnce machinery survives the
-    // round trip through C via a `*mut c_void` userdata pointer.
-    // FnOnce can't be invoked through a bare fn-ptr without
-    // assistance — the trampoline below pulls the Box back out
-    // and calls the closure exactly once.
-    struct Bundle<F: FnOnce() -> u64> {
-        f: Option<F>,
-    }
-
-    unsafe extern "C" fn trampoline<F: FnOnce() -> u64>(ud: *mut c_void) -> u64 {
-        let bundle = unsafe { &mut *(ud as *mut Bundle<F>) };
-        let f = bundle.f.take().expect("ICE: call_with_raise trampoline fired twice");
-        f()
-    }
-
-    let mut bundle = Bundle::<F> { f: Some(f) };
+/// The caller must guarantee:
+///   - `func` is a valid function pointer of an arity that matches
+///     `arity` (caller validates against the registered arity from
+///     `rb_define_*_function`).
+///   - `args` is a valid pointer to `arity + 1` `Value`s.
+///   - No Rust RAII guards held by the caller cross the call: the
+///     host's `cext_dispatch` keeps them on its own frame, OUTSIDE
+///     this call. (The previous design had a Rust trampoline frame
+///     between setjmp and the cext fn — review #7 / #8 flagged
+///     that as longjmp-across-Rust UB; this signature avoids it by
+///     pushing the arity dispatch into C.)
+///
+/// # Returns
+///
+/// `Raised::Returned(value)` for normal return; `Raised::Raised`
+/// for a caught rb_raise. Never panics.
+pub unsafe fn invoke_with_raise(
+    func: super::OpaqueFn,
+    arity: i32,
+    args: &[super::Value],
+) -> Raised {
+    debug_assert_eq!(
+        args.len(),
+        (arity as usize) + 1,
+        "invoke_with_raise: args length must be arity + 1 (self + call args)"
+    );
     let mut out_class: u64 = 0;
     let mut out_msg: *mut c_char = std::ptr::null_mut();
     let raw_result = unsafe {
-        rubyrs_jmp_call(
-            trampoline::<F>,
-            (&raw mut bundle) as *mut c_void,
+        rubyrs_jmp_invoke(
+            func,
+            arity as std::ffi::c_int,
+            args.as_ptr(),
             &mut out_class as *mut u64,
             &mut out_msg as *mut *mut c_char,
         )

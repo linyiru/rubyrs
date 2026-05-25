@@ -62,10 +62,39 @@ static __thread jmp_stack_t g_jmps = { -1, {{0}} };
 static __thread uint64_t g_pending_class = 0;
 static __thread char *g_pending_msg = NULL;
 
-uint64_t rubyrs_jmp_call(uint64_t (*cb)(void *),
-                         void *userdata,
-                         uint64_t *out_raised_class,
-                         char **out_raised_msg) {
+/* Arity-specific function-pointer types for the cext dispatch. The
+ * Rust host transmutes the registered `OpaqueFn` to one of these
+ * based on the arity captured at `rb_define_*_function` time.
+ * Done here in C (rather than via a generic Rust callback) so that
+ * longjmp from rb_raise unwinds ONLY C frames between setjmp and
+ * the cext call. Longjmp across a Rust frame would skip its RAII
+ * `Drop`s and is implementation-defined; closing that gap was the
+ * point of review #7 / #8 on PR #14. */
+typedef uint64_t (*rubyrs_arity0_fn)(uint64_t);
+typedef uint64_t (*rubyrs_arity1_fn)(uint64_t, uint64_t);
+typedef uint64_t (*rubyrs_arity2_fn)(uint64_t, uint64_t, uint64_t);
+typedef uint64_t (*rubyrs_arity3_fn)(uint64_t, uint64_t, uint64_t, uint64_t);
+typedef uint64_t (*rubyrs_arity4_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef uint64_t (*rubyrs_arity5_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+/* Invoke the C extension function under a setjmp protected frame.
+ *
+ *   `func`  — the OpaqueFn registered by rb_define_*_function.
+ *   `arity` — 0..5 (caller validates).
+ *   `args`  — pointer to an array of length `arity + 1`; args[0]
+ *             is the `self` handle, args[1..] are the call args.
+ *
+ * Returns the C function's u64 return value on normal return; on a
+ * raised exception writes (class, msg) into the out-params and
+ * returns 0 (meaningless — caller checks `*out_raised_class`).
+ *
+ * The whole call chain from `setjmp` to `func(...)` lives in C
+ * frames, so a longjmp from rb_raise never unwinds a Rust frame. */
+uint64_t rubyrs_jmp_invoke(void (*func)(void),
+                           int arity,
+                           const uint64_t *args,
+                           uint64_t *out_raised_class,
+                           char **out_raised_msg) {
     if (g_jmps.top + 1 >= RUBYRS_JMP_MAX_NEST) {
         /* Programmer error — the host should not be nesting this
          * deep. Abort rather than silently corrupting the stack. */
@@ -74,7 +103,31 @@ uint64_t rubyrs_jmp_call(uint64_t (*cb)(void *),
     g_jmps.top += 1;
     int raised = setjmp(g_jmps.bufs[g_jmps.top]);
     if (raised == 0) {
-        uint64_t result = cb(userdata);
+        uint64_t result;
+        switch (arity) {
+            case 0:
+                result = ((rubyrs_arity0_fn)func)(args[0]);
+                break;
+            case 1:
+                result = ((rubyrs_arity1_fn)func)(args[0], args[1]);
+                break;
+            case 2:
+                result = ((rubyrs_arity2_fn)func)(args[0], args[1], args[2]);
+                break;
+            case 3:
+                result = ((rubyrs_arity3_fn)func)(args[0], args[1], args[2], args[3]);
+                break;
+            case 4:
+                result = ((rubyrs_arity4_fn)func)(args[0], args[1], args[2], args[3], args[4]);
+                break;
+            case 5:
+                result = ((rubyrs_arity5_fn)func)(args[0], args[1], args[2], args[3], args[4], args[5]);
+                break;
+            default:
+                /* Caller (Rust cext_dispatch) validates arity before
+                 * reaching us, so anything outside 0..5 is a host bug. */
+                abort();
+        }
         /* Normal return — pop the buf and clear the out-params. */
         g_jmps.top -= 1;
         *out_raised_class = 0;
