@@ -1,0 +1,10 @@
+1: result="ran" v=42
+2: log=["ensure-1", "body-1", "ensure-2", "ensure-3", "body-3"]
+3: trail=["inner", "outer"] v="deep"
+4: catch_ran=true caught="secondary"
+5: v=99
+6: effects=["before-break", "in-ensure"] v="value-1"
+8: v="broke-via-ensure"
+8a: [1, 2, 3]
+7a: v=[10, 20, 30]
+7: trail=["ensure-1", "body-1", "next-arg-2", "ensure-2", "ensure-3", "body-3"]

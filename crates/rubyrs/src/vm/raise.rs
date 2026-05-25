@@ -23,7 +23,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{Class, Instance, Value};
 
-use super::{class_is_a, Vm};
+use super::{class_is_a, LoopTransfer, LoopTransferKind, Vm};
 
 impl Vm {
     /// Convert a Ruby-level `raise` argument into an Exception instance.
@@ -117,6 +117,12 @@ impl Vm {
 
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) -> Result<(), Trap> {
         cold_path();
+        // A real exception supersedes any in-flight `break`/`next`
+        // transfer (CRuby semantics: if the ensure body raises while
+        // a break is pending, the raise wins and the break is silently
+        // dropped). Clear the slot before walking handlers so a later
+        // EndEnsure doesn't try to resume a now-cancelled transfer.
+        self.pending_loop_transfer = None;
         // Resolve the raised value's class once up front; the unwind loop
         // may probe many handlers before finding (or not finding) a match.
         let exc_class: Option<Rc<Class>> = match &exc {
@@ -168,8 +174,11 @@ impl Vm {
                 // entries leak on the stack (we jumped to the handler
                 // without their `ExitLoop` running). Without this fix
                 // a later `BreakLoop` in this frame reads an orphan
-                // entry and pops the wrong handler depth.
+                // entry and pops the wrong handler depth. Parallel
+                // truncate on `loop_stack_depths` keeps the two
+                // stacks in lock-step.
                 f.loop_rescue_depths.truncate(h.loop_depth_at_push);
+                f.loop_stack_depths.truncate(h.loop_depth_at_push);
                 if h.is_ensure {
                     // ensure handler: push the exception onto the operand
                     // stack; the handler's compiled code ends in `Op::Raise`
@@ -217,6 +226,101 @@ impl Vm {
                 return Err(self.trap(RubyError::Uncaught { class_name, message }));
             }
         }
+    }
+
+    /// Kicks off a `break` / `next` transfer through any intervening
+    /// `is_ensure` handlers between the source op and the target loop.
+    /// Walks the frame's rescues from top down: discards plain
+    /// rescues (they don't catch break/next); for each ensure it
+    /// encounters, suspends the walk by jumping into the ensure's
+    /// handler body. `Op::EndEnsure` at the body's tail will pick the
+    /// walk back up via `continue_loop_transfer`. If no ensure sits
+    /// above the target depth, lands at the target inline.
+    pub(crate) fn begin_loop_transfer(
+        &mut self,
+        kind: LoopTransferKind,
+        target_ip: usize,
+        target_rescues_len: usize,
+    ) -> Result<(), Trap> {
+        let f = self.frames.last().expect("ICE: begin_loop_transfer no frame");
+        // Target loop_depth is the slot that BreakLoop/NextLoop were
+        // about to consume: the innermost EnterLoop entry. Save it
+        // so the eventual landing can truncate `loop_rescue_depths`
+        // (entries pushed by lexically-inner whiles the transfer is
+        // escaping out of get discarded along the way).
+        let target_loop_depth = f.loop_rescue_depths.len() - 1;
+        // Capture the operand-stack depth at the matching EnterLoop's
+        // time. The landing path truncates to this depth so any
+        // residue accumulated in the body (most importantly the
+        // exception value `unwind_with_exception` pushed when
+        // entering an ensure handler, in scenarios like
+        // `while; begin; raise; ensure; break; end; end`) is
+        // flushed before the break value lands.
+        let target_stack_depth = *f.loop_stack_depths.last()
+            .expect("ICE: loop_stack_depths empty at begin_loop_transfer");
+        self.pending_loop_transfer = Some(LoopTransfer {
+            kind, target_ip, target_rescues_len, target_loop_depth,
+            target_stack_depth,
+        });
+        self.continue_loop_transfer()
+    }
+
+    /// Resume the in-flight `break`/`next` transfer. Called by
+    /// `Op::EndEnsure` at the tail of an ensure handler body, and
+    /// directly by `begin_loop_transfer` to do the first hop.
+    pub(crate) fn continue_loop_transfer(&mut self) -> Result<(), Trap> {
+        let target = self.pending_loop_transfer.as_ref()
+            .expect("ICE: continue_loop_transfer with no pending transfer");
+        let target_rescues_len = target.target_rescues_len;
+        let target_ip = target.target_ip;
+        let target_loop_depth = target.target_loop_depth;
+        let target_stack_depth = target.target_stack_depth;
+        // Walk the frame's rescues from top, dropping any non-ensure
+        // entries (rescue clauses don't catch a structured break/next).
+        // The first ensure we hit gets entered — the rest of the
+        // walk happens on the next EndEnsure.
+        loop {
+            let f = self.frames.last_mut().expect("ICE: continue_loop_transfer no frame");
+            if f.rescues.len() <= target_rescues_len { break; }
+            let h = f.rescues.pop().expect("ICE: rescues non-empty by length check");
+            if h.is_ensure {
+                // Suspend the transfer here. Restore the operand
+                // stack to PushEnsure depth (matching the
+                // exception-path entry) but do NOT push anything —
+                // the ensure body runs with whatever the surrounding
+                // code already had on stack at PushEnsure time.
+                // EndEnsure at the body's tail resumes the walk.
+                self.stack.truncate(h.stack_depth);
+                f.ip = h.handler_ip;
+                return Ok(());
+            }
+            // Plain rescue handler — silently discard. break/next
+            // never trigger a rescue clause.
+        }
+        // No more intervening ensures. Land at the target.
+        let transfer = self.pending_loop_transfer.take().expect("ICE: just had it");
+        // Flush operand-stack residue down to the EnterLoop snapshot.
+        // Most importantly: if `break`/`next` started from inside an
+        // ensure body that `unwind_with_exception` had entered (which
+        // pushes the exception onto the operand stack), this discards
+        // that stranded exception. CRuby semantics: a control transfer
+        // from an ensure cancels the exception that was being unwound.
+        self.stack.truncate(target_stack_depth);
+        let f = self.frames.last_mut().expect("ICE: loop transfer landing no frame");
+        // Truncate loop_rescue_depths (+ parallel loop_stack_depths)
+        // to the entry we're targeting (drops EnterLoop entries from
+        // nested whiles the transfer is escaping out of).
+        f.loop_rescue_depths.truncate(target_loop_depth + 1);
+        f.loop_stack_depths.truncate(target_loop_depth + 1);
+        f.ip = target_ip;
+        if let LoopTransferKind::Break { value } = transfer.kind {
+            // Push the break value so the loop's join sees it as
+            // the loop expression's result. `next` has no value to
+            // push; iter_check evaluates the cond from a clean
+            // stack.
+            self.stack.push(value);
+        }
+        Ok(())
     }
 }
 

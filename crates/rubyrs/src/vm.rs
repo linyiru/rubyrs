@@ -94,6 +94,49 @@ pub(crate) struct Frame {
     /// iteration-driver / block return (the existing `Op::Break`
     /// path stays untouched).
     pub(crate) loop_rescue_depths: Vec<usize>,
+    /// Parallel stack to `loop_rescue_depths`: `stack.len()` at the
+    /// moment each enclosing `while`'s `Op::EnterLoop` ran. Used by
+    /// `continue_loop_transfer`'s landing path to truncate any
+    /// operand-stack residue accumulated inside the body — most
+    /// importantly the exception value `unwind_with_exception`
+    /// pushes when entering an ensure handler (which `break`/`next`
+    /// from inside that handler would otherwise leave stranded).
+    /// Kept in lock-step with `loop_rescue_depths`: same push site
+    /// (EnterLoop), pop site (ExitLoop), and truncate site
+    /// (rescue/ensure match in `unwind_with_exception`).
+    pub(crate) loop_stack_depths: Vec<usize>,
+}
+
+/// In-flight structured `break`/`next` walking through an
+/// `ensure` chain. The `kind` carries the break value (or `Next`
+/// for `next`); `target_ip` is the instruction the transfer
+/// lands at once every intervening `is_ensure` handler has run;
+/// `target_loop_depth` is the `loop_rescue_depths` length the
+/// frame should have after the transfer (entries pushed by
+/// `EnterLoop`s the transfer is escaping out of get truncated).
+/// One slot per VM is enough — break/next transfers are single-
+/// frame and complete (or get superseded by a real raise)
+/// before any new one can start.
+pub(crate) struct LoopTransfer {
+    pub(crate) kind: LoopTransferKind,
+    pub(crate) target_ip: usize,
+    pub(crate) target_rescues_len: usize,
+    pub(crate) target_loop_depth: usize,
+    /// `stack.len()` at the time `Op::EnterLoop` ran for this
+    /// transfer's target loop. On landing the stack is truncated
+    /// to this depth before the break value (if any) is pushed —
+    /// flushes any operand-stack residue the body accumulated,
+    /// including the exception that `unwind_with_exception` pushed
+    /// when it entered an ensure handler we're now `break`ing out
+    /// of. Without this, `while; begin; raise; ensure; break; end;
+    /// end` leaks the exception value on the operand stack until
+    /// the surrounding frame pops.
+    pub(crate) target_stack_depth: usize,
+}
+
+pub(crate) enum LoopTransferKind {
+    Break { value: Value },
+    Next,
 }
 
 /// RAII guard for `Vm.pinned`. Native-side code that needs heap
@@ -315,6 +358,18 @@ pub(crate) struct Vm {
     /// semantics: `return` inside a `do…end` exits the enclosing
     /// method, not just the block.
     pub(crate) method_return: Option<Value>,
+    /// In-flight `break`/`next` through `ensure` chain. Set by
+    /// `Op::BreakLoop`/`Op::NextLoop` when an `is_ensure` handler
+    /// sits between the source and the target; cleared once the
+    /// transfer lands at its target loop label. `Op::EndEnsure`
+    /// (emitted at the tail of every ensure handler body) reads
+    /// this field to decide whether to keep walking the rescue
+    /// chain or fall back to normal end-of-ensure exception
+    /// re-raise. `unwind_with_exception` clears this field
+    /// whenever a real exception starts unwinding — matching
+    /// CRuby semantics where a `raise` inside an ensure body
+    /// silently drops a pending break/next.
+    pub(crate) pending_loop_transfer: Option<LoopTransfer>,
     /// One-shot flag set by a builtin that detected its caller was
     /// unwound past its own call-site (e.g. `require_relative` saw
     /// `unwind_with_exception` route control to an outer
@@ -387,6 +442,7 @@ impl Vm {
             method_compose_forwarder_proto: None,
             sources: HashMap::new(),
             method_return: None,
+            pending_loop_transfer: None,
             suppress_call_result_push: false,
         }
     }

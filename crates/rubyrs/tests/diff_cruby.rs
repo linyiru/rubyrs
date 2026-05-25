@@ -214,6 +214,7 @@ fn run_diff(name: &str) {
 #[test] fn require_relative_main() { run_diff("require_relative_main"); }
 #[test] fn break_in_while() { run_diff("break_in_while"); }
 #[test] fn next_in_while() { run_diff("next_in_while"); }
+#[test] fn break_next_ensure() { run_diff("break_next_ensure"); }
 #[test] fn singleton_class_body() { run_diff("singleton_class_body"); }
 #[test] fn global_variables() { run_diff("global_variables"); }
 #[test] fn op_assign_extended() { run_diff("op_assign_extended"); }

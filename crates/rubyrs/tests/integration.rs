@@ -88,23 +88,9 @@ fn run_error_fixture(name: &str) {
 #[test] fn err_nomethod() { run_error_fixture("nomethod"); }
 #[test] fn err_wrong_args() { run_error_fixture("wrong_args"); }
 #[test] fn err_yield_no_block() { run_error_fixture("yield_no_block"); }
-// Pins the defensive trap for `break` through an `ensure` body inside
-// a `while` loop. Full Ruby semantics (run the ensure body, then
-// exit the loop with the break value) requires a break-aware Trap
-// variant + Op::Raise hook — too large to land alongside the basic
-// break-in-while fix. Until that lands, we error with a clear message
-// rather than silently dropping the ensure body. The .expected_err
-// pins that message so a future regression that re-silences the
-// case (or, conversely, the proper fix that removes the trap) shows
-// up as a test diff.
-#[test] fn err_break_through_ensure() { run_error_fixture("break_through_ensure"); }
-// Variant: outer `begin/rescue` around the offending loop. The
-// defensive trap is `Uncaught` (intentionally non-rescuable), so
-// the outer rescue must NOT silently catch it — that would mask
-// the limitation and diverge from CRuby (where `break` is a
-// structured transfer that never triggers `rescue`). If a future
-// refactor routes through a rescuable variant, this test goes red.
-#[test] fn err_break_through_ensure_outer_rescue() { run_error_fixture("break_through_ensure_outer_rescue"); }
-// Sibling defense for `next` — same shape, same Uncaught
-// NotImplementedError until the proper semantics land.
-#[test] fn err_next_through_ensure() { run_error_fixture("next_through_ensure"); }
+// `break`/`next` through an `ensure` body inside a `while` loop is
+// implemented with full Ruby semantics (run the ensure body, then
+// complete the structured transfer). The defensive `NotImplementedError`
+// trap that previously gated this case has been removed; positive
+// coverage lives in `tests/diff/break_next_ensure.rb` (diff_cruby
+// against CRuby as oracle).

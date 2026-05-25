@@ -173,10 +173,29 @@ pub(crate) enum Op {
     /// unwinding and hits a PushEnsure handler, the exception value is
     /// pushed onto the operand stack and control jumps to the handler;
     /// the handler runs the ensure body (which must leave the stack
-    /// unchanged) and ends with `Raise` to rethrow.
+    /// unchanged) and ends with `Op::EndEnsure` to either rethrow the
+    /// exception or resume an in-flight `break`/`next` loop transfer
+    /// (see `Op::EndEnsure` for the two paths).
     PushEnsure(i32),
     PopEnsure,
     Raise,
+    /// Terminator emitted at the tail of every `ensure` handler
+    /// body. Two paths:
+    ///   - Normal exception-unwind path: an exception value sits
+    ///     on top of the operand stack (pushed by the unwinder
+    ///     when it jumped to this handler). Pop it and re-raise
+    ///     so the unwind continues to the next handler / frame.
+    ///   - Loop-transfer path: `vm.pending_loop_transfer` is
+    ///     `Some` because `BreakLoop`/`NextLoop` started a
+    ///     `break`/`next` walk through this ensure. The stack
+    ///     was NOT pushed-to on entry; we resume the transfer
+    ///     by walking the remaining rescues, running any further
+    ///     `is_ensure` handlers, and eventually landing at the
+    ///     loop's target IP.
+    /// Replaces the prior `Op::Raise` the compiler used to emit
+    /// at the same position. User-level `raise` keyword still
+    /// emits `Op::Raise` and never reaches this op.
+    EndEnsure,
     /// Signals the current iteration driver (Array#each, #map, etc.) to
     /// stop and use the value on top of the operand stack as the call's
     /// return value. Almost always emitted as `<val>; Break; Return` so

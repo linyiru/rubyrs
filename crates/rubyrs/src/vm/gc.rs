@@ -30,7 +30,7 @@ impl Vm {
             locals: Rc::new(RefCell::new(vec_nil(n_locals))),
             self_val: Value::Nil,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![],
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None, is_block: false, n_given_positional: 0, rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![],
         });
         self.dispatch()?;
         Ok(self.stack.pop().unwrap_or(Value::Nil))
@@ -113,6 +113,21 @@ impl Vm {
         let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() + self.pinned.len() + 64);
         for v in &self.stack { roots.push(v.clone()); }
         for v in &self.pinned { roots.push(v.clone()); }
+        // In-flight break/next transfer: the break value lives only
+        // in `pending_loop_transfer` between `begin_loop_transfer`
+        // and the final landing. The ensure body runs in between
+        // and can trigger GC at allocation sites; without rooting
+        // here a heap-allocated break value (Array/Hash/String/
+        // Object) gets swept and the eventual stack.push in
+        // `continue_loop_transfer` would re-publish a dangling
+        // handle — silent heap corruption (ICE on the next op
+        // that consults the slot's type). Reproduced under
+        // STRESS_GC=1.
+        if let Some(super::LoopTransfer {
+            kind: super::LoopTransferKind::Break { value }, ..
+        }) = &self.pending_loop_transfer {
+            roots.push(value.clone());
+        }
         // ENV hash, once initialised, is reachable from script
         // code via the `ENV` constant — pin it so the cache
         // doesn't get swept between LoadConst loads.
