@@ -120,12 +120,16 @@ pub unsafe extern "C" fn rb_check_type(v: Value, t: c_int) {
     assert!(actual == t, "rb_check_type: expected {}, got {}", t, actual);
 }
 
-/// Verify argc in [min, max]; max == -1 means unbounded. Returns argc on success.
+/// Verify argc in [min, max]; max == -1 means unbounded.
+///
+/// PR #42 review #6 fix: header declares return as `void`. Previously
+/// returned `c_int` — ABI mismatch (caller may interpret garbage as
+/// the return value across the FFI boundary). CRuby's macro form
+/// `rb_check_arity(argc, min, max)` discards the value anyway.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_check_arity(argc: c_int, min: c_int, max: c_int) -> c_int {
+pub unsafe extern "C" fn rb_check_arity(argc: c_int, min: c_int, max: c_int) {
     assert!(argc >= min, "rb_check_arity: argc {} < min {}", argc, min);
     assert!(max == -1 || argc <= max, "rb_check_arity: argc {} > max {}", argc, max);
-    argc
 }
 
 /// Spike: trust caller, return v unchanged.

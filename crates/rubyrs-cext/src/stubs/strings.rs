@@ -182,13 +182,19 @@ pub unsafe extern "C" fn rb_enc_str_coderange(_v: Value) -> c_int {
 }
 
 // Raise-with-encoding: drop the encoding tag and forward to rb_raise.
-// Forwarded without varargs — rb_raise is variadic noreturn; passing
-// only the fmt string yields the literal message (sufficient for spike).
+//
+// PR #42 review #2 fix: callers pass format strings containing `%s`
+// (flori/json: `"unexpected token at '%s'"`). Forwarding fmt directly
+// to rb_raise made vsnprintf read absent varargs → UB / crash on any
+// parse error. Treat the caller's fmt as already-rendered text by
+// wrapping it in `"%s"` and passing the original ptr as the sole arg.
+// Loses CRuby's format-with-actual-args behavior, but that fidelity
+// requires va_list pass-through which isn't available in stable Rust.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn rb_enc_raise(
     _enc: *mut c_void,
     exc: Value,
     fmt: *const c_char,
 ) -> ! {
-    unsafe { rb_raise(exc, fmt) }
+    unsafe { rb_raise(exc, b"%s\0".as_ptr() as *const c_char, fmt) }
 }

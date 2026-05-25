@@ -237,7 +237,7 @@ mod _cext_l3d_exports {
     #[used] static T11: unsafe extern "C" fn(Value) -> ID = rb_sym2id;
     #[used] static T12: unsafe extern "C" fn(Value) -> Value = rb_sym2str;
     #[used] static T13: unsafe extern "C" fn(Value, c_int) = rb_check_type;
-    #[used] static T14: unsafe extern "C" fn(c_int, c_int, c_int) -> c_int = rb_check_arity;
+    #[used] static T14: unsafe extern "C" fn(c_int, c_int, c_int) = rb_check_arity;
     #[used] static T15: unsafe extern "C" fn(Value, c_int, *const c_char, *const c_char) -> Value = rb_convert_type;
     #[used] static T16: unsafe extern "C" fn(Value) -> c_long = RHASH_SIZE;
 
@@ -275,7 +275,7 @@ mod _cext_l3d_exports {
     #[used] static G5: unsafe extern "C" fn(*mut Value) = rb_global_variable;
     #[used] static G6: unsafe extern "C" fn(c_int) = rb_ext_ractor_safe;
     #[used] static G7: unsafe extern "C" fn(*const c_char) = rb_warn;
-    #[used] static G8: unsafe extern "C" fn(c_int, *const c_char) = rb_category_warn;
+    #[used] static G8: unsafe extern "C" fn(*const c_char, *const c_char) = rb_category_warn;
     #[used] static G9: unsafe extern "C" fn(*const c_char, *mut c_void) -> Value = rb_vsprintf;
     #[used] static G10: unsafe extern "C" fn(Value) -> Value = rb_io_flush;
     #[used] static G11: unsafe extern "C" fn(Value, Value) -> Value = rb_io_write;
@@ -284,9 +284,9 @@ mod _cext_l3d_exports {
     // stubs/dispatch.rs
     use rubyrs_cext::stubs::dispatch::*;
     #[used] static D1: unsafe extern "C" fn(Value) -> Value = rb_obj_class;
-    #[used] static D2: unsafe extern "C" fn(Value) -> *const c_char = rb_class_name;
+    #[used] static D2: unsafe extern "C" fn(Value) -> Value = rb_class_name;
     #[used] static D3: unsafe extern "C" fn(c_int, *const Value, Value) -> Value = rb_class_new_instance;
-    #[used] static D4: unsafe extern "C" fn(Value, Value) -> Value = rb_obj_is_kind_of;
+    #[used] static D4: unsafe extern "C" fn(Value, Value) -> c_int = rb_obj_is_kind_of;
     #[used] static D5: unsafe extern "C" fn(Value, ID) -> c_int = rb_respond_to;
     #[used] static D6: unsafe extern "C" fn(Value, *const c_char, *const c_char) = rb_define_alias;
     #[used] static D7: unsafe extern "C" fn(Value, extern "C" fn(Value) -> Value) = rb_define_alloc_func;
@@ -298,7 +298,7 @@ mod _cext_l3d_exports {
     #[used] static D13: unsafe extern "C" fn(c_int, *const Value) -> Value = rb_call_super;
     #[used] static D14: unsafe extern "C" fn(Value, Value) -> Value = rb_exc_new_str;
     #[used] static D15: unsafe extern "C" fn(Value) -> ! = rb_exc_raise;
-    #[used] static D16: unsafe extern "C" fn(extern "C" fn(Value) -> Value, Value, *const c_void, Value) -> Value = rb_rescue;
+    #[used] static D16: unsafe extern "C" fn(extern "C" fn(Value) -> Value, Value, extern "C" fn(Value, Value) -> Value, Value) -> Value = rb_rescue;
     #[used] static D17: unsafe extern "C" fn(c_int, *const Value, *const c_char) -> c_int = rb_scan_args;
     #[used] static D18: unsafe extern "C" fn(c_long, *const Value) -> Value = rb_ary_new_from_values;
     #[used] static D19: unsafe extern "C" fn(Value, extern "C" fn(Value, Value, Value) -> c_int, Value) = rb_hash_foreach;

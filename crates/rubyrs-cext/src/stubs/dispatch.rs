@@ -4,10 +4,9 @@
 //! few forward to existing lib.rs impls (rb_define_private_method →
 //! rb_define_method, etc.).
 
-use std::ffi::{c_char, c_int, c_long, c_void};
-use std::ptr;
+use std::ffi::{c_char, c_int, c_long};
 
-use crate::{with_state, CValue, OpaqueFn, Qfalse, Qnil, Value, ID};
+use crate::{with_state, CValue, OpaqueFn, Qnil, Value, ID};
 
 // Class of `v` — forward to rb_basic_class.
 #[unsafe(no_mangle)]
@@ -15,10 +14,20 @@ pub unsafe extern "C" fn rb_obj_class(v: Value) -> Value {
     unsafe { crate::rb_basic_class(v) }
 }
 
-// Class name as C string — spike returns null (callers use this for diagnostics).
+// Class name. PR #42 review #3 fix: header declares return as
+// `VALUE` (a Ruby String, which callers pass to RSTRING_PTR), not
+// `*const c_char`. Previously returned null ptr → UB on any caller
+// that read through the returned VALUE as a String. Now: return
+// the class's interned name as a real Ruby String VALUE.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_class_name(_klass: Value) -> *const c_char {
-    ptr::null()
+pub unsafe extern "C" fn rb_class_name(klass: Value) -> Value {
+    crate::with_state(|st| match st.resolve(klass) {
+        CValue::Class(name) => {
+            let bytes = name.clone().into_bytes();
+            st.intern(CValue::str_from_bytes(&bytes))
+        }
+        _ => Qnil,
+    })
 }
 
 // Instantiate `klass` with argv — spike returns Qnil (allocator path not modelled).
@@ -31,15 +40,19 @@ pub unsafe extern "C" fn rb_class_new_instance(
     Qnil
 }
 
-// kind_of? check — conservatively false; callers fall back to general dispatch.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_obj_is_kind_of(_obj: Value, _klass: Value) -> Value {
-    Qfalse
-}
-
 // respond_to? check — conservatively 0 (no); callers fall back.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_respond_to(_obj: Value, _id: ID) -> c_int {
+    0
+}
+
+// kind_of? check. PR #42 review #4 fix: header declares return as
+// `int`, NOT `VALUE`. Previously returned Qfalse (=2 as Value),
+// which in C bool context evaluates *truthy*, inverting the
+// intended semantics. Return 0 (false) — also ABI-correct vs the
+// header's `int` declaration.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_obj_is_kind_of(_obj: Value, _klass: Value) -> c_int {
     0
 }
 
@@ -114,11 +127,17 @@ pub unsafe extern "C" fn rb_exc_raise(_exc: Value) -> ! {
 }
 
 // rescue wrapper — invoke body without rescue (no Rust-side rescue mechanism yet).
+//
+// PR #42 review #5 fix: header declares the rescue parameter as a
+// function pointer `VALUE (*rescue)(VALUE, VALUE)`, NOT a data
+// pointer. C callers (flori/json's generator) pass a real fn ptr;
+// receiving as *const c_void was an ABI mismatch and would be UB
+// once the rescue branch was ever taken. Now matches header.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_rescue(
     body: extern "C" fn(Value) -> Value,
     body_arg: Value,
-    _rescue: *const c_void,
+    _rescue: extern "C" fn(Value, Value) -> Value,
     _rescue_arg: Value,
 ) -> Value {
     body(body_arg)

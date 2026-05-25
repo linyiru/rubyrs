@@ -45,13 +45,25 @@ pub unsafe extern "C" fn rb_warn(fmt: *const c_char) {
 }
 
 /// Same as rb_warn but with a category prefix; varargs ignored.
+///
+/// PR #42 review #1 fix: header declares `category` as
+/// `const char *`, matching CRuby (cf RB_WARN_CATEGORY_DEPRECATED =
+/// "deprecated" string literal). Previously typed as `c_int` —
+/// flori/json's caller would pass the string pointer, the stub
+/// would interpret its low bits as an int → ABI mismatch.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rb_category_warn(_category: c_int, fmt: *const c_char) {
+pub unsafe extern "C" fn rb_category_warn(category: *const c_char, fmt: *const c_char) {
     if fmt.is_null() {
         return;
     }
+    let cat = if category.is_null() {
+        std::borrow::Cow::Borrowed("?")
+    } else {
+        let s = unsafe { CStr::from_ptr(category) }.to_bytes();
+        String::from_utf8_lossy(s)
+    };
     let s = unsafe { CStr::from_ptr(fmt) }.to_bytes();
-    eprintln!("[rb_category_warn] {}", String::from_utf8_lossy(s));
+    eprintln!("[rb_warn:{}] {}", cat, String::from_utf8_lossy(s));
 }
 
 /// Spike: return Qnil (callers using this for rb_raise get a generic error).
