@@ -219,20 +219,48 @@ jobs:
           # shipped these without bumping; PR #14 picks them up via
           # the merge-result count.
           #
-          # Bumped 70 → 76 by master commits between PR #14 merge
-          # and the L3-B rebase point (Hash#dig / Array#dig,
-          # Array#flat_map / each_slice / each_cons / chunk,
-          # Object#tap / #then / #yield_self, kernel.rs extract,
-          # ternary regression coverage). +6 in aggregate, all
-          # ICE-class in dispatch / built-in implementations.
-          # Master shipped red on its own CI without bumping.
-          check crates/rubyrs/src/vm.rs       76
+          # Ratcheted vm.rs from 76 → 0 after the vm/* CRuby-mirrored
+          # split. The 76 panics that used to live in the single
+          # vm.rs are now distributed across the per-type submodules
+          # below; vm.rs itself holds only the Vm struct + shared
+          # scaffolding (no panic-class code).
+          check crates/rubyrs/src/vm.rs               0
+          # Per-submodule budgets — total is 87 (one count higher
+          # than the pre-split 76 due to F-series feature work in
+          # B6 / F4 / F6 that landed new ICE-class invariants in
+          # dispatch + step + iter). The total can ratchet down
+          # if/when individual sites become Trap-class.
+          check crates/rubyrs/src/vm/dispatch.rs     13
+          check crates/rubyrs/src/vm/step.rs         51
+          check crates/rubyrs/src/vm/iter.rs         10
+          check crates/rubyrs/src/vm/cext.rs          5
+          check crates/rubyrs/src/vm/raise.rs         3
+          check crates/rubyrs/src/vm/lookup.rs        3
+          check crates/rubyrs/src/vm/range.rs         1
+          check crates/rubyrs/src/vm/string.rs        1
+          # The remaining vm/* submodules (array, fileops, gc, hash,
+          # kernel, numeric, primitive, sprintf, util) currently have
+          # zero panic-class sites; ratcheting them all at 0 keeps
+          # them honest.
+          check crates/rubyrs/src/vm/array.rs         0
+          check crates/rubyrs/src/vm/fileops.rs       0
+          check crates/rubyrs/src/vm/gc.rs            0
+          check crates/rubyrs/src/vm/hash.rs          0
+          check crates/rubyrs/src/vm/kernel.rs        0
+          check crates/rubyrs/src/vm/numeric.rs       0
+          check crates/rubyrs/src/vm/primitive.rs     0
+          check crates/rubyrs/src/vm/sprintf.rs       0
+          check crates/rubyrs/src/vm/util.rs          0
           # Bumped 10 → 12 by Spike L3-B: heap.rs gains the
           # `typed_data(id)` and `class_of(id)` accessors that
           # `panic!("ICE: ...")` on slot-type mismatch — same
           # ICE-class invariant pattern as the existing
           # `instance(id)` etc. accessors.
-          check crates/rubyrs/src/heap.rs     12
+          #
+          # Bumped 12 → 13 by F6: the eigenclass accessor on
+          # Instance.singleton_class adds one more ICE-class
+          # accessor in the same shape.
+          check crates/rubyrs/src/heap.rs             13
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-

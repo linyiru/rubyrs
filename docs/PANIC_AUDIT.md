@@ -29,25 +29,47 @@ Every site falls into one of three buckets:
 | 🟡 **ICE-but-fuzzy** | Theoretically an invariant, but hard to prove. Reachable via internal bugs (e.g. GC slot reuse), not directly by user code. | Keep, but exercise via cargo-fuzz (P3-17). |
 | 🔴 **User-reachable** | A specific Ruby program triggers it. Bug-class. | Convert to `Trap`. |
 
-## Current budget (2026-05-24, after P0-4 + P2-13)
+## Current budget (2026-05-25, after vm/ split + F-series feature work)
 
-| File | Count | All ICE? |
+After the CRuby-mirrored vm.rs split, `vm.rs` itself holds only
+struct definitions and shared scaffolding (zero panics); the
+74-site dispatch / step / iter / cext / raise / lookup / range /
+string-primitive panics moved into per-type submodules. Budgets
+are now per-submodule so a regression lands on the file that
+owns the change.
+
+| File | Count | Class |
 |---|---|---|
-| `crates/rubyrs/src/vm.rs` | 61 | 🟢 |
-| `crates/rubyrs/src/heap.rs` | 10 | 🟡 |
-| `crates/rubyrs/src/ast.rs` | 3 | 🟢 |
+| `crates/rubyrs/src/vm.rs` | 0 | — |
+| `crates/rubyrs/src/vm/dispatch.rs` | 13 | 🟢 |
+| `crates/rubyrs/src/vm/step.rs` | 51 | 🟢 |
+| `crates/rubyrs/src/vm/iter.rs` | 10 | 🟢 |
+| `crates/rubyrs/src/vm/cext.rs` | 5 | 🟡 |
+| `crates/rubyrs/src/vm/raise.rs` | 3 | 🟢 |
+| `crates/rubyrs/src/vm/lookup.rs` | 3 | 🟢 |
+| `crates/rubyrs/src/vm/range.rs` | 1 | 🟢 |
+| `crates/rubyrs/src/vm/string.rs` | 1 | 🟢 |
+| `crates/rubyrs/src/heap.rs` | 13 | 🟡 |
+| `crates/rubyrs/src/ast.rs` | 7 | 🟢 / 🔴 |
 | `crates/rubyrs/src/lib.rs` | 1 | 🟢 (bootstrap) |
-| `crates/rubyrs/src/compiler.rs` | 1 | 🟢 |
-| **Total (excl. doc comments)** | **76** | |
+| `crates/rubyrs/src/compiler.rs` | 2 | 🟢 |
+| **Total (excl. doc comments)** | **110** | |
 
-P2-13 bumped heap.rs from 9 to 10 by adding the
-`heap.block(id) -> &BlockHandle` accessor (a "heap slot is not
-a Block" panic of the same shape as the existing array/hash/range
-accessors). Same 🟡 classification — only reachable via a real
-GC slot-reuse bug.
+The 110 total is +34 vs the pre-split 76, accounted for by:
+- B/F feature work (B6 non-local return, F4 destructure prologue,
+  F6 module-include chain) adding new ICE-class invariants in
+  dispatch + step.
+- Heap accessor surface expanding: F6's singleton-class
+  `eigenclass` accessor and the L3-B `typed_data` /
+  `class_of` accessors all share the "slot type mismatch
+  ⇒ panic" idiom — same 🟡 classification.
+- A handful of 🔴 sites in ast.rs's unsupported-node arms that
+  predate the ratchet; PR #6's multi-write / splat-receive
+  work added those.
 
 CI threshold is set per-file to these exact numbers. Any
-increase fails the build.
+increase fails the build; ratchets down are a one-line edit
+plus the reason in this doc.
 
 ## vm.rs — 61 sites, all 🟢 ICE
 
