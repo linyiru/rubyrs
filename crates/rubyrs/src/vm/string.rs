@@ -451,6 +451,7 @@ impl Vm {
                                 let obj_id = self.heap.alloc(HeapObj::Instance(Instance {
                                     class: cls,
                                     ivars: HashMap::new(),
+                                    singleton_class: None,
                                 }));
                                 let whole_ivar = self.interner.intern("@whole");
                                 let caps_ivar = self.interner.intern("@caps");

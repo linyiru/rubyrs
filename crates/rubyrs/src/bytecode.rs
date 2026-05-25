@@ -76,13 +76,26 @@ pub(crate) enum Op {
     /// the per-site cache).
     Super(SymId, u8),
     DefMethod(SymId, u32),         // name, proto_idx
-    /// `def self.foo` — install `foo` on the surrounding class's
-    /// `singleton_methods` table instead of the instance-method
-    /// `methods` table. Compiled from `Expr::Def { is_singleton:
-    /// true, .. }`. Outside a class body the emitter falls back
-    /// to a regular DefMethod (toplevel singleton has no
-    /// well-defined target).
+    /// `def self.foo` inside a class body — installs `foo` on
+    /// the surrounding class's `singleton_methods` table (not
+    /// the instance-method `methods` table). Compiled from
+    /// `Expr::Def { receiver: Some(SelfExpr), .. }`. Looks up
+    /// the target class via `class_stack.last()`; outside a
+    /// class body the handler falls back to `toplevel_methods`.
     DefSingletonMethod(SymId, u32),
+    /// `def obj.name; ...; end` with a non-`self` receiver, or
+    /// `recv.define_singleton_method(:name) { ... }` —
+    /// instance-level singleton install. Pops the receiver off
+    /// the operand stack; raises `TypeError` if it's not a
+    /// `Value::Object` (singleton methods on primitives need
+    /// a more elaborate model than this PoC provides);
+    /// lazily allocates a per-Object eigenclass; installs a
+    /// Method (built from `proto_idx`) into the eigenclass.
+    /// Distinct from `DefSingletonMethod` because the target
+    /// is an Instance's eigenclass rather than a Class's own
+    /// `singleton_methods` table. Bumps `method_gen` like
+    /// `Op::DefMethod`.
+    DefObjectSingletonMethod(SymId, u32),
     /// `alias_method :new, :old`. Resolves `old` by walking the
     /// surrounding class's ancestor chain (or `toplevel_methods` at
     /// the top level) so inherited methods can be aliased; installs
@@ -100,6 +113,15 @@ pub(crate) enum Op {
     /// `Rc<RefCell<Vec<Value>>>` as the BlockHandle, so closures
     /// over outer-scope locals stay live. Bumps `method_gen`.
     DefMethodBlock(SymId),         // name (block on stack)
+    /// `recv.define_singleton_method(:name) { ... }` — closure-
+    /// method install on the receiver's eigenclass. Pops the
+    /// block (top of stack) then the receiver. Same closure-
+    /// over-captured-locals semantics as `Op::DefMethodBlock`,
+    /// but installs into `recv`'s singleton class rather than
+    /// the surrounding class_stack target. Raises `TypeError` if
+    /// the receiver isn't a `Value::Object` (consistent with
+    /// `Op::DefObjectSingletonMethod`'s restriction).
+    DefObjectSingletonMethodBlock(SymId),
     DefClass(SymId, u32),
     NewArray(u16),
     NewHash(u16),

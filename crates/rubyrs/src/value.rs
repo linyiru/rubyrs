@@ -124,6 +124,22 @@ pub struct Class {
 pub struct Instance {
     pub(crate) class: Rc<Class>,
     pub(crate) ivars: HashMap<SymId, Value>,
+    /// CRuby-style eigenclass: a synthetic Class whose
+    /// `superclass` is `self.class`, holding methods unique to
+    /// this one object. `None` until the first singleton method
+    /// is installed (`def obj.foo` or
+    /// `obj.define_singleton_method(:foo)`); allocated lazily so
+    /// the common case where an object never gets a singleton
+    /// method pays nothing.
+    ///
+    /// Method lookup goes through `Heap::class_of(id)` which
+    /// returns this eigenclass if present (and the eigenclass's
+    /// `superclass` chain walks back to the real class
+    /// transparently). `Object#class` script behaviour uses
+    /// `Heap::real_class_of(id)` to skip past the eigenclass and
+    /// report the original — matching CRuby, where `obj.class`
+    /// returns the user-declared class, not the eigenclass.
+    pub(crate) singleton_class: Option<Rc<Class>>,
 }
 
 #[derive(Debug)]
@@ -137,7 +153,17 @@ pub struct Method {
     /// definition" rule. Methods defined at the toplevel (in
     /// `<main>`, not inside any class body) have `None`; calling
     /// `super` from there raises NoMethodError.
-    pub(crate) defining_class: Option<Rc<Class>>,
+    /// Weak ref so singleton-class methods don't form a strong
+    /// cycle: an eigenclass is held only by its `Instance`'s
+    /// `singleton_class` field, and each Method inside that
+    /// eigenclass would otherwise pin the eigenclass back via
+    /// `defining_class`. With Weak, sweeping the Instance drops
+    /// the eigenclass, which drops all its Methods. Regular
+    /// classes (held by `Vm.classes` for the program's lifetime)
+    /// also use Weak here — the upgrade always succeeds in the
+    /// regular case because `Vm.classes` keeps the strong ref.
+    /// See PR #31 review for the cycle analysis.
+    pub(crate) defining_class: Option<std::rc::Weak<Class>>,
     /// Method visibility. Set at `def` time from the surrounding
     /// class body's current visibility mode, but mutable post-hoc
     /// via `private :sym` / `public :sym` / `protected :sym`.

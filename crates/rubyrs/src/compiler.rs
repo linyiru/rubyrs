@@ -583,7 +583,7 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, body, is_singleton } => {
+        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, receiver, body } => {
             let lit_defaults: Vec<Option<Value>> = defaults.iter().map(|d| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
@@ -627,10 +627,26 @@ pub(crate) fn compile_expr(
                 protos[proto_idx].kw_rest_param = Some(slot_name);
             }
             let name_id = interner.intern(name);
-            if *is_singleton {
-                b.emit(Op::DefSingletonMethod(name_id, proto_idx as u32));
-            } else {
-                b.emit(Op::DefMethod(name_id, proto_idx as u32));
+            match receiver {
+                None => {
+                    b.emit(Op::DefMethod(name_id, proto_idx as u32));
+                }
+                Some(recv_expr) if matches!(recv_expr.node, Expr::SelfExpr) => {
+                    // `def self.foo` in a class body — install
+                    // on the surrounding class's
+                    // `singleton_methods` table. Master ships
+                    // this via `Op::DefSingletonMethod` (no
+                    // operand-stack receiver; target via
+                    // `class_stack.last()`).
+                    b.emit(Op::DefSingletonMethod(name_id, proto_idx as u32));
+                }
+                Some(recv_expr) => {
+                    // `def obj.foo` — instance-level singleton.
+                    // Compile the receiver and emit the
+                    // pop-and-install op.
+                    compile_expr(b, recv_expr, protos, interner, cc);
+                    b.emit(Op::DefObjectSingletonMethod(name_id, proto_idx as u32));
+                }
             }
             b.emit(Op::LoadNil);
         }
@@ -710,6 +726,28 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
                 let nid = interner.intern(&sym_name);
                 b.emit(Op::DefMethodBlock(nid));
+                b.current_span = prev_span;
+                return;
+            }
+            // `recv.define_singleton_method(:foo) { |args| ... }` —
+            // compile-time intercept, analogous to `define_method`
+            // above but with an explicit receiver. The block is
+            // pushed *after* the receiver so the runtime op pops
+            // (block, recv) in that order. Receiver-side TypeError
+            // (non-Object) is raised at
+            // Op::DefObjectSingletonMethodBlock dispatch time.
+            if let Some(r) = receiver
+                && name == "define_singleton_method"
+                && args.len() == 1
+                && matches!(args[0].node, Expr::SymbolLit(_))
+            {
+                let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
+                compile_expr(b, r, protos, interner, cc);
+                let (block_proto_idx, param_start, n_params) =
+                    compile_block(b, block_params, block_body, protos, interner, cc);
+                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
+                let nid = interner.intern(&sym_name);
+                b.emit(Op::DefObjectSingletonMethodBlock(nid));
                 b.current_span = prev_span;
                 return;
             }

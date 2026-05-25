@@ -125,18 +125,66 @@ impl Heap {
         if let HeapObj::Instance(i) = self.get(id) { i } else { panic!("ICE: heap slot is not an Instance") }
     }
 
-    /// L3-B: class of any `Value::Object(id)` regardless of whether
-    /// the underlying slot is a plain `Instance` (script-defined
-    /// class) or a `TypedData` (C ext-wrapped state). Use this in
-    /// preference to `instance(id).class` whenever code reaches
-    /// for "what's this Object's class" — TypedData objects don't
-    /// have an Instance struct so the direct accessor panics.
+    /// Class to start method lookup from for any `Value::Object(id)`,
+    /// regardless of whether the underlying slot is a plain `Instance`
+    /// (script-defined class) or a `TypedData` (C ext-wrapped state).
+    /// Use this in preference to `instance(id).class` whenever code
+    /// reaches for "where do I look for a method on this Object" —
+    /// TypedData objects don't have an Instance struct so the direct
+    /// accessor panics.
+    ///
+    /// **Returns the singleton class if one was installed** (via
+    /// `def obj.foo` or `define_singleton_method`); the singleton's
+    /// `superclass` chain walks back to the real class transparently,
+    /// so dispatch stays a single chain walk. For script-visible
+    /// `Object#class` semantics (which CRuby reports as the original,
+    /// not the eigenclass), use `real_class_of` instead.
     pub(crate) fn class_of(&self, id: ObjId) -> Rc<crate::value::Class> {
         match self.get(id) {
-            HeapObj::Instance(i) => i.class.clone(),
+            HeapObj::Instance(i) => match &i.singleton_class {
+                Some(sc) => sc.clone(),
+                None => i.class.clone(),
+            },
             HeapObj::TypedData(d) => d.class.clone(),
             _ => panic!("ICE: class_of called on non-Object slot"),
         }
+    }
+    /// Original class — what `Object#class` returns to script code
+    /// (CRuby skips the eigenclass when reporting). Same shape as
+    /// `class_of` but doesn't substitute the singleton class.
+    pub(crate) fn real_class_of(&self, id: ObjId) -> Rc<crate::value::Class> {
+        match self.get(id) {
+            HeapObj::Instance(i) => i.class.clone(),
+            HeapObj::TypedData(d) => d.class.clone(),
+            _ => panic!("ICE: real_class_of called on non-Object slot"),
+        }
+    }
+    /// Lazily install + return the singleton class for an Object.
+    /// Idempotent: returns the same `Rc<Class>` on subsequent calls.
+    /// The synthesised class has `superclass = i.class.clone()` so
+    /// the chain walk transparently falls through to the original
+    /// class after exhausting singleton methods.
+    pub(crate) fn ensure_singleton_class(&mut self, id: ObjId) -> Rc<crate::value::Class> {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        let inst = self.instance_mut(id);
+        if let Some(sc) = &inst.singleton_class {
+            return sc.clone();
+        }
+        let original = inst.class.clone();
+        let sc = Rc::new(crate::value::Class {
+            name: format!("#<Class:#<{}>>", original.name),
+            methods: RefCell::new(HashMap::new()),
+            // Eigenclasses have no per-class singleton-method
+            // table of their own — `def self.foo` (master's
+            // class-level singletons) doesn't apply to a
+            // synthetic singleton class. Keep this empty so
+            // dispatch sites that walk the chain don't break.
+            singleton_methods: RefCell::new(HashMap::new()),
+            superclass: RefCell::new(Some(original)),
+        });
+        inst.singleton_class = Some(sc.clone());
+        sc
     }
     pub(crate) fn instance_mut(&mut self, id: ObjId) -> &mut Instance {
         if let HeapObj::Instance(i) = self.get_mut(id) { i } else { panic!("ICE: heap slot is not an Instance") }
@@ -208,6 +256,28 @@ impl Heap {
                 Slot::Live(HeapObj::Instance(inst)) => {
                     for v in inst.ivars.values() {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    // Walk singleton-class closure methods too:
+                    // singleton classes aren't in `Vm.classes`
+                    // (they're per-object, allocated by
+                    // `ensure_singleton_class`), so the
+                    // `maybe_gc` root-walker that handles regular
+                    // classes never reaches them. A closure-
+                    // method installed via
+                    // `define_singleton_method` captures locals
+                    // through its `MethodClosure.captured` Rc;
+                    // without this loop, those locals would be
+                    // unreachable once the lexical scope returns
+                    // and the GC would sweep them out from under
+                    // the singleton method.
+                    if let Some(sc) = &inst.singleton_class {
+                        for m in sc.methods.borrow().values() {
+                            if let Some(cl) = &m.closure {
+                                for v in cl.captured.borrow().iter() {
+                                    Heap::visit_value(v, &mut self.marks, &mut worklist);
+                                }
+                            }
+                        }
                     }
                 }
                 Slot::Live(HeapObj::Array(a)) => {
@@ -330,7 +400,11 @@ impl Value {
             // Use class_of so TypedData-backed Objects (L3-B) print
             // safely too — `heap.instance(*id)` would panic on
             // those slots (review #1).
-            Value::Object(id) => format!("#<{}>", heap.class_of(*id).name),
+            // `#<Foo>` shows the user-declared class; CRuby
+            // doesn't surface the eigenclass here even when one
+            // exists. Use `real_class_of` for the same reason
+            // `Object#class` does.
+            Value::Object(id) => format!("#<{}>", heap.real_class_of(*id).name),
             Value::Array(id) => {
                 let a = heap.array(*id);
                 let parts: Vec<String> = a.iter().map(|v| v.to_inspect(heap, interner)).collect();

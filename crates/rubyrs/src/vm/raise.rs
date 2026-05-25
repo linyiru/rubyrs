@@ -41,6 +41,7 @@ impl Vm {
                     let id = self.heap.alloc(HeapObj::Instance(Instance {
                         class: cls,
                         ivars: HashMap::new(),
+                        singleton_class: None,
                     }));
                     let msg_id = self.interner.intern("@message");
                     self.heap.instance_mut(id).ivars.insert(msg_id, v);
@@ -62,6 +63,7 @@ impl Vm {
                 let id = self.heap.alloc(HeapObj::Instance(Instance {
                     class: cls.clone(),
                     ivars: HashMap::new(),
+                    singleton_class: None,
                 }));
                 Value::Object(id)
             }
@@ -106,6 +108,7 @@ impl Vm {
         let id = self.heap.alloc(HeapObj::Instance(Instance {
             class: cls,
             ivars: HashMap::new(),
+            singleton_class: None,
         }));
         let msg_sym = self.interner.intern("@message");
         self.heap.instance_mut(id).ivars.insert(msg_sym, Value::new_str(message));
@@ -117,7 +120,11 @@ impl Vm {
         // Resolve the raised value's class once up front; the unwind loop
         // may probe many handlers before finding (or not finding) a match.
         let exc_class: Option<Rc<Class>> = match &exc {
-            Value::Object(id) => Some(self.heap.class_of(*id)),
+            // Rescue handlers match against the user-declared
+            // class, not the eigenclass (CRuby: `rescue Foo`
+            // matches `Foo` instances regardless of whether
+            // they've had singleton methods installed).
+            Value::Object(id) => Some(self.heap.real_class_of(*id)),
             _ => None,
         };
         loop {
@@ -181,8 +188,12 @@ impl Vm {
                 // `RubyError::Uncaught { class_name, message }` and
                 // decide what to do.
                 let class_name = match &exc {
-                    // class_of handles both Instance and TypedData (review #1).
-                    Value::Object(id) => self.heap.class_of(*id).name.clone(),
+                    // real_class_of (vs class_of) so the host
+                    // sees the user-declared class name, not
+                    // the eigenclass's synthetic
+                    // `#<Class:#<Foo>>`. Handles both Instance
+                    // and TypedData like its caller.
+                    Value::Object(id) => self.heap.real_class_of(*id).name.clone(),
                     _ => exc.type_name().to_string(),
                 };
                 let message = match &exc {

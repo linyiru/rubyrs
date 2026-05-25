@@ -475,7 +475,8 @@ impl Vm {
                 // when we're inside `class Foo; def bar; end; end`)
                 // so `super` later starts its lookup from the
                 // right place. `None` for toplevel defs.
-                let defining_class = self.class_stack.last().cloned();
+                // Stored as Weak — see Method.defining_class docs.
+                let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
                 let m = Rc::new(Method {
                     params: proto.params.clone(),
@@ -497,12 +498,9 @@ impl Vm {
                 // table, dispatched against `Value::Class(c)`
                 // receivers in `do_call`. Outside a class body
                 // (toplevel singleton has no well-defined target)
-                // we fall back to installing on `toplevel_methods`
-                // — matches CRuby's "main object's singleton class
-                // = Object" approximation closely enough for the
-                // subset.
+                // we fall back to installing on `toplevel_methods`.
                 let proto = &self.protos[p_idx as usize];
-                let defining_class = self.class_stack.last().cloned();
+                let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
                 let m = Rc::new(Method {
                     params: proto.params.clone(),
@@ -516,6 +514,49 @@ impl Vm {
                 } else {
                     self.toplevel_methods.insert(name_id, m);
                 }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Nil);
+            }
+            Op::DefObjectSingletonMethod(name_id, p_idx) => {
+                // `def obj.name; ...; end` (non-`self` receiver)
+                // — instance-level singleton install. Receiver
+                // was pushed by the compiler immediately before
+                // this op (see `compile_expr`'s Def arm).
+                let recv = self.stack.pop()
+                    .expect("ICE: DefObjectSingletonMethod stack underflow");
+                let obj_id = match recv {
+                    Value::Object(id) => id,
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "can't define singleton method on {} (only user-class instances are supported)",
+                                other.type_name(),
+                            ),
+                        }));
+                    }
+                };
+                // Lazily allocate the eigenclass — the receiver
+                // pays nothing for objects that never get a
+                // singleton method. Repeated `def obj.x` /
+                // `def obj.y` on the same object reuse the same
+                // singleton class.
+                let sc = self.heap.ensure_singleton_class(obj_id);
+                let proto = &self.protos[p_idx as usize];
+                // `defining_class` points at the eigenclass so
+                // `super` from inside walks the eigenclass's
+                // superclass chain (= original class), matching
+                // CRuby's "module of definition" rule. Stored
+                // as `Weak` so the (sc ↔ Method) cycle doesn't
+                // pin the eigenclass past the receiver's
+                // lifetime — see PR #31 review for the analysis.
+                let m = Rc::new(Method {
+                    params: proto.params.clone(),
+                    proto_idx: p_idx as usize,
+                    defining_class: Some(Rc::downgrade(&sc)),
+                    visibility: std::cell::Cell::new(Visibility::Public),
+                    closure: None,
+                });
+                sc.methods.borrow_mut().insert(name_id, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
@@ -590,7 +631,7 @@ impl Vm {
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
-                let defining_class = self.class_stack.last().cloned();
+                let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(crate::value::Visibility::Public);
                 let m = Rc::new(Method {
                     params,
@@ -601,6 +642,54 @@ impl Vm {
                 });
                 if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Nil);
+            }
+            Op::DefObjectSingletonMethodBlock(name_id) => {
+                // `recv.define_singleton_method(:foo) { |args| ... }`
+                // — closure-method install on the receiver's
+                // eigenclass. Compiler pushed `recv` first then
+                // the `CreateBlock`-produced block, so pop in
+                // that reverse order.
+                let bv = self.stack.pop()
+                    .expect("ICE: DefObjectSingletonMethodBlock no block on stack");
+                let block_id = if let Value::Block(id) = bv { id } else {
+                    panic!("ICE: DefObjectSingletonMethodBlock without Block on stack");
+                };
+                let recv = self.stack.pop()
+                    .expect("ICE: DefObjectSingletonMethodBlock no receiver on stack");
+                let obj_id = match recv {
+                    Value::Object(id) => id,
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "can't define singleton method on {} (only user-class instances are supported)",
+                                other.type_name(),
+                            ),
+                        }));
+                    }
+                };
+                let (proto_idx, captured, param_start, n_params) = {
+                    let bh = self.heap.block(block_id);
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                };
+                let proto = &self.protos[proto_idx];
+                let params = proto.params.clone();
+                let sc = self.heap.ensure_singleton_class(obj_id);
+                // `defining_class` points at the eigenclass so
+                // `super` from inside walks the eigenclass's
+                // superclass chain (which falls through to the
+                // original class), matching `Op::DefSingletonMethod`'s
+                // chain semantics.
+                let m = Rc::new(Method {
+                    params,
+                    proto_idx,
+                    // Weak — same cycle break as DefSingletonMethod.
+                    defining_class: Some(Rc::downgrade(&sc)),
+                    visibility: std::cell::Cell::new(Visibility::Public),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                });
+                sc.methods.borrow_mut().insert(name_id, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
