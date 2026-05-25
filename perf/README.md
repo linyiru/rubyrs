@@ -38,11 +38,24 @@ or rubyrs makes a real perf improvement.
 | `crates/rubyrs/examples/metaprog_bench/mm_bench.rb` | 2M `method_missing` dispatches; closure-allocator load |
 | `crates/rubyrs/examples/metaprog_bench/dm_bench.rb` | 2M calls into a `define_method`-installed closure-method |
 | `crates/rubyrs/examples/metaprog_bench/static_bench.rb` | 2M `def`+`@ivar` calls — control for the metaprog comparisons |
+| `crates/rubyrs/benches/fizzbuzz_1m.rb` | 1M-iter fizzbuzz — Op::BinOpInt + Op::IncLocal + dispatch fast paths |
+| `crates/rubyrs/benches/gc_churn.rb` | 200k short-lived Array+Hash allocs — mark/sweep + `maybe_gc` heuristic |
+| `crates/rubyrs/benches/string_interp.rb` | 200k `InterpolatedStr` builds — `Op::InterpStr` + `to_s` dispatch |
+| `crates/rubyrs/benches/hash_mutate.rb` | 200k Hash `[]=` overwrites + 1k reads — `ruby_eq` Hash key probe |
 
 The three metaprog workloads are deliberate: they exercise different
 allocation + dispatch patterns. A broad regression shows up in all
 three; a targeted one (only ivars, only closures, only dispatch
 loops) shows up in exactly one.
+
+The four `benches/*.rb` files were added to broaden the shapes
+defended by the budget. The original four exercised
+allocation-light dispatch; the new four add a 1M-iter
+arithmetic loop (fizzbuzz_1m), GC pressure (gc_churn),
+interpolation-heavy work (string_interp), and Hash mutation
+(hash_mutate). A regression in one optimisation (e.g.
+String#+ → Op::ConcatStr fusion) now shows up in the matching
+workload directly.
 
 ## Running locally
 

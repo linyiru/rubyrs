@@ -72,3 +72,6 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	5500	1100	2M method_missing di
 crates/rubyrs/examples/metaprog_bench/dm_bench.rb	5500	700	2M define_method dispatch (closure-method)
 crates/rubyrs/examples/metaprog_bench/static_bench.rb	5500	1000	2M def+ivar (control for the metaprog comparisons)
 crates/rubyrs/benches/fizzbuzz_1m.rb	6000	600	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
+crates/rubyrs/benches/gc_churn.rb	6000	250	200k short-lived Array+Hash allocs; stresses mark/sweep
+crates/rubyrs/benches/string_interp.rb	6000	550	200k InterpolatedStr; Op::InterpStr + to_s dispatch
+crates/rubyrs/benches/hash_mutate.rb	6000	500	200k Hash[]= overwrites + 1k Hash[] reads
