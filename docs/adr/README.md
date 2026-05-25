@@ -63,3 +63,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0011 — CRuby-mirrored vm.rs split](0011-cruby-mirrored-vm-split.md)
 - [0012 — Thin LTO in release profile](0012-thin-lto-release-profile.md)
 - [0013 — CURRENT_VM_PTR borrow-aliasing policy](0013-current-vm-ptr-aliasing.md)
+- [0014 — Concentric architecture via tiered Cargo features](0014-concentric-architecture.md)
