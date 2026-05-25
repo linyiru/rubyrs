@@ -759,6 +759,29 @@ fn alias_method_multiple_per_class_body_stays_stack_balanced() {
 }
 
 #[test]
+fn alias_method_can_alias_inherited_method() {
+    // Regression for PR #8 review (vm.rs:3621): Op::AliasMethod
+    // used to look up `old_id` only in the immediate class's
+    // method table, missing inherited methods. CRuby's
+    // `alias_method` walks the ancestor chain to find the source
+    // and installs the alias on the *current* class — so the alias
+    // can name an inherited method.
+    let (mut rt, buf) = rt_with_buf();
+    rt.eval(r#"
+        class Parent
+          def parent_method
+            "from-parent"
+          end
+        end
+        class Child < Parent
+          alias_method :inherited_alias, :parent_method
+        end
+        puts Child.new.inherited_alias
+    "#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "from-parent\n");
+}
+
+#[test]
 fn alias_method_shares_super_lookup_chain() {
     let (mut rt, buf) = rt_with_buf();
     // Alias preserves defining_class — `super` from `greet`

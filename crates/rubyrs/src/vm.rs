@@ -3885,14 +3885,20 @@ impl Vm {
                 self.stack.push(Value::Nil);
             }
             Op::AliasMethod(new_id, old_id) => {
-                // Resolve `old` in the surrounding class (or toplevel)
-                // and re-insert the same Rc<Method> under `new`. We
-                // share the Rc — alias is intentionally semantically
-                // identical to the original, including its
-                // `defining_class` (so `super` from inside the aliased
-                // call walks the same chain).
+                // Resolve `old` along the surrounding class's ancestor
+                // chain (or toplevel) and re-insert the same Rc<Method>
+                // under `new` in the *current* class. We share the Rc
+                // — alias is intentionally semantically identical to
+                // the original, including its `defining_class` (so
+                // `super` from inside the aliased call walks from the
+                // original's super, matching CRuby's "module of
+                // definition" rule for aliases).
+                //
+                // The walk lets `class Child < Parent; alias_method :x,
+                // :parent_method; end` work: the source method lives
+                // on Parent, the alias name `x` lands on Child.
                 let existing = if let Some(cls) = self.class_stack.last() {
-                    cls.methods.borrow().get(&old_id).cloned()
+                    self.lookup_method_uncached(cls, old_id)
                 } else {
                     self.toplevel_methods.get(&old_id).cloned()
                 };
