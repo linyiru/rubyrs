@@ -105,8 +105,22 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (wasm32-wasip1 target)
-        uses: dtolnay/rust-toolchain@stable
+        # `dtolnay/rust-toolchain@stable` would install rust-std for
+        # the *stable* channel — but `rust-toolchain.toml` in this
+        # repo pins the build to 1.95, so cargo would run under 1.95
+        # while the wasm32-wasip1 std lived on stable, producing
+        # "can't find crate for `core`" (E0463). Pin to 1.95
+        # explicitly here so the target install lands on the same
+        # channel cargo will actually run under.
+        #
+        # The duplication with `rust-toolchain.toml` is unavoidable:
+        # `dtolnay/rust-toolchain@master` treats `toolchain` as a
+        # required input (the action errors with "toolchain is a
+        # required input" if omitted). If/when rust-toolchain.toml
+        # bumps, both places need updating in lockstep.
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.95"
           targets: wasm32-wasip1
 
       - name: Cache cargo + wasi-sdk
