@@ -135,11 +135,11 @@ scope for rubyrs."
 
 ## Current deviations (target vs reality)
 
-This ADR specifies the *target* Tier-1 shape. As of merging, a
-small number of code paths violate it and need follow-up gating
-PRs before the spec is fully enforced. Listing them explicitly
-so future contributors don't read the rules and assume the code
-already matches.
+This ADR specifies the *target* Tier-1 shape. As of writing
+(2026-05), a small number of code paths violate it and need
+follow-up gating PRs before the spec is fully enforced. Listing
+them explicitly so future contributors don't read the rules and
+assume the code already matches.
 
 | Deviation | Verified at | Rule violated | Planned remediation |
 |-----------|-------------|---------------|---------------------|
@@ -173,14 +173,17 @@ would import the rule violation along with the feature.
   tomorrow: Rails-capable bet" framing has architectural backing:
   Tier 1 is the today-shippable surface, the outer tiers stay
   honest about their bet-vs-promise status.
-- **Sandbox story is consistent (after the deviations land).**
-  Hosts running untrusted scripts get the documented guarantee:
-  build with `--no-default-features` (or with only the `core`
-  tier), and every OS-touching capability is in their hands.
-  See the "Current deviations" table — until those PRs ship,
-  Tier 1 builds still default-leak `stdout`, `ENV`, and `$$`
-  to the host process. The spec is the contract the deviations
-  PRs are closing toward.
+- **Sandbox story is consistent (after the deviations land,
+  and after Tier-2/3 features exist to opt out of).** Hosts
+  running untrusted scripts get the documented guarantee: build
+  with `--no-default-features` (which today only opts out of
+  `cext`; future tier features will be additive options that
+  enable the larger surfaces), and every OS-touching capability
+  is in their hands. See the "Current deviations" table —
+  until those PRs ship, Tier 1 builds still default-leak
+  `stdout`, `ENV`, and `$$` to the host process. The spec is
+  the contract the deviations PRs (and the later Tier-2/3
+  feature PRs) are closing toward.
 - **Reviewer + contributor checklist.** "Is this PR adding a
   syscall to Tier 1?" becomes a literal text-search check on the
   cfg gates.
