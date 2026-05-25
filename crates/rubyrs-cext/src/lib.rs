@@ -1,3 +1,12 @@
+// Per-function `# Safety` docs are intentionally omitted across
+// the cext FFI surface — the safety contract is consolidated in
+// `docs/CEXT_SAFETY.md` and discussed at the policy level in ADR
+// 0009 (cext panic policy). Repeating the same contract on every
+// `unsafe extern "C" fn` would 100×-duplicate text without adding
+// information; consumers of this crate are C extensions calling
+// through the documented ABI, not Rust callers reading rustdoc.
+#![allow(clippy::missing_safety_doc)]
+
 //! rubyrs-cext — opaque C ABI for hosting CRuby-shape C extensions.
 //!
 //! # Level 0 spike scope
@@ -1534,11 +1543,10 @@ pub unsafe extern "C" fn rb_typeddata_data_slot(_obj: Value) -> *mut *mut std::f
 fn path_lookup_or_stub(name: String) -> Value {
     with_state(|st| {
         for (idx, v) in st.values.iter().enumerate() {
-            if let CValue::Class(n) = v {
-                if n == &name {
+            if let CValue::Class(n) = v
+                && n == &name {
                     return idx as Value;
                 }
-            }
         }
         st.intern(CValue::Class(name))
     })

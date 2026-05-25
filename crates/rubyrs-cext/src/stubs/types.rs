@@ -63,7 +63,10 @@ pub unsafe extern "C" fn rb_value_is_special_const(v: Value) -> c_int {
 /// LL2NUM — intern as CValue::Int.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_ll2num(n: c_longlong) -> Value {
-    with_state(|st| st.intern(CValue::Int(n as i64)))
+    // `c_longlong` is guaranteed by the C standard to be at least
+    // 64 bits — i64 on every target rubyrs supports — so no widening
+    // cast is needed (and clippy::unnecessary_cast flags one).
+    with_state(|st| st.intern(CValue::Int(n)))
 }
 
 /// rubyrs has no Float CValue; return Qnil.

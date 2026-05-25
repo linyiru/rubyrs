@@ -132,19 +132,22 @@ pub unsafe extern "C" fn rb_enc_interned_str(
 }
 
 // Encoding singletons: stable non-null sentinels (cext only compares ==).
+// `without_provenance_mut(N)` is the idiomatic way to fabricate a
+// pointer from an integer with no provenance — same numeric value
+// as `N as *mut c_void` but doesn't trip clippy's manual-dangling-ptr.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_utf8_encoding() -> *mut c_void {
-    1 as *mut c_void
+    std::ptr::without_provenance_mut(1)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_ascii8bit_encoding() -> *mut c_void {
-    2 as *mut c_void
+    std::ptr::without_provenance_mut(2)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_usascii_encoding() -> *mut c_void {
-    3 as *mut c_void
+    std::ptr::without_provenance_mut(3)
 }
 
 // Encoding indices: arbitrary but stable.
@@ -196,5 +199,5 @@ pub unsafe extern "C-unwind" fn rb_enc_raise(
     exc: Value,
     fmt: *const c_char,
 ) -> ! {
-    unsafe { rb_raise(exc, b"%s\0".as_ptr() as *const c_char, fmt) }
+    unsafe { rb_raise(exc, c"%s".as_ptr(), fmt) }
 }
