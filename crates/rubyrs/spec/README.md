@@ -29,14 +29,19 @@ spec/
     ├── string_gsub_spec.rb        # translated from upstream
     ├── string_reverse_spec.rb     # ruby/spec snapshot ~2026-05;
     ├── string_include_spec.rb     # see TESTING.md for the
-    └── string_empty_spec.rb       # ingestion-pipeline roadmap)
+    ├── string_empty_spec.rb       # ingestion-pipeline roadmap)
+    │
+    ├── method_call_spec.rb        # core/method subset
+    ├── method_compose_spec.rb     # (#>> #<< composition,
+    ├── method_curry_spec.rb       #  curry, #==)
+    └── method_equal_spec.rb
 ```
 
 The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **65 examples across 11
+"Future work" below). Current total: **87 examples across 15
 files**, all passing.
 
 ## DSL the helper provides
