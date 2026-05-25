@@ -176,8 +176,14 @@ which were hand-polished.
 End-to-end:
 
 ```bash
-# 1. Fetch upstream (one-off; or use your local ruby/spec clone)
-curl -sL 'https://raw.githubusercontent.com/ruby/spec/master/core/integer/digits_spec.rb' \
+# 1. Fetch upstream — pin to a specific commit so reruns are
+#    reproducible. `master` URLs drift; the spec file you
+#    commit cites a SHA, so the fetch should match. Look up
+#    the latest at https://github.com/ruby/spec/commits/master
+#    and substitute it below. Example uses the SHA the first
+#    landed file (integer_digits_spec.rb) was extracted from.
+SPEC_SHA=448cb34000b160396d6292af77a319f3a600b7ce
+curl -sL "https://raw.githubusercontent.com/ruby/spec/${SPEC_SHA}/core/integer/digits_spec.rb" \
   > /tmp/upstream.rb
 
 # 2. Run the extractor (stdout = the extracted file)

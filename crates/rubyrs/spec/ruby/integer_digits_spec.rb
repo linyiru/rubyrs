@@ -23,9 +23,10 @@ describe "Integer#digits" do
     assert_eq(12345.digits(7), [4,6,6,0,5])
   end
 
-  # Skipped — upstream uses mspec's `mock_int(2)` to exercise the
-  # `to_int` coercion protocol. rubyrs has no mock library and
-  # Integer#digits(int_like) coercion is a separate spec area.
+  # Skipped — upstream digits_spec.rb:12-14 uses mspec's
+  # `mock_int(2)` to exercise the `to_int` coercion protocol.
+  # rubyrs has no mock library and Integer#digits(int_like)
+  # coercion is a separate spec area.
   #
   # it "converts the radix with #to_int" do
   #   assert_eq(12345.digits(mock_int(2)), [1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1])
@@ -52,10 +53,11 @@ describe "Integer#digits" do
     end
   end
 
-  # Skipped (divergence) — CRuby raises Math::DomainError on
-  # Integer#digits called on a negative receiver; rubyrs raises
-  # ArgumentError. Tracked in docs/SUBSET.md → "Integer
-  # built-in methods". Un-skip when alignment lands.
+  # Skipped (divergence) — upstream digits_spec.rb:29-31.
+  # CRuby raises Math::DomainError on Integer#digits called on
+  # a negative receiver; rubyrs raises ArgumentError. Tracked
+  # in docs/SUBSET.md → "Integer built-in methods". Un-skip
+  # when alignment lands.
   #
   # it "raises Math::DomainError when calling digits on a negative number" do
   #   assert_raises("Math::DomainError") do
