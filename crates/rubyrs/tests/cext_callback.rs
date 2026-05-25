@@ -26,39 +26,63 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
+
+/// Build the callback-cext bundle exactly once per test process.
+///
+/// `cargo test` runs integration tests in parallel by default. The
+/// two tests in this file both invoke `examples/callback-cext/build.sh`,
+/// which writes the same `callback_ext.{bundle,so,dll}` artifact.
+/// Without serialisation the two `cc -o` invocations can race on
+/// the output file → flaky CI.
+///
+/// `OnceLock::get_or_init` guarantees the closure runs at most once
+/// across all threads in the process; concurrent callers block until
+/// it returns. Each test calls `ensure_callback_bundle_built()` and
+/// gets a no-op after the first build completes.
+fn ensure_callback_bundle_built() -> PathBuf {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let example_dir = crate_dir.join("examples/callback-cext");
+            let build_sh = example_dir.join("build.sh");
+            assert!(
+                build_sh.exists(),
+                "missing build.sh at {}",
+                build_sh.display()
+            );
+            let build = Command::new("bash")
+                .arg(&build_sh)
+                .output()
+                .expect("failed to spawn build.sh");
+            assert!(
+                build.status.success(),
+                "build.sh failed.\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&build.stdout),
+                String::from_utf8_lossy(&build.stderr),
+            );
+            let ext = if cfg!(target_os = "macos") {
+                "bundle"
+            } else if cfg!(windows) {
+                "dll"
+            } else {
+                "so"
+            };
+            let bundle = example_dir.join(format!("callback_ext.{}", ext));
+            assert!(
+                bundle.exists(),
+                "build.sh did not produce {}",
+                bundle.display()
+            );
+            bundle
+        })
+        .clone()
+}
 
 #[test]
 fn cext_rb_funcall_round_trip() {
-    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let example_dir = crate_dir.join("examples/callback-cext");
-    let build_sh = example_dir.join("build.sh");
-    assert!(build_sh.exists(), "missing build.sh at {}", build_sh.display());
-
-    let build = Command::new("bash")
-        .arg(&build_sh)
-        .output()
-        .expect("failed to spawn build.sh");
-    assert!(
-        build.status.success(),
-        "build.sh failed.\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&build.stdout),
-        String::from_utf8_lossy(&build.stderr),
-    );
-
-    let ext = if cfg!(target_os = "macos") {
-        "bundle"
-    } else if cfg!(windows) {
-        "dll"
-    } else {
-        "so"
-    };
-    let bundle = example_dir.join(format!("callback_ext.{}", ext));
-    assert!(
-        bundle.exists(),
-        "build.sh did not produce {}",
-        bundle.display()
-    );
-
+    let bundle = ensure_callback_bundle_built();
     let bundle_no_ext = bundle.with_extension("");
     let driver_dir = env!("CARGO_TARGET_TMPDIR");
     let driver = PathBuf::from(driver_dir).join("cext_callback_driver.rb");
@@ -127,35 +151,7 @@ false
 ///      with PinGuard correctness.
 #[test]
 fn cext_array_hash_round_trip() {
-    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let example_dir = crate_dir.join("examples/callback-cext");
-    let build_sh = example_dir.join("build.sh");
-
-    let build = Command::new("bash")
-        .arg(&build_sh)
-        .output()
-        .expect("failed to spawn build.sh");
-    assert!(
-        build.status.success(),
-        "build.sh failed.\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&build.stdout),
-        String::from_utf8_lossy(&build.stderr),
-    );
-
-    let ext = if cfg!(target_os = "macos") {
-        "bundle"
-    } else if cfg!(windows) {
-        "dll"
-    } else {
-        "so"
-    };
-    let bundle = example_dir.join(format!("callback_ext.{}", ext));
-    assert!(
-        bundle.exists(),
-        "build.sh did not produce {}",
-        bundle.display()
-    );
-
+    let bundle = ensure_callback_bundle_built();
     let bundle_no_ext = bundle.with_extension("");
     let driver_dir = env!("CARGO_TARGET_TMPDIR");
     let driver = PathBuf::from(driver_dir).join("cext_collections_driver.rb");
