@@ -18,6 +18,7 @@
  * Mirror that so unmodified CRuby C extensions compile against us
  * without needing to add their own #include lines.
  * `<stdarg.h>` is for the `rb_funcall` static-inline wrapper. */
+#include <limits.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -35,11 +36,18 @@ extern "C" {
  * CRuby's tagged representation.) */
 typedef uint64_t VALUE;
 
-/* Singleton handles. Their numeric values are part of the ABI and
- * must match the constants defined in the Rust-side implementation. */
-extern VALUE Qnil;
-extern VALUE Qtrue;
-extern VALUE Qfalse;
+/* Singleton handles. Numeric values ARE the ABI — kept in sync
+ * with the `pub static Q*: Value = N` exports in rubyrs-cext's
+ * lib.rs (handles 0/1/2). Compile-time-constant macros (mirroring
+ * CRuby's `enum ruby_special_consts` shape) so cexts can use them
+ * in static initializers, e.g. `VALUE cFoo = Qnil;` at file scope.
+ *
+ * The Rust statics still exist as dlopen-resolvable symbols for
+ * cexts that reference them by extern declaration; the macros
+ * here just give the literal value path. */
+#define Qnil   ((VALUE)0)
+#define Qtrue  ((VALUE)1)
+#define Qfalse ((VALUE)2)
 
 /* Test whether a VALUE is the nil singleton. Mirrors CRuby. */
 #define NIL_P(v) ((v) == Qnil)
@@ -63,6 +71,14 @@ extern VALUE Qfalse;
  * CRuby's macro of the same name — extensions written for CRuby can
  * use this verbatim. */
 #define RUBY_METHOD_FUNC(func) ((VALUE (*)(ANYARGS))(func))
+
+/* NORETURN(decl): wrap a declaration with the `[[noreturn]]`-like
+ * attribute. CRuby's macro shape: `NORETURN(static void foo(int a))`.
+ * Without this define, the preprocessor leaves NORETURN(...) as
+ * what looks like a function call, and the inner declaration's
+ * arg names get parsed as K&R-style parameters — yielding
+ * "undeclared identifier" on every named arg. */
+#define NORETURN(decl) __attribute__((noreturn)) decl
 
 /* Allocate a new Ruby String from a NUL-terminated C string.
  * The bytes are copied; the caller retains ownership of `s`. */
@@ -520,6 +536,14 @@ void rb_ext_ractor_safe(int safe);
 #define RUBY_TYPED_WB_PROTECTED      2
 #define RUBY_TYPED_FROZEN_SHAREABLE  4
 
+/* RUBY_TYPED_DEFAULT_FREE: CRuby sentinel value for "this TypedData
+ * uses system free()". When a `rb_data_type_t`'s `dfree` slot is
+ * set to this value, GC sweep should call `free(data_ptr)` directly.
+ * rubyrs's heap-sweep treats it as a regular `unsafe extern "C" fn`
+ * pointer — supplying the libc `free()` here keeps the contract
+ * intact without a separate sentinel branch on the host side. */
+#define RUBY_TYPED_DEFAULT_FREE ((void (*)(void *))free)
+
 /* TypedData_Make_Struct: combined alloc + wrap (CRuby convenience).
  *   sval = malloc(sizeof(type)); memset(sval, 0, sizeof(type));
  *   return TypedData_Wrap_Struct(klass, type_ptr, sval);
@@ -729,6 +753,132 @@ VALUE rb_convert_type(VALUE val, int type, const char *cname, const char *method
 #ifndef RB_GC_GUARD
 #define RB_GC_GUARD(v) ((void)(v))
 #endif
+
+/* ========================================================
+ * msgpack-ruby additions (L3-E spike).
+ *
+ * Surface beyond what flori/json's L3-D wedge needed:
+ *   - Bignum accessors (rubyrs has no arbitrary precision —
+ *     all integers are i64; >i64 values overflow at convert)
+ *   - rb_num2dbl (Float coercion)
+ *   - rb_class_of / rb_class_inherited_p (ancestry)
+ *   - rb_hash_lookup (returns Qnil for missing, like rb_hash_aref;
+ *     real CRuby distinguishes "missing" from "default value")
+ *   - Encoding macros for ENCODING_GET/SET on strings
+ *   - RUBY_FUNC_EXPORTED visibility attr
+ * ========================================================
+ */
+
+/* Visibility attr: CRuby uses this on Init_<gem>. */
+#define RUBY_FUNC_EXPORTED __attribute__((visibility("default")))
+
+/* rb_class_of: alias for the existing rb_basic_class helper. */
+#define rb_class_of(v) rb_basic_class(v)
+
+/* rb_class_inherited_p(child, parent): is child a subclass of parent
+ * (or equal to it)? rubyrs has no inheritance modeling at the spike
+ * level — return Qtrue conservatively so dispatch fallthrough works,
+ * matching the "respond_to / kind_of return permissive default"
+ * shape used elsewhere. */
+VALUE rb_class_inherited_p(VALUE child, VALUE parent);
+
+/* rb_hash_lookup(h, key): same as rb_hash_aref. CRuby uses this to
+ * skip the default-value path; rubyrs doesn't track defaults so
+ * the two are equivalent. */
+#define rb_hash_lookup(h, k) rb_hash_aref((h), (k))
+
+/* Numeric coercion */
+double rb_num2dbl(VALUE v);
+
+/* Bignum surface. rubyrs's Number is fixed i64; values outside
+ * the range overflow lossily. msgpack's packer uses these to
+ * decide narrow vs wide integer encoding. */
+size_t rb_absint_size(VALUE v, int *nlz_bits_ret);
+unsigned long long rb_big2ull(VALUE v);
+long long rb_big2ll(VALUE v);
+int rb_bignum_positive_p(VALUE v);
+#define RBIGNUM_POSITIVE_P(v) rb_bignum_positive_p(v)
+
+/* Encoding macros. ENCODING_GET returns the encindex of a String;
+ * ENCODING_SET tags a String with an encindex. rubyrs is UTF-8-
+ * everywhere so both collapse to no-op shape (GET always returns
+ * the UTF-8 index; SET is ignored). Distinct from the encoding.h
+ * functional accessors so cext code using either form compiles. */
+#define ENCODING_GET(v) rb_enc_get_index(v)
+#define ENCODING_SET(v, idx) ((void)(idx))
+
+/* ========================================================
+ * msgpack-ruby round 2 additions.
+ * ========================================================
+ */
+
+/* Conversions */
+#define NUM2SIZET(v)   ((size_t)rb_num2long(v))
+#define SIZET2NUM(n)   rb_long2num((long)(n))
+#define NUM2UINT(v)    ((unsigned int)rb_num2long(v))
+#define ULONG2NUM(n)   rb_long2num((long)(n))
+VALUE rb_ull2inum(unsigned long long n);
+/* ULL2NUM was defined earlier as rb_ll2num cast; redefine to the
+ * unsigned-truncating path now that we have a dedicated symbol. */
+#undef ULL2NUM
+#define ULL2NUM(n) rb_ull2inum(n)
+VALUE rb_float_new(double d);
+
+/* Array varargs ctor: rb_ary_new3(n, v1, v2, ...). CRuby exposes
+ * this as a variadic alias for rb_ary_new_from_args. rubyrs's
+ * variadic surface is limited; emulate via the existing
+ * rb_ary_new_from_values + caller staging the args into a stack
+ * array. msgpack uses small Ns (typically 2-3); macro form
+ * dispatches up to N=5. */
+VALUE rb_ary_new3(long n, ...);
+
+/* Hash mutation */
+VALUE rb_hash_clear(VALUE h);
+VALUE rb_hash_dup(VALUE h);
+VALUE rb_hash_freeze(VALUE h);
+
+/* String mutation */
+VALUE rb_str_buf_cat(VALUE str, const char *ptr, long len);
+VALUE rb_str_replace(VALUE dst, VALUE src);
+VALUE rb_String(VALUE v);  /* coerce to String via to_s */
+
+/* Exception flow control */
+__attribute__((noreturn))
+void rb_bug(const char *fmt, ...);
+VALUE rb_errinfo(void);
+__attribute__((noreturn))
+void rb_jump_tag(int tag);
+VALUE rb_protect(VALUE (*body)(VALUE), VALUE arg, int *state);
+VALUE rb_rescue2(VALUE (*body)(VALUE), VALUE body_arg,
+                 VALUE (*rescue)(VALUE, VALUE), VALUE rescue_arg, ...);
+extern VALUE rb_eEOFError;
+extern VALUE rb_eFrozenError;
+extern VALUE rb_eEncCompatError;
+
+/* Class / object */
+void rb_define_const(VALUE klass, const char *name, VALUE val);
+const char *rb_obj_classname(VALUE v);
+VALUE rb_obj_freeze(VALUE v);
+int rb_obj_frozen_p(VALUE v);
+
+/* Symbols */
+ID rb_intern3(const char *name, long len, void *enc);
+
+/* Struct — rubyrs doesn't model Struct; stub returns a Class
+ * sentinel that supports `.new(args) -> Array-shape Object`. */
+VALUE rb_struct_define(const char *name, ...);
+VALUE rb_struct_new(VALUE klass, ...);
+#define RSTRUCT_GET(s, i) rb_struct_aref((s), (i))
+VALUE rb_struct_aref(VALUE s, long i);
+
+/* msgpack-ruby round 3 additions. */
+#define FIX2ULONG(v) ((unsigned long)rb_num2long(v))
+VALUE rb_ll2inum(long long n);
+VALUE rb_check_string_type(VALUE v);
+void rb_include_module(VALUE klass, VALUE mod);
+VALUE rb_str_resize(VALUE str, long len);
+void rb_undef_alloc_func(VALUE klass);
+VALUE rb_yield(VALUE arg);
 
 #ifdef __cplusplus
 }
