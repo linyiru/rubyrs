@@ -61,6 +61,10 @@ CLASSIFIER_PATHS=(
   "crates/rubyrs/src/ast.rs"
   "crates/rubyrs/data/supported_prism_nodes.txt"
   "crates/rubyrs/data/rides_along_prism_nodes.txt"
+  # rubyrs's build.rs is what *emits* SUPPORTED_PRISM_NODES /
+  # RIDES_ALONG_PRISM_NODES from the data files — changes to it
+  # can shift classification even when the data files don't.
+  "crates/rubyrs/build.rs"
   "crates/rubyrs-gapscan/src/"
   "crates/rubyrs-gapscan/data/"
   "crates/rubyrs-gapscan/build.rs"
@@ -74,23 +78,43 @@ has_classifier_change() {
 
 # --- clone or refresh each target into CACHE_DIR ------------------
 # Clones are *blobless* partial clones (`--filter=blob:none`) with
-# sparse-checkout restricted to the scanned relpath. The combination
+# sparse-checkout restricted to the scanned relpaths. The combination
 # means: clone keeps full commit + tree history (so arbitrary SHAs
-# resolve without re-fetching) but on first checkout only downloads
-# the blobs for files inside relpath. For ruby/ruby this is a
-# multi-hundred-MB saving — we only materialise lib/set.rb,
-# lib/optparse.rb, or lib/uri/ depending on which target.
+# resolve without re-fetching) but checkout only materialises blobs
+# for files inside the listed relpaths.
+#
+# Same-repo targets share one underlying clone, keyed on repo URL.
+# ruby/ruby in particular has three TARGETS rows (stdlib-set,
+# stdlib-optparse, stdlib-uri) all pinned to the same SHA — cloning
+# it once instead of three times saves ~200M of cache and the
+# corresponding clone time. The sparse-checkout grows incrementally
+# as each new relpath is added.
+#
+# Echoes the resolved checkout directory on stdout so the caller can
+# compose `$dir/$relpath` for scanning.
+repo_cache_dir() {
+  # Stable, filesystem-safe directory name from the repo URL.
+  printf "%s\n" "$1" | sha1sum | cut -c1-12
+}
+
 ensure_target() {
   local key="$1" repo="$2" sha="$3" relpath="$4"
-  local dir="$CACHE_DIR/$key"
+  local dir="$CACHE_DIR/$(repo_cache_dir "$repo")"
   if [[ ! -d "$dir/.git" ]]; then
-    log "cloning $key from $repo (blobless + sparse on $relpath)"
+    log "cloning $repo (blobless + sparse) into shared cache dir"
     git clone --quiet --no-checkout --filter=blob:none --no-tags "$repo" "$dir"
     # Non-cone mode handles single-file paths like `lib/set.rb`.
-    git -C "$dir" sparse-checkout set --no-cone "$relpath" "/$relpath"
+    git -C "$dir" sparse-checkout set --no-cone "/$relpath"
+  else
+    # Repo already cloned for an earlier same-repo target — extend
+    # the sparse-checkout to include this target's relpath too.
+    # `add` is idempotent; safe to call when relpath is already in.
+    # Note `add` doesn't accept --no-cone (it inherits whatever mode
+    # the initial `set --no-cone` left in effect).
+    git -C "$dir" sparse-checkout add "/$relpath"
   fi
   if ! git -C "$dir" rev-parse --verify --quiet "$sha^{commit}" >/dev/null; then
-    log "fetching $sha for $key"
+    log "fetching $sha for $repo"
     # Fetch only the pinned SHA when the host supports it
     # (GitHub does, via uploadpack.allowReachableSHA1InWant);
     # fall back to a full fetch otherwise.
@@ -98,6 +122,7 @@ ensure_target() {
       || git -C "$dir" fetch --quiet --no-tags --filter=blob:none origin
   fi
   git -C "$dir" -c advice.detachedHead=false checkout --quiet "$sha"
+  echo "$dir"
 }
 
 # --- build the HEAD gapscan binary --------------------------------
@@ -292,8 +317,8 @@ build_base_gapscan
 : > "$per_target_jsonl"
 for target in "${TARGETS[@]}"; do
   IFS='|' read -r key repo sha relpath <<< "$target"
-  ensure_target "$key" "$repo" "$sha" "$relpath"
-  scan_path="$CACHE_DIR/$key/$relpath"
+  dir=$(ensure_target "$key" "$repo" "$sha" "$relpath")
+  scan_path="$dir/$relpath"
   before="$WORK/${key}-base.json"
   after="$WORK/${key}-head.json"
   scan_json "$GAPSCAN_BIN_BASE" "$scan_path" "$before"
