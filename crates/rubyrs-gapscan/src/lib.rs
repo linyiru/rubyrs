@@ -236,10 +236,11 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
 
     for file in files {
         report.files_scanned += 1;
+        let rel = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
         let src = match std::fs::read(&file) {
             Ok(b) => b,
             Err(_) => {
-                report.files_with_errors.push(file);
+                report.files_with_errors.push(rel);
                 continue;
             }
         };
@@ -249,9 +250,8 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> std::io::Result<Report> {
         // partial tree but record the file if it had any errors.
         let had_errors = parsed.errors().count() > 0;
         if had_errors {
-            report.files_with_errors.push(file.clone());
+            report.files_with_errors.push(rel.clone());
         }
-        let rel = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
         let mut file_stat = FileStat {
             path: rel.clone(),
             ..Default::default()

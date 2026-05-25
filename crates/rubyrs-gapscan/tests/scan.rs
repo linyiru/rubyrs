@@ -249,6 +249,26 @@ fn scan_skips_spec_and_test_dirs_by_default() {
     assert!(!opts.skip_tests);
 }
 
+#[test]
+fn files_with_errors_uses_root_relative_paths() {
+    // PR #3 round 3 review #18: previously stored absolute paths
+    // while every other path field is root-relative. Mismatched
+    // paths make JSON reports unstable across machines.
+    let td = TempDir::new("rel-errs");
+    // Write a syntactically broken file so Prism reports an error.
+    td.write("bad.rb", "def\n");
+    td.write("good.rb", "puts 1\n");
+    let report = scan(td.path(), &ScanOptions::default()).unwrap();
+    assert!(!report.files_with_errors.is_empty(), "expected parse error");
+    for p in &report.files_with_errors {
+        assert!(p.is_relative(), "expected relative, got {p:?}");
+        assert!(
+            !p.starts_with(td.path()),
+            "still contains tempdir prefix: {p:?}"
+        );
+    }
+}
+
 // ---- symlink edge cases (PR #3 round 3 reviews #16 #17) ----
 // Gated on `unix` because creating symlinks on Windows requires
 // elevated privileges; the production code itself is portable.
