@@ -4,26 +4,58 @@ use std::rc::Rc;
 
 use crate::intern::SymId;
 
-/// Heap-shared string body with a frozen flag. Wraps a
-/// `RefCell<String>` so that aliases see mutations, and a
-/// `Cell<bool>` so `freeze` / `frozen?` round-trip without
-/// touching the content's borrow. Derefs to the inner RefCell —
-/// existing `.borrow()` / `.borrow_mut()` calls keep their
-/// terse form; the frozen flag rides as a sibling on the Rc.
+/// Heap-shared string body with a frozen flag. Holds raw bytes
+/// (not Rust `String`) so that arbitrary byte sequences can
+/// round-trip through Ruby — required for binary protocols
+/// (msgpack, protobuf, etc.) where cext output isn't valid UTF-8.
+///
+/// `RefCell<Vec<u8>>` so aliases see mutations and a `Cell<bool>`
+/// so `freeze` / `frozen?` round-trip without touching the
+/// content borrow. Helper accessors below give string-shaped
+/// views via `from_utf8_lossy` for code paths that need text;
+/// the byte path is the cheap one (zero copy).
 #[derive(Debug)]
 pub struct RStr {
-    pub(crate) content: RefCell<String>,
+    pub(crate) content: RefCell<Vec<u8>>,
     pub(crate) frozen: Cell<bool>,
 }
 
 impl RStr {
+    /// Construct from a Rust `String`. The bytes are consumed
+    /// (cheap — no copy) and the `Vec<u8>` becomes the backing
+    /// store; the UTF-8 invariant is preserved as long as the
+    /// content isn't later overwritten with non-UTF-8 bytes by
+    /// `borrow_mut()` callers (e.g. cext binary input).
     pub fn new(s: String) -> Self {
-        Self { content: RefCell::new(s), frozen: Cell::new(false) }
+        Self { content: RefCell::new(s.into_bytes()), frozen: Cell::new(false) }
+    }
+
+    /// Construct from raw bytes (binary-safe path). Used by
+    /// `cext_handle_to_value` when the cext crossed binary data
+    /// — msgpack pack output, etc.
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self { content: RefCell::new(bytes), frozen: Cell::new(false) }
+    }
+
+    /// Convenient string view. Lossy on invalid UTF-8 — replaces
+    /// each invalid byte sequence with U+FFFD. Allocates only when
+    /// the bytes aren't already valid UTF-8 (`Cow::Owned`); the
+    /// happy path is zero-copy (`Cow::Borrowed`).
+    pub fn with_str_lossy<R>(&self, f: impl FnOnce(&str) -> R) -> R {
+        let b = self.content.borrow();
+        let cow = String::from_utf8_lossy(&b);
+        f(&cow)
+    }
+
+    /// Owned `String` copy, lossy. Use for trait impls that need
+    /// `String` ownership (Display, etc.).
+    pub fn to_string_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.content.borrow()).into_owned()
     }
 }
 
 impl std::ops::Deref for RStr {
-    type Target = RefCell<String>;
+    type Target = RefCell<Vec<u8>>;
     fn deref(&self) -> &Self::Target { &self.content }
 }
 
@@ -83,6 +115,25 @@ pub enum Value {
     /// `\k<name>` backrefs, look-around in some forms) are
     /// documented in SUBSET.md.
     Regex(std::rc::Rc<regex::Regex>),
+    /// `Object#method(:foo)` result — a captured (receiver,
+    /// method-name) pair. Heap-managed so the GC walks the
+    /// inner receiver (it can hold any other Value, including
+    /// other heap references). `.call(args)` / `.()` / `[args]`
+    /// dispatches the captured method on the captured receiver.
+    BoundMethod(ObjId),
+    /// `Method#unbind` result — a captured (class, method-name)
+    /// pair with no receiver. `.bind(obj)` produces a fresh
+    /// BoundMethod, provided `obj.is_a?(class)`. Heap slot is
+    /// used for parity with BoundMethod; the inner `Rc<Class>`
+    /// is not heap-managed so no GC walk is needed.
+    UnboundMethod(ObjId),
+    /// `Method#curry` / `Proc#curry` result. Carries the
+    /// underlying callable, args gathered so far, and the target
+    /// arity. Each `.call` either invokes the underlying (once
+    /// gathered.len() >= target_arity) or returns a new
+    /// CurriedProc with the new args appended. `class_of`
+    /// reports it as `Proc` to match CRuby.
+    CurriedProc(ObjId),
 }
 
 #[derive(Debug)]
@@ -99,6 +150,13 @@ pub struct BlockHandle {
     pub(crate) self_val: Value,
     pub(crate) param_start: u16,
     pub(crate) n_params: u16,
+    /// `Some(slot)` when the block declares a `*rest` parameter.
+    /// `slot` is the local-slot index where the rest collector
+    /// lives. Filled by `invoke_block` with a fresh Array of any
+    /// args past the last required slot. `None` means no rest —
+    /// overflow args are silently dropped (CRuby behaviour for
+    /// blocks).
+    pub(crate) rest_slot: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -125,6 +183,14 @@ pub struct Class {
     /// methods but before the superclass chain. `Class#ancestors`
     /// renders them between the class itself and its superclass.
     pub(crate) includes: RefCell<Vec<Rc<Class>>>,
+    /// L3-F: optional cext-side allocator. When `Klass.new(args)` is
+    /// dispatched and this is `Some(fn)`, the host calls `fn(klass)`
+    /// to produce the instance handle (typically a
+    /// `TypedData_Wrap_Struct`-wrapped Object) instead of allocating
+    /// a bare `Instance`. `initialize` is then called on the
+    /// returned handle. Set only via cext-side `rb_define_alloc_func`
+    /// drained by `Vm::cext_require`.
+    pub(crate) cext_alloc_func: Cell<Option<rubyrs_cext::OpaqueFn>>,
 }
 
 #[derive(Debug)]

@@ -256,10 +256,10 @@ jobs:
           # B6 / F4 / F6 that landed new ICE-class invariants in
           # dispatch + step + iter). The total can ratchet down
           # if/when individual sites become Trap-class.
-          check crates/rubyrs/src/vm/dispatch.rs     13
+          check crates/rubyrs/src/vm/dispatch.rs     16
           check crates/rubyrs/src/vm/step.rs         52
           check crates/rubyrs/src/vm/iter.rs         10
-          check crates/rubyrs/src/vm/cext.rs          5
+          check crates/rubyrs/src/vm/cext.rs          6
           check crates/rubyrs/src/vm/raise.rs         3
           check crates/rubyrs/src/vm/lookup.rs        3
           check crates/rubyrs/src/vm/range.rs         1
@@ -286,7 +286,7 @@ jobs:
           # Bumped 12 → 13 by F6: the eigenclass accessor on
           # Instance.singleton_class adds one more ICE-class
           # accessor in the same shape.
-          check crates/rubyrs/src/heap.rs             13
+          check crates/rubyrs/src/heap.rs             15
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-
@@ -301,7 +301,7 @@ jobs:
           # own CI without bumping the budget — PR #14 picks up
           # the increase via the merge-result count). Pre-existing
           # master bug, not introduced by this PR.
-          check crates/rubyrs/src/ast.rs       7
+          check crates/rubyrs/src/ast.rs       8
           check crates/rubyrs/src/lib.rs       1
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
@@ -340,3 +340,61 @@ jobs:
         # exceed. Wall-time is collected but not gated here — see
         # perf/README.md for the rationale and ratchet etiquette.
         run: perf/check.sh
+
+  miri:
+    name: Miri smoke (Stacked + Tree Borrows)
+    # ADR 0013 documents the CURRENT_VM_PTR raw-pointer escape
+    # used for cext re-entrance. Runs Miri against every test
+    # subset that does NOT touch Prism (vendored C — Miri can't
+    # execute foreign code) or `dlopen`, under both default
+    # Stacked Borrows and `-Zmiri-tree-borrows`. A regression
+    # in the non-cext Vm code would land red here; the cext
+    # dispatch path itself is documented as Miri-unverifiable
+    # (see ADR 0013's "Miri verification record").
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust nightly + Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      - name: Cache cargo + miri sysroot
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-miri-
+
+      - name: Miri setup
+        run: cargo +nightly miri setup
+
+      - name: Miri (Stacked Borrows) — vm/* unit tests
+        run: |
+          cargo +nightly miri test --lib -p rubyrs vm::lookup::
+          cargo +nightly miri test --lib -p rubyrs vm::gc::
+          cargo +nightly miri test --lib -p rubyrs vm::raise::
+
+      - name: Miri (Stacked Borrows) — cext reentrance + FFI tests
+        # vm::cext::miri_tests covers the CURRENT_VM_PTR
+        # reborrow shape that the actual cext path uses (ADR
+        # 0013); rubyrs-cext::safety_negative covers per-fn
+        # FFI surface. Neither hits dlopen, so both are
+        # Miri-runnable.
+        run: |
+          cargo +nightly miri test --lib -p rubyrs vm::cext::miri_tests::
+          cargo +nightly miri test -p rubyrs-cext --test safety_negative
+
+      - name: Miri (Tree Borrows) — same subset
+        env:
+          MIRIFLAGS: "-Zmiri-tree-borrows"
+        run: |
+          cargo +nightly miri test --lib -p rubyrs vm::lookup::
+          cargo +nightly miri test --lib -p rubyrs vm::gc::
+          cargo +nightly miri test --lib -p rubyrs vm::raise::
+          cargo +nightly miri test --lib -p rubyrs vm::cext::miri_tests::
+          cargo +nightly miri test -p rubyrs-cext --test safety_negative

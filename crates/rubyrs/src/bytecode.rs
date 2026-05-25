@@ -135,7 +135,11 @@ pub(crate) enum Op {
     NewHash(u16),
     /// Pops two values (begin, end). u8 nonzero = exclusive (`...`).
     NewRange(u8),
-    CreateBlock(u32, u16, u16),    // proto_idx, param_start, n_params
+    /// proto_idx, param_start, n_params, rest_slot.
+    /// `rest_slot == u16::MAX` is the sentinel for "no rest";
+    /// any other value is the local-slot index where `*args`
+    /// gathers overflow into a fresh Array at invoke time.
+    CreateBlock(u32, u16, u16, u16),
     CallBlock(SymId, u8, u16),
     CallNoRecvBlock(SymId, u8, u16),
     Yield(u8),
@@ -250,6 +254,14 @@ pub(crate) struct Proto {
     /// (after every kw_param) so the existing kw-binding loop
     /// remains contiguous.
     pub(crate) kw_rest_param: Option<String>,
+    /// `Some(name)` for `def foo(&blk)` — the block-as-data
+    /// parameter name. At call time, the BlockHandle the caller
+    /// passed (the same ObjId held by `frame.block_arg`) is bound
+    /// into the local named here as a `Value::Block`; if the
+    /// caller passed no block the slot gets `Value::Nil`. Lives
+    /// at the very end of `params` (after kw_rest if any) so the
+    /// rest/kw layout stays contiguous.
+    pub(crate) block_param: Option<String>,
     pub(crate) n_locals: u16,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.

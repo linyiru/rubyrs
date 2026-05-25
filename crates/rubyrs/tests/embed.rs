@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
-use rubyrs::{Config, Runtime, RubyError, Value};
+use rubyrs::{Config, HostCtx, Runtime, RubyError, Trap, Value};
 
 #[derive(Clone)]
 struct SharedBuf(Rc<RefCell<Vec<u8>>>);
@@ -73,6 +73,191 @@ fn host_fn_can_propagate_trap() {
     let formatted = rt.format_trap(&res.unwrap_err());
     assert!(formatted.contains("no good"), "got: {}", formatted);
     assert!(formatted.contains("ArgumentError"), "got: {}", formatted);
+}
+
+#[test]
+fn register_fn_v2_reads_array_arg_via_host_ctx() {
+    // v2 signature gives the closure a `HostCtx` so it can unpack
+    // `Value::Array` directly — the heap-y shape that v1's
+    // `&[Value]`-only signature couldn't reach without going back
+    // through the (cloning) `Runtime::resolve_array`. This is the
+    // gap PR #35's Gemfile demo hit and worked around with a
+    // Ruby-side prelude that flattened `*args` to a `|`-joined
+    // String.
+    let (mut rt, buf) = rt_with_buf();
+    rt.register_fn_v2("sum_array", |ctx: &HostCtx, args: &[Value]| {
+        let arr = match args {
+            [v] => ctx.resolve_array(v).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "expected Array".into() },
+                backtrace: vec![],
+            })?,
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "wrong arity".into() },
+                backtrace: vec![],
+            }),
+        };
+        let mut total: i64 = 0;
+        for v in arr {
+            if let Value::Int(n) = v { total += n; } else {
+                return Err(Trap {
+                    err: RubyError::TypeError { msg: "expected Integer element".into() },
+                    backtrace: vec![],
+                });
+            }
+        }
+        Ok(Value::Int(total))
+    });
+    rt.eval(r#"puts sum_array([1, 2, 3, 4, 5])"#, "t.rb").unwrap();
+    assert_eq!(buf.snapshot(), "15\n");
+}
+
+#[test]
+fn register_fn_v2_reads_hash_arg_via_host_ctx() {
+    // Two checks against the same Hash:
+    //   1. key lookup returns the right Value (exercises the
+    //      resolve_hash → (k, v) pair shape end-to-end).
+    //   2. iteration order matches insertion order. CRuby's
+    //      Hash guarantees this since 1.9; rubyrs's
+    //      `Vec<(Value, Value)>` representation preserves it
+    //      mechanically. The `hash_keys` host fn below joins
+    //      keys with `|` so a regression that switched to a
+    //      `HashMap` or any unordered shape would fail with a
+    //      different concrete output string.
+    let mut rt = Runtime::new();
+    rt.register_fn_v2("hash_lookup", |ctx: &HostCtx, args: &[Value]| {
+        let (h, want) = match args {
+            [h, Value::Str(s)] => (
+                ctx.resolve_hash(h).ok_or_else(|| Trap {
+                    err: RubyError::ArgumentError { msg: "expected Hash".into() },
+                    backtrace: vec![],
+                })?,
+                s.to_string_lossy(),
+            ),
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "wrong arity / types".into() },
+                backtrace: vec![],
+            }),
+        };
+        for (k, v) in h {
+            if let Value::Str(ks) = k
+                && ks.to_string_lossy() == want
+            {
+                return Ok(v.clone());
+            }
+        }
+        Ok(Value::Nil)
+    });
+    // Captures the iteration order Rust-side so the assertion
+    // below can read an actual String (sidesteps `Value::Str`'s
+    // non-public constructor).
+    let captured_keys: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![]));
+    let captured_for_fn = captured_keys.clone();
+    rt.register_fn_v2("hash_keys", move |ctx: &HostCtx, args: &[Value]| {
+        let h = match args {
+            [h] => ctx.resolve_hash(h).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "expected Hash".into() },
+                backtrace: vec![],
+            })?,
+            _ => return Err(Trap {
+                err: RubyError::ArgumentError { msg: "wrong arity".into() },
+                backtrace: vec![],
+            }),
+        };
+        let mut out = captured_for_fn.borrow_mut();
+        out.clear();
+        for (k, _) in h {
+            if let Value::Str(s) = k { out.push(s.to_string_lossy()); }
+        }
+        Ok(Value::Nil)
+    });
+
+    // Key lookup.
+    let v = rt.eval(
+        r#"hash_lookup({ "a" => 1, "b" => 2, "c" => 3 }, "b")"#,
+        "t.rb",
+    ).unwrap();
+    assert!(matches!(v, Value::Int(2)), "expected Int(2), got {:?}", v);
+
+    // Iteration order. Insertion order is `a, b, c`; if the
+    // underlying representation ever became unordered (e.g.
+    // HashMap) this assertion would fail with a different
+    // permutation rather than passing silently.
+    rt.eval(
+        r#"hash_keys({ "a" => 1, "b" => 2, "c" => 3 })"#,
+        "t.rb",
+    ).unwrap();
+    assert_eq!(&*captured_keys.borrow(), &["a", "b", "c"],
+        "hash iteration order should match insertion");
+}
+
+#[test]
+fn register_fn_v2_resolves_sym_arg_via_host_ctx() {
+    // `HostCtx::resolve_sym` lets the host borrow the interned name
+    // of a `Value::Sym` arg without going through the prelude. This
+    // closes the gap PR #40 noted: a Bundler-style kwarg Hash with
+    // Symbol keys (`require:`, `platforms:`) can be consumed
+    // host-side without a Ruby `k.to_s` rebuild.
+    let captured: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![]));
+    let captured_for_fn = captured.clone();
+    let mut rt = Runtime::new();
+    rt.register_fn_v2("sym_names", move |ctx: &HostCtx, args: &[Value]| {
+        let mut out = captured_for_fn.borrow_mut();
+        out.clear();
+        for v in args {
+            let name = ctx.resolve_sym(v).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError {
+                    msg: "expected all args to be Symbols".into(),
+                },
+                backtrace: vec![],
+            })?;
+            out.push(name.to_string());
+        }
+        Ok(Value::Nil)
+    });
+
+    rt.eval(r#"sym_names(:require, :platforms, :mri)"#, "t.rb").unwrap();
+    assert_eq!(&*captured.borrow(), &["require", "platforms", "mri"]);
+
+    // Negative case: a non-Symbol arg surfaces the explicit
+    // ArgumentError, not a silent skip.
+    let err = rt.eval(r#"sym_names(:ok, "not a sym")"#, "t.rb").unwrap_err();
+    assert!(err.err.is("ArgumentError"),
+        "expected ArgumentError on non-Sym arg, got {:?}", err.err);
+}
+
+#[test]
+fn register_fn_v2_replaces_prior_v1_registration() {
+    // Re-registering under the same name swaps the slot —
+    // pinning this so a future refactor that uses separate v1/v2
+    // maps would have to keep this guarantee explicit.
+    let mut rt = Runtime::new();
+    rt.register_fn("answer", |_| Ok(Value::Int(42)));
+    let v1 = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(v1, Value::Int(42)));
+
+    rt.register_fn_v2("answer", |_ctx, _args| Ok(Value::Int(99)));
+    let v2 = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(v2, Value::Int(99)));
+}
+
+#[test]
+fn register_fn_replaces_prior_v2_registration() {
+    // Symmetric direction. Both register_fn / register_fn_v2 doc
+    // strings promise replacement either way; without this test a
+    // future map-split refactor (separate v1_fns / v2_fns maps)
+    // could keep a stale v2 closure live after the embedder
+    // re-registered with v1. Existing v1→v2 test above wouldn't
+    // catch that direction.
+    let mut rt = Runtime::new();
+    rt.register_fn_v2("answer", |_ctx, _args| Ok(Value::Int(99)));
+    let first = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(first, Value::Int(99)));
+
+    rt.register_fn("answer", |_| Ok(Value::Int(42)));
+    let second = rt.eval(r#"answer"#, "t.rb").unwrap();
+    assert!(matches!(second, Value::Int(42)),
+        "v1 registration should have replaced the prior v2 slot, got {:?}",
+        second);
 }
 
 #[test]
@@ -775,9 +960,9 @@ fn resolve_hash_unpacks_pairs() {
     let val = rt.eval(r#"{ "a" => 1, "b" => 2 }"#, "t.rb").unwrap();
     let pairs = rt.resolve_hash(&val).expect("should be a Hash");
     assert_eq!(pairs.len(), 2);
-    assert!(matches!(&pairs[0].0, Value::Str(s) if *s.borrow() == "a"));
+    assert!(matches!(&pairs[0].0, Value::Str(s) if s.to_string_lossy() == "a"));
     assert!(matches!(&pairs[0].1, Value::Int(1)));
-    assert!(matches!(&pairs[1].0, Value::Str(s) if *s.borrow() == "b"));
+    assert!(matches!(&pairs[1].0, Value::Str(s) if s.to_string_lossy() == "b"));
     assert!(matches!(&pairs[1].1, Value::Int(2)));
 }
 
@@ -1177,7 +1362,7 @@ fn gemfile_dsl_real_hosting_end_to_end() {
     let mut rt = Runtime::new();
 
     fn s(v: &Value) -> String {
-        if let Value::Str(rs) = v { rs.borrow().clone() } else { String::new() }
+        if let Value::Str(rs) = v { rs.to_string_lossy() } else { String::new() }
     }
 
     {
@@ -1194,34 +1379,104 @@ fn gemfile_dsl_real_hosting_end_to_end() {
             Ok(Value::Nil)
         });
     }
+    // v2 form — mirrors examples/gemfile.rs::__gemfile_gem_v2.
+    // Fail-fast shape validation: matches the demo's pattern and
+    // the earlier register_fn_v2_reads_* unit tests. A regression
+    // in the prelude (sending the wrong shape) surfaces as an
+    // ArgumentError here, not as a silent partial GemfileState
+    // that fails 200 lines later in `.gems.len() != 18`.
     {
         let st = state.clone();
-        rt.register_fn("__gemfile_gem", move |args| {
-            if let [name, reqs, req_kw, plat_kw] = args {
-                let mut sm = st.borrow_mut();
-                let groups: Vec<String> = sm.group_stack.last()
-                    .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
-                    .unwrap_or_default();
-                let platforms_scope: Vec<String> = sm.platforms_stack.last()
-                    .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
-                    .unwrap_or_default();
-                let source_override = sm.source_stack.last().cloned();
-                let req_str = s(reqs);
-                let reqs_vec = if req_str.is_empty() {
-                    vec![]
-                } else {
-                    req_str.split('|').map(String::from).collect()
-                };
-                sm.gems.push(Gem {
-                    name: s(name),
-                    reqs: reqs_vec,
-                    groups,
-                    require_kw: s(req_kw),
-                    platforms_kw: s(plat_kw),
-                    platforms_scope,
-                    source_override,
+        rt.register_fn_v2("__gemfile_gem_v2", move |ctx, args| {
+            let [name, requirements, opts] = args else {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: format!("__gemfile_gem_v2: expected 3 args, got {}", args.len()),
+                    },
+                    backtrace: vec![],
                 });
+            };
+            let name = if let Value::Str(rs) = name {
+                rs.to_string_lossy()
+            } else {
+                return Err(Trap {
+                    err: RubyError::ArgumentError { msg: "name must be a String".into() },
+                    backtrace: vec![],
+                });
+            };
+            let reqs_slice = ctx.resolve_array(requirements).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "requirements must be an Array".into() },
+                backtrace: vec![],
+            })?;
+            let opts_slice = ctx.resolve_hash(opts).ok_or_else(|| Trap {
+                err: RubyError::ArgumentError { msg: "opts must be a Hash".into() },
+                backtrace: vec![],
+            })?;
+
+            let reqs_vec: Vec<String> = reqs_slice.iter()
+                .map(|v| if let Value::Str(rs) = v {
+                    Ok(rs.to_string_lossy())
+                } else {
+                    Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: "requirements element must be a String".into(),
+                        },
+                        backtrace: vec![],
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            // Bundler kwargs Hash: Symbol keys, mixed values (Bool /
+            // Sym / String). Mirrors examples/gemfile.rs.
+            let mut require_kw = String::new();
+            let mut platforms_kw = String::new();
+            for (k, v) in opts_slice {
+                let key = ctx.resolve_sym(k).ok_or_else(|| Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "opts keys must be Symbols".into(),
+                    },
+                    backtrace: vec![],
+                })?;
+                let vs = match v {
+                    Value::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
+                    Value::Str(rs) => rs.to_string_lossy(),
+                    // The outer match already filtered on `Value::Sym`,
+                    // so `resolve_sym` is guaranteed to return Some.
+                    // `expect` rather than `unwrap_or("")` so a future
+                    // interner-contract regression surfaces loudly.
+                    Value::Sym(_) => ctx.resolve_sym(v)
+                        .expect("resolve_sym on Value::Sym arm must return Some")
+                        .to_string(),
+                    _ => return Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: format!("opts[{key}] must be a Bool, Symbol, or String"),
+                        },
+                        backtrace: vec![],
+                    }),
+                };
+                match key {
+                    "require"   => require_kw   = vs,
+                    "platforms" => platforms_kw = vs,
+                    _ => {}
+                }
             }
+
+            let mut sm = st.borrow_mut();
+            let groups: Vec<String> = sm.group_stack.last()
+                .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+                .unwrap_or_default();
+            let platforms_scope: Vec<String> = sm.platforms_stack.last()
+                .map(|s| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
+                .unwrap_or_default();
+            let source_override = sm.source_stack.last().cloned();
+            sm.gems.push(Gem {
+                name,
+                reqs: reqs_vec,
+                groups,
+                require_kw,
+                platforms_kw,
+                platforms_scope,
+                source_override,
+            });
             Ok(Value::Nil)
         });
     }

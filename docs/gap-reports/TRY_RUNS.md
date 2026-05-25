@@ -40,7 +40,58 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
-## Results — 2026-05-25 (re-run), rubyrs at `a35348b`
+## Results — 2026-05-25 (third pass), rubyrs at `402917e`
+
+Third pass after PR #34 (`default args = any expression`) landed
+plus the subsequent Method-* / cext / GC-root-hole cleanup wave
+(#41 #45 #49 #51). Same 12 standalone files at the same pinned
+target commits. Diff vs the second pass (post-PR #30) below:
+
+| File | Was (second pass) | Now | Change |
+|---|---|---|---|
+| sinatra/middleware/logger.rb | E | **B** | E rule gone, but the file's line 3 `require "logger"` (hidden behind the line-8 literal-default-arg compile error) now fires first |
+| rake/linked_list.rb | E | **F** | E rule gone, file now reaches line 7 `include Enumerable` — `Enumerable` isn't registered, trips "wrong argument type NilClass (expected Module)" |
+| (all 10 other files) | — | — | unchanged — failure stays in same category |
+
+Pass count: **5 → 5** (out of 12, unchanged). Category E drops
+from 2 → 0, but the two E-blocked files BOTH had latent
+non-language blockers waiting behind them — sinatra's was a C-ext
+require, rake/linked_list's was a Module-missing `include`. The
+PR #34 description called this out explicitly as a possibility;
+this re-run confirms it.
+
+The optimistic projection from the post-#30 doc ("relaxing E
+would push pass to 7/12") was wrong — pass *would* have moved to
+7/12 if E had been the only blocker on those files, but in
+practice E was the first-line error message that masked deeper
+problems. Worth recording: **at the AST-supportedness frontier,
+each `.rb` file typically has 2–3 stacked blockers; removing the
+visible one usually exposes the next**.
+
+### What this changes about the priority list
+
+The next-cheapest "more files run clean" move is now harder to
+identify by AST signal alone:
+
+- B (C-ext `require`): 3/12 files. Implementing a `require "logger"`
+  / `require "time"` path that materialises the host-side Ruby
+  std stub is non-trivial (would need at minimum a built-in
+  `Logger` class + Time epoch). Not "easy win" anymore.
+- C (`require_relative`): 1/12 file (tilt). Possible but only
+  unblocks one file unless the loaded file then also fails on
+  something else (likely given the pattern above).
+- F (missing host helper / module): 3/12 files. Each is a
+  bespoke fix — `delegate_method_as` is a Jekyll DSL,
+  `Enumerable` is stdlib-shaped, the bundler one is project-
+  internal. No batch fix.
+
+In other words: the AST-frontier pass-count metric **has flattened**.
+Further "AST + 1 fix → more passes" wins require either Tier 3 codebase
+expansion (find files where AST coverage IS the bottleneck) or
+investment in non-AST features (require chain, Enumerable mixin,
+Logger built-in).
+
+### Results — 2026-05-25 (second pass, post-PR #30), rubyrs at `a35348b`
 
 Second pass after PR #30 (`ConstantWriteNode`) landed. Same
 pinned target commits and fuel cap as the first pass, re-running
@@ -99,10 +150,12 @@ that the gap reports were generated against):
 > us**, **What "Phase 3" would look like** — were written
 > against the first-pass data and are kept as the historical
 > record (body unchanged; the legend heading was labelled
-> "(first pass)" for clarity). After the re-run above,
-> Category D = 0 and the `ConstantWriteNode` half of "Phase 3
-> step 1" is done (the `ConstantPathWriteNode` half is still
-> outstanding).
+> "(first pass)" for clarity). After the **third pass** above:
+> Category D = 0 (PR #30 ConstantWriteNode), Category E = 0
+> (PR #34 default-args-any-expression). The `ConstantWriteNode`
+> half of "Phase 3 step 1" is done; the `ConstantPathWriteNode`
+> half is still outstanding. Pass count flat at 5/12 because the
+> E-blocked files had latent B/F blockers behind them.
 
 ### Category legend (first pass)
 

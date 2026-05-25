@@ -136,7 +136,8 @@ impl Vm {
                 "to_i" | "to_f" | "abs" | "even?" | "odd?" |
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
-                "times" | "upto" | "downto"
+                "times" | "upto" | "downto" |
+                "digits" | "bit_length"
             ),
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |
@@ -145,7 +146,7 @@ impl Vm {
                 "to_i" | "to_f" | "abs" |
                 "zero?" | "positive?" | "negative?" |
                 "nan?" | "infinite?" | "finite?" |
-                "floor" | "ceil" | "round" |
+                "floor" | "ceil" | "round" | "truncate" |
                 "-@" | "+@"
             ),
             Value::Str(_) => matches!(name,
@@ -153,10 +154,11 @@ impl Vm {
                 "length" | "size" | "empty?" |
                 "upcase" | "downcase" | "reverse" |
                 "strip" | "lstrip" | "rstrip" |
+                "center" | "ljust" | "rjust" |
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
-                "sub" | "gsub" | "tr" |
+                "sub" | "gsub" | "tr" | "squeeze" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
@@ -166,7 +168,8 @@ impl Vm {
             Value::Array(_) => matches!(name,
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "first" | "last" | "empty?" | "include?" |
-                "count" | "sum" | "min" | "max" | "sort" |
+                "count" | "sum" | "min" | "max" | "sort" | "tally" |
+                "combination" | "permutation" | "assoc" | "rassoc" |
                 "inject" | "reduce" |
                 "to_a" | "reverse" | "uniq" | "compact" |
                 "flatten" | "join" |
@@ -176,10 +179,11 @@ impl Vm {
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "sort_by" |
                 "min_by" | "max_by" | "group_by" |
-                "each_with_object" | "partition" |
+                "each_with_object" | "partition" | "chunk_while" | "bsearch" |
+                "take_while" | "drop_while" |
                 "zip" |
                 "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
-                "flat_map" | "collect_concat" | "chunk" |
+                "flat_map" | "collect_concat" | "chunk" | "filter_map" |
                 "each_slice" | "each_cons" |
                 "inspect"
             ),
@@ -187,12 +191,14 @@ impl Vm {
                 "length" | "size" | "[]" | "[]=" | "empty?" |
                 "include?" | "has_key?" | "key?" | "member?" |
                 "keys" | "values" | "to_h" | "to_a" |
-                "merge" | "delete" | "invert" | "store" |
+                "merge" | "delete" | "invert" | "store" | "except" | "slice" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
                 "each_with_index" | "map" | "collect" | "fetch" |
                 "sort" | "sort_by" | "min_by" | "max_by" | "group_by" |
+                "transform_keys" | "transform_values" |
+                "compact" | "compact!" | "filter_map" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,
@@ -213,8 +219,11 @@ impl Vm {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
             }
-            Value::Block(_) => matches!(name, "call"),
+            Value::Block(_) => matches!(name, "call" | "[]" | "()" | "curry" | ">>" | "<<"),
             Value::Regex(_) => matches!(name, "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"),
+            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver"),
+            Value::UnboundMethod(_) => matches!(name, "bind" | "arity" | "parameters" | "==" | "owner"),
+            Value::CurriedProc(_) => matches!(name, "call" | "[]" | "()"),
         }
     }
 
@@ -240,6 +249,9 @@ impl Vm {
             Value::Block(_) => "Proc",
             Value::Class(_) => "Class",
             Value::Regex(_) => "Regexp",
+            Value::BoundMethod(_) => "Method",
+            Value::UnboundMethod(_) => "UnboundMethod",
+            Value::CurriedProc(_) => "Proc",
             // `Object#class` script call: CRuby reports the
             // user-declared class, not the eigenclass. Use
             // `real_class_of` so a `def obj.foo` installation
@@ -334,6 +346,7 @@ mod tests {
             singleton_methods: RefCell::new(HashMap::new()),
             includes: RefCell::new(Vec::new()),
             superclass: RefCell::new(superclass),
+            cext_alloc_func: std::cell::Cell::new(None),
         })
     }
 

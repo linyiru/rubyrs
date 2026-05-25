@@ -131,6 +131,12 @@ pub(crate) enum Expr {
         /// kw-rest capture; trailing-Hash callers with
         /// unrecognised keys raise ArgumentError.
         kw_rest: Option<String>,
+        /// `Some(name)` for `def foo(&blk)` — the block-as-data
+        /// parameter. Captures the BlockHandle the caller passed
+        /// (or nil if no block) into a local of this name. `None`
+        /// for plain `def foo`. Lives after kw_rest in the slot
+        /// layout (see Proto.block_param).
+        block_param: Option<String>,
         /// `def receiver.name; ...; end` — singleton method
         /// definition. `Some(SelfExpr)` is the class-body
         /// `def self.foo` form (compiles to
@@ -192,7 +198,7 @@ pub(crate) enum Expr {
     /// consumed by a method call. We don't distinguish Lambda
     /// from Proc at runtime; the strict-arity check that CRuby's
     /// Lambda enforces is missing — documented in SUBSET.md.
-    Lambda { params: Vec<String>, body: Vec<SExpr> },
+    Lambda { params: Vec<BlockParam>, body: Vec<SExpr> },
     /// `return [val]` — exits the current method/block frame with `val`.
     Return(Option<Box<SExpr>>),
     /// `next [val]` — exits the current block iteration with `val`.
@@ -233,6 +239,13 @@ pub(crate) enum Expr {
 pub(crate) enum BlockParam {
     Single(String),
     Destructure(Vec<BlockParam>),
+    /// `|*args|` rest parameter — collects all positional args
+    /// past the last `Single` / `Destructure` slot into a fresh
+    /// Array bound to this name. At most one Rest per param list
+    /// (Prism enforces source-level uniqueness). Empty name is
+    /// the anonymous form `|*|` (reserve the slot, drop the
+    /// data — analogous to `**` for kwargs).
+    Rest(String),
 }
 
 #[derive(Debug, Clone)]
@@ -734,9 +747,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     .and_then(|pn| pn.as_block_parameters_node())
                     .and_then(|bp| bp.parameters())
                     .map(|p| {
-                        p.requireds().iter()
+                        let mut out: Vec<BlockParam> = p.requireds().iter()
                             .filter_map(|r| parse_one(&r))
-                            .collect()
+                            .collect();
+                        // `|*rest|` — Prism reports the rest param
+                        // separately from requireds. Append as a
+                        // Rest BlockParam; the compiler's prologue
+                        // will gather overflow args here.
+                        if let Some(rest) = p.rest()
+                            && let Some(rp) = rest.as_rest_parameter_node() {
+                                let name = rp.name().map(cid_to_string).unwrap_or_default();
+                                out.push(BlockParam::Rest(name));
+                            }
+                        out
                     })
                     .unwrap_or_default();
                 let block_body: Vec<SExpr> = match bn.body() {
@@ -877,14 +900,24 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return s("expression");
     }
     if let Some(n) = node.as_lambda_node() {
-        // `->(x, y) { body }` — same param/body extraction as
-        // block literals attached to call nodes.
-        let params: Vec<String> = n.parameters()
+        // `->(x, *rest) { body }` — same param shape as block
+        // literals: requireds + optional rest. Lambda body is
+        // a `Vec<SExpr>` evaluated in the block proto.
+        let params: Vec<BlockParam> = n.parameters()
             .and_then(|pn| pn.as_block_parameters_node())
             .and_then(|bp| bp.parameters())
-            .map(|p| p.requireds().iter()
-                .filter_map(|r| r.as_required_parameter_node().map(|rp| cid_to_string(rp.name())))
-                .collect())
+            .map(|p| {
+                let mut out: Vec<BlockParam> = p.requireds().iter()
+                    .filter_map(|r| r.as_required_parameter_node()
+                        .map(|rp| BlockParam::Single(cid_to_string(rp.name()))))
+                    .collect();
+                if let Some(rest) = p.rest()
+                    && let Some(rp) = rest.as_rest_parameter_node() {
+                        let name = rp.name().map(cid_to_string).unwrap_or_default();
+                        out.push(BlockParam::Rest(name));
+                    }
+                out
+            })
             .unwrap_or_default();
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
@@ -1119,7 +1152,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let mut rest: Option<String> = None;
         let mut kw_params: Vec<(String, Option<SExpr>)> = Vec::new();
         let mut kw_rest: Option<String> = None;
+        let mut block_param: Option<String> = None;
         if let Some(p) = n.parameters() {
+            if let Some(b) = p.block() {
+                // `def foo(&blk)`: capture the caller's block into
+                // the named slot. Anonymous form `def foo(&)` would
+                // have `b.name() == None`; CRuby uses it for
+                // forward-the-block-only, which we don't model yet
+                // — treat as no-name (skip the bind). Prism returns
+                // `BlockParameterNode` directly from `p.block()`
+                // (it's an alternation node, not a generic Node);
+                // no `as_*_node` cast needed.
+                block_param = b.name().map(cid_to_string);
+            }
             if let Some(r) = p.rest()
                 && let Some(rp) = r.as_rest_parameter_node() {
                     rest = rp.name().map(|n| cid_to_string(n));
@@ -1188,7 +1233,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // any other expression (instance-level singleton on a
         // Value::Object) at compile time.
         let receiver = n.receiver().map(|r| Box::new(tr(&r)));
-        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, kw_rest, receiver, body });
+        return sp(node, Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body });
     }
     if let Some(n) = node.as_range_node() {
         // Beginless / endless ranges (`..3`, `1..`) are not yet supported;

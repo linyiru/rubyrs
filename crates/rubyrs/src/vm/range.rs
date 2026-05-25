@@ -34,8 +34,8 @@ impl Vm {
                     // to avoid running away when succ produces a
                     // longer string than the upper endpoint.
                     if let (Value::Str(sb), Value::Str(se)) = (&b, &e) {
-                        let start = sb.borrow().clone();
-                        let stop = se.borrow().clone();
+                        let start = sb.to_string_lossy();
+                        let stop = se.to_string_lossy();
                         match (name, args) {
                             ("to_a", []) | ("sort", []) => {
                                 let mut out: Vec<Value> = Vec::new();
@@ -69,7 +69,7 @@ impl Vm {
                                 return Ok(Some(Value::Int(n)));
                             }
                             ("include?", [Value::Str(needle)]) | ("cover?", [Value::Str(needle)]) => {
-                                let n = needle.borrow().clone();
+                                let n = needle.to_string_lossy();
                                 let lo_ok = n >= start;
                                 let hi_ok = if excl { n < stop } else { n <= stop };
                                 return Ok(Some(Value::Bool(lo_ok && hi_ok)));

@@ -216,6 +216,127 @@ impl Vm {
             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
             return Ok(Some(if name == "tap" { recv.clone() } else { r }));
         }
+        // `s.gsub(/pat/) { |m| ... }` / `s.sub(/pat/) { |m| ... }`.
+        // For each match the block is invoked with the matched
+        // substring; its return value is converted to a string and
+        // spliced in place of the match. gsub iterates all matches;
+        // sub does only the first. Backref groups in the matched
+        // text are NOT exposed to the block — only the full match —
+        // matching CRuby's "block gets the match string, not the
+        // MatchData" convention for the common case.
+        if let (Value::Str(s), Value::Regex(re), 1) = (recv, args.first().unwrap_or(&Value::Nil), args.len())
+            && (name == "gsub" || name == "sub") {
+                let source = s.to_string_lossy();
+                let only_first = name == "sub";
+                let mut g = PinGuard::new(self);
+                g.pin(recv.clone());
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut out = String::with_capacity(source.len());
+                let mut last_end = 0usize;
+                let mut bail = false;
+                for m in re.find_iter(&source) {
+                    out.push_str(&source[last_end..m.start()]);
+                    g.vm.invoke_block(block, vec![Value::new_str(m.as_str().to_string())])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { bail = true; break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        // CRuby semantics: break val from inside a
+                        // gsub block returns val as the call's
+                        // result (not the partially-built string).
+                        return Ok(Some(r));
+                    }
+                    let r_str = r.to_display(&g.vm.heap, &g.vm.interner);
+                    out.push_str(&r_str);
+                    last_end = m.end();
+                    if only_first { break; }
+                }
+                if bail { return Ok(None); }
+                out.push_str(&source[last_end..]);
+                return Ok(Some(Value::new_str(out)));
+            }
+        // `s.scan(/pat/) { |m| ... }` / `s.scan(string) { |m| ... }`
+        // — yield each match to the block (capture-group Array if
+        // the regex has groups, the matched substring otherwise).
+        // Returns the receiver String, matching CRuby.
+        if let (Value::Str(s), 1) = (recv, args.len()) && name == "scan" {
+            let source: Vec<u8> = s.borrow().clone();
+            let source_str = String::from_utf8_lossy(&source).into_owned();
+            let mut g = PinGuard::new(self);
+            g.pin(recv.clone());
+            g.pin(Value::Block(block));
+            let pre_frames = g.vm.frames.len();
+            let mut early: Option<Value> = None;
+            match &args[0] {
+                Value::Regex(re) => {
+                    let has_groups = re.captures_len() > 1;
+                    if has_groups {
+                        for caps in re.captures_iter(&source_str) {
+                            let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
+                            for i in 1..caps.len() {
+                                let v = caps.get(i)
+                                    .map(|m| Value::new_str(m.as_str()))
+                                    .unwrap_or(Value::Nil);
+                                group_vec.push(v);
+                            }
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let gid = g.vm.heap.alloc(HeapObj::Array(group_vec));
+                            g.vm.invoke_block(block, vec![Value::Array(gid)])?;
+                            g.vm.dispatch_until(pre_frames)?;
+                            if g.vm.method_return.is_some() { return Ok(None); }
+                            let _ = g.vm.stack.pop();
+                            if g.vm.break_signaled {
+                                g.vm.break_signaled = false;
+                                early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
+                                break;
+                            }
+                        }
+                    } else {
+                        for m in re.find_iter(&source_str) {
+                            g.vm.invoke_block(block, vec![Value::new_str(m.as_str())])?;
+                            g.vm.dispatch_until(pre_frames)?;
+                            if g.vm.method_return.is_some() { return Ok(None); }
+                            let _ = g.vm.stack.pop();
+                            if g.vm.break_signaled {
+                                g.vm.break_signaled = false;
+                                early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Value::Str(pat) => {
+                    let pat_owned: Vec<u8> = pat.borrow().clone();
+                    if !pat_owned.is_empty() {
+                        let bytes: &[u8] = &source;
+                        let pat_bytes: &[u8] = &pat_owned;
+                        let plen = pat_bytes.len();
+                        let mut i = 0;
+                        while i + plen <= bytes.len() {
+                            if &bytes[i..i + plen] == pat_bytes {
+                                g.vm.invoke_block(block, vec![Value::new_str_bytes(pat_owned.clone())])?;
+                                g.vm.dispatch_until(pre_frames)?;
+                                if g.vm.method_return.is_some() { return Ok(None); }
+                                let _ = g.vm.stack.pop();
+                                if g.vm.break_signaled {
+                                    g.vm.break_signaled = false;
+                                    early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
+                                    break;
+                                }
+                                i += plen;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+                _ => return Ok(None),
+            }
+            return Ok(Some(early.unwrap_or_else(|| recv.clone())));
+        }
         Ok(match (recv, name, args) {
             (Value::Array(id), "each", []) => {
                 let mut g = PinGuard::new(self);
@@ -265,6 +386,37 @@ impl Vm {
             // `flat_map { ... }` = map then flatten(1). Same
             // driver as map, but each block result that's an
             // Array gets spread into the result.
+            // `arr.filter_map { |x| ... }` — map + select in one
+            // pass. Block return is kept iff truthy; nil/false are
+            // dropped (not "false is included" — strict truthiness,
+            // matching CRuby).
+            (Value::Array(id), "filter_map", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() {
+                        g.vm.heap.array_mut(result_id).push(r);
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
             (Value::Array(id), "flat_map", []) | (Value::Array(id), "collect_concat", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
@@ -440,6 +592,107 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
+            // `h.transform_keys { |k| ... }` — new Hash with keys
+            // mapped through the block. Values preserved. On
+            // collision (block maps two distinct keys to the same
+            // new key), later wins, matching CRuby.
+            // `h.filter_map { |k, v| ... }` — yields each (k, v),
+            // collects truthy block results into a fresh Array.
+            // Like Array#filter_map but on Hash entries; the
+            // result is NOT a Hash (CRuby behaviour).
+            (Value::Hash(id), "filter_map", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.invoke_block(block, vec![k, v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() {
+                        g.vm.heap.array_mut(result_id).push(r);
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
+            (Value::Hash(id), "transform_keys", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::new()));
+                g.pin(Value::Hash(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.invoke_block(block, vec![k])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let new_key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(new_key);
+                        break;
+                    }
+                    // Last-wins collision: overwrite existing slot
+                    // if the new_key equals one already present;
+                    // otherwise append. Matches CRuby's iteration-
+                    // order semantics.
+                    let existing = g.vm.heap.hash(result_id).iter()
+                        .position(|(k2, _)| k2.ruby_eq(&new_key, &g.vm.heap));
+                    if let Some(p) = existing {
+                        g.vm.heap.hash_mut(result_id)[p] = (new_key, v);
+                    } else {
+                        g.vm.heap.hash_mut(result_id).push((new_key, v));
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(result_id)))
+            }
+            // `h.transform_values { |v| ... }` — new Hash with the
+            // same keys but values mapped through the block. No
+            // collision possible (keys unchanged); order preserved.
+            (Value::Hash(id), "transform_values", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::with_capacity(snapshot.len())));
+                g.pin(Value::Hash(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    g.vm.invoke_block(block, vec![v])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let new_v = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(new_v);
+                        break;
+                    }
+                    g.vm.heap.hash_mut(result_id).push((k, new_v));
+                }
+                Some(early.unwrap_or(Value::Hash(result_id)))
+            }
             (Value::Hash(id), "fetch", [k]) => {
                 // Block form: `h.fetch(k) { |k| default_expr }`.
                 // Block is invoked only on miss; CRuby ignores the
@@ -503,20 +756,31 @@ impl Vm {
                 Some(early.unwrap_or(Value::Int(start)))
             }
             (Value::Int(n), "times", []) => {
-                let pre_frames = self.frames.len();
+                // Pin the block: the body may allocate freely (eg.
+                // `N.times { a = [1,2,3] }`) which can trigger GC,
+                // and the block ObjId is no longer on the stack at
+                // this point — without a pin, the block slot gets
+                // swept mid-iteration and the next invoke_block
+                // panics with use-after-free (heap.rs:115).
+                // Matches the pin pattern used by Array#each /
+                // Range#each / map etc.
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
                 let mut early = None;
-                for i in 0..*n {
-                    self.invoke_block(block,vec![Value::Int(i)])?;
-                    self.dispatch_until(pre_frames)?;
-                    if self.method_return.is_some() { break; }
-                    let r = self.stack.pop().unwrap_or(Value::Nil);
-                    if self.break_signaled {
-                        self.break_signaled = false;
+                let n_val = *n;
+                for i in 0..n_val {
+                    g.vm.invoke_block(block, vec![Value::Int(i)])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
                         early = Some(r);
                         break;
                     }
                 }
-                Some(early.unwrap_or(Value::Int(*n)))
+                Some(early.unwrap_or(Value::Int(n_val)))
             }
             (Value::Range(id), "each", []) => {
                 // Two endpoint shapes drive iteration: Int+Int (the
@@ -556,8 +820,8 @@ impl Vm {
                         // Walk via String#succ, comparing
                         // lexicographically — matches CRuby's
                         // ('a'..'z').each iteration model.
-                        let start = if let Value::Str(s) = &b { s.borrow().clone() } else { unreachable!() };
-                        let stop = if let Value::Str(s) = &e { s.borrow().clone() } else { unreachable!() };
+                        let start = if let Value::Str(s) = &b { s.to_string_lossy() } else { unreachable!() };
+                        let stop = if let Value::Str(s) = &e { s.to_string_lossy() } else { unreachable!() };
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Range(*id));
                         g.pin(Value::Block(block));
@@ -677,6 +941,233 @@ impl Vm {
                     Value::Array(yes_id), Value::Array(no_id),
                 ]));
                 Some(Value::Array(pair_id))
+            }
+            // `arr.take_while { |x| ... }` / `#drop_while` — prefix
+            // partitioning. `take_while` returns the prefix while
+            // the block is truthy and stops at the first falsy
+            // return. `drop_while` skips that prefix and returns
+            // the rest unchanged (block isn't invoked past the
+            // crossing point).
+            (Value::Array(id), "take_while" | "drop_while", []) => {
+                let want_take = name == "take_while";
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early: Option<Value> = None;
+                let mut crossed = false;
+                let mut crossing_idx: Option<usize> = None;
+                for (i, v) in snapshot.iter().enumerate() {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if !r.is_truthy() {
+                        crossed = true;
+                        crossing_idx = Some(i);
+                        break;
+                    }
+                    if want_take {
+                        g.vm.heap.array_mut(result_id).push(v.clone());
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                if !want_take {
+                    // drop_while: copy from the crossing point to
+                    // the end. If we never crossed, drop_while
+                    // returns []; the result_id is already empty.
+                    if let Some(start) = crossing_idx {
+                        for w in &snapshot[start..] {
+                            g.vm.heap.array_mut(result_id).push(w.clone());
+                        }
+                    } else if !crossed {
+                        // Block was truthy for every element →
+                        // drop_while drops the whole array. Already
+                        // empty result_id is correct.
+                    }
+                }
+                Some(Value::Array(result_id))
+            }
+            // `arr.bsearch { |x| ... }` — binary search a sorted
+            // Array. Two modes, distinguished by the block's return
+            // type at runtime:
+            //   find-minimum (block returns Bool / nil): returns the
+            //     smallest element for which the block is truthy,
+            //     nil if none. Array must be partitioned false...true.
+            //   find-any (block returns Int): 0 = match, <0 means
+            //     "x too large" (search left), >0 means "x too
+            //     small" (search right). Returns the matching
+            //     element or nil. Array must be sorted in the
+            //     comparison direction.
+            // Other block-return types raise TypeError, matching
+            // CRuby.
+            (Value::Array(id), "bsearch", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut low = 0usize;
+                let mut high = snapshot.len();
+                let mut saw_int = false;
+                let mut int_match: Option<Value> = None;
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    let elem = snapshot[mid].clone();
+                    g.vm.invoke_block(block, vec![elem.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        return Ok(Some(r));
+                    }
+                    match r {
+                        Value::Bool(true) => high = mid,
+                        Value::Bool(false) | Value::Nil => low = mid + 1,
+                        Value::Int(n) => {
+                            saw_int = true;
+                            if n == 0 { int_match = Some(elem); break; }
+                            else if n < 0 { high = mid; }
+                            else { low = mid + 1; }
+                        }
+                        other => return Err(g.vm.trap(crate::error::RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (must be numeric, true, false or nil)",
+                                other.type_name(),
+                            ),
+                        })),
+                    }
+                }
+                if let Some(m) = int_match { return Ok(Some(m)); }
+                if saw_int { return Ok(Some(Value::Nil)); }
+                Some(if low < snapshot.len() { snapshot[low].clone() } else { Value::Nil })
+            }
+            // `arr.chunk_while { |a, b| pred(a, b) }` — partition
+            // into runs of consecutive elements where the block
+            // returns truthy for the pair (a=prev, b=current).
+            // Falsy starts a new chunk. Empty input → `[]`;
+            // single-element → `[[elem]]`.
+            (Value::Array(id), "chunk_while", []) => {
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                if snapshot.is_empty() {
+                    return Ok(Some(Value::Array(result_id)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut current_chunk: Vec<Value> = vec![snapshot[0].clone()];
+                let mut early: Option<Value> = None;
+                for pair in snapshot.windows(2) {
+                    g.vm.invoke_block(block, vec![pair[0].clone(), pair[1].clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                    if r.is_truthy() {
+                        current_chunk.push(pair[1].clone());
+                    } else {
+                        // Flush current chunk and start a fresh one.
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let chunk_id = g.vm.heap.alloc(HeapObj::Array(std::mem::take(&mut current_chunk)));
+                        g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                        current_chunk.push(pair[1].clone());
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                // Flush the trailing chunk.
+                if !current_chunk.is_empty() {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let chunk_id = g.vm.heap.alloc(HeapObj::Array(current_chunk));
+                    g.vm.heap.array_mut(result_id).push(Value::Array(chunk_id));
+                }
+                Some(Value::Array(result_id))
+            }
+            // `arr.min_by(n) { |x| key(x) }` / `arr.max_by(n) { ... }`
+            // — top-n form. Returns an Array of `n` extremes
+            // sorted by key (ascending for min_by, descending for
+            // max_by). `n <= 0` yields `[]`; `n > len` yields all
+            // elements sorted. Uses a full sort_by then truncate,
+            // not a heap — O(n log n) is fine at the input sizes
+            // we see in our niche.
+            (Value::Array(id), "min_by", [Value::Int(n)])
+            | (Value::Array(id), "max_by", [Value::Int(n)]) => {
+                let want_min = name == "min_by";
+                if *n < 0 {
+                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                        msg: format!("negative size ({})", n),
+                    }));
+                }
+                let n_take = *n as usize;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                if n_take == 0 || snapshot.is_empty() {
+                    return Ok(Some(Value::Array(result_id)));
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+                let mut early: Option<Value> = None;
+                for v in snapshot {
+                    g.vm.invoke_block(block, vec![v.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { return Ok(None); }
+                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(key);
+                        break;
+                    }
+                    pairs.push((key, v));
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                let interner = &g.vm.interner;
+                // CRuby treats incomparable keys here as an error;
+                // we keep the same shape as sort_by — return None
+                // and let the caller surface NoMethodError.
+                let mut incomparable = false;
+                pairs.sort_by(|(ka, _), (kb, _)| {
+                    match value_cmp_v(ka, kb, interner) {
+                        Some(o) => o,
+                        None => { incomparable = true; std::cmp::Ordering::Equal }
+                    }
+                });
+                if incomparable { return Ok(None); }
+                let take = n_take.min(pairs.len());
+                let result_vec: Vec<Value> = if want_min {
+                    pairs.into_iter().take(take).map(|(_, v)| v).collect()
+                } else {
+                    // Largest n: reverse-sorted prefix.
+                    pairs.into_iter().rev().take(take).map(|(_, v)| v).collect()
+                };
+                *g.vm.heap.array_mut(result_id) = result_vec;
+                Some(Value::Array(result_id))
             }
             (Value::Array(id), "min_by", []) | (Value::Array(id), "max_by", []) => {
                 // For each element, call the block once to produce a

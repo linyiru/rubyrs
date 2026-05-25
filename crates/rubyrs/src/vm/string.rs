@@ -42,17 +42,26 @@ pub(crate) fn string_call(
         (Value::Str(a), "+", [Value::Str(b)]) => {
             check(a.borrow().len().saturating_add(b.borrow().len()))?;
             let mut s = a.borrow().clone();
-            s.push_str(&b.borrow());
-            Some(Value::new_str(s))
+            s.extend_from_slice(&b.borrow());
+            Some(Value::new_str_bytes(s))
         }
         (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() == *b.borrow())),
         (Value::Str(a), "!=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() != *b.borrow())),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
-        (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => Some(Value::Int(a.borrow().chars().count() as i64)),
+        // PR #53 review #1: `length`/`size` return UTF-8 character
+        // count (lossy on invalid UTF-8 — non-UTF-8 bytes count as
+        // one U+FFFD char each). Matches CRuby's "length on a
+        // UTF-8-encoded String" behavior. For raw byte count, use
+        // `bytesize` (added below); for binary protocol gems the
+        // bytesize semantic is the meaningful one.
+        (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => {
+            Some(Value::Int(a.with_str_lossy(|s| s.chars().count()) as i64))
+        }
+        (Value::Str(a), "bytesize", []) => Some(Value::Int(a.borrow().len() as i64)),
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
-        (Value::Str(a), "upcase", []) => Some(Value::new_str(a.borrow().to_uppercase())),
-        (Value::Str(a), "downcase", []) => Some(Value::new_str(a.borrow().to_lowercase())),
-        (Value::Str(a), "reverse", []) => Some(Value::new_str(a.borrow().chars().rev().collect::<String>())),
+        (Value::Str(a), "upcase", []) => Some(Value::new_str(a.to_string_lossy().to_uppercase())),
+        (Value::Str(a), "downcase", []) => Some(Value::new_str(a.to_string_lossy().to_lowercase())),
+        (Value::Str(a), "reverse", []) => Some(Value::new_str(a.to_string_lossy().chars().rev().collect::<String>())),
         // `String#succ` / `#next` — Ruby's "alphanumeric successor".
         // We support the common single-letter case (`'a'.succ == 'b'`,
         // `'Z'.succ == 'AA'`) plus the general "rightmost alnum
@@ -61,22 +70,93 @@ pub(crate) fn string_call(
         // documented gaps; CRuby diff fixtures pin the supported
         // shape.
         (Value::Str(a), "succ", []) | (Value::Str(a), "next", []) => {
-            Some(Value::new_str(str_succ(&a.borrow())))
+            Some(Value::new_str(a.with_str_lossy(str_succ)))
         }
-        (Value::Str(a), "strip", []) => Some(Value::new_str(a.borrow().trim().to_string())),
-        (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.borrow().trim_start().to_string())),
-        (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.borrow().trim_end().to_string())),
-        (Value::Str(a), "include?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().contains(&*b.borrow()))),
+        // `center` / `ljust` / `rjust` — pad to `width` with the
+        // optional pad-string (default " "). The pad cycles when
+        // multichar. If `width` is ≤ receiver length, the receiver
+        // is returned unchanged. Empty pad raises ArgumentError
+        // (caught by the early arg-shape guard via `pad_len == 0`).
+        // CRuby: when `center` produces odd-total padding, the
+        // extra char goes on the RIGHT.
+        (Value::Str(a), "center" | "ljust" | "rjust", pad_args)
+            if matches!(pad_args.first(), Some(Value::Int(_)))
+                && (pad_args.len() == 1
+                    || (pad_args.len() == 2 && matches!(pad_args[1], Value::Str(_)))) => {
+            let width = match &pad_args[0] {
+                Value::Int(w) => *w,
+                _ => unreachable!(),
+            };
+            let pad: String = match pad_args.get(1) {
+                None => " ".to_string(),
+                Some(Value::Str(s)) => s.to_string_lossy(),
+                _ => unreachable!(),
+            };
+            if pad.is_empty() {
+                return Err(RubyError::ArgumentError {
+                    msg: "zero width padding".into(),
+                });
+            }
+            let a_str = a.to_string_lossy();
+            let recv_chars: Vec<char> = a_str.chars().collect();
+            let recv_len = recv_chars.len() as i64;
+            if width <= recv_len {
+                return Ok(Some(Value::Str(a.clone())));
+            }
+            let pad_chars: Vec<char> = pad.chars().collect();
+            let total_pad = (width - recv_len) as usize;
+            let take_from_pad = |n: usize| -> String {
+                let mut out = String::with_capacity(n);
+                for i in 0..n { out.push(pad_chars[i % pad_chars.len()]); }
+                out
+            };
+            let result: String = match name {
+                "ljust" => {
+                    let mut s = a_str.clone();
+                    s.push_str(&take_from_pad(total_pad));
+                    s
+                }
+                "rjust" => {
+                    let mut s = take_from_pad(total_pad);
+                    s.push_str(&a_str);
+                    s
+                }
+                "center" => {
+                    let left = total_pad / 2;
+                    let right = total_pad - left;
+                    let mut s = take_from_pad(left);
+                    s.push_str(&a_str);
+                    s.push_str(&take_from_pad(right));
+                    s
+                }
+                _ => unreachable!(),
+            };
+            check(result.len())?;
+            Some(Value::new_str(result))
+        }
+        (Value::Str(a), "strip", []) => Some(Value::new_str(a.to_string_lossy().trim().to_string())),
+        (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_start().to_string())),
+        (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_end().to_string())),
+        // PR #53 review #3: use with_str_lossy (Cow-backed) so the
+        // valid-UTF-8 hot path is zero-alloc — only the invalid-
+        // UTF-8 branch allocates. to_string_lossy() unconditionally
+        // owns the String even when from_utf8_lossy returns
+        // Cow::Borrowed.
+        (Value::Str(a), "include?", [Value::Str(b)]) => {
+            Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.contains(sb)))))
+        }
         // Literal-substring `match?` — true iff the receiver
         // contains the argument as a substring. CRuby additionally
         // accepts a Regexp here; we only handle String, in line
         // with the rest of our regex-free subset. Calls with a
         // non-String argument fall through to NoMethodError.
-        (Value::Str(a), "match?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().contains(&*b.borrow()))),
+        (Value::Str(a), "match?", [Value::Str(b)]) => {
+            Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.contains(sb)))))
+        }
         // String#match? with a Regex — proper regex match. Returns
         // bool without populating any match-data side state.
         (Value::Str(a), "match?", [Value::Regex(re)]) => {
-            Some(Value::Bool(re.is_match(&a.borrow())))
+            Some(Value::Bool(a.with_str_lossy(|s| re.is_match(s))))
         }
         // `index(substr)` / `rindex(substr)` — return the byte
         // offset where the substring first / last appears, or
@@ -86,16 +166,16 @@ pub(crate) fn string_call(
         // for our test fixtures) and diverges for multibyte —
         // documented in SUBSET.md.
         (Value::Str(a), "index", [Value::Str(b)]) => {
-            Some(match a.borrow().find(&*b.borrow()) {
+            Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| match sa.find(sb) {
                 Some(i) => Value::Int(i as i64),
                 None => Value::Nil,
-            })
+            })))
         }
         (Value::Str(a), "rindex", [Value::Str(b)]) => {
-            Some(match a.borrow().rfind(&*b.borrow()) {
+            Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| match sa.rfind(sb) {
                 Some(i) => Value::Int(i as i64),
                 None => Value::Nil,
-            })
+            })))
         }
         // Literal-substring sub/gsub. Regex forms (`gsub(/pat/, ...)`)
         // are out of scope until we add a regex engine — documented
@@ -104,15 +184,15 @@ pub(crate) fn string_call(
         // that via `Rust`'s `str::replace` for non-empty patterns
         // and a hand-rolled walk for the empty-pattern case.
         (Value::Str(a), "sub", [Value::Str(pat), Value::Str(repl)]) => {
-            let a_ref = a.borrow();
-            let pat_ref = pat.borrow();
-            let repl_ref = repl.borrow();
+            let a_ref = a.to_string_lossy();
+            let pat_ref = pat.to_string_lossy();
+            let repl_ref = repl.to_string_lossy();
             let out = if pat_ref.is_empty() {
                 // CRuby: sub("", repl) inserts `repl` at index 0.
                 let mut s = repl_ref.clone();
                 s.push_str(&a_ref);
                 s
-            } else if let Some(idx) = a_ref.find(&*pat_ref) {
+            } else if let Some(idx) = a_ref.find(pat_ref.as_str()) {
                 let mut s = String::with_capacity(a_ref.len() + repl_ref.len());
                 s.push_str(&a_ref[..idx]);
                 s.push_str(&repl_ref);
@@ -124,10 +204,32 @@ pub(crate) fn string_call(
             check(out.len())?;
             Some(Value::new_str(out))
         }
+        // Regex form: `s.sub(/pat/, "repl")`. Replacement string
+        // supports Ruby backrefs `\0` / `\1` / ... — translate to
+        // the `regex` crate's `$0` / `$1` syntax. `\\` escapes a
+        // literal backslash. Block form
+        // (`s.sub(/pat/) { |m| ... }`) is the higher-value but
+        // separately-dispatched path; not handled here.
+        (Value::Str(a), "sub", [Value::Regex(re), Value::Str(repl)]) => {
+            let a_ref = a.to_string_lossy();
+            let repl_ref = repl.to_string_lossy();
+            let repl_xlated = ruby_backref_to_dollar(&repl_ref);
+            let out = re.replace(&a_ref, repl_xlated.as_str()).into_owned();
+            check(out.len())?;
+            Some(Value::new_str(out))
+        }
+        (Value::Str(a), "gsub", [Value::Regex(re), Value::Str(repl)]) => {
+            let a_ref = a.to_string_lossy();
+            let repl_ref = repl.to_string_lossy();
+            let repl_xlated = ruby_backref_to_dollar(&repl_ref);
+            let out = re.replace_all(&a_ref, repl_xlated.as_str()).into_owned();
+            check(out.len())?;
+            Some(Value::new_str(out))
+        }
         (Value::Str(a), "gsub", [Value::Str(pat), Value::Str(repl)]) => {
-            let a_ref = a.borrow();
-            let pat_ref = pat.borrow();
-            let repl_ref = repl.borrow();
+            let a_ref = a.to_string_lossy();
+            let pat_ref = pat.to_string_lossy();
+            let repl_ref = repl.to_string_lossy();
             let out = if pat_ref.is_empty() {
                 // CRuby: gsub("", repl) wraps `repl` around every
                 // character — `"abc".gsub("", "X") == "XaXbXcX"`.
@@ -138,7 +240,7 @@ pub(crate) fn string_call(
                 }
                 s
             } else {
-                a_ref.replace(&*pat_ref, &repl_ref)
+                a_ref.replace(pat_ref.as_str(), &repl_ref)
             };
             check(out.len())?;
             Some(Value::new_str(out))
@@ -151,9 +253,9 @@ pub(crate) fn string_call(
         // (`"a-z"`) is intentionally NOT expanded — flagged in
         // SUBSET.md.
         (Value::Str(a), "tr", [Value::Str(from), Value::Str(to)]) => {
-            let a_ref = a.borrow();
-            let from_ref = from.borrow();
-            let to_ref = to.borrow();
+            let a_ref = a.to_string_lossy();
+            let from_ref = from.to_string_lossy();
+            let to_ref = to.to_string_lossy();
             let from_chars: Vec<char> = from_ref.chars().collect();
             let to_chars: Vec<char> = to_ref.chars().collect();
             let mut out = String::with_capacity(a_ref.len());
@@ -173,13 +275,46 @@ pub(crate) fn string_call(
             check(out.len())?;
             Some(Value::new_str(out))
         }
-        (Value::Str(a), "start_with?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().starts_with(&*b.borrow()))),
-        (Value::Str(a), "end_with?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().ends_with(&*b.borrow()))),
+        // `String#squeeze` — collapse consecutive runs of the same
+        // character. With a char-set arg, only chars in the set
+        // are squeezed. Char-set ranges (`"a-z"`) and ^-negation
+        // are NOT expanded here — same conservative semantics as
+        // `tr`. Documented in SUBSET.md.
+        (Value::Str(a), "squeeze", rest) if rest.is_empty()
+            || (rest.len() == 1 && matches!(rest[0], Value::Str(_))) => {
+            let a_str = a.to_string_lossy();
+            let set: Option<Vec<char>> = match rest.first() {
+                None => None,
+                Some(Value::Str(s)) => Some(s.to_string_lossy().chars().collect()),
+                _ => unreachable!(),
+            };
+            let mut out = String::with_capacity(a_str.len());
+            let mut prev: Option<char> = None;
+            for ch in a_str.chars() {
+                let in_set = match &set {
+                    Some(s) => s.contains(&ch),
+                    None => true,
+                };
+                if in_set && Some(ch) == prev {
+                    continue;
+                }
+                out.push(ch);
+                prev = Some(ch);
+            }
+            check(out.len())?;
+            Some(Value::new_str(out))
+        }
+        (Value::Str(a), "start_with?", [Value::Str(b)]) => {
+            Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.starts_with(sb)))))
+        }
+        (Value::Str(a), "end_with?", [Value::Str(b)]) => {
+            Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.ends_with(sb)))))
+        }
         (Value::Str(a), "to_i", []) => {
             // CRuby's `String#to_i` is famously lenient: leading
             // whitespace, optional sign, then as many digits as it
             // can read; non-numeric tail (or empty input) gives 0.
-            let a_ref = a.borrow();
+            let a_ref = a.to_string_lossy();
             let s = a_ref.trim_start();
             let (sign, rest) = match s.as_bytes().first() {
                 Some(b'-') => (-1i64, &s[1..]),
@@ -201,7 +336,7 @@ pub(crate) fn string_call(
             // we can, return 0.0 for "garbage". Rust's stdlib
             // `f64::from_str` is stricter (rejects trailing junk),
             // so we scan a Ruby-shaped prefix ourselves.
-            let a_ref = a.borrow();
+            let a_ref = a.to_string_lossy();
             let s = a_ref.trim_start();
             let bytes = s.as_bytes();
             let mut end = 0usize;
@@ -236,7 +371,7 @@ pub(crate) fn string_call(
         (Value::Str(a), "*", [Value::Int(n)]) => {
             let n = (*n).max(0) as usize;
             check(a.borrow().len().saturating_mul(n))?;
-            Some(Value::new_str(a.borrow().repeat(n)))
+            Some(Value::new_str_bytes(a.borrow().repeat(n)))
         }
         (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() < *b.borrow())),
         (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() <= *b.borrow())),
@@ -245,7 +380,7 @@ pub(crate) fn string_call(
         (Value::Str(a), ">=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() >= *b.borrow())),
         // Regex#match? mirror — same semantics either side.
         (Value::Regex(re), "match?", [Value::Str(s)]) => {
-            Some(Value::Bool(re.is_match(&s.borrow())))
+            Some(Value::Bool(s.with_str_lossy(|s| re.is_match(s))))
         }
         // Regex#source — the raw pattern string.
         (Value::Regex(re), "source", []) => Some(Value::new_str(re.as_str().to_string())),
@@ -256,7 +391,7 @@ pub(crate) fn string_call(
         // printable ASCII + the standard escape set; exotic
         // Unicode escapes (`\u{...}`) are out of scope.
         (Value::Str(s), "inspect", []) => {
-            let raw = s.borrow();
+            let raw = s.to_string_lossy();
             let mut out = String::with_capacity(raw.len() + 2);
             out.push('"');
             for c in raw.chars() {
@@ -312,7 +447,7 @@ impl Vm {
                     // Fresh Rc, fresh RefCell, NOT frozen — `dup`
                     // copies content but resets the frozen bit.
                     let copy = s.content.borrow().clone();
-                    return Ok(Some(Value::new_str(copy)));
+                    return Ok(Some(Value::new_str_bytes(copy)));
                 }
                 // Helper closure: bail out of any mutating method
                 // if `s` was frozen. Used by `<<`, `concat`,
@@ -331,7 +466,7 @@ impl Vm {
                     match &args[0] {
                         Value::Str(other) => {
                             let to_push = other.borrow().clone();
-                            s.borrow_mut().push_str(&to_push);
+                            s.borrow_mut().extend_from_slice(&to_push);
                         }
                         // CRuby's String#<< also accepts Integer
                         // (treated as a codepoint). Support it
@@ -339,7 +474,9 @@ impl Vm {
                         // for fast char-by-char concatenation.
                         Value::Int(n) => {
                             if let Some(c) = char::from_u32(*n as u32) {
-                                s.borrow_mut().push(c);
+                                let mut buf = [0u8; 4];
+                                let bs = c.encode_utf8(&mut buf);
+                                s.borrow_mut().extend_from_slice(bs.as_bytes());
                             } else {
                                 return Err(self.trap(RubyError::ArgumentError {
                                     msg: format!("{} out of char range", n),
@@ -358,7 +495,7 @@ impl Vm {
                         match a {
                             Value::Str(o) => {
                                 let to_push = o.borrow().clone();
-                                s.borrow_mut().push_str(&to_push);
+                                s.borrow_mut().extend_from_slice(&to_push);
                             }
                             _ => return Err(self.trap(RubyError::TypeError {
                                 msg: format!("no implicit conversion of {} into String", a.type_name()),
@@ -373,17 +510,17 @@ impl Vm {
                     // existing content. CRuby's `prepend("a","b")`
                     // results in `"a" + "b" + self`, not the
                     // reverse — verified against MRI.
-                    let mut prefix = String::new();
+                    let mut prefix: Vec<u8> = Vec::new();
                     for a in args {
                         match a {
-                            Value::Str(o) => prefix.push_str(&o.borrow()),
+                            Value::Str(o) => prefix.extend_from_slice(&o.borrow()),
                             _ => return Err(self.trap(RubyError::TypeError {
                                 msg: format!("no implicit conversion of {} into String", a.type_name()),
                             })),
                         }
                     }
                     let mut buf = prefix;
-                    buf.push_str(&s.borrow());
+                    buf.extend_from_slice(&s.borrow());
                     *s.borrow_mut() = buf;
                     return Ok(Some(Value::Str(s)));
                 }
@@ -428,7 +565,7 @@ impl Vm {
                 // a starting offset; both out of scope here.
                 if name == "match" && args.len() == 1 {
                     if let Value::Regex(re) = &args[0] {
-                        let bound = s.content.borrow().clone();
+                        let bound = s.to_string_lossy();
                         let captures = re.captures(&bound);
                         match captures {
                             None => return Ok(Some(Value::Nil)),
@@ -467,7 +604,7 @@ impl Vm {
                     return Ok(None);
                 }
                 if (name == "[]" || name == "slice") && args.len() == 1 {
-                    let chars: Vec<char> = s.borrow().chars().collect();
+                    let chars: Vec<char> = s.to_string_lossy().chars().collect();
                     let len = chars.len() as i64;
                     return Ok(Some(match &args[0] {
                         Value::Int(i) => {
@@ -517,7 +654,7 @@ impl Vm {
                 }
                 if (name == "[]" || name == "slice") && args.len() == 2 {
                     if let (Value::Int(i), Value::Int(n)) = (&args[0], &args[1]) {
-                        let chars: Vec<char> = s.borrow().chars().collect();
+                        let chars: Vec<char> = s.to_string_lossy().chars().collect();
                         let len = chars.len() as i64;
                         let start_raw = if *i < 0 { len + *i } else { *i };
                         if start_raw < 0 || start_raw > len || *n < 0 {
@@ -539,13 +676,19 @@ impl Vm {
                 // through the Trap-to-rescue path).
                 //
                 // The mutation works because Value::Str holds an
-                // Rc<RefCell<String>>: every clone of this Value
-                // shares the same RefCell, so writes through
-                // `borrow_mut` are visible to all aliases.
+                // Rc<RStr> whose `content` is RefCell<Vec<u8>>:
+                // every clone of this Value shares the same
+                // RefCell, so writes through `borrow_mut` are
+                // visible to all aliases. Char-indexed `[]=` goes
+                // through `to_string_lossy → mutate → into_bytes`,
+                // which scrubs a previously-binary String to
+                // lossy UTF-8 (documented tradeoff — CRuby's
+                // char-index semantics aren't defined for binary
+                // content; use setbyte for byte-level writes).
                 if name == "[]=" && args.len() == 2 {
                     check_unfrozen(self)?;
                     if let (Value::Int(i), Value::Str(repl)) = (&args[0], &args[1]) {
-                        let chars: Vec<char> = s.borrow().chars().collect();
+                        let chars: Vec<char> = s.to_string_lossy().chars().collect();
                         let len = chars.len() as i64;
                         let idx = if *i < 0 { len + *i } else { *i };
                         if idx < 0 || idx >= len {
@@ -554,9 +697,9 @@ impl Vm {
                             }));
                         }
                         let mut buf: String = chars[..idx as usize].iter().collect();
-                        buf.push_str(&repl.borrow());
+                        buf.push_str(&repl.to_string_lossy());
                         buf.extend(chars[idx as usize + 1..].iter());
-                        *s.borrow_mut() = buf;
+                        *s.borrow_mut() = buf.into_bytes();
                         return Ok(Some(args[1].clone()));
                     }
                     return Ok(None);
@@ -564,7 +707,7 @@ impl Vm {
                 if name == "[]=" && args.len() == 3 {
                     check_unfrozen(self)?;
                     if let (Value::Int(i), Value::Int(n), Value::Str(repl)) = (&args[0], &args[1], &args[2]) {
-                        let chars: Vec<char> = s.borrow().chars().collect();
+                        let chars: Vec<char> = s.to_string_lossy().chars().collect();
                         let len = chars.len() as i64;
                         let start_raw = if *i < 0 { len + *i } else { *i };
                         if start_raw < 0 || start_raw > len || *n < 0 {
@@ -575,16 +718,16 @@ impl Vm {
                         let start = start_raw as usize;
                         let take = (*n as usize).min(chars.len() - start);
                         let mut buf: String = chars[..start].iter().collect();
-                        buf.push_str(&repl.borrow());
+                        buf.push_str(&repl.to_string_lossy());
                         buf.extend(chars[start + take..].iter());
-                        *s.borrow_mut() = buf;
+                        *s.borrow_mut() = buf.into_bytes();
                         return Ok(Some(args[2].clone()));
                     }
                     return Ok(None);
                 }
                 match (name, args) {
                     ("chars", []) => {
-                        let elems: Vec<Value> = s.borrow().chars()
+                        let elems: Vec<Value> = s.to_string_lossy().chars()
                             .map(|c| Value::new_str(c.to_string()))
                             .collect();
                         self.maybe_gc();
@@ -595,7 +738,8 @@ impl Vm {
                         // No-arg `split` matches CRuby's `split(nil)`:
                         // splits on runs of whitespace, drops the
                         // leading empty token.
-                        let elems: Vec<Value> = s.borrow().split_whitespace()
+                        let src = s.to_string_lossy();
+                        let elems: Vec<Value> = src.split_whitespace()
                             .map(Value::new_str)
                             .collect();
                         self.maybe_gc();
@@ -603,11 +747,13 @@ impl Vm {
                         Some(Value::Array(id))
                     }
                     ("split", [Value::Str(sep)]) => {
-                        let elems: Vec<Value> = if sep.borrow().is_empty() {
+                        let sep_s = sep.to_string_lossy();
+                        let src = s.to_string_lossy();
+                        let elems: Vec<Value> = if sep_s.is_empty() {
                             // CRuby: empty-sep split returns each character.
-                            s.borrow().chars().map(|c| Value::new_str(c.to_string())).collect()
+                            src.chars().map(|c| Value::new_str(c.to_string())).collect()
                         } else {
-                            s.borrow().split(&*sep.borrow()).map(Value::new_str).collect()
+                            src.split(sep_s.as_str()).map(Value::new_str).collect()
                         };
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
@@ -627,7 +773,8 @@ impl Vm {
                             }
                             _ => std::slice::from_ref(single_arg),
                         };
-                        let out = ruby_sprintf(&s.borrow(), fmt_args, &self.heap, &self.interner)
+                        let fmt_str = s.to_string_lossy();
+                        let out = ruby_sprintf(&fmt_str, fmt_args, &self.heap, &self.interner)
                             .map_err(|e| self.trap(e))?;
                         if let Some(max) = self.max_value_bytes
                             && out.len() > max {
@@ -647,20 +794,61 @@ impl Vm {
                     // implement. An empty pattern returns
                     // `[""] * (chars + 1)` to match CRuby; this is
                     // unusual but well-defined and cheap.
+                    // `String#scan(/pat/)` — Regex form. Returns
+                    // either an Array of matched strings (no
+                    // capture groups in the pattern) or an Array
+                    // of capture-group Arrays (one or more
+                    // groups). CRuby's behaviour: with groups the
+                    // FULL match is dropped and only captures
+                    // appear; without groups the full match is
+                    // the element.
+                    ("scan", [Value::Regex(re)]) => {
+                        // regex crate is &str-only; lossy view at
+                        // iteration entry (binary input degrades to
+                        // lossy UTF-8 here — regex itself only
+                        // matches UTF-8 anyway).
+                        let s_owned = s.to_string_lossy();
+                        let has_groups = re.captures_len() > 1;
+                        let mut out: Vec<Value> = Vec::new();
+                        if has_groups {
+                            for caps in re.captures_iter(&s_owned) {
+                                let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
+                                for i in 1..caps.len() {
+                                    let g = caps.get(i)
+                                        .map(|m| Value::new_str(m.as_str()))
+                                        .unwrap_or(Value::Nil);
+                                    group_vec.push(g);
+                                }
+                                self.maybe_gc();
+                                self.check_alloc()?;
+                                let gid = self.heap.alloc(HeapObj::Array(group_vec));
+                                out.push(Value::Array(gid));
+                            }
+                        } else {
+                            for m in re.find_iter(&s_owned) {
+                                out.push(Value::new_str(m.as_str()));
+                            }
+                        }
+                        self.maybe_gc();
+                        self.check_alloc()?;
+                        let id = self.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(id))
+                    }
                     ("scan", [Value::Str(pat)]) => {
                         let parts: Vec<Value> = if pat.borrow().is_empty() {
                             std::iter::repeat_with(|| Value::new_str(""))
-                                .take(s.borrow().chars().count() + 1)
+                                .take(s.to_string_lossy().chars().count() + 1)
                                 .collect()
                         } else {
                             let mut out: Vec<Value> = Vec::new();
                             let mut i = 0;
                             let s_ref = s.borrow();
-                            let bytes = s_ref.as_bytes();
+                            let bytes: &[u8] = &s_ref;
                             let pat_ref = pat.borrow();
-                            let plen = pat_ref.len();
+                            let pat_bytes: &[u8] = &pat_ref;
+                            let plen = pat_bytes.len();
                             while i + plen <= bytes.len() {
-                                if &bytes[i..i + plen] == pat_ref.as_bytes() {
+                                if &bytes[i..i + plen] == pat_bytes {
                                     out.push(Value::Str(pat.clone()));
                                     i += plen;
                                 } else {
@@ -679,13 +867,14 @@ impl Vm {
                         // can quietly grow it without bound. Existing
                         // symbols always re-resolve; only fresh strings
                         // count against the cap.
+                        let s_str = s.to_string_lossy();
                         if let Some(max) = self.max_symbols
-                            && !self.interner.contains(&s.borrow()) && self.interner.len() >= max {
+                            && !self.interner.contains(&s_str) && self.interner.len() >= max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("interner exhausted: {} symbols", max),
                                 }));
                             }
-                        let sym = self.interner.intern(&s.borrow());
+                        let sym = self.interner.intern(&s_str);
                         Some(Value::Sym(sym))
                     }
                     _ => None,
@@ -753,3 +942,42 @@ pub(crate) fn str_succ(s: &str) -> String {
     }
 }
 
+/// Translate Ruby's `\0` / `\1` / … backref syntax in a
+/// String#gsub replacement template into the `regex` crate's
+/// `$0` / `$1` / … convention. Doubled backslash (`\\`) escapes
+/// a literal backslash. `\&` is the entire match (CRuby alias
+/// for `\0`); `\'` (post-match) / `\`` (pre-match) are NOT
+/// supported in our subset — they'd need MatchData state we
+/// don't currently carry.
+///
+/// Also escapes any literal `$` in the template so the regex
+/// crate doesn't interpret it as its own backref form.
+pub(crate) fn ruby_backref_to_dollar(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.peek() {
+                Some(&n) if n.is_ascii_digit() => {
+                    chars.next();
+                    out.push('$');
+                    out.push(n);
+                }
+                Some(&'&') => {
+                    chars.next();
+                    out.push('$');
+                    out.push('0');
+                }
+                Some(&'\\') => {
+                    chars.next();
+                    out.push('\\');
+                }
+                _ => out.push('\\'),
+            },
+            // Escape `$` so the regex crate doesn't capture it.
+            '$' => out.push_str("$$"),
+            _ => out.push(c),
+        }
+    }
+    out
+}

@@ -442,7 +442,7 @@ impl Vm {
                 };
                 self.invoke_method(m, self_val, args)?;
             }
-            Op::CreateBlock(p_idx, param_start, n_params) => {
+            Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw) => {
                 // Snapshot the surrounding frame's captured locals
                 // (shared Rc with subsequent invocations of this
                 // block) and self before any mutable borrow of
@@ -452,6 +452,7 @@ impl Vm {
                     let f = self.frames.last().expect("ICE: CreateBlock no frame");
                     (f.locals.clone(), f.self_val.clone())
                 };
+                let rest_slot = if rest_slot_raw == u16::MAX { None } else { Some(rest_slot_raw) };
                 self.maybe_gc();
                 self.check_alloc()?;
                 let id = self.heap.alloc(HeapObj::Block(BlockHandle {
@@ -460,6 +461,7 @@ impl Vm {
                     self_val,
                     param_start,
                     n_params,
+                    rest_slot,
                 }));
                 self.stack.push(Value::Block(id));
             }
@@ -713,6 +715,7 @@ impl Vm {
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(parent.clone()),
                     includes: RefCell::new(Vec::new()),
+                    cext_alloc_func: std::cell::Cell::new(None),
                 })).clone();
                 // If the class already existed (reopened) and the user specified a parent
                 // this time, update it (only if it wasn't already set to something else).

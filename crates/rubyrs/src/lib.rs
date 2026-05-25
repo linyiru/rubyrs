@@ -184,6 +184,12 @@ mod cext_raise_exports {
     static _RB_E_ZERO_DIV:   &rubyrs_cext::Value = &rubyrs_cext::raise::rb_eZeroDivError;
     #[used]
     static _RB_E_NOT_IMP:    &rubyrs_cext::Value = &rubyrs_cext::raise::rb_eNotImpError;
+    #[used]
+    static _RB_E_EOF:        &rubyrs_cext::Value = &rubyrs_cext::raise::rb_eEOFError;
+    #[used]
+    static _RB_E_FROZEN:     &rubyrs_cext::Value = &rubyrs_cext::raise::rb_eFrozenError;
+    #[used]
+    static _RB_E_ENC_COMPAT: &rubyrs_cext::Value = &rubyrs_cext::raise::rb_eEncCompatError;
 }
 
 // === L3-B: TypedData ABI ===
@@ -198,6 +204,156 @@ static _RB_CHECK_TYPEDDATA: unsafe extern "C" fn(
     rubyrs_cext::Value,
     *const rubyrs_cext::rb_data_type_t,
 ) -> *mut std::ffi::c_void = rubyrs_cext::rb_check_typeddata;
+
+// === L3-D: bulk #[used] force-exports for stubs/*.rs ===
+//
+// rubyrs-cext is consumed as an rlib. The linker drops object
+// files whose symbols aren't referenced from the consuming crate
+// (rubyrs binary). `#[unsafe(no_mangle)]` on a fn alone is not
+// enough — `#[used]` only applies to statics in stable Rust, so
+// each cext fn needs a static reference here to survive DCE.
+//
+// The list below is exhaustive for what flori/json's parser.c
+// and generator.c touch. Compile-checked by type inference: if
+// a signature drifts between header and impl, the static line
+// fails to type-check (catches ABI breakage early).
+#[allow(non_upper_case_globals)]
+mod _cext_l3d_exports {
+    use rubyrs_cext::{ID, Value};
+    use std::ffi::{c_char, c_double, c_int, c_long, c_longlong, c_void};
+
+    // Tricky fns (live in main lib.rs, not stubs/).
+    #[used] static F1: unsafe extern "C" fn(Value) -> Value = rubyrs_cext::rb_basic_class;
+    #[used] static F2: unsafe extern "C" fn(Value) -> *mut *mut c_void = rubyrs_cext::rb_typeddata_data_slot;
+    #[used] static F3: unsafe extern "C" fn(Value) -> Value = rubyrs_cext::rb_path_to_class;
+    #[used] static F4: unsafe extern "C" fn(*const c_char) -> Value = rubyrs_cext::rb_path2class;
+
+    // stubs/types.rs
+    use rubyrs_cext::stubs::types::*;
+    #[used] static T1: unsafe extern "C" fn(Value) -> c_int = rb_value_type;
+    #[used] static T2: unsafe extern "C" fn(Value) -> c_int = rb_value_is_fixnum;
+    #[used] static T3: unsafe extern "C" fn(Value) -> c_int = rb_value_is_flonum;
+    #[used] static T4: unsafe extern "C" fn(Value) -> c_int = rb_value_is_special_const;
+    #[used] static T5: unsafe extern "C" fn(c_longlong) -> Value = rb_ll2num;
+    #[used] static T6: unsafe extern "C" fn(c_double) -> Value = rb_dbl2num;
+    #[used] static T7: unsafe extern "C" fn(*const c_char, c_int) -> Value = rb_cstr2inum;
+    #[used] static T8: unsafe extern "C" fn(*const c_char, c_int) -> c_double = rb_cstr_to_dbl;
+    #[used] static T9: unsafe extern "C" fn(Value) -> c_double = rb_float_value;
+    #[used] static T10: unsafe extern "C" fn(ID) -> Value = rb_id2sym;
+    #[used] static T11: unsafe extern "C" fn(Value) -> ID = rb_sym2id;
+    #[used] static T12: unsafe extern "C" fn(Value) -> Value = rb_sym2str;
+    #[used] static T13: unsafe extern "C" fn(Value, c_int) = rb_check_type;
+    #[used] static T14: unsafe extern "C" fn(c_int, c_int, c_int) = rb_check_arity;
+    #[used] static T15: unsafe extern "C" fn(Value, c_int, *const c_char, *const c_char) -> Value = rb_convert_type;
+    #[used] static T16: unsafe extern "C" fn(Value) -> c_long = RHASH_SIZE;
+    // msgpack additions in types.rs
+    #[used] static T17: unsafe extern "C" fn(c_longlong) -> Value = rb_ll2inum;
+    #[used] static T18: unsafe extern "C" fn(u64) -> Value = rb_ull2inum;
+    #[used] static T19: unsafe extern "C" fn(Value) -> c_double = rb_num2dbl;
+    #[used] static T20: unsafe extern "C" fn(c_double) -> Value = rb_float_new;
+    #[used] static T21: unsafe extern "C" fn(Value, *mut c_int) -> usize = rb_absint_size;
+    #[used] static T22: unsafe extern "C" fn(Value) -> u64 = rb_big2ull;
+    #[used] static T23: unsafe extern "C" fn(Value) -> c_longlong = rb_big2ll;
+    #[used] static T24: unsafe extern "C" fn(Value) -> c_int = rb_bignum_positive_p;
+
+    // stubs/strings.rs
+    use rubyrs_cext::stubs::strings::*;
+    #[used] static S1: unsafe extern "C" fn(c_long) -> Value = rb_str_buf_new;
+    #[used] static S2: unsafe extern "C" fn(Value) -> Value = rb_str_dup;
+    #[used] static S3: unsafe extern "C" fn(Value) -> Value = rb_str_freeze;
+    #[used] static S4: unsafe extern "C" fn(Value) -> Value = rb_str_intern;
+    #[used] static S5: unsafe extern "C" fn(Value, c_long) = rb_str_set_len;
+    #[used] static S6: unsafe extern "C" fn(Value, c_long, c_long) -> Value = rb_str_substr;
+    #[used] static S7: unsafe extern "C" fn(*mut Value) -> Value = rb_string_value;
+    #[used] static S8: unsafe extern "C" fn(*const c_char, c_long) -> Value = rb_utf8_str_new;
+    #[used] static S9: unsafe extern "C" fn(*const c_char) -> Value = rb_utf8_str_new_cstr;
+    #[used] static S10: unsafe extern "C" fn(*const c_char, c_long) -> Value = rb_usascii_str_new;
+    #[used] static S11: unsafe extern "C" fn(*const c_char, c_long, *const c_void) -> Value = rb_enc_str_new;
+    #[used] static S12: unsafe extern "C" fn(*const c_char, c_long, *const c_void) -> Value = rb_enc_interned_str;
+    #[used] static S13: unsafe extern "C" fn() -> *mut c_void = rb_utf8_encoding;
+    #[used] static S14: unsafe extern "C" fn() -> *mut c_void = rb_ascii8bit_encoding;
+    #[used] static S15: unsafe extern "C" fn() -> *mut c_void = rb_usascii_encoding;
+    #[used] static S16: unsafe extern "C" fn() -> c_int = rb_utf8_encindex;
+    #[used] static S17: unsafe extern "C" fn() -> c_int = rb_usascii_encindex;
+    #[used] static S18: unsafe extern "C" fn() -> c_int = rb_ascii8bit_encindex;
+    #[used] static S19: unsafe extern "C" fn(Value, c_int) -> Value = rb_enc_associate_index;
+    #[used] static S20: unsafe extern "C" fn(Value) -> c_int = rb_enc_get_index;
+    #[used] static S21: unsafe extern "C" fn(Value) -> c_int = rb_enc_str_coderange;
+    #[used] static S22: unsafe extern "C-unwind" fn(*mut c_void, Value, *const c_char) -> ! = rb_enc_raise;
+    // msgpack additions in strings.rs
+    #[used] static S23: unsafe extern "C" fn(Value, *const c_char, c_long) -> Value = rb_str_buf_cat;
+    #[used] static S24: unsafe extern "C" fn(Value, Value) -> Value = rb_str_replace;
+    #[used] static S25: unsafe extern "C" fn(Value, c_long) -> Value = rb_str_resize;
+    #[used] static S26: unsafe extern "C" fn(Value, Value, c_int, Value) -> Value = rb_str_encode;
+    #[used] static S27: unsafe extern "C" fn(Value) -> Value = rb_check_string_type;
+    #[used] static S28: unsafe extern "C" fn(Value) -> Value = rb_String;
+    #[used] static S29: unsafe extern "C" fn(*mut c_void) -> c_int = rb_enc_asciicompat;
+    #[used] static S30: unsafe extern "C" fn(c_int) -> *mut c_void = rb_enc_from_index;
+    #[used] static S31: unsafe extern "C" fn(*mut c_void) -> Value = rb_enc_from_encoding;
+
+    // stubs/gc.rs
+    use rubyrs_cext::stubs::gc::*;
+    #[used] static G1: unsafe extern "C" fn(Value) = rb_gc_mark;
+    #[used] static G2: unsafe extern "C" fn(Value) = rb_gc_mark_movable;
+    #[used] static G3: unsafe extern "C" fn(Value) -> Value = rb_gc_location;
+    #[used] static G4: unsafe extern "C" fn(Value) = rb_gc_register_mark_object;
+    #[used] static G5: unsafe extern "C" fn(*mut Value) = rb_global_variable;
+    #[used] static G6: unsafe extern "C" fn(c_int) = rb_ext_ractor_safe;
+    #[used] static G7: unsafe extern "C" fn(*const c_char) = rb_warn;
+    #[used] static G8: unsafe extern "C" fn(*const c_char, *const c_char) = rb_category_warn;
+    #[used] static G9: unsafe extern "C" fn(*const c_char, *mut c_void) -> Value = rb_vsprintf;
+    #[used] static G10: unsafe extern "C" fn(Value) -> Value = rb_io_flush;
+    #[used] static G11: unsafe extern "C" fn(Value, Value) -> Value = rb_io_write;
+    #[used] static G12: unsafe extern "C" fn(*const c_char) -> Value = rb_require;
+    // msgpack additions in gc.rs
+    #[used] static G13: unsafe extern "C" fn(*const c_char) -> ! = rb_bug;
+    #[used] static G14: unsafe extern "C" fn() -> Value = rb_errinfo;
+    #[used] static G15: unsafe extern "C" fn(c_int) -> ! = rb_jump_tag;
+    #[used] static G16: unsafe extern "C" fn(extern "C" fn(Value) -> Value, Value, *mut c_int) -> Value = rb_protect;
+    #[used] static G17: unsafe extern "C" fn(extern "C" fn(Value) -> Value, Value, extern "C" fn(Value, Value) -> Value, Value) -> Value = rb_rescue2;
+    #[used] static G18: unsafe extern "C" fn(Value) -> Value = rb_yield;
+    #[used] static G19: unsafe extern "C" fn(*const c_char, c_long, *mut c_void) -> u64 = rb_intern3;
+
+    // stubs/dispatch.rs
+    use rubyrs_cext::stubs::dispatch::*;
+    #[used] static D1: unsafe extern "C" fn(Value) -> Value = rb_obj_class;
+    #[used] static D2: unsafe extern "C" fn(Value) -> Value = rb_class_name;
+    #[used] static D3: unsafe extern "C" fn(c_int, *const Value, Value) -> Value = rb_class_new_instance;
+    #[used] static D4: unsafe extern "C" fn(Value, Value) -> c_int = rb_obj_is_kind_of;
+    #[used] static D5: unsafe extern "C" fn(Value, ID) -> c_int = rb_respond_to;
+    #[used] static D6: unsafe extern "C" fn(Value, *const c_char, *const c_char) = rb_define_alias;
+    // L3-F: rb_define_alloc_func now lives in main lib.rs (was stub) —
+    // signature uses OpaqueFn since the cext side stores it that way.
+    #[used] static D7: unsafe extern "C" fn(Value, rubyrs_cext::OpaqueFn) = rubyrs_cext::rb_define_alloc_func;
+    #[used] static D8: unsafe extern "C" fn(Value, *const c_char, rubyrs_cext::OpaqueFn, c_int) = rb_define_private_method;
+    #[used] static D9: unsafe extern "C" fn(Value, *const c_char) -> Value = rb_define_module_under;
+    #[used] static D10: unsafe extern "C" fn(Value, ID) -> Value = rb_const_get;
+    #[used] static D11: unsafe extern "C" fn(Value, ID, Value) -> Value = rb_ivar_set;
+    #[used] static D12: unsafe extern "C" fn(Value, ID) -> Value = rb_ivar_get;
+    #[used] static D13: unsafe extern "C" fn(c_int, *const Value) -> Value = rb_call_super;
+    #[used] static D14: unsafe extern "C" fn(Value, Value) -> Value = rb_exc_new_str;
+    #[used] static D15: unsafe extern "C" fn(Value) -> ! = rb_exc_raise;
+    #[used] static D16: unsafe extern "C" fn(extern "C" fn(Value) -> Value, Value, extern "C" fn(Value, Value) -> Value, Value) -> Value = rb_rescue;
+    #[used] static D17: unsafe extern "C" fn(c_int, *const Value, *const c_char) -> c_int = rb_scan_args;
+    #[used] static D18: unsafe extern "C" fn(c_long, *const Value) -> Value = rb_ary_new_from_values;
+    #[used] static D19: unsafe extern "C" fn(Value, extern "C" fn(Value, Value, Value) -> c_int, Value) = rb_hash_foreach;
+    #[used] static D20: unsafe extern "C" fn(c_long) -> Value = rb_hash_new_capa;
+    // msgpack additions in dispatch.rs
+    #[used] static D21: unsafe extern "C" fn(Value, *const c_char, Value) = rb_define_const;
+    #[used] static D22: unsafe extern "C" fn(Value) -> *const c_char = rb_obj_classname;
+    #[used] static D23: unsafe extern "C" fn(Value) -> Value = rb_obj_freeze;
+    #[used] static D24: unsafe extern "C" fn(Value) -> c_int = rb_obj_frozen_p;
+    #[used] static D25: unsafe extern "C" fn(c_long) -> Value = rb_ary_new3;
+    #[used] static D26: unsafe extern "C" fn(Value, Value) -> Value = rb_class_inherited_p;
+    #[used] static D27: unsafe extern "C" fn(Value) -> Value = rb_hash_clear;
+    #[used] static D28: unsafe extern "C" fn(Value) -> Value = rb_hash_dup;
+    #[used] static D29: unsafe extern "C" fn(Value) -> Value = rb_hash_freeze;
+    #[used] static D30: unsafe extern "C" fn(Value, Value) = rb_include_module;
+    #[used] static D31: unsafe extern "C" fn(Value) = rb_undef_alloc_func;
+    #[used] static D32: unsafe extern "C" fn(*const c_char) -> Value = rb_struct_define;
+    #[used] static D33: unsafe extern "C" fn(Value) -> Value = rb_struct_new;
+    #[used] static D34: unsafe extern "C" fn(Value, c_long) -> Value = rb_struct_aref;
+}
 
 // Public Prism node-class manifests. Generated by build.rs from
 // `data/supported_prism_nodes.txt` and `data/rides_along_prism_nodes.txt`,
@@ -255,6 +411,76 @@ pub struct Config {
     /// reuse a Runtime across many short evaluations without each
     /// one inheriting the previous timer.
     pub deadline: Option<std::time::Duration>,
+}
+
+/// Read-only handle into the runtime's heap, passed to closures
+/// registered via [`Runtime::register_fn_v2`]. Lets the closure
+/// unpack `Value::Array` / `Value::Hash` arguments without going
+/// back through [`Runtime::resolve_array`] / [`Runtime::resolve_hash`]
+/// (which clone).
+///
+/// Mutability is omitted by construction:
+/// - `HostCtx` exposes no mutating method.
+/// - The V2 dispatch path (see `Vm::invoke_host_fn`) does NOT
+///   overwrite `CURRENT_VM_PTR`, and the TLS itself is `pub(crate)`,
+///   so an external v2 closure has no language-level path to reach
+///   the `*mut Vm` re-entry channel. The TLS may already be non-null
+///   from an outer v1/cext frame — the guarantee is "unreachable
+///   from external v2 code," not "TLS is null."
+///
+/// Together these mean the slices returned by `resolve_array` /
+/// `resolve_hash` are valid for the entire closure body without
+/// further caveat from outside the crate. Embed hosts MUST NOT leak
+/// the returned slices past the closure return (the lifetime
+/// already prevents this, but worth stating).
+pub struct HostCtx<'a> {
+    heap: &'a heap::Heap,
+    interner: &'a intern::Interner,
+}
+
+impl<'a> HostCtx<'a> {
+    /// Internal constructor — the dispatch site borrows `&Heap` and
+    /// `&Interner` from the VM and hands them to the v2 closure via
+    /// this ctx. Both borrows are immutable and time-bounded by the
+    /// closure invocation (see `Vm::invoke_host_fn`).
+    pub(crate) fn new(heap: &'a heap::Heap, interner: &'a intern::Interner) -> Self {
+        Self { heap, interner }
+    }
+
+    /// Borrow the contents of a `Value::Array`. Returns `None` for
+    /// any other shape — the host fn can decide whether to error or
+    /// fall through.
+    pub fn resolve_array(&self, val: &Value) -> Option<&[Value]> {
+        if let Value::Array(id) = val {
+            Some(self.heap.array(*id).as_slice())
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the contents of a `Value::Hash` as a flat slice of
+    /// `(key, value)` pairs (preserving insertion order). Returns
+    /// `None` for any other shape.
+    pub fn resolve_hash(&self, val: &Value) -> Option<&[(Value, Value)]> {
+        if let Value::Hash(id) = val {
+            Some(self.heap.hash(*id).as_slice())
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the interned name of a `Value::Sym`. Returns `None` for
+    /// any other shape. Useful for v2 host fns that receive a
+    /// kwargs `Hash` with Symbol keys (`require:`, `platforms:`, …)
+    /// — the host can branch on the borrowed `&str` directly without
+    /// a Ruby-side `k.to_s` rebuild of the Hash.
+    pub fn resolve_sym(&self, val: &Value) -> Option<&str> {
+        if let Value::Sym(id) = val {
+            Some(self.interner.resolve(*id))
+        } else {
+            None
+        }
+    }
 }
 
 /// A self-contained rubyrs runtime. State (class definitions, top-level
@@ -373,6 +599,15 @@ class NilClass
 end
 class Proc
 end
+## Method — `Object#method(:foo)` returns a BoundMethod value
+## whose class reports as Method. Stub class so `m.class.name`
+## resolves to "Method".
+class Method
+end
+## UnboundMethod — `Method#unbind` returns this; `bind(obj)`
+## rehydrates it into a Method.
+class UnboundMethod
+end
 class Class
 end
 ## File — class-method dispatch is wired host-side in
@@ -460,13 +695,32 @@ class Comparable
   def between?(lo, hi)
     self >= lo && self <= hi
   end
-  def clamp(lo, hi)
-    if self < lo
-      lo
-    elsif self > hi
-      hi
+  def clamp(*args)
+    ## Range form (one arg): `clamp(lo..hi)`. Endpoints may be
+    ## nil for one-sided ranges (`(..max)` / `(min..)`); a nil
+    ## bound is treated as "no limit on that side", matching
+    ## CRuby.
+    if args.length == 1 && args[0].is_a?(Range)
+      r = args[0]
+      lo, hi = r.begin, r.end
+      if !lo.nil? && self < lo
+        lo
+      elsif !hi.nil? && self > hi
+        hi
+      else
+        self
+      end
+    elsif args.length == 2
+      lo, hi = args[0], args[1]
+      if !lo.nil? && self < lo
+        lo
+      elsif !hi.nil? && self > hi
+        hi
+      else
+        self
+      end
     else
-      self
+      raise ArgumentError, "wrong number of arguments (given #{args.length}, expected 1..2)"
     end
   end
 end
@@ -484,14 +738,45 @@ end
 
     /// Register a host function callable from Ruby code with `name(args)`.
     /// The function receives evaluated argument values and returns either
-    /// a `Value` or a `Trap`. Calling `register_fn` with the same name
-    /// replaces a previous registration.
+    /// a `Value` or a `Trap`.
+    ///
+    /// Calling `register_fn` (or [`Runtime::register_fn_v2`]) with the
+    /// same name replaces any previous registration — v1 and v2 share
+    /// a single slot per name. Class- or instance-attached methods
+    /// installed by a C extension live in independent dispatch tables
+    /// and are NOT affected by this call.
     pub fn register_fn<F>(&mut self, name: &str, f: F)
     where
         F: Fn(&[Value]) -> Result<Value, Trap> + 'static,
     {
         let id = self.vm.interner.intern(name);
-        self.vm.host_fns.insert(id, Rc::new(f));
+        self.vm.host_fns.insert(id, vm::HostFnSlot::V1(Rc::new(f)));
+    }
+
+    /// Variant of [`Runtime::register_fn`] whose closure also receives a
+    /// [`HostCtx`] handle for reading heap-y arguments.
+    ///
+    /// Use this when the Ruby caller passes an `Array` or `Hash` shape
+    /// that the closure needs to inspect — `Value::Array` and
+    /// `Value::Hash` are opaque heap handles, so the v1 `&[Value]`-only
+    /// signature can't reach their contents from inside the closure.
+    /// `HostCtx::resolve_array` / `resolve_hash` borrow directly from
+    /// the heap, no clone.
+    ///
+    /// The ctx is read-only by design (see the [`HostCtx`] doc for the
+    /// soundness argument). Re-entrant eval needs the cext path, not
+    /// this one.
+    ///
+    /// Replaces any previous v1 or v2 registration under the same name
+    /// (same slot as [`Runtime::register_fn`]). Class- or instance-
+    /// attached methods installed by a C extension live in independent
+    /// dispatch tables and are NOT affected by this call.
+    pub fn register_fn_v2<F>(&mut self, name: &str, f: F)
+    where
+        F: Fn(&HostCtx, &[Value]) -> Result<Value, Trap> + 'static,
+    {
+        let id = self.vm.interner.intern(name);
+        self.vm.host_fns.insert(id, vm::HostFnSlot::V2(Rc::new(f)));
     }
 
     /// Parse, compile, and run a Ruby source. The returned value is the

@@ -239,12 +239,14 @@ fn cext_handle_to_value_d(
         rubyrs_cext::CValue::True => Value::Bool(true),
         rubyrs_cext::CValue::False => Value::Bool(false),
         // CValue::Str stores bytes + sentinel NUL; the logical
-        // string is `.len() - 1` bytes. Decode lossily into UTF-8
-        // since rubyrs's Value::Str is `Rc<str>` (UTF-8). Binary-
-        // safe storage on the rubyrs side lands in a later level.
+        // string is `.len() - 1` bytes. L3-G: rubyrs's Value::Str
+        // now holds `Vec<u8>` directly, so we copy bytes through
+        // without the previous lossy UTF-8 round-trip — msgpack
+        // pack output (and any other binary-protocol cext) now
+        // survives the cext → Vm crossing intact.
         rubyrs_cext::CValue::Str(bytes) => {
             let logical = &bytes[..bytes.len().saturating_sub(1)];
-            Value::new_str(String::from_utf8_lossy(logical))
+            Value::new_str_bytes(logical.to_vec())
         }
         rubyrs_cext::CValue::Int(n) => Value::Int(*n),
         // L3-C: a CValue::Class handle resolves to the actual Vm
@@ -365,7 +367,7 @@ fn cext_value_to_cvalue_d(
         Value::Nil => rubyrs_cext::CValue::Nil,
         Value::Bool(true) => rubyrs_cext::CValue::True,
         Value::Bool(false) => rubyrs_cext::CValue::False,
-        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.borrow().as_bytes()),
+        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(&s.borrow()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
         // L3-B: a Value::Object handle crossing Ruby → C is
         // represented as a CValue::HeapRef carrying the raw ObjId.
@@ -961,12 +963,12 @@ impl Vm {
                 let cfn_name = cfn.name.clone();
                 self.host_fns.insert(
                     sym,
-                    Rc::new(move |args: &[Value]| {
+                    crate::vm::HostFnSlot::V1(Rc::new(move |args: &[Value]| {
                         // Top-level functions get Qnil as `self`,
                         // matching CRuby's `rb_define_global_function`
                         // convention.
                         cext_dispatch(&cfn_name, func, arity, args, CextSelfHandle::Global)
-                    }),
+                    })),
                 );
             }
 
@@ -980,6 +982,7 @@ impl Vm {
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(None),
                     includes: RefCell::new(Vec::new()),
+                    cext_alloc_func: std::cell::Cell::new(None),
                 });
                 self.classes.insert(name_sym, new_class);
             }
@@ -1029,6 +1032,34 @@ impl Vm {
                     );
             }
 
+            // L3-F: install per-class custom allocators. Looks up the
+            // target class by joined name; if found, stash the cext
+            // allocator fn in its `cext_alloc_func` slot so
+            // `Klass.new(args)` routes through the cext-side
+            // allocator before calling `initialize`.
+            //
+            // PR #50 review #4: registered_classes is drained BEFORE
+            // alloc_funcs (a few blocks up), so by this point every
+            // class the cext declared is in self.classes. An alloc_func
+            // pointing at an unknown class means the cext called
+            // rb_define_alloc_func without a prior rb_define_class_under
+            // — a contract violation that would silently produce bare
+            // Instance receivers at .new time, leading to confusing
+            // TypeError far from the cause. Panic instead so cext
+            // authors find the bug immediately.
+            for af in state.registered_alloc_funcs {
+                let name_sym = self.interner.intern(&af.class_joined_name);
+                let cls = self.classes.get(&name_sym).unwrap_or_else(|| {
+                    panic!(
+                        "ICE: rb_define_alloc_func for unregistered class {:?} \
+                         — cext called rb_define_alloc_func before (or instead of) \
+                         rb_define_class_under",
+                        af.class_joined_name
+                    )
+                });
+                cls.cext_alloc_func.set(Some(af.func));
+            }
+
             // Level 0: keep the library mapped for the lifetime of the
             // process. Registered function pointers point into its
             // text segment; unmapping would dangle them. A real impl
@@ -1039,5 +1070,134 @@ impl Vm {
         Ok(Value::Nil)
     }
 
+}
+
+#[cfg(test)]
+mod miri_tests {
+    //! Synthetic tests for the `CURRENT_VM_PTR` re-entrance
+    //! pattern documented in ADR 0013. Driver code mirrors
+    //! what `cext_funcall_to_vm` does in production —
+    //! `with_vm_ptr_set` installs the thread-local, the body
+    //! reads it back and reborrows as `&mut Vm` to mutate the
+    //! VM state — but WITHOUT going through `dlopen`.
+    //!
+    //! We deliberately do NOT call `cext_invoke_method` here:
+    //! it pushes a frame and assumes an outer dispatch loop
+    //! will execute the bytecode. The frame-machinery sets up
+    //! its own `&mut Vm` aliasing inside the dispatcher
+    //! that's orthogonal to ADR 0013's concern. What ADR 0013
+    //! actually worries about is the raw-pointer reborrow
+    //! happening on top of an existing outer `&mut` — and
+    //! THAT shape we can exercise directly here.
+    //!
+    //! If Miri (Stacked or Tree Borrows) flags any of this as
+    //! UB, the time-disjoint argument behind the current shape
+    //! collapses and ADR 0013's deferred `UnsafeCell<VmState>`
+    //! refactor (J4) gets a forcing function.
+    use super::*;
+    use crate::bytecode::Proto;
+    use crate::heap::HeapObj;
+    use crate::intern::Interner;
+
+    fn mk_vm() -> Vm {
+        Vm::new(Vec::<Proto>::new(), Interner::new())
+    }
+
+    /// Helper: simulate the outer-frame entry point. Real
+    /// dispatch holds `&mut self` on its callstack; inside it
+    /// reborrows `self` as `*mut Vm` for the host-fn call. We
+    /// model that with a `&mut Vm` method that takes the
+    /// pointer, hands it to `with_vm_ptr_set`, and lets the
+    /// closure reborrow.
+    impl Vm {
+        fn miri_drive_cext_pattern(&mut self) -> usize {
+            // `let vm_ptr: *mut Vm = self;` — the production
+            // pattern (dispatch.rs:152). The outer `&mut self`
+            // is "parked" while the closure runs.
+            let vm_ptr: *mut Vm = self;
+            with_vm_ptr_set(vm_ptr, || {
+                let ptr = CURRENT_VM_PTR.with(|c| c.get());
+                assert!(!ptr.is_null());
+                // SAFETY: matches the cext_funcall_to_vm
+                // contract documented at cext.rs:780+. The
+                // outer `&mut self` is time-disjoint with this
+                // reborrow because no method on `*self` runs
+                // between the `let vm_ptr = self;` line and
+                // here — we already entered the closure.
+                let inner_vm = unsafe { &mut *ptr };
+                // Mutate every Vm field the cext path touches
+                // in production: heap, classes, interner, stack,
+                // pinned. If any of these triggers Stacked
+                // Borrows UB it'll surface under Miri here.
+                let id = inner_vm.heap.alloc(HeapObj::Array(vec![Value::Int(1)]));
+                let name = inner_vm.interner.intern("synthetic");
+                inner_vm.stack.push(Value::Array(id));
+                inner_vm.pinned.push(Value::Sym(name));
+                let popped = inner_vm.stack.pop().expect("just pushed");
+                inner_vm.pinned.pop();
+                let _ = popped;
+                inner_vm.heap.live_count
+            })
+        }
+    }
+
+    #[test]
+    fn cext_reentrance_pattern_is_aliasing_clean() {
+        // Drive the synthetic pattern. If Miri (Stacked or
+        // Tree Borrows) finds an aliasing violation here, it
+        // would find one in the real cext path too. The real
+        // path is gated by dlopen which Miri can't run; this
+        // synthetic version covers the same reborrow shape
+        // with only types Miri CAN run.
+        let mut vm = mk_vm();
+        let pre_live = vm.heap.live_count;
+        let live = vm.miri_drive_cext_pattern();
+        assert_eq!(live, pre_live + 1, "alloc should bump live_count");
+        // Post-invariant: CURRENT_VM_PTR restored to null.
+        let ptr_after = CURRENT_VM_PTR.with(|c| c.get());
+        assert!(ptr_after.is_null());
+    }
+
+    #[test]
+    fn cext_reentrance_can_re_enter_multiple_times() {
+        // Two separate `miri_drive_cext_pattern` invocations
+        // from the same outer scope. Verifies the
+        // pointer-stash + restore cycles cleanly across
+        // independent host-fn calls.
+        let mut vm = mk_vm();
+        let _ = vm.miri_drive_cext_pattern();
+        let _ = vm.miri_drive_cext_pattern();
+        assert_eq!(vm.heap.live_count, 2);
+    }
+
+    #[test]
+    fn cext_reentrance_nested_save_restore() {
+        // Two nested `with_vm_ptr_set` calls should save and
+        // restore the TLS exactly. Matches the real-world
+        // "host_fn invokes rb_funcallv which invokes another
+        // host_fn" chain.
+        let mut vm = mk_vm();
+        let vm_ptr: *mut Vm = &mut vm;
+
+        let outer = with_vm_ptr_set(vm_ptr, || {
+            let outer_ptr = CURRENT_VM_PTR.with(|c| c.get());
+            assert!(!outer_ptr.is_null());
+
+            // Inner: same pointer (could in principle be a
+            // different vm in a multi-Vm host, but our model
+            // is single-Vm per thread).
+            let inner = with_vm_ptr_set(vm_ptr, || {
+                CURRENT_VM_PTR.with(|c| c.get())
+            });
+            assert_eq!(outer_ptr, inner);
+
+            // After inner exits, outer pointer is restored.
+            CURRENT_VM_PTR.with(|c| c.get())
+        });
+
+        assert_eq!(outer, vm_ptr);
+        // After outer exits, TLS is null again.
+        assert!(CURRENT_VM_PTR.with(|c| c.get()).is_null());
+    }
 }
 

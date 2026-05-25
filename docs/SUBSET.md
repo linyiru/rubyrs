@@ -56,6 +56,92 @@ If you need Rails, Sinatra, Bundler, gems, or `eval` — use CRuby.
 - `puts`, `print`
 - `Integer#times { |i| ... }`
 
+### String built-in methods
+
+Covered: `length` / `size`, `+`, `==`, `empty?`, `reverse`,
+`upcase`, `downcase`, `include?(String)`, `equal?` (identity),
+interpolation `"... #{expr} ..."`.
+
+Not yet covered on String identity / inspection:
+
+- `object_id` — use `equal?` instead for identity assertions.
+
+`String#sub` and `String#gsub` cover the patterns shipped so
+far:
+
+- **Regex pattern, String replacement**:
+  `"hello".sub(/[aeiou]/, '*')` → `"h*llo"`
+- **Regex pattern, block replacement**:
+  `"hello".gsub(/[aeiou]/) { |m| m.upcase }` → `"hEllO"`
+- **String pattern, String replacement** (literal, no regex
+  metacharacter interpretation): `"\\d".sub('\\d', 'a')` → `"a"`
+
+Not yet shipped on `sub` / `gsub` (each will land in its own
+PR; specs in
+[`crates/rubyrs/spec/ruby/string_*_spec.rb`](../crates/rubyrs/spec/ruby/)
+skip the upstream blocks that exercise them, with a `#`
+comment naming the gap):
+
+- `/i` case-insensitive Regex flag. `"Hello".sub(/h/i, "j")`
+  currently returns `"Hello"` (no match), upstream expects
+  `"jello"`.
+- Backref replacement strings: `'\1'`, `'\&'`, `'\k<name>'`.
+  The substitution String is taken verbatim — captures aren't
+  expanded.
+- String pattern under block form: `"hi".sub("hi") { "bye" }`.
+  rubyrs routes block-form sub through the Regex path only;
+  String-pattern + block currently raises NoMethodError.
+
+### Regex literals
+
+Covered: `/.../` literal, single-character classes (`/[aeiou]/`),
+the empty regex `//` (matches between every character),
+anchors `\A` (string start) and `\z` (string end).
+
+Divergence from CRuby on the `^` anchor: rubyrs's regex engine
+fires `^` only at the string start, not at every line start in
+multi-line input. `"Text\nFoo".gsub(/^/, ' ')` returns
+`" Text\nFoo"` (one anchor); CRuby returns `" Text\n Foo"` (one
+per line). Tracked as a separate engine upgrade. The upstream
+ruby/spec `it` block covering this is skipped in
+[`crates/rubyrs/spec/ruby/string_gsub_spec.rb`](../crates/rubyrs/spec/ruby/string_gsub_spec.rb)
+with a comment naming the upstream expectation and pointing
+back at this section; the skip un-resolves once per-line
+anchoring lands.
+
+### Method objects
+
+Covered: `obj.method(:name)` capture (including implicit-self
+`method(:foo)` inside a class body), `Class#instance_method`,
+`Method#call` / `Method#()` shorthand (with ArgumentError on
+arity mismatch), `Method#curry` (including the explicit-arity
+form), `Method#>>` / `Method#<<` composition (with another
+Method or any Proc on the RHS), `Method#==` /
+`UnboundMethod#==`, `Method#owner` (the class/module that
+defined the method, walking through inheritance and through
+`alias_method`), `Method#receiver` (the bound object, by
+identity), `Method#to_proc` (both explicit `.to_proc` and the
+implicit `&meth` forwarding path).
+
+Divergence from CRuby on `Method#==` for aliased methods:
+
+```ruby
+class Foo
+  def bar; 1; end
+  alias_method :baz, :bar
+end
+f = Foo.new
+f.method(:bar) == f.method(:baz)  # CRuby: true; rubyrs: false
+```
+
+rubyrs's `Method#==` compares both the underlying Method
+pointer and the call name; an `alias_method :baz, :bar`
+produces a Method whose call name is `:baz`, so the equality
+check returns false. CRuby looks through the alias. Tracked
+as a separate engine upgrade. The upstream ruby/spec `it`
+block covering aliased equality is skipped in
+[`crates/rubyrs/spec/ruby/method_equal_spec.rb`](../crates/rubyrs/spec/ruby/method_equal_spec.rb).
+
 ### Metaprogramming (PoC)
 - `alias_method :new, :old` — resolves the source method by walking
   the surrounding class's ancestor chain (so inherited methods can
@@ -222,7 +308,7 @@ end
 |---------|------------------------|
 | `Range` (`1..10`) | high |
 | More `Enumerable`: `select`, `reject`, `inject`, `find`, `any?`, `all?`, `include?` | high |
-| String methods: `split`, `gsub`, `sub`, `chomp`, `strip`, `upcase`, `downcase`, `chars` | high |
+| Additional String methods: `split`, `chomp`, `strip`, `chars` (see "String built-in methods" above for what ships today, including `sub` / `gsub` / `upcase` / `downcase` / `reverse` / `include?` / `empty?`) | high |
 | `Module`, `include`, `extend` | high |
 | Class inheritance (`class Foo < Bar`), `super` | high |
 | `Rational`, `Complex`, big-Integer overflow promotion | low |

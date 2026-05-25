@@ -194,6 +194,18 @@ pub static rb_eZeroDivError:    super::Value = 0xE000_0000_0000_0009;
 #[unsafe(no_mangle)]
 pub static rb_eNotImpError:     super::Value = 0xE000_0000_0000_000A;
 
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eEOFError:        super::Value = 0xE000_0000_0000_000B;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eFrozenError:     super::Value = 0xE000_0000_0000_000C;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eEncCompatError:  super::Value = 0xE000_0000_0000_000D;
+
 /// Map a raised class sentinel back to the rubyrs exception-class
 /// name string used by `RubyError::*::class_name()`. Returns
 /// `"RuntimeError"` as the fallback for any unknown / future
@@ -211,6 +223,9 @@ pub fn exception_class_name_for_sentinel(class: super::Value) -> &'static str {
         x if x == rb_eNameError       => "NameError",
         x if x == rb_eZeroDivError    => "ZeroDivisionError",
         x if x == rb_eNotImpError     => "NotImplementedError",
+        x if x == rb_eEOFError        => "EOFError",
+        x if x == rb_eFrozenError     => "FrozenError",
+        x if x == rb_eEncCompatError  => "Encoding::CompatibilityError",
         _ => "RuntimeError",
     }
 }

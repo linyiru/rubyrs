@@ -14,6 +14,7 @@ members = [
     "crates/rubyrs-cext",
     "crates/rubund",
     "crates/rubyrs-gapscan",
+    "crates/rubyrs-spec-extract",
 ]
 
 # Shared metadata — individual crates pick these up with

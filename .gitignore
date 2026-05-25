@@ -24,3 +24,12 @@ crates/rubyrs/examples/counter-cext/counter_ext.dll
 crates/rubyrs/examples/mini-json-cext/mini_json.so
 crates/rubyrs/examples/mini-json-cext/mini_json.bundle
 crates/rubyrs/examples/mini-json-cext/mini_json.dll
+crates/rubyrs/examples/flori-json-cext/parser.so
+crates/rubyrs/examples/flori-json-cext/parser.bundle
+crates/rubyrs/examples/flori-json-cext/parser.dll
+crates/rubyrs/examples/flori-json-cext/generator.so
+crates/rubyrs/examples/flori-json-cext/generator.bundle
+crates/rubyrs/examples/flori-json-cext/generator.dll
+crates/rubyrs/examples/msgpack-cext/msgpack.so
+crates/rubyrs/examples/msgpack-cext/msgpack.bundle
+crates/rubyrs/examples/msgpack-cext/msgpack.dll

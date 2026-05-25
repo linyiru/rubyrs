@@ -507,6 +507,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubyrs-spec-extract"
+version = "0.1.0"
+dependencies = [
+ "ruby-prism",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

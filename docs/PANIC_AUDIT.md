@@ -41,21 +41,21 @@ owns the change.
 | File | Count | Class |
 |---|---|---|
 | `crates/rubyrs/src/vm.rs` | 0 | — |
-| `crates/rubyrs/src/vm/dispatch.rs` | 13 | 🟢 |
+| `crates/rubyrs/src/vm/dispatch.rs` | 14 | 🟢 |
 | `crates/rubyrs/src/vm/step.rs` | 52 | 🟢 |
 | `crates/rubyrs/src/vm/iter.rs` | 10 | 🟢 |
-| `crates/rubyrs/src/vm/cext.rs` | 5 | 🟡 |
+| `crates/rubyrs/src/vm/cext.rs` | 6 | 🟡 |
 | `crates/rubyrs/src/vm/raise.rs` | 3 | 🟢 |
 | `crates/rubyrs/src/vm/lookup.rs` | 3 | 🟢 |
 | `crates/rubyrs/src/vm/range.rs` | 1 | 🟢 |
 | `crates/rubyrs/src/vm/string.rs` | 1 | 🟢 |
 | `crates/rubyrs/src/heap.rs` | 13 | 🟡 |
-| `crates/rubyrs/src/ast.rs` | 7 | 🟢 / 🔴 |
+| `crates/rubyrs/src/ast.rs` | 8 | 🟢 / 🔴 |
 | `crates/rubyrs/src/lib.rs` | 1 | 🟢 (bootstrap) |
 | `crates/rubyrs/src/compiler.rs` | 2 | 🟢 |
-| **Total (excl. doc comments)** | **110** | |
+| **Total (excl. doc comments)** | **113** | |
 
-The 110 total is +34 vs the pre-split 76, accounted for by:
+The 113 total is +37 vs the pre-split 76, accounted for by:
 - B/F feature work (B6 non-local return, F4 destructure prologue,
   F6 module-include chain) adding new ICE-class invariants in
   dispatch + step.
@@ -124,15 +124,23 @@ always to chase the GC root hole, not to soften the assertion.
 
 The fuzz target landing in P3-17 specifically exercises these.
 
-## ast.rs — 3 sites, 🟢 ICE
+## ast.rs — 8 sites, 🟢 ICE
 
 After P0-4, the user-reachable unsupported-node panic is gone
 (replaced with a `SyntaxError` Trap surfaced from
-`tr_with_errors`). Remaining sites:
+`tr_with_errors`). Remaining sites (line numbers track current
+master; re-grep after touch-ups):
 
-- Lines 117, 142, 312: `stmts.into_iter().next().unwrap()`
-  guarded by `if stmts.len() == 1`. The next() can never be
-  None.
+- `chunks.into_iter().next().unwrap()` / `stmts.into_iter().next().unwrap()`
+  / `acc.into_iter().next().unwrap()` / `v.into_iter().next().unwrap()`
+  — five sites in helpers that immediately precede the call
+  with an `is_empty()` or `len() == 1` guard. `next()` can never
+  be None on the path that reaches the unwrap.
+- Three `n.receiver().map(|r| tr(&r)).expect(...)` sites in
+  the `IndexOrWriteNode` / `IndexAndWriteNode` /
+  `IndexOperatorWriteNode` arms. Prism guarantees these op-assign
+  index nodes carry a receiver — the expect is a contract check
+  on Prism's shape, not a user-reachable failure.
 
 ## lib.rs — 1 site, 🟢 ICE
 

@@ -27,8 +27,9 @@ use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 #[cfg(not(target_os = "wasi"))]
 use super::with_vm_ptr_set;
 use super::{
-    primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, PinGuard, Vm,
+    primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
 };
+use crate::HostCtx;
 
 impl Vm {
     /// Re-entrant dispatch entry for C extensions calling back into
@@ -114,6 +115,53 @@ impl Vm {
 
 
 
+    /// Invoke a registered host fn (either v1 or v2 slot).
+    ///
+    /// V1 stashes `*mut Vm` via `with_vm_ptr_set` so a cext-style
+    /// re-entrant `rb_funcall` can find the running VM (ADR 0013).
+    /// V1 closures hold no Rust borrow of `self` during the call, so
+    /// the raw-ptr reborrow inside cext is the only access path and
+    /// aliasing is well-defined.
+    ///
+    /// V2 deliberately does NOT call `with_vm_ptr_set`. The V2
+    /// closure holds a `HostCtx` that borrows `&self.heap` for the
+    /// duration of the call; if we *also* re-aimed CURRENT_VM_PTR at
+    /// `self` and the closure reborrowed it as `&mut Vm`, that
+    /// reborrow would alias the live `&self.heap` borrow — any heap
+    /// mutation during the inner call could realloc the backing
+    /// `Vec<HeapObj>` and dangle slices returned by
+    /// `ctx.resolve_array` / `resolve_hash`.
+    ///
+    /// Note that `CURRENT_VM_PTR` may already be non-null on entry
+    /// (an outer v1/cext frame set it), so the V2 arm is NOT
+    /// asserting "TLS is null." The actual boundary is: the TLS is
+    /// `pub(crate)`, so an external v2 closure has no language-level
+    /// path to read it — the unsafe re-entry channel is unreachable
+    /// to user code in the V2 slot. Skipping the overwrite here is
+    /// the closing brick: even an internal future v2 helper would
+    /// have to explicitly opt into touching the TLS, which is the
+    /// point at which the soundness review is expected.
+    ///
+    /// cext bridges register as V1, so nothing legitimate needs the
+    /// ptr from the V2 arm.
+    fn invoke_host_fn(&mut self, slot: HostFnSlot, args: &[Value]) -> Result<Value, Trap> {
+        match slot {
+            HostFnSlot::V1(host) => {
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    let vm_ptr: *mut Vm = self;
+                    with_vm_ptr_set(vm_ptr, || host(args))
+                }
+                #[cfg(target_os = "wasi")]
+                { host(args) }
+            }
+            HostFnSlot::V2(host) => {
+                let ctx = HostCtx::new(&self.heap, &self.interner);
+                host(&ctx, args)
+            }
+        }
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         let split = self.stack.len() - argc;
@@ -130,22 +178,28 @@ impl Vm {
                 return Ok(());
             }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
-                // Stash this Vm pointer for the duration of the host
-                // call so `cext_dispatch` (if the host fn is a cext
-                // closure) can install a `rb_funcallv` callback that
-                // re-enters this Vm. See CURRENT_VM_PTR for the
-                // borrow-aliasing discussion.
-                #[cfg(not(target_os = "wasi"))]
-                let v = {
-                    let vm_ptr: *mut Vm = self;
-                    with_vm_ptr_set(vm_ptr, || host(&args))?
-                };
-                #[cfg(target_os = "wasi")]
-                let v = host(&args)?;
+                let v = self.invoke_host_fn(host, &args)?;
                 self.stack.push(v);
                 return Ok(());
             }
+            // Bare `method(:foo)` — implicit-self capture. Same
+            // shape as `obj.method(:foo)` (the receiver-form arm
+            // below) but the receiver is the surrounding frame's
+            // `self_val`. Lets `arr.map(&method(:foo))` work from
+            // inside an instance method body without writing
+            // `&self.method(:foo)`.
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
+            if &*name == "method" && args.len() == 1
+                && let Value::Sym(bound_name_id) = &args[0] {
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::BoundMethod {
+                        recv: self_val.clone(),
+                        name_id: *bound_name_id,
+                    });
+                    self.stack.push(Value::BoundMethod(id));
+                    return Ok(());
+                }
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.class_of(*id);
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
@@ -206,7 +260,7 @@ impl Vm {
                         for a in &args {
                             let key: Option<SymId> = match a {
                                 Value::Sym(s) => Some(*s),
-                                Value::Str(s) => Some(self.interner.intern(&s.borrow())),
+                                Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
                                 _ => None,
                             };
                             if let Some(mid) = key
@@ -255,30 +309,142 @@ impl Vm {
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {
-                // `args` and `recv` were popped off the operand stack by
-                // do_call's setup; while we're about to trigger GC via
-                // `maybe_gc`, they exist only as Rust locals. Pin any
-                // heap values inside `args` (Class is `Rc`-managed and
-                // doesn't need pinning) so the GC's root walk sees them.
-                // The `check_alloc()?` inside the guard is now safe — the
-                // guard's Drop pops on the early-return path.
-                let id = {
-                    let mut g = PinGuard::new(self);
-                    for a in &args { g.pin(a.clone()); }
+                // L3-F: cext-registered allocator path. When the class
+                // came from rb_define_class_under AND the cext called
+                // rb_define_alloc_func on it, route the allocation
+                // through that callback (typically wraps a malloc'd C
+                // struct in TypedData) instead of producing a bare
+                // Instance. Without this, every TypedData_Get_Struct in
+                // the cext's instance methods fails because `self` is a
+                // plain Instance, not a TypedData slot.
+                // Outer PinGuard covers BOTH the allocator call and
+                // the subsequent initialize. cext_dispatch can trigger
+                // maybe_gc (TypedData wrap, result translation,
+                // nested rb_funcall); args + obj live only as Rust
+                // locals here and would be swept otherwise (PR #50
+                // review #1 + #3 — same shape as the Integer#times
+                // PinGuard fix in L3-D).
+                let mut g = PinGuard::new(self);
+                for a in &args { g.pin(a.clone()); }
+                let obj = if let Some(alloc_func) = cls.cext_alloc_func.get() {
+                    #[cfg(not(target_os = "wasi"))]
+                    {
+                        // arity=0 (self-only) is the alloc_func ABI:
+                        // VALUE allocate(VALUE klass). CURRENT_VM_PTR
+                        // must be set so the cext can rb_funcall back
+                        // and rb_data_typed_object_wrap can locate
+                        // the Vm to allocate on its heap.
+                        let class_name = cls.name.clone();
+                        let qualified = format!("{}::allocate", class_name);
+                        let vm_ptr: *mut Vm = g.vm;
+                        let raw = super::cext::with_vm_ptr_set(vm_ptr, || {
+                            super::cext::cext_dispatch(
+                                &qualified,
+                                alloc_func,
+                                0,
+                                &[],
+                                super::cext::CextSelfHandle::Class(&class_name),
+                            )
+                        })?;
+                        // PR #50 review #2: validate that the cext
+                        // honored the rb_define_alloc_func contract.
+                        // CRuby's allocator must return an Object
+                        // (typically TypedData_Wrap_Struct'd); if a
+                        // buggy cext returns Nil / a Class / an Int
+                        // and we silently proceed, `initialize` is
+                        // called on something that's not an instance,
+                        // and instance-method dispatch later fails
+                        // in a way that's hard to trace back to the
+                        // allocator. Trap immediately with TypeError.
+                        match &raw {
+                            Value::Object(_) => raw,
+                            other => {
+                                let msg = format!(
+                                    "allocator function for {} must return an Object, got {}",
+                                    class_name,
+                                    other.type_name()
+                                );
+                                return Err(g.vm.trap(RubyError::TypeError { msg }));
+                            }
+                        }
+                    }
+                    #[cfg(target_os = "wasi")]
+                    {
+                        // wasi: cext path is stubbed; fall back to
+                        // plain Instance allocation. The `alloc_func`
+                        // from the if-let binding is unused on this
+                        // target (no cext_dispatch to forward it to);
+                        // marker reference keeps -D warnings happy.
+                        let _ = alloc_func;
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
+                            class: cls.clone(),
+                            ivars: HashMap::new(),
+                            singleton_class: None,
+                        }));
+                        Value::Object(id)
+                    }
+                } else {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
-                    g.vm.heap.alloc(HeapObj::Instance(Instance {
+                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
                         class: cls.clone(),
                         ivars: HashMap::new(),
                         singleton_class: None,
-                    }))
+                    }));
+                    Value::Object(id)
                 };
-                let obj = Value::Object(id);
-                let init_id = self.interner.intern("initialize");
-                if let Some(m) = self.lookup_method_uncached(cls, init_id) {
+                // Pin the freshly-allocated obj across initialize so
+                // a maybe_gc inside the (cext-defined or Ruby-defined)
+                // initialize doesn't sweep it.
+                g.pin(obj.clone());
+                let init_id = g.vm.interner.intern("initialize");
+                let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
+                if let Some(m) = ruby_init {
+                    // Ruby-defined initialize takes precedence.
+                    // Drop the guard before invoke_method (which
+                    // needs &mut self uncontested); the pinned
+                    // entries survive only the alloc step — by this
+                    // point obj/args are already on Rust locals that
+                    // invoke_method propagates.
+                    drop(g);
                     self.invoke_method(m, obj.clone(), args)?;
                     self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
                 } else {
+                    // L3-F: cext-defined initialize (registered via
+                    // rb_define_method) lives in cext_instance_methods.
+                    // Dispatch through the existing instance-method
+                    // path if present — this picks up arity validation
+                    // and rb_raise handling for free. Skip on
+                    // arity-mismatch (variadic / -1 isn't supported by
+                    // the setjmp shim yet) so allocation still
+                    // succeeds; common case where Packer.new / Parser
+                    // .new is called with no args still works because
+                    // the cext-side state was already zero-init'd in
+                    // the alloc_func.
+                    #[cfg(not(target_os = "wasi"))]
+                    {
+                        let cext_init_reg = g.vm.cext_instance_methods
+                            .get(&cls.name)
+                            .and_then(|t| t.get(&init_id).cloned())
+                            .filter(|reg| (0..=5).contains(&reg.arity) && reg.arity as usize == args.len());
+                        if let Some(reg) = cext_init_reg {
+                            let qualified = reg.qualified_name.clone();
+                            let func = reg.func;
+                            let arity = reg.arity;
+                            let obj_clone = obj.clone();
+                            let args_ref = args.clone();
+                            let vm_ptr: *mut Vm = g.vm;
+                            super::cext::with_vm_ptr_set(vm_ptr, || {
+                                super::cext::cext_dispatch(
+                                    &qualified, func, arity, &args_ref,
+                                    super::cext::CextSelfHandle::Object(obj_clone),
+                                )
+                            })?;
+                        }
+                    }
+                    drop(g);
                     self.stack.push(obj);
                 }
                 return Ok(());
@@ -517,6 +683,409 @@ impl Vm {
                 self.dispatch_until(pre_frames)?;
                 return Ok(());
             }
+        // `Object#method(:name)` — capture (recv, name_id) into a
+        // BoundMethod heap object. Returned Value can be `.call`'d
+        // (handled in the next arm) or stored. Args must be a
+        // single Symbol; CRuby also accepts String but we keep
+        // the subset narrow for now.
+        if &*name == "method" && args.len() == 1
+            && let Value::Sym(bound_name_id) = &args[0] {
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::BoundMethod {
+                    recv: recv.clone(),
+                    name_id: *bound_name_id,
+                });
+                self.stack.push(Value::BoundMethod(id));
+                return Ok(());
+            }
+        // `bm.call(args)` / `bm.()` / `bm[args]` — dispatch the
+        // captured method on the captured receiver. We re-enter
+        // `do_call` recursively with the bound recv pushed below
+        // the args, the captured name interned, and the original
+        // argc.
+        // `bm.unbind` — strip the receiver, keep (class_of(recv),
+        // name_id). The captured class is the receiver's class at
+        // unbind time; CRuby technically captures the *owner* (the
+        // class that defined the method), but for our subset
+        // `class_of` is the closest approximation and roundtrips
+        // through `bind` correctly for the common shapes.
+        if let Value::BoundMethod(bid) = &recv && &*name == "unbind" && args.is_empty() {
+            let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+                _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
+            };
+            let cls = match self.class_of(&bm_recv) {
+                Value::Class(c) => c,
+                _ => return Err(self.trap(RubyError::TypeError {
+                    msg: "cannot unbind method on a value without a class".into(),
+                })),
+            };
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls, name_id: bm_name_id });
+            self.stack.push(Value::UnboundMethod(id));
+            return Ok(());
+        }
+        // `ubm.bind(obj)` — reconstitute a BoundMethod, checking
+        // that `obj` is_a? the captured class. Raises TypeError on
+        // mismatch, matching CRuby.
+        if let Value::UnboundMethod(uid) = &recv && &*name == "bind" && args.len() == 1 {
+            let (cap_class, cap_name_id) = match self.heap.get(*uid) {
+                HeapObj::UnboundMethod { class, name_id } => (class.clone(), *name_id),
+                _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
+            };
+            let mut args = args;
+            let target = args.swap_remove(0);
+            let target_class = match self.class_of(&target) {
+                Value::Class(c) => c,
+                _ => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("bind argument must have a class (got {})", target.type_name()),
+                })),
+            };
+            if !super::class_is_a(&target_class, &cap_class) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "bind argument must be an instance of {} (got {})",
+                        cap_class.name, target_class.name,
+                    ),
+                }));
+            }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::BoundMethod { recv: target, name_id: cap_name_id });
+            self.stack.push(Value::BoundMethod(id));
+            return Ok(());
+        }
+        // `m.to_proc` — explicit conversion to a Proc. Equivalent
+        // to the implicit `&m` coercion: routes through the same
+        // `coerce_bound_method_to_block` forwarder so calling the
+        // resulting Proc splats its args back into `bm.call(...)`.
+        if let Value::BoundMethod(bid) = &recv
+            && &*name == "to_proc" && args.is_empty() {
+                let bm_id = *bid;
+                let id = self.coerce_bound_method_to_block(bm_id)?;
+                self.stack.push(Value::Block(id));
+                return Ok(());
+            }
+        // `m.curry` / `m.curry(n)` — host-side partial application.
+        // Returns a CurriedProc that gathers args across successive
+        // `.call` invocations until `target_arity` is reached, then
+        // invokes the underlying with the full arg list. `class_of`
+        // reports CurriedProc as `Proc`, matching CRuby.
+        if matches!(&recv, Value::BoundMethod(_) | Value::Block(_))
+            && &*name == "curry" && args.len() <= 1 {
+                let target_arity: u16 = if let Some(Value::Int(n)) = args.first() {
+                    if *n < 0 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("negative arity for curry ({})", n),
+                        }));
+                    }
+                    if *n > u16::MAX as i64 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("curry arity out of range ({})", n),
+                        }));
+                    }
+                    *n as u16
+                } else if let Value::BoundMethod(bid) = &recv {
+                    let (bm_recv, m_name_id) = {
+                        let (r, n) = self.heap.bound_method(*bid);
+                        (r.clone(), n)
+                    };
+                    let class = match self.class_of(&bm_recv) {
+                        Value::Class(c) => c,
+                        _ => return Err(self.trap(RubyError::TypeError {
+                            msg: "Method receiver has no resolvable class".into(),
+                        })),
+                    };
+                    match self.lookup_method_uncached(&class, m_name_id) {
+                        Some(m) => self.protos[m.proto_idx].n_required_positional,
+                        None => return Err(self.trap(RubyError::ArgumentError {
+                            msg: "cannot curry a method with unknown arity (builtin)".into(),
+                        })),
+                    }
+                } else if let Value::Block(bid) = &recv {
+                    // Proc#curry — derive arity from the underlying
+                    // proto's required-positional count. Rest / kw
+                    // are not supported as auto-arity for curry; user
+                    // can still pass an explicit arity hint above.
+                    let bh = self.heap.block(*bid);
+                    let proto = &self.protos[bh.proto_idx];
+                    if bh.rest_slot.is_some() && proto.n_required_positional == 0 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "cannot curry a proc with only rest params (pass explicit arity)".into(),
+                        }));
+                    }
+                    proto.n_required_positional
+                } else {
+                    unreachable!()
+                };
+                // Pin `recv` (the underlying BoundMethod / Proc):
+                // it was popped from the operand stack by do_call, so
+                // it has no GC root by the time maybe_gc fires. Same
+                // root-hole shape as the BoundMethod-coerce-to-Block
+                // fix in PR #45 (5874798 / 50867c5).
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(recv.clone());
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let id = g.vm.heap.alloc(HeapObj::CurriedProc {
+                    underlying: recv.clone(),
+                    gathered: Vec::new(),
+                    target_arity,
+                });
+                g.vm.stack.push(Value::CurriedProc(id));
+                return Ok(());
+            }
+        // `cp.call(args)` — append to gathered; invoke if arity hit,
+        // else return a new CurriedProc carrying the appended state.
+        if let Value::CurriedProc(cid) = &recv
+            && matches!(&*name, "call" | "[]" | "()") {
+                let (underlying, gathered, arity) = {
+                    let (u, g, a) = self.heap.curried_proc(*cid);
+                    (u.clone(), g.clone(), a)
+                };
+                let mut combined = gathered;
+                combined.extend(args);
+                if combined.len() >= arity as usize {
+                    let argc = combined.len();
+                    self.stack.push(underlying);
+                    for a in combined { self.stack.push(a); }
+                    let call_sym = self.interner.intern("call");
+                    return self.do_call(call_sym, argc, false, u16::MAX);
+                }
+                // Same pin-the-underlying pattern as the curry-on-Method
+                // branch above. `combined` may also contain heap-typed
+                // arg values that are only held in this Rust-local Vec;
+                // pinning the underlying alone is enough because the
+                // mark phase walks CurriedProc's contents only after
+                // alloc — but the new alloc's reading the SAME Vec, so
+                // we need both pinned across the maybe_gc call.
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(underlying.clone());
+                for v in &combined { g.pin(v.clone()); }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let id = g.vm.heap.alloc(HeapObj::CurriedProc {
+                    underlying,
+                    gathered: combined,
+                    target_arity: arity,
+                });
+                g.vm.stack.push(Value::CurriedProc(id));
+                return Ok(());
+            }
+        // `m >> other` / `m << other` — function composition.
+        // `(m >> g).(x) == g.(m.(x))`; `(m << g).(x) == m.(g.(x))`.
+        // Both sides must be callable — BoundMethod or Block. The
+        // result is a Block (Proc) that splats `*args` through the
+        // chain in the right order.
+        if matches!(&recv, Value::BoundMethod(_) | Value::Block(_))
+            && matches!(&*name, ">>" | "<<") && args.len() == 1 {
+                let mut args = args;
+                let other = args.swap_remove(0);
+                if !matches!(&other, Value::BoundMethod(_) | Value::Block(_)) {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "compose argument must be a Method or Proc (got {})",
+                            other.type_name(),
+                        ),
+                    }));
+                }
+                let (outer, inner) = if &*name == ">>" {
+                    (other, recv)
+                } else {
+                    (recv, other)
+                };
+                let id = self.coerce_compose_to_block(outer, inner)?;
+                self.stack.push(Value::Block(id));
+                return Ok(());
+            }
+        // `m.owner` — the class that defined the resolved Method
+        // (CRuby's `Method#owner` / `UnboundMethod#owner`). Walks
+        // the ancestor chain to find where the method actually
+        // lives; falls back to the captured class for builtins
+        // (whose primitive_call backing has no Method record).
+        //
+        // `m.receiver` — the captured recv on a BoundMethod.
+        // UnboundMethod#receiver raises NoMethodError, matching
+        // CRuby (it has no receiver to give).
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && matches!(&*name, "owner" | "receiver") && args.is_empty() {
+                if &*name == "receiver" {
+                    return match &recv {
+                        Value::BoundMethod(bid) => {
+                            let (r, _) = self.heap.bound_method(*bid);
+                            let r = r.clone();
+                            self.stack.push(r);
+                            Ok(())
+                        }
+                        Value::UnboundMethod(_) => Err(self.trap(RubyError::NoMethodError {
+                            method: "receiver".into(),
+                            recv_type: "UnboundMethod",
+                        })),
+                        _ => unreachable!(),
+                    };
+                }
+                // owner: resolve Method through lookup; prefer its
+                // defining_class.upgrade() over the captured class.
+                let (cap_class, m_name_id) = match &recv {
+                    Value::BoundMethod(bid) => {
+                        let (r, n) = self.heap.bound_method(*bid);
+                        let r = r.clone();
+                        let cls = match self.class_of(&r) {
+                            Value::Class(c) => c,
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            })),
+                        };
+                        (cls, n)
+                    }
+                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    _ => unreachable!(),
+                };
+                let owner = match self.lookup_method_uncached(&cap_class, m_name_id) {
+                    Some(m) => m.defining_class.as_ref()
+                        .and_then(|w| w.upgrade())
+                        .unwrap_or_else(|| cap_class.clone()),
+                    None => cap_class.clone(),
+                };
+                self.stack.push(Value::Class(owner));
+                return Ok(());
+            }
+        // `m.arity` / `m.parameters` — Method introspection. Walks
+        // the captured class chain to find the user-defined Method;
+        // if absent (builtin / primitive_call backed), returns
+        // CRuby's "fully varadic" signature: arity = -1,
+        // parameters = `[[:rest]]`. Same shape for BoundMethod and
+        // UnboundMethod.
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+            && matches!(&*name, "arity" | "parameters") && args.is_empty() {
+                let (class, m_name_id) = match &recv {
+                    Value::BoundMethod(bid) => {
+                        let (bm_recv, nid) = {
+                            let (r, n) = self.heap.bound_method(*bid);
+                            (r.clone(), n)
+                        };
+                        let cls = match self.class_of(&bm_recv) {
+                            Value::Class(c) => c,
+                            _ => return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            })),
+                        };
+                        (cls, nid)
+                    }
+                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    _ => unreachable!(),
+                };
+                let m_opt = self.lookup_method_uncached(&class, m_name_id);
+                let (arity, params_info) = match m_opt {
+                    Some(m) => {
+                        let proto = &self.protos[m.proto_idx];
+                        let n_req_pos = proto.n_required_positional as usize;
+                        let rest_count = proto.rest_param.is_some() as usize;
+                        let kw_count = proto.kw_param_defaults.len();
+                        let kw_rest_count = proto.kw_rest_param.is_some() as usize;
+                        let positional_total = proto.params.len()
+                            .saturating_sub(rest_count + kw_count + kw_rest_count);
+                        let n_opt_pos = positional_total.saturating_sub(n_req_pos);
+                        let n_req_kw = proto.kw_param_defaults.iter().filter(|d| d.is_none()).count();
+                        let n_opt_kw = proto.kw_param_defaults.iter().filter(|d| d.is_some()).count();
+                        // CRuby's arity rule: any *required* keyword
+                        // adds 1 to the mandatory count; the kwargs
+                        // bundle is then treated as a single
+                        // mandatory arg (so the signature is "fully
+                        // specified" if there's no opt-pos / rest).
+                        // If there are no required kwargs but some
+                        // optional/kw_rest are present, the bundle
+                        // is treated as a single OPTIONAL arg —
+                        // arity goes negative.
+                        let req_kw_present = n_req_kw > 0;
+                        let effective_req = n_req_pos + req_kw_present as usize;
+                        let has_pos_optional = n_opt_pos > 0 || rest_count > 0;
+                        let has_kw_optional = !req_kw_present && (n_opt_kw > 0 || kw_rest_count > 0);
+                        let arity: i64 = if has_pos_optional || has_kw_optional {
+                            -((effective_req + 1) as i64)
+                        } else {
+                            effective_req as i64
+                        };
+                        let mut params: Vec<(&'static str, Option<String>)> = Vec::new();
+                        for i in 0..n_req_pos {
+                            params.push(("req", Some(proto.params[i].clone())));
+                        }
+                        for i in n_req_pos..positional_total {
+                            params.push(("opt", Some(proto.params[i].clone())));
+                        }
+                        if let Some(rname) = &proto.rest_param {
+                            let n = if rname.is_empty() { None } else { Some(rname.clone()) };
+                            params.push(("rest", n));
+                        }
+                        let kw_name_start = positional_total + rest_count;
+                        for (i, default) in proto.kw_param_defaults.iter().enumerate() {
+                            let kind = if default.is_none() { "keyreq" } else { "key" };
+                            params.push((kind, Some(proto.params[kw_name_start + i].clone())));
+                        }
+                        if let Some(krname) = &proto.kw_rest_param {
+                            let n = if krname == "__kw_rest_anon" { None } else { Some(krname.clone()) };
+                            params.push(("keyrest", n));
+                        }
+                        (arity, params)
+                    }
+                    None => (-1i64, vec![("rest", None)]),
+                };
+                if &*name == "arity" {
+                    self.stack.push(Value::Int(arity));
+                    return Ok(());
+                }
+                // Build [[kind_sym, name_sym?], ...] array. Anonymous
+                // rest / kw_rest yields a single-element pair, matching
+                // CRuby's `[[:rest]]` / `[[:keyrest]]`.
+                //
+                // PinGuard across the whole loop so the inner-pair
+                // ObjIds in `outer` survive every maybe_gc — without
+                // this, under STRESS_GC each iteration's pair slot
+                // gets swept (no GC root: `outer` is a Rust-local
+                // Vec), the next alloc reuses it, and the final
+                // `heap.alloc(HeapObj::Array(outer))` can land on the
+                // same recycled slot — yielding a self-referencing
+                // Array whose `.inspect` recurses to stack overflow.
+                let mut g = crate::vm::PinGuard::new(self);
+                let mut outer: Vec<Value> = Vec::with_capacity(params_info.len());
+                for (kind, name_opt) in params_info {
+                    let kind_sym = g.vm.interner.intern(kind);
+                    let mut pair = vec![Value::Sym(kind_sym)];
+                    if let Some(n) = name_opt {
+                        let nsym = g.vm.interner.intern(&n);
+                        pair.push(Value::Sym(nsym));
+                    }
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pid = g.vm.heap.alloc(HeapObj::Array(pair));
+                    g.pin(Value::Array(pid));
+                    outer.push(Value::Array(pid));
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let aid = g.vm.heap.alloc(HeapObj::Array(outer));
+                g.vm.stack.push(Value::Array(aid));
+                return Ok(());
+            }
+        if let Value::BoundMethod(bid) = &recv
+            && matches!(&*name, "call" | "[]" | "()") {
+                let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
+                    HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+                    _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
+                };
+                let argc = args.len();
+                self.stack.push(bm_recv);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call(
+                    bm_name_id, argc,
+                    /* no_recv = */ false,
+                    /* cache_id = */ u16::MAX,
+                );
+            }
         if let Value::Class(target) = &recv
             && (&*name == "include" || &*name == "extend") && !args.is_empty() {
                 // Explicit-receiver form: `MyClass.include(Mod)`.
@@ -593,11 +1162,69 @@ impl Vm {
                     self.stack.push(Value::Bool(included));
                     return Ok(());
                 }
+                // `Class#instance_method(:sym)` — direct UnboundMethod
+                // construction. Walks the ancestor chain via
+                // `lookup_method_uncached`; NameError if the method
+                // isn't defined anywhere in the chain. Captures the
+                // receiver class (not the *defining* class) — the
+                // same approximation as `Method#unbind`.
+                ("instance_method", [Value::Sym(sid)]) => {
+                    if self.lookup_method_uncached(cls, *sid).is_none() {
+                        let mname = self.interner.resolve(*sid).to_string();
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
+                        }));
+                    }
+                    let cls_owned = cls.clone();
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls_owned, name_id: *sid });
+                    self.stack.push(Value::UnboundMethod(id));
+                    return Ok(());
+                }
                 _ => {}
             }
         }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
+            return Ok(());
+        }
+        // `Integer#digits([base])` — LSB-first digit Array. Default
+        // base 10; custom base must be >= 2. Negative receivers
+        // raise (CRuby raises Math::DomainError; subset uses
+        // ArgumentError since Math::DomainError isn't modelled).
+        if let Value::Int(n) = &recv && &*name == "digits" && args.len() <= 1 {
+            let base: i64 = match args.first() {
+                None => 10,
+                Some(Value::Int(b)) => *b,
+                Some(other) => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                })),
+            };
+            if base < 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("invalid radix {}", base),
+                }));
+            }
+            if *n < 0 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "numerical argument is out of domain - \"digits\"".into(),
+                }));
+            }
+            let mut elems: Vec<Value> = Vec::new();
+            let mut m = *n;
+            if m == 0 {
+                elems.push(Value::Int(0));
+            } else {
+                while m > 0 {
+                    elems.push(Value::Int(m % base));
+                    m /= base;
+                }
+            }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(elems));
+            self.stack.push(Value::Array(id));
             return Ok(());
         }
         // `Object#equal?` — identity comparison. For heap-managed
@@ -623,6 +1250,49 @@ impl Vm {
             self.stack.push(Value::Bool(same));
             return Ok(());
         }
+        // `Method#==` / `UnboundMethod#==` — intercept before the
+        // universal `==` fallback (which has no arm for these and
+        // would return `false`).
+        //
+        // BoundMethod: same name_id AND receiver identity. Heap-
+        // backed recvs compare by ObjId / Rc-pointer; primitives
+        // (Int / Sym / Bool / ...) compare by value. This matches
+        // CRuby, where `s1.method(:length) == s2.method(:length)`
+        // is `false` for distinct String instances but `true` for
+        // the same Integer literal.
+        //
+        // UnboundMethod: lookup both classes' Method records via
+        // `lookup_method_uncached` (walks ancestor chain) and
+        // compare by Rc-pointer. Two UnboundMethods that resolve
+        // to the same underlying definition — e.g., a parent's
+        // method inherited by a subclass — are equal, matching
+        // CRuby's `C.instance_method(:foo) == D.instance_method(:foo)`.
+        if args.len() == 1 && &*name == "=="
+            && matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_)) {
+                let other = &args[0];
+                let result = match (&recv, other) {
+                    (Value::BoundMethod(a), Value::BoundMethod(b)) => {
+                        let (ra, na) = self.heap.bound_method(*a);
+                        let ra = ra.clone();
+                        let (rb, nb) = self.heap.bound_method(*b);
+                        let rb = rb.clone();
+                        na == nb && method_recv_identity(&ra, &rb)
+                    }
+                    (Value::UnboundMethod(a), Value::UnboundMethod(b)) => {
+                        let (ca, na) = self.heap.unbound_method(*a);
+                        let (cb, nb) = self.heap.unbound_method(*b);
+                        let ma = self.lookup_method_uncached(&ca, na);
+                        let mb = self.lookup_method_uncached(&cb, nb);
+                        match (ma, mb) {
+                            (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
+                            _ => na == nb && Rc::ptr_eq(&ca, &cb),
+                        }
+                    }
+                    _ => false,
+                };
+                self.stack.push(Value::Bool(result));
+                return Ok(());
+            }
         // `Object#==` / `Object#!=` cross-type fallback. The
         // per-type primitive arms (`String == String`,
         // `Sym == Sym`, `Class == Class`, etc.) all fired earlier
@@ -710,7 +1380,7 @@ impl Vm {
                     hit
                 }
                 Value::Regex(re) => match arg {
-                    Value::Str(s) => re.is_match(&s.borrow()),
+                    Value::Str(s) => s.with_str_lossy(|s| re.is_match(s)),
                     _ => false,
                 },
                 _ => recv.ruby_eq(arg, &self.heap),
@@ -725,7 +1395,7 @@ impl Vm {
         if &*name == "=~" && args.len() == 1 {
             let result = match (&recv, &args[0]) {
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
-                    let bound = s.borrow();
+                    let bound = s.to_string_lossy();
                     match re.find(&bound) {
                         Some(m) => Value::Int(m.start() as i64),
                         None => Value::Nil,
@@ -771,7 +1441,7 @@ impl Vm {
         if &*name == "respond_to?" && args.len() == 1 {
             let lookup_name: Option<SymId> = match &args[0] {
                 Value::Sym(id) => Some(*id),
-                Value::Str(s) => Some(self.interner.intern(&s.borrow())),
+                Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
                 _ => None,
             };
             if let Some(id) = lookup_name {
@@ -858,13 +1528,15 @@ impl Vm {
         let proto = &self.protos[m.proto_idx];
         let has_rest = proto.rest_param.is_some();
         let has_kw_rest = proto.kw_rest_param.is_some();
+        let has_block_param = proto.block_param.is_some();
         let kw_count = proto.kw_param_defaults.len();
         // Layout of `m.params` tail:
-        //   [...positional..., rest?, ...kw_params..., kw_rest?]
+        //   [...positional..., rest?, ...kw_params..., kw_rest?, block_param?]
         let positional_max = m.params.len()
             - (if has_rest { 1 } else { 0 })
             - kw_count
-            - (if has_kw_rest { 1 } else { 0 });
+            - (if has_kw_rest { 1 } else { 0 })
+            - (if has_block_param { 1 } else { 0 });
         let required = proto.n_required_positional as usize;
         // Pop trailing Hash arg (if present and we expect kw
         // params) — those entries become keyword bindings, not
@@ -1051,6 +1723,21 @@ impl Vm {
             };
             locals[kw_rest_slot] = Value::Hash(hid);
         }
+        // `&blk` named block param: bind the caller's block (if any)
+        // into the trailing block_param slot as `Value::Block(id)`,
+        // or `Value::Nil` if no block was passed. The slot lives at
+        // the very end of `params` after kw_rest (see Proto.block_param
+        // / compile_proto for layout).
+        if has_block_param {
+            let block_slot = positional_max
+                + if has_rest { 1 } else { 0 }
+                + kw_count
+                + if has_kw_rest { 1 } else { 0 };
+            locals[block_slot] = match block {
+                Some(id) => Value::Block(id),
+                None => Value::Nil,
+            };
+        }
         self.frames.push(Frame {
             proto_idx: m.proto_idx,
             ip: 0,
@@ -1187,14 +1874,154 @@ impl Vm {
         Ok(())
     }
 
+    /// Wrap a BoundMethod into a fresh `Value::Block` so it can
+    /// be passed wherever a block is expected. Lazily compiles a
+    /// single shared forwarder proto on first call; subsequent
+    /// calls reuse the same proto index. The synthesised
+    /// BlockHandle stashes the BoundMethod in `captured[0]` and
+    /// uses the proto's rest slot to splat the caller's args
+    /// into a `.call(...)` on it.
+    pub(crate) fn coerce_bound_method_to_block(&mut self, bm_id: crate::value::ObjId)
+        -> Result<crate::value::ObjId, Trap>
+    {
+        use crate::bytecode::{Op, Proto};
+        use crate::error::Span;
+        use crate::heap::HeapObj;
+        use std::cell::RefCell;
+
+        // Lazy proto build. Locals layout:
+        //   slot 0: the BoundMethod (captured)
+        //   slot 1: args Array (rest slot, filled by invoke_block)
+        let proto_idx = if let Some(idx) = self.bound_method_forwarder_proto {
+            idx
+        } else {
+            let call_id = self.interner.intern("call");
+            let proto = Proto {
+                name: "<bound-method-forwarder>".to_string(),
+                params: Vec::new(),
+                n_required_positional: 0,
+                rest_param: None,
+                kw_param_defaults: Vec::new(),
+                kw_rest_param: None,
+                block_param: None,
+                n_locals: 2,
+                code: vec![
+                    Op::LoadLocal(0),
+                    Op::LoadLocal(1),
+                    Op::ApplyCall(call_id, u16::MAX),
+                    Op::Return,
+                ],
+                op_spans: vec![Span::ZERO; 4],
+                filename: "<synthetic>".into(),
+            };
+            let idx = self.protos.len();
+            self.protos.push(proto);
+            self.bound_method_forwarder_proto = Some(idx);
+            idx
+        };
+
+        // captured[0] = the BoundMethod; captured[1] left to
+        // invoke_block to populate with the rest Array.
+        //
+        // Pin the BoundMethod across maybe_gc — the Rc<RefCell<Vec>>
+        // we just built is a Rust-local with no GC root yet (the
+        // Block that would own it isn't alloc'd until after the
+        // maybe_gc). Without the pin, STRESS_GC sweeps the
+        // BoundMethod slot between Vec construction and Block alloc;
+        // the new Block alloc reuses the freed slot, and the
+        // captured BoundMethod ObjId silently points at the Block
+        // itself — invoke_block then panics with "BoundMethod slot
+        // holds non-BoundMethod" when `.call` dispatches.
+        let captured = Rc::new(RefCell::new(vec![Value::BoundMethod(bm_id), Value::Nil]));
+        let mut g = crate::vm::PinGuard::new(self);
+        g.pin(Value::BoundMethod(bm_id));
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let id = g.vm.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
+            proto_idx,
+            captured,
+            self_val: Value::Nil,
+            param_start: 0,
+            n_params: 0,
+            rest_slot: Some(1),
+        }));
+        Ok(id)
+    }
+
+    /// Build a `Value::Block` that, when called with `*args`,
+    /// invokes `outer.call(inner.(*args))`. Used by Method#`>>` /
+    /// `<<` to express function composition. Both sides must be
+    /// callable (BoundMethod or Block); validated by the caller.
+    /// Proto is lazy-built and shared across all composition sites.
+    pub(crate) fn coerce_compose_to_block(
+        &mut self,
+        outer: Value,
+        inner: Value,
+    ) -> Result<crate::value::ObjId, Trap> {
+        use crate::bytecode::{Op, Proto};
+        use crate::error::Span;
+        use crate::heap::HeapObj;
+        use std::cell::RefCell;
+
+        // Locals layout:
+        //   slot 0: outer callable (runs second)
+        //   slot 1: inner callable (runs first)
+        //   slot 2: args Array (filled via rest_slot)
+        let proto_idx = if let Some(idx) = self.method_compose_forwarder_proto {
+            idx
+        } else {
+            let call_id = self.interner.intern("call");
+            let proto = Proto {
+                name: "<method-compose-forwarder>".to_string(),
+                params: Vec::new(),
+                n_required_positional: 0,
+                rest_param: None,
+                kw_param_defaults: Vec::new(),
+                kw_rest_param: None,
+                block_param: None,
+                n_locals: 3,
+                code: vec![
+                    Op::LoadLocal(0),                   // [outer]
+                    Op::LoadLocal(1),                   // [outer, inner]
+                    Op::LoadLocal(2),                   // [outer, inner, args]
+                    Op::ApplyCall(call_id, u16::MAX),   // [outer, inner_result]
+                    Op::Call(call_id, 1, u16::MAX),     // [outer_result]
+                    Op::Return,
+                ],
+                op_spans: vec![Span::ZERO; 6],
+                filename: "<synthetic>".into(),
+            };
+            let idx = self.protos.len();
+            self.protos.push(proto);
+            self.method_compose_forwarder_proto = Some(idx);
+            idx
+        };
+        let captured = Rc::new(RefCell::new(vec![outer.clone(), inner.clone(), Value::Nil]));
+        let mut g = crate::vm::PinGuard::new(self);
+        g.pin(outer);
+        g.pin(inner);
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let id = g.vm.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
+            proto_idx,
+            captured,
+            self_val: Value::Nil,
+            param_start: 0,
+            n_params: 0,
+            rest_slot: Some(2),
+        }));
+        Ok(id)
+    }
+
     pub(crate) fn invoke_block(&mut self, block_id: ObjId, args: Vec<Value>) -> Result<(), Trap> {
         self.check_frames()?;
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
         // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
-        let (proto_idx, captured, self_val, param_start, n_params) = {
+        let (proto_idx, captured, self_val, param_start, n_params, rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(), bh.param_start, bh.n_params)
+            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
+             bh.param_start, bh.n_params, bh.rest_slot)
         };
         // CRuby auto-splat: when a block declared with >1 parameter
         // is called with a single Array argument, the Array's
@@ -1206,13 +2033,31 @@ impl Vm {
         // Hash#each / #map already yield two args directly, so this
         // path doesn't change their behaviour. Single-param blocks
         // also unaffected — they bind the whole Array.
-        let args: Vec<Value> = if n_params > 1 && args.len() == 1 {
+        //
+        // Auto-splat doesn't apply to rest-param blocks — `|*args|`
+        // wants to capture the whole arg list, including a single
+        // Array as-is.
+        let args: Vec<Value> = if n_params > 1 && args.len() == 1 && rest_slot.is_none() {
             match &args[0] {
                 Value::Array(aid) => self.heap.array(*aid).clone(),
                 _ => args,
             }
         } else {
             args
+        };
+        // Build the rest Array (if any) BEFORE taking the locals
+        // borrow — heap.alloc needs &mut self.heap, which conflicts
+        // with the captured.borrow_mut() below.
+        let rest_array_val = if let Some(slot) = rest_slot {
+            let rest_args: Vec<Value> = args.iter().skip(n_params as usize).cloned().collect();
+            // Truncate args to the leading required slots — the
+            // overflow now lives in rest_args.
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(rest_args));
+            Some((slot, Value::Array(id)))
+        } else {
+            None
         };
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
@@ -1221,15 +2066,17 @@ impl Vm {
             if locals.len() < needed {
                 while locals.len() < needed { locals.push(Value::Nil); }
             }
-            // Place args into the block's param slots. CRuby's
-            // arity-mismatch semantics: too few args → leftover
-            // params bind to Nil (not whatever stale value the
-            // shared captured locals held from a previous
-            // iteration). Walk every param slot, picking from
-            // `args` where available and Nil otherwise.
+            // Place args into the block's required param slots.
+            // CRuby's arity-mismatch semantics: too few args →
+            // leftover slots bind to Nil. Overflow past n_params
+            // either flows into the rest slot (handled below) or
+            // is silently dropped (block-arity-permissive default).
             let mut it = args.into_iter();
             for i in 0..n_params as usize {
                 locals[param_start as usize + i] = it.next().unwrap_or(Value::Nil);
+            }
+            if let Some((slot, val)) = rest_array_val {
+                locals[slot as usize] = val;
             }
         }
         self.frames.push(Frame {
@@ -1251,8 +2098,15 @@ impl Vm {
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
-        let block = if let Value::Block(id) = block_val { id } else {
-            panic!("ICE: CallBlock without Block value on stack");
+        let block = match block_val {
+            Value::Block(id) => id,
+            // `&method_object` forwarding (K8): coerce the
+            // BoundMethod into a Block via `to_proc` semantics.
+            // Synthesises a vararg-lambda whose captured locals
+            // hold the BoundMethod; when invoked, it does
+            // `m.call(*args)`. See `coerce_bound_method_to_block`.
+            Value::BoundMethod(bm_id) => self.coerce_bound_method_to_block(bm_id)?,
+            _ => panic!("ICE: CallBlock without Block value on stack"),
         };
         let recv = if no_recv {
             None
@@ -1323,13 +2177,7 @@ impl Vm {
             }
             if let Some(res) = self.builtin_call(&name, &args) { self.stack.push(res?); return Ok(()); }
             if let Some(host) = self.host_fns.get(&name_id).cloned() {
-                #[cfg(not(target_os = "wasi"))]
-                let v = {
-                    let vm_ptr: *mut Vm = self;
-                    with_vm_ptr_set(vm_ptr, || host(&args))?
-                };
-                #[cfg(target_os = "wasi")]
-                let v = host(&args)?;
+                let v = self.invoke_host_fn(host, &args)?;
                 self.stack.push(v);
                 return Ok(());
             }
@@ -1396,4 +2244,28 @@ impl Vm {
     }
 
 
+}
+
+/// Identity comparison for Method receivers — heap-managed
+/// recvs compare by ObjId / Rc-pointer; primitives compare by
+/// value. Matches CRuby's `equal?`-style semantics, narrowed to
+/// the cases that can appear in a BoundMethod recv slot.
+fn method_recv_identity(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => x == y,
+        (Value::Array(x), Value::Array(y)) => x == y,
+        (Value::Hash(x), Value::Hash(y)) => x == y,
+        (Value::Range(x), Value::Range(y)) => x == y,
+        (Value::Block(x), Value::Block(y)) => x == y,
+        (Value::BoundMethod(x), Value::BoundMethod(y)) => x == y,
+        (Value::UnboundMethod(x), Value::UnboundMethod(y)) => x == y,
+        (Value::Class(x), Value::Class(y)) => Rc::ptr_eq(x, y),
+        (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y),
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Sym(x), Value::Sym(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Nil, Value::Nil) => true,
+        _ => false,
+    }
 }

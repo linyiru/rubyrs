@@ -43,17 +43,14 @@ def ruby(version)
 end
 
 # The workhorse. Bundler accepts `gem "name", *version_specs, **opts`.
-# rubyrs's host-fn API gives the closure a `&[Value]`, with no
-# `&Heap` to peer into the trailing Hash or splatted Array. So
-# we unpack here: stringify the requirements with `|` as a
-# separator (no version spec contains `|`), pull the kwargs we
-# care about, then pass everything as plain positionals to the
-# host. The host re-splits and records.
+# v2 host fn (`register_fn_v2` + `HostCtx`) reads the splat as an
+# Array and the kwargs as a Hash directly, with no Ruby-side
+# massage — `HostCtx` exposes `resolve_array`, `resolve_hash`, and
+# `resolve_sym` so Bundler's `:require => false` /
+# `:platforms => :mri` kwargs are unpacked entirely in typed
+# Rust. The Gemfile lines reach the host byte-for-byte unchanged.
 def gem(name, *requirements, **opts)
-  reqs = requirements.join("|")
-  require_kw   = opts.key?(:require)   ? opts[:require].to_s   : ""
-  platforms_kw = opts.key?(:platforms) ? opts[:platforms].to_s : ""
-  __gemfile_gem(name, reqs, require_kw, platforms_kw)
+  __gemfile_gem_v2(name, requirements, opts)
 end
 
 # ---------- block-scoping helpers ----------

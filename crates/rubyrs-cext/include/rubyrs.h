@@ -18,6 +18,7 @@
  * Mirror that so unmodified CRuby C extensions compile against us
  * without needing to add their own #include lines.
  * `<stdarg.h>` is for the `rb_funcall` static-inline wrapper. */
+#include <limits.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -35,11 +36,18 @@ extern "C" {
  * CRuby's tagged representation.) */
 typedef uint64_t VALUE;
 
-/* Singleton handles. Their numeric values are part of the ABI and
- * must match the constants defined in the Rust-side implementation. */
-extern VALUE Qnil;
-extern VALUE Qtrue;
-extern VALUE Qfalse;
+/* Singleton handles. Numeric values ARE the ABI — kept in sync
+ * with the `pub static Q*: Value = N` exports in rubyrs-cext's
+ * lib.rs (handles 0/1/2). Compile-time-constant macros (mirroring
+ * CRuby's `enum ruby_special_consts` shape) so cexts can use them
+ * in static initializers, e.g. `VALUE cFoo = Qnil;` at file scope.
+ *
+ * The Rust statics still exist as dlopen-resolvable symbols for
+ * cexts that reference them by extern declaration; the macros
+ * here just give the literal value path. */
+#define Qnil   ((VALUE)0)
+#define Qtrue  ((VALUE)1)
+#define Qfalse ((VALUE)2)
 
 /* Test whether a VALUE is the nil singleton. Mirrors CRuby. */
 #define NIL_P(v) ((v) == Qnil)
@@ -63,6 +71,14 @@ extern VALUE Qfalse;
  * CRuby's macro of the same name — extensions written for CRuby can
  * use this verbatim. */
 #define RUBY_METHOD_FUNC(func) ((VALUE (*)(ANYARGS))(func))
+
+/* NORETURN(decl): wrap a declaration with the `[[noreturn]]`-like
+ * attribute. CRuby's macro shape: `NORETURN(static void foo(int a))`.
+ * Without this define, the preprocessor leaves NORETURN(...) as
+ * what looks like a function call, and the inner declaration's
+ * arg names get parsed as K&R-style parameters — yielding
+ * "undeclared identifier" on every named arg. */
+#define NORETURN(decl) __attribute__((noreturn)) decl
 
 /* Allocate a new Ruby String from a NUL-terminated C string.
  * The bytes are copied; the caller retains ownership of `s`. */
@@ -147,6 +163,19 @@ void rb_define_global_function(const char *name,
  * `rb_define_class_under(parent, name, rb_cObject)` accepts its
  * third arg unchanged. Superclass is ignored at spike scope. */
 extern VALUE rb_cObject;
+extern VALUE rb_cString;
+extern VALUE rb_cArray;
+extern VALUE rb_cHash;
+extern VALUE rb_cFloat;
+extern VALUE rb_cInteger;
+extern VALUE rb_cNumeric;
+extern VALUE rb_cSymbol;
+extern VALUE rb_cTrueClass;
+extern VALUE rb_cFalseClass;
+extern VALUE rb_cNilClass;
+extern VALUE rb_cBasicObject;
+extern VALUE rb_cModule;
+extern VALUE rb_cClass;
 
 /* Declare a top-level module. Returns a class/module handle that
  * can be passed to `rb_define_class_under` or
@@ -337,7 +366,12 @@ typedef struct {
     void (*dmark)(void *);
     void (*dfree)(void *);
     size_t (*dsize)(const void *);
-    void *reserved[2];
+    /* dcompact: invoked by CRuby's compaction GC to update embedded
+     * VALUE references after objects move. rubyrs has no compaction
+     * GC, so this slot is parsed for ABI compat but never called.
+     * Cexts initialize it; we ignore it. */
+    void (*dcompact)(void *);
+    void *reserved[1];
 } rb_data_type_function_t;
 
 typedef struct rb_data_type_struct {
@@ -379,6 +413,472 @@ void *rb_check_typeddata(VALUE obj, const rb_data_type_t *type);
  */
 #define TypedData_Get_Struct(obj, type, data_type, sval) \
     ((sval) = (type *)rb_check_typeddata((obj), (data_type)))
+
+/* ===== Spike L3-D: trivial macros + stubs for flori/json wedge =====
+ *
+ * Cluster 1 — type predicates (host-side type-tag inspection).
+ * rubyrs has VALUE as opaque u64; we don't expose the tag layout
+ * to C. These predicates approximate the CRuby semantics enough
+ * for json-shape dispatch:
+ *   - FIXNUM_P / FLONUM_P / SPECIAL_CONST_P → defer to host
+ *     via a tiny helper rb_value_is_fixnum / rb_value_is_flonum,
+ *     declared below. (CRuby implements them as bit checks; we
+ *     can't because there's no exposed tag bit.)
+ *   - RB_TYPE_P / rb_type → host helper returns a CRuby-shape
+ *     `enum ruby_value_type` int. */
+typedef int rb_value_type_t;
+#define T_NONE     0
+#define T_NIL      1
+#define T_TRUE     2
+#define T_FALSE    3
+#define T_FIXNUM   4
+#define T_FLOAT    5
+#define T_STRING   6
+#define T_ARRAY    7
+#define T_HASH     8
+#define T_SYMBOL   9
+#define T_OBJECT  10
+#define T_CLASS   11
+#define T_MODULE  12
+#define T_DATA    13
+/* T_BIGNUM: CRuby's arbitrary-precision integer. rubyrs only has
+ * fixed-width i64 inside Number, so no value ever returns T_BIGNUM
+ * from rb_type — but the constant must exist so cext type switches
+ * compile. */
+#define T_BIGNUM  14
+#define T_REGEXP  15
+#define T_STRUCT  16
+#define T_RATIONAL 17
+#define T_COMPLEX 18
+
+int rb_value_type(VALUE v);
+#define rb_type(v) ((int)rb_value_type(v))
+#define RB_TYPE_P(v, t) (rb_value_type(v) == (t))
+#define RB_BUILTIN_TYPE(v) rb_value_type(v)
+
+int rb_value_is_fixnum(VALUE v);
+int rb_value_is_flonum(VALUE v);
+int rb_value_is_special_const(VALUE v);
+#define RB_FIXNUM_P(v)        rb_value_is_fixnum(v)
+#define RB_FLONUM_P(v)        rb_value_is_flonum(v)
+#define RB_SPECIAL_CONST_P(v) rb_value_is_special_const(v)
+#define FIXNUM_P(v)           RB_FIXNUM_P(v)
+#define FLONUM_P(v)           RB_FLONUM_P(v)
+#define SPECIAL_CONST_P(v)    RB_SPECIAL_CONST_P(v)
+
+/* Cluster 2 — conversion macros. rubyrs already has rb_int2num /
+ * rb_long2num / rb_num2int / rb_num2long; these macros wire the
+ * "FIX" / "ID" aliases CRuby code expects. */
+#define FIX2INT(v)   rb_num2int(v)
+#define FIX2LONG(v)  rb_num2long(v)
+#define LONG2FIX(n)  rb_long2num((long)(n))
+#define INT2FIX(n)   rb_int2num((int)(n))
+
+/* SYM2ID / ID2SYM — Symbol is a CValue::Sym(ID) on the host
+ * side; the macros here forward to small helpers. */
+ID rb_sym2id(VALUE sym);
+VALUE rb_id2sym(ID id);
+#define SYM2ID(sym) rb_sym2id(sym)
+#define ID2SYM(id)  rb_id2sym(id)
+
+/* Cluster 3 — branch hints. Free in CRuby; we just forward to
+ * the standard `__builtin_expect` ones. */
+#define RB_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define RB_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#ifndef LIKELY
+#define LIKELY(x)   RB_LIKELY(x)
+#endif
+#ifndef UNLIKELY
+#define UNLIKELY(x) RB_UNLIKELY(x)
+#endif
+
+/* Cluster 4 — GC barriers. rubyrs has mark-and-sweep, NO
+ * generational / incremental / movable GC. Every write-barrier
+ * macro the CRuby world cares about collapses to a plain
+ * assignment here. rb_gc_mark / rb_gc_mark_movable / rb_gc_location
+ * are no-ops because rubyrs walks roots from the host side and
+ * doesn't ask cexts to enumerate. */
+#define RB_OBJ_WRITE(a, slot, v)   ((*(slot)) = (v))
+#define RB_OBJ_WRITTEN(a, oldv, v) ((void)0)
+#define OBJ_WRITE(a, slot, v)      RB_OBJ_WRITE((a), (slot), (v))
+#define OBJ_WRITTEN(a, ov, v)      RB_OBJ_WRITTEN((a), (ov), (v))
+
+void rb_gc_mark(VALUE v);
+void rb_gc_mark_movable(VALUE v);
+VALUE rb_gc_location(VALUE v);
+void rb_gc_register_mark_object(VALUE v);
+void rb_global_variable(VALUE *var);
+
+/* Ractor safety declaration — CRuby uses this to opt a cext
+ * into the parallel-Ractor execution model. rubyrs is
+ * single-threaded across the cext boundary; the macro is a
+ * no-op. */
+void rb_ext_ractor_safe(int safe);
+#define RB_EXT_RACTOR_SAFE(x) rb_ext_ractor_safe(x)
+
+/* Cluster 4a — additional sentinels + TypedData flags + truthy.
+ *
+ * Qundef is CRuby's "uninitialized" sentinel (distinct from Qnil);
+ * used as default arg for rb_scan_args / rb_hash_lookup fallback.
+ * rubyrs uses Qnil for "absent" — Qundef aliases to a fresh
+ * never-allocated handle value (high bit set, like rb_e* sentinels). */
+#define Qundef ((VALUE)0xC000000000000000ULL)
+
+/* RTEST: CRuby truthiness — everything except Qnil and Qfalse is
+ * truthy. */
+#define RTEST(v) (((v) != Qnil) && ((v) != Qfalse))
+
+/* rb_data_type_t flags. RUBY_TYPED_FREE_IMMEDIATELY tells the
+ * GC to invoke dfree on sweep rather than deferring; rubyrs
+ * always frees immediately (we don't have generational GC), so
+ * this flag is informational only. */
+#define RUBY_TYPED_FREE_IMMEDIATELY  1
+#define RUBY_TYPED_WB_PROTECTED      2
+#define RUBY_TYPED_FROZEN_SHAREABLE  4
+
+/* RUBY_TYPED_DEFAULT_FREE: CRuby sentinel value for "this TypedData
+ * uses system free()". When a `rb_data_type_t`'s `dfree` slot is
+ * set to this value, GC sweep should call `free(data_ptr)` directly.
+ * rubyrs's heap-sweep treats it as a regular `unsafe extern "C" fn`
+ * pointer — supplying the libc `free()` here keeps the contract
+ * intact without a separate sentinel branch on the host side. */
+#define RUBY_TYPED_DEFAULT_FREE ((void (*)(void *))free)
+
+/* TypedData_Make_Struct: combined alloc + wrap (CRuby convenience).
+ *   sval = malloc(sizeof(type)); memset(sval, 0, sizeof(type));
+ *   return TypedData_Wrap_Struct(klass, type_ptr, sval);
+ * Matches CRuby's macro shape; the alloc'd struct is zero-init. */
+#define TypedData_Make_Struct(klass, type, type_ptr, sval) ( \
+    (sval) = (type *)ruby_xcalloc(1, sizeof(type)), \
+    rb_data_typed_object_wrap((klass), (sval), (type_ptr)) \
+)
+
+/* RTYPEDDATA_DATA: CRuby's macro is an lvalue used both to read
+ * (`p = RTYPEDDATA_DATA(v)`) and assign (`RTYPEDDATA_DATA(v) = NULL`,
+ * eg parser.rl:304). We expose a host helper returning a
+ * `void **` slot; deref makes it lvalue-compatible. */
+void **rb_typeddata_data_slot(VALUE obj);
+#define RTYPEDDATA_DATA(obj) (*rb_typeddata_data_slot(obj))
+
+/* OBJ_FREEZE: CRuby freezes the object so further mutation raises
+ * FrozenError. rubyrs's wedge doesn't enforce freeze on cext-side
+ * Values (would need parallel freeze flags on every CValue
+ * variant); no-op for now. flori/json freezes lookup tables which
+ * are read-only by construction. */
+#define OBJ_FREEZE(v) ((void)(v))
+#define OBJ_FROZEN(v) (1)  /* conservative: always-frozen */
+
+/* Module / global sentinels. rb_mKernel is the Kernel module
+ * handle returned by `rb_define_module("Kernel")` at bootstrap;
+ * cexts use it as a method-attach target for top-level methods.
+ * rb_cObject is already declared near the top of this header. */
+extern VALUE rb_mKernel;
+extern VALUE rb_mComparable;
+extern VALUE rb_mEnumerable;
+
+/* Cluster 5 — Array/Hash helpers used by flori/json. */
+VALUE rb_ary_new_from_values(long n, const VALUE *values);
+#define RARRAY_AREF(ary, i)  rb_ary_entry((ary), (i))
+long RHASH_SIZE(VALUE h);
+VALUE rb_hash_new_capa(long capa);
+#define RB_HASH_NEW_CAPA(n) rb_hash_new_capa((long)(n))
+/* hash_bulk_insert: CRuby fast path for bulk Hash construction.
+ * `argv` points to alternating key/value pairs; `n` is the
+ * count of values (so 2 entries per pair). flori/json uses this
+ * to build result Hashes without per-pair rb_hash_aset. */
+void rb_hash_bulk_insert(long n, const VALUE *argv, VALUE hash);
+#define RB_HASH_BULK_INSERT rb_hash_bulk_insert
+/* hash_foreach takes a C callback invoked per (k,v). Returning
+ * ST_CONTINUE (0) advances; ST_STOP (1) exits. */
+#define ST_CONTINUE 0
+#define ST_STOP     1
+typedef int (*rb_hash_foreach_func)(VALUE key, VALUE value, VALUE data);
+void rb_hash_foreach(VALUE hash, rb_hash_foreach_func cb, VALUE arg);
+
+/* Cluster 6 — Class / module helpers. */
+VALUE rb_obj_class(VALUE obj);
+VALUE rb_class_name(VALUE cls);
+VALUE rb_class_new_instance(int argc, const VALUE *argv, VALUE klass);
+VALUE rb_const_get(VALUE klass, ID id);
+VALUE rb_path_to_class(VALUE pathname);
+int rb_obj_is_kind_of(VALUE obj, VALUE klass);
+int rb_respond_to(VALUE obj, ID id);
+VALUE rb_define_module_under(VALUE outer, const char *name);
+void rb_define_alias(VALUE klass, const char *new_name, const char *old_name);
+void rb_define_private_method(VALUE klass, const char *name,
+                              VALUE (*func)(ANYARGS), int arity);
+typedef VALUE (*rb_alloc_func_t)(VALUE klass);
+void rb_define_alloc_func(VALUE klass, rb_alloc_func_t fn);
+VALUE rb_call_super(int argc, const VALUE *argv);
+VALUE rb_ivar_set(VALUE obj, ID id, VALUE val);
+VALUE rb_ivar_get(VALUE obj, ID id);
+
+/* Cluster 7 — exception helpers. */
+VALUE rb_exc_new_str(VALUE klass, VALUE msg);
+__attribute__((noreturn))
+void rb_exc_raise(VALUE exception);
+VALUE rb_rescue(VALUE (*body)(VALUE), VALUE arg,
+                VALUE (*rescue)(VALUE, VALUE), VALUE rescue_arg);
+
+/* Cluster 8 — argument-parsing helpers. */
+void rb_check_arity(int argc, int min, int max);
+int rb_scan_args(int argc, const VALUE *argv, const char *fmt, ...);
+
+/* Cluster 9 — misc IO + warning + require. */
+void rb_warn(const char *fmt, ...);
+void rb_category_warn(const char *category, const char *fmt, ...);
+#define RB_WARN_CATEGORY_DEPRECATED "deprecated"
+VALUE rb_io_flush(VALUE io);
+VALUE rb_io_write(VALUE io, VALUE str);
+VALUE rb_require(const char *feature);
+VALUE rb_vsprintf(const char *fmt, va_list args);
+
+/* Cluster 10a — memory helpers. CRuby exposes ALLOC_N / xfree /
+ * etc. as part of the public API; rubyrs maps them straight to
+ * libc since we don't track per-allocation telemetry. xmalloc /
+ * xfree historically panic-on-OOM (CRuby raises NoMemError);
+ * we mirror by aborting (real Trap propagation is L3-A.1 work). */
+#include <stdlib.h>
+#include <string.h>
+static inline void *ruby_xmalloc(size_t size) {
+    void *p = malloc(size);
+    if (!p) abort();  /* L3-A.1 follow-up: raise NoMemError */
+    return p;
+}
+static inline void *ruby_xrealloc(void *ptr, size_t size) {
+    void *p = realloc(ptr, size);
+    if (!p && size != 0) abort();
+    return p;
+}
+static inline void *ruby_xcalloc(size_t n, size_t size) {
+    void *p = calloc(n, size);
+    if (!p && n * size != 0) abort();
+    return p;
+}
+static inline void ruby_xfree(void *ptr) { free(ptr); }
+#define xmalloc(s)        ruby_xmalloc(s)
+#define xrealloc(p, s)    ruby_xrealloc((p), (s))
+#define xcalloc(n, s)     ruby_xcalloc((n), (s))
+#define xfree(p)          ruby_xfree(p)
+#define ALLOC(type)       ((type *)ruby_xmalloc(sizeof(type)))
+#define ALLOC_N(type, n)  ((type *)ruby_xmalloc(sizeof(type) * (size_t)(n)))
+#define REALLOC_N(var, type, n) \
+    ((var) = (type *)ruby_xrealloc((var), sizeof(type) * (size_t)(n)))
+#define MEMCPY(dst, src, type, n) \
+    memcpy((dst), (src), sizeof(type) * (size_t)(n))
+#define MEMMOVE(dst, src, type, n) \
+    memmove((dst), (src), sizeof(type) * (size_t)(n))
+#define MEMZERO(dst, type, n) \
+    memset((dst), 0, sizeof(type) * (size_t)(n))
+
+/* Cluster 9a — Number conversions. */
+VALUE rb_ll2num(long long n);
+VALUE rb_dbl2num(double d);
+#define LL2NUM(n)  rb_ll2num((long long)(n))
+#define ULL2NUM(n) rb_ll2num((long long)(n))
+#define DBL2NUM(d) rb_dbl2num((double)(d))
+VALUE rb_cstr2inum(const char *str, int base);
+
+/* rb_path_to_class takes a Ruby String (VALUE); rb_path2class
+ * takes a C string (const char *). CRuby exposes both as
+ * distinct entry points, not as macro aliases. */
+VALUE rb_path2class(const char *path);
+
+/* Check_Type asserts that v's type tag is T (raises TypeError
+ * otherwise). Mirrors CRuby's macro. */
+void rb_check_type(VALUE v, int t);
+#define Check_Type(v, t) rb_check_type((v), (t))
+
+/* StringValue: convert to String via implicit to_str dispatch,
+ * raise TypeError on failure. Takes a pointer because CRuby's
+ * version replaces *v with the converted value. */
+VALUE rb_string_value(VALUE *v);
+#define StringValue(v)     rb_string_value(&(v))
+
+/* rb_eArgError: alias for rb_eArgumentError used by older code.
+ * CRuby exposes both; we forward the alias. */
+#define rb_eArgError rb_eArgumentError
+
+/* Additional encoding indices used by flori/json's binary-vs-utf8
+ * dispatch. */
+int rb_ascii8bit_encindex(void);
+
+/* RBASIC_CLASS: returns the class VALUE of any object. Generator
+ * uses it for fast dispatch (compare against rb_cString / rb_cHash
+ * before falling through to method-call dispatch). */
+VALUE rb_basic_class(VALUE obj);
+#define RBASIC_CLASS(obj) rb_basic_class(obj)
+
+/* RFLOAT_VALUE: extract the C double from a Float VALUE. CRuby
+ * provides this as a struct field accessor; we expose as a host
+ * function call. */
+double rb_float_value(VALUE v);
+#define RFLOAT_VALUE(v) rb_float_value(v)
+
+/* rb_utf8_str_new_lit: CRuby variant that takes a string literal
+ * and uses sizeof - 1 for length. We collapse to rb_utf8_str_new
+ * via __builtin_strlen so a constant arg gets folded. */
+#define rb_utf8_str_new_lit(s) rb_utf8_str_new((s), (long)(sizeof(s) - 1))
+#define rb_str_new_lit(s)      rb_str_new((s), (long)(sizeof(s) - 1))
+
+/* PRIsVALUE: CRuby's printf conversion specifier that prints a
+ * VALUE via rb_obj_as_string (object → its inspect representation).
+ * rubyrs has no printf hook to intercept this, so we fall back to
+ * printing the raw u64 handle in hex. Output isn't pretty (cext
+ * uses this in error messages), but it compiles and the message
+ * is still distinguishable. A proper fix would route rb_raise's
+ * fmt through a custom formatter — beyond wedge scope. */
+#define PRIsVALUE "llx"
+
+/* CLASS_OF: returns the class VALUE of any object. Same surface
+ * as RBASIC_CLASS — distinct CRuby names that we collapse. */
+#define CLASS_OF(obj) rb_obj_class(obj)
+
+/* Cluster 10 — String helpers. */
+VALUE rb_str_buf_new(long capa);
+VALUE rb_str_dup(VALUE str);
+VALUE rb_str_freeze(VALUE str);
+VALUE rb_str_intern(VALUE str);
+void  rb_str_set_len(VALUE str, long len);
+VALUE rb_str_substr(VALUE str, long beg, long len);
+VALUE rb_sym2str(VALUE sym);
+double rb_cstr_to_dbl(const char *p, int badcheck);
+VALUE rb_convert_type(VALUE val, int type, const char *cname, const char *method);
+
+/* RB_GC_GUARD — keeps a Value live until the macro's call site.
+ * In CRuby this prevents the optimizer from dropping the binding
+ * before its heap reference is used. rubyrs's `Vm::pinned`
+ * mechanism does the same job from the host side, but cexts
+ * still write `RB_GC_GUARD(v)` for portability — no-op here. */
+#ifndef RB_GC_GUARD
+#define RB_GC_GUARD(v) ((void)(v))
+#endif
+
+/* ========================================================
+ * msgpack-ruby additions (L3-E spike).
+ *
+ * Surface beyond what flori/json's L3-D wedge needed:
+ *   - Bignum accessors (rubyrs has no arbitrary precision —
+ *     all integers are i64; >i64 values overflow at convert)
+ *   - rb_num2dbl (Float coercion)
+ *   - rb_class_of / rb_class_inherited_p (ancestry)
+ *   - rb_hash_lookup (returns Qnil for missing, like rb_hash_aref;
+ *     real CRuby distinguishes "missing" from "default value")
+ *   - Encoding macros for ENCODING_GET/SET on strings
+ *   - RUBY_FUNC_EXPORTED visibility attr
+ * ========================================================
+ */
+
+/* Visibility attr: CRuby uses this on Init_<gem>. */
+#define RUBY_FUNC_EXPORTED __attribute__((visibility("default")))
+
+/* rb_class_of: alias for the existing rb_basic_class helper. */
+#define rb_class_of(v) rb_basic_class(v)
+
+/* rb_class_inherited_p(child, parent): is child a subclass of parent
+ * (or equal to it)? rubyrs has no inheritance modeling at the spike
+ * level — return Qtrue conservatively so dispatch fallthrough works,
+ * matching the "respond_to / kind_of return permissive default"
+ * shape used elsewhere. */
+VALUE rb_class_inherited_p(VALUE child, VALUE parent);
+
+/* rb_hash_lookup(h, key): same as rb_hash_aref. CRuby uses this to
+ * skip the default-value path; rubyrs doesn't track defaults so
+ * the two are equivalent. */
+#define rb_hash_lookup(h, k) rb_hash_aref((h), (k))
+
+/* Numeric coercion */
+double rb_num2dbl(VALUE v);
+
+/* Bignum surface. rubyrs's Number is fixed i64; values outside
+ * the range overflow lossily. msgpack's packer uses these to
+ * decide narrow vs wide integer encoding. */
+size_t rb_absint_size(VALUE v, int *nlz_bits_ret);
+unsigned long long rb_big2ull(VALUE v);
+long long rb_big2ll(VALUE v);
+int rb_bignum_positive_p(VALUE v);
+#define RBIGNUM_POSITIVE_P(v) rb_bignum_positive_p(v)
+
+/* Encoding macros. ENCODING_GET returns the encindex of a String;
+ * ENCODING_SET tags a String with an encindex. rubyrs is UTF-8-
+ * everywhere so both collapse to no-op shape (GET always returns
+ * the UTF-8 index; SET is ignored). Distinct from the encoding.h
+ * functional accessors so cext code using either form compiles. */
+#define ENCODING_GET(v) rb_enc_get_index(v)
+#define ENCODING_SET(v, idx) ((void)(idx))
+
+/* ========================================================
+ * msgpack-ruby round 2 additions.
+ * ========================================================
+ */
+
+/* Conversions */
+#define NUM2SIZET(v)   ((size_t)rb_num2long(v))
+#define SIZET2NUM(n)   rb_long2num((long)(n))
+#define NUM2UINT(v)    ((unsigned int)rb_num2long(v))
+#define ULONG2NUM(n)   rb_long2num((long)(n))
+VALUE rb_ull2inum(unsigned long long n);
+/* ULL2NUM was defined earlier as rb_ll2num cast; redefine to the
+ * unsigned-truncating path now that we have a dedicated symbol. */
+#undef ULL2NUM
+#define ULL2NUM(n) rb_ull2inum(n)
+VALUE rb_float_new(double d);
+
+/* Array varargs ctor: rb_ary_new3(n, v1, v2, ...). CRuby exposes
+ * this as a variadic alias for rb_ary_new_from_args. rubyrs's
+ * variadic surface is limited; emulate via the existing
+ * rb_ary_new_from_values + caller staging the args into a stack
+ * array. msgpack uses small Ns (typically 2-3); macro form
+ * dispatches up to N=5. */
+VALUE rb_ary_new3(long n, ...);
+
+/* Hash mutation */
+VALUE rb_hash_clear(VALUE h);
+VALUE rb_hash_dup(VALUE h);
+VALUE rb_hash_freeze(VALUE h);
+
+/* String mutation */
+VALUE rb_str_buf_cat(VALUE str, const char *ptr, long len);
+VALUE rb_str_replace(VALUE dst, VALUE src);
+VALUE rb_String(VALUE v);  /* coerce to String via to_s */
+
+/* Exception flow control */
+__attribute__((noreturn))
+void rb_bug(const char *fmt, ...);
+VALUE rb_errinfo(void);
+__attribute__((noreturn))
+void rb_jump_tag(int tag);
+VALUE rb_protect(VALUE (*body)(VALUE), VALUE arg, int *state);
+VALUE rb_rescue2(VALUE (*body)(VALUE), VALUE body_arg,
+                 VALUE (*rescue)(VALUE, VALUE), VALUE rescue_arg, ...);
+extern VALUE rb_eEOFError;
+extern VALUE rb_eFrozenError;
+extern VALUE rb_eEncCompatError;
+
+/* Class / object */
+void rb_define_const(VALUE klass, const char *name, VALUE val);
+const char *rb_obj_classname(VALUE v);
+VALUE rb_obj_freeze(VALUE v);
+int rb_obj_frozen_p(VALUE v);
+
+/* Symbols */
+ID rb_intern3(const char *name, long len, void *enc);
+
+/* Struct — rubyrs doesn't model Struct; stub returns a Class
+ * sentinel that supports `.new(args) -> Array-shape Object`. */
+VALUE rb_struct_define(const char *name, ...);
+VALUE rb_struct_new(VALUE klass, ...);
+#define RSTRUCT_GET(s, i) rb_struct_aref((s), (i))
+VALUE rb_struct_aref(VALUE s, long i);
+
+/* msgpack-ruby round 3 additions. */
+#define FIX2ULONG(v) ((unsigned long)rb_num2long(v))
+VALUE rb_ll2inum(long long n);
+VALUE rb_check_string_type(VALUE v);
+void rb_include_module(VALUE klass, VALUE mod);
+VALUE rb_str_resize(VALUE str, long len);
+void rb_undef_alloc_func(VALUE klass);
+VALUE rb_yield(VALUE arg);
 
 #ifdef __cplusplus
 }

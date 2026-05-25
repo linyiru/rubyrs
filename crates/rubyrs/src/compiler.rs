@@ -96,6 +96,7 @@ impl ProtoBuilder {
             rest_param: None,
             kw_param_defaults: vec![],
             kw_rest_param: None,
+            block_param: None,
             n_locals: self.n_locals,
             code: self.code,
             op_spans: self.op_spans,
@@ -603,7 +604,7 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CallNoRecv(name_id, argc, cid));
             }
         }
-        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, receiver, body } => {
+        Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
             // `defaults` is parallel to `params`: leading `None`s are
             // required positionals, trailing `Some(expr)`s are
             // optionals. The compile_proto_kind helper emits a
@@ -637,6 +638,12 @@ pub(crate) fn compile_expr(
                 let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
                 effective_params.push(slot_name);
             }
+            // `&blk` named block param goes at the very end, after
+            // kw_rest if any. Frame setup binds either Value::Block
+            // (if caller passed a block) or Value::Nil into this slot.
+            if let Some(bname) = block_param {
+                effective_params.push(bname.clone());
+            }
             let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
                 d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
             }).collect();
@@ -651,6 +658,9 @@ pub(crate) fn compile_expr(
             if let Some(krname) = kw_rest {
                 let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
                 protos[proto_idx].kw_rest_param = Some(slot_name);
+            }
+            if let Some(bname) = block_param {
+                protos[proto_idx].block_param = Some(bname.clone());
             }
             let name_id = interner.intern(name);
             match receiver {
@@ -747,9 +757,9 @@ pub(crate) fn compile_expr(
                 && matches!(args[0].node, Expr::SymbolLit(_))
             {
                 let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
-                let (block_proto_idx, param_start, n_params) =
+                let (block_proto_idx, param_start, n_params, rest_slot) =
                     compile_block(b, block_params, block_body, protos, interner, cc);
-                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
+                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
                 let nid = interner.intern(&sym_name);
                 b.emit(Op::DefMethodBlock(nid));
                 b.current_span = prev_span;
@@ -769,20 +779,20 @@ pub(crate) fn compile_expr(
             {
                 let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
                 compile_expr(b, r, protos, interner, cc);
-                let (block_proto_idx, param_start, n_params) =
+                let (block_proto_idx, param_start, n_params, rest_slot) =
                     compile_block(b, block_params, block_body, protos, interner, cc);
-                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
+                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
                 let nid = interner.intern(&sym_name);
                 b.emit(Op::DefObjectSingletonMethodBlock(nid));
                 b.current_span = prev_span;
                 return;
             }
-            let (block_proto_idx, param_start, n_params) =
+            let (block_proto_idx, param_start, n_params, rest_slot) =
                 compile_block(b, block_params, block_body, protos, interner, cc);
             let name_id = interner.intern(name);
             let has_recv = receiver.is_some();
             if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
-            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
+            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
             let cid = *cc as u16; *cc += 1;
@@ -890,13 +900,11 @@ pub(crate) fn compile_expr(
             // `->(p) { body }` — compile the body as a block proto
             // and emit CreateBlock. Result stays on the stack as a
             // Value::Block (which supports `.call(args)` already).
-            // Lambda params are always plain names (no destructure
-            // in Prism's LambdaNode parameters), so wrap each as
-            // `BlockParam::Single` to match compile_block's API.
-            let bps: Vec<BlockParam> = params.iter().cloned().map(BlockParam::Single).collect();
-            let (block_proto_idx, param_start, n_params) =
-                compile_block(b, &bps, body, protos, interner, cc);
-            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params));
+            // Lambda params are now `Vec<BlockParam>` (post K7), so
+            // they go straight into compile_block without rewrapping.
+            let (block_proto_idx, param_start, n_params, rest_slot) =
+                compile_block(b, params, body, protos, interner, cc);
+            b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
         }
         Expr::Begin { body, rescue, ensure } => {
             // Layered: optional outer ensure, zero-or-more inner
@@ -1067,10 +1075,14 @@ fn literal_to_value(e: &Expr, interner: &mut Interner) -> Value {
     }
 }
 
+/// Compile a block body into a fresh proto + return its
+/// (proto_idx, param_start, n_params, rest_slot) for the
+/// caller to encode into the `CreateBlock` op. `rest_slot`
+/// is `u16::MAX` when the block has no `*rest` parameter.
 pub(crate) fn compile_block(
-    parent: &ProtoBuilder, block_params: &[BlockParam], body: &[SExpr],
+    parent: &mut ProtoBuilder, block_params: &[BlockParam], body: &[SExpr],
     protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
-) -> (usize, u16, u16) {
+) -> (usize, u16, u16, u16) {
     let mut b = ProtoBuilder {
         code: vec![],
         op_spans: vec![],
@@ -1134,6 +1146,15 @@ pub(crate) fn compile_block(
                     child_slots.push(anon_slot);
                     nested.push((anon_slot, deeper, anon));
                 }
+                BlockParam::Rest(_) => {
+                    // Rest-in-destructure (`|(a, *b)|`) isn't part
+                    // of our subset — Prism would emit it as a
+                    // SplatNode inside MultiTargetNode.lefts(),
+                    // which the AST translator's `parse_one` does
+                    // NOT recognise. If we ever extend support,
+                    // the rest slot would go into child_slots
+                    // alongside the leading required ones.
+                }
             }
         }
         jobs.push(Job::Job(parent_slot, child_slots));
@@ -1145,21 +1166,40 @@ pub(crate) fn compile_block(
         }
     }
 
-    // Phase 1: top-level call-interface slots.
+    // Phase 1: top-level call-interface slots. Rest params get
+    // their own slot but are NOT counted in `n_params` — the
+    // call-interface arg loop in invoke_block tops out at
+    // n_params, then a separate rest-collector loop fills the
+    // rest slot from any overflow args.
     let mut top_destructures: Vec<(u16, &[BlockParam], String)> = Vec::new();
+    let mut rest_slot: u16 = u16::MAX;
+    let mut n_required: u16 = 0;
     for (i, p) in block_params.iter().enumerate() {
         match p {
             BlockParam::Single(name) => {
                 b.define_local_slot(name);
+                n_required += 1;
             }
             BlockParam::Destructure(inners) => {
                 let anon = format!("__destruct_{i}");
                 let anon_slot = b.define_local_slot(&anon);
                 top_destructures.push((anon_slot, inners, anon));
+                n_required += 1;
+            }
+            BlockParam::Rest(name) => {
+                // Anonymous `|*|` reserves a slot under a synth
+                // name so the prologue still has somewhere to put
+                // the Array (just unreachable from the body).
+                let slot_name = if name.is_empty() { format!("__rest_{i}") } else { name.clone() };
+                let s = b.define_local_slot(&slot_name);
+                // Only one rest slot per param list — Prism
+                // enforces this at parse time; defensive overwrite
+                // just keeps the last one if we ever extend.
+                rest_slot = s;
             }
         }
     }
-    let n_params = block_params.len() as u16;
+    let n_params = n_required;
     // Phase 2: walk every top-level destructure's children.
     for (anon_slot, inners, anon_name) in top_destructures {
         alloc_inner(&mut b, anon_slot, inners, &mut jobs, &anon_name);
@@ -1201,14 +1241,29 @@ pub(crate) fn compile_block(
     // destructure block params we use the synthesised anonymous
     // name in the call-interface slot; the named inner locals
     // are not part of params (they aren't fed by the caller).
-    let proto_params: Vec<String> = block_params.iter().enumerate().map(|(i, p)| match p {
-        BlockParam::Single(n) => n.clone(),
-        BlockParam::Destructure(_) => format!("__destruct_{i}"),
+    let proto_params: Vec<String> = block_params.iter().enumerate().filter_map(|(i, p)| match p {
+        BlockParam::Single(n) => Some(n.clone()),
+        BlockParam::Destructure(_) => Some(format!("__destruct_{i}")),
+        // Rest param isn't part of the call-interface params
+        // (invoke_block populates it via the rest-collector
+        // loop, not the per-arg fill).
+        BlockParam::Rest(_) => None,
     }).collect();
     let proto_param_count = proto_params.len();
     let idx = protos.len();
     // Blocks don't use the default-arg prologue (no defaults
     // syntax in our block params), so every slot is required.
+    // Propagate the block's slot reservations back to the parent
+    // so subsequent outer-scope local allocations (`x = 99` after
+    // `f = ->(a,b) { ... }`) don't reuse the block's param /
+    // body slots and clobber them on each invocation. The
+    // captured Rc is shared, so writes to the block's slots
+    // are visible (and DESTRUCTIVE) to anything the parent
+    // happens to bind into the same index later.
+    let block_n_locals = b.n_locals;
     protos.push(b.build("<block>".into(), proto_params, proto_param_count as u16));
-    (idx, param_start, n_params)
+    if parent.n_locals < block_n_locals {
+        parent.n_locals = block_n_locals;
+    }
+    (idx, param_start, n_params, rest_slot)
 }

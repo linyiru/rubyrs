@@ -89,6 +89,17 @@ pub(crate) fn numeric_call(
         (Value::Int(a), "zero?", []) => Some(Value::Bool(*a == 0)),
         (Value::Int(a), "positive?", []) => Some(Value::Bool(*a > 0)),
         (Value::Int(a), "negative?", []) => Some(Value::Bool(*a < 0)),
+        // `Integer#bit_length` — number of bits required to
+        // represent the magnitude. For negatives, CRuby uses
+        // two's-complement semantics: bit_length(-1) = 0,
+        // bit_length(-256) = 8. Equivalent to `bit_length(~n)`
+        // for negative `n`. For non-negatives, it's the position
+        // of the most-significant 1 bit.
+        (Value::Int(a), "bit_length", []) => {
+            let magnitude: u64 = if *a >= 0 { *a as u64 } else { !(*a as u64) };
+            let bits = 64 - magnitude.leading_zeros();
+            Some(Value::Int(bits as i64))
+        }
         (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => Some(Value::Int(a.wrapping_add(1))),
         (Value::Int(a), "pred", []) => Some(Value::Int(a.wrapping_sub(1))),
         (Value::Int(a), "to_f", []) => Some(Value::Float(*a as f64)),
@@ -118,6 +129,35 @@ pub(crate) fn numeric_call(
             "**" => Some(Value::Float(a.powf(*b))),
             _ => None,
         },
+        // Precision-arg form of Float#round / #truncate. Lives
+        // BEFORE the mixed-numeric coercion arm below — otherwise
+        // that broader `(Float, op, [Int])` arm shadows these.
+        // Positive `n` keeps `n` digits after the decimal point
+        // and returns a Float; negative `n` zeros out the
+        // low-order Integer digits and returns Int. Mirrors
+        // CRuby's `Float#round(n)` / `#truncate(n)` shape.
+        (Value::Float(a), "round", [Value::Int(n)]) => {
+            if *n == 0 {
+                Some(Value::Int(a.round() as i64))
+            } else if *n > 0 {
+                let p = 10f64.powi((*n).min(15) as i32);
+                Some(Value::Float((a * p).round() / p))
+            } else {
+                let p = 10f64.powi((-*n).min(18) as i32);
+                Some(Value::Int(((a / p).round() * p) as i64))
+            }
+        }
+        (Value::Float(a), "truncate", [Value::Int(n)]) => {
+            if *n == 0 {
+                Some(Value::Int(a.trunc() as i64))
+            } else if *n > 0 {
+                let p = 10f64.powi((*n).min(15) as i32);
+                Some(Value::Float((a * p).trunc() / p))
+            } else {
+                let p = 10f64.powi((-*n).min(18) as i32);
+                Some(Value::Int(((a / p).trunc() * p) as i64))
+            }
+        }
         // Mixed Int/Float — CRuby's "Float wins" coercion.
         (Value::Float(a), op, [Value::Int(b)]) => {
             let b = *b as f64;
@@ -188,6 +228,7 @@ pub(crate) fn numeric_call(
         (Value::Float(a), "floor", []) => Some(Value::Int(a.floor() as i64)),
         (Value::Float(a), "ceil", []) => Some(Value::Int(a.ceil() as i64)),
         (Value::Float(a), "round", []) => Some(Value::Int(a.round() as i64)),
+        (Value::Float(a), "truncate", []) => Some(Value::Int(a.trunc() as i64)),
         _ => None,
     })
 }

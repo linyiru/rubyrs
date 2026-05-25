@@ -200,7 +200,7 @@ fn string_arg(args: &[Value], idx: usize) -> Option<String> {
     // RStr derefs to RefCell<String>; clone out the inner String
     // so we own it past the borrow.
     match args.get(idx) {
-        Some(Value::Str(s)) => Some(s.borrow().clone()),
+        Some(Value::Str(s)) => Some(s.to_string_lossy()),
         _ => None,
     }
 }

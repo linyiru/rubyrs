@@ -100,10 +100,12 @@ fn run_rubyrs_eval(gemfile_path: &Path) -> Vec<GemRequirement> {
             let mut version = "1.0.0".to_string(); // fallback
             if args.len() > 1
                 && let Value::Str(v) = &args[1] {
-                    version = v.borrow().clone();
+                    version = v.to_string_lossy();
                 }
+            // RStr::borrow() returns Vec<u8> post-PR #53; convert
+            // lossily — gem names are ASCII in practice.
             reqs_clone.borrow_mut().push(GemRequirement {
-                name: name.borrow().clone(),
+                name: name.to_string_lossy(),
                 version: clean_version(&version),
             });
         }
