@@ -1,33 +1,71 @@
-//! Acceptance test for the Level 1 C-ext compat spike.
+//! Acceptance test for the Level 1.5 C-ext compat spike.
 //!
-//! Builds and runs `examples/bcrypt-cext/`, a CRuby-shape extension
-//! that takes (password, salt) Strings and returns a 60-byte
-//! bcrypt-formatted String. The crypto inside the bundle is a
-//! deterministic stub — the test exercises:
+//! This is the "100% verification" gate the user asked for: not
+//! "our stub round-trips correctly" but "bcrypt-ruby's actual
+//! `bcrypt_ext.c` source — unmodified — links against vendored
+//! openwall crypt_blowfish, runs under rubyrs, and produces
+//! byte-identical output to the published bcrypt reference vectors".
 //!
-//!   1. arity-2 dispatch from `Vm::cext_require` into the C ext
-//!   2. String args travelling Ruby → C via `RSTRING_PTR` /
-//!      `RSTRING_LEN`
-//!   3. String return travelling C → Ruby via `rb_str_new(ptr, len)`
-//!   4. per-call `CExtState` reset (handles allocated inside call N
-//!      don't leak into call N+1)
+//! What this exercises:
 //!
-//! If any wire is loose, one of the assertions below catches it.
-//! See `crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.c` for what
-//! "stub crypto" means here and how to upgrade to the real gem.
+//!   1. CRuby-shape extension source (`#include <ruby.h>`) compiles
+//!      against our `<ruby.h>` alias unchanged.
+//!   2. `rb_define_module("BCrypt")` + `rb_define_class_under(...,
+//!      "Engine", rb_cObject)` + `rb_define_singleton_method`
+//!      produce a class lookup-able from Ruby as `BCrypt::Engine`.
+//!   3. `BCrypt::Engine.__bc_crypt(pw, salt)` from Ruby dispatches
+//!      to bc_crypt with arity 2.
+//!   4. bc_crypt's `StringValueCStr` / `NIL_P` / `rb_str_new_frozen`
+//!      / `RB_GC_GUARD` / `rb_str_new2` / `free` macros all work.
+//!   5. The byte-pointer it hands to `crypt_ra` is NUL-terminated
+//!      (the bcrypt $2a$ format includes the salt in the input
+//!      `setting` arg, and crypt_ra reads up to `\0`).
+//!   6. The bcrypt output bytes round-trip back through `rb_str_new2`
+//!      → host translation → Ruby String → `puts`.
+//!
+//! Every byte of every assertion below was produced by Openwall's
+//! crypt_blowfish reference implementation on a CRuby system and
+//! published as canonical bcrypt test data.
+//!
+//! If this test goes red, the bcrypt path is genuinely broken
+//! somewhere — there's no plausible failure mode here that doesn't
+//! map to a real regression in the cext FFI.
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Openwall bcrypt test vectors. Format: `(password, salt-with-cost-prefix, expected-hash)`.
+///
+/// Source: bcrypt reference test data shipped with openwall
+/// crypt_blowfish. Each vector independently verifiable against
+/// `openssl passwd -2a` or any conforming bcrypt implementation.
+const REFERENCE_VECTORS: &[(&str, &str, &str)] = &[
+    (
+        "U*U",
+        "$2a$05$CCCCCCCCCCCCCCCCCCCCC.",
+        "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW",
+    ),
+    (
+        "U*U*",
+        "$2a$05$CCCCCCCCCCCCCCCCCCCCC.",
+        "$2a$05$CCCCCCCCCCCCCCCCCCCCC.VGOzA784oUp/Z0DY336zx7pLYAy0lwK",
+    ),
+    (
+        "U*U*U",
+        "$2a$05$XXXXXXXXXXXXXXXXXXXXXO",
+        "$2a$05$XXXXXXXXXXXXXXXXXXXXXOAcXxm9kjPGEMsLznoKqmqw7tc8WCx4a",
+    ),
+];
+
 #[test]
-fn bcrypt_cext_round_trip() {
+fn bcrypt_reference_vectors_round_trip() {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let example_dir = crate_dir.join("examples/bcrypt-cext");
     let build_sh = example_dir.join("build.sh");
     assert!(build_sh.exists(), "missing build.sh at {}", build_sh.display());
 
-    // 1. Build the bundle.
+    // 1. Build the bundle (and vendored crypt_blowfish, if not cached).
     let build = Command::new("bash")
         .arg(&build_sh)
         .output()
@@ -39,7 +77,7 @@ fn bcrypt_cext_round_trip() {
         String::from_utf8_lossy(&build.stderr),
     );
 
-    // 2. Locate artefact, host-aware.
+    // 2. Locate artefact.
     let ext = if cfg!(target_os = "macos") {
         "bundle"
     } else if cfg!(windows) {
@@ -54,28 +92,22 @@ fn bcrypt_cext_round_trip() {
         bundle.display()
     );
 
-    // 3. Driver: call bcrypt_hash four times, dump each result on
-    //    its own line so Rust can parse and compare. Spelled out
-    //    explicitly because rubyrs doesn't have `String#!=` yet —
-    //    the cross-string comparisons live on the Rust side.
+    // 3. Driver: for each reference vector, call
+    //    `BCrypt::Engine.__bc_crypt(password, salt)` and `puts` the
+    //    result on its own line. Output order matches REFERENCE_VECTORS.
     let bundle_no_ext = bundle.with_extension("");
     let driver_dir = env!("CARGO_TARGET_TMPDIR");
     let driver = PathBuf::from(driver_dir).join("cext_bcrypt_driver.rb");
-    fs::write(
-        &driver,
-        format!(
-            r#"require "{}"
-puts bcrypt_hash("hunter2", "saltsalt")
-puts bcrypt_hash("hunter2", "saltsalt")
-puts bcrypt_hash("hunter3", "saltsalt")
-puts bcrypt_hash("hunter2", "saltdiff")
-"#,
-            bundle_no_ext.display()
-        ),
-    )
-    .expect("failed to write driver.rb");
+    let mut script = format!("require \"{}\"\n", bundle_no_ext.display());
+    for (pw, salt, _) in REFERENCE_VECTORS {
+        script.push_str(&format!(
+            "puts BCrypt::Engine.__bc_crypt({:?}, {:?})\n",
+            pw, salt
+        ));
+    }
+    fs::write(&driver, &script).expect("failed to write driver.rb");
 
-    // 4. Run.
+    // 4. Run rubyrs against the driver.
     let rubyrs_bin = env!("CARGO_BIN_EXE_rubyrs");
     let run = Command::new(rubyrs_bin)
         .arg(&driver)
@@ -94,48 +126,22 @@ puts bcrypt_hash("hunter2", "saltdiff")
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
         lines.len(),
-        4,
-        "expected 4 output lines, got {}\nstdout:\n{}",
+        REFERENCE_VECTORS.len(),
+        "expected {} output lines, got {}\nstdout:\n{}",
+        REFERENCE_VECTORS.len(),
         lines.len(),
         stdout
     );
 
-    // 5. Shape: each is 60 bytes, $2a$10$ prefixed.
-    for (i, line) in lines.iter().enumerate() {
+    // 5. The load-bearing assertion. Each output byte-identical
+    //    to the published reference vector.
+    for (i, ((pw, salt, expected), got)) in
+        REFERENCE_VECTORS.iter().zip(lines.iter()).enumerate()
+    {
         assert_eq!(
-            line.len(),
-            60,
-            "line {} wrong length ({}): {:?}",
-            i,
-            line.len(),
-            line
-        );
-        assert!(
-            line.starts_with("$2a$10$"),
-            "line {} missing bcrypt prefix: {:?}",
-            i,
-            line
+            got, expected,
+            "vector #{}: bcrypt({:?}, {:?})\n  expected: {}\n  got:      {}",
+            i, pw, salt, expected, got
         );
     }
-
-    // 6. Determinism: same inputs → identical output.
-    assert_eq!(
-        lines[0], lines[1],
-        "bcrypt_hash is non-deterministic for identical inputs:\n  {:?}\n  {:?}",
-        lines[0], lines[1]
-    );
-
-    // 7. Password-sensitive: changing password changes output.
-    assert_ne!(
-        lines[0], lines[2],
-        "bcrypt_hash is insensitive to the password arg:\n  pw=hunter2 → {:?}\n  pw=hunter3 → {:?}",
-        lines[0], lines[2]
-    );
-
-    // 8. Salt-sensitive: changing salt changes output.
-    assert_ne!(
-        lines[0], lines[3],
-        "bcrypt_hash is insensitive to the salt arg:\n  salt=saltsalt → {:?}\n  salt=saltdiff → {:?}",
-        lines[0], lines[3]
-    );
 }

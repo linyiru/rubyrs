@@ -63,6 +63,46 @@ static _RB_DEFINE_GLOBAL_FUNCTION: unsafe extern "C" fn(
     rubyrs_cext::OpaqueFn,
     std::ffi::c_int,
 ) = rubyrs_cext::rb_define_global_function;
+#[used]
+static _RB_STR_NEW_FROZEN: unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_str_new_frozen;
+#[used]
+static _RB_STRING_VALUE_CSTR: unsafe extern "C" fn(*mut rubyrs_cext::Value) -> *const std::ffi::c_char =
+    rubyrs_cext::rb_string_value_cstr;
+#[used]
+static _RB_STRING_VALUE_PTR: unsafe extern "C" fn(*mut rubyrs_cext::Value) -> *const std::ffi::c_char =
+    rubyrs_cext::rb_string_value_ptr;
+#[used]
+static _RB_INT2NUM: unsafe extern "C" fn(std::ffi::c_int) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_int2num;
+#[used]
+static _RB_LONG2NUM: unsafe extern "C" fn(std::ffi::c_long) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_long2num;
+#[used]
+static _RB_NUM2INT: unsafe extern "C" fn(rubyrs_cext::Value) -> std::ffi::c_int =
+    rubyrs_cext::rb_num2int;
+#[used]
+static _RB_NUM2LONG: unsafe extern "C" fn(rubyrs_cext::Value) -> std::ffi::c_long =
+    rubyrs_cext::rb_num2long;
+#[used]
+static _RB_NUM2ULONG: unsafe extern "C" fn(rubyrs_cext::Value) -> std::ffi::c_ulong =
+    rubyrs_cext::rb_num2ulong;
+#[used]
+static _RB_DEFINE_MODULE: unsafe extern "C" fn(*const std::ffi::c_char) -> rubyrs_cext::Value =
+    rubyrs_cext::rb_define_module;
+#[used]
+static _RB_DEFINE_CLASS_UNDER: unsafe extern "C" fn(
+    rubyrs_cext::Value,
+    *const std::ffi::c_char,
+    rubyrs_cext::Value,
+) -> rubyrs_cext::Value = rubyrs_cext::rb_define_class_under;
+#[used]
+static _RB_DEFINE_SINGLETON_METHOD: unsafe extern "C" fn(
+    rubyrs_cext::Value,
+    *const std::ffi::c_char,
+    rubyrs_cext::OpaqueFn,
+    std::ffi::c_int,
+) = rubyrs_cext::rb_define_singleton_method;
 
 /// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
 /// untrusted scripts.

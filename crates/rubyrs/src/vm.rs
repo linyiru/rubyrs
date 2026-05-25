@@ -134,6 +134,12 @@ pub(crate) struct Vm {
     pub(crate) classes: HashMap<SymId, Rc<Class>>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
     pub(crate) host_fns: HashMap<SymId, Rc<HostFn>>,
+    /// C-ext singleton-method dispatch table. Indexed by
+    /// `(class joined name, method SymId)`. Populated by
+    /// `Vm::cext_require` whenever a C ext calls
+    /// `rb_define_singleton_method`; consulted by `do_call` when
+    /// the receiver is `Value::Class(c)`.
+    pub(crate) cext_class_methods: HashMap<String, HashMap<SymId, Rc<HostFn>>>,
     pub(crate) class_stack: Vec<Rc<Class>>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
@@ -204,6 +210,7 @@ impl Vm {
             classes: HashMap::new(),
             toplevel_methods: HashMap::new(),
             host_fns: HashMap::new(),
+            cext_class_methods: HashMap::new(),
             class_stack: vec![],
             stack: Vec::with_capacity(1024),
             frames: vec![],
@@ -591,6 +598,19 @@ impl Vm {
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
+            }
+        }
+        // C-ext singleton dispatch: `BCrypt::Engine.__bc_crypt(args)`
+        // arrives here with recv = Value::Class(c). Look up the
+        // method in the per-class cext table populated by
+        // `Vm::cext_require` (rb_define_singleton_method).
+        if let Value::Class(cls) = &recv {
+            if let Some(table) = self.cext_class_methods.get(&cls.name) {
+                if let Some(host) = table.get(&name_id).cloned() {
+                    let v = host(&args)?;
+                    self.stack.push(v);
+                    return Ok(());
+                }
             }
         }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
@@ -2547,6 +2567,36 @@ impl Vm {
                 );
             }
 
+            // Materialise every class/module the C ext declared, so
+            // `LoadConst("BCrypt::Engine")` finds them.
+            for cls in state.registered_classes {
+                let name_sym = self.interner.intern(&cls.joined_name);
+                let new_class = Rc::new(Class {
+                    name: cls.joined_name.clone(),
+                    methods: RefCell::new(HashMap::new()),
+                    superclass: RefCell::new(None),
+                });
+                self.classes.insert(name_sym, new_class);
+            }
+
+            // Register every singleton method into the per-class
+            // dispatch table consulted by `do_call`.
+            for sm in state.registered_singletons {
+                let method_sym = self.interner.intern(&sm.method_name);
+                let func = sm.func;
+                let arity = sm.arity;
+                let qualified = format!("{}.{}", sm.class_joined_name, sm.method_name);
+                self.cext_class_methods
+                    .entry(sm.class_joined_name)
+                    .or_default()
+                    .insert(
+                        method_sym,
+                        Rc::new(move |args: &[Value]| {
+                            cext_dispatch(&qualified, func, arity, args)
+                        }),
+                    );
+            }
+
             // Level 0: keep the library mapped for the lifetime of the
             // process. Registered function pointers point into its
             // text segment; unmapping would dangle them. A real impl
@@ -2565,7 +2615,21 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
         rubyrs_cext::CValue::Nil => Value::Nil,
         rubyrs_cext::CValue::True => Value::Bool(true),
         rubyrs_cext::CValue::False => Value::Bool(false),
-        rubyrs_cext::CValue::Str(s) => Value::Str(Rc::from(s.as_str())),
+        // CValue::Str stores bytes + sentinel NUL; the logical
+        // string is `.len() - 1` bytes. Decode lossily into UTF-8
+        // since rubyrs's Value::Str is `Rc<str>` (UTF-8). Binary-
+        // safe storage on the rubyrs side lands in a later level.
+        rubyrs_cext::CValue::Str(bytes) => {
+            let logical = &bytes[..bytes.len().saturating_sub(1)];
+            Value::Str(Rc::from(String::from_utf8_lossy(logical).as_ref()))
+        }
+        rubyrs_cext::CValue::Int(n) => Value::Int(*n),
+        // Class handles are returned from `rb_define_module` /
+        // `rb_define_class_under`; bcrypt's wrappers don't return
+        // them as plain values to Ruby, but if a future ext does,
+        // surface as Nil for now (no Class lookup from raw name
+        // outside the rubyrs::classes registry yet).
+        rubyrs_cext::CValue::Class(_) => Value::Nil,
     }
 }
 
@@ -2579,7 +2643,8 @@ fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext
         Value::Nil => rubyrs_cext::CValue::Nil,
         Value::Bool(true) => rubyrs_cext::CValue::True,
         Value::Bool(false) => rubyrs_cext::CValue::False,
-        Value::Str(s) => rubyrs_cext::CValue::Str(s.to_string()),
+        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.as_bytes()),
+        Value::Int(n) => rubyrs_cext::CValue::Int(*n),
         other => {
             return Err(Trap::new(RubyError::ArgumentError {
                 msg: format!(
@@ -2611,11 +2676,11 @@ fn cext_dispatch(
     args: &[Value],
 ) -> Result<Value, Trap> {
     let expected_argc = match arity {
-        0 | 1 | 2 => arity as usize,
+        0..=5 => arity as usize,
         _ => {
             return Err(Trap::new(RubyError::ArgumentError {
                 msg: format!(
-                    "C ext `{}': spike Level 1 only dispatches arity 0/1/2 (got arity {})",
+                    "C ext `{}': spike dispatches arity 0..=5 (got arity {})",
                     name, arity
                 ),
             }));
@@ -2674,6 +2739,45 @@ fn cext_dispatch(
                     ) -> rubyrs_cext::Value;
                     let f: F = std::mem::transmute(func);
                     f(rubyrs_cext::Qnil, arg_handles[0], arg_handles[1])
+                }
+                3 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(rubyrs_cext::Qnil, arg_handles[0], arg_handles[1], arg_handles[2])
+                }
+                4 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(
+                        rubyrs_cext::Qnil,
+                        arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3],
+                    )
+                }
+                5 => {
+                    type F = unsafe extern "C" fn(
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                        rubyrs_cext::Value,
+                    ) -> rubyrs_cext::Value;
+                    let f: F = std::mem::transmute(func);
+                    f(
+                        rubyrs_cext::Qnil,
+                        arg_handles[0], arg_handles[1], arg_handles[2], arg_handles[3], arg_handles[4],
+                    )
                 }
                 _ => unreachable!("arity validated above"),
             }

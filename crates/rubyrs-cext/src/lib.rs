@@ -28,22 +28,46 @@
 //! critical path for the Level 0 hypothesis we're testing.
 
 use std::cell::RefCell;
-use std::ffi::{CStr, c_char, c_int, c_long};
+use std::ffi::{CStr, c_char, c_int, c_long, c_ulong};
 
 /// Opaque token the C side sees as `VALUE`. Numerically an index
 /// into [`CExtState::values`]; semantically meaningless to C code.
 pub type Value = u64;
 
-/// Mirror of the subset of `rubyrs::Value` that crosses the C ABI
-/// at Level 0. Kept independent so this crate doesn't pull in the
-/// whole interpreter — the host translates between the two when
-/// draining registered functions and when wrapping arguments.
+/// Mirror of the subset of `rubyrs::Value` that crosses the C ABI.
+/// Kept independent so this crate doesn't pull in the whole
+/// interpreter — the host translates between the two when draining
+/// registered functions and when wrapping arguments.
+///
+/// `Str` stores **bytes with a sentinel trailing NUL** that is NOT
+/// counted by [`RSTRING_LEN`]. This lets `StringValueCStr` /
+/// `RSTRING_PTR` hand out a pointer that CRuby C extensions can
+/// safely pass to `strlen`, `strcmp`, etc. — matching CRuby's own
+/// "always one byte of capacity past the end is `\0`" guarantee.
 #[derive(Clone, Debug)]
 pub enum CValue {
     Nil,
     True,
     False,
-    Str(String),
+    Str(Vec<u8>), // invariant: ends with `\0`; logical length is `.len() - 1`
+    /// CRuby's "Fixnum" range — for the spike all integers are i64
+    /// regardless of which `NUMxxx` macro the C ext used.
+    Int(i64),
+    /// A handle to a class or module by its (joined) name. Returned
+    /// from `rb_define_module` / `rb_define_class_under`; consumed
+    /// by `rb_define_singleton_method`.
+    Class(String),
+}
+
+impl CValue {
+    /// Construct a String CValue from raw bytes, appending the
+    /// sentinel NUL.
+    pub fn str_from_bytes(bytes: &[u8]) -> Self {
+        let mut v = Vec::with_capacity(bytes.len() + 1);
+        v.extend_from_slice(bytes);
+        v.push(0);
+        CValue::Str(v)
+    }
 }
 
 /// Opaque function-pointer storage. C extensions register pointers
@@ -59,8 +83,26 @@ pub type OpaqueFn = unsafe extern "C" fn();
 pub struct CFn {
     pub name: String,
     pub func: OpaqueFn,
-    /// CRuby-style arity. Level 1 dispatches 0, 1, and 2; other
-    /// values register but trap at invocation.
+    /// CRuby-style arity. cext_dispatch in the host handles 0–5;
+    /// other values register but trap at invocation.
+    pub arity: i32,
+}
+
+/// A class/module the C ext declared via `rb_define_module` or
+/// `rb_define_class_under`. Drained by the host into `Vm.classes`
+/// under the joined name.
+pub struct CExtClassReg {
+    pub joined_name: String,
+}
+
+/// A singleton method the C ext attached to a previously-registered
+/// class. Drained by the host into a per-class dispatch table
+/// consulted when a `Value::Class` receiver is called with that
+/// method name.
+pub struct CExtSingletonMethod {
+    pub class_joined_name: String,
+    pub method_name: String,
+    pub func: OpaqueFn,
     pub arity: i32,
 }
 
@@ -68,20 +110,36 @@ pub struct CFn {
 /// call. The host swaps this around every C-side entry point so a
 /// fresh handle table is in scope.
 pub struct CExtState {
-    /// Indexed by handle. Indices `0`, `1`, `2` are pre-populated
-    /// for [`Qnil`], [`Qtrue`], [`Qfalse`] so their on-disk constants
-    /// resolve correctly.
+    /// Indexed by handle. Indices `0`, `1`, `2`, `3` are pre-populated
+    /// for [`Qnil`], [`Qtrue`], [`Qfalse`], [`rb_cObject`].
     pub values: Vec<CValue>,
     /// Accumulator for [`rb_define_global_function`] calls. The host
     /// drains this after `Init_<name>` returns.
     pub registered_fns: Vec<CFn>,
+    /// Modules / classes declared during this Init pass.
+    pub registered_classes: Vec<CExtClassReg>,
+    /// Singleton methods declared during this Init pass. Each entry
+    /// references its target class by joined name.
+    pub registered_singletons: Vec<CExtSingletonMethod>,
 }
 
 impl CExtState {
     pub fn new() -> Self {
         Self {
-            values: vec![CValue::Nil, CValue::True, CValue::False],
+            // Sentinel handle 3 = rb_cObject. We don't actually register
+            // an Object class on the rubyrs side; this exists purely so
+            // `rb_define_class_under(parent, name, rb_cObject)` accepts
+            // its third argument. Superclass is ignored at the spike
+            // level — flat namespace only.
+            values: vec![
+                CValue::Nil,
+                CValue::True,
+                CValue::False,
+                CValue::Class(String::from("Object")),
+            ],
             registered_fns: Vec::new(),
+            registered_classes: Vec::new(),
+            registered_singletons: Vec::new(),
         }
     }
 
@@ -168,6 +226,14 @@ pub static Qtrue: Value = 1;
 #[unsafe(no_mangle)]
 pub static Qfalse: Value = 2;
 
+/// Sentinel handle for the `Object` class. Used as the third arg to
+/// `rb_define_class_under(parent, name, rb_cObject)`. Pre-populated
+/// at index 3 of every fresh [`CExtState`]; the rubyrs side ignores
+/// superclass at spike scope.
+#[used]
+#[unsafe(no_mangle)]
+pub static rb_cObject: Value = 3;
+
 /// # Safety
 ///
 /// `s` must be a valid pointer to a NUL-terminated C string. The
@@ -177,8 +243,8 @@ pub static Qfalse: Value = 2;
 pub unsafe extern "C" fn rb_str_new_cstr(s: *const c_char) -> Value {
     assert!(!s.is_null(), "rb_str_new_cstr: null pointer");
     let cstr = unsafe { CStr::from_ptr(s) };
-    let owned = cstr.to_string_lossy().into_owned();
-    with_state(|st| st.intern(CValue::Str(owned)))
+    let bytes = cstr.to_bytes();
+    with_state(|st| st.intern(CValue::str_from_bytes(bytes)))
 }
 
 /// # Safety
@@ -189,15 +255,56 @@ pub unsafe extern "C" fn rb_str_new_cstr(s: *const c_char) -> Value {
 /// preserve binary input verbatim.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_str_new(ptr: *const c_char, len: c_long) -> Value {
-    let owned = if len == 0 {
-        String::new()
+    let bytes: &[u8] = if len == 0 {
+        &[]
     } else {
         assert!(!ptr.is_null(), "rb_str_new: null pointer with len > 0");
         // SAFETY: caller guarantees `ptr..ptr+len` is readable.
-        let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        String::from_utf8_lossy(slice).into_owned()
+        unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) }
     };
-    with_state(|st| st.intern(CValue::Str(owned)))
+    with_state(|st| st.intern(CValue::str_from_bytes(bytes)))
+}
+
+/// CRuby's `rb_str_new_frozen` returns a frozen *copy* of the
+/// string (or the original if already frozen). rubyrs doesn't yet
+/// track frozenness as a runtime attribute, and the spike doesn't
+/// need it for correctness, so this is a structural no-op: the
+/// caller-supplied handle is returned unchanged.
+///
+/// Real-bcrypt thread-safety logic uses this to snapshot password /
+/// salt args defensively; in our single-threaded host that's
+/// already-safe-by-construction.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_str_new_frozen(v: Value) -> Value {
+    v
+}
+
+/// CRuby's `StringValueCStr(v)` macro expands to a call into this
+/// function with `&v`. It's meant to coerce `*v` to a String (via
+/// `to_str`) if necessary and return a NUL-terminated `char *`.
+///
+/// Spike scope: we assume `*v` is already a String (the only
+/// non-nil/bool CValue variant). Coercion lands when we expose
+/// `rb_funcall(v, "to_str", 0)`-style call backs from C. The NUL
+/// termination is honoured because [`CValue::Str`] always stores a
+/// sentinel `\0` past the logical end.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_string_value_cstr(v: *mut Value) -> *const c_char {
+    assert!(!v.is_null(), "rb_string_value_cstr: null VALUE pointer");
+    let handle = unsafe { *v };
+    with_state(|st| match st.resolve(handle) {
+        CValue::Str(bytes) => bytes.as_ptr() as *const c_char,
+        _ => std::ptr::null(),
+    })
+}
+
+/// CRuby's `StringValuePtr(v)` macro counterpart. Same as
+/// [`rb_string_value_cstr`] today since both extract the underlying
+/// byte pointer — diverges once we track NUL-termination separately
+/// for `b"\0"`-containing strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_string_value_ptr(v: *mut Value) -> *const c_char {
+    unsafe { rb_string_value_cstr(v) }
 }
 
 /// Return a pointer to the underlying bytes of a String VALUE.
@@ -208,22 +315,67 @@ pub unsafe extern "C" fn rb_str_new(ptr: *const c_char, len: c_long) -> Value {
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn RSTRING_PTR(v: Value) -> *const c_char {
-    // Pulling a borrow out of with_state would fight the borrow
-    // checker — instead we read the raw address while the borrow
-    // is live and return it. Safe because the underlying String
-    // is pinned by being owned inside CExtState until `leave()`.
     with_state(|st| match st.resolve(v) {
-        CValue::Str(s) => s.as_ptr() as *const c_char,
+        CValue::Str(bytes) => bytes.as_ptr() as *const c_char,
         _ => std::ptr::null(),
     })
 }
 
-/// Length of a String VALUE, in bytes.
+/// Length of a String VALUE, in bytes — NOT including the sentinel
+/// trailing NUL that [`CValue::Str`] stores past the logical end.
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn RSTRING_LEN(v: Value) -> c_long {
     with_state(|st| match st.resolve(v) {
-        CValue::Str(s) => s.len() as c_long,
+        // Subtract 1 for the sentinel NUL.
+        CValue::Str(bytes) => (bytes.len() as c_long) - 1,
+        _ => 0,
+    })
+}
+
+// ===== Integer ↔ VALUE =====
+//
+// Spike scope: all integers live in `i64`, so every NUMxxx call
+// goes through the same path with a final cast. CRuby distinguishes
+// Fixnum (tagged in VALUE) from Bignum (heap-allocated); we don't.
+
+/// Convert a C `long` to a Ruby Integer VALUE.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_long2num(n: c_long) -> Value {
+    with_state(|st| st.intern(CValue::Int(n as i64)))
+}
+
+/// Convert a Ruby Integer VALUE to a C `long`. Range overflow
+/// truncates silently — spike scope.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_num2long(v: Value) -> c_long {
+    with_state(|st| match st.resolve(v) {
+        CValue::Int(n) => *n as c_long,
+        _ => 0,
+    })
+}
+
+/// Convert a Ruby Integer VALUE to a C `unsigned long`. Negative
+/// values wrap (CRuby raises `RangeError`; spike just casts).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_num2ulong(v: Value) -> c_ulong {
+    with_state(|st| match st.resolve(v) {
+        CValue::Int(n) => *n as c_ulong,
+        _ => 0,
+    })
+}
+
+/// Convert a C `int` to a Ruby Integer VALUE.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_int2num(n: c_int) -> Value {
+    with_state(|st| st.intern(CValue::Int(n as i64)))
+}
+
+/// Convert a Ruby Integer VALUE to a C `int`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_num2int(v: Value) -> c_int {
+    with_state(|st| match st.resolve(v) {
+        CValue::Int(n) => *n as c_int,
         _ => 0,
     })
 }
@@ -251,6 +403,101 @@ pub unsafe extern "C" fn rb_define_global_function(
     with_state(|st| {
         st.registered_fns.push(CFn {
             name,
+            func,
+            arity: arity as i32,
+        });
+    });
+}
+
+/// Declare a module by name. The host drains this into `Vm.classes`
+/// after Init returns; the joined name is used flat (no nesting).
+/// Returns a `CValue::Class(name)` handle.
+///
+/// # Safety
+///
+/// `name` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_define_module(name: *const c_char) -> Value {
+    assert!(!name.is_null(), "rb_define_module: null name");
+    let name = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    with_state(|st| {
+        st.registered_classes.push(CExtClassReg {
+            joined_name: name.clone(),
+        });
+        st.intern(CValue::Class(name))
+    })
+}
+
+/// Declare a class nested under `parent` (e.g. `Engine` under
+/// `BCrypt`), inheriting from `_super`. Spike scope: superclass is
+/// ignored; nesting becomes a `parent::name` joined string used
+/// flat for top-level lookup.
+///
+/// # Safety
+///
+/// `name` must be a valid NUL-terminated C string. `parent` must be
+/// a class/module handle returned by an earlier `rb_define_module`
+/// or `rb_define_class_under`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_define_class_under(
+    parent: Value,
+    name: *const c_char,
+    _super: Value,
+) -> Value {
+    assert!(!name.is_null(), "rb_define_class_under: null name");
+    let leaf = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    with_state(|st| {
+        let parent_name = match st.resolve(parent) {
+            CValue::Class(n) => n.clone(),
+            other => panic!(
+                "rb_define_class_under: parent handle resolved to non-class {:?}",
+                other
+            ),
+        };
+        let joined = format!("{}::{}", parent_name, leaf);
+        st.registered_classes.push(CExtClassReg {
+            joined_name: joined.clone(),
+        });
+        st.intern(CValue::Class(joined))
+    })
+}
+
+/// Register a singleton method on a previously-declared class.
+/// `func` is dispatched the same way as
+/// `rb_define_global_function`-registered callbacks (transmute by
+/// arity, per-call CExtState).
+///
+/// # Safety
+///
+/// `name` must be a valid NUL-terminated C string. `klass` must be
+/// a class handle; `func` must remain callable for the lifetime of
+/// the host runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_define_singleton_method(
+    klass: Value,
+    name: *const c_char,
+    func: OpaqueFn,
+    arity: c_int,
+) {
+    assert!(!name.is_null(), "rb_define_singleton_method: null name");
+    let method_name = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    with_state(|st| {
+        let class_name = match st.resolve(klass) {
+            CValue::Class(n) => n.clone(),
+            other => panic!(
+                "rb_define_singleton_method: klass resolved to non-class {:?}",
+                other
+            ),
+        };
+        st.registered_singletons.push(CExtSingletonMethod {
+            class_joined_name: class_name,
+            method_name,
             func,
             arity: arity as i32,
         });

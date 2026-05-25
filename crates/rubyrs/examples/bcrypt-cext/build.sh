@@ -43,9 +43,27 @@ case "$(uname -s)" in
 esac
 
 OUT="$SCRIPT_DIR/bcrypt_ext.$EXT"
+
+# Vendored crypt_blowfish: Solar Designer's bcrypt, public domain.
+# Compile all .c files together — bcrypt-ruby's extconf does the same
+# (it generates a Makefile that includes them all). We deliberately
+# do NOT define HAVE_RUBY_THREAD_H or HAVE_RB_EXT_RACTOR_SAFE so
+# bcrypt_ext.c's #ifdef-gated paths take the simple synchronous
+# branches that don't need APIs we haven't implemented.
+VENDOR_SRC=(
+    "$SCRIPT_DIR/vendor/crypt_blowfish.c"
+    "$SCRIPT_DIR/vendor/crypt_gensalt.c"
+    "$SCRIPT_DIR/vendor/wrapper.c"
+)
+# crypt.c is the system-crypt() compatibility entry; not needed
+# when we expose crypt_ra/crypt_gensalt_ra directly.
+
 cc "${LDFLAGS[@]}" \
+   -D__SKIP_GNU \
    -I "$WORKSPACE_ROOT/crates/rubyrs-cext/include" \
+   -I "$SCRIPT_DIR/vendor" \
    "$SCRIPT_DIR/bcrypt_ext.c" \
+   "${VENDOR_SRC[@]}" \
    -o "$OUT"
 
 echo "built $OUT"

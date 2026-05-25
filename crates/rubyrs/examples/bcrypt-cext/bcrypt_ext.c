@@ -1,92 +1,125 @@
-/* bcrypt_ext.c — Level 1 spike: bcrypt-shape C extension.
- *
- * Mirrors the shape of the bcrypt-ruby gem's `ext/mri/bcrypt_ext.c`,
- * but with a deterministic STUB crypto routine in place of openwall's
- * crypt_blowfish. The point of this Level 1 spike is to validate the
- * rubyrs cext FFI plumbing — non-zero arity, String args from Ruby
- * into C (via RSTRING_PTR / RSTRING_LEN), String return from C back
- * into Ruby — not to ship real bcrypt.
- *
- * To upgrade to actual bcrypt-the-gem:
- *   1. Drop openwall's `crypt_blowfish.c`, `crypt_gensalt.c`, and
- *      `wrapper.c` into this directory (public domain / BSD-ish).
- *   2. Replace `stub_bcrypt` below with a call to `crypt_rn()`.
- *   3. Compile the extra .c files in `build.sh`.
- * That swap is purely mechanical — every architectural question is
- * answered by the fact that THIS file compiles, dlopens, and round
- * trips.
- *
- * Ruby surface:
- *   require "bcrypt_ext"
- *   bcrypt_hash(password_str, salt_str) #=> "$2a$10$" + deterministic-22 + deterministic-31
- */
+#include <ruby.h>
+#include <ow-crypt.h>
 
-#include "rubyrs.h"
+#ifdef HAVE_RUBY_THREAD_H
+#include <ruby/thread.h>
+#endif
 
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>
+static VALUE mBCrypt;
+static VALUE cBCryptEngine;
 
-/* STUB. Not crypto. Replace with crypt_rn() to ship real bcrypt.
- *
- * Mixes password and salt bytes into a 53-byte buffer that looks
- * structurally like a bcrypt $2a$ hash so callers can assert on
- * specific deterministic outputs without us pretending to compute
- * a real one. */
-static void stub_bcrypt(const char *pw, long pw_len,
-                        const char *salt, long salt_len,
-                        char *out_53)
-{
-    /* bcrypt hash digit-and-letter alphabet, used for the trailing 31
-     * char "hash" portion. Real bcrypt uses 6-bit groups from the
-     * Blowfish ciphertext; we just pick deterministically from
-     * (password ⊕ salt) byte mixes. */
-    static const char ALPHABET[] =
-        "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+struct bc_salt_args {
+    const char * prefix;
+    unsigned long count;
+    const char * input;
+    int size;
+};
 
-    /* The 22-char "salt" portion: take the first up-to-22 bytes of the
-     * provided salt and project them into ALPHABET deterministically. */
-    for (int i = 0; i < 22; i++) {
-        uint8_t b = (salt_len > 0) ? (uint8_t)salt[i % salt_len] : 0;
-        out_53[i] = ALPHABET[b % 64];
-    }
+static void * bc_salt_nogvl(void * ptr) {
+    struct bc_salt_args * args = ptr;
 
-    /* The 31-char "hash" portion: mix every password byte with every
-     * salt byte to get a deterministic dependency on both inputs. */
-    for (int i = 0; i < 31; i++) {
-        uint32_t acc = (uint32_t)i * 2654435761u; /* Knuth multiplicative */
-        for (long p = 0; p < pw_len; p++) {
-            acc ^= ((uint32_t)(uint8_t)pw[p]) << ((p + i) & 24);
-            acc = (acc << 1) | (acc >> 31);
-        }
-        for (long s = 0; s < salt_len; s++) {
-            acc ^= ((uint32_t)(uint8_t)salt[s]) << ((s + i) & 24);
-            acc = (acc << 1) | (acc >> 31);
-        }
-        out_53[22 + i] = ALPHABET[acc % 64];
-    }
+    return crypt_gensalt_ra(args->prefix, args->count, args->input, args->size);
 }
 
-/* bcrypt_hash(password: String, salt: String) -> String
- *
- * Builds "$2a$10$" + 53-char body and returns it as a Ruby String.
- * Output is deterministic in (password, salt). */
-static VALUE bcrypt_hash(VALUE self, VALUE password, VALUE salt) {
-    (void)self;
+/* Given a logarithmic cost parameter, generates a salt for use with +bc_crypt+.
+*/
+static VALUE bc_salt(VALUE self, VALUE prefix, VALUE count, VALUE input) {
+    char * salt;
+    VALUE str_salt;
+    struct bc_salt_args args;
 
-    const char *pw_ptr = RSTRING_PTR(password);
-    long        pw_len = RSTRING_LEN(password);
-    const char *sa_ptr = RSTRING_PTR(salt);
-    long        sa_len = RSTRING_LEN(salt);
+    /* duplicate the parameters for thread safety.  If another thread has a
+     * reference to the parameters and mutates them while we are working,
+     * that would be very bad.  Duping the strings means that the reference
+     * isn't shared. */
+    prefix = rb_str_new_frozen(prefix);
+    input  = rb_str_new_frozen(input);
 
-    /* "$2a$10$" + 22 salt + 31 hash = 60 bytes, no NUL. */
-    char buf[60];
-    memcpy(buf, "$2a$10$", 7);
-    stub_bcrypt(pw_ptr, pw_len, sa_ptr, sa_len, buf + 7);
+    args.prefix = StringValueCStr(prefix);
+    args.count  = NUM2ULONG(count);
+    args.input  = NIL_P(input) ? NULL : StringValuePtr(input);
+    args.size   = NIL_P(input) ? 0 : RSTRING_LEN(input);
 
-    return rb_str_new(buf, 60);
+#ifdef HAVE_RUBY_THREAD_H
+    salt = rb_thread_call_without_gvl(bc_salt_nogvl, &args, NULL, NULL);
+#else
+    salt = bc_salt_nogvl((void *)&args);
+#endif
+
+    if(!salt) return Qnil;
+
+    str_salt = rb_str_new2(salt);
+
+    RB_GC_GUARD(prefix);
+    RB_GC_GUARD(input);
+    free(salt);
+
+    return str_salt;
 }
 
-void Init_bcrypt_ext(void) {
-    rb_define_global_function("bcrypt_hash", RUBY_METHOD_FUNC(bcrypt_hash), 2);
+struct bc_crypt_args {
+    const char * key;
+    const char * setting;
+    void * data;
+    int size;
+};
+
+static void * bc_crypt_nogvl(void * ptr) {
+    struct bc_crypt_args * args = ptr;
+
+    return crypt_ra(args->key, args->setting, &args->data, &args->size);
 }
+
+/* Given a secret and a salt, generates a salted hash (which you can then store safely).
+*/
+static VALUE bc_crypt(VALUE self, VALUE key, VALUE setting) {
+    char * value;
+    VALUE out;
+
+    struct bc_crypt_args args;
+
+    if(NIL_P(key) || NIL_P(setting)) return Qnil;
+
+    /* duplicate the parameters for thread safety.  If another thread has a
+     * reference to the parameters and mutates them while we are working,
+     * that would be very bad.  Duping the strings means that the reference
+     * isn't shared. */
+    key     = rb_str_new_frozen(key);
+    setting = rb_str_new_frozen(setting);
+
+    args.data    = NULL;
+    args.size    = 0xDEADBEEF;
+    args.key     = NIL_P(key)     ? NULL : StringValueCStr(key);
+    args.setting = NIL_P(setting) ? NULL : StringValueCStr(setting);
+
+#ifdef HAVE_RUBY_THREAD_H
+    value = rb_thread_call_without_gvl(bc_crypt_nogvl, &args, NULL, NULL);
+#else
+    value = bc_crypt_nogvl((void *)&args);
+#endif
+
+    if(!value || !args.data) return Qnil;
+
+    out = rb_str_new2(value);
+
+    RB_GC_GUARD(key);
+    RB_GC_GUARD(setting);
+    free(args.data);
+
+    return out;
+}
+
+/* Create the BCrypt and BCrypt::Engine modules, and populate them with methods. */
+void Init_bcrypt_ext(){
+#ifdef HAVE_RB_EXT_RACTOR_SAFE
+    rb_ext_ractor_safe(true);
+#endif
+    
+    mBCrypt = rb_define_module("BCrypt");
+    cBCryptEngine = rb_define_class_under(mBCrypt, "Engine", rb_cObject);
+
+    rb_define_singleton_method(cBCryptEngine, "__bc_salt", bc_salt, 3);
+    rb_define_singleton_method(cBCryptEngine, "__bc_crypt", bc_crypt, 2);
+}
+
+/* vim: set noet sws=4 sw=4: */
