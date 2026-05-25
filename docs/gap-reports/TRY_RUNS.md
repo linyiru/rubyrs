@@ -98,9 +98,10 @@ that the gap reports were generated against):
 > us**, **What "Phase 3" would look like** — were written
 > against the first-pass data and are kept verbatim as the
 > historical record. After the re-run above, Category D = 0
-> and "Phase 3 step 1" (ConstantWriteNode) is already done.
+> and the `ConstantWriteNode` half of "Phase 3 step 1" is done
+> (the `ConstantPathWriteNode` half is still outstanding).
 
-### Category legend
+### Category legend (first pass)
 
 | Code | Category | Count |
 |---:|---|---:|
