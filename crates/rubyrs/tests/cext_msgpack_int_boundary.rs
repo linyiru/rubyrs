@@ -103,18 +103,31 @@ fn cext_msgpack_int_boundary_round_trip() {
     ];
 
     // Build a Ruby script that round-trips each case and emits
-    // one parseable line per case: "n=V wire=B ok=true/false".
+    // one parseable line per case: "n=V wire=B ok=true/false" on
+    // success, or "n=V FAIL exception=<class>:<message>" on raise.
+    //
+    // Reviewer finding F2 (post-PR-#68): wrap each case in
+    // begin/rescue so a single failing case does NOT abort the
+    // whole driver — without this, one regression collapses the
+    // 21-case matrix into a single opaque "rubyrs exited
+    // non-zero" with no per-case attribution, defeating the
+    // diagnostic the docstring promises. Mirrors the rescue
+    // pattern in sibling `cext_msgpack_cases.rs` lines 126-136.
     let mut script = format!("require \"{}\"\n", bundle_no_ext.display());
     for (n, _) in cases {
         script.push_str(&format!(
             r#"
-p = MessagePack::Packer.new
-p.write({n})
-bytes = p.to_str
-u = MessagePack::Unpacker.new
-u.feed(bytes)
-m = u.read
-puts "n={n} wire=" + bytes.bytesize.to_s + " ok=" + (m == {n}).to_s
+begin
+  p = MessagePack::Packer.new
+  p.write({n})
+  bytes = p.to_str
+  u = MessagePack::Unpacker.new
+  u.feed(bytes)
+  m = u.read
+  puts "n={n} wire=" + bytes.bytesize.to_s + " ok=" + (m == {n}).to_s
+rescue => e
+  puts "n={n} FAIL exception=" + e.class.to_s + ":" + e.message.to_s
+end
 "#,
             n = n
         ));
@@ -135,23 +148,73 @@ puts "n={n} wire=" + bytes.bytesize.to_s + " ok=" + (m == {n}).to_s
     );
 
     // Parse each line, compare against expected wire size + ok.
+    // Reviewer finding F3 (post-PR-#68): bound-check before
+    // indexing `cases[seen]` — if rubyrs ever emits an extra
+    // `n=`-prefixed line (regression / debug print), the loop's
+    // 22nd iteration would otherwise panic with an opaque
+    // "index out of bounds" and short-circuit the clean
+    // `assert_eq!(seen, cases.len(), ...)` diagnostic below.
+    // Now extras are recorded as failures so the downstream
+    // diagnostic still produces a useful message.
     let mut failures: Vec<String> = Vec::new();
     let mut seen = 0;
     for line in stdout.lines() {
         if !line.starts_with("n=") {
             continue;
         }
-        // Format: "n=V wire=B ok=true"
-        let mut iter = line.split_whitespace();
-        let n_part = iter.next().unwrap().trim_start_matches("n=");
-        let wire_part = iter.next().unwrap().trim_start_matches("wire=");
-        let ok_part = iter.next().unwrap().trim_start_matches("ok=");
-        let n: i64 = n_part.parse().expect("parse n");
-        let wire: usize = wire_part.parse().expect("parse wire");
-        let ok: bool = ok_part == "true";
-
+        if seen >= cases.len() {
+            failures.push(format!("unexpected extra line: {}", line));
+            seen += 1;
+            continue;
+        }
         let (expected_n, expected_wire) = cases[seen];
         seen += 1;
+
+        // Per-case FAIL (rescued exception in driver) — surface
+        // the class:message verbatim with the case index.
+        if let Some(rest) = line.strip_prefix(&format!("n={} FAIL exception=", expected_n)) {
+            failures.push(format!(
+                "case {}: n={} raised — {}",
+                seen, expected_n, rest
+            ));
+            continue;
+        }
+
+        // Format: "n=V wire=B ok=true". Reject malformed lines
+        // explicitly rather than unwrapping mid-parse.
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() != 3 {
+            failures.push(format!(
+                "case {}: malformed line ({} tokens, expected 3): {:?}",
+                seen, toks.len(), line
+            ));
+            continue;
+        }
+        let n_part = toks[0].trim_start_matches("n=");
+        let wire_part = toks[1].trim_start_matches("wire=");
+        let ok_part = toks[2].trim_start_matches("ok=");
+        let n: i64 = match n_part.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                failures.push(format!(
+                    "case {}: cannot parse n from {:?}",
+                    seen, line
+                ));
+                continue;
+            }
+        };
+        let wire: usize = match wire_part.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                failures.push(format!(
+                    "case {}: cannot parse wire from {:?}",
+                    seen, line
+                ));
+                continue;
+            }
+        };
+        let ok: bool = ok_part == "true";
+
         if n != expected_n {
             failures.push(format!(
                 "case {}: n mismatch — got {}, expected {}",
