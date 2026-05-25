@@ -84,6 +84,7 @@ jobs:
           bash crates/rubyrs/examples/callback-cext/build.sh
           bash crates/rubyrs/examples/raise-cext/build.sh
           bash crates/rubyrs/examples/counter-cext/build.sh
+          bash crates/rubyrs/examples/mini-json-cext/build.sh
           ext=$([ "$(uname -s)" = "Darwin" ] && echo bundle || echo so)
           test -f "crates/rubyrs/examples/hello-cext/hello.$ext"
           test -f "crates/rubyrs/examples/bcrypt-cext/bcrypt_ext.$ext"
@@ -91,6 +92,7 @@ jobs:
           test -f "crates/rubyrs/examples/callback-cext/callback_ext.$ext"
           test -f "crates/rubyrs/examples/raise-cext/raise_ext.$ext"
           test -f "crates/rubyrs/examples/counter-cext/counter_ext.$ext"
+          test -f "crates/rubyrs/examples/mini-json-cext/mini_json.$ext"
 
   wasm:
     name: Build (wasm32-wasip1)

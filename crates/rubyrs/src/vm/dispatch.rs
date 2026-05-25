@@ -304,6 +304,30 @@ impl Vm {
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
             }
+            // L3-C: cext-registered instance method
+            // (`rb_define_method`). Looked up AFTER script-defined
+            // methods so a Ruby-side override wins (matches CRuby's
+            // ancestor-chain semantics).
+            #[cfg(not(target_os = "wasi"))]
+            {
+                if let Some(table) = self.cext_instance_methods.get(&cls.name) {
+                    if let Some(reg) = table.get(&name_id).cloned() {
+                        let vm_ptr: *mut Vm = self;
+                        let recv_clone = recv.clone();
+                        let v = with_vm_ptr_set(vm_ptr, || {
+                            crate::vm::cext::cext_dispatch(
+                                &reg.qualified_name,
+                                reg.func,
+                                reg.arity,
+                                &args,
+                                crate::vm::cext::CextSelfHandle::Object(recv_clone),
+                            )
+                        })?;
+                        self.stack.push(v);
+                        return Ok(());
+                    }
+                }
+            }
         }
         // C-ext singleton dispatch: `BCrypt::Engine.__bc_crypt(args)`
         // arrives here with recv = Value::Class(c). Look up the

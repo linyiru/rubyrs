@@ -199,6 +199,20 @@ pub struct CExtSingletonMethod {
     pub arity: i32,
 }
 
+/// Spike L3-C: an instance method the C ext attached to a
+/// previously-registered class via `rb_define_method`. Drained by
+/// the host into a per-class instance-method dispatch table
+/// consulted when a `Value::Object` receiver's class matches.
+/// Mirrors [`CExtSingletonMethod`] in shape; the dispatch site
+/// differs (Object-recv vs Class-recv) but the registration data
+/// is the same.
+pub struct CExtInstanceMethod {
+    pub class_joined_name: String,
+    pub method_name: String,
+    pub func: OpaqueFn,
+    pub arity: i32,
+}
+
 /// Per-thread state shared between the host Vm and any active C ext
 /// call. The host swaps this around every C-side entry point so a
 /// fresh handle table is in scope.
@@ -214,6 +228,11 @@ pub struct CExtState {
     /// Singleton methods declared during this Init pass. Each entry
     /// references its target class by joined name.
     pub registered_singletons: Vec<CExtSingletonMethod>,
+    /// Spike L3-C: instance methods declared during this Init pass
+    /// via `rb_define_method`. Same shape as singletons; the host
+    /// drains into a parallel per-class table consulted for
+    /// `Value::Object` receivers.
+    pub registered_methods: Vec<CExtInstanceMethod>,
 }
 
 impl CExtState {
@@ -233,6 +252,7 @@ impl CExtState {
             registered_fns: Vec::new(),
             registered_classes: Vec::new(),
             registered_singletons: Vec::new(),
+            registered_methods: Vec::new(),
         }
     }
 
@@ -803,6 +823,51 @@ pub unsafe extern "C" fn rb_define_singleton_method(
             method_name,
             func,
             arity,
+        });
+    });
+}
+
+/// L3-C: Register an instance method on a previously-declared class.
+/// Same dispatch shape as `rb_define_singleton_method` — the
+/// function pointer is stashed in a per-call CExtState and drained
+/// by the host into a per-class instance-method table — except the
+/// receiver at call time is the Ruby `Value::Object` whose class
+/// matches, not the class itself.
+///
+/// `self` passed into the C function at call time is the receiver
+/// (the Object), not the class. C exts use `TypedData_Get_Struct`
+/// to unwrap the receiver's data pointer.
+///
+/// # Safety
+///
+/// `klass` must be a class handle returned by `rb_define_class_under`
+/// in the same CExtState. `name` must be a NUL-terminated C string.
+/// `func` must be callable with the registered arity (the host
+/// transmutes per-call based on `arity`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_define_method(
+    klass: Value,
+    name: *const c_char,
+    func: OpaqueFn,
+    arity: c_int,
+) {
+    assert!(!name.is_null(), "rb_define_method: null name");
+    let method_name = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    with_state(|st| {
+        let class_name = match st.resolve(klass) {
+            CValue::Class(n) => n.clone(),
+            other => panic!(
+                "rb_define_method: klass resolved to non-class {:?}",
+                other
+            ),
+        };
+        st.registered_methods.push(CExtInstanceMethod {
+            class_joined_name: class_name,
+            method_name,
+            func,
+            arity: arity as i32,
         });
     });
 }
