@@ -745,12 +745,21 @@ pub unsafe extern "C" fn rb_hash_aref(h: Value, key: Value) -> Value {
     })
 }
 
-/// Shallow CValue equality for Hash key lookup. Compares by handle
-/// identity OR by primitive equality for the variants where two
-/// distinct handles can hold equal values (Nil/Bool/Str/Int).
-/// Class/Array/Hash variants compare by handle only — matching
-/// CRuby's `eql?` for those types being effectively reference
-/// equality unless overridden, which spike doesn't model.
+/// CValue equality for Hash key lookup. Compares by handle identity
+/// first, then falls back to content equality:
+///
+///   - Nil / True / False / Str / Int : per-variant value compare
+///   - Array : same length AND pairwise-equal elements (recursive)
+///   - Hash  : same length AND every (k, v) in self has a matching
+///             pair somewhere in other (recursive, order-independent)
+///   - Class : handle-identity only (CRuby's Module / Class compare
+///             by identity by default; spike doesn't model singleton
+///             classes that might override)
+///
+/// Matches Ruby's `eql?` semantics for the variants we model. Recursive
+/// equality matters because L2-3 lets a C ext build a Hash key as
+/// `rb_ary_new()`-based or `rb_hash_new()`-based, and a lookup with
+/// content-equal but distinct-handle key would otherwise miss.
 fn cvalue_eq(st: &CExtState, a: Value, b: Value) -> bool {
     if a == b {
         return true;
@@ -761,6 +770,24 @@ fn cvalue_eq(st: &CExtState, a: Value, b: Value) -> bool {
         (CValue::False, CValue::False) => true,
         (CValue::Str(x), CValue::Str(y)) => x == y,
         (CValue::Int(x), CValue::Int(y)) => x == y,
+        (CValue::Array(x), CValue::Array(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(ah, bh)| cvalue_eq(st, *ah, *bh))
+        }
+        (CValue::Hash(x), CValue::Hash(y)) => {
+            // Order-independent: every (k, v) in x must have a
+            // matching (k', v') in y where k eql k' AND v eql v'.
+            // O(n²) lookup — spike scope; CRuby uses an indexed
+            // table for the same compare.
+            x.len() == y.len()
+                && x.iter().all(|(ak, av)| {
+                    y.iter().any(|(bk, bv)| {
+                        cvalue_eq(st, *ak, *bk) && cvalue_eq(st, *av, *bv)
+                    })
+                })
+        }
         _ => false,
     }
 }
