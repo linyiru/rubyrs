@@ -178,6 +178,13 @@ impl Heap {
 }
 
 impl Value {
+    /// Build a `Value::Str` from anything stringy. Centralises the
+    /// `Rc<RefCell<String>>` wrap so call sites don't repeat the
+    /// boilerplate.
+    pub fn new_str(s: impl Into<String>) -> Self {
+        Value::Str(std::rc::Rc::new(std::cell::RefCell::new(s.into())))
+    }
+
     pub(crate) fn is_truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
     }
@@ -201,7 +208,7 @@ impl Value {
         match self {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => format_float(*f),
-            Value::Str(s) => s.to_string(),
+            Value::Str(s) => s.borrow().clone(),
             Value::Sym(id) => interner.resolve(*id).to_string(),
             Value::Bool(true) => "true".into(),
             Value::Bool(false) => "false".into(),
@@ -240,7 +247,7 @@ impl Value {
     }
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
-            Value::Str(s) => format!("\"{}\"", s),
+            Value::Str(s) => format!("\"{}\"", s.borrow()),
             Value::Sym(id) => format!(":{}", interner.resolve(*id)),
             Value::Nil => "nil".into(),
             _ => self.to_display(heap, interner),
@@ -256,7 +263,7 @@ impl Value {
             // via `as f64` does the right thing.
             (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
-            (Value::Str(a), Value::Str(b)) => **a == **b,
+            (Value::Str(a), Value::Str(b)) => *a.borrow() == *b.borrow(),
             (Value::Sym(a), Value::Sym(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Nil, Value::Nil) => true,

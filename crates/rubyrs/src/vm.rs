@@ -29,7 +29,7 @@ use crate::value::{BlockHandle, Class, Instance, Method, ObjId, Value, Visibilit
 fn value_cmp_v(a: &Value, b: &Value, interner: &Interner) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
-        (Value::Str(x), Value::Str(y)) => Some((**x).cmp(&**y)),
+        (Value::Str(x), Value::Str(y)) => Some(x.borrow().cmp(&*y.borrow())),
         (Value::Sym(x), Value::Sym(y)) => {
             let sx = interner.resolve(*x);
             let sy = interner.resolve(*y);
@@ -770,7 +770,7 @@ impl Vm {
                         for a in &args {
                             let key: Option<SymId> = match a {
                                 Value::Sym(s) => Some(*s),
-                                Value::Str(s) => Some(self.interner.intern(s)),
+                                Value::Str(s) => Some(self.interner.intern(&s.borrow())),
                                 _ => None,
                             };
                             if let Some(mid) = key {
@@ -990,7 +990,7 @@ impl Vm {
         if &*name == "respond_to?" && args.len() == 1 {
             let lookup_name: Option<SymId> = match &args[0] {
                 Value::Sym(id) => Some(*id),
-                Value::Str(s) => Some(self.interner.intern(s)),
+                Value::Str(s) => Some(self.interner.intern(&s.borrow())),
                 _ => None,
             };
             if let Some(id) = lookup_name {
@@ -1212,7 +1212,7 @@ impl Vm {
                     ("to_a", []) => Some(Value::Array(id)),
                     ("inspect", []) => {
                         let s = Value::Array(id).to_inspect(&self.heap, &self.interner);
-                        Some(Value::Str(Rc::from(s.as_str())))
+                        Some(Value::new_str(s))
                     }
                     ("reverse", []) => {
                         let rev: Vec<Value> = self.heap.array(id).iter().rev().cloned().collect();
@@ -1263,13 +1263,13 @@ impl Vm {
                         let parts: Vec<String> = self.heap.array(id).iter()
                             .map(|v| v.to_display(&self.heap, &self.interner))
                             .collect();
-                        Some(Value::Str(Rc::from(parts.join("").as_str())))
+                        Some(Value::new_str(parts.join("")))
                     }
                     ("join", [Value::Str(sep)]) => {
                         let parts: Vec<String> = self.heap.array(id).iter()
                             .map(|v| v.to_display(&self.heap, &self.interner))
                             .collect();
-                        Some(Value::Str(Rc::from(parts.join(&**sep).as_str())))
+                        Some(Value::new_str(parts.join(&*sep.borrow())))
                     }
                     ("+", [Value::Array(other)]) => {
                         let mut out: Vec<Value> = self.heap.array(id).clone();
@@ -1446,7 +1446,7 @@ impl Vm {
                     ("to_h", []) => Some(Value::Hash(id)),
                     ("inspect", []) => {
                         let s = Value::Hash(id).to_inspect(&self.heap, &self.interner);
-                        Some(Value::Str(Rc::from(s.as_str())))
+                        Some(Value::new_str(s))
                     }
                     ("to_a", []) | ("sort", []) => {
                         // Hash#to_a returns an Array of two-element Arrays.
@@ -1577,7 +1577,7 @@ impl Vm {
                     chars.iter().skip(start).take(n).collect()
                 }
                 if (name == "[]" || name == "slice") && args.len() == 1 {
-                    let chars: Vec<char> = s.chars().collect();
+                    let chars: Vec<char> = s.borrow().chars().collect();
                     let len = chars.len() as i64;
                     return Ok(Some(match &args[0] {
                         Value::Int(i) => {
@@ -1586,7 +1586,7 @@ impl Vm {
                                 Value::Nil
                             } else {
                                 let ch = chars[idx as usize].to_string();
-                                Value::Str(Rc::from(ch.as_str()))
+                                Value::new_str(ch)
                             }
                         }
                         Value::Range(rid) => {
@@ -1606,14 +1606,14 @@ impl Vm {
                             if !excl { end += 1; }
                             let end = end.clamp(start as i64, len) as usize;
                             let slice: String = str_slice(&chars, start, end.saturating_sub(start));
-                            Value::Str(Rc::from(slice.as_str()))
+                            Value::new_str(slice)
                         }
                         _ => return Ok(None),
                     }));
                 }
                 if (name == "[]" || name == "slice") && args.len() == 2 {
                     if let (Value::Int(i), Value::Int(n)) = (&args[0], &args[1]) {
-                        let chars: Vec<char> = s.chars().collect();
+                        let chars: Vec<char> = s.borrow().chars().collect();
                         let len = chars.len() as i64;
                         let start_raw = if *i < 0 { len + *i } else { *i };
                         if start_raw < 0 || start_raw > len || *n < 0 {
@@ -1622,14 +1622,64 @@ impl Vm {
                         let start = start_raw as usize;
                         let n = (*n as usize).min(chars.len() - start);
                         let slice = str_slice(&chars, start, n);
-                        return Ok(Some(Value::Str(Rc::from(slice.as_str()))));
+                        return Ok(Some(Value::new_str(slice)));
+                    }
+                    return Ok(None);
+                }
+                // String#[]= — in-place mutation. Three shapes:
+                //   s[i]      = x   → replace one char at char-index i
+                //   s[i, n]   = x   → replace n chars from char-index i
+                //   s[range]  = x   → replace the slice covered by the range
+                // Negative indices count from the end. Out-of-range
+                // raises IndexError, matching CRuby (we surface that
+                // through the Trap-to-rescue path).
+                //
+                // The mutation works because Value::Str holds an
+                // Rc<RefCell<String>>: every clone of this Value
+                // shares the same RefCell, so writes through
+                // `borrow_mut` are visible to all aliases.
+                if name == "[]=" && args.len() == 2 {
+                    if let (Value::Int(i), Value::Str(repl)) = (&args[0], &args[1]) {
+                        let chars: Vec<char> = s.borrow().chars().collect();
+                        let len = chars.len() as i64;
+                        let idx = if *i < 0 { len + *i } else { *i };
+                        if idx < 0 || idx >= len {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!("index {i} out of string"),
+                            }));
+                        }
+                        let mut buf: String = chars[..idx as usize].iter().collect();
+                        buf.push_str(&repl.borrow());
+                        buf.extend(chars[idx as usize + 1..].iter());
+                        *s.borrow_mut() = buf;
+                        return Ok(Some(args[1].clone()));
+                    }
+                    return Ok(None);
+                }
+                if name == "[]=" && args.len() == 3 {
+                    if let (Value::Int(i), Value::Int(n), Value::Str(repl)) = (&args[0], &args[1], &args[2]) {
+                        let chars: Vec<char> = s.borrow().chars().collect();
+                        let len = chars.len() as i64;
+                        let start_raw = if *i < 0 { len + *i } else { *i };
+                        if start_raw < 0 || start_raw > len || *n < 0 {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!("index {i} out of string"),
+                            }));
+                        }
+                        let start = start_raw as usize;
+                        let take = (*n as usize).min(chars.len() - start);
+                        let mut buf: String = chars[..start].iter().collect();
+                        buf.push_str(&repl.borrow());
+                        buf.extend(chars[start + take..].iter());
+                        *s.borrow_mut() = buf;
+                        return Ok(Some(args[2].clone()));
                     }
                     return Ok(None);
                 }
                 match (name, args) {
                     ("chars", []) => {
-                        let elems: Vec<Value> = s.chars()
-                            .map(|c| Value::Str(Rc::from(c.to_string().as_str())))
+                        let elems: Vec<Value> = s.borrow().chars()
+                            .map(|c| Value::new_str(c.to_string()))
                             .collect();
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
@@ -1639,19 +1689,19 @@ impl Vm {
                         // No-arg `split` matches CRuby's `split(nil)`:
                         // splits on runs of whitespace, drops the
                         // leading empty token.
-                        let elems: Vec<Value> = s.split_whitespace()
-                            .map(|t| Value::Str(Rc::from(t)))
+                        let elems: Vec<Value> = s.borrow().split_whitespace()
+                            .map(|t| Value::new_str(t))
                             .collect();
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
                         Some(Value::Array(id))
                     }
                     ("split", [Value::Str(sep)]) => {
-                        let elems: Vec<Value> = if sep.is_empty() {
+                        let elems: Vec<Value> = if sep.borrow().is_empty() {
                             // CRuby: empty-sep split returns each character.
-                            s.chars().map(|c| Value::Str(Rc::from(c.to_string().as_str()))).collect()
+                            s.borrow().chars().map(|c| Value::new_str(c.to_string())).collect()
                         } else {
-                            s.split(&**sep).map(|t| Value::Str(Rc::from(t))).collect()
+                            s.borrow().split(&*sep.borrow()).map(|t| Value::new_str(t)).collect()
                         };
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems));
@@ -1671,7 +1721,7 @@ impl Vm {
                             }
                             _ => std::slice::from_ref(single_arg),
                         };
-                        let out = ruby_sprintf(&s, fmt_args, &self.heap, &self.interner)
+                        let out = ruby_sprintf(&s.borrow(), fmt_args, &self.heap, &self.interner)
                             .map_err(|e| self.trap(e))?;
                         if let Some(max) = self.max_value_bytes {
                             if out.len() > max {
@@ -1680,7 +1730,7 @@ impl Vm {
                                 }));
                             }
                         }
-                        Some(Value::Str(Rc::from(out.as_str())))
+                        Some(Value::new_str(out))
                     }
                     // Literal-substring `scan` — returns a fresh
                     // Array containing one copy of the pattern for
@@ -1693,17 +1743,19 @@ impl Vm {
                     // `[""] * (chars + 1)` to match CRuby; this is
                     // unusual but well-defined and cheap.
                     ("scan", [Value::Str(pat)]) => {
-                        let parts: Vec<Value> = if pat.is_empty() {
-                            std::iter::repeat_with(|| Value::Str(Rc::from("")))
-                                .take(s.chars().count() + 1)
+                        let parts: Vec<Value> = if pat.borrow().is_empty() {
+                            std::iter::repeat_with(|| Value::new_str(""))
+                                .take(s.borrow().chars().count() + 1)
                                 .collect()
                         } else {
                             let mut out: Vec<Value> = Vec::new();
                             let mut i = 0;
-                            let bytes = s.as_bytes();
-                            let plen = pat.len();
+                            let s_ref = s.borrow();
+                            let bytes = s_ref.as_bytes();
+                            let pat_ref = pat.borrow();
+                            let plen = pat_ref.len();
                             while i + plen <= bytes.len() {
-                                if &bytes[i..i + plen] == pat.as_bytes() {
+                                if &bytes[i..i + plen] == pat_ref.as_bytes() {
                                     out.push(Value::Str(pat.clone()));
                                     i += plen;
                                 } else {
@@ -1723,13 +1775,13 @@ impl Vm {
                         // symbols always re-resolve; only fresh strings
                         // count against the cap.
                         if let Some(max) = self.max_symbols {
-                            if !self.interner.contains(&s) && self.interner.len() >= max {
+                            if !self.interner.contains(&s.borrow()) && self.interner.len() >= max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("interner exhausted: {} symbols", max),
                                 }));
                             }
                         }
-                        let sym = self.interner.intern(&s);
+                        let sym = self.interner.intern(&s.borrow());
                         Some(Value::Sym(sym))
                     }
                     _ => None,
@@ -1887,7 +1939,7 @@ impl Vm {
             ivars: HashMap::new(),
         }));
         let msg_sym = self.interner.intern("@message");
-        self.heap.instance_mut(id).ivars.insert(msg_sym, Value::Str(Rc::from(message.as_str())));
+        self.heap.instance_mut(id).ivars.insert(msg_sym, Value::new_str(message));
         Some(Value::Object(id))
     }
 
@@ -3338,7 +3390,7 @@ impl Vm {
             Op::LoadConstFloat(f) => self.stack.push(Value::Float(f)),
             Op::LoadConstStr(id) => {
                 let s = self.interner.resolve(id).clone();
-                self.stack.push(Value::Str(s));
+                self.stack.push(Value::new_str(s.to_string()));
             }
             Op::LoadSymbol(id) => {
                 self.stack.push(Value::Sym(id));
@@ -3849,7 +3901,7 @@ impl Vm {
             // gem/load-path resolution is deferred.
             "require" => match args {
                 [Value::Str(path)] => {
-                    let path = path.to_string();
+                    let path = path.borrow().clone();
                     Some(self.cext_require(&path))
                 }
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
@@ -4173,7 +4225,7 @@ fn cext_handle_to_value(state: &rubyrs_cext::CExtState, h: rubyrs_cext::Value) -
         // safe storage on the rubyrs side lands in a later level.
         rubyrs_cext::CValue::Str(bytes) => {
             let logical = &bytes[..bytes.len().saturating_sub(1)];
-            Value::Str(Rc::from(String::from_utf8_lossy(logical).as_ref()))
+            Value::new_str(String::from_utf8_lossy(logical))
         }
         rubyrs_cext::CValue::Int(n) => Value::Int(*n),
         // Class handles are returned from `rb_define_module` /
@@ -4198,7 +4250,7 @@ fn cext_value_to_cvalue(name: &str, idx: usize, v: &Value) -> Result<rubyrs_cext
         Value::Nil => rubyrs_cext::CValue::Nil,
         Value::Bool(true) => rubyrs_cext::CValue::True,
         Value::Bool(false) => rubyrs_cext::CValue::False,
-        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.as_bytes()),
+        Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.borrow().as_bytes()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
         other => {
             return Err(Trap::new(RubyError::ArgumentError {
@@ -4613,7 +4665,7 @@ pub(crate) fn ruby_sprintf(
                         }
                     })?
                 }
-                Value::Str(s) => s.chars().next().map(|c| c.to_string()).unwrap_or_default(),
+                Value::Str(s) => s.borrow().chars().next().map(|c| c.to_string()).unwrap_or_default(),
                 _ => return Err(RubyError::TypeError {
                     msg: format!("no implicit conversion to %c from {}", arg.type_name()),
                 }),
@@ -4660,7 +4712,7 @@ fn coerce_int(v: &Value) -> Result<i64, RubyError> {
     match v {
         Value::Int(n) => Ok(*n),
         Value::Float(f) => Ok(*f as i64),
-        Value::Str(s) => Ok(s.trim().parse::<i64>().unwrap_or(0)),
+        Value::Str(s) => Ok(s.borrow().trim().parse::<i64>().unwrap_or(0)),
         Value::Nil => Err(RubyError::TypeError {
             msg: "no implicit conversion from nil to Integer".into(),
         }),
@@ -4674,7 +4726,7 @@ fn coerce_float(v: &Value) -> Result<f64, RubyError> {
     match v {
         Value::Float(f) => Ok(*f),
         Value::Int(n) => Ok(*n as f64),
-        Value::Str(s) => Ok(s.trim().parse::<f64>().unwrap_or(0.0)),
+        Value::Str(s) => Ok(s.borrow().trim().parse::<f64>().unwrap_or(0.0)),
         Value::Nil => Err(RubyError::TypeError {
             msg: "no implicit conversion from nil to Float".into(),
         }),
@@ -4787,7 +4839,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             _ => None,
         },
         (Value::Int(a), "to_s", []) | (Value::Int(a), "inspect", []) => {
-            Some(Value::Str(Rc::from(a.to_string().as_str())))
+            Some(Value::new_str(a.to_string()))
         }
         (Value::Int(a), "to_i", []) => Some(Value::Int(*a)),
         (Value::Int(a), "abs", []) => Some(Value::Int(a.wrapping_abs())),
@@ -4874,7 +4926,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             }
         }
         // Float predicates and conversions.
-        (Value::Float(a), "to_s", []) => Some(Value::Str(Rc::from(crate::heap::format_float(*a).as_str()))),
+        (Value::Float(a), "to_s", []) => Some(Value::new_str(crate::heap::format_float(*a))),
         (Value::Float(a), "to_f", []) => Some(Value::Float(*a)),
         (Value::Float(a), "to_i", []) => Some(Value::Int(*a as i64)),
         (Value::Float(a), "abs", []) => Some(Value::Float(a.abs())),
@@ -4898,29 +4950,29 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Float(a), "round", []) => Some(Value::Int(a.round() as i64)),
 
         (Value::Str(a), "+", [Value::Str(b)]) => {
-            check(a.len().saturating_add(b.len()))?;
-            let mut s = a.to_string();
-            s.push_str(b);
-            Some(Value::Str(Rc::from(s.as_str())))
+            check(a.borrow().len().saturating_add(b.borrow().len()))?;
+            let mut s = a.borrow().clone();
+            s.push_str(&b.borrow());
+            Some(Value::new_str(s))
         }
-        (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(**a == **b)),
-        (Value::Str(a), "!=", [Value::Str(b)]) => Some(Value::Bool(**a != **b)),
+        (Value::Str(a), "==", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() == *b.borrow())),
+        (Value::Str(a), "!=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() != *b.borrow())),
         (Value::Str(a), "to_s", []) => Some(Value::Str(a.clone())),
-        (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => Some(Value::Int(a.chars().count() as i64)),
-        (Value::Str(a), "empty?", []) => Some(Value::Bool(a.is_empty())),
-        (Value::Str(a), "upcase", []) => Some(Value::Str(Rc::from(a.to_uppercase().as_str()))),
-        (Value::Str(a), "downcase", []) => Some(Value::Str(Rc::from(a.to_lowercase().as_str()))),
-        (Value::Str(a), "reverse", []) => Some(Value::Str(Rc::from(a.chars().rev().collect::<String>().as_str()))),
-        (Value::Str(a), "strip", []) => Some(Value::Str(Rc::from(a.trim()))),
-        (Value::Str(a), "lstrip", []) => Some(Value::Str(Rc::from(a.trim_start()))),
-        (Value::Str(a), "rstrip", []) => Some(Value::Str(Rc::from(a.trim_end()))),
-        (Value::Str(a), "include?", [Value::Str(b)]) => Some(Value::Bool(a.contains(&**b))),
+        (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => Some(Value::Int(a.borrow().chars().count() as i64)),
+        (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
+        (Value::Str(a), "upcase", []) => Some(Value::new_str(a.borrow().to_uppercase())),
+        (Value::Str(a), "downcase", []) => Some(Value::new_str(a.borrow().to_lowercase())),
+        (Value::Str(a), "reverse", []) => Some(Value::new_str(a.borrow().chars().rev().collect::<String>())),
+        (Value::Str(a), "strip", []) => Some(Value::new_str(a.borrow().trim().to_string())),
+        (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.borrow().trim_start().to_string())),
+        (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.borrow().trim_end().to_string())),
+        (Value::Str(a), "include?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().contains(&*b.borrow()))),
         // Literal-substring `match?` — true iff the receiver
         // contains the argument as a substring. CRuby additionally
         // accepts a Regexp here; we only handle String, in line
         // with the rest of our regex-free subset. Calls with a
         // non-String argument fall through to NoMethodError.
-        (Value::Str(a), "match?", [Value::Str(b)]) => Some(Value::Bool(a.contains(&**b))),
+        (Value::Str(a), "match?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().contains(&*b.borrow()))),
         // `index(substr)` / `rindex(substr)` — return the byte
         // offset where the substring first / last appears, or
         // nil if it's absent. CRuby reports a *character* index
@@ -4929,13 +4981,13 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // for our test fixtures) and diverges for multibyte —
         // documented in SUBSET.md.
         (Value::Str(a), "index", [Value::Str(b)]) => {
-            Some(match a.find(&**b) {
+            Some(match a.borrow().find(&*b.borrow()) {
                 Some(i) => Value::Int(i as i64),
                 None => Value::Nil,
             })
         }
         (Value::Str(a), "rindex", [Value::Str(b)]) => {
-            Some(match a.rfind(&**b) {
+            Some(match a.borrow().rfind(&*b.borrow()) {
                 Some(i) => Value::Int(i as i64),
                 None => Value::Nil,
             })
@@ -4947,38 +4999,44 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // that via `Rust`'s `str::replace` for non-empty patterns
         // and a hand-rolled walk for the empty-pattern case.
         (Value::Str(a), "sub", [Value::Str(pat), Value::Str(repl)]) => {
-            let out = if pat.is_empty() {
+            let a_ref = a.borrow();
+            let pat_ref = pat.borrow();
+            let repl_ref = repl.borrow();
+            let out = if pat_ref.is_empty() {
                 // CRuby: sub("", repl) inserts `repl` at index 0.
-                let mut s = repl.to_string();
-                s.push_str(a);
+                let mut s = repl_ref.clone();
+                s.push_str(&a_ref);
                 s
-            } else if let Some(idx) = a.find(&**pat) {
-                let mut s = String::with_capacity(a.len() + repl.len());
-                s.push_str(&a[..idx]);
-                s.push_str(repl);
-                s.push_str(&a[idx + pat.len()..]);
+            } else if let Some(idx) = a_ref.find(&*pat_ref) {
+                let mut s = String::with_capacity(a_ref.len() + repl_ref.len());
+                s.push_str(&a_ref[..idx]);
+                s.push_str(&repl_ref);
+                s.push_str(&a_ref[idx + pat_ref.len()..]);
                 s
             } else {
-                a.to_string()
+                a_ref.clone()
             };
             check(out.len())?;
-            Some(Value::Str(Rc::from(out.as_str())))
+            Some(Value::new_str(out))
         }
         (Value::Str(a), "gsub", [Value::Str(pat), Value::Str(repl)]) => {
-            let out = if pat.is_empty() {
+            let a_ref = a.borrow();
+            let pat_ref = pat.borrow();
+            let repl_ref = repl.borrow();
+            let out = if pat_ref.is_empty() {
                 // CRuby: gsub("", repl) wraps `repl` around every
                 // character — `"abc".gsub("", "X") == "XaXbXcX"`.
-                let mut s = repl.to_string();
-                for c in a.chars() {
+                let mut s = repl_ref.clone();
+                for c in a_ref.chars() {
                     s.push(c);
-                    s.push_str(repl);
+                    s.push_str(&repl_ref);
                 }
                 s
             } else {
-                a.replace(&**pat, repl)
+                a_ref.replace(&*pat_ref, &repl_ref)
             };
             check(out.len())?;
-            Some(Value::Str(Rc::from(out.as_str())))
+            Some(Value::new_str(out))
         }
         // String#tr — character-by-character translation. Each
         // char in `from` maps to the same-index char in `to`; if
@@ -4988,10 +5046,11 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // (`"a-z"`) is intentionally NOT expanded — flagged in
         // SUBSET.md.
         (Value::Str(a), "tr", [Value::Str(from), Value::Str(to)]) => {
-            let from_chars: Vec<char> = from.chars().collect();
-            let to_chars: Vec<char> = to.chars().collect();
-            let mut out = String::with_capacity(a.len());
-            for ch in a.chars() {
+            let from_chars: Vec<char> = from.borrow().chars().collect();
+            let to_chars: Vec<char> = to.borrow().chars().collect();
+            let a_ref = a.borrow();
+            let mut out = String::with_capacity(a_ref.len());
+            for ch in a_ref.chars() {
                 if let Some(idx) = from_chars.iter().position(|c| *c == ch) {
                     if to_chars.is_empty() {
                         // Delete: skip this character entirely.
@@ -5005,15 +5064,16 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
                 }
             }
             check(out.len())?;
-            Some(Value::Str(Rc::from(out.as_str())))
+            Some(Value::new_str(out))
         }
-        (Value::Str(a), "start_with?", [Value::Str(b)]) => Some(Value::Bool(a.starts_with(&**b))),
-        (Value::Str(a), "end_with?", [Value::Str(b)]) => Some(Value::Bool(a.ends_with(&**b))),
+        (Value::Str(a), "start_with?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().starts_with(&*b.borrow()))),
+        (Value::Str(a), "end_with?", [Value::Str(b)]) => Some(Value::Bool(a.borrow().ends_with(&*b.borrow()))),
         (Value::Str(a), "to_i", []) => {
             // CRuby's `String#to_i` is famously lenient: leading
             // whitespace, optional sign, then as many digits as it
             // can read; non-numeric tail (or empty input) gives 0.
-            let s = a.trim_start();
+            let a_ref = a.borrow();
+            let s = a_ref.trim_start();
             let (sign, rest) = match s.as_bytes().first() {
                 Some(b'-') => (-1i64, &s[1..]),
                 Some(b'+') => (1i64, &s[1..]),
@@ -5034,7 +5094,8 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             // we can, return 0.0 for "garbage". Rust's stdlib
             // `f64::from_str` is stricter (rejects trailing junk),
             // so we scan a Ruby-shaped prefix ourselves.
-            let s = a.trim_start();
+            let a_ref = a.borrow();
+            let s = a_ref.trim_start();
             let bytes = s.as_bytes();
             let mut end = 0usize;
             if bytes.first() == Some(&b'-') || bytes.first() == Some(&b'+') {
@@ -5067,18 +5128,18 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         }
         (Value::Str(a), "*", [Value::Int(n)]) => {
             let n = (*n).max(0) as usize;
-            check(a.len().saturating_mul(n))?;
-            Some(Value::Str(Rc::from(a.repeat(n).as_str())))
+            check(a.borrow().len().saturating_mul(n))?;
+            Some(Value::new_str(a.borrow().repeat(n)))
         }
-        (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(**a < **b)),
-        (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(**a <= **b)),
-        (Value::Str(a), ">", [Value::Str(b)]) => Some(Value::Bool(**a > **b)),
-        (Value::Str(a), "<=>", [Value::Str(b)]) => Some(Value::Int((**a).cmp(&**b) as i64)),
-        (Value::Str(a), ">=", [Value::Str(b)]) => Some(Value::Bool(**a >= **b)),
+        (Value::Str(a), "<", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() < *b.borrow())),
+        (Value::Str(a), "<=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() <= *b.borrow())),
+        (Value::Str(a), ">", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() > *b.borrow())),
+        (Value::Str(a), "<=>", [Value::Str(b)]) => Some(Value::Int(a.borrow().cmp(&*b.borrow()) as i64)),
+        (Value::Str(a), ">=", [Value::Str(b)]) => Some(Value::Bool(*a.borrow() >= *b.borrow())),
         (Value::Sym(a), "==", [Value::Sym(b)]) => Some(Value::Bool(a == b)),
         (Value::Sym(a), "!=", [Value::Sym(b)]) => Some(Value::Bool(a != b)),
-        (Value::Nil, "to_s", []) => Some(Value::Str(Rc::from(""))),
-        (Value::Nil, "inspect", []) => Some(Value::Str(Rc::from("nil"))),
+        (Value::Nil, "to_s", []) => Some(Value::new_str("")),
+        (Value::Nil, "inspect", []) => Some(Value::new_str("nil")),
         (Value::Nil, "nil?", []) => Some(Value::Bool(true)),
         // Object#nil? is `false` for every non-nil receiver. We
         // implement it here as a generic fallback so e.g.
@@ -5091,7 +5152,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // covers every receiver. `!@` (the alternate spelling
         // used by `attr_*` / `define_method`) is the same op.
         (_, "!", []) | (_, "!@", []) => Some(Value::Bool(!recv.is_truthy())),
-        (Value::Bool(b), "to_s", []) => Some(Value::Str(Rc::from(if *b { "true" } else { "false" }))),
+        (Value::Bool(b), "to_s", []) => Some(Value::new_str(if *b { "true" } else { "false" })),
         // CRuby's TrueClass / FalseClass don't define `<=>`;
         // `Object#<=>` falls back to "0 if identical instance
         // else nil". Booleans are singletons (every `true` is
@@ -5113,7 +5174,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Bool(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Nil, "<=>", [_]) => Some(Value::Nil),
         (Value::Class(c), "name", []) | (Value::Class(c), "to_s", []) => {
-            Some(Value::Str(Rc::from(c.name.as_str())))
+            Some(Value::new_str(c.name.clone()))
         }
         // Class identity is `Rc::ptr_eq` — two `Value::Class` refer
         // to the same class iff they point at the same `Rc<Class>`.
@@ -5131,7 +5192,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
 impl Vm {
     pub(crate) fn sym_primitive(&self, recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
         match (recv, name, args) {
-            (Value::Sym(id), "to_s", []) => Some(Value::Str(self.interner.resolve(*id).clone())),
+            (Value::Sym(id), "to_s", []) => Some(Value::new_str(self.interner.resolve(*id).to_string())),
             (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
             // Symbol <=> Symbol compares the interned names
             // lexicographically — matches `value_cmp_v`.

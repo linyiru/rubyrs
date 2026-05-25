@@ -100,11 +100,11 @@ fn run_rubyrs_eval(gemfile_path: &Path) -> Vec<GemRequirement> {
             let mut version = "1.0.0".to_string(); // fallback
             if args.len() > 1 {
                 if let Value::Str(v) = &args[1] {
-                    version = v.to_string();
+                    version = v.borrow().clone();
                 }
             }
             reqs_clone.borrow_mut().push(GemRequirement {
-                name: name.to_string(),
+                name: name.borrow().clone(),
                 version: clean_version(&version),
             });
         }

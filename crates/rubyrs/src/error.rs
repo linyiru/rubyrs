@@ -47,6 +47,12 @@ pub enum RubyError {
     /// by `dispatch`, so a script `rescue KeyError => e` catches
     /// it like CRuby.
     KeyError { msg: String },
+    /// Out-of-range indexing into a String (via `s[i] = x` and
+    /// friends). The Array#[] / Array#[]= path returns nil for
+    /// OOB rather than raising, matching CRuby. Arrays grow on
+    /// write; strings don't (at least not without a different
+    /// CRuby method), hence the trap.
+    IndexError { msg: String },
     /// Integer `/` or `%` with a zero divisor. CRuby raises
     /// `ZeroDivisionError`; without this variant the Rust
     /// `i64::div` would panic the host process. Float `/ 0.0`
@@ -76,6 +82,7 @@ impl RubyError {
             RubyError::RuntimeError { .. } => "RuntimeError",
             RubyError::NameError { .. } => "NameError",
             RubyError::KeyError { .. } => "KeyError",
+            RubyError::IndexError { .. } => "IndexError",
             RubyError::ZeroDivisionError { .. } => "ZeroDivisionError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
             // Uncaught carries the actual class name from the script's
@@ -93,6 +100,7 @@ impl RubyError {
             | RubyError::RuntimeError { msg }
             | RubyError::NameError { msg }
             | RubyError::KeyError { msg }
+            | RubyError::IndexError { msg }
             | RubyError::ZeroDivisionError { msg }
             | RubyError::ResourceExhausted { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),

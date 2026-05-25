@@ -693,9 +693,9 @@ fn resolve_hash_unpacks_pairs() {
     let val = rt.eval(r#"{ "a" => 1, "b" => 2 }"#, "t.rb").unwrap();
     let pairs = rt.resolve_hash(&val).expect("should be a Hash");
     assert_eq!(pairs.len(), 2);
-    assert!(matches!(&pairs[0].0, Value::Str(s) if &**s == "a"));
+    assert!(matches!(&pairs[0].0, Value::Str(s) if *s.borrow() == "a"));
     assert!(matches!(&pairs[0].1, Value::Int(1)));
-    assert!(matches!(&pairs[1].0, Value::Str(s) if &**s == "b"));
+    assert!(matches!(&pairs[1].0, Value::Str(s) if *s.borrow() == "b"));
     assert!(matches!(&pairs[1].1, Value::Int(2)));
 }
 

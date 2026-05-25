@@ -61,7 +61,7 @@ fn main() {
         let b = bf.clone();
         rt.register_fn("tap", move |args| {
             if let [Value::Str(s)] = args {
-                b.borrow_mut().taps.push(s.to_string());
+                b.borrow_mut().taps.push(s.borrow().clone());
             }
             Ok(Value::Nil)
         });
@@ -70,7 +70,7 @@ fn main() {
         let b = bf.clone();
         rt.register_fn("brew", move |args| {
             if let [Value::Str(s)] = args {
-                b.borrow_mut().formulae.push(s.to_string());
+                b.borrow_mut().formulae.push(s.borrow().clone());
             }
             Ok(Value::Nil)
         });
@@ -79,7 +79,7 @@ fn main() {
         let b = bf.clone();
         rt.register_fn("cask", move |args| {
             if let [Value::Str(s)] = args {
-                b.borrow_mut().casks.push(s.to_string());
+                b.borrow_mut().casks.push(s.borrow().clone());
             }
             Ok(Value::Nil)
         });
@@ -88,7 +88,7 @@ fn main() {
         let b = bf.clone();
         rt.register_fn("mas", move |args| {
             if let [Value::Str(name), Value::Int(id)] = args {
-                b.borrow_mut().mas_apps.push((name.to_string(), *id));
+                b.borrow_mut().mas_apps.push((name.borrow().clone(), *id));
             }
             Ok(Value::Nil)
         });

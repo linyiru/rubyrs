@@ -65,8 +65,8 @@ fn run_active_builder_style() {
     rt.register_fn("host_register_server", move |args| {
         if let [Value::Str(name), Value::Str(itype), Value::Int(port)] = args {
             topo_for_server.borrow_mut().servers.push(ServerConfig {
-                name: name.to_string(),
-                instance_type: itype.to_string(),
+                name: name.borrow().clone(),
+                instance_type: itype.borrow().clone(),
                 port: *port,
             });
         }
@@ -77,7 +77,7 @@ fn run_active_builder_style() {
     rt.register_fn("host_register_lb", move |args| {
         if let [Value::Str(name)] = args {
             topo_for_lb.borrow_mut().load_balancers.push(LoadBalancerConfig {
-                name: name.to_string(),
+                name: name.borrow().clone(),
                 routes: Vec::new(),
             });
         }
@@ -88,8 +88,8 @@ fn run_active_builder_style() {
     rt.register_fn("host_register_route", move |args| {
         if let [Value::Str(lb_name), Value::Str(path), Value::Str(target)] = args {
             let mut topo = topo_for_route.borrow_mut();
-            if let Some(lb) = topo.load_balancers.iter_mut().find(|l| l.name == **lb_name) {
-                lb.routes.push((path.to_string(), target.to_string()));
+            if let Some(lb) = topo.load_balancers.iter_mut().find(|l| l.name == *lb_name.borrow()) {
+                lb.routes.push((path.borrow().clone(), target.borrow().clone()));
             }
         }
         Ok(Value::Nil)
@@ -221,8 +221,8 @@ fn parse_declarative_topology(rt: &Runtime, val: &Value) -> Option<InfraTopology
                     for (sk, sv) in s_hash {
                         if let Value::Sym(ssym) = sk {
                             match rt.resolve_sym(ssym) {
-                                "name" => if let Value::Str(s) = sv { server.name = s.to_string(); },
-                                "type" => if let Value::Str(s) = sv { server.instance_type = s.to_string(); },
+                                "name" => if let Value::Str(s) = sv { server.name = s.borrow().clone(); },
+                                "type" => if let Value::Str(s) = sv { server.instance_type = s.borrow().clone(); },
                                 "port" => if let Value::Int(i) = sv { server.port = i; },
                                 _ => {}
                             }
@@ -239,7 +239,7 @@ fn parse_declarative_topology(rt: &Runtime, val: &Value) -> Option<InfraTopology
                     for (lk, lv) in lb_hash {
                         if let Value::Sym(lsym) = lk {
                             match rt.resolve_sym(lsym) {
-                                "name" => if let Value::Str(s) = lv { lb.name = s.to_string(); },
+                                "name" => if let Value::Str(s) = lv { lb.name = s.borrow().clone(); },
                                 "routes" => {
                                     let r_array = rt.resolve_array(&lv)?;
                                     for r_val in r_array {
@@ -249,8 +249,8 @@ fn parse_declarative_topology(rt: &Runtime, val: &Value) -> Option<InfraTopology
                                         for (rk, rv) in r_hash {
                                             if let Value::Sym(rsym) = rk {
                                                 match rt.resolve_sym(rsym) {
-                                                    "path" => if let Value::Str(s) = rv { path = s.to_string(); },
-                                                    "target" => if let Value::Str(s) = rv { target = s.to_string(); },
+                                                    "path" => if let Value::Str(s) = rv { path = s.borrow().clone(); },
+                                                    "target" => if let Value::Str(s) = rv { target = s.borrow().clone(); },
                                                     _ => {}
                                                 }
                                             }

@@ -31,7 +31,14 @@ pub enum Value {
     /// (CRuby's "Float wins on mix" rule). Equality across the
     /// numeric types coerces too — `5 == 5.0` is `true`.
     Float(f64),
-    Str(Rc<str>),
+    /// Mutable string. `Rc<RefCell<String>>` rather than `Rc<str>`
+    /// so that `s[i] = x` and friends can update the underlying
+    /// storage and have every alias of `s` see the change — CRuby
+    /// treats String as a mutable object reference. Every read
+    /// path borrows through `.borrow()`; every mutation goes
+    /// through `.borrow_mut()`. The Rc lets value-clones stay
+    /// O(1) (refcount bump, no String copy).
+    Str(Rc<RefCell<String>>),
     Sym(SymId),
     Bool(bool),
     Nil,

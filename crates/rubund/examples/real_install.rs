@@ -97,9 +97,9 @@ fn run_rubyrs_eval() -> Vec<GemRequirement> {
     rt.register_fn("host_register_gem", move |args| {
         if let [Value::Str(name), Value::Str(version), Value::Str(group)] = args {
             reqs_clone.borrow_mut().push(GemRequirement {
-                name: name.to_string(),
-                version: version.to_string(),
-                group: group.to_string(),
+                name: name.borrow().clone(),
+                version: version.borrow().clone(),
+                group: group.borrow().clone(),
             });
         }
         Ok(Value::Nil)

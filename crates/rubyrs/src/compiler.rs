@@ -779,7 +779,7 @@ fn literal_to_value(e: &Expr) -> Value {
     match e {
         Expr::IntLit(n) => Value::Int(*n),
         Expr::FloatLit(f) => Value::Float(*f),
-        Expr::StrLit(s) => Value::Str(std::rc::Rc::from(s.as_str())),
+        Expr::StrLit(s) => Value::new_str(s.as_str()),
         Expr::SymbolLit(_) => {
             // SymbolLit-to-Value needs the interner, which the
             // compiler doesn't pass to `literal_to_value`. Promote
