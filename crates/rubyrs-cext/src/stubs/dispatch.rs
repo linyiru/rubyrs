@@ -190,3 +190,97 @@ pub unsafe extern "C" fn rb_hash_foreach(
 pub unsafe extern "C" fn rb_hash_new_capa(_capa: c_long) -> Value {
     unsafe { crate::rb_hash_new() }
 }
+
+// ===== msgpack-ruby additions =====
+
+// Define a constant on a class — spike doesn't model class constants,
+// so no-op (subsequent rb_const_get returns Qnil regardless).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_define_const(_klass: Value, _name: *const c_char, _val: Value) {}
+
+// Class name as C string. Returns "" for non-Class. Memory leaks
+// (returning a static-lifetime const char* from owned String is not
+// possible without a stable interner — spike scope; if this is called
+// in a hot loop it'll grow.)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_obj_classname(v: Value) -> *const c_char {
+    with_state(|st| match st.resolve(v) {
+        CValue::Class(name) => {
+            // Leak: caller treats it as static. Acceptable per call;
+            // not hot-path.
+            let cs = std::ffi::CString::new(name.clone()).unwrap_or_default();
+            cs.into_raw() as *const c_char
+        }
+        _ => b"\0".as_ptr() as *const c_char,
+    })
+}
+
+// Freeze / frozen?: spike doesn't track frozenness.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_obj_freeze(v: Value) -> Value { v }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_obj_frozen_p(_v: Value) -> c_int { 0 }
+
+// Array from variadic args. Variadic forwarding requires nightly
+// c_variadic; spike returns an empty array and drops the args
+// (cdecl ABI cleans up). msgpack uses rb_ary_new3 in non-hot paths
+// (error msgs, registry init); empty array is wrong-but-defined.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_ary_new3(_n: c_long) -> Value {
+    unsafe { crate::rb_ary_new() }
+}
+
+// Class ancestry — rubyrs has no inheritance modeling. Return Qtrue
+// conservatively (caller treats any non-Qfalse as "yes").
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_class_inherited_p(_child: Value, _parent: Value) -> Value {
+    unsafe { crate::Qtrue }
+}
+
+// Hash mutators.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_clear(h: Value) -> Value {
+    with_state(|st| {
+        if let CValue::Hash(pairs) = st.resolve_mut(h) {
+            pairs.clear();
+        }
+    });
+    h
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_dup(h: Value) -> Value {
+    let pairs: Vec<(Value, Value)> = with_state(|st| match st.resolve(h) {
+        CValue::Hash(p) => p.clone(),
+        _ => Vec::new(),
+    });
+    with_state(|st| st.intern(CValue::Hash(pairs)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_hash_freeze(h: Value) -> Value { h }
+
+// Mixin: spike doesn't model module composition.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_include_module(_klass: Value, _mod: Value) {}
+
+// Opposite of rb_define_alloc_func: spike has no allocator table to undo.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_undef_alloc_func(_klass: Value) {}
+
+// Struct: rubyrs has no Struct. Return the class handle directly;
+// the (variadic) member-name args are dropped by the ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_struct_define(name: *const c_char) -> Value {
+    if name.is_null() {
+        return Qnil;
+    }
+    let n = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    with_state(|st| st.intern(CValue::Class(n)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_struct_new(_klass: Value) -> Value { Qnil }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rb_struct_aref(_s: Value, _i: c_long) -> Value { Qnil }
