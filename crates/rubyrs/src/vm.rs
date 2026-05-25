@@ -4397,6 +4397,7 @@ fn cext_handle_to_value(
 #[cfg(not(target_os = "wasi"))]
 fn cext_value_to_cvalue(
     vm: &Vm,
+    st: &mut rubyrs_cext::CExtState,
     name: &str,
     idx: usize,
     v: &Value,
@@ -4408,14 +4409,21 @@ fn cext_value_to_cvalue(
         Value::Str(s) => rubyrs_cext::CValue::str_from_bytes(s.borrow().as_bytes()),
         Value::Int(n) => rubyrs_cext::CValue::Int(*n),
         // Array/Hash crossing Ruby → C: build a CValue::Array/Hash
-        // whose elements are FRESH handles interned into the topmost
-        // CExtState. Recurses on contained Values.
+        // whose elements are FRESH handles interned into `st`.
+        // Recurses on contained Values, interning each child into
+        // the SAME state the caller will hand the result to. This
+        // is the L2-3-review-fix #10: the previous impl used the
+        // thread-local `with_state` accessor, which interned children
+        // into whatever state was topmost at the time — wrong if the
+        // outer caller had a state pushed but the inner caller hadn't
+        // pushed yet (top-level cext call), and corrupting on
+        // nesting.
         Value::Array(id) => {
             let elements = vm.heap.array(*id).clone();
             let mut handles: Vec<rubyrs_cext::Value> = Vec::with_capacity(elements.len());
             for elem in &elements {
-                let cv = cext_value_to_cvalue(vm, name, idx, elem)?;
-                handles.push(rubyrs_cext::with_state(|st| st.intern(cv)));
+                let cv = cext_value_to_cvalue(vm, st, name, idx, elem)?;
+                handles.push(st.intern(cv));
             }
             rubyrs_cext::CValue::Array(handles)
         }
@@ -4424,10 +4432,10 @@ fn cext_value_to_cvalue(
             let mut pairs_out: Vec<(rubyrs_cext::Value, rubyrs_cext::Value)> =
                 Vec::with_capacity(pairs.len());
             for (k, v) in &pairs {
-                let kc = cext_value_to_cvalue(vm, name, idx, k)?;
-                let vc = cext_value_to_cvalue(vm, name, idx, v)?;
-                let kh = rubyrs_cext::with_state(|st| st.intern(kc));
-                let vh = rubyrs_cext::with_state(|st| st.intern(vc));
+                let kc = cext_value_to_cvalue(vm, st, name, idx, k)?;
+                let kh = st.intern(kc);
+                let vc = cext_value_to_cvalue(vm, st, name, idx, v)?;
+                let vh = st.intern(vc);
                 pairs_out.push((kh, vh));
             }
             rubyrs_cext::CValue::Hash(pairs_out)
@@ -4504,24 +4512,11 @@ fn cext_dispatch(
          host did not set it before calling host fn"
     );
 
-    // Translate args while the *previous* state (if any) is still
-    // torn down. Errors must abort before we `enter()` a new state.
-    // SAFETY: vm_ptr was just validated above; the &Vm here is
-    // read-only and time-disjoint from the &mut Vm uses below.
-    let cargs: Vec<rubyrs_cext::CValue> = {
-        let vm: &Vm = unsafe { &*vm_ptr };
-        args.iter()
-            .enumerate()
-            .map(|(i, v)| cext_value_to_cvalue(vm, name, i, v))
-            .collect::<Result<_, _>>()?
-    };
-
     // SAFETY: we transmute `OpaqueFn` (zero-arg) to an arity-specific
     // signature with VALUE-shaped args. The original function was
     // registered with that exact signature by the C ext; we just
     // recovered it through the `ANYARGS` convention.
     unsafe {
-
         // From here on, every push has a matching RAII guard. A panic
         // (or any future early-return) will unwind through these and
         // pop both stacks in LIFO order, leaving thread-local state
@@ -4532,6 +4527,28 @@ fn cext_dispatch(
                 cext_funcall_to_vm(vm_ptr, recv_h, method_name, arg_hs)
             },
         ));
+
+        // Translate args INTO the now-active state, interning each
+        // (and each child for Array/Hash) directly via the same `st`
+        // we're about to hand to the C ext. Trap-propagating via `?`;
+        // RAII guards above drop on the early-return path.
+        //
+        // Previously the translation ran BEFORE `enter()` and used
+        // `with_state` for child interning, which silently interned
+        // Array/Hash children into the OUTER state (or panicked on
+        // empty STATE for top-level calls). Fix for PR #6 review #10.
+        let arg_handles: Vec<rubyrs_cext::Value> = {
+            let vm_ref: &Vm = &*vm_ptr;
+            rubyrs_cext::with_state(|st| {
+                args.iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let cv = cext_value_to_cvalue(vm_ref, st, name, i, v)?;
+                        Ok::<_, Trap>(st.intern(cv))
+                    })
+                    .collect::<Result<Vec<_>, Trap>>()
+            })?
+        };
 
         let ret_handle = with_caught_unwind(|| {
             // Build the `self` handle:
@@ -4550,12 +4567,6 @@ fn cext_dispatch(
                 }),
                 None => rubyrs_cext::Qnil,
             };
-
-            // Intern args into the now-active state so the C side
-            // sees them as valid handles.
-            let arg_handles: Vec<rubyrs_cext::Value> = rubyrs_cext::with_state(|st| {
-                cargs.into_iter().map(|cv| st.intern(cv)).collect()
-            });
             match arity {
                 0 => {
                     type F = unsafe extern "C" fn(rubyrs_cext::Value) -> rubyrs_cext::Value;
@@ -4687,9 +4698,11 @@ fn cext_funcall_to_vm(
     };
 
     // Translate result back to a handle in the topmost CExtState.
-    // `cext_value_to_cvalue` only needs `&Vm` (read-only heap walk).
+    // `cext_value_to_cvalue` now takes the same `st` it'll be interned
+    // into, so Array/Hash result children land in the correct state
+    // — the topmost, which is the C ext's current state.
     rubyrs_cext::with_state(|st| {
-        match cext_value_to_cvalue(vm_for_result, "rb_funcallv:result", 0, &result) {
+        match cext_value_to_cvalue(vm_for_result, st, "rb_funcallv:result", 0, &result) {
             Ok(cv) => st.intern(cv),
             Err(_) => rubyrs_cext::Qnil,
         }
