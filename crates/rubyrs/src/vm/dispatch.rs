@@ -423,14 +423,21 @@ impl Vm {
                     // cext_dispatch's accepted-arities rule.
                     #[cfg(not(target_os = "wasi"))]
                     {
+                        // PR #60 review #10: don't silently skip
+                        // initialize on arity mismatch — that
+                        // diverges from Ruby semantics
+                        // (`Klass.new` must raise ArgumentError if
+                        // the args don't fit initialize). Only
+                        // filter on whether the arity is
+                        // dispatchable by the setjmp shim at all
+                        // ({-1} ∪ 0..=5); cext_dispatch then
+                        // validates argc against arity for fixed
+                        // cases and raises ArgumentError on a
+                        // mismatch.
                         let cext_init_reg = g.vm.cext_instance_methods
                             .get(&cls.name)
                             .and_then(|t| t.get(&init_id).cloned())
-                            // L3-H: also accept variadic arity (-1)
-                            // — setjmp shim now dispatches it.
-                            .filter(|reg| reg.arity == -1
-                                || ((0..=5).contains(&reg.arity)
-                                    && reg.arity as usize == args.len()));
+                            .filter(|reg| reg.arity == -1 || (0..=5).contains(&reg.arity));
                         if let Some(reg) = cext_init_reg {
                             let qualified = reg.qualified_name.clone();
                             let func = reg.func;

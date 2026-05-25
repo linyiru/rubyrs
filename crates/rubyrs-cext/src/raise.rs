@@ -40,8 +40,18 @@ unsafe extern "C" {
     /// Rust frames between setjmp and the cext call, so a longjmp
     /// from rb_raise never has to unwind a Rust frame's RAII Drop.
     ///
-    /// `args` must point to an array of length `arity + 1` (args[0]
-    /// is `self`, args[1..] are the call arguments).
+    /// `args` must point to an array of length `nargs`. PR #60
+    /// review #12: this is the post-L3-H contract — the pre-L3-H
+    /// docstring said "length arity+1" which only held for fixed
+    /// arity 0..=5.
+    ///
+    /// Per-arity contract:
+    ///   - fixed 0..=5: caller must ensure `nargs == arity + 1`
+    ///     (args[0] is self; args[1..nargs] are the fixed call
+    ///     args, one per arity slot).
+    ///   - variadic -1: `nargs >= 1` (args[0] is self; args[1] ..
+    ///     args[nargs-1] are the user args; the shim computes
+    ///     argc = nargs - 1 and passes &args[1] as argv).
     ///
     /// Returns the cext fn's u64 on normal return; on raise, writes
     /// the class id + heap-owned message into the out-params and
@@ -108,13 +118,25 @@ pub unsafe fn invoke_with_raise(
         if arity == -1 { !args.is_empty() } else { args.len() == (arity as usize) + 1 },
         "invoke_with_raise: args length mismatch (arity={}, got {})", arity, args.len()
     );
+    // PR #60 review #11: checked cast for nargs. `args.len() as
+    // c_int` would silently truncate / wrap negative on > i32::MAX
+    // elements; for variadic calls there's no static bound. Abort
+    // with a clear message — c_int overflow here would corrupt
+    // the C shim's argc calculation (nargs - 1) and lead to OOB
+    // indexing in case -1.
+    let nargs: std::ffi::c_int = std::ffi::c_int::try_from(args.len()).unwrap_or_else(|_| {
+        panic!(
+            "invoke_with_raise: args.len() ({}) exceeds c_int::MAX",
+            args.len()
+        );
+    });
     let mut out_class: u64 = 0;
     let mut out_msg: *mut c_char = std::ptr::null_mut();
     let raw_result = unsafe {
         rubyrs_jmp_invoke(
             func,
             arity as std::ffi::c_int,
-            args.len() as std::ffi::c_int,
+            nargs,
             args.as_ptr(),
             &mut out_class as *mut u64,
             &mut out_msg as *mut *mut c_char,
