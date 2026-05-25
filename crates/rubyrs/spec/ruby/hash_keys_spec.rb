@@ -13,9 +13,10 @@ describe "Hash#keys" do
     assert_eq({}.keys, [])
     assert({}.keys.is_a?(Array))
     # Skipped — upstream keys_spec.rb:7-8 covers Hash with
-    # default value / proc; rubyrs's `Hash.new(default)`
-    # / `Hash.new { ... }` doesn't construct a Hash (returns
-    # Object). Tracked via docs/SUBSET.md.
+    # default value / proc; rubyrs's `Hash.new(default)` /
+    # `Hash.new { ... }` returns an Object, not a Hash. See
+    # docs/SUBSET.md → "Hash built-in methods" for the
+    # divergence entry.
     #   assert_eq(Hash.new(5).keys, [])
     #   assert_eq(Hash.new { 5 }.keys, [])
     assert_eq({ 1 => 2, 4 => 8, 2 => 4 }.keys, [1, 4, 2])

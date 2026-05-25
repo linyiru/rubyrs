@@ -228,9 +228,11 @@ Divergence from CRuby on `Array#take(negative)`:
               # rubyrs: returns [] (silent)
 ```
 
-Same coalesce-rather-than-raise tendency as
-`Integer#digits(-n)` (raises ArgumentError where CRuby
-raises Math::DomainError — see above). The upstream
+Similar in spirit to the `Integer#digits` divergence above
+(`-12345.digits(7)` on a negative RECEIVER raises
+ArgumentError rather than Math::DomainError) — both are
+cases where rubyrs returns a less specific signal than
+CRuby, just via different mechanisms. The upstream
 ruby/spec `it` block covering this is skipped in
 [`crates/rubyrs/spec/ruby/array_take_spec.rb`](../crates/rubyrs/spec/ruby/array_take_spec.rb)
 with a comment naming the upstream expectation and pointing
@@ -260,6 +262,18 @@ results), `select` / `filter`, `reject`, `find` / `detect`,
 CRuby's later-wins iteration order), `filter_map` (collects
 truthy block returns into a flat Array — not a Hash —
 matching CRuby).
+
+Divergence — `Hash.new` with a default value / default proc
+isn't supported: `Hash.new(5)` and `Hash.new { ... }` both
+return an `Object`, not a Hash. Calling any Hash method on
+the result (`.keys`, `.[]`, `.empty?`) raises NoMethodError.
+For the niche the runtime targets (small embedded DSLs),
+the default-value behaviour rarely shows up; full
+constructor support is a separate engine task. The upstream
+ruby/spec `it` blocks that touch this form are skipped
+inline in
+[`crates/rubyrs/spec/ruby/hash_keys_spec.rb`](../crates/rubyrs/spec/ruby/hash_keys_spec.rb)
+with `# Skipped` comments naming the upstream line.
 
 ### Range built-in methods
 
