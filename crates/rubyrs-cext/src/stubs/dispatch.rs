@@ -221,7 +221,7 @@ pub unsafe extern "C" fn rb_obj_classname(v: Value) -> *const c_char {
         _ => String::new(),
     });
     if name.is_empty() {
-        return b"\0".as_ptr() as *const c_char;
+        return c"".as_ptr();
     }
     CACHE.with(|c| {
         let mut m = c.borrow_mut();
@@ -260,7 +260,7 @@ pub unsafe extern "C" fn rb_ary_new3(_n: c_long) -> Value {
 // conservatively (caller treats any non-Qfalse as "yes").
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_class_inherited_p(_child: Value, _parent: Value) -> Value {
-    unsafe { crate::Qtrue }
+    crate::Qtrue
 }
 
 // Hash mutators.

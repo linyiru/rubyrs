@@ -158,9 +158,11 @@ pub unsafe extern "C" fn RHASH_SIZE(v: Value) -> c_long {
 // ===== msgpack-ruby additions =====
 
 /// long long -> Integer. rubyrs's Number is i64; identical to rb_ll2num.
+/// `c_longlong` is guaranteed ≥64 bits per the C standard so `n` is
+/// already i64 on every target — no widening cast needed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rb_ll2inum(n: c_longlong) -> Value {
-    with_state(|st| st.intern(CValue::Int(n as i64)))
+    with_state(|st| st.intern(CValue::Int(n)))
 }
 
 /// unsigned long long -> Integer. Truncates to i64 (rubyrs has no

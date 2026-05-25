@@ -287,10 +287,12 @@ pub unsafe extern "C" fn rb_enc_asciicompat(_enc: *mut c_void) -> c_int { 1 }
 pub unsafe extern "C" fn rb_enc_from_index(idx: c_int) -> *mut c_void {
     // Match the singletons in rb_utf8_encoding / rb_ascii8bit_encoding
     // / rb_usascii_encoding.
+    // `without_provenance_mut(N)` matches the encoding-singleton
+    // pattern used by rb_utf8_encoding et al. above.
     match idx {
-        0 => 3 as *mut c_void, // usascii
-        2 => 2 as *mut c_void, // ascii8bit
-        _ => 1 as *mut c_void, // utf8 default
+        0 => std::ptr::without_provenance_mut(3), // usascii
+        2 => std::ptr::without_provenance_mut(2), // ascii8bit
+        _ => std::ptr::without_provenance_mut(1), // utf8 default
     }
 }
 
