@@ -308,6 +308,11 @@ impl CExtState {
         // Vec::grow reallocations per cext_dispatch. The
         // 20 sentinels seeded below already consume 31% of the
         // initial capacity; `intern` grows from there if needed.
+        // Sentinel count must match the explicit array literal
+        // length below — kept as a sibling constant so the Class
+        // deduplication path in `intern` doesn't scan past the
+        // seeded range and accidentally collide a future user
+        // class with a fresh-interned-but-also-cached entry.
         let mut values = Vec::with_capacity(64);
         values.extend([
                 CValue::Nil,                                 // 0  Qnil
@@ -332,6 +337,7 @@ impl CExtState {
                 CValue::Class(String::from("Enumerable")),   // 19 rb_mEnumerable
                 CValue::Class(String::from("Proc")),         // 20 rb_cProc
             ]);
+        debug_assert_eq!(values.len(), SENTINEL_COUNT);
         Self {
             values,
             registered_fns: Vec::new(),
@@ -342,8 +348,39 @@ impl CExtState {
         }
     }
 
+}
+
+/// Number of pre-seeded handle slots. Mirrors the array literal
+/// in `CExtState::new` (slots 0..=20 covering Qnil/Qtrue/Qfalse
+/// plus 18 sentinel Class handles). The `intern` Class-dedup
+/// path scans exactly this range.
+const SENTINEL_COUNT: usize = 21;
+
+impl CExtState {
     /// Push a fresh value into the handle table and return its token.
+    /// Exception: `CValue::Class` is deduplicated against the seeded
+    /// sentinel slots (positions 3..=20 cover `rb_cObject`,
+    /// `rb_cString`, `rb_cArray`, …) so that
+    /// `ext_module == rb_cSymbol`-style equality checks inside a
+    /// vendored cext (msgpack's `register_type_internal` is the
+    /// canonical caller) compare equal across a Vm → cext crossing.
+    /// Without this, a Vm-side `Value::Class(c)` where `c.name ==
+    /// "Symbol"` would intern at a fresh handle distinct from the
+    /// sentinel `rb_cSymbol = 10`, and the registry's
+    /// "if (ext_module == rb_cSymbol) pk->has_symbol_ext_type = true"
+    /// branch would silently not fire — Symbol values would then
+    /// pack as fixstr instead of ext-type 0x00. User classes (names
+    /// not in the sentinel set) always intern fresh.
     pub fn intern(&mut self, v: CValue) -> Value {
+        if let CValue::Class(name) = &v {
+            for (h, existing) in self.values.iter().enumerate().take(SENTINEL_COUNT) {
+                if let CValue::Class(existing_name) = existing {
+                    if existing_name == name {
+                        return h as u64;
+                    }
+                }
+            }
+        }
         let h = self.values.len() as u64;
         self.values.push(v);
         h
