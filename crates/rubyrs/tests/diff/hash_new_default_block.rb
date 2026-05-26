@@ -89,6 +89,27 @@ puts merged.inspect                             # {a: 1}
 puts merged[:new_key]                           # base-new_key (block fired)
 puts merged.inspect                             # {a: 1, new_key: "base-new_key"}
 
+# --- break from default-block raises LocalJumpError ---
+# CRuby: a Hash default-block is a stored Proc, not an iterator
+# yield, so `break` is illegal — "break from proc-closure"
+# LocalJumpError. Catches code that defensively uses `break`
+# as a signal mechanism inside a default-proc.
+hb = Hash.new { |_, _| break :nope }
+begin
+  hb[:x]
+rescue LocalJumpError => e
+  puts e.message                                # "break from proc-closure"
+end
+
+# `dig` exhibits the same shape (its default-block path mirrors
+# `[]`'s).
+hd = Hash.new { |_, _| break :nope_dig }
+begin
+  hd.dig(:x, :y)
+rescue LocalJumpError => e
+  puts e.message
+end
+
 # --- Hash#dig consults default-block per step ---
 # CRuby's `Hash#dig` walks via `[]` at each level, so a default-
 # block fires on missing keys during the dig. Without this,

@@ -73,14 +73,19 @@ impl Vm {
                                 return Ok(Some(Value::Nil));
                             }
                             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                            // `break value` from inside the block
-                            // exits the `[]` call with that value
-                            // — same shape as `break` from an
-                            // iterator block. Clear the flag so it
-                            // doesn't leak into the surrounding
-                            // method's loop/iterator state.
+                            // `break` from inside a stored Proc
+                            // (which is what a Hash default-block
+                            // is — not an iterator yield) is a
+                            // LocalJumpError in CRuby: there's no
+                            // loop body to break out of. Raise to
+                            // match. Clear the flag first so the
+                            // trap doesn't carry it into the outer
+                            // unwind state.
                             if g.vm.break_signaled {
                                 g.vm.break_signaled = false;
+                                return Err(g.vm.trap(crate::error::RubyError::LocalJumpError {
+                                    msg: "break from proc-closure".into(),
+                                }));
                             }
                             return Ok(Some(r));
                         }

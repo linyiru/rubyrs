@@ -639,8 +639,14 @@ impl Vm {
                         return Ok(Value::Nil);
                     }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    // Same Proc-break-LocalJumpError semantics as
+                    // the `Hash#[]` arm. See its comment for the
+                    // rationale (stored block, not iterator yield).
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
+                        return Err(g.vm.trap(crate::error::RubyError::LocalJumpError {
+                            msg: "break from proc-closure".into(),
+                        }));
                     }
                     return Ok(r);
                 }
