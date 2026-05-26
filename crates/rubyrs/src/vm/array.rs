@@ -195,16 +195,30 @@ impl Vm {
                     // `arr.first(n)` / `arr.last(n)` — CRuby returns a
                     // new Array of up to `n` elements (capped at the
                     // receiver's length). `n == 0` is `[]`; `n < 0` is
-                    // ArgumentError "negative array size". Symmetric
-                    // with `take` / `drop` already implemented below,
-                    // modulo the negative-`n` policy: those silently
-                    // clamp to 0 instead of trapping. `Range#first(n)`
-                    // at vm/range.rs:83 also clamps; this arm
-                    // deliberately diverges to match CRuby's
-                    // Array-specific ArgumentError. Aligning the
-                    // Range / take / drop paths is a separate
-                    // cleanup, since both are pre-existing CRuby
-                    // divergences not introduced by this change.
+                    // ArgumentError "negative array size".
+                    //
+                    // CRuby-divergences NOT introduced here but worth
+                    // naming so a reader doesn't think the inconsistency
+                    // came from this PR:
+                    //
+                    //   - Array#take / Array#drop (vm/array.rs ~770)
+                    //     silently clamp negative `n` to 0 rather than
+                    //     trapping. Array#first / #last now trap, on
+                    //     purpose — matches CRuby's actual semantics for
+                    //     the *Array* methods.
+                    //   - Range#first(n) is missing entirely on closed
+                    //     ranges (e.g. `(1..5).first(2)` → NoMethodError);
+                    //     the only arm that exists is the *endless* one
+                    //     at vm/range.rs:83, and that arm silently clamps
+                    //     negative n via `(*n).max(0)` instead of
+                    //     trapping. Both gaps are pre-existing. Tracked
+                    //     in issue #143.
+                    //
+                    // The Range gap is tracked separately rather than
+                    // bundled in this PR — fixing it touches a different
+                    // file, a different (endless / closed) shape split,
+                    // and a different semantic question (does Range
+                    // materialise into an Array, or stream lazily).
                     ("first", [Value::Int(n)]) => {
                         if *n < 0 {
                             return Err(self.trap(RubyError::ArgumentError {
