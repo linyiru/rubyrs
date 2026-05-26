@@ -63,6 +63,7 @@ InstanceVariableReadNode
 InstanceVariableTargetNode
 InstanceVariableWriteNode
 IntegerNode
+InterpolatedRegularExpressionNode
 InterpolatedStringNode
 KeywordRestParameterNode
 KeywordHashNode

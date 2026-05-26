@@ -30,6 +30,15 @@ pub(crate) enum Op {
     /// and `Expr::RegexLit` never reaches the compiler arm.
     #[cfg(feature = "regex")]
     LoadRegex(SymId),
+    /// Pop a Value::Str, compile it as a Regex pattern, push
+    /// Value::Regex. Emitted by `Expr::InterpolatedRegex` after
+    /// the same `to_s + +` build sequence used by InterpolatedStr.
+    /// Pattern reuse hits the same `regex_cache` keyed by SymId
+    /// of the assembled pattern. Compile errors surface as
+    /// SyntaxError traps at runtime (same shape as `LoadRegex`,
+    /// since the pattern is unknown until interpolation runs).
+    #[cfg(feature = "regex")]
+    CompileRegex,
     LoadSymbol(SymId),
     LoadNil,
     LoadTrue,

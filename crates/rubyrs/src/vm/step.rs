@@ -208,6 +208,45 @@ impl Vm {
                 };
                 self.stack.push(Value::Regex(regex_rc));
             }
+            #[cfg(feature = "regex")]
+            Op::CompileRegex => {
+                // Top of stack: a `Value::Str` produced by the
+                // InterpolatedRegex build sequence. Intern the
+                // assembled pattern so cache lookups can dedup
+                // repeated identical expansions (same pattern
+                // emitted by different call sites collapses to
+                // one compiled Regex).
+                let pat_val = self.stack.pop().unwrap_or(Value::Nil);
+                let pat = match &pat_val {
+                    Value::Str(s) => s.to_string_lossy(),
+                    other => {
+                        // Defensive: the compiler always emits a
+                        // string-producing sequence before this op,
+                        // but if a future refactor breaks that
+                        // invariant we'd rather raise than miscompile.
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "CompileRegex expected String pattern on stack, got {}",
+                                other.type_name()
+                            ),
+                        }));
+                    }
+                };
+                let id = self.interner.intern(&pat);
+                let regex_rc = if let Some(r) = self.regex_cache.get(&id) {
+                    r.clone()
+                } else {
+                    let compiled = regex::Regex::new(&pat).map_err(|e| {
+                        self.trap(RubyError::SyntaxError {
+                            msg: format!("invalid regex /{}/: {}", pat, e),
+                        })
+                    })?;
+                    let rc = Rc::new(compiled);
+                    self.regex_cache.insert(id, rc.clone());
+                    rc
+                };
+                self.stack.push(Value::Regex(regex_rc));
+            }
             Op::LoadSymbol(id) => {
                 self.stack.push(Value::Sym(id));
             }
