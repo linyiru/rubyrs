@@ -1030,10 +1030,13 @@ impl Vm {
             Op::SingletonChainPrepend => {
                 // Pop the module/class value and push it onto the
                 // surrounding class's `singleton_prepends` chain.
-                // Same scope guard as `AliasSingletonMethod`: only
-                // emitted by AST for `class << self; prepend Mod;
-                // end` inside a class body, so class_stack.last()
-                // is the install target.
+                // The AST recogniser is purely syntactic (it matches
+                // any `class << self; prepend Mod; end` regardless
+                // of enclosing scope), so the install-target check
+                // is enforced HERE at runtime: use
+                // `class_stack.last()` when present; trap with
+                // SyntaxError otherwise (toplevel / class-eval
+                // contexts where there's no class on the stack).
                 //
                 // CRuby parity:
                 // 1. The arg must be a Module — Classes (i.e.
@@ -1061,19 +1064,24 @@ impl Vm {
                 let target = match self.class_stack.last().cloned() {
                     Some(c) => c,
                     None => {
-                        // `class << self; prepend Mod; end` at
-                        // toplevel — CRuby would install on main's
-                        // eigenclass, which rubyrs doesn't model.
-                        // Raising here is the honest signal:
-                        // silently swallowing would diverge from
-                        // CRuby observably (the prepend has no
-                        // effect on subsequent toplevel calls).
-                        // No real-world target in our subset uses
+                        // No class on `class_stack` — covers
+                        // toplevel (`class << self; prepend Mod;
+                        // end` at the script top) and other
+                        // contexts where `self` isn't a class
+                        // (e.g. inside a method body where
+                        // class_stack hasn't been pushed). CRuby
+                        // would install on the surrounding self's
+                        // eigenclass; rubyrs doesn't model main's
+                        // eigenclass or non-Object eigenclasses
+                        // distinctly. Raising here is the honest
+                        // signal — silently swallowing would
+                        // diverge from CRuby observably. No
+                        // real-world target in our subset uses
                         // this shape; tilt's `class << self;
                         // prepend ...` always sits inside a class
                         // body.
                         return Err(self.trap(RubyError::SyntaxError {
-                            msg: "`class << self; prepend Mod; end` at toplevel is not supported in the spike subset (would install on main's eigenclass, not modelled in rubyrs)".into(),
+                            msg: "`class << self; prepend Mod; end` is not supported outside a class/module body (no singleton-class install target — main's / instance eigenclasses not modelled in rubyrs)".into(),
                         }));
                     }
                 };

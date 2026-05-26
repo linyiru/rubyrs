@@ -2298,13 +2298,16 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             // `class << self; prepend Mod; end` — install Mod on
             // X's singleton-class prepend chain. Same `self`-
-            // receiver guard as `alias`: the compiled
-            // `Op::SingletonChainPrepend` mutates
-            // `class_stack.last().singleton_prepends`, which is
-            // only correct when the surrounding shape is
-            // `class << self` inside a class body. Tilt's
-            // finalize! is the motivating case
-            // (`prepend(Module.new { ... })`).
+            // receiver gate as `alias`. The recogniser is purely
+            // syntactic: this arm matches any `class << self;
+            // prepend Mod; end` regardless of enclosing scope.
+            // The compiled `Op::SingletonChainPrepend` enforces
+            // the install-target check at runtime — it uses
+            // `class_stack.last()` when present, traps with
+            // SyntaxError otherwise (covers toplevel and any
+            // context where the surrounding self isn't a
+            // class/module). Tilt's finalize! is the motivating
+            // case (`prepend(Module.new { ... })`).
             //
             // Single-arg form only (matches CRuby's single-module
             // prepend grammar in practice — `prepend(A, B)` is
