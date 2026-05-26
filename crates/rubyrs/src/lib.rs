@@ -811,6 +811,18 @@ impl Runtime {
             "<rubyrs:preamble:comparable>",
         )
             .expect("ICE: failed to load Comparable preamble");
+        // MatchData — the value returned by `String#match`. Needs
+        // to be loaded before any regex match call because the
+        // Rust-side `Vm::materialize_match_data` looks the class
+        // up by name when allocating the result. Cfg-irrelevant
+        // here (regex-off builds simply never call into
+        // materialize_match_data, but loading the empty preamble
+        // string is cheap).
+        self.eval(
+            include_str!("preamble/match_data.rb"),
+            "<rubyrs:preamble:match_data>",
+        )
+            .expect("ICE: failed to load MatchData preamble");
         const PREAMBLE: &str = r#"
 ## Stub classes for built-in types. Without these, `5.class` and
 ## friends have nothing to return; the bodies stay empty because
@@ -1035,60 +1047,15 @@ Encoding::BINARY = Encoding::ASCII_8BIT
 RUBY_VERSION = "3.4.0".freeze
 RUBY_PLATFORM = "rubyrs".freeze
 RUBY_ENGINE = "ruby".freeze
-## Comparable — a stub class (we don't have Modules in this subset)
-## that holds the six derived comparison methods plus `between?`
-## and `clamp`, each defined in terms of `<=>`. `include Comparable`
-## copies these into the target class's method table (see
-## `do_call`'s include-intercept). User-defined methods on the
-## including class take precedence — the copy is non-destructive.
-##
-## On `<=>` returning nil (incomparable pair), the four ordered
-## predicates raise ArgumentError, matching CRuby. `==` returns
-## `false` instead of raising — CRuby's documented exception to
-## the rule (Object equality must never raise).
-## MatchData — the value returned by `String#match(regex)`. Wraps
-## the whole match + numbered captures. CRuby's MatchData has a
-## lot of API surface (`pre_match`, `post_match`, `named_captures`,
-## `regexp`); we expose only `[]`, `captures`, `to_a`, `size`,
-## `to_s`, and `inspect`. Stored as a regular user-class so the
-## existing instance-method dispatch carries the load.
-class MatchData
-  def initialize(whole, caps)
-    @whole = whole
-    @caps  = caps
-  end
-  def [](i)
-    if i == 0
-      @whole
-    else
-      @caps[i - 1]
-    end
-  end
-  def captures
-    @caps
-  end
-  def to_a
-    [@whole] + @caps
-  end
-  def size
-    @caps.length + 1
-  end
-  def length
-    size
-  end
-  def to_s
-    @whole
-  end
-  def inspect
-    # Plain concatenation — kept simple to avoid quote/hash
-    # sequences that conflict with the surrounding Rust raw
-    # string delimiter.
-    "<MatchData " + @whole + ">"
-  end
-end
-## `class Comparable; ... end` (the comparison-operator mixin
-## that fans out from `<=>`) is loaded from
-## `preamble/comparable.rb` BEFORE this `PREAMBLE` eval.
+## `class MatchData; ... end` is loaded from
+## `preamble/match_data.rb` BEFORE this `PREAMBLE` eval — the
+## Rust-side `Vm::materialize_match_data` needs the class to
+## exist before any `String#match` hit lands.
+## `class Comparable; ... end` is loaded from
+## `preamble/comparable.rb` BEFORE this `PREAMBLE` eval. The
+## comment that used to describe Comparable here (about
+## `include Comparable` semantics and the ArgumentError-on-nil
+## rule) moved to the externalised file's header.
 ## Enumerable — stub class (we don't have real Modules in this
 ## subset). CRuby's Enumerable defines ~50 methods (each_with_index,
 ## map, select, reject, inject, sort, to_a, ...) all in terms of

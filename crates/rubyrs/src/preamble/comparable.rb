@@ -12,6 +12,16 @@
 # Loaded after Object so `is_a?(Comparable)` / `class C <
 # Comparable` resolves; loaded before Enumerable to match the
 # original inline preamble order.
+#
+# `include Comparable` copies these methods into the target
+# class's method table (see `do_call`'s include-intercept).
+# User-defined methods on the including class take precedence —
+# the copy is non-destructive.
+#
+# On `<=>` returning nil (incomparable pair), the four ordered
+# predicates raise ArgumentError, matching CRuby. `==` returns
+# `false` instead of raising — CRuby's documented exception to
+# the rule that Object equality must never raise.
 
 class Comparable
   def <(other)
