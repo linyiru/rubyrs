@@ -1710,6 +1710,46 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // wrapping `class << X` doesn't introduce a NEW class with its
     // own name; the defs already address the existing
     // singleton_methods table on X's class chain.
+    // `alias new old` keyword form (method-name aliasing) —
+    // desugar into a synthetic `alias_method :new, :old` Call so
+    // the existing compiler intercept (compiler.rs,
+    // `Op::AliasMethod`) handles it. Both operands are parsed as
+    // `SymbolNode` by Prism; non-Symbol shapes here are exotic
+    // (dynamic dispatch via `alias` is uncommon) and fall
+    // through to the AST_ERRORS trail.
+    //
+    // NOT THIS ARM: `alias $new $old` (global-variable aliasing)
+    // is `AliasGlobalVariableNode` — a distinct Prism node, not
+    // an `AliasMethodNode` with GlobalVariableNode operands. The
+    // arm below only matches AliasMethodNode, so global-alias
+    // forms naturally fall through to the unsupported-node trail
+    // unchanged.
+    //
+    // OUT OF SCOPE: `alias` inside `class << X` body. The
+    // existing intercept emits Op::AliasMethod targeting
+    // `class_stack.last().methods` (instance methods), not the
+    // singleton table. Tilt's `class << self; alias prefer
+    // register; end` would silently alias on the wrong table.
+    // Wrapped at the singleton-class body translation site below
+    // — those cases still surface as the existing "only def and
+    // attr_*" SyntaxError.
+    if let Some(n) = node.as_alias_method_node()
+        && let (Some(new_sym), Some(old_sym)) = (
+            n.new_name().as_symbol_node(),
+            n.old_name().as_symbol_node(),
+        )
+    {
+        let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
+        let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
+        return sp(node, Expr::Call {
+            receiver: None,
+            name: "alias_method".into(),
+            args: vec![
+                sp(node, Expr::SymbolLit(new_name)),
+                sp(node, Expr::SymbolLit(old_name)),
+            ],
+        });
+    }
     if let Some(n) = node.as_singleton_class_node() {
         let recv_expr = tr(&n.expression());
         let body_nodes: Vec<_> = match n.body() {
