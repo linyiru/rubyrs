@@ -1084,6 +1084,7 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
         "pathname" => &[("Pathname", false)],
         "tempfile" => &[("Tempfile", false)],
         "stringio" => &[("StringIO", false)],
+        "strscan" => &[("StringScanner", false)],
         "fileutils" => &[("FileUtils", true)],
         "digest" => &[("Digest", true)],
         "digest/md5" | "digest/sha1" | "digest/sha2" => &[],
@@ -1124,7 +1125,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         "uri" | "uri/generic" | "uri/common"
         | "set" | "logger" | "forwardable"
         | "singleton" | "delegate" | "ostruct"
-        | "pathname" | "tempfile" | "stringio" | "fileutils"
+        | "pathname" | "tempfile" | "stringio" | "strscan" | "fileutils"
         | "digest" | "digest/md5" | "digest/sha1" | "digest/sha2"
         | "base64" | "securerandom"
         | "json" | "yaml" | "date" | "time" | "csv"
