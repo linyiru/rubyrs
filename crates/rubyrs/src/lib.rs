@@ -879,14 +879,16 @@ end
 ##
 ## Why keep the stub anyway: `class Foo; include Enumerable; def
 ## each; ...; end; end` is a load-time-only operation — `include`
-## walks the chain and copies methods (zero, for our empty stub),
-## but doesn't crash. Before this stub, `include Enumerable`
-## raised "wrong argument type NilClass (expected Module)" and
-## the file failed to load. Affected: rake/linked_list.rb at
-## minimum (Plan A try-run target), plus any other codebase that
-## does the same `include Enumerable + def each` pattern. Methods
-## like `.map` on a user `LinkedList` instance still NoMethodError
-## at call time — documented divergence, follow-up PR.
+## pushes Enumerable onto Foo's `includes` chain (vm/dispatch.rs's
+## include arm; lookup walks the chain at method-dispatch time,
+## no copy). Empty Enumerable adds nothing to dispatch but
+## doesn't crash. Before this stub, `include Enumerable` raised
+## "wrong argument type NilClass (expected Module)" and the file
+## failed to load. Affected: rake/linked_list.rb at minimum
+## (Plan A try-run target), plus any other codebase that does
+## the same `include Enumerable + def each` pattern. Methods like
+## `.map` on a user `LinkedList` instance still NoMethodError at
+## call time — documented divergence, follow-up PR.
 class Enumerable
 end
 "#;
