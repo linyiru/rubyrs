@@ -136,6 +136,8 @@ fn fixture_exercises_exact_missing_class_set() {
     // BackReferenceReadNode (`$&`) and ImaginaryNode (`1i`)
     // as the two non-CVarWrite tripwires — both single-token
     // leaves, no Missing children, still not-supported.
+    // (`$~` was an early swap candidate too, but Prism classes
+    // it as GlobalVariableReadNode, which is already Supported.)
     let expected: std::collections::BTreeSet<&str> =
         ["BackReferenceReadNode", "ImaginaryNode", "ClassVariableWriteNode"]
             .into_iter()
