@@ -22,6 +22,7 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         "pathname" => Some(include_str!("stdlib_vendor/pathname.rb")),
         "set" => Some(include_str!("stdlib_vendor/set.rb")),
         "stringio" => Some(include_str!("stdlib_vendor/stringio.rb")),
+        "strscan" => Some(include_str!("stdlib_vendor/strscan.rb")),
         _ => None,
     }
 }
