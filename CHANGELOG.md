@@ -1251,16 +1251,18 @@ won't be fixed until we have a clear use case demanding parity.
 
 ### Internal
 - **GC rooting lint gate ([issue #90](https://github.com/linyiru/rubyrs/issues/90)).**
-  After seven structurally-identical GC-rooting incidents in
-  three discovery rounds (`86db73d` / `f2c3538` / `5946caa` /
-  the site-#8 fix in this cycle), a static gate now prevents
-  the eighth from being written. `scripts/lint-gc-rooting.sh`
-  scans every `vm/*.rs` file for the dangerous shape — a
-  `self.maybe_gc()` + `self.heap.alloc(` pair preceded by a
-  Value drain (`self.stack.pop` / `self.stack.drain` /
-  `self.stack.swap_remove` / `args.swap_remove` / `args.drain` /
-  `args.pop` / `args[N]`) in the same logical block, without an
-  intervening `PinGuard::new(self)`. Sites using the PinGuard
+  After seven prior structurally-identical GC-rooting incidents
+  in three discovery rounds (`86db73d` / `f2c3538` / `5946caa`)
+  plus two more closed in this cycle (`Kernel#Array(other)` —
+  site #8, and `Kernel#p` / `pp` multi-arg return), a static
+  gate now prevents the next from being written.
+  `scripts/lint-gc-rooting.sh` scans every `vm/*.rs` file for
+  the dangerous shape — a `self.maybe_gc()` + `self.heap.alloc(`
+  pair preceded by a Value drain (`self.stack.pop` /
+  `self.stack.drain` / `self.stack.swap_remove` /
+  `args.swap_remove` / `args.drain` / `args.pop` / `args[N]` /
+  a `match (&)?args { ... }` arm-binding pattern) in the same
+  logical block, without an intervening `PinGuard::new(self)`. Sites using the PinGuard
   form (`g.vm.maybe_gc()` / `g.vm.heap.alloc()`) are deliberately
   bypassed — that pattern is the structural fix and the lint
   treats it as the canonical recipe. Genuine false-positives

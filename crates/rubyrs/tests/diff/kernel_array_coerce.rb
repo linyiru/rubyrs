@@ -3,8 +3,8 @@
 # `["hi"]`. Under STRESS_GC=1 this site is delicate: the wrapped
 # value is read out of `args[0]` into a Rust local, GC may run
 # between that read and the `heap.alloc` for the new Array, and
-# nothing pins the local across the gap — see issue #90, site
-# #8. This fixture exercises the path with heap-bearing Value
+# nothing pins the local across the gap — see issue #90, site #8.
+# This fixture exercises the path with heap-bearing Value
 # flavours (String, user instance) so STRESS_GC flushes any
 # rooting hole on the wrap.
 #
