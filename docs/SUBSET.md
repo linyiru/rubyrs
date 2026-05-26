@@ -614,6 +614,31 @@ end
 - Tests: `resource_exhausted_cannot_be_swallowed_by_bare_rescue`
   and `resource_exhausted_is_uncatchable_even_with_rescue_exception`.
 
+### `deprecate_constant` is accepted but silent
+
+```ruby
+class Foo
+  OLD = 1
+  deprecate_constant :OLD
+end
+Foo::OLD                       # CRuby: warns; rubyrs: 1 (no warning)
+```
+
+- `Module#deprecate_constant` accepts any number of Symbol args
+  and returns the receiver (chainable form), matching CRuby's
+  call-site contract.
+- Reading a deprecated constant does NOT emit a warning in
+  rubyrs — there's no warning subsystem to route it through.
+  The constant value is returned silently, identical to a
+  non-deprecated read.
+- Why: MRI's `lib/erb.rb:264` calls
+  `deprecate_constant :Revision` at the class body's top
+  level; without the call-shape acceptance, ERB fails to load
+  (this is the motivating consumer behind the stub).
+- Test: extends `crates/rubyrs/tests/diff/tilt_load_capabilities.rb`
+  (locks both forms — class-body and explicit-receiver — plus
+  `respond_to?` parity).
+
 ### `private_constant` / `public_constant` are accepted but not enforced
 
 ```ruby

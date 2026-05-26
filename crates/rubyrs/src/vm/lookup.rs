@@ -384,9 +384,10 @@ impl Vm {
                 // dispatches successfully — diverges from CRuby.
                 //
                 // `autoload` / `private_constant` / `public_constant`
-                // are stub no-ops (see dispatch.rs); they're in the
-                // whitelist so feature-detection (`C.respond_to?(
-                // :autoload)`) agrees with what dispatch will accept.
+                // / `deprecate_constant` are stub no-ops (see
+                // dispatch.rs); they're in the whitelist so
+                // feature-detection (`C.respond_to?(:autoload)`)
+                // agrees with what dispatch will accept.
                 if matches!(name,
                     "new" | "name" | "to_s" | "inspect"
                     | "method_defined?" | "instance_method" | "undef_method"
@@ -395,6 +396,7 @@ impl Vm {
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
                     | "autoload" | "private_constant" | "public_constant"
+                    | "deprecate_constant"
                 ) {
                     return true;
                 }

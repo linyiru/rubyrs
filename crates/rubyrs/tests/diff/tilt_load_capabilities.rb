@@ -11,17 +11,26 @@
 # would just lock in divergence. They're documented at the
 # implementation sites and in SUBSET.md.
 
-# --- private_constant / public_constant ---
-# Both forms (no-recv inside class body, explicit receiver from
-# outside) accept symbol args and return the module (chainable).
+# --- private_constant / public_constant / deprecate_constant ---
+# All three forms (no-recv inside class body, explicit receiver
+# from outside) accept symbol args and return the module
+# (chainable). `deprecate_constant` would emit a warning when
+# the constant is later read; rubyrs doesn't model deprecation
+# warnings, so the read path is silent. Motivating use: MRI
+# `lib/erb.rb:264` (`deprecate_constant :Revision`).
 module CV
   HIDDEN = 1
   private_constant :HIDDEN
   VISIBLE = 2
   public_constant :VISIBLE
+  STALE = "legacy"
+  deprecate_constant :STALE
 end
 puts CV::VISIBLE                                # 2 (visibility not enforced)
+puts CV::STALE                                  # "legacy" (warning not modelled)
 puts(CV.private_constant(:HIDDEN) == CV)        # true (chainable form)
+puts(CV.deprecate_constant(:STALE) == CV)       # true (chainable form)
+puts CV.respond_to?(:deprecate_constant)        # true (matches dispatch)
 
 # --- autoload ---
 # Returns nil (CRuby's actual contract for `Module#autoload`,
