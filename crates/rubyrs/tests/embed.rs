@@ -1999,10 +1999,18 @@ fn bigint_pow_negative_exponent_returns_float() {
 
 #[cfg(feature = "bignum")]
 #[test]
-fn bigint_pow_identity_bases_skip_u32_cap() {
+fn pow_int_int_identity_bases_skip_numeric_u32_clamp() {
     // 0/±1 bases produce trivial results regardless of exponent
-    // size — they must short-circuit BEFORE the u32 conversion
-    // so `1 ** (u32::MAX as i64 + 1)` doesn't spuriously trap.
+    // size — numeric.rs's `**` arm short-circuits via parity
+    // BEFORE the `(*b as u64).min(u32::MAX as u64) as u32`
+    // clamp it would otherwise apply. Without those short-
+    // circuits `(-1) ** (u32::MAX + 2)` would clamp to the
+    // u32::MAX exponent (odd) and silently flip sign for an
+    // even input. The inputs here are all Int×Int, so dispatch
+    // is owned by numeric.rs and never reaches
+    // `Vm::try_bigint_pow` — the BigInt-exponent equivalent of
+    // this guarantee lives in
+    // `bigint_pow_identity_bases_with_bigint_exponent` below.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
@@ -2011,7 +2019,7 @@ fn bigint_pow_identity_bases_skip_u32_cap() {
         &format!("puts 1 ** {h}\nputs 0 ** {h}\nputs (-1) ** {h}\nputs (-1) ** ({h} + 1)",
             h = huge),
         "pow_identity_huge.rb",
-    ).expect("identity bases must skip the u32 cap");
+    ).expect("identity bases must skip the u32 clamp");
     assert_eq!(buf.snapshot().trim(), "1\n0\n1\n-1");
 }
 
