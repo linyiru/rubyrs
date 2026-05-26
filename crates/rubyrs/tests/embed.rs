@@ -2374,6 +2374,7 @@ fn sprintf_alt_form_with_zero_pad_keeps_prefix_before_zeros() {
         "puts '%#08x' % 255\n\
          puts '%#08X' % 255\n\
          puts '%#08b' % 7\n\
+         puts '%#08B' % 7\n\
          puts '%#08o' % 7\n\
          puts '%#08x' % (2 ** 60)",
         "sprintf_alt_zero_pad.rb",
@@ -2383,8 +2384,9 @@ fn sprintf_alt_form_with_zero_pad_keeps_prefix_before_zeros() {
     assert_eq!(lines[0], "0x0000ff");
     assert_eq!(lines[1], "0X0000FF");
     assert_eq!(lines[2], "0b000111");
-    assert_eq!(lines[3], "00000007");
-    assert_eq!(lines[4], "0x1000000000000000"); // body > width, no pad
+    assert_eq!(lines[3], "0B000111");
+    assert_eq!(lines[4], "00000007");
+    assert_eq!(lines[5], "0x1000000000000000"); // body > width, no pad
 }
 
 #[test]
