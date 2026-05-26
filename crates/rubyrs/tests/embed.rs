@@ -2333,6 +2333,81 @@ fn digits_int_path_error_semantics_match_bignum_profile() {
     }
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {
+    // CRuby renders negative integers in non-decimal bases with
+    // an `..f`-prefixed two's-complement form (e.g. `(-256).to_s(16)
+    // == "-100"` for to_s but `"%x" % -256 == "..f00"` for sprintf).
+    // Wait — to_s actually IS `-<magnitude>`, sprintf is the
+    // `..f` form. We match CRuby for to_s exactly (no divergence
+    // there) and diverge for sprintf (documented).
+    //
+    // This test pins to_s — both Int and BigInt receivers should
+    // produce `-<magnitude>` for negative inputs.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (-256).to_s(16)\n\
+         puts (0 - (2 ** 100)).to_s(16)\n\
+         puts (0 - (2 ** 64)).to_s(2).start_with?(\"-1\")",
+        "bigint_to_s_neg.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-100");
+    // 2^100 in hex = 0x10000000000000000000000000 (1 followed by 25 zeros)
+    assert!(lines[1].starts_with("-1") && lines[1].len() == 27,
+        "expected -10000... (27 chars), got {:?}", lines[1]);
+    assert_eq!(lines[2], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_bigint_radix_negative_uses_minus_magnitude_divergence() {
+    // Documented divergence shared with the Int sprintf path:
+    // CRuby renders `'%x' % -256` as `..f00` (two's-complement
+    // infinite-ones notation), we render `-100`. Same shape for
+    // negative BigInt. Pin our behaviour so a future "fix" that
+    // adds CRuby compat is an opt-in upgrade rather than a silent
+    // regression.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%x' % (0 - 256)\n\
+         puts '%x' % (0 - (2 ** 100))\n\
+         puts '%b' % (0 - (2 ** 16))",
+        "sprintf_bigint_neg.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-100");
+    assert!(lines[1].starts_with("-1") && lines[1].len() == 27);
+    assert!(lines[2].starts_with("-1"));
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_traps_under_max_value_bytes() {
+    // Like the 0-arg to_s arm, the radix form's string output must
+    // be capped against `max_value_bytes` to prevent a hostile
+    // script from DoSing the host via `(2 ** 1_000_000).to_s(2)`.
+    // `(2 ** 10_000).to_s(2)` is exactly 10_001 chars; pin under
+    // a 4 KB cap so the trap fires.
+    let cfg = rubyrs::Config { max_value_bytes: Some(4 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "(2 ** 10_000).to_s(2)",
+        "to_s_radix_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
 #[test]
 fn digits_negative_recv_takes_precedence_over_arity_and_base_errors() {
     // CRuby precedence: a negative `Integer#digits` receiver

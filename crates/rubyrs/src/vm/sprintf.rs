@@ -79,9 +79,9 @@ pub(crate) fn ruby_sprintf(
             'd' | 'i' => {
                 // BigInt fast path: render the decimal directly via
                 // num_bigint's Display so `'%d' % (2**100)` works.
-                // Other base specifiers (%x/X/o/b/B) remain Int-only
-                // for Phase A; arbitrary-precision base conversion is
-                // a Phase B follow-up.
+                // Base specifiers (%x/X/o/b/B) now route through
+                // `format_radix_any` which has its own BigInt arm
+                // — see those format-spec match arms below.
                 #[cfg(feature = "bignum")]
                 let big_decimal: Option<String> = match arg {
                     Value::BigInt(id) => Some(heap.bigint(*id).to_string()),
@@ -132,11 +132,18 @@ pub(crate) fn ruby_sprintf(
                 }
                 body
             }
-            'x' => format_radix_int(coerce_int(arg)?, 16, false, flag_hash),
-            'X' => format_radix_int(coerce_int(arg)?, 16, true, flag_hash),
-            'o' => format_radix_int(coerce_int(arg)?, 8, false, flag_hash),
-            'b' => format_radix_int(coerce_int(arg)?, 2, false, flag_hash),
-            'B' => format_radix_int(coerce_int(arg)?, 2, true, flag_hash),
+            // Base-N specifiers. BigInt args render via
+            // `format_radix_bigint`; Int args via the i64 helper.
+            // Both render negative magnitudes as `-<digits>`
+            // rather than CRuby's `..f`-prefixed two's-complement
+            // form — documented divergence (see `format_radix_int`
+            // comment). For BigInt, the divergence applies the
+            // same way.
+            'x' => format_radix_any(arg, heap, 16, false, flag_hash)?,
+            'X' => format_radix_any(arg, heap, 16, true, flag_hash)?,
+            'o' => format_radix_any(arg, heap, 8, false, flag_hash)?,
+            'b' => format_radix_any(arg, heap, 2, false, flag_hash)?,
+            'B' => format_radix_any(arg, heap, 2, true, flag_hash)?,
             'f' => {
                 let f = coerce_float(arg)?;
                 let prec = precision.unwrap_or(6);
@@ -232,6 +239,45 @@ fn coerce_float(v: &Value) -> Result<f64, RubyError> {
             msg: format!("no implicit conversion of {} to Float", v.type_name()),
         }),
     }
+}
+
+/// Render `arg` in `radix` (2 / 8 / 16). Dispatches:
+/// - `Value::BigInt` → num_bigint's `to_str_radix(radix)` on
+///   the magnitude, prefixed with sign and (if `alt`) the
+///   conventional `0x` / `0X` / `0` / `0b` / `0B` prefix.
+/// - All other shapes → coerce to i64 (TypeError on incoerciable
+///   types) and defer to `format_radix_int`.
+///
+/// Negative values render as `-<digits>` rather than CRuby's
+/// `..f`-prefixed two's-complement form for BOTH Int and BigInt —
+/// documented divergence shared with `format_radix_int`.
+#[cfg(feature = "bignum")]
+fn format_radix_any(arg: &Value, heap: &Heap, radix: u32, upper: bool, alt: bool) -> Result<String, RubyError> {
+    use num_bigint::Sign;
+    if let Value::BigInt(id) = arg {
+        let b = heap.bigint(*id);
+        let prefix: &str = if !alt { "" } else {
+            match radix {
+                16 => if upper { "0X" } else { "0x" },
+                8 => "0",
+                2 => if upper { "0B" } else { "0b" },
+                _ => "",
+            }
+        };
+        // `to_str_radix` on the magnitude (positive BigUint) gives
+        // lowercase digits 10..35 as 'a'..'z'. Uppercase variant
+        // post-processes the same way the i64 path does.
+        let mag = b.magnitude().to_str_radix(radix);
+        let mag = if upper { mag.to_uppercase() } else { mag };
+        let sign = if b.sign() == Sign::Minus { "-" } else { "" };
+        return Ok(format!("{sign}{prefix}{mag}"));
+    }
+    Ok(format_radix_int(coerce_int(arg)?, radix, upper, alt))
+}
+
+#[cfg(not(feature = "bignum"))]
+fn format_radix_any(arg: &Value, _heap: &Heap, radix: u32, upper: bool, alt: bool) -> Result<String, RubyError> {
+    Ok(format_radix_int(coerce_int(arg)?, radix, upper, alt))
 }
 
 fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {

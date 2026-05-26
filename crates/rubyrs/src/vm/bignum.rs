@@ -960,6 +960,44 @@ impl Vm {
                 ),
             }));
         }
+        // `Integer#to_s(radix)` — 1-arg form for BigInt receivers.
+        // Symmetric with the Int side (numeric_call's `to_s(radix)`
+        // arm). Validates radix ∈ 2..=36, then defers to
+        // num_bigint's `to_str_radix` (which handles negative sign
+        // and digits >= 10 as lowercase). Post-allocation cap
+        // check mirrors the 0-arg to_s arm below (capped string
+        // size to avoid host OOM on `(2**1_000_000).to_s(2)`).
+        if name == "to_s" && args.len() == 1
+            && let Value::BigInt(id) = recv
+        {
+            let radix: u32 = match &args[0] {
+                Value::Int(r) => {
+                    if !(2..=36).contains(r) {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("invalid radix {}", r),
+                        }));
+                    }
+                    *r as u32
+                }
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            crate::vm::numeric::type_name_for_coerce(other),
+                        ),
+                    }));
+                }
+            };
+            let s = self.heap.bigint(*id).to_str_radix(radix);
+            if let Some(max) = self.max_value_bytes
+                && s.len() > max
+            {
+                return Err(self.trap(RubyError::ResourceExhausted {
+                    msg: format!("value size {} bytes > cap {}", s.len(), max),
+                }));
+            }
+            return Ok(Some(Value::new_str(s)));
+        }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
         if !recv_is_bigint && !arg_is_bigint {
