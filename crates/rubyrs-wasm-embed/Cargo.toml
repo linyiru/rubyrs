@@ -1,0 +1,24 @@
+[package]
+name = "rubyrs-wasm-embed"
+description = "PoC minimal embedder — links wasmtime as a library and runs rubyrs.cwasm directly, skipping the wasmtime CLI's argv parsing and config plumbing. Spike artifact for measuring how much of wasmtime CLI's ~5 ms init is its own framing vs the wasmtime runtime core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "rubyrs-wasm-embed"
+path = "src/main.rs"
+
+[dependencies]
+# Match the version `perf/wasm_check.sh` already validates in CI
+# (.github/workflows/ci.yml installs wasmtime v45.0.0 from the
+# release tarball with a pinned sha256). Using the same version
+# keeps cwasm produced by the CLI deserialize-able by this
+# embedder — wasmtime's serialized format is version-stamped and
+# `Module::deserialize` rejects mismatches.
+wasmtime = "45.0"
+wasmtime-wasi = "45.0"

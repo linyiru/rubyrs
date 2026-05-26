@@ -249,3 +249,34 @@ baseline_min "wasmtime --version:" wasmtime --version
 echo ""
 echo "  Subtract '/usr/bin/true' from any row to get the host-runtime-"
 echo "  specific overhead above the macOS fork+exec floor."
+
+# 9. Same cwasm + same script through the in-tree embedder, when
+#    present. Side-by-side comparison answers "how much of the
+#    wasmtime CLI cold-start is the CLI's own framing vs the
+#    wasmtime runtime?" Skip silently if the embedder isn't built —
+#    breakdowns shouldn't fail just because the optional PoC is
+#    absent.
+EMBED_BIN="target/release/rubyrs-wasm-embed"
+if [[ -x "$EMBED_BIN" ]]; then
+  echo ""
+  echo "=== alternative host: rubyrs-wasm-embed (MIN of $RUNS runs) ==="
+  echo ""
+  EMBED_BEST=""
+  for _ in $(seq 1 "$RUNS"); do
+    us=$("$TIMER_BIN" "$EMBED_BIN" "$CWASM" "$SCRIPT" 2>&1 1>/dev/null \
+          | awk -F'\t' '$1=="wasm-timer" && $2=="wall_us" { print $3 }')
+    if [[ -z "$EMBED_BEST" ]] || [[ "$us" -lt "$EMBED_BEST" ]]; then EMBED_BEST=$us; fi
+  done
+  printf "  %-22s %10s us\n" "rubyrs-wasm-embed:" "$EMBED_BEST"
+  if [[ -n "$EMBED_BEST" ]] && [[ "$EMBED_BEST" -gt 0 ]]; then
+    DIFF=$((WALL_US - EMBED_BEST))
+    PCT=$((DIFF * 100 / WALL_US))
+    printf "  %-22s %10d us  (%d%% of CLI total)\n" \
+      "vs wasmtime CLI:" "$DIFF" "$PCT"
+  fi
+  echo ""
+  echo "  Embedder skips the wasmtime CLI's argv parsing, command"
+  echo "  dispatch, file-config layer, and signal handling. Same"
+  echo "  cwasm; difference is pure CLI tax. Build with:"
+  echo "    cargo build --release -p rubyrs-wasm-embed"
+fi
