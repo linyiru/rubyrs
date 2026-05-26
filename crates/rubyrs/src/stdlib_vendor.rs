@@ -20,6 +20,7 @@
 pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
     match name {
         "pathname" => Some(include_str!("stdlib_vendor/pathname.rb")),
+        "set" => Some(include_str!("stdlib_vendor/set.rb")),
         _ => None,
     }
 }
