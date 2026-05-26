@@ -339,6 +339,7 @@ mod tests {
     fn mk_class(name: &str, superclass: Option<Rc<Class>>) -> Rc<Class> {
         Rc::new(Class {
             name: name.to_string(),
+            is_module: false,
             ivars: RefCell::new(HashMap::new()),
             methods: RefCell::new(HashMap::new()),
             singleton_methods: RefCell::new(HashMap::new()),

@@ -290,6 +290,15 @@ pub(crate) enum Expr {
         /// Name of the parent class, if `class Foo < Bar` syntax was used.
         superclass: Option<String>,
         body: Vec<SExpr>,
+        /// `true` when the AST node was a `module X; end` rather
+        /// than `class X; end`. Drives `Class.is_module` at
+        /// runtime so `is_a?(Class)` / `is_a?(Module)` /
+        /// `class_of` distinguish the two shapes. `module` and
+        /// `class` are still translated to the same Expr
+        /// variant because their body-compilation steps are
+        /// identical — only the constructed Class struct's
+        /// flag differs.
+        is_module: bool,
     },
     /// `alias new old` keyword form encountered INSIDE a
     /// `class << X` body. Compiles to `Op::AliasSingletonMethod`
@@ -1960,7 +1969,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Class { name, superclass, body });
+        return sp(node, Expr::Class { name, superclass, body, is_module: false });
     }
     // `module Foo; ... end` — our subset doesn't distinguish
     // modules from classes (Comparable was already a stub class
@@ -1982,7 +1991,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             None => vec![],
         };
-        return sp(node, Expr::Class { name, superclass: None, body });
+        return sp(node, Expr::Class { name, superclass: None, body, is_module: true });
     }
     // `class << X; body; end` — singleton class body. Supported
     // body entries in the spike subset:

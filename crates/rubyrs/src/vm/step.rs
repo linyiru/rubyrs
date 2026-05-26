@@ -1150,7 +1150,13 @@ impl Vm {
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
-            Op::DefClass(name_id, p_idx, qual_id) => {
+            Op::DefClass(name_id, p_idx, qual_id) | Op::DefModule(name_id, p_idx, qual_id) => {
+                // `DefModule` distinguishes the source keyword
+                // (`module X; end`) so the resulting Class shell
+                // gets `is_module: true`. Otherwise identical to
+                // DefClass — same body-frame push, same constant-
+                // alias plumbing.
+                let is_module = matches!(op, Op::DefModule(..));
                 // Pop superclass (Nil for "default to Object", a Class for `class Foo < Bar`).
                 let parent_val = self.stack.pop().expect("ICE: DefClass without superclass slot");
                 let parent = match parent_val {
@@ -1173,6 +1179,7 @@ impl Vm {
                 };
                 let cls = self.classes.entry(name_id).or_insert_with(|| Rc::new(Class {
                     name: name_str,
+                    is_module,
                     ivars: RefCell::new(HashMap::new()),
                     methods: RefCell::new(HashMap::new()),
                     singleton_methods: RefCell::new(HashMap::new()),

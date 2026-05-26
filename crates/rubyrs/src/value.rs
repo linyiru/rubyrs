@@ -169,6 +169,16 @@ pub struct BlockHandle {
 #[derive(Debug)]
 pub struct Class {
     pub(crate) name: String,
+    /// `true` when this Class shell models a `module X; end`
+    /// declaration (or a stdlib-stub installed as a Module-
+    /// shaped name like `URI` / `JSON`). Drives `Class#is_a?`
+    /// (Module-shape returns false for `is_a?(Class)`, true
+    /// for `is_a?(Module)`) and `class_of` (returns "Module"
+    /// vs "Class"). Tier 1 still models both with the same
+    /// underlying `Class` struct — the flag is the only
+    /// runtime distinction. `class X; end` and Class-shaped
+    /// stubs (`Logger`) keep this `false`.
+    pub(crate) is_module: bool,
     /// Class-level instance variables — the `@foo = ...` slots
     /// that live ON the Class object itself (CRuby calls these
     /// "class instance variables" to distinguish from `@@foo`

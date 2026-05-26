@@ -250,6 +250,7 @@ fn run_diff(name: &str) {
 #[test] fn source_line() { run_diff("source_line"); }
 #[test] fn require_xpkg() { run_diff("require_xpkg"); }
 #[test] fn stdlib_require_stub() { run_diff("stdlib_require_stub"); }
+#[test] fn module_vs_class() { run_diff("module_vs_class"); }
 #[test] fn class_level_ivars() { run_diff("class_level_ivars"); }
 #[test] fn enumerable_stub() { run_diff("enumerable_stub"); }
 #[test] fn object_and_string_hash() { run_diff("object_and_string_hash"); }

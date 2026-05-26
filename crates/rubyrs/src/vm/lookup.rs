@@ -284,7 +284,7 @@ impl Vm {
             Value::Bool(false) => "FalseClass",
             Value::Nil => "NilClass",
             Value::Block(_) => "Proc",
-            Value::Class(_) => "Class",
+            Value::Class(c) => if c.is_module { "Module" } else { "Class" },
             #[cfg(feature = "regex")]
             Value::Regex(_) => "Regexp",
             Value::BoundMethod(_) => "Method",
@@ -389,6 +389,7 @@ mod tests {
     fn mk_class(name: &str, superclass: Option<Rc<Class>>) -> Rc<Class> {
         Rc::new(Class {
             name: name.to_string(),
+            is_module: false,
             ivars: RefCell::new(HashMap::new()),
             methods: RefCell::new(HashMap::new()),
             singleton_methods: RefCell::new(HashMap::new()),

@@ -394,11 +394,13 @@ impl Vm {
                             // methods — calls into it still fail
                             // with NoMethodError, but the surface
                             // for "name exists" is now correct.
-                            for cname in stdlib_constant_names(&path_str) {
+                            for (cname, is_module) in stdlib_constant_names(&path_str) {
                                 let cid = self.interner.intern(cname);
+                                let is_module = *is_module;
                                 self.classes.entry(cid).or_insert_with(|| {
                                     std::rc::Rc::new(crate::value::Class {
                                         name: cname.to_string(),
+                                        is_module,
                                         methods: std::cell::RefCell::new(std::collections::HashMap::new()),
                                         singleton_methods: std::cell::RefCell::new(std::collections::HashMap::new()),
                                         superclass: std::cell::RefCell::new(None),
@@ -905,37 +907,45 @@ impl Vm {
 /// (true in rubyrs for everything; false in CRuby for the
 /// Module-shaped names). Documented divergence; fixtures
 /// probe `defined?` and `.name` which agree.
-fn stdlib_constant_names(name: &str) -> &'static [&'static str] {
+fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
+    // Each entry is (constant_name, is_module). `true` for
+    // names CRuby exposes as `Module` (URI / JSON / Base64 /
+    // Forwardable / Singleton / FileUtils / Digest / YAML
+    // / Math / SecureRandom / Open3 / Shellwords / FileTest
+    // / CGI / Kernel-like utility namespaces); `false` for
+    // names CRuby exposes as `Class` (Logger / Set / Pathname
+    // / Tempfile / StringIO / Date / OpenStruct / Delegator /
+    // OptionParser / BigDecimal / Monitor / ERB / WeakRef).
     match name {
-        "uri" | "uri/generic" | "uri/common" => &["URI"],
-        "set" => &["Set"],
-        "logger" => &["Logger"],
-        "forwardable" => &["Forwardable", "SingleForwardable"],
-        "singleton" => &["Singleton"],
-        "delegate" => &["Delegator", "SimpleDelegator"],
-        "ostruct" => &["OpenStruct"],
-        "pathname" => &["Pathname"],
-        "tempfile" => &["Tempfile"],
-        "stringio" => &["StringIO"],
-        "fileutils" => &["FileUtils"],
-        "digest" => &["Digest"],
+        "uri" | "uri/generic" | "uri/common" => &[("URI", true)],
+        "set" => &[("Set", false)],
+        "logger" => &[("Logger", false)],
+        "forwardable" => &[("Forwardable", true), ("SingleForwardable", true)],
+        "singleton" => &[("Singleton", true)],
+        "delegate" => &[("Delegator", false), ("SimpleDelegator", false)],
+        "ostruct" => &[("OpenStruct", false)],
+        "pathname" => &[("Pathname", false)],
+        "tempfile" => &[("Tempfile", false)],
+        "stringio" => &[("StringIO", false)],
+        "fileutils" => &[("FileUtils", true)],
+        "digest" => &[("Digest", true)],
         "digest/md5" | "digest/sha1" | "digest/sha2" => &[],
-        "base64" => &["Base64"],
-        "securerandom" => &["SecureRandom"],
-        "json" => &["JSON"],
-        "yaml" => &["YAML"],
-        "date" => &["Date", "DateTime"],
+        "base64" => &[("Base64", true)],
+        "securerandom" => &[("SecureRandom", true)],
+        "json" => &[("JSON", true)],
+        "yaml" => &[("YAML", true)],
+        "date" => &[("Date", false), ("DateTime", false)],
         "time" => &[],
-        "csv" => &["CSV"],
-        "optparse" => &["OptionParser"],
+        "csv" => &[("CSV", false)],
+        "optparse" => &[("OptionParser", false)],
         "english" | "English" => &[],
-        "bigdecimal" => &["BigDecimal"],
-        "monitor" => &["Monitor", "MonitorMixin"],
-        "erb" => &["ERB"],
-        "open3" => &["Open3"],
-        "shellwords" => &["Shellwords"],
-        "weakref" => &["WeakRef"],
-        "cgi" | "cgi/util" => &["CGI"],
+        "bigdecimal" => &[("BigDecimal", false)],
+        "monitor" => &[("Monitor", false), ("MonitorMixin", true)],
+        "erb" => &[("ERB", false)],
+        "open3" => &[("Open3", true)],
+        "shellwords" => &[("Shellwords", true)],
+        "weakref" => &[("WeakRef", false)],
+        "cgi" | "cgi/util" => &[("CGI", false)],
         _ => &[],
     }
 }

@@ -697,7 +697,16 @@ end
 ## rehydrates it into a Method.
 class UnboundMethod
 end
-class Class
+## Module — empty preamble shell so `is_a?(Module)` /
+## `class_of` reach a real class table entry. CRuby's
+## hierarchy: `Class < Module < Object`; rubyrs mirrors
+## the inheritance so `Class.is_a?(Module)` walks
+## superclass → Module → true via the existing
+## `class_is_a` helper. `module` keyword sets
+## `is_module: true` on the Class shell (`Op::DefModule`).
+module Module
+end
+class Class < Module
 end
 ## File — class-method dispatch is wired host-side in
 ## `Vm::file_class_dispatch`. The class body is intentionally

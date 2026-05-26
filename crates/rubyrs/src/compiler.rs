@@ -938,7 +938,7 @@ pub(crate) fn compile_expr(
             compile_expr(b, args_expr, protos, interner, cc);
             b.emit(Op::ApplySuper(name_id));
         }
-        Expr::Class { name, superclass, body } => {
+        Expr::Class { name, superclass, body, is_module } => {
             // Child path = parent's class_path + [this name]. Threaded
             // into the body proto so a further-nested `class Inner`
             // sees the full chain and aliases under
@@ -971,7 +971,11 @@ pub(crate) fn compile_expr(
             } else {
                 crate::intern::SymId(u32::MAX)
             };
-            b.emit(Op::DefClass(name_id, proto_idx as u32, qual_id));
+            if *is_module {
+                b.emit(Op::DefModule(name_id, proto_idx as u32, qual_id));
+            } else {
+                b.emit(Op::DefClass(name_id, proto_idx as u32, qual_id));
+            }
             // Alias under the prefixed path so `Foo::Bar.new` from
             // outside resolves. Skipped when class_path is empty
             // (top-level — no prefix needed) or when name already

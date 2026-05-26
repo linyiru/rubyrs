@@ -212,6 +212,18 @@ pub(crate) enum Op {
     /// classes use the bare SymId for their name field
     /// (already-equal to the first arg's resolution).
     DefClass(SymId, u32, SymId),
+    /// `module X; body; end`. Same shape as `Op::DefClass` —
+    /// builds the surrounding Class shell, pushes its body
+    /// frame, runs the body, leaves the Class on the stack —
+    /// but flips `Class.is_module = true` on first creation
+    /// so dispatch arms can distinguish Module-vs-Class
+    /// (e.g. `Module#is_a?(Class)` returns false; `class_of`
+    /// reports "Module"). On re-open of the same name, the
+    /// existing Class wins regardless of which keyword was
+    /// used — Ruby's `module Foo; end` then `class Foo; end`
+    /// raises TypeError, but rubyrs leniently keeps the
+    /// first-defined kind. Documented divergence.
+    DefModule(SymId, u32, SymId),
     NewArray(u16),
     NewHash(u16),
     /// Pops two values (begin, end). u8 nonzero = exclusive (`...`).
