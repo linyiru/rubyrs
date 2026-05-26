@@ -102,6 +102,12 @@ impl Vm {
 
     /// (`module M; include N; end; class C; include M; end` ⇒ C
     /// resolves N's methods).
+    ///
+    /// Prepend chain: `Module#prepend` puts modules ahead of the
+    /// class's own methods, so the walk order at each chain node is
+    /// prepends → own methods → includes → superclass. Prepended
+    /// modules also walk their own prepends/includes (so a prepended
+    /// `module M; include N; end` still resolves `N`'s methods).
     #[inline]
     pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
         // Recursive helper that walks one node's own methods + its
@@ -119,6 +125,11 @@ impl Vm {
         }
         let mut current = cls.clone();
         loop {
+            for pre in current.prepends.borrow().iter() {
+                if let Some(found) = walk_module(pre, name_id) {
+                    return Some(found);
+                }
+            }
             if let Some(m) = walk_module(&current, name_id) {
                 return Some(m);
             }
@@ -317,10 +328,14 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     }
     let mut current = child.clone();
     loop {
-        // Recursively walk included modules so transitive includes
-        // (`include M; M includes N` ⇒ `class_is_a(C, N) == true`)
-        // resolve. Matches CRuby's rescue-filter behaviour and the
-        // `is_a?` / `kind_of?` predicates.
+        // Recursively walk included AND prepended modules so
+        // transitive ancestors resolve. Matches CRuby's rescue-
+        // filter behaviour and the `is_a?` / `kind_of?` predicates;
+        // `obj.is_a?(M)` is true for both included and prepended
+        // `M` (and their own transitive includes).
+        for pre in current.prepends.borrow().iter() {
+            if walks_through(pre, ancestor) { return true; }
+        }
         if walks_through(&current, ancestor) { return true; }
         let parent = current.superclass.borrow().clone();
         match parent {
@@ -393,6 +408,7 @@ mod tests {
             methods: RefCell::new(HashMap::new()),
             singleton_methods: RefCell::new(HashMap::new()),
             includes: RefCell::new(Vec::new()),
+            prepends: RefCell::new(Vec::new()),
             superclass: RefCell::new(superclass),
             class_vars: RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]

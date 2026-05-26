@@ -405,8 +405,9 @@ impl Vm {
             // walks the chain at dispatch time. Bumps method_gen
             // so any monomorphic inline cache entry that thought
             // the class lacked the included methods invalidates.
-            if (&*name == "include" || &*name == "extend") && !args.is_empty()
+            if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
+                    let is_prepend = &*name == "prepend";
                     for a in &args {
                         let src = match a {
                             Value::Class(c) => c.clone(),
@@ -417,10 +418,18 @@ impl Vm {
                                 ),
                             })),
                         };
-                        // CRuby last-included-wins: push to the
-                        // front so it's checked first by the lookup
-                        // walk (which goes head-to-tail).
-                        let mut chain = target.includes.borrow_mut();
+                        // CRuby last-{included,prepended}-wins:
+                        // push to the front so it's checked first
+                        // by the lookup walk (which goes head-to-
+                        // tail). `prepend` and `include` route into
+                        // separate chains — `lookup_method_uncached`
+                        // walks prepends BEFORE the class's own
+                        // methods, and includes AFTER.
+                        let mut chain = if is_prepend {
+                            target.prepends.borrow_mut()
+                        } else {
+                            target.includes.borrow_mut()
+                        };
                         if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
                             chain.insert(0, src);
                         }
@@ -1466,10 +1475,12 @@ impl Vm {
                 );
             }
         if let Value::Class(target) = &recv
-            && (&*name == "include" || &*name == "extend") && !args.is_empty() {
-                // Explicit-receiver form: `MyClass.include(Mod)`.
-                // Same chain-push semantics as the no-receiver
-                // form above — see that comment for the rationale.
+            && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
+                // Explicit-receiver form: `MyClass.include(Mod)` /
+                // `.prepend(Mod)`. Same chain-push semantics as the
+                // no-receiver form above — see that comment for the
+                // rationale and the prepend-vs-include split.
+                let is_prepend = &*name == "prepend";
                 for a in &args {
                     let src = match a {
                         Value::Class(c) => c.clone(),
@@ -1480,7 +1491,11 @@ impl Vm {
                             ),
                         })),
                     };
-                    let mut chain = target.includes.borrow_mut();
+                    let mut chain = if is_prepend {
+                        target.prepends.borrow_mut()
+                    } else {
+                        target.includes.borrow_mut()
+                    };
                     if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
                         chain.insert(0, src);
                     }
@@ -1520,6 +1535,15 @@ impl Vm {
                     let mut chain: Vec<Value> = Vec::new();
                     let mut current = cls.clone();
                     loop {
+                        // CRuby `Class#ancestors` renders prepends
+                        // ABOVE the class itself; includes between
+                        // the class and its superclass. Order
+                        // matches the `lookup_method_uncached`
+                        // walk so `ancestors` is the visible
+                        // ground-truth of the dispatch order.
+                        for pre in current.prepends.borrow().iter() {
+                            chain.push(Value::Class(pre.clone()));
+                        }
                         chain.push(Value::Class(current.clone()));
                         for inc in current.includes.borrow().iter() {
                             chain.push(Value::Class(inc.clone()));

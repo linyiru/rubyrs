@@ -204,6 +204,14 @@ pub struct Class {
     /// methods but before the superclass chain. `Class#ancestors`
     /// renders them between the class itself and its superclass.
     pub(crate) includes: RefCell<Vec<Rc<Class>>>,
+    /// Modules prepended via `prepend Mod`. CRuby semantics:
+    /// dispatch walks the prepend chain BEFORE the class's own
+    /// methods (the opposite of include). `Class#ancestors`
+    /// renders them ABOVE the class itself. Reverse-prepend order
+    /// (last-prepended first) mirrors `includes`. Walked by
+    /// `lookup_method_uncached` and `class_is_a` so `is_a?(M)`
+    /// returns true for prepended modules too.
+    pub(crate) prepends: RefCell<Vec<Rc<Class>>>,
     /// Class variables (`@@foo`) defined on this class. Tier 1
     /// simplification: stored directly on the class (no
     /// hierarchy walk on read/write), so subclass `@@foo` and

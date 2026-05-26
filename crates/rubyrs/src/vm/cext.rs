@@ -1016,6 +1016,7 @@ impl Vm {
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(None),
                     includes: RefCell::new(Vec::new()),
+                    prepends: RefCell::new(Vec::new()),
                     class_vars: RefCell::new(HashMap::new()),
                     cext_alloc_func: std::cell::Cell::new(None),
                 });
