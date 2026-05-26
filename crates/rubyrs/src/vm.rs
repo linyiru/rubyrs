@@ -864,6 +864,78 @@ impl Vm {
             }
         }
     }
+
+    /// `**` exponentiation with BigInt promotion and DoS cap.
+    /// Returns:
+    /// - `Some(v)` for any Int/BigInt × non-negative-Int exponent
+    ///   (the only shape Phase B.1 handles — Float exponent is
+    ///   handled by numeric_call's Float arm; BigInt exponent
+    ///   would imply a result with > 2^31 bits which we always
+    ///   refuse).
+    /// - `None` for operand shapes this branch doesn't cover
+    ///   (Float exponent, non-integer recv); the caller falls
+    ///   through to primitive_call's existing arms.
+    ///
+    /// DoS protection: result bit count is approximately
+    /// `bit_length(base) * exp` — a few bytes of input can ask
+    /// for many GB of output. Pre-estimate and trap
+    /// `ResourceExhausted` before calling `BigInt::pow`. Honours
+    /// `Config::max_value_bytes` (same cap that bounds String /
+    /// Array growth); falls back to a 1 MB safety ceiling when
+    /// no cap is configured.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_pow(
+        &mut self,
+        recv: &Value,
+        exp_arg: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        let base_big = match self.as_bigint(recv) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        // Negative exponent → Float (reciprocal); let
+        // numeric_call's Float arm handle (matches Phase A's
+        // documented Rational divergence — we give `0.5` where
+        // CRuby gives `(1/2)`). Only the positive-Int exponent
+        // case is in scope here.
+        let exp_i64 = match exp_arg {
+            Value::Int(n) if *n >= 0 => *n,
+            Value::Int(_) => return Ok(None),
+            _ => return Ok(None),
+        };
+        let exp_u32: u32 = match u32::try_from(exp_i64) {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(self.trap(RubyError::ResourceExhausted {
+                    msg: format!("integer exponent {} exceeds u32::MAX", exp_i64),
+                }));
+            }
+        };
+        // Special-case empty result: 0**0 == 1 in CRuby and
+        // BigInt; 0**n for n>0 = 0; 1**n = 1. BigInt::pow handles
+        // these correctly so we don't need early returns — but
+        // estimating bits for `0` or `1` would erroneously
+        // multiply by `exp` even though the result fits trivially.
+        // Cheap guards keep the cap check meaningful.
+        if base_big.bits() <= 1 {
+            return Ok(Some(self.bigint_to_value(base_big.pow(exp_u32))?));
+        }
+        // Estimate result size and trap before allocating GBs.
+        let base_bits = base_big.bits();
+        let est_bits: u64 = base_bits.saturating_mul(exp_u32 as u64);
+        let est_bytes: usize = ((est_bits / 8) + 1) as usize;
+        let cap = self.max_value_bytes.unwrap_or(1 << 20);
+        if est_bytes > cap {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!(
+                    "integer ** exp would need ~{} bytes, exceeding cap {}",
+                    est_bytes, cap
+                ),
+            }));
+        }
+        let result = base_big.pow(exp_u32);
+        Ok(Some(self.bigint_to_value(result)?))
+    }
 }
 
 /// BigInt method dispatch — covers the calls `primitive_call`
@@ -888,14 +960,29 @@ impl Vm {
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>, Trap> {
-        // Two entry conditions:
-        // - Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
-        // - Recv is Int AND a BigInt is among args: covers the
-        //   inverse-receiver operator method-call shape `1.+(2**63)`,
-        //   which goes through the Int-side dispatch path and would
-        //   otherwise miss BigInt arithmetic entirely (the expression
-        //   form `1 + big` works because Op::BinOp already routes via
-        //   try_bigint_binop on either-operand-is-BigInt).
+        // Entry conditions, in order of precedence:
+        // 1. `**` exponentiation fires for ANY Int/BigInt operand
+        //    combo, including Int×Int — numeric_call's `**` arm
+        //    declines on i64 overflow so we get the chance to
+        //    promote here (`2 ** 100`). Handled before the guard
+        //    below so the Int×Int overflow case isn't filtered out.
+        // 2. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // 3. Recv is Int AND a BigInt is among args: covers the
+        //    inverse-receiver operator method-call shape
+        //    `1.+(2**63)`, which goes through the Int-side
+        //    dispatch path and would otherwise miss BigInt
+        //    arithmetic entirely (the expression form `1 + big`
+        //    works because Op::BinOp already routes via
+        //    try_bigint_binop on either-operand-is-BigInt).
+        if args.len() == 1 && name == "**" {
+            if let Some(v) = self.try_bigint_pow(recv, &args[0])? {
+                return Ok(Some(v));
+            }
+            // Fall through to the rest of bigint_primitive only if
+            // try_bigint_pow declined (operand shape it doesn't
+            // handle, e.g. Float exponent — let primitive_call's
+            // float arm pick up).
+        }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
         if !recv_is_bigint && !arg_is_bigint {

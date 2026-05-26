@@ -103,18 +103,41 @@ pub(crate) fn numeric_call(
             ">"  => Some(Value::Bool(a > b)),
             ">=" => Some(Value::Bool(a >= b)),
             "<=>" => Some(Value::Int(a.cmp(b) as i64)),
-            // Integer exponentiation. Positive exponent stays in i64
-            // (saturating on overflow, matching i64::saturating_pow).
-            // Negative exponent promotes to Float for the reciprocal,
-            // since we don't have Rational — CRuby would give `(1/2)`,
-            // we give `0.5`. Documented divergence.
-            "**" => Some(if *b >= 0 {
-                let exp = (*b as u64).min(u32::MAX as u64) as u32;
-                Value::Int(a.saturating_pow(exp))
-            } else {
-                let f = (*a as f64).powi(*b as i32);
-                Value::Float(f)
-            }),
+            // Integer exponentiation. Positive exponent uses
+            // `checked_pow` so overflow is detectable — with
+            // `bignum` on we DECLINE (return None) and let
+            // bigint_primitive promote to BigInt. Without
+            // `bignum`, fall back to `saturating_pow` so the
+            // pre-Phase-B behaviour is preserved.
+            // Negative exponent promotes to Float for the
+            // reciprocal, since we don't have Rational — CRuby
+            // would give `(1/2)`, we give `0.5`. Documented
+            // divergence.
+            "**" => {
+                if *b < 0 {
+                    let f = (*a as f64).powi(*b as i32);
+                    Some(Value::Float(f))
+                } else {
+                    let exp = (*b as u64).min(u32::MAX as u64) as u32;
+                    #[cfg(feature = "bignum")]
+                    {
+                        if let Some(v) = a.checked_pow(exp) {
+                            Some(Value::Int(v))
+                        } else {
+                            // Overflow → decline so bigint_primitive
+                            // can produce the real arbitrary-precision
+                            // value. The caller (do_call after
+                            // primitive_call returns None) routes
+                            // BigInt-aware ops through bigint_primitive.
+                            None
+                        }
+                    }
+                    #[cfg(not(feature = "bignum"))]
+                    {
+                        Some(Value::Int(a.saturating_pow(exp)))
+                    }
+                }
+            }
             // Bitwise. Ruby uses arbitrary-precision Integer; we
             // truncate to i64. `<<` on a negative shift count is
             // CRuby's right-shift (and vice versa) — we mirror with

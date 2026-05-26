@@ -1942,3 +1942,55 @@ fn preamble_fits_under_tight_resource_caps() {
     // tight, so this only succeeds if there's headroom left.
     rt.eval("1 + 1", "preamble_canary.rb").expect("trivial eval must succeed after preamble under tight caps");
 }
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_caps_huge_result() {
+    // Phase B.1: `**` with a huge exponent estimates result bits
+    // and traps ResourceExhausted before allocating GBs. Default
+    // ceiling (no max_value_bytes) is 1 MB; `2 ** 10_000_000`
+    // would need ~1.25 MB so it traps.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "2 ** 10_000_000",
+        "pow_huge.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted trap from 2**10_000_000, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_honors_max_value_bytes() {
+    // The DoS cap respects Config::max_value_bytes when set —
+    // a tight 64-byte cap rejects `2 ** 1000` (~125 bytes of
+    // decimal output, ~125 bytes of internal magnitude too).
+    let cfg = rubyrs::Config { max_value_bytes: Some(64), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "2 ** 1000",
+        "pow_tight_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted under max_value_bytes=64, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_negative_exponent_returns_float() {
+    // CRuby returns Rational `(1/4)` for `2 ** -2`; rubyrs uses
+    // Float because there's no Rational in the subset
+    // (documented SUBSET.md divergence). Pin the Float path here
+    // since diff_cruby can't compare the formats.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts (2 ** -2)", "pow_neg.rb").expect("Float reciprocal path");
+    assert_eq!(buf.snapshot().trim(), "0.25");
+}

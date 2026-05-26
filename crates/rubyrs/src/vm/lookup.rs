@@ -280,7 +280,7 @@ impl Vm {
             // shape.
             #[cfg(feature = "bignum")]
             Value::BigInt(_) => matches!(name,
-                "+" | "-" | "*" | "/" | "%" |
+                "+" | "-" | "*" | "/" | "%" | "**" |
                 "<" | "<=" | ">" | ">=" |
                 "to_s" | "inspect" |
                 "to_i" | "to_f" |
