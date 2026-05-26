@@ -30,10 +30,16 @@
 # `baselines.tsv` — the wall metric here is the wasm-specific lever.
 #
 # Exit codes:
-#   0  — every workload within its wall budget
-#   1  — at least one workload over budget
-#   2  — setup error (wasm not built, time/wasmtime missing,
-#        row malformed)
+#   0       — every workload within its wall budget
+#   1       — at least one workload over budget
+#   2       — setup error (wasm not built, time/wasmtime missing,
+#             row malformed)
+#   128+sig — interrupted by a signal (Ctrl-C → 130 for SIGINT,
+#             143 for SIGTERM). Cleanup still runs via the
+#             EXIT/INT/TERM trap. Wrapping CI scripts that
+#             classify exit codes should treat 128–255 as
+#             "interrupted", separately from the setup/budget
+#             buckets above.
 
 set -euo pipefail
 
