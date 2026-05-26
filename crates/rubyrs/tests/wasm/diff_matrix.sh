@@ -5,15 +5,15 @@
 #      always verified the wasi-portable code compiles cleanly.
 #   2. `smoke.sh` (PR #106) — added "actually runs end-to-end
 #      under wasmtime" via one curated fixture.
-#   3. THIS SCRIPT — runs a curated subset of `tests/diff/*.rb`
+#   3. THIS SCRIPT — runs a curated subset of `crates/rubyrs/tests/diff/*.rb`
 #      fixtures under BOTH `ruby` (CRuby oracle) and the built
 #      `rubyrs.wasm` (under wasmtime), and asserts byte-identical
 #      stdout. Catches behavioural divergence between native and
 #      wasi-portable execution paths that compile-only checks
 #      miss.
 #
-# The fixture list lives in `tests/wasm/diff_manifest.txt`. Why
-# a separate manifest instead of running every `tests/diff/*.rb`
+# The fixture list lives in `crates/rubyrs/tests/wasm/diff_manifest.txt`. Why
+# a separate manifest instead of running every `crates/rubyrs/tests/diff/*.rb`
 # under wasm: a few fixtures depend on wasi-hostile resources
 # (ENV semantics, file I/O paths, subshells); the manifest
 # curates a high-signal spread without those gotchas. Adding a

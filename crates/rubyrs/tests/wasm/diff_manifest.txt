@@ -1,4 +1,4 @@
-# Curated subset of `tests/diff/` fixtures that get re-run under
+# Curated subset of `crates/rubyrs/tests/diff/` fixtures that get re-run under
 # the wasm32-wasip1 build to prove the wasi-portable code path
 # stays behaviorally equivalent to the native runtime — not just
 # compile-clean (which is what the earlier wasm CI lane checked)
