@@ -586,6 +586,34 @@ end
 - Tests: `resource_exhausted_cannot_be_swallowed_by_bare_rescue`
   and `resource_exhausted_is_uncatchable_even_with_rescue_exception`.
 
+### `private_constant` / `public_constant` are accepted but not enforced
+
+```ruby
+class Foo
+  BAR = 1
+  private_constant :BAR
+end
+Foo::BAR                       # CRuby: NameError; rubyrs: 1
+```
+
+- `Module#private_constant` and `Module#public_constant` accept
+  Symbol / String args (or no args) and return the receiver,
+  matching CRuby's call-site contract. Internal references to the
+  named constants work in both runtimes.
+- External access to a private constant (`Klass::Foo` from outside
+  the class body) does NOT raise NameError in rubyrs — the
+  visibility flag isn't tracked on the per-class constants table.
+  CRuby raises.
+- Why: tilt's `lib/tilt/mapping.rb` calls
+  `private_constant :BaseMapping` from a class body; without the
+  call-shape acceptance, tilt fails to load. Enforcement on the
+  lookup side is a separable change that can land later without
+  breaking this contract.
+- Test: `crates/rubyrs/tests/diff/private_constant.rb` (locks the
+  call shapes and the receiver return value; the no-enforcement
+  divergence is documented here rather than encoded as a passing
+  diff).
+
 ## Deferred to outer tiers
 
 Features whose absence is a tier-assignment decision per
