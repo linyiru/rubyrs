@@ -849,6 +849,42 @@ impl Vm {
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
+            Op::AliasSingletonMethod(new_id, old_id) => {
+                // `alias new old` inside `class << X` body.
+                // Mirrors Op::AliasMethod's shape but resolves
+                // `old` via `lookup_class_singleton_method` (walks
+                // the surrounding class's singleton_methods chain
+                // including its superclass chain) and installs into
+                // `singleton_methods`, not `methods`. Outside a
+                // class body, falls back to toplevel_methods like
+                // the regular alias op — toplevel `class << X` is
+                // legal but rarely used and the surface area is
+                // identical there.
+                let existing = if let Some(cls) = self.class_stack.last() {
+                    self.lookup_class_singleton_method(cls, old_id)
+                } else {
+                    self.toplevel_methods.get(&old_id).cloned()
+                };
+                let m = match existing {
+                    Some(m) => m,
+                    None => {
+                        let name = self.interner.resolve(old_id).to_string();
+                        let ctx = self.class_stack.last()
+                            .map(|c| format!("singleton class of `{}'", c.name))
+                            .unwrap_or_else(|| "main".to_string());
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("undefined method `{}' for {}", name, ctx),
+                        }));
+                    }
+                };
+                if let Some(cls) = self.class_stack.last() {
+                    cls.singleton_methods.borrow_mut().insert(new_id, m);
+                } else {
+                    self.toplevel_methods.insert(new_id, m);
+                }
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Nil);
+            }
             Op::DefMethodBlock(name_id) => {
                 // Pop the BlockHandle the preceding `CreateBlock`
                 // pushed, then wrap it as a closure-method. We

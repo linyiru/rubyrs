@@ -148,6 +148,15 @@ pub(crate) enum Op {
     /// `method_gen` so per-call-site IC entries re-resolve. Raises
     /// `NameError` if `old` doesn't exist anywhere on the chain.
     AliasMethod(SymId, SymId),     // new, old
+    /// `alias new old` (keyword form) inside a `class << X` body.
+    /// Same as `Op::AliasMethod` but resolves `old` along the
+    /// surrounding class's SINGLETON-method chain
+    /// (`lookup_class_singleton_method`) and installs the same
+    /// Rc<Method> under `new` in `class_stack.last().singleton_methods`.
+    /// Outside a class body the handler falls back to the same
+    /// toplevel-methods path as `AliasMethod`, matching CRuby's
+    /// "no containing class context → treat as toplevel" rule.
+    AliasSingletonMethod(SymId, SymId), // new, old
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured
     /// locals into a Method, and installs it under `name` in the
