@@ -168,7 +168,15 @@ pub struct BlockHandle {
 
 #[derive(Debug)]
 pub struct Class {
-    pub(crate) name: String,
+    /// Class / Module identity name. Wrapped in `RefCell` as
+    /// infrastructure for an upcoming scope-aware naming pass
+    /// — the current `Op::DefClass` arm still stamps the name
+    /// on first creation only, so `Class#name` reopen semantics
+    /// are unchanged by this refactor. The mutability hook lets
+    /// the follow-up landing (whether qualified-key class table
+    /// or bare→qualified upgrade on reopen) update the field
+    /// without touching every read site again.
+    pub(crate) name: std::cell::RefCell<String>,
     /// `true` when this Class shell models a `module X; end`
     /// declaration (or a stdlib-stub installed as a Module-
     /// shaped name like `URI` / `JSON`). Drives `Class#is_a?`

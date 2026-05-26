@@ -924,7 +924,7 @@ impl Vm {
                         // correctly.
                         let cls_ref = self.class_stack.last().cloned();
                         if let Some(cls) = &cls_ref
-                            && self.primitive_class_responds_to(&cls.name, old_id) {
+                            && self.primitive_class_responds_to(&cls.name.borrow(), old_id) {
                             let synth = self.synth_primitive_forwarder(cls, old_id);
                             cls.methods.borrow_mut().insert(new_id, synth);
                             self.method_gen = self.method_gen.wrapping_add(1);
@@ -941,7 +941,7 @@ impl Vm {
                         // "Class" }` was misleading.
                         let name = self.interner.resolve(old_id).to_string();
                         let ctx = self.class_stack.last()
-                            .map(|c| format!("class `{}'", c.name))
+                            .map(|c| format!("class `{}'", c.name.borrow()))
                             .unwrap_or_else(|| "main".to_string());
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method `{}' for {}", name, ctx),
@@ -983,7 +983,7 @@ impl Vm {
                         // singleton/instance distinction is rarely
                         // load-bearing in real error logs.)
                         let ctx = self.class_stack.last()
-                            .map(|c| format!("class `{}'", c.name))
+                            .map(|c| format!("class `{}'", c.name.borrow()))
                             .unwrap_or_else(|| "main".to_string());
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method `{}' for {}", name, ctx),
@@ -1113,7 +1113,7 @@ impl Vm {
                     self.interner.resolve(qual_id).to_string()
                 };
                 let cls = self.classes.entry(name_id).or_insert_with(|| Rc::new(Class {
-                    name: name_str,
+                    name: std::cell::RefCell::new(name_str),
                     is_module,
                     ivars: RefCell::new(HashMap::new()),
                     methods: RefCell::new(HashMap::new()),
