@@ -2334,6 +2334,35 @@ fn digits_int_path_error_semantics_match_bignum_profile() {
 }
 
 #[test]
+fn sprintf_alt_form_with_zero_pad_keeps_prefix_before_zeros() {
+    // Regression guard: pre-fix `'%#08x' % 255` produced
+    // `00000xff` (zero-pad inserted before the `0x` prefix);
+    // CRuby produces `0x0000ff` (zeros go between prefix and
+    // digits). Same for `%#08X`, `%#08b`, `%#08B`. Octal's `0`
+    // alt prefix happens to behave identically under
+    // unconditional zero-padding (`'%#08o' % 7` → `00000007`
+    // either way), so no special handling there.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%#08x' % 255\n\
+         puts '%#08X' % 255\n\
+         puts '%#08b' % 7\n\
+         puts '%#08o' % 7\n\
+         puts '%#08x' % (2 ** 60)",
+        "sprintf_alt_zero_pad.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0x0000ff");
+    assert_eq!(lines[1], "0X0000FF");
+    assert_eq!(lines[2], "0b000111");
+    assert_eq!(lines[3], "00000007");
+    assert_eq!(lines[4], "0x1000000000000000"); // body > width, no pad
+}
+
+#[test]
 fn sprintf_radix_int_min_does_not_panic() {
     // Regression guard: `format_radix_int` used to compute the
     // magnitude of a negative i64 via `(-n) as u64`, which panics

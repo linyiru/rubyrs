@@ -198,14 +198,32 @@ pub(crate) fn ruby_sprintf(
                 if flag_minus {
                     body.push_str(&pad);
                 } else if pad_char == '0' {
-                    // Zero-pad goes inside the sign for numbers.
-                    if let Some(first) = body.chars().next() {
-                        if matches!(first, '-' | '+' | ' ') {
-                            let rest: String = body.chars().skip(1).collect();
-                            body = format!("{first}{pad}{rest}");
-                        } else {
-                            body = format!("{pad}{body}");
-                        }
+                    // Zero-pad goes inside (a) the sign and
+                    // (b) the alt-form prefix (`0x`/`0X`/`0b`/`0B`)
+                    // for numbers. CRuby's `'%#08x' % 255` is
+                    // `0x0000ff`, not `00000xff`. Octal's `0`
+                    // alt prefix is itself a digit and CRuby's
+                    // output happens to match unconditional
+                    // zero-padding (both produce `00000007` for
+                    // `'%#08o' % 7`), so we skip prefix detection
+                    // for octal.
+                    let bytes = body.as_bytes();
+                    let sign_len = if matches!(bytes.first(), Some(b'-' | b'+' | b' ')) { 1 } else { 0 };
+                    let prefix_len = if bytes.len() >= sign_len + 2
+                        && bytes[sign_len] == b'0'
+                        && matches!(bytes[sign_len + 1], b'x' | b'X' | b'b' | b'B')
+                    {
+                        2
+                    } else {
+                        0
+                    };
+                    let head_len = sign_len + prefix_len;
+                    if head_len > 0 {
+                        let head = &body[..head_len];
+                        let rest = &body[head_len..];
+                        body = format!("{head}{pad}{rest}");
+                    } else {
+                        body = format!("{pad}{body}");
                     }
                 } else {
                     body = format!("{pad}{body}");
