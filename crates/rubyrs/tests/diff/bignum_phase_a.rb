@@ -148,3 +148,18 @@ puts [10, 9_223_372_036_854_775_808, 100].sum
 # fast path must detect this via checked_mul and fall through
 # to the BigInt branch; pre-cycle-9 the wrap was silent.
 puts (1..4_000_000_000).sum
+
+# Singleton inclusive range — `(N..N).inject(:op)`. Pre-cycle-12
+# this hung the host because the loop was unconditional and
+# i = bi + 1 > end_inc never satisfied the `i == end_inc` break.
+puts (1..1).inject(:+)
+puts (5..5).inject(:*)
+
+# Int#+/-/* operator method-call with i64-overflow result. Pre-
+# cycle-12 the method-call form (`a.+(b)`, `a.send(:+, b)`)
+# went through numeric_call's plain `+` which wraps; only the
+# Op::BinOp expression form (`a + b`) promoted. Now both
+# match Op::BinOp's behaviour via a pre-primitive_call intercept.
+puts 9_223_372_036_854_775_807.+(1)
+puts 9_223_372_036_854_775_807.send(:+, 1)
+puts 1_000_000_000.send(:*, 1_000_000_000).send(:*, 1_000_000_000)

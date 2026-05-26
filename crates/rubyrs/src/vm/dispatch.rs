@@ -521,6 +521,33 @@ impl Vm {
             return self.do_call(target_sym, new_argc, false, u16::MAX);
         }
 
+        // Int#+/-/* operator method-call BigInt-aware intercept.
+        // Op::BinOp's hot path inlines `apply_int.unwrap_or →
+        // bigint_arith`, but the method-call form (`a.+(b)` /
+        // `a.send(:+, b)`) goes through primitive_call which uses
+        // plain i64 ops that wrap on overflow. Route Int×Int
+        // operator names through `apply_int_promote` here so
+        // `a.send(:+, big_literal)` matches Op::BinOp's
+        // overflow-promotion behaviour exactly. With bignum off
+        // apply_int_promote falls back to wrapping so the
+        // pre-PR behaviour is preserved.
+        #[cfg(feature = "bignum")]
+        if args.len() == 1
+            && matches!(&recv, Value::Int(_))
+            && matches!(&args[0], Value::Int(_))
+            && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(&name)
+            && matches!(kind,
+                crate::bytecode::BinOpKind::Add
+                | crate::bytecode::BinOpKind::Sub
+                | crate::bytecode::BinOpKind::Mul
+            )
+        {
+            let (Value::Int(x), Value::Int(y)) = (&recv, &args[0]) else { unreachable!() };
+            let v = self.apply_int_promote(kind, *x, *y)?;
+            self.stack.push(v);
+            return Ok(());
+        }
+
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
             .map_err(|e| self.trap(e))? {
             self.stack.push(v);

@@ -290,6 +290,14 @@ impl Vm {
                             Some(v) => v,
                             None => return Ok(Some(acc)),
                         };
+                        // Singleton inclusive range (e.g. `(1..1)`):
+                        // bi == end_inc, so i = bi + 1 > end_inc and
+                        // the loop body must NOT run. Without this
+                        // guard the loop runs anyway (i starts > end_inc
+                        // but the `if i == end_inc break` never fires),
+                        // incrementing i forever and hanging the host.
+                        // Real bug found by Copilot cycle 12.
+                        if i > end_inc { return Ok(Some(acc)); }
                         // Single shared increment site. The BigInt
                         // arm previously had its own `i += 1; continue;`
                         // which double-incremented; now both arms
