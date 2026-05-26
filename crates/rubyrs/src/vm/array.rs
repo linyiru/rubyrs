@@ -370,7 +370,14 @@ impl Vm {
                                 (Value::Int(x), Value::Int(y)) => {
                                     acc = self.apply_int_promote(kind, *x, *y)?;
                                 }
-                                (_, Value::Int(_)) => {
+                                _ => {
+                                    // Either acc or v (or both) is
+                                    // BigInt — try_bigint_binop handles
+                                    // any Int/BigInt mix. Pre-cycle-9
+                                    // this arm only fired when v was
+                                    // Int (the `(_, Int)` arm) and
+                                    // bailed on a BigInt element like
+                                    // `[2**63].sum`.
                                     #[cfg(feature = "bignum")]
                                     if let Some(next) = self.try_bigint_binop(kind, &acc, v)? {
                                         acc = next;
@@ -378,7 +385,6 @@ impl Vm {
                                     }
                                     return Ok(None);
                                 }
-                                _ => return Ok(None),
                             }
                         }
                         Some(acc)

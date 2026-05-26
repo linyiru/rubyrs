@@ -218,27 +218,22 @@ impl Vm {
                         let init = match args { [Value::Int(n)] => *n, _ => 0 };
                         let end_inc = if excl { ei - 1 } else { ei };
                         if bi > end_inc { return Ok(Some(Value::Int(init))); }
-                        // n * (bi + end_inc) / 2 closed form. n and
-                        // bi+end_inc each fit i64, but their product
-                        // can overflow for large ranges (e.g.
-                        // `(1..10_000_000_000).sum`). Try the i64
-                        // fast path; promote to BigInt on overflow
-                        // when the feature is on, otherwise wrap (the
-                        // pre-PR behaviour for both no-bignum and the
-                        // accidental wrap with bignum on).
-                        let n = end_inc - bi + 1;
-                        // Fast path: each checked_* must succeed. If
-                        // ANY step overflows i64 we fall through to
-                        // the BigInt branch (or the wrapping legacy
-                        // arm with bignum off). Earlier draft used
-                        // `unwrap_or(i64::MAX)` here, which silently
-                        // substituted a bogus value when bi+end_inc
-                        // overflowed and could return an incorrect
-                        // in-range result instead of falling back —
-                        // fixed to short-circuit cleanly with `?`.
+                        // n * (bi + end_inc) / 2 closed form. The
+                        // i64 fast path computes EVERY step with
+                        // checked_* (including `n = end_inc - bi + 1`,
+                        // which can overflow on extremely wide ranges
+                        // like `i64::MIN..i64::MAX`). On any overflow
+                        // we fall through to the BigInt branch (or
+                        // the wrapping legacy arm with bignum off).
+                        // The BigInt branch computes everything from
+                        // the endpoints in BigInt space — never
+                        // touches the i64 `n` — so a fast-path
+                        // overflow can't carry a wrapped value into
+                        // the precise calculation.
                         if let Some(total) = (|| -> Option<i64> {
+                            let n_i64 = end_inc.checked_sub(bi)?.checked_add(1)?;
                             let sum = bi.checked_add(end_inc)?;
-                            let prod = n.checked_mul(sum)?;
+                            let prod = n_i64.checked_mul(sum)?;
                             init.checked_add(prod / 2)
                         })() {
                             return Ok(Some(Value::Int(total)));
@@ -246,13 +241,19 @@ impl Vm {
                         #[cfg(feature = "bignum")]
                         {
                             use num_bigint::BigInt;
-                            let big_n = BigInt::from(n);
-                            let big_sum = BigInt::from(bi) + BigInt::from(end_inc);
+                            let big_bi = BigInt::from(bi);
+                            let big_end = BigInt::from(end_inc);
+                            // n = end_inc - bi + 1, computed in BigInt
+                            // so we don't inherit the i64 overflow from
+                            // the fast path above.
+                            let big_n = &big_end - &big_bi + 1;
+                            let big_sum = &big_bi + &big_end;
                             let big_total = BigInt::from(init) + (big_n * big_sum) / 2;
                             return Ok(Some(self.bigint_to_value(big_total)?));
                         }
                         #[cfg(not(feature = "bignum"))]
                         {
+                            let n = end_inc.wrapping_sub(bi).wrapping_add(1);
                             let s = n.wrapping_mul(bi.wrapping_add(end_inc)) / 2;
                             Some(Value::Int(init.wrapping_add(s)))
                         }

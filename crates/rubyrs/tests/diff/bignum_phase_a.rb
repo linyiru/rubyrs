@@ -134,3 +134,16 @@ huge = 9_999_999_999_999_999_999
 puts huge <=> 1
 puts 1 <=> huge
 puts huge <=> huge
+
+# Array#sum with BigInt elements (not just BigInt accumulator).
+# Pre-cycle-9 the wildcard arm `_ => return Ok(None)` bailed the
+# whole primitive when ANY element was BigInt, even though
+# `[bignum_literal].sum` is the canonical case.
+puts [9_223_372_036_854_775_808].sum
+puts [10, 9_223_372_036_854_775_808, 100].sum
+
+# Range#sum with width that overflows `end_inc - bi` in i64
+# (-2^62 .. 2^62 has width 2^63 + 1, exceeding i64::MAX). Pre-
+# cycle-9 the `n = end_inc - bi + 1` line outside the checked
+# closure could wrap before the fast-path detector ran.
+puts (-4_611_686_018_427_387_904 .. 4_611_686_018_427_387_904).sum
