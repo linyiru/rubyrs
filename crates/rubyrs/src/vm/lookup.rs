@@ -145,10 +145,16 @@ impl Vm {
     /// `respond_to?` itself, `==` / `!=`) are matched first
     /// regardless of receiver.
     pub(crate) fn responds_to(&self, recv: &Value, name_id: SymId) -> bool {
-        let name: &str = &self.interner.resolve(name_id).clone();
+        let name: &str = self.interner.resolve(name_id);
         // Universal — every receiver responds to these.
+        // `send` / `__send__` go here because the `do_call`
+        // recogniser handles them on any receiver type (primitive
+        // or user-defined), so `obj.respond_to?(:send)` should
+        // be true for every value — feature-detection has to
+        // agree with what dispatch will actually accept.
         if matches!(name,
             "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?"
+            | "send" | "__send__"
         ) {
             return true;
         }

@@ -243,3 +243,4 @@ fn run_diff(name: &str) {
 #[test] fn class_qualified_name() { run_diff("class_qualified_name"); }
 #[test] fn alias_method_primitive() { run_diff("alias_method_primitive"); }
 #[test] fn super_splat() { run_diff("super_splat"); }
+#[test] fn object_send() { run_diff("object_send"); }

@@ -10,15 +10,10 @@
 # which inlined the `it_behaves_like :string_length, :length`
 # call against the shared body and substituted `@method` → `:length`.
 #
-# Hand-fix on top of the extractor output: the shared body
-# calls `"".send(@method)` rather than `"".length` directly,
-# so v0.4 emits `"".send(:length)` verbatim. rubyrs doesn't
-# implement `Object#send` yet (subset gap surfaced by this
-# dogfood), so each `.send(:length)` is rewritten to `.length`
-# in the runnable block below. When `Object#send` lands,
-# re-running the extractor will produce a smaller diff (just
-# the `:length` symbol substitution) and this hand-fix step
-# can be retired.
+# The shared body calls `"".send(@method)`, so v0.4 emits
+# `"".send(:length)` verbatim. `Object#send` is now in subset
+# (see `tests/diff/object_send.rb`), so the extractor output
+# runs as-is — no hand-fix needed.
 #
 # Six of the upstream shared-body `it` blocks need features
 # rubyrs doesn't model — Encoding objects (`Encoding::UTF_32BE`,
@@ -32,12 +27,12 @@
 
 describe "String#length" do
   it "returns the length of self" do
-    assert_eq("".length, 0)
-    assert_eq("\x00".length, 1)
-    assert_eq("one".length, 3)
-    assert_eq("two".length, 3)
-    assert_eq("three".length, 5)
-    assert_eq("four".length, 4)
+    assert_eq("".send(:length), 0)
+    assert_eq("\x00".send(:length), 1)
+    assert_eq("one".send(:length), 3)
+    assert_eq("two".send(:length), 3)
+    assert_eq("three".send(:length), 5)
+    assert_eq("four".send(:length), 4)
   end
 
   # Skipped — upstream shared/length.rb:13–18 needs

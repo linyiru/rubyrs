@@ -180,8 +180,58 @@ impl Vm {
         }
     }
 
+    /// Parse the first arg of a `send` / `__send__` call as the
+    /// target method name. Symbol passes through; String is
+    /// interned (CRuby's transparent `to_sym` on the name arg).
+    /// Anything else returns the CRuby-shape TypeError
+    /// (`<inspect> is not a symbol nor a string`); zero args
+    /// returns the CRuby-shape ArgumentError. Shared by all four
+    /// send-recogniser sites (`do_call` / `do_call_block`, each
+    /// with their no_recv and recv arms) so the validation +
+    /// error formatting can't drift between paths.
+    fn parse_send_target(&mut self, args: &[Value]) -> Result<SymId, Trap> {
+        if args.is_empty() {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1+)".into(),
+            }));
+        }
+        match &args[0] {
+            Value::Sym(s) => Ok(*s),
+            Value::Str(s) => {
+                // Same `Config::max_symbols` cap as `String#to_sym`
+                // (vm/string.rs:971) — without this, untrusted code
+                // could grow the interner unbounded by calling
+                // `send("dyn_#{i}")` in a loop. Existing symbols
+                // always re-resolve; only fresh names count.
+                let name = s.to_string_lossy();
+                if let Some(max) = self.max_symbols
+                    && !self.interner.contains(&name) && self.interner.len() >= max {
+                        return Err(self.trap(RubyError::ResourceExhausted {
+                            msg: format!("interner exhausted: {} symbols", max),
+                        }));
+                    }
+                Ok(self.interner.intern(&name))
+            }
+            other => {
+                let inspected = other.to_inspect(&self.heap, &self.interner);
+                Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} is not a symbol nor a string", inspected),
+                }))
+            }
+        }
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
+        // Consume `bypass_visibility_once` at the dispatch
+        // boundary, before any arm runs. A naive consume-at-the-
+        // vis-check would leak the flag whenever the dispatch
+        // bottoms out without entering the Value::Object arm
+        // (e.g. `send(:nonexistent)` on a primitive receiver
+        // raises NoMethodError before the Object arm is reached
+        // — the flag would survive and silently bypass the next
+        // call's vis check).
+        let bypass_visibility = std::mem::replace(&mut self.bypass_visibility_once, false);
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let recv = if no_recv {
@@ -210,6 +260,44 @@ impl Vm {
                 let v = self.invoke_host_fn(host, &args)?;
                 self.stack.push(v);
                 return Ok(());
+            }
+            // Bare `send(:foo)` / `__send__(:foo)` — CRuby treats
+            // these as `self.send(:foo)`. Resolve target and re-aim
+            // through `do_call` with `no_recv = true` so the call
+            // routes through the same implicit-self lookup path the
+            // bare-call arm uses below. User `def send` on the
+            // surrounding self wins for `send` (reserved-name rule
+            // applies only to `__send__`); when the lookup finds a
+            // user override, skip the recogniser so the normal
+            // implicit-self arm below invokes it.
+            //
+            // The visibility-bypass flag is irrelevant here — the
+            // no_recv arm doesn't enforce private/protected (calls
+            // with implicit-self are always allowed) — but we still
+            // set it for parity with the receiver-form arm, so any
+            // helper that later inspects the flag sees a consistent
+            // shape.
+            if matches!(&*name, "send" | "__send__") {
+                let frame_self = self.frames.last()
+                    .expect("ICE: do_call(no_recv) with empty frames")
+                    .self_val.clone();
+                let user_override = &*name == "send" && match &frame_self {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                    }
+                    Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                    _ => false,
+                };
+                if !user_override {
+                    let target_sym = self.parse_send_target(&args)?;
+                    let new_argc = args.len() - 1;
+                    self.bypass_visibility_once = true;
+                    for a in args.into_iter().skip(1) {
+                        self.stack.push(a);
+                    }
+                    return self.do_call(target_sym, new_argc, true, u16::MAX);
+                }
             }
             // Bare `method(:foo)` — implicit-self capture. Same
             // shape as `obj.method(:foo)` (the receiver-form arm
@@ -372,6 +460,66 @@ impl Vm {
         }
 
         let recv = recv.expect("ICE: receiver missing");
+
+        // `Object#send(:name, args...)` / `__send__(:name, args...)`
+        // — dynamic dispatch. Resolve the first arg as the target
+        // method name and re-enter `do_call` with `recv` pushed
+        // back, the remaining args on the stack, and the resolved
+        // SymId in name_id. The whole normal lookup path then
+        // handles the rest (primitives, singleton methods, host
+        // fns, method_missing, etc.) — `send` is just a name
+        // re-aim, not a separate dispatch table.
+        //
+        // The method-name arg accepts both Symbol and String
+        // (CRuby's transparent `to_sym`). Same precedent as
+        // `Object#method` but broader because shared specs and
+        // tilt-style libraries commonly pass `send("foo")`.
+        // Block-form (`send(:name) { ... }`) lives in
+        // `do_call_block`; this arm covers the block-less call.
+        //
+        // cache_id passed as `u16::MAX` because the re-entered call
+        // resolves a runtime-dynamic name — caching it at the
+        // original `send` call site's slot would poison whatever
+        // method the bytecode actually compiled for that slot.
+        //
+        // **CRuby parity — user-defined `def send`**: only
+        // `__send__` is reserved. A user `def send` on the
+        // receiver's class wins over the built-in re-aim when the
+        // call is named `send`. We check that first and fall
+        // through to the regular `Value::Object` arm if found.
+        //
+        // **CRuby parity — visibility bypass**: `send` and
+        // `__send__` may invoke private/protected methods. Set
+        // `bypass_visibility_once` to suppress the visibility
+        // check during the re-entered call. The flag is consumed
+        // (single-shot) at the top of the next `do_call` /
+        // `do_call_block` into a local — *not* at the visibility
+        // check site — so a dispatch that bottoms out before the
+        // Object arm (e.g. `send(:nonexistent)` raising
+        // NoMethodError on a primitive) can't leak the bypass
+        // into the next unrelated call.
+        let user_send_override = &*name == "send" && match &recv {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+            }
+            // `def self.send` on a class — singleton-method lookup
+            // walking the class's superclass chain. Falls through to
+            // the existing `Value::Class` arm which invokes the
+            // user's singleton `send`.
+            Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+            _ => false,
+        };
+        if matches!(&*name, "send" | "__send__") && !user_send_override {
+            let target_sym = self.parse_send_target(&args)?;
+            let new_argc = args.len() - 1;
+            self.bypass_visibility_once = true;
+            self.stack.push(recv);
+            for a in args.into_iter().skip(1) {
+                self.stack.push(a);
+            }
+            return self.do_call(target_sym, new_argc, false, u16::MAX);
+        }
 
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
             .map_err(|e| self.trap(e))? {
@@ -591,13 +739,18 @@ impl Vm {
                 // the receiver class via the existing
                 // `class_is_a` helper.
                 let vis = m.visibility.get();
-                if vis == Visibility::Private {
+                // `send` / `__send__` bypass the visibility check
+                // exactly once. The flag was consumed at the top
+                // of `do_call` into a local so it applies even when
+                // the bypassed method itself dispatches other
+                // calls (those see a freshly-cleared flag).
+                if vis == Visibility::Private && !bypass_visibility {
                     return Err(self.trap(RubyError::NoMethodError {
                         method: format!("private method '{name}' called"),
                         recv_type: recv.type_name(),
                     }));
                 }
-                if vis == Visibility::Protected {
+                if vis == Visibility::Protected && !bypass_visibility {
                     // Check against the method's *defining* class
                     // (where `def name` literally lives) rather
                     // than the receiver's class — that's CRuby's
@@ -2558,6 +2711,14 @@ impl Vm {
 
     pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
+        // Consume `bypass_visibility_once` at the dispatch boundary
+        // — same reasoning as `do_call`. `do_call_block` doesn't
+        // have a visibility-check site of its own today (block-form
+        // private/protected enforcement is a pre-existing gap), so
+        // the consumed value is unused locally; the important
+        // effect is that the flag can't leak past the block-form
+        // `send`/`__send__` re-aim into the next unrelated call.
+        let _bypass_visibility = std::mem::replace(&mut self.bypass_visibility_once, false);
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
@@ -2654,6 +2815,32 @@ impl Vm {
                 self.stack.push(v);
                 return Ok(());
             }
+            // Bare `send(:foo) { ... }` / `__send__(:foo) { ... }`
+            // — same re-aim as the no_recv arm in `do_call`. See
+            // there for the override + visibility rationale.
+            if matches!(&*name, "send" | "__send__") {
+                let frame_self = self.frames.last()
+                    .expect("ICE: do_call_block(no_recv) with empty frames")
+                    .self_val.clone();
+                let user_override = &*name == "send" && match &frame_self {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                    }
+                    Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                    _ => false,
+                };
+                if !user_override {
+                    let target_sym = self.parse_send_target(&args)?;
+                    let new_argc = args.len() - 1;
+                    self.bypass_visibility_once = true;
+                    self.stack.push(Value::Block(block));
+                    for a in args.into_iter().skip(1) {
+                        self.stack.push(a);
+                    }
+                    return self.do_call_block(target_sym, new_argc, true, u16::MAX);
+                }
+            }
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.class_of(*id);
@@ -2674,6 +2861,40 @@ impl Vm {
             }));
         }
         let recv = recv.expect("ICE: receiver missing for block call");
+
+        // `obj.send(:name, args...) { ... }` — same dynamic-name
+        // re-aim as the block-less arm in `do_call`. `do_call_block`
+        // pops args then block then recv (in that drain/pop order),
+        // so the stack shape it expects from a caller is
+        // `[..., recv, block, *args]`. Put them back in that order
+        // and re-enter. cache_id = u16::MAX for the same reason as
+        // the block-less arm. User-`def send` override + visibility
+        // bypass parity — same rules as the block-less arm; see
+        // there for the rationale.
+        let user_send_override = &*name == "send" && match &recv {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+            }
+            // `def self.send` on a class — singleton-method lookup
+            // walking the class's superclass chain. Falls through to
+            // the existing `Value::Class` arm which invokes the
+            // user's singleton `send`.
+            Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+            _ => false,
+        };
+        if matches!(&*name, "send" | "__send__") && !user_send_override {
+            let target_sym = self.parse_send_target(&args)?;
+            let new_argc = args.len() - 1;
+            self.bypass_visibility_once = true;
+            self.stack.push(recv);
+            self.stack.push(Value::Block(block));
+            for a in args.into_iter().skip(1) {
+                self.stack.push(a);
+            }
+            return self.do_call_block(target_sym, new_argc, false, u16::MAX);
+        }
+
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
         let new_id = self.interner.intern("new");
