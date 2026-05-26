@@ -530,6 +530,19 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // BigInt method dispatch — `primitive_call` and friends
+        // are stateless and can't read the heap, so the BigInt
+        // surface is hooked here where `&mut self` is available.
+        // Phase A: `to_s` and `inspect` (which produce a String
+        // from the BigInt's decimal). Arithmetic + comparison
+        // already get handled at the BinOp arm via the cold-path
+        // `try_bigint_binop`; this hook covers method-call shape
+        // (`big.to_s`, `big.inspect`, `big.send(:to_s)`).
+        #[cfg(feature = "bignum")]
+        if let Some(v) = self.bigint_primitive(&recv, &name, &args) {
+            self.stack.push(v);
+            return Ok(());
+        }
 
         let new_id = self.interner.intern("new");
         if name_id == new_id
@@ -3106,6 +3119,15 @@ fn method_recv_identity(a: &Value, b: &Value) -> bool {
         (Value::Block(x), Value::Block(y)) => x == y,
         (Value::BoundMethod(x), Value::BoundMethod(y)) => x == y,
         (Value::UnboundMethod(x), Value::UnboundMethod(y)) => x == y,
+        // ObjId identity, matching `method_recv_hash`. Two BigInt
+        // Values are "the same receiver" only when they share an
+        // ObjId; canonical-value equality (e.g. comparing two
+        // independently-allocated 2^64 BigInts) is intentionally
+        // not the relation here — `bound_method == other` only
+        // collapses when the underlying receiver is literally the
+        // same heap slot.
+        #[cfg(feature = "bignum")]
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
         (Value::Class(x), Value::Class(y)) => Rc::ptr_eq(x, y),
         (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y),
         (Value::Int(x), Value::Int(y)) => x == y,

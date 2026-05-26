@@ -51,8 +51,15 @@ cext = ["dep:rubyrs-cext", "dep:libloading"]
 #     the integer-literal overflow → BigInt promotion path all
 #     cfg out; arithmetic falls back to today's i64-saturating
 #     `wrapping_*` discipline
-#   - script-visible: `2 ** 64` saturates to `i64::MAX` instead
-#     of producing the real value
+#   - script-visible: integer literals beyond i64 (e.g.
+#     `9_223_372_036_854_775_808`) and `+`/`-`/`*`/`/`/`%` results
+#     that overflow i64 saturate / wrap instead of promoting to a
+#     real arbitrary-precision Integer
+# Phase A surface (today): `+`, `-`, `*`, `/`, `%`, comparison,
+# `to_s`, `inspect`, `class`. Phase B will add `**` (which still
+# saturates today, gated on the `primitive_call &mut Vm` plumbing
+# tracked separately), bit ops, unary `-@`/`+@`, `abs`, and Float
+# interop.
 # Integer is Tier-1 semantics in CRuby (Fixnum + Bignum unified),
 # so BigInt lives in Tier 1 (will move to `rubyrs-core` in
 # Phase 1 of ADR 0018). The default keeps it on so CLI / embed

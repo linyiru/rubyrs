@@ -67,3 +67,11 @@ puts (fact(30) == fact(30))
 # `class` reports Integer for both Fixnum-fit and Bignum-overflow.
 puts fact(20).class
 puts fact(30).class
+
+# Method-call shape — `to_s` and `inspect` on a BigInt receiver
+# must work via direct invocation AND via `send`. Pre-PR these
+# raised NoMethodError because the BigInt dispatch path was only
+# wired into Op::BinOp, not the do_call method-lookup path.
+puts fact(30).to_s
+puts fact(30).inspect
+puts fact(30).send(:to_s)

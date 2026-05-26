@@ -781,6 +781,33 @@ impl Vm {
     }
 }
 
+/// BigInt method dispatch — covers the calls `primitive_call`
+/// can't satisfy (it's stateless; BigInt needs heap access for
+/// the decimal-string read). Hooked from `Vm::do_call` after
+/// the regular primitive paths. Phase A supports `to_s` /
+/// `inspect`; arithmetic + comparison are routed through
+/// `Op::BinOp` → `try_bigint_binop` and don't reach here.
+#[cfg(feature = "bignum")]
+impl Vm {
+    pub(crate) fn bigint_primitive(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Option<Value> {
+        let id = match recv {
+            Value::BigInt(id) => *id,
+            _ => return None,
+        };
+        match (name, args.len()) {
+            ("to_s", 0) | ("inspect", 0) => {
+                Some(Value::new_str(self.heap.bigint(id).to_string()))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// BigInt arithmetic surface — shared by the i64-overflow promotion
 /// path in `Op::BinOp` / `Op::BinOpInt` and by the cold-path
 /// dispatch for already-BigInt operands. Cfg-gated on `bignum`
