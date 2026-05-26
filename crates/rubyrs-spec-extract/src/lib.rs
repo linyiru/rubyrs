@@ -41,16 +41,6 @@
 
 use ruby_prism::{Node, Visit};
 
-/// Recognise `expr.should == val` and rewrite to
-/// `assert_eq(expr, val)`, then strip `require_relative` lines
-/// the micro-runner can't load. Everything else passes through.
-///
-/// Returns the rewritten source. `extract(s) == s` only when
-/// nothing matched AND there were no `require_relative` lines.
-///
-/// Parse errors are NOT surfaced here — callers that care
-/// should use [`parse_errors`] alongside this fn. The CLI does
-/// (`main.rs`); golden tests don't need to.
 /// A vendored `shared/foo.rb` upstream file. Pass into
 /// [`extract_with_shared`] so the extractor can inline
 /// `it_behaves_like :NAME, args...` calls in the consumer
@@ -85,6 +75,16 @@ pub fn extract_with_shared(source: &str, shared: &[SharedSpec<'_>]) -> String {
     extract_inner(source, &registry)
 }
 
+/// Recognise `expr.should == val` and rewrite to
+/// `assert_eq(expr, val)`, then strip `require_relative` lines
+/// the micro-runner can't load. Everything else passes through.
+///
+/// Returns the rewritten source. `extract(s) == s` only when
+/// nothing matched AND there were no `require_relative` lines.
+///
+/// Parse errors are NOT surfaced here — callers that care
+/// should use [`parse_errors`] alongside this fn. The CLI does
+/// (`main.rs`); golden tests don't need to.
 pub fn extract(source: &str) -> String {
     extract_inner(source, &SharedRegistry::default())
 }
@@ -109,14 +109,19 @@ fn extract_inner(source: &str, registry: &SharedRegistry) -> String {
     let consumed = lifter.consumed_before_ranges;
 
     // v0.4: inline `it_behaves_like :NAME, args...` calls
-    // against the shared registry.
+    // against the shared registry. Skip the walk entirely when
+    // the registry is empty — that's the common `extract()` path
+    // (callers that don't pass `--shared`), and the visitor has
+    // nothing to match against anyway.
     let mut inliner = SharedInliner {
         source,
         registry,
         substitutions: Vec::new(),
         consumed_it_behaves_like_ranges: Vec::new(),
     };
-    inliner.visit(&root);
+    if !registry.is_empty() {
+        inliner.visit(&root);
+    }
     let consumed_iblike = inliner.consumed_it_behaves_like_ranges.clone();
 
     // Drop recogniser substitutions that fall inside a lifter
@@ -918,6 +923,10 @@ struct SharedRegistry {
 impl SharedRegistry {
     fn get(&self, name: &str) -> Option<&str> {
         self.entries.get(name).map(|s| s.as_str())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
