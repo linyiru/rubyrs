@@ -441,6 +441,11 @@ impl Vm {
                         let kind = match crate::bytecode::BinOpKind::from_op_name(&op_name) { Some(k) => k, None => return Ok(None) };
                         let mut acc = a[0].clone();
                         for v in &a[1..] {
+                            // Int×Int fast path with overflow promotion;
+                            // once `acc` becomes BigInt (or `v` is one),
+                            // fall through to `try_bigint_binop` so the
+                            // fold continues in arbitrary precision
+                            // instead of bailing the whole primitive.
                             match (&acc, v) {
                                 (Value::Int(x), Value::Int(y)) => {
                                     if matches!(kind, crate::bytecode::BinOpKind::Div | crate::bytecode::BinOpKind::Mod) && *y == 0 {
@@ -450,7 +455,14 @@ impl Vm {
                                     }
                                     acc = self.apply_int_promote(kind, *x, *y)?;
                                 }
-                                _ => return Ok(None),
+                                _ => {
+                                    #[cfg(feature = "bignum")]
+                                    if let Some(next) = self.try_bigint_binop(kind, &acc, v)? {
+                                        acc = next;
+                                        continue;
+                                    }
+                                    return Ok(None);
+                                }
                             }
                         }
                         Some(acc)

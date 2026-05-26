@@ -101,3 +101,16 @@ puts h[9_999_999_999_999_999_999]
 # overflows must still compare equal to a literal of the same
 # value passed as an Int operand). 2^63 is the smallest such case.
 puts [9_223_372_036_854_775_808].include?(9_223_372_036_854_775_808)
+
+# Inverse-receiver operator method-call — Int receiver with
+# BigInt arg (`1.+(big)`, `1.send(:+, big)`). Pre-cycle-4 the
+# bigint_primitive hook only fired when receiver was BigInt, so
+# this fell through to Int#+ which couldn't handle BigInt args.
+puts 1.+(9_223_372_036_854_775_808)
+puts 1.send(:+, 9_223_372_036_854_775_808)
+
+# Range#inject / Array#inject must keep folding once the
+# accumulator promotes to BigInt — pre-cycle-4 they hit the
+# wildcard arm and bailed the whole primitive.
+puts (1..30).inject(:*)
+puts [10_000_000_000, 10_000_000_000, 10_000_000_000].inject(:+)

@@ -423,11 +423,12 @@ impl Heap {
             }
             #[cfg(feature = "bignum")]
             Value::BigInt(id) => {
+                // Leaf: HeapObj::BigInt holds no nested Values, so we
+                // just mark — pushing onto the worklist would only
+                // make the sweep loop re-visit a slot it has nothing
+                // to do for.
                 let i = id.0 as usize;
-                if !marks[i] {
-                    marks[i] = true;
-                    worklist.push(*id);
-                }
+                marks[i] = true;
             }
             _ => {}
         }

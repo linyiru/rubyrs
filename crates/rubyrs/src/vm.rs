@@ -801,23 +801,36 @@ impl Vm {
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>, Trap> {
-        let id = match recv {
-            Value::BigInt(id) => *id,
-            _ => return Ok(None),
-        };
-        // Phase A heap-read operations.
-        if args.is_empty() {
-            match name {
-                "to_s" | "inspect" => {
-                    return Ok(Some(Value::new_str(self.heap.bigint(id).to_string())));
+        // Two entry conditions:
+        // - Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // - Recv is Int AND a BigInt is among args: covers the
+        //   inverse-receiver operator method-call shape `1.+(2**63)`,
+        //   which goes through the Int-side dispatch path and would
+        //   otherwise miss BigInt arithmetic entirely (the expression
+        //   form `1 + big` works because Op::BinOp already routes via
+        //   try_bigint_binop on either-operand-is-BigInt).
+        let recv_is_bigint = matches!(recv, Value::BigInt(_));
+        let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
+        if !recv_is_bigint && !arg_is_bigint {
+            return Ok(None);
+        }
+        // Phase A heap-read operations — only meaningful on a BigInt
+        // receiver (Int#to_s already handled by numeric_call).
+        if recv_is_bigint && args.is_empty() {
+            if let Value::BigInt(id) = recv {
+                match name {
+                    "to_s" | "inspect" => {
+                        return Ok(Some(Value::new_str(self.heap.bigint(*id).to_string())));
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
-        // Operator method-call shape — `big.+(1)`, `big.send(:==, x)`.
-        // Route through `try_bigint_binop` so the answer matches the
-        // `Op::BinOp` path exactly (same arithmetic / floor-div semantics,
-        // same comparison Bool, same overflow-promotion-then-demote rule).
+        // Operator method-call shape — `big.+(1)`, `1.+(big)`,
+        // `big.send(:==, x)`. Route through `try_bigint_binop` so
+        // the answer matches the `Op::BinOp` path exactly (same
+        // arithmetic / floor-div semantics, same comparison Bool,
+        // same overflow-promotion-then-demote rule).
         if args.len() == 1
             && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(name)
             && let Some(v) = self.try_bigint_binop(kind, recv, &args[0])?

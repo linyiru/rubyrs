@@ -230,6 +230,12 @@ impl Vm {
                         let mut acc = Value::Int(bi);
                         let mut i = bi + 1;
                         while i <= end_inc {
+                            // Same overflow-promotion shape as
+                            // Array#inject: once `acc` becomes BigInt
+                            // (e.g. `(1..30).inject(:*)`), fall through
+                            // to `try_bigint_binop` so the fold
+                            // continues in arbitrary precision instead
+                            // of bailing the whole primitive.
                             match &acc {
                                 Value::Int(x) => {
                                     if matches!(kind, crate::bytecode::BinOpKind::Div | crate::bytecode::BinOpKind::Mod) && i == 0 {
@@ -239,7 +245,15 @@ impl Vm {
                                     }
                                     acc = self.apply_int_promote(kind, *x, i)?;
                                 }
-                                _ => return Ok(None),
+                                _ => {
+                                    #[cfg(feature = "bignum")]
+                                    if let Some(next) = self.try_bigint_binop(kind, &acc, &Value::Int(i))? {
+                                        acc = next;
+                                        i += 1;
+                                        continue;
+                                    }
+                                    return Ok(None);
+                                }
                             }
                             i += 1;
                         }
