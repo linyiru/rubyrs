@@ -1464,6 +1464,19 @@ impl Vm {
         {
             return Ok(Some(v));
         }
+        // Arity guard for BigInt receivers — numeric.rs's arity
+        // guard only catches Int×*, so `big.pow` / `big.pow(1,2,3)`
+        // would otherwise fall through to NoMethodError despite
+        // `respond_to?(:pow)` being true. Match CRuby's exact
+        // ArgumentError message text.
+        if name == "pow" && matches!(recv, Value::BigInt(_)) && args.len() != 2 && args.len() != 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1..2)",
+                    args.len(),
+                ),
+            }));
+        }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
         if !recv_is_bigint && !arg_is_bigint {

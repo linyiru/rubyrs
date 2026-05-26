@@ -2194,6 +2194,36 @@ fn pow_method_works_under_no_bignum_profile() {
     assert_eq!(buf.snapshot().trim(), "125\n6\n1\n1\n-1");
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_arity_guard_fires_for_bigint_receiver() {
+    // numeric.rs's arity guard only catches Int receivers — BigInt
+    // receivers go through bigint_primitive's separate dispatch
+    // path. Mirror the guard there so `big.pow` / `big.pow(1,2,3)`
+    // raise CRuby's exact ArgumentError instead of NoMethodError.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [
+        ("big = 2 ** 100; big.pow", 0),
+        ("big = 2 ** 100; big.pow(1, 2, 3)", 3),
+    ] {
+        let err = rt.eval(script, "bigint_pow_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 1..2)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
 #[test]
 fn pow_arity_zero_or_too_many_args_raise_argument_error() {
     // CRuby: `5.pow` and `5.pow(1, 2, 3)` raise ArgumentError
