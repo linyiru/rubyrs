@@ -299,5 +299,6 @@ fn run_diff(name: &str) {
 #[test] fn array_sort_block() { run_diff("array_sort_block"); }
 #[test] fn class_new_override() { run_diff("class_new_override"); }
 #[test] fn backreference_globals() { run_diff("backreference_globals"); }
+#[test] fn class_path_nested() { run_diff("class_path_nested"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_strscan() { run_diff("stdlib_strscan"); }
