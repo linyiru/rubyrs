@@ -1097,12 +1097,12 @@ impl Vm {
         }
         // `m.to_proc` — explicit conversion to a Proc. Equivalent
         // to the implicit `&m` coercion: routes through the same
-        // `coerce_bound_method_to_block` forwarder so calling the
+        // `coerce_callable_to_block` forwarder so calling the
         // resulting Proc splats its args back into `bm.call(...)`.
         if let Value::BoundMethod(bid) = &recv
             && &*name == "to_proc" && args.is_empty() {
                 let bm_id = *bid;
-                let id = self.coerce_bound_method_to_block(bm_id)?;
+                let id = self.coerce_callable_to_block(Value::BoundMethod(bm_id))?;
                 self.stack.push(Value::Block(id));
                 return Ok(());
             }
@@ -2649,14 +2649,16 @@ impl Vm {
         Ok(())
     }
 
-    /// Wrap a BoundMethod into a fresh `Value::Block` so it can
-    /// be passed wherever a block is expected. Lazily compiles a
-    /// single shared forwarder proto on first call; subsequent
-    /// calls reuse the same proto index. The synthesised
-    /// BlockHandle stashes the BoundMethod in `captured[0]` and
-    /// uses the proto's rest slot to splat the caller's args
-    /// into a `.call(...)` on it.
-    pub(crate) fn coerce_bound_method_to_block(&mut self, bm_id: crate::value::ObjId)
+    /// Wrap a callable Value (BoundMethod, CurriedProc, ...) into
+    /// a fresh `Value::Block` so it can be passed wherever a
+    /// block is expected. Lazily compiles a single shared
+    /// forwarder proto on first call; subsequent calls reuse the
+    /// same proto index. The synthesised BlockHandle stashes the
+    /// callable in `captured[0]` and uses the proto's rest slot
+    /// to splat the caller's args into a `.call(...)` on it.
+    /// Caller must pass a value whose `.call` dispatch is
+    /// already wired up (currently BoundMethod and CurriedProc).
+    pub(crate) fn coerce_callable_to_block(&mut self, callable: Value)
         -> Result<crate::value::ObjId, Trap>
     {
         use crate::bytecode::{Op, Proto};
@@ -2665,14 +2667,14 @@ impl Vm {
         use std::cell::RefCell;
 
         // Lazy proto build. Locals layout:
-        //   slot 0: the BoundMethod (captured)
+        //   slot 0: the callable (captured)
         //   slot 1: args Array (rest slot, filled by invoke_block)
-        let proto_idx = if let Some(idx) = self.bound_method_forwarder_proto {
+        let proto_idx = if let Some(idx) = self.callable_forwarder_proto {
             idx
         } else {
             let call_id = self.interner.intern("call");
             let proto = Proto {
-                name: "<bound-method-forwarder>".to_string(),
+                name: "<callable-forwarder>".to_string(),
                 params: Vec::new(),
                 n_required_positional: 0,
                 rest_param: None,
@@ -2698,25 +2700,24 @@ impl Vm {
             };
             let idx = self.protos.len();
             self.protos.push(proto);
-            self.bound_method_forwarder_proto = Some(idx);
+            self.callable_forwarder_proto = Some(idx);
             idx
         };
 
-        // captured[0] = the BoundMethod; captured[1] left to
+        // captured[0] = the callable; captured[1] left to
         // invoke_block to populate with the rest Array.
         //
-        // Pin the BoundMethod across maybe_gc — the Rc<RefCell<Vec>>
+        // Pin the callable across maybe_gc — the Rc<RefCell<Vec>>
         // we just built is a Rust-local with no GC root yet (the
         // Block that would own it isn't alloc'd until after the
         // maybe_gc). Without the pin, STRESS_GC sweeps the
-        // BoundMethod slot between Vec construction and Block alloc;
+        // callable's slot between Vec construction and Block alloc;
         // the new Block alloc reuses the freed slot, and the
-        // captured BoundMethod ObjId silently points at the Block
-        // itself — invoke_block then panics with "BoundMethod slot
-        // holds non-BoundMethod" when `.call` dispatches.
-        let captured = Rc::new(RefCell::new(vec![Value::BoundMethod(bm_id), Value::Nil]));
+        // captured ObjId silently points at the Block itself —
+        // invoke_block then panics when `.call` dispatches.
+        let captured = Rc::new(RefCell::new(vec![callable.clone(), Value::Nil]));
         let mut g = crate::vm::PinGuard::new(self);
-        g.pin(Value::BoundMethod(bm_id));
+        g.pin(callable);
         g.vm.maybe_gc();
         g.vm.check_alloc()?;
         let id = g.vm.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
@@ -2945,8 +2946,15 @@ impl Vm {
             // BoundMethod into a Block via `to_proc` semantics.
             // Synthesises a vararg-lambda whose captured locals
             // hold the BoundMethod; when invoked, it does
-            // `m.call(*args)`. See `coerce_bound_method_to_block`.
-            Value::BoundMethod(bm_id) => self.coerce_bound_method_to_block(bm_id)?,
+            // `m.call(*args)`. See `coerce_callable_to_block`.
+            Value::BoundMethod(bm_id) => self.coerce_callable_to_block(Value::BoundMethod(bm_id))?,
+            // `&curried_proc` — a curried proc is still a Proc in
+            // CRuby, so `&` on it forwards as a block. Same shape
+            // as the BoundMethod arm: the synthesised forwarder
+            // does `cp.call(*args)`, and `CurriedProc#call`
+            // (dispatch.rs:1159) handles arity-completion / partial
+            // application from there.
+            Value::CurriedProc(cp_id) => self.coerce_callable_to_block(Value::CurriedProc(cp_id))?,
             // `foo(&nil)` in CRuby is equivalent to `foo` without
             // a block. Common shape: `def render(&block);
             // evaluate(&block); end` invoked without a block ⇒

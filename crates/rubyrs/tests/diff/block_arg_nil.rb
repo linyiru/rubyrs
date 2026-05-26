@@ -37,3 +37,13 @@ begin
 rescue TypeError => e
   puts "caught: #{e.message}"
 end
+
+# --- Curried Proc forwarded as &block ---
+# A curried Proc is still a Proc; `&curried_proc` must work
+# the same way as `&lambda`.
+add = lambda { |a, b, c| a + b + c }
+c = add.curry[1]                      # CurriedProc, needs (b, c)
+def take_block(b)
+  yield(b, 100)
+end
+puts take_block(2, &c)                # 1 + 2 + 100 = 103
