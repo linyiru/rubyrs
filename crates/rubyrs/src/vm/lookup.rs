@@ -268,20 +268,21 @@ impl Vm {
                 "times" | "upto" | "downto" |
                 "digits" | "bit_length" | "[]"
             ),
-            // Phase A BigInt subset + Phase B.1 `**` —
-            // arithmetic, comparison, to_s/inspect, pure
-            // predicates, and exponentiation (auto-promote /
-            // DoS-capped, see Vm::try_bigint_pow). Unary `-@`/`+@`,
-            // bit ops, `abs`, iteration helpers (`times`, `upto`,
-            // `downto`), `digits` and `bit_length` remain unshipped
-            // Phase B groups — each needs a `&mut Vm` heap path
-            // that the stateless `primitive_call` doesn't grant.
-            // The predicates below only READ the bigint to compute
-            // a Bool/Int, so they fit cleanly in the existing
+            // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
+            // unary (`-@`/`+@`/`abs`) — arithmetic, comparison,
+            // to_s/inspect, pure predicates, exponentiation (auto-
+            // promote / DoS-capped), and unary sign/magnitude. Bit
+            // ops, iteration helpers (`times`, `upto`, `downto`),
+            // `digits` and `bit_length` remain unshipped Phase B
+            // groups — each needs a `&mut Vm` heap path that the
+            // stateless `primitive_call` doesn't grant. The
+            // predicates below only READ the bigint to compute a
+            // Bool/Int, so they fit cleanly in the existing
             // bigint_primitive shape.
             #[cfg(feature = "bignum")]
             Value::BigInt(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |
+                "-@" | "+@" | "abs" |
                 "<" | "<=" | ">" | ">=" |
                 "to_s" | "inspect" |
                 "to_i" | "to_f" |

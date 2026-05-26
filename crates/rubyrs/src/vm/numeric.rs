@@ -203,8 +203,23 @@ pub(crate) fn numeric_call(
             Some(Value::new_str(a.to_string()))
         }
         (Value::Int(a), "to_i", []) => Some(Value::Int(*a)),
-        (Value::Int(a), "abs", []) => Some(Value::Int(a.wrapping_abs())),
-        (Value::Int(a), "-@", []) => Some(Value::Int(a.wrapping_neg())),
+        // `abs` / `-@`: i64::MIN.abs() and -i64::MIN both overflow
+        // i64 (CRuby promotes to Bignum). With `bignum` on, decline
+        // here so bigint_primitive's unary arm produces the
+        // BigInt(2^63). Without `bignum`, keep the historical
+        // wrapping behaviour (returns i64::MIN unchanged).
+        (Value::Int(a), "abs", []) => {
+            #[cfg(feature = "bignum")]
+            { if *a == i64::MIN { None } else { Some(Value::Int(a.wrapping_abs())) } }
+            #[cfg(not(feature = "bignum"))]
+            { Some(Value::Int(a.wrapping_abs())) }
+        }
+        (Value::Int(a), "-@", []) => {
+            #[cfg(feature = "bignum")]
+            { if *a == i64::MIN { None } else { Some(Value::Int(a.wrapping_neg())) } }
+            #[cfg(not(feature = "bignum"))]
+            { Some(Value::Int(a.wrapping_neg())) }
+        }
         (Value::Int(a), "+@", []) => Some(Value::Int(*a)),
         (Value::Int(a), "~", []) => Some(Value::Int(!a)),
         (Value::Int(a), "even?", []) => Some(Value::Bool(a % 2 == 0)),

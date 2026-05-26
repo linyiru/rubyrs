@@ -1192,6 +1192,90 @@ impl Vm {
             None => f64::NAN,
         }
     }
+
+    /// Unary `-@` / `+@` / `abs` for BigInt receivers, plus the
+    /// Int(i64::MIN) auto-promotion case (where the i64 cannot
+    /// represent its own negation or absolute value, so numeric.rs
+    /// declines and we materialise the BigInt 2^63 here). For Int
+    /// receivers other than i64::MIN we return `None` so dispatch
+    /// stays on numeric.rs's existing wrapping arms. `+@` on
+    /// BigInt is a no-op clone; on Int it shouldn't even reach
+    /// here (numeric.rs handles it) — included for completeness.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_unary(
+        &mut self,
+        recv: &Value,
+        name: &str,
+    ) -> Result<Option<Value>, Trap> {
+        use num_bigint::{BigInt, Sign};
+        match recv {
+            Value::BigInt(id) => {
+                // Compute the owned result in a borrow scope, then
+                // drop the borrow before calling bigint_to_value
+                // (&mut self). `+@` just hands back the receiver
+                // unchanged — no demote needed. The identity
+                // shortcut is sound ONLY because every
+                // `Value::BigInt(id)` is allocated through
+                // `bigint_to_value`, which demotes any in-i64
+                // magnitude to `Value::Int(n)` — see the
+                // `debug_assert!` below. If a future cext/FFI path
+                // ever bypasses `bigint_to_value` and stores an
+                // in-i64 magnitude as `HeapObj::BigInt`, this
+                // shortcut would leak a non-canonical
+                // `Value::BigInt(small)` whose dispatch semantics
+                // drift from `Value::Int(small)`.
+                if name == "+@" {
+                    debug_assert!(
+                        i64::try_from(self.heap.bigint(*id)).is_err(),
+                        "non-canonical BigInt reached try_bigint_unary +@: \
+                         magnitude fits i64 but wasn't demoted by bigint_to_value",
+                    );
+                    return Ok(Some(recv.clone()));
+                }
+                // `abs` on an already-non-negative BigInt is the
+                // identity: skip both the BigInt clone and the
+                // bigint_to_value allocation by handing back
+                // `recv` unchanged (same shape as `+@`). Only the
+                // Minus branch needs a fresh BigInt + demote-on-fit
+                // funnel.
+                if name == "abs" {
+                    let sign = self.heap.bigint(*id).sign();
+                    if sign != Sign::Minus {
+                        debug_assert!(
+                            i64::try_from(self.heap.bigint(*id)).is_err(),
+                            "non-canonical BigInt reached try_bigint_unary abs: \
+                             magnitude fits i64 but wasn't demoted by bigint_to_value",
+                        );
+                        return Ok(Some(recv.clone()));
+                    }
+                }
+                let result = {
+                    let b = self.heap.bigint(*id);
+                    match name {
+                        "-@" => -b,
+                        "abs" => -b, // sign == Minus from check above
+                        _ => return Ok(None),
+                    }
+                };
+                Ok(Some(self.bigint_to_value(result)?))
+            }
+            Value::Int(n) if *n == i64::MIN => {
+                // i64::MIN.abs() and -i64::MIN both overflow i64 by
+                // exactly one (the magnitude is 2^63, one past
+                // i64::MAX). Promote via BigInt — bigint_to_value
+                // will keep it as BigInt since it doesn't fit.
+                match name {
+                    "abs" | "-@" => {
+                        let promoted = -BigInt::from(i64::MIN);
+                        Ok(Some(self.bigint_to_value(promoted)?))
+                    }
+                    "+@" => Ok(Some(Value::Int(i64::MIN))),
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 /// BigInt method dispatch — covers the calls `primitive_call`
@@ -1222,14 +1306,25 @@ impl Vm {
         //    declines on i64 overflow so we get the chance to
         //    promote here (`2 ** 100`). Handled before the guard
         //    below so the Int×Int overflow case isn't filtered out.
-        // 2. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
-        // 3. Recv is Int AND a BigInt is among args: covers the
+        // 2. Unary `-@` / `+@` / `abs` — fires for BigInt recv OR
+        //    Int(i64::MIN) recv. numeric_call declines on i64::MIN
+        //    under `bignum` so this arm can promote to the
+        //    BigInt 2^63. Also sits ahead of the recv-or-arg-is-
+        //    BigInt guard for the same reason as `**`.
+        // 3. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // 4. Recv is Int AND a BigInt is among args: covers the
         //    inverse-receiver operator method-call shape
         //    `1.+(2**63)`, which goes through the Int-side
         //    dispatch path and would otherwise miss BigInt
         //    arithmetic entirely (the expression form `1 + big`
         //    works because Op::BinOp already routes via
         //    try_bigint_binop on either-operand-is-BigInt).
+        //
+        // When adding a new entry path that needs to fire for
+        // Int receivers without a BigInt arg (e.g. another auto-
+        // promotion shape), place it BEFORE the
+        // `recv_is_bigint || arg_is_bigint` guard below.
+        //
         // Fall through to the rest of bigint_primitive when
         // `try_bigint_pow` declines. Decline cases narrow to
         // Int recv × Int (positive) exp where `numeric_call`
@@ -1244,6 +1339,12 @@ impl Vm {
             && let Some(v) = self.try_bigint_pow(recv, &args[0])?
         {
             return Ok(Some(v));
+        }
+        // Cond 2 — see entry-conditions doc above.
+        if args.is_empty() && matches!(name, "-@" | "+@" | "abs") {
+            if let Some(v) = self.try_bigint_unary(recv, name)? {
+                return Ok(Some(v));
+            }
         }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
