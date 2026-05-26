@@ -533,6 +533,34 @@ end
 - Test: `rescue_with_unresolved_class_does_not_catch` in
   `crates/rubyrs/tests/embed.rs`.
 
+### `class MyHash < Hash` returns Value::Object, not Value::Hash
+
+```ruby
+class MyHash < Hash
+end
+h = MyHash.new
+h[:k] = 1  # NoMethodError in rubyrs; works in CRuby
+```
+
+- The `Hash.new` intercept (`vm/dispatch.rs`) matches solely on
+  `cls.name == "Hash"`, so user subclasses fall through to the
+  generic `Class.new` allocator and return a bare
+  `Value::Object` instance whose methods table doesn't include
+  the Hash primitives (`[]`, `keys`, `each`, ...).
+- Switching the intercept to a `Hash`-in-`cls.ancestors` walk
+  would fix the primitive-method side but BREAK any custom
+  instance methods defined on the subclass: `Value::Hash`
+  dispatches only the hardcoded primitives, so
+  `class MyHash < Hash; def my_helper; ...; end; end` would
+  see `my_helper` become NoMethodError too.
+- The proper fix is a structural one: give `Value::Hash` a
+  class-of slot AND route primitive Hash methods through that
+  slot rather than the fixed primitive table. Sizeable
+  refactor; deferred until a real caller needs Hash
+  subclassing.
+- No test pin (would lock in divergence); this entry is the
+  contract.
+
 ### `freeze` doesn't actually freeze — `frozen?` always false
 
 ```ruby
