@@ -293,3 +293,4 @@ fn run_diff(name: &str) {
 #[test] fn hash_new_default_block() { run_diff("hash_new_default_block"); }
 #[test] fn array_sort_block() { run_diff("array_sort_block"); }
 #[test] fn class_new_override() { run_diff("class_new_override"); }
+#[test] fn backreference_globals() { run_diff("backreference_globals"); }

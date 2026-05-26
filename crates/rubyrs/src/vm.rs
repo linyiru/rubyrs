@@ -245,6 +245,15 @@ impl Clone for HostFnSlot {
 pub(crate) struct LastMatch {
     pub(crate) whole: String,
     pub(crate) caps: Vec<Option<String>>,
+    /// Original input string the match was performed against, plus
+    /// the byte span of the whole match within it. Required to back
+    /// `` $` `` (pre-match) and `$'` (post-match) — those return
+    /// slices of the input that we'd otherwise have to recompute.
+    /// `pre_match` is `input[..m_start]`, `post_match` is
+    /// `input[m_end..]`.
+    pub(crate) input: String,
+    pub(crate) m_start: usize,
+    pub(crate) m_end: usize,
 }
 
 pub(crate) struct Vm {

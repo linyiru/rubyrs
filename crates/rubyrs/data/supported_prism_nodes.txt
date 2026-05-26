@@ -19,6 +19,7 @@ AndNode
 ArrayNode
 AssocSplatNode
 AssocNode
+BackReferenceReadNode
 BeginNode
 BlockArgumentNode
 BlockNode
