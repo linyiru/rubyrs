@@ -398,13 +398,16 @@ impl Vm {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());
             }
-            // `include Mod` inside a class body — `self` is the
-            // class, name resolves with no receiver. Pushes the
-            // source onto the target's `includes` chain (instead
-            // of copying methods); `lookup_method_uncached` then
-            // walks the chain at dispatch time. Bumps method_gen
-            // so any monomorphic inline cache entry that thought
-            // the class lacked the included methods invalidates.
+            // `include Mod` / `extend Mod` / `prepend Mod` inside
+            // a class body — `self` is the class, name resolves
+            // with no receiver. Pushes the source module onto the
+            // target's `includes` or `prepends` chain (split by
+            // method name; see the dispatch order comment on
+            // `lookup_method_uncached`). Methods aren't copied —
+            // `lookup_method_uncached` walks the chain at dispatch
+            // time. Bumps `method_gen` so any monomorphic inline
+            // cache entry that thought the class lacked the
+            // included/prepended methods invalidates.
             if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
                     let is_prepend = &*name == "prepend";
@@ -1532,28 +1535,18 @@ impl Vm {
         if let Value::Class(cls) = &recv {
             match (&*name, args.as_slice()) {
                 ("ancestors", []) => {
-                    let mut chain: Vec<Value> = Vec::new();
-                    let mut current = cls.clone();
-                    loop {
-                        // CRuby `Class#ancestors` renders prepends
-                        // ABOVE the class itself; includes between
-                        // the class and its superclass. Order
-                        // matches the `lookup_method_uncached`
-                        // walk so `ancestors` is the visible
-                        // ground-truth of the dispatch order.
-                        for pre in current.prepends.borrow().iter() {
-                            chain.push(Value::Class(pre.clone()));
-                        }
-                        chain.push(Value::Class(current.clone()));
-                        for inc in current.includes.borrow().iter() {
-                            chain.push(Value::Class(inc.clone()));
-                        }
-                        let parent = current.superclass.borrow().clone();
-                        match parent {
-                            Some(p) => current = p,
-                            None => break,
-                        }
-                    }
+                    // Go through `flatten_ancestors` so the result
+                    // matches the dispatch order
+                    // `lookup_method_uncached` actually walks —
+                    // transitive expansion of includes/prepends +
+                    // diamond dedup. Without this, the user-visible
+                    // ancestors list could diverge from CRuby's
+                    // linearization (and from what method resolution
+                    // actually does).
+                    let chain: Vec<Value> = super::flatten_ancestors(cls)
+                        .into_iter()
+                        .map(Value::Class)
+                        .collect();
                     self.maybe_gc();
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::Array(chain));

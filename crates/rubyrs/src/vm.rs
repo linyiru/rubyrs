@@ -37,7 +37,7 @@ mod string;
 mod util;
 #[cfg(all(feature = "cext", not(target_os = "wasi")))]
 pub(crate) use cext::with_vm_ptr_set;
-pub(crate) use lookup::{class_is_a, CallCache};
+pub(crate) use lookup::{class_is_a, flatten_ancestors, CallCache};
 pub(crate) use primitive::primitive_call;
 pub(crate) use sprintf::ruby_sprintf;
 pub(crate) use util::{value_cmp_v, vec_nil, visibility_from_name};

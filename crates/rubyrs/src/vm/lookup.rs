@@ -336,8 +336,8 @@ impl Vm {
 }
 
 /// `child` is-a `ancestor` if `ancestor` appears anywhere in `child`'s
-/// superclass chain (or `child == ancestor`).
-#[allow(dead_code)] // wired up in the next commit (rescue ClassName filter)
+/// superclass chain (or `child == ancestor`). Wired into rescue-by-
+/// class filter matching and the `is_a?` / `include?` dispatch arms.
 pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     fn walks_through(
         node: &Rc<Class>,
@@ -480,8 +480,15 @@ impl Vm {
         // own class is "Class", not its inheritance chain.
         if let Value::Class(cls) = &self_val {
             let mut chain: Vec<Rc<Class>> = Vec::new();
+            let mut visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
             let mut cur = cls.clone();
             loop {
+                // Same cycle defensiveness as `flatten_ancestors`
+                // / `walk_module` / `walks_through` — a cyclic
+                // superclass chain (cext or direct mutation; CRuby
+                // raises TypeError at class-definition time)
+                // would otherwise spin here.
+                if !visited.insert(Rc::as_ptr(&cur)) { break; }
                 chain.push(cur.clone());
                 let parent = cur.superclass.borrow().clone();
                 match parent {
