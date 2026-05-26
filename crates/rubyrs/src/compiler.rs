@@ -623,6 +623,11 @@ pub(crate) fn compile_expr(
             // body. Paired with the `class << X` AST-level expansion
             // in ast.rs (see `attr_reader_writer_flags`): if the
             // semantics of either intercept change, update both.
+            //
+            // Zero-arg form is intentionally accepted as a silent
+            // no-op — CRuby 3.4 does the same (verified: no
+            // ArgumentError, no methods defined). The for-loop
+            // below handles empty args naturally (vacuous iter()).
             if receiver.is_none()
                 && let Some((do_reader, do_writer)) = crate::ast::attr_reader_writer_flags(name)
                 && args.iter().all(|a| matches!(a.node, Expr::SymbolLit(_)))

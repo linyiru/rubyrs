@@ -1790,6 +1790,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 let name = cid_to_string(call.name());
                 // Decode via the shared helper (paired with
                 // compiler.rs's normal-class-body attr_* arm).
+                // NOTE: zero-arg `attr_accessor` (etc.) is a SILENT
+                // NO-OP in CRuby 3.4 (verified: no ArgumentError,
+                // no methods defined). Our loop below handles that
+                // case naturally — empty sym_names → no iterations
+                // → nothing emitted. Don't add a guard rejecting
+                // zero-arg; that would diverge from CRuby.
                 if let Some((do_reader, do_writer)) = attr_reader_writer_flags(&name) {
                     let mut all_sym_args = true;
                     let sym_names: Vec<String> = call.arguments()
