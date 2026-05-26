@@ -70,3 +70,12 @@ class Hash
   def self.new(*args); "Hash.new override: #{args.inspect}"; end
 end
 puts Hash.new("x")
+
+# Block-form Hash.new also routes through the override (parity
+# with no-block path). Without the matching check in
+# do_call_block's Hash.new intercept, `Hash.new { ... }` would
+# silently bypass the override.
+class Hash
+  def self.new(&b); "Hash.new block override"; end
+end
+puts Hash.new { |h, k| h[k] = [] }

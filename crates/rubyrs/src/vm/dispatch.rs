@@ -3540,6 +3540,25 @@ impl Vm {
             && let Some(Value::Class(cls)) = &recv
             && cls.name.as_str() == "Hash"
         {
+            // Same precedence rule as the no-block path
+            // (do_call:874): a user `def self.new` on Hash
+            // (reopened class) wins over the built-in default-
+            // block intercept. CRuby treats `Class#new` as a
+            // regular method; a reopen-and-override is just
+            // normal method-resolution and should be honoured
+            // in block-form too. Without this check, `class
+            // Hash; def self.new(&b); ...; end; end;
+            // Hash.new { ... }` silently returned `{}` from
+            // the hardcoded intercept below.
+            //
+            // The generic Value::Class singleton-method dispatch
+            // arm at line 3705 would catch this for non-Hash
+            // classes, but it fires AFTER this Hash intercept,
+            // so Hash specifically needs the explicit pre-check.
+            if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                let target_self = Value::Class(cls.clone());
+                return self.invoke_method_with_block(m, target_self, args, Some(block));
+            }
             if !args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
