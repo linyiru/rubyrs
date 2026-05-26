@@ -62,16 +62,19 @@ puts $2                                          # v
 # dialect. The preprocessor must NOT strip `\G` inside `[...]`
 # or the class would silently change behaviour (empty class,
 # regex compile error, or collapse with neighbours).
-puts "XYZ" =~ /[\G]/                            # nil  (no G in XYZ)
-puts ("GHI" =~ /[\G]/)                          # 0    (G at offset 0)
-puts ("ABCG" =~ /[\G]/)                         # 3    (G at offset 3)
+# Use `.inspect` on every `=~` result so nil renders as the
+# string "nil" rather than a blank line (matches other diff
+# fixtures' style and makes diff output unambiguous).
+puts ("XYZ" =~ /[\G]/).inspect                  # nil  (no G in XYZ)
+puts ("GHI" =~ /[\G]/).inspect                  # 0    (G at offset 0)
+puts ("ABCG" =~ /[\G]/).inspect                 # 3    (G at offset 3)
 # POSIX class + `\G` inside the same outer class. The naive
 # bracket tracker would flip in_class to false at the `]` that
 # closes `[:digit:]`, then strip `\G` instead of translating to
 # literal G. The POSIX-skip pass keeps the outer class intact.
-puts ("G123" =~ /[[:digit:]\G]/)                # 0    (G at offset 0; class is "digit or G")
-puts ("xyz" =~ /[[:digit:]\G]/)                 # nil  (no digit, no G)
-puts ("9" =~ /[[:digit:]\G]/)                   # 0    (digit at offset 0)
+puts ("G123" =~ /[[:digit:]\G]/).inspect        # 0    (G at offset 0; class is "digit or G")
+puts ("xyz" =~ /[[:digit:]\G]/).inspect         # nil  (no digit, no G)
+puts ("9" =~ /[[:digit:]\G]/).inspect           # 0    (digit at offset 0)
 
 # --- UTF-8 passthrough: multibyte literals in patterns ---
 # The preprocessor walks the pattern at the byte level (every
