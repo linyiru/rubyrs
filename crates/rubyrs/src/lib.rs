@@ -1200,11 +1200,9 @@ end
         self.vm.sources.insert(filename_rc.clone(), source_rc);
 
         let parse_result = ruby_prism::parse(source.as_bytes());
-        let errors: Vec<_> = parse_result.errors().collect();
-        if !errors.is_empty() {
-            let msg = errors.iter()
-                .map(|e| format!("{:?}", e))
-                .collect::<Vec<_>>().join("; ");
+        let mut errors_iter = parse_result.errors().peekable();
+        if errors_iter.peek().is_some() {
+            let msg = error::format_prism_errors(source, errors_iter);
             return Err(Trap {
                 err: RubyError::SyntaxError { msg },
                 backtrace: vec![],
