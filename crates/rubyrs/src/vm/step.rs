@@ -58,12 +58,15 @@ fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
     if !src.contains("\\G") {
         return std::borrow::Cow::Borrowed(src);
     }
-    // Tracks character-class depth so `\G` is only stripped when
-    // it's the Onigmo anchor (outside any `[...]`). Inside a
-    // character class — `/[\G]/` — `\G` is a literal `G` in
-    // every regex dialect, and dropping the `\\G` would change
-    // it to an empty character class (regex compile error) or
-    // collapse it with neighbours.
+    // Tracks whether we are inside an outer character class
+    // (single bool, not a depth counter — POSIX subclasses like
+    // `[:alpha:]` are skipped as a unit below so they never
+    // re-toggle). `\G` is only stripped when it's the Onigmo
+    // anchor (outside any `[...]`). Inside a character class —
+    // `/[\G]/` — `\G` is a literal `G` in every regex dialect,
+    // and dropping the `\\G` would change it to an empty
+    // character class (regex compile error) or collapse it
+    // with neighbours.
     //
     // POSIX classes (`[:digit:]`, `[:alpha:]`, etc.) need their
     // own pass: the inner `]` that closes `:digit:]` would
