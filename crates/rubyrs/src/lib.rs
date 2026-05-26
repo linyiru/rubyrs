@@ -801,6 +801,16 @@ impl Runtime {
             "<rubyrs:preamble:object>",
         )
             .expect("ICE: failed to load Object preamble");
+        // Comparable mixin — comparison-operator fan-out from
+        // `<=>`. Loaded ahead of the inline PREAMBLE so any
+        // `class X < Comparable` shape (or `is_a?(Comparable)`
+        // predicate) inside the remaining preamble fragments
+        // resolves at definition time.
+        self.eval(
+            include_str!("preamble/comparable.rb"),
+            "<rubyrs:preamble:comparable>",
+        )
+            .expect("ICE: failed to load Comparable preamble");
         const PREAMBLE: &str = r#"
 ## Stub classes for built-in types. Without these, `5.class` and
 ## friends have nothing to return; the bodies stay empty because
@@ -1076,64 +1086,9 @@ class MatchData
     "<MatchData " + @whole + ">"
   end
 end
-class Comparable
-  def <(other)
-    c = self <=> other
-    raise ArgumentError, "comparison failed" if c.nil?
-    c < 0
-  end
-  def <=(other)
-    c = self <=> other
-    raise ArgumentError, "comparison failed" if c.nil?
-    c <= 0
-  end
-  def >(other)
-    c = self <=> other
-    raise ArgumentError, "comparison failed" if c.nil?
-    c > 0
-  end
-  def >=(other)
-    c = self <=> other
-    raise ArgumentError, "comparison failed" if c.nil?
-    c >= 0
-  end
-  def ==(other)
-    c = self <=> other
-    return false if c.nil?
-    c == 0
-  end
-  def between?(lo, hi)
-    self >= lo && self <= hi
-  end
-  def clamp(*args)
-    ## Range form (one arg): `clamp(lo..hi)`. Endpoints may be
-    ## nil for one-sided ranges (`(..max)` / `(min..)`); a nil
-    ## bound is treated as "no limit on that side", matching
-    ## CRuby.
-    if args.length == 1 && args[0].is_a?(Range)
-      r = args[0]
-      lo, hi = r.begin, r.end
-      if !lo.nil? && self < lo
-        lo
-      elsif !hi.nil? && self > hi
-        hi
-      else
-        self
-      end
-    elsif args.length == 2
-      lo, hi = args[0], args[1]
-      if !lo.nil? && self < lo
-        lo
-      elsif !hi.nil? && self > hi
-        hi
-      else
-        self
-      end
-    else
-      raise ArgumentError, "wrong number of arguments (given #{args.length}, expected 1..2)"
-    end
-  end
-end
+## `class Comparable; ... end` (the comparison-operator mixin
+## that fans out from `<=>`) is loaded from
+## `preamble/comparable.rb` BEFORE this `PREAMBLE` eval.
 ## Enumerable — stub class (we don't have real Modules in this
 ## subset). CRuby's Enumerable defines ~50 methods (each_with_index,
 ## map, select, reject, inject, sort, to_a, ...) all in terms of
