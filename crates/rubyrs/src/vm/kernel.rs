@@ -208,21 +208,61 @@ impl Vm {
             // typically wrapped in an inline rescue:
             //   port = Integer(ENV['PORT']) rescue 8080
             "Integer" => {
-                if args.len() != 1 {
+                // Accept 1 or 2 args. The 2-arg form `Integer(str,
+                // radix)` is the strict counterpart to
+                // `String#to_i(radix)` — any garbage tail raises
+                // ArgumentError where `to_i` would silently
+                // accept a prefix and stop. Radix 0 means
+                // "auto-detect via 0x/0o/0b/0d prefix"; 2..=36 is
+                // the explicit form; anything else raises
+                // ArgumentError.
+                if args.is_empty() || args.len() > 2 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..2)",
+                            args.len(),
+                        ),
                     })));
                 }
-                let result = match &args[0] {
-                    Value::Int(n) => Ok(Value::Int(*n)),
-                    Value::Float(f) => {
+                let radix_arg: Option<i64> = if args.len() == 2 {
+                    match &args[1] {
+                        Value::Int(r) => Some(*r),
+                        other => {
+                            return Some(Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "no implicit conversion of {} into Integer",
+                                    other.type_name(),
+                                ),
+                            })));
+                        }
+                    }
+                } else { None };
+                // Validate the radix early — `Integer(non-str, 16)`
+                // is a TypeError on the receiver and never reaches
+                // the parse path, but `Integer("ff", 1)` is an
+                // ArgumentError on the radix.
+                if let Some(r) = radix_arg
+                    && r != 0
+                    && !(2..=36).contains(&r)
+                {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("invalid radix {}", r),
+                    })));
+                }
+                let result = match (&args[0], radix_arg) {
+                    // 1-arg form: receiver-shape dispatch, same
+                    // as before. The 2-arg form REQUIRES a String
+                    // (or Symbol — but CRuby doesn't accept those
+                    // here either, so we don't).
+                    (Value::Int(n), None) => Ok(Value::Int(*n)),
+                    (Value::Float(f), None) => {
                         if !f.is_finite() {
                             Err(RubyError::TypeError {
                                 msg: format!("can't convert {} into Integer", crate::heap::format_float(*f)),
                             })
                         } else { Ok(Value::Int(*f as i64)) }
                     }
-                    Value::Str(s) => {
+                    (Value::Str(s), None) => {
                         let raw = s.to_string_lossy();
                         let trimmed = raw.trim();
                         match trimmed.parse::<i64>() {
@@ -232,11 +272,32 @@ impl Vm {
                             }),
                         }
                     }
-                    Value::Nil => Err(RubyError::TypeError {
+                    (Value::Nil, None) => Err(RubyError::TypeError {
                         msg: "can't convert nil into Integer".into(),
                     }),
-                    other => Err(RubyError::TypeError {
+                    (other, None) => Err(RubyError::TypeError {
                         msg: format!("can't convert {} into Integer", other.type_name()),
+                    }),
+                    // 2-arg form: only String accepted as the value.
+                    (Value::Str(s), Some(radix)) => {
+                        let raw = s.to_string_lossy();
+                        match strict_parse_integer(&raw, radix) {
+                            Some(n) => Ok(Value::Int(n)),
+                            None => Err(RubyError::ArgumentError {
+                                msg: format!("invalid value for Integer(): \"{}\"", raw),
+                            }),
+                        }
+                    }
+                    (_other, Some(_)) => Err(RubyError::ArgumentError {
+                        // CRuby's exact message for the
+                        // `Integer(non_string, radix)` case is
+                        // `"base specified for non string value"` —
+                        // it's an ArgumentError, NOT a TypeError,
+                        // because the radix only makes sense paired
+                        // with a String to parse. Mirror the class
+                        // so `rescue ArgumentError` catches both
+                        // rubyrs and CRuby alike.
+                        msg: "base specified for non string value".into(),
                     }),
                 };
                 Some(result.map_err(|e| self.trap(e)))
@@ -1030,4 +1091,81 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util"
     )
+}
+
+/// Strict base-aware integer parser used by `Kernel#Integer(str,
+/// radix)`. CRuby semantics:
+///
+///   - Strip leading + trailing whitespace.
+///   - Optional `+` / `-` sign.
+///   - `radix == 0` consults the source's `0x` / `0o` / `0b` /
+///     `0d` prefix to pick the radix (default `10` if no
+///     prefix). `2..=36` is an explicit radix; if the source
+///     carries a MATCHING prefix it's consumed, otherwise the
+///     parse starts at the first non-sign char.
+///   - `_` is allowed BETWEEN digits but not adjacent to the
+///     sign / prefix / endpoints (CRuby's strict literal shape).
+///   - Every remaining char must be a valid digit in the chosen
+///     radix — otherwise the parse fails (unlike `String#to_i`'s
+///     lenient "stop at first non-digit" rule).
+///
+/// Returns `Some(n)` on a successful parse, `None` otherwise.
+/// Wrapping arithmetic on the accumulator matches the existing
+/// `String#to_i` semantics; i64 overflow is silently wrapped at
+/// the parse step (BigInt promotion at the Kernel level is a
+/// follow-up).
+fn strict_parse_integer(raw: &str, radix: i64) -> Option<i64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (sign, mut body) = match s.as_bytes().first() {
+        Some(b'-') => (-1i64, &s[1..]),
+        Some(b'+') => (1i64, &s[1..]),
+        _ => (1i64, s),
+    };
+    if body.is_empty() {
+        return None;
+    }
+    let mut effective_r: u32 = if radix == 0 { 10 } else { radix as u32 };
+    let body_bytes = body.as_bytes();
+    if body_bytes.len() >= 2 && body_bytes[0] == b'0' {
+        let prefix_r: u32 = match body_bytes[1] {
+            b'x' | b'X' => 16,
+            b'b' | b'B' => 2,
+            b'o' | b'O' => 8,
+            b'd' | b'D' => 10,
+            _ => 0,
+        };
+        if prefix_r != 0 && (radix == 0 || radix as u32 == prefix_r) {
+            effective_r = prefix_r;
+            body = &body[2..];
+        }
+    }
+    // After all prefix handling, the body must have at least one
+    // digit. Leading `_` is rejected (CRuby refuses `_` adjacent
+    // to the sign / prefix boundary).
+    if body.is_empty() || body.starts_with('_') || body.ends_with('_') {
+        return None;
+    }
+    let mut n: i64 = 0;
+    let mut prev_was_underscore = false;
+    for c in body.chars() {
+        if c == '_' {
+            // Two underscores in a row, or right after the
+            // boundary, isn't legal in a Ruby integer literal.
+            if prev_was_underscore { return None; }
+            prev_was_underscore = true;
+            continue;
+        }
+        prev_was_underscore = false;
+        match c.to_digit(effective_r) {
+            Some(d) => {
+                n = n.wrapping_mul(effective_r as i64)
+                    .wrapping_add(d as i64);
+            }
+            None => return None, // any non-digit tail is a hard error
+        }
+    }
+    Some(sign.wrapping_mul(n))
 }

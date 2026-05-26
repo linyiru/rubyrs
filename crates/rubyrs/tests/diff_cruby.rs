@@ -110,6 +110,7 @@ fn run_diff(name: &str) {
 #[test] fn string_index_offset() { run_diff("string_index_offset"); }
 #[test] fn hash_each_key_value() { run_diff("hash_each_key_value"); }
 #[test] fn string_to_i_radix() { run_diff("string_to_i_radix"); }
+#[test] fn kernel_integer_radix() { run_diff("kernel_integer_radix"); }
 #[test] fn enumerable_by() { run_diff("enumerable_by"); }
 #[test] fn super_call() { run_diff("super_call"); }
 #[test] fn return_nonlocal() { run_diff("return_nonlocal"); }
