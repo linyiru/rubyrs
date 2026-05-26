@@ -354,17 +354,16 @@ EXTRACTOR_LEFTOVER_PATTERNS = [
     # nested inside an `it`-bearing `describe`, dropping the
     # whole block would lose passing examples.
     r"^\s*context\s+[\"']",
-    # NOTE: `before :each` / `before :all` / `after :each` / `after :all`
-    # were listed here in v1 of this set as "unaddressed by polish",
-    # but `DROP_TOP_LEVEL_HEADS`'s `^\s*before\b` / `^\s*after\b`
-    # entries above DO catch the do-form of every hook variant (the
-    # extractor's v0.4 hook-lifter handles `before :each do` separately
-    # by lifting the body into each sibling `it`; remaining hook
-    # blocks polish drops with `# skipped (before-not-lifted)` /
-    # `(after-not-supported)`). Listing them here too would make
-    # `rewrite_extractor_header` over-conservative — it'd refuse
-    # to strip the extractor header on files where polish HAS
-    # actually resolved every hook. Removed (reviewer feedback PR #133).
+    # Curly-brace hook forms (`before { ... }`, `before(:each) {
+    # ... }`, `after { ... }`). DROP_TOP_LEVEL_HEADS only catches
+    # the do-form via `BEFORE_OPEN`'s `\bdo\b` requirement; curly
+    # hooks would otherwise slip through polish AND the extractor
+    # header would get stripped — making the file look polished
+    # while it still file-level-traps on the unknown `before`
+    # method. /code-review caught this gap. (do-form hooks remain
+    # the common case in ruby/spec; this list is defense for the
+    # less-common shape.)
+    r"^\s*(?:before|after)\b[^\n]*\{",
 ]
 
 
