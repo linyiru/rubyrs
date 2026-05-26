@@ -42,20 +42,31 @@ RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 
 ## Results — 2026-05-26 (fifth pass), rubyrs at `cba21b6`
 
-Fifth pass after the session's PR wave landed: stdlib-require
-stub-out (PR #98), `Class.new { ... }` block dispatch lifecycle
-(#102), inline-rescue / class @ivar / hash equality / Object
-ancestor stub (#107), module `prepend` (#105), `&nil` and
-`&curried_proc` block-arg dispatch (#109), plus the rake
-constant-assignment / linked-list defaults pair (#102, #104).
+Fifth pass after the session's PR wave landed:
+
+- **PR #102** — class-level `@ivars` + class variables (`@@foo`)
+- **PR #104** — Enumerable preamble stub + `require` leniency
+  (caller-dir / caller-parent search) + `$LOAD_PATH` as a real
+  Array + `__FILE__` / `__dir__` / `File.expand_path`
+- **PR #105** — `Module#prepend` (chain walked before class's own
+  methods)
+- **PR #107** — stdlib `require` lenient pass-through stub
+  (no-op for known names like `time`, `date`, `logger`,
+  `forwardable`; `loaded_features` tracked so re-require returns
+  false) + Object preamble stub + `String#hash`
+- **PR #109** — block-arg dispatch: `&nil` is no-block,
+  `&curried_proc` is accepted as block, `&` TypeError reports
+  CRuby class names, `send(:priv, &nil)` preserves visibility
+  bypass
+
 Same 12 standalone files, same pinned target commits.
 
 | File | Was (fourth) | Now | Change |
 |---|---|---|---|
-| liquid/extensions.rb | B | **A** | `require 'time'` / `require 'date'` now stub-out (PR #98 stdlib_require_stub); file body runs clean |
-| sinatra/middleware/logger.rb | B | **A** | `require 'logger'` / `require 'forwardable'` stubbed; class body executes — `Logger` itself isn't built in, but the file's class definition no longer touches it |
-| rake/linked_list.rb | D+E | **A** | non-literal default args (#34), `EMPTY = self.new` style constant assigns (#30 → #102 follow-up), and the lazy `EMPTY_HASH` / Enumerable mix-in pieces all line up |
-| tilt/string.rb | D | **A** | three-layer unblock: PR #105 (`module_prepend`) closed `class << self; prepend(...)` in `tilt.rb`; #107 (Object stub + class @ivar) closed `tilt/template.rb` load; #109 (block-arg ICE) closed the remaining downstream call sites. The file's class body executes top-to-bottom |
+| liquid/extensions.rb | B | **A** | `require 'time'` / `require 'date'` now stub-out (PR #107 stdlib require stub); file body runs clean |
+| sinatra/middleware/logger.rb | B | **A** | `require 'logger'` / `require 'forwardable'` stubbed by the same PR #107 stub; class body executes — `Logger` itself isn't built in, but the file's class definition no longer touches it |
+| rake/linked_list.rb | D+E | **A** | non-literal default args (#34) + `EMPTY = self.new`-style constant assigns (#30) + Enumerable preamble stub and `require` leniency (#104) line up |
+| tilt/string.rb | D | **A** | three-layer unblock: #105 (`Module#prepend`) closed `class << self; prepend(...)` in `tilt.rb`; #107 (Object stub + `String#hash` + stdlib require stub) closed `tilt/template.rb` load; #109 (block-arg `&nil` ICE) closed the remaining downstream `evaluate(..., &block)` call sites. The file's class body executes top-to-bottom |
 | (8 others) | — | — | unchanged — same A or same blocker as the fourth pass |
 
 Pass count: **5 → 9** (out of 12). Four files moved from blocked
@@ -77,14 +88,15 @@ and that the C-ext require wall (Cat B) and project-helper holes
   surfaces another layer per unblock, and pass-count movement
   arrives only when the LAST one closes.
 - **Cat B partially fell to a stub strategy**: rather than
-  building real `Time` / `Logger` modules, PR #98's stub-out
-  treats common stdlib `require` calls as no-ops. Files that
-  only depend on the *load* succeeding (not on the module
-  being functional at runtime) now pass. liquid/extensions.rb
-  and sinatra/middleware/logger.rb both fit that shape; the
-  remaining Cat B file (dry/struct/extensions/pretty_print.rb)
-  doesn't — it actually exercises `PP.pp` and needs a real
-  module.
+  building real `Time` / `Logger` modules, PR #107's stdlib
+  require stub treats common stdlib `require` calls as no-ops
+  (with `loaded_features` tracked so re-require returns false).
+  Files that only depend on the *load* succeeding (not on the
+  module being functional at runtime) now pass.
+  liquid/extensions.rb and sinatra/middleware/logger.rb both
+  fit that shape; the remaining Cat B file
+  (dry/struct/extensions/pretty_print.rb) doesn't — it
+  actually exercises `PP.pp` and needs a real module.
 
 ### Cumulative category histogram
 
