@@ -553,7 +553,17 @@ impl Vm {
             // `respond_to?(:deprecate_constant, true)` feature
             // detection inside `class Tilt` body where self is a
             // Class.
-            if &*name == "respond_to?" && (args.len() == 1 || args.len() == 2) {
+            if &*name == "respond_to?" {
+                // Arity: CRuby raises ArgumentError on 0 args or 3+,
+                // before reaching method_missing / NoMethodError. The
+                // no-recv path runs FIRST so this guard is what users
+                // see for bare `respond_to?` calls inside a method
+                // body or class body.
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    }));
+                }
                 let lookup_name: Option<SymId> = match &args[0] {
                     Value::Sym(id) => Some(*id),
                     Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
@@ -2453,7 +2463,16 @@ impl Vm {
         // the 2-arg form lets feature-detection patterns like
         // `respond_to?(:deprecate_constant, true)` work without
         // tripping NoMethodError.
-        if &*name == "respond_to?" && (args.len() == 1 || args.len() == 2) {
+        if &*name == "respond_to?" {
+            // Arity check matches the no-recv path: CRuby raises
+            // ArgumentError on 0 args or 3+. Keeps the explicit-
+            // receiver shape (`obj.respond_to?()`) from misreporting
+            // as method_missing / NoMethodError.
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                }));
+            }
             let lookup_name: Option<SymId> = match &args[0] {
                 Value::Sym(id) => Some(*id),
                 Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),

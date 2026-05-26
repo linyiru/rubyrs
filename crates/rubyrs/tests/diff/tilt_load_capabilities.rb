@@ -76,6 +76,24 @@ rescue ArgumentError => e
   puts e.message
 end
 
+# --- Array / Hash freeze/frozen? arity ---
+# Both methods are 0-arg in CRuby; wrong arity raises
+# ArgumentError before any work. Without an explicit check, the
+# stub fall-through would surface as NoMethodError instead,
+# masking the caller bug.
+begin; [].freeze(1); rescue ArgumentError => e; puts e.message; end
+begin; [].frozen?(:x); rescue ArgumentError => e; puts e.message; end
+begin; {}.freeze("y"); rescue ArgumentError => e; puts e.message; end
+begin; {}.frozen?(1, 2); rescue ArgumentError => e; puts e.message; end
+
+# --- respond_to? arity ---
+# 1 or 2 args in CRuby; 0 or 3+ raises ArgumentError. Applies to
+# both implicit-self (no-recv) and explicit-receiver forms.
+begin; respond_to?; rescue ArgumentError => e; puts e.message; end
+begin; respond_to?(:a, true, :extra); rescue ArgumentError => e; puts e.message; end
+begin; Object.new.respond_to?; rescue ArgumentError => e; puts e.message; end
+begin; "x".respond_to?(:a, true, :extra); rescue ArgumentError => e; puts e.message; end
+
 # --- NotImplementedError class hierarchy (CRuby parity) ---
 # Subclass of ScriptError (NOT StandardError) so a bare `rescue`
 # does NOT catch it — that's CRuby's behaviour and we now match.
