@@ -7,10 +7,14 @@
 # num_bigint's `to_str_radix` on the magnitude, with sign + alt
 # prefix applied uniformly with the Int side.
 #
-# Negative receivers / args render as `-<digits>` rather than
-# CRuby's `..f`-prefixed two's-complement form — a documented
-# divergence shared with the Int path. Those cases live in
-# `tests/embed.rs` since the byte output differs from CRuby.
+# `Integer#to_s(radix)` already returns `-<magnitude>` for
+# negative inputs in CRuby (no divergence), so the negative-to_s
+# cases below match byte-for-byte and the embed test
+# `bigint_to_s_radix_negative_uses_minus_magnitude_form` pins
+# that exact behaviour. The `..f` two's-complement divergence
+# only applies to `sprintf '%x' % neg` — that case is exercised
+# in `tests/embed.rs::sprintf_bigint_radix_negative_uses_minus_magnitude_divergence`
+# and excluded from this fixture (byte output differs from CRuby).
 
 # `to_s(radix)` — basic positive cases (byte-identical to CRuby).
 big = 2 ** 100

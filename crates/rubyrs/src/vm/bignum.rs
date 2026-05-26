@@ -964,9 +964,17 @@ impl Vm {
         // Symmetric with the Int side (numeric_call's `to_s(radix)`
         // arm). Validates radix ∈ 2..=36, then defers to
         // num_bigint's `to_str_radix` (which handles negative sign
-        // and digits >= 10 as lowercase). Post-allocation cap
-        // check mirrors the 0-arg to_s arm below (capped string
-        // size to avoid host OOM on `(2**1_000_000).to_s(2)`).
+        // and digits >= 10 as lowercase).
+        //
+        // PRE-allocation cap check: `to_str_radix(2)` on a 1M-bit
+        // BigInt allocates ~1 MB before we get a chance to inspect
+        // its length. Estimate the rendered length first via
+        // `bits()` and trap before the alloc. Bound:
+        // `ceil(bits / log2_lower) + 1` where `log2_lower =
+        // max(1, ceil(log2(radix)))` is the per-digit bit yield —
+        // i.e. how many output chars one bit produces — divided
+        // out. Mirror with the 0-arg arm so both paths share the
+        // protection. +1 for the sign byte (negative receivers).
         if name == "to_s" && args.len() == 1
             && let Value::BigInt(id) = recv
         {
@@ -988,14 +996,8 @@ impl Vm {
                     }));
                 }
             };
+            self.check_bigint_to_s_cap(*id, radix)?;
             let s = self.heap.bigint(*id).to_str_radix(radix);
-            if let Some(max) = self.max_value_bytes
-                && s.len() > max
-            {
-                return Err(self.trap(RubyError::ResourceExhausted {
-                    msg: format!("value size {} bytes > cap {}", s.len(), max),
-                }));
-            }
             return Ok(Some(Value::new_str(s)));
         }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
@@ -1016,17 +1018,20 @@ impl Vm {
                         // `n = 2 ** 1_000_000; n.to_s`), so the
                         // String materialised here must obey the same
                         // `Config::max_value_bytes` cap that other
-                        // primitive_call arms enforce. Without this
-                        // check a script could DoS the host by
-                        // converting a huge BigInt to string.
-                        let s = b.to_string();
-                        if let Some(max) = self.max_value_bytes
-                            && s.len() > max
-                        {
-                            return Err(self.trap(RubyError::ResourceExhausted {
-                                msg: format!("value size {} bytes > cap {}", s.len(), max),
-                            }));
-                        }
+                        // primitive_call arms enforce. Pre-allocation
+                        // estimate via `bits()` traps BEFORE the
+                        // `to_string()` call — otherwise the host
+                        // could OOM on a 1 MB string before we get a
+                        // chance to check `s.len()`. Shared helper
+                        // with the 1-arg `to_s(radix)` arm above.
+                        // End the heap borrow before calling
+                        // `check_bigint_to_s_cap` (which needs
+                        // `&mut self`). `let _ = b` discards the
+                        // borrow without the `drop()` lint nag.
+                        let big_id = *id;
+                        let _ = b;
+                        self.check_bigint_to_s_cap(big_id, 10)?;
+                        let s = self.heap.bigint(big_id).to_string();
                         return Ok(Some(Value::new_str(s)));
                     }
                     // Pure read-only predicates — fit cleanly in
@@ -1103,6 +1108,40 @@ impl Vm {
             return Ok(Some(Value::Int(n)));
         }
         Ok(None)
+    }
+
+    /// Pre-allocation cap check for `BigInt#to_s` / `to_s(radix)`.
+    /// `BigInt::to_str_radix(2)` on a 10M-bit input allocates a
+    /// 10 MB+ string in one go — without this check the host can
+    /// OOM (or hit the allocator's panic-on-fail path) before we
+    /// get a chance to inspect `s.len()`. Estimate the rendered
+    /// length from the BigInt's bit count + per-digit bit yield:
+    ///   `ceil(bits / log2_per_digit) + 1` (sign byte)
+    /// where `log2_per_digit = max(1, base.bits() - 1)` is a
+    /// lower bound on `log2(base)`, matching the
+    /// `Vm::try_integer_digits` estimator. Dividing by a smaller
+    /// log gives a safe upper bound on the char count.
+    /// `max_value_bytes` falls back to the same 1 MB safety
+    /// ceiling that `try_bigint_pow` uses when no host cap is
+    /// configured.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn check_bigint_to_s_cap(&mut self, id: crate::value::ObjId, radix: u32) -> Result<(), crate::error::Trap> {
+        let bits = self.heap.bigint(id).bits();
+        // log2_per_digit lower bound: u32::BITS - leading_zeros - 1,
+        // floor of log2(radix). For radix == 2 this is 1 (exact);
+        // for radix == 10 this is 3; for radix == 36 this is 5.
+        let log2_per_digit: u64 = (u32::BITS - radix.leading_zeros())
+            .saturating_sub(1) as u64;
+        let log2_per_digit = log2_per_digit.max(1);
+        // ceil-div bits / log2_per_digit, + 1 for sign byte.
+        let est: u64 = bits.saturating_add(log2_per_digit - 1) / log2_per_digit + 1;
+        let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
+        if est > cap {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!("value size ~{} bytes > cap {}", est, cap),
+            }));
+        }
+        Ok(())
     }
 }
 
