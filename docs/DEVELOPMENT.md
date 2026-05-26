@@ -162,9 +162,12 @@ Notes:
   each pulled in additional code paths.
 - `std::process::id()` panics on wasm32-wasip1 (wasi has no PID
   concept). `crates/rubyrs/src/main.rs` cfg-gates the call so the
-  `pid` field is `None` on wasi; the runtime treats that as "host
-  didn't provide one", and `$$` surfaces a clear trap rather than
-  crashing the interpreter.
+  `pid` field is `None` on wasi; the runtime treats that as a
+  sentinel and surfaces `$$` as `Int(0)` (see
+  `vm/step.rs::"$$"`). The interpreter stays alive — only the
+  `$$` value differs from a native host. wasi scripts that
+  meaningfully depend on a non-zero PID need to detect the
+  zero sentinel themselves.
 
 ## Profiling
 

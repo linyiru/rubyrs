@@ -40,8 +40,12 @@ fn main() {
         env: Some(env::vars().collect()),
         // `std::process::id()` panics on wasm32-wasip1 (wasi has no
         // process-ID concept). The runtime treats `pid: None` as
-        // "host did not provide one" — `$$` in script then surfaces
-        // a no-pid trap rather than crashing the interpreter.
+        // a sentinel and surfaces `$$` as `Int(0)` (see
+        // `vm/step.rs::"$$"`), not a trap — wasi scripts that
+        // depend on a non-zero PID need to detect the zero
+        // sentinel themselves. Leaving the interpreter alive
+        // rather than panicking at construction is the load-
+        // bearing fix for wasi.
         #[cfg(not(target_os = "wasi"))]
         pid: std::num::NonZeroU32::new(process::id()),
         #[cfg(target_os = "wasi")]
