@@ -49,3 +49,27 @@ def take_block(b)
   yield(b, 100)
 end
 puts take_block(2, &c)                # 1 + 2 + 100 = 103
+
+# --- `send(:priv, &nil)` still bypasses visibility ---
+# `do_call_block` consumes `bypass_visibility_once` at entry
+# (so the flag can't leak); the `&nil` arm must re-install it
+# before delegating to `do_call`, otherwise the private check
+# in `do_call` would raise NoMethodError on the inner call.
+class V
+  def priv_method
+    "private-result"
+  end
+  private :priv_method
+end
+v = V.new
+nb = nil
+puts v.send(:priv_method, &nb)
+
+# Sanity: visibility enforcement is still active when called
+# without the `send` bypass. (Just check the class raised.)
+begin
+  v.priv_method
+  puts "private NOT guarded"
+rescue NoMethodError
+  puts "private guarded"
+end

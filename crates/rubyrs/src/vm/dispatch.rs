@@ -2930,13 +2930,15 @@ impl Vm {
     pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         // Consume `bypass_visibility_once` at the dispatch boundary
-        // — same reasoning as `do_call`. `do_call_block` doesn't
-        // have a visibility-check site of its own today (block-form
+        // — same reasoning as `do_call`. `do_call_block` itself
+        // has no visibility-check site today (block-form
         // private/protected enforcement is a pre-existing gap), so
-        // the consumed value is unused locally; the important
-        // effect is that the flag can't leak past the block-form
-        // `send`/`__send__` re-aim into the next unrelated call.
-        let _bypass_visibility = std::mem::replace(&mut self.bypass_visibility_once, false);
+        // the consumed value is mostly there to prevent leaking
+        // past the block-form `send`/`__send__` re-aim into the
+        // next unrelated call. The `&nil` arm below re-installs
+        // it before delegating to `do_call`, which DOES enforce
+        // visibility — so `send(:priv, &nil)` still bypasses.
+        let bypass_visibility = std::mem::replace(&mut self.bypass_visibility_once, false);
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
@@ -2962,6 +2964,12 @@ impl Vm {
             // `evaluate(&nil)`. Restore args to the stack and
             // delegate to the no-block dispatch path.
             Value::Nil => {
+                // Re-install the visibility-bypass flag we consumed
+                // at entry. `send(:priv_method, &nil)` should still
+                // bypass visibility — without this, `do_call` would
+                // raise NoMethodError on a private method because
+                // its own bypass slot is now `false`.
+                self.bypass_visibility_once = bypass_visibility;
                 for a in args { self.stack.push(a); }
                 return self.do_call(name_id, argc, no_recv, cache_id);
             }
