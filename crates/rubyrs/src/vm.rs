@@ -867,14 +867,16 @@ impl Vm {
 
     /// `**` exponentiation with BigInt promotion and DoS cap.
     /// Returns:
-    /// - `Some(v)` for any Int/BigInt × non-negative-Int exponent
-    ///   (the only shape Phase B.1 handles — Float exponent is
-    ///   handled by numeric_call's Float arm; BigInt exponent
-    ///   would imply a result with > 2^31 bits which we always
-    ///   refuse).
-    /// - `None` for operand shapes this branch doesn't cover
-    ///   (Float exponent, non-integer recv); the caller falls
-    ///   through to primitive_call's existing arms.
+    /// - `Some(v)` for any Int/BigInt × {Int (non-negative), BigInt,
+    ///   Float, negative Int} where we can produce a value. Float /
+    ///   negative-Int exponents on Int receivers are normally handled
+    ///   by numeric_call BEFORE reaching this fn; we cover them here
+    ///   only when the receiver is a BigInt (otherwise it would
+    ///   NoMethodError even though `respond_to?(:**)` is true) and
+    ///   when |base| ≤ 1 (constant-size results for any exp shape).
+    /// - `None` for operand shapes outside this branch's scope
+    ///   (non-integer recv, or Int recv + Float/negative exp where
+    ///   numeric_call handles it); the caller falls through.
     ///
     /// DoS protection: result bit count is approximately
     /// `bit_length(base) * exp` — a few bytes of input can ask
@@ -894,79 +896,116 @@ impl Vm {
             Some(v) => v,
             None => return Ok(None),
         };
+        let recv_is_bigint = matches!(recv, Value::BigInt(_));
+        // BigInt → f64 via decimal-string round-trip — mirrors the
+        // dispatch.rs Range coercion pattern, avoids pulling in
+        // num-traits just for `ToPrimitive::to_f64`. Adequate
+        // precision for the Float ** Float fallback (f64.powf is
+        // already lossy past 2**53).
+        let base_to_f64 = || -> f64 {
+            base_big.to_string().parse::<f64>().unwrap_or(f64::NAN)
+        };
+        // Float exponent: coerce base to f64 and use powf. Int
+        // receivers go through numeric_call's Int×Float arm BEFORE
+        // reaching here, so this fires only for BigInt receivers
+        // (where the alternative would be NoMethodError despite
+        // `respond_to?(:**)` returning true).
+        if let Value::Float(f) = exp_arg {
+            if recv_is_bigint {
+                return Ok(Some(Value::Float(base_to_f64().powf(*f))));
+            }
+            return Ok(None);
+        }
         // Short-circuit |base| ≤ 1 BEFORE classifying the exponent —
         // these results are constant-size and depend only on
         // sign + parity, so they're safe for ANY exponent shape
         // (positive Int, negative Int, BigInt). bits() returns the
         // magnitude width, so `<= 1` ⇔ value ∈ {-1, 0, 1}.
+        // Compute parity / sign / zero of the exponent up front so
+        // every branch below can dispatch on the same vocabulary
+        // without re-matching exp_arg.
+        let (exp_is_negative, exp_is_zero, exp_is_odd) = match exp_arg {
+            Value::Int(n) => (*n < 0, *n == 0, *n & 1 != 0),
+            Value::BigInt(id) => {
+                let big = self.heap.bigint(*id);
+                let s = big.sign();
+                (s == Sign::Minus, s == Sign::NoSign, big.bit(0))
+            }
+            _ => return Ok(None),
+        };
         if base_big.bits() <= 1 {
-            // Compute parity of the exponent without losing
-            // information: i64 parity from low bit; BigInt parity
-            // from bit(0) (which reads the two's-complement low
-            // bit, matching magnitude parity for negative values).
-            let (exp_is_negative, exp_is_zero, exp_is_odd) = match exp_arg {
-                Value::Int(n) => (*n < 0, *n == 0, *n & 1 != 0),
-                Value::BigInt(id) => {
-                    let big = self.heap.bigint(*id);
-                    let s = big.sign();
-                    (s == Sign::Minus, s == Sign::NoSign, big.bit(0))
-                }
-                _ => return Ok(None),
-            };
             match base_big.sign() {
                 Sign::NoSign => {
                     // base == 0. 0**0 == 1; 0**n (n>0) == 0;
-                    // 0**n (n<0) is ZeroDivision in CRuby — let
-                    // the Float path handle as `inf` (documented
-                    // divergence) by declining.
-                    if exp_is_negative { return Ok(None); }
+                    // 0**n (n<0) is ZeroDivision in CRuby — we
+                    // realise the Float divergence (`inf`) here
+                    // for BigInt receivers (Int receivers go
+                    // through numeric.rs's Float arm first).
+                    if exp_is_negative {
+                        if recv_is_bigint {
+                            return Ok(Some(Value::Float(f64::INFINITY)));
+                        }
+                        return Ok(None);
+                    }
                     let r = if exp_is_zero { BigInt::from(1) } else { BigInt::from(0) };
                     return Ok(Some(self.bigint_to_value(r)?));
                 }
                 Sign::Plus => {
-                    // base == 1: always 1, even for negative
-                    // exponents (1.0 reciprocal). But CRuby
-                    // returns Rational for negative exp; the
-                    // documented divergence is Float. Keep
-                    // returning Int(1) for the canonical positive
-                    // case, decline negative to keep the Float
-                    // divergence centralised in numeric.rs.
-                    if exp_is_negative { return Ok(None); }
+                    // base == 1: always 1. Negative exp → Float(1.0)
+                    // (documented Rational divergence) — realised
+                    // here for BigInt recv; Int recv defers to
+                    // numeric.rs's parity-preserving ±1 arm.
+                    if exp_is_negative {
+                        if recv_is_bigint {
+                            return Ok(Some(Value::Float(1.0)));
+                        }
+                        return Ok(None);
+                    }
                     return Ok(Some(self.bigint_to_value(BigInt::from(1))?));
                 }
                 Sign::Minus => {
                     // base == -1: parity decides sign. Negative
-                    // exponent also has |result| = 1, so we can
-                    // return the Int form directly here too —
-                    // but to keep parity preservation simple and
-                    // not over-promise on the Rational divergence,
-                    // decline negative exponents and let numeric.rs
-                    // (which now also parity-handles ±1) return
-                    // the Float form.
-                    if exp_is_negative { return Ok(None); }
+                    // exponent: |result| = 1, sign from parity.
+                    if exp_is_negative {
+                        if recv_is_bigint {
+                            return Ok(Some(Value::Float(if exp_is_odd { -1.0 } else { 1.0 })));
+                        }
+                        return Ok(None);
+                    }
                     let r = if exp_is_odd { BigInt::from(-1) } else { BigInt::from(1) };
                     return Ok(Some(self.bigint_to_value(r)?));
                 }
             }
         }
-        // |base| > 1 from here on. A BigInt exponent at this point
-        // would need at least 2**63 bits of storage — any cap we
-        // care about would trip — so trap ResourceExhausted
-        // instead of falling through to NoMethodError.
+        // |base| > 1 from here on.
+        // Negative Int / BigInt exp: Float reciprocal. Int
+        // receivers go through numeric.rs first; for BigInt
+        // receivers we realise it here so the path doesn't
+        // NoMethodError.
+        if exp_is_negative {
+            if recv_is_bigint {
+                let exp_f = match exp_arg {
+                    Value::Int(n) => *n as f64,
+                    // BigInt-negative exp on a |base|>1 receiver:
+                    // result is sub-normal Float (~0). Coerce via
+                    // string round-trip too (BigInt → f64).
+                    Value::BigInt(id) => self.heap.bigint(*id).to_string()
+                        .parse::<f64>().unwrap_or(f64::NEG_INFINITY),
+                    _ => unreachable!(),
+                };
+                return Ok(Some(Value::Float(base_to_f64().powf(exp_f))));
+            }
+            return Ok(None);
+        }
+        // Positive exp. BigInt exponent with |base|>1 → trap.
         if matches!(exp_arg, Value::BigInt(_)) {
             return Err(self.trap(RubyError::ResourceExhausted {
                 msg: "integer ** BigInt exponent exceeds u32::MAX".to_string(),
             }));
         }
-        // Negative exponent → Float (reciprocal); let
-        // numeric_call's Float arm handle (matches Phase A's
-        // documented Rational divergence — we give `0.5` where
-        // CRuby gives `(1/2)`). Only the positive-Int exponent
-        // case is in scope below.
         let exp_i64 = match exp_arg {
-            Value::Int(n) if *n >= 0 => *n,
-            Value::Int(_) => return Ok(None),
-            _ => return Ok(None),
+            Value::Int(n) => *n, // ≥ 0 (negative handled above)
+            _ => unreachable!("non-Int/BigInt/Float exp returned earlier"),
         };
         let exp_u32: u32 = match u32::try_from(exp_i64) {
             Ok(v) => v,

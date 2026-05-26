@@ -2015,6 +2015,41 @@ fn bigint_pow_identity_bases_skip_u32_cap() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_pow_bigint_receiver_negative_exponent_returns_float() {
+    // BigInt receiver + negative Int exp must not NoMethodError —
+    // respond_to?(:**) is true for BigInt, so the dispatch path
+    // has to produce *something*. We pick Float (matches the
+    // documented Rational divergence for `Int ** -n`).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    // (2 ** 100) ** -2 → 1 / (2**200) which underflows f64 to 0.0.
+    rt.eval("puts ((2 ** 100) ** -2)", "bigint_pow_neg.rb")
+        .expect("BigInt ** negative-Int must return a Float, not NoMethodError");
+    let out = buf.snapshot();
+    let v: f64 = out.trim().parse().expect("output must parse as Float");
+    assert!(v >= 0.0 && v < 1e-30, "expected near-zero Float, got {}", v);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_bigint_receiver_float_exponent_returns_float() {
+    // BigInt receiver + Float exp must also return a Float, not
+    // NoMethodError. `(2 ** 100) ** 0.5` ≈ 2**50 ≈ 1.126e15.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts ((2 ** 100) ** 0.5)", "bigint_pow_float_exp.rb")
+        .expect("BigInt ** Float must return a Float, not NoMethodError");
+    let out = buf.snapshot();
+    let v: f64 = out.trim().parse().expect("output must parse as Float");
+    let expected = (2.0_f64).powi(50);
+    let rel = ((v - expected) / expected).abs();
+    assert!(rel < 1e-6, "expected ~{}, got {} (rel error {})", expected, v, rel);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_pow_identity_bases_with_bigint_exponent() {
     // |base| ≤ 1 must not trap on BigInt exponents — results are
     // constant-size. Pin `1 ** big`, `0 ** big`, `(-1) ** big`
