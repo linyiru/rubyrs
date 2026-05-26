@@ -73,6 +73,20 @@ puts ("G123" =~ /[[:digit:]\G]/)                # 0    (G at offset 0; class is 
 puts ("xyz" =~ /[[:digit:]\G]/)                 # nil  (no digit, no G)
 puts ("9" =~ /[[:digit:]\G]/)                   # 0    (digit at offset 0)
 
+# --- UTF-8 passthrough: multibyte literals in patterns ---
+# The preprocessor walks the pattern at the byte level (every
+# structural token it cares about is ASCII), so multibyte UTF-8
+# sequences for CJK and similar must pass through unchanged. A
+# naïve `out.push(byte as char)` would re-encode each byte as a
+# separate Latin-1 codepoint and corrupt the regex.
+puts ("こんにちは" =~ /こ/).inspect             # 0
+# Note: `"hello こんにちは" =~ /\Gこ/` returns nil in CRuby
+# (\\G requires pos 0) but 6 in rubyrs (\\G stripped → bare
+# /こ/ matches the byte offset). Documented divergence — same
+# shape as the ASCII case earlier; pinned in the comment only.
+puts ("こんにちは" =~ /\Gこ/).inspect            # 0
+puts ("abc" =~ /[こa]/).inspect                  # 0 — class containing こ + a, a matches at 0
+
 # --- `\G` inside an alternation / grouping ---
 # Mirror lib/erb/compiler.rb:460's other shape:
 #   /\G(?:<%#(.*)%>|%#(.*)\n)/

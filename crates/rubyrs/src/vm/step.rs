@@ -55,8 +55,16 @@ fn preprocess_regex_pattern(src: &str) -> String {
     // pattern like `/[[:digit:]\G]/`. We detect `[:`,
     // `[=`, `[.` after entering a class and skip past the
     // matching `:]`/`=]`/`.]` as a unit.
+    // Accumulate as raw bytes so multibyte UTF-8 sequences pass
+    // through unchanged. `out.push(c as char)` would write each
+    // byte as a separate Latin-1 codepoint, mangling any non-
+    // ASCII pattern text (CJK literals, U+FFFD from invalid-byte
+    // recovery, etc.). All structural tokens we look for (`\`,
+    // `G`, `[`, `]`, `:`, `=`, `.`) are single-byte ASCII so
+    // operating at the byte level is safe — UTF-8 multibyte
+    // bytes are all 0x80+, never confusable with ASCII.
     let bytes = src.as_bytes();
-    let mut out = String::with_capacity(src.len());
+    let mut out: Vec<u8> = Vec::with_capacity(src.len());
     let mut i = 0;
     let mut in_class = false;
     while i < bytes.len() {
@@ -71,15 +79,19 @@ fn preprocess_regex_pattern(src: &str) -> String {
             // (`/[\G]/` → `/[G]/`).
             if next == b'G' {
                 if in_class {
-                    out.push('G');
+                    out.push(b'G');
                 }
                 i += 2;
                 continue;
             }
-            // Other escapes pass through unchanged in both
-            // contexts.
-            out.push(c as char);
-            out.push(next as char);
+            // Other escapes pass through unchanged. `next` is
+            // always ASCII (\d, \s, \., \\, ...); if a multibyte
+            // codepoint somehow followed a `\` we'd want to copy
+            // all of its bytes — but Ruby/Onigmo doesn't allow
+            // `\<multibyte>` as an escape, so the next byte
+            // being ASCII is invariant.
+            out.push(c);
+            out.push(next);
             i += 2;
             continue;
         }
@@ -104,7 +116,7 @@ fn preprocess_regex_pattern(src: &str) -> String {
             // bail out and just copy the `[` to let the regex
             // crate report its own error.
             if j + 1 < bytes.len() && &bytes[j..j + 2] == close {
-                out.push_str(&src[i..j + 2]);
+                out.extend_from_slice(&bytes[i..j + 2]);
                 i = j + 2;
                 continue;
             }
@@ -117,10 +129,13 @@ fn preprocess_regex_pattern(src: &str) -> String {
         } else if c == b']' && in_class {
             in_class = false;
         }
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
-    out
+    // SAFETY: input was a &str (valid UTF-8) and every byte
+    // operation above either copies an input run verbatim or
+    // pushes ASCII (`G`). No way to produce invalid UTF-8.
+    String::from_utf8(out).expect("ICE: preprocess_regex_pattern produced invalid UTF-8")
 }
 
 impl Vm {
