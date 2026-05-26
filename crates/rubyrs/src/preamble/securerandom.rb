@@ -54,11 +54,8 @@ module SecureRandom
   # SecureRandom.alphanumeric's MRI source.
   ALPHANUMERIC = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
   def self.alphanumeric(n = 16)
-    # Tier 1 `String#each_byte` isn't on the fast path; `.bytes`
-    # is and returns the same byte-Integer Array, so we walk
-    # that with `each`. The mapping step is identical.
     out = ""
-    random_bytes(n).bytes.each do |b|
+    random_bytes(n).each_byte do |b|
       out << ALPHANUMERIC[b % 62]
     end
     out
@@ -72,13 +69,20 @@ module SecureRandom
   # OS CSPRNG).
   def self.uuid
     raw = random_bytes(16).bytes
-    # Force the version + variant nibbles via `%` (BigInt-safe;
-    # `&` on Integer works but stays consistent with the
-    # Random preamble's avoidance pattern).
+    # Force the version + variant nibbles via `%` rather than
+    # bit-AND. The Random preamble masks 32-bit state with `%
+    # 0x100000000` to stay BigInt-Phase-A-friendly (Phase A
+    # didn't ship bit-AND); we use the same idiom here for
+    # consistency even though these values are tiny — `raw[6] %
+    # 16` is the bottom nibble, `raw[8] % 64` is the bottom 6
+    # bits.
     raw[6] = (raw[6] % 16) | 0x40       # version 4 (top nibble = 4)
     raw[8] = (raw[8] % 64) | 0x80       # variant 10xxxxxx (top two bits)
-    # 16 bytes → 32 lowercase hex chars via the same
-    # pack/unpack route `hex` uses.
+    # 16 bytes → 32 lowercase hex chars. `pack("C*").unpack("H*")`
+    # is the canonical Ruby byte→hex idiom; `Integer#to_s(16)` per
+    # byte (now available since the Tier 1 gap-fill batch) would
+    # work too but adds a `.rjust(2, "0")` step and 16 extra
+    # allocations.
     hex = raw.pack("C*").unpack("H*").first
     hex[0, 8] + "-" + hex[8, 4] + "-" + hex[12, 4] + "-" + hex[16, 4] + "-" + hex[20, 12]
   end

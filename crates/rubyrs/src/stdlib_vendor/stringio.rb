@@ -154,19 +154,18 @@ class StringIO
 
   def gets
     return nil if @pos >= @str.length
-    # `String#index` two-arg form (with start offset) isn't on the
-    # Tier 1 fast path; slice from `@pos` first and search the
-    # resulting substring. One extra allocation per `gets`, but
-    # the buffer-only StringIO shape isn't a hot path.
-    remaining = @str[@pos..] || ""
-    rel = remaining.index("\n")
-    if rel
-      line = remaining[0, rel + 1]
-      @pos += rel + 1
+    # `String#index(needle, offset)` returns the ABSOLUTE byte
+    # index in the receiver, so we can scan directly from `@pos`
+    # without slicing — one less allocation per `gets`.
+    nl = @str.index("\n", @pos)
+    if nl
+      line = @str[@pos..nl]
+      @pos = nl + 1
       line
     else
+      rest = @str[@pos..]
       @pos = @str.length
-      remaining
+      rest
     end
   end
 

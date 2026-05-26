@@ -79,22 +79,18 @@ class Random
   # `n` raw bytes as a binary String. Each Mulberry32 step emits
   # 32 bits; emit 4 bytes per step (little-endian) until we have
   # `n` total. The trailing partial chunk is truncated as needed.
-  # Built via Array#pack("C*") because rubyrs Tier 1 doesn't yet
-  # carry `Integer#chr` and `String.new` returns a generic Object
-  # rather than a `Value::Str` — both blockers for the natural
-  # "build a String byte-by-byte" loop.
   def bytes(n)
     raise ArgumentError, "negative size" if n < 0
-    out_bytes = []
-    while out_bytes.length < n
+    out = String.new
+    while out.bytesize < n
       v = next_u32
       4.times do
-        break if out_bytes.length >= n
-        out_bytes << (v % 256)
+        break if out.bytesize >= n
+        out << (v % 256).chr
         v >>= 8
       end
     end
-    out_bytes.pack("C*")
+    out
   end
 
   private

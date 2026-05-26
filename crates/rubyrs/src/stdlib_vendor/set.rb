@@ -53,14 +53,14 @@ class Set
   end
 
   def each(&block)
-    @hash.keys.each(&block)
+    @hash.each_key(&block)
     self
   end
 
   def ==(other)
     return false unless other.is_a?(Set)
     return false unless size == other.size
-    @hash.keys.each { |k| return false unless other.include?(k) }
+    @hash.each_key { |k| return false unless other.include?(k) }
     true
   end
   alias_method :eql?, :==
@@ -89,7 +89,7 @@ class Set
     result = Set.new
     drop = {}
     enum.each { |o| drop[o] = true }
-    @hash.keys.each { |k| result.add(k) unless drop.key?(k) }
+    @hash.each_key { |k| result.add(k) unless drop.key?(k) }
     result
   end
   alias_method :difference, :-
@@ -99,7 +99,7 @@ class Set
     result = Set.new
     keep = {}
     enum.each { |o| keep[o] = true }
-    @hash.keys.each { |k| result.add(k) if keep.key?(k) }
+    @hash.each_key { |k| result.add(k) if keep.key?(k) }
     result
   end
   alias_method :intersection, :&
@@ -107,7 +107,7 @@ class Set
   def subset?(other)
     return false unless other.is_a?(Set)
     return false if size > other.size
-    @hash.keys.each { |k| return false unless other.include?(k) }
+    @hash.each_key { |k| return false unless other.include?(k) }
     true
   end
   alias_method :<=, :subset?
