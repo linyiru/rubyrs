@@ -99,8 +99,13 @@ if [[ ! -x "$EMBED_BIN" ]]; then
   exit 2
 fi
 
-WIZ_OPT_SIZE="$(stat -f %z "$WIZ_OPT" 2>/dev/null || stat -c %s "$WIZ_OPT")"
-EMBED_SIZE="$(stat -f %z "$EMBED_BIN" 2>/dev/null || stat -c %s "$EMBED_BIN")"
+# `stat -f %z` is BSD/macOS format, `stat -c %s` is GNU/Linux.
+# Initial form (`stat -f ... || stat -c ...`) had it backwards:
+# GNU `stat -f` is "filesystem mode" (block size etc.) and
+# silently succeeds with garbage on Linux. Use `wc -c < file`
+# which is POSIX and identical on both platforms.
+WIZ_OPT_SIZE="$(wc -c < "$WIZ_OPT" | tr -d ' ')"
+EMBED_SIZE="$(wc -c < "$EMBED_BIN" | tr -d ' ')"
 
 echo ""
 echo "=== built ==="
