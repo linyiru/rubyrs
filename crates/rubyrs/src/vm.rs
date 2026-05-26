@@ -1476,14 +1476,23 @@ impl Vm {
             }
         };
         // Pre-estimate array length to avoid building a multi-GB
-        // Vec on hostile input. With `recv_bits` and base ≥ 2,
-        // count is at most `ceil(recv_bits / log2(base))`. For
-        // base = 2 that's `recv_bits`; for larger bases fewer.
-        // Conservative upper bound: `recv_bits + 1` (covers all
-        // bases ≥ 2). Multiply by sizeof(Value) for the byte
-        // estimate; check against `max_value_bytes` (1 MB default).
+        // Vec on hostile input. True count is
+        // `ceil(recv_bits / log2(base))`. Use the integer lower
+        // bound `log2(base) >= base.bits() - 1` (since
+        // `base >= 2^(base.bits() - 1)`); dividing by a smaller
+        // log gives a safe upper bound on the count without
+        // floating-point. Add 1 for the leading non-zero digit.
+        //
+        // Base = 2: `base.bits() - 1 == 1`, est ≈ recv_bits + 1.
+        // Base = 10: `base.bits() - 1 == 3`, est ≈ recv_bits/3 + 1.
+        // Base = 256: `base.bits() - 1 == 8`, est ≈ recv_bits/8 + 1.
+        //
+        // Previous estimate (`recv_bits + 1` for ALL bases) was
+        // overly conservative for bases > 2 — could falsely trap
+        // under a tight cap even when the actual array fits.
         const VALUE_BYTES: u64 = std::mem::size_of::<Value>() as u64;
-        let est_count: u64 = recv_bits.saturating_add(1);
+        let log2_lower: u64 = base.bits().saturating_sub(1).max(1);
+        let est_count: u64 = (recv_bits / log2_lower).saturating_add(1);
         let est_bytes: u64 = est_count.saturating_mul(VALUE_BYTES);
         let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
         if est_bytes > cap {

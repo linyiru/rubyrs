@@ -2226,6 +2226,34 @@ fn digits_negative_recv_raises_argument_error_substitute() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn digits_estimator_uses_log2_base_not_just_bits() {
+    // Tighter estimator (`recv_bits / (base.bits() - 1) + 1`)
+    // means a `recv` whose base-2 expansion would exceed the cap
+    // can still succeed in base-10 / base-16 — the actual digit
+    // count for those bases is far smaller. Pin this so a future
+    // refactor that drops the log-2 division and reverts to
+    // `recv_bits + 1` fails immediately. `(2 ** 1000).digits` is
+    // ~302 decimal digits ≈ 4.8 KB at 16 B per Value, fits an
+    // 8 KB cap; base-2 form would be 1001 elements ≈ 16 KB and
+    // would still pass; base-2 of `2 ** 100_000` (1.6 MB) is the
+    // shape the sibling test pins as a trap.
+    let cfg = rubyrs::Config { max_value_bytes: Some(8 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let v = rt.eval(
+        "(2 ** 1000).digits.length",
+        "digits_base10_fits.rb",
+    ).expect("base-10 estimate must fit 8 KB cap for 2**1000");
+    match v {
+        rubyrs::Value::Int(n) => {
+            // 2**1000 has 302 decimal digits.
+            assert_eq!(n, 302, "expected 302 decimal digits, got {}", n);
+        }
+        other => panic!("expected Value::Int, got {:?}", other),
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn digits_huge_bigint_in_base_2_traps_under_tight_cap() {
     // `(2 ** 100_000).digits(2)` would produce a 100_001-element
     // array (~1.6 MB at 16 B per Value). Under a tight cap, the
