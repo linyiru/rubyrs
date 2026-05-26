@@ -1489,29 +1489,23 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             0 => None,
             // Single arg, no splat: pass through directly.
             //
-            // Single arg, splat form `return *val`: CRuby's actual
+            // Single arg, splat form `return *val`: CRuby's
             // semantics is `return Array(val)` — wraps scalars
             // (`*5` → `[5]`), expands Array (`*[1,2]` → `[1,2]`),
-            // empty-array for nil (`*nil` → `[]`). We pass `val`
-            // through unchanged: matches CRuby when `val` is
-            // already an Array (the typical real-world shape,
-            // e.g. `return *some_method_returning_array`),
-            // diverges on scalar wrap.
-            //
-            // DIVERGENCE: `def f; return *5; end; f` returns `5`
-            // in rubyrs, `[5]` in CRuby. Inherits the same gap
-            // as the wider `[*x]` array-literal arm (rubyrs's
-            // splat passes through bare values rather than
-            // delegating to `Kernel#Array`). Documented in
-            // SUBSET.md / `Kernel#Array` line item. Closing this
-            // requires a Kernel#Array implementation and either
-            // a new opcode or an AST-level Call rewrite — out of
-            // this PR's scope.
+            // empty-array for nil (`*nil` → `[]`). Lower to a
+            // synthetic `Array(inner)` call so the runtime's
+            // existing `Kernel#Array` impl produces the correct
+            // shape. No new opcode needed.
             1 => {
                 let only = &arg_nodes[0];
                 if let Some(sn) = only.as_splat_node()
                     && let Some(inner) = sn.expression() {
-                    return Some(Box::new(tr(&inner)));
+                    let inner_expr = tr(&inner);
+                    return Some(Box::new(sp(span_node, Expr::Call {
+                        receiver: None,
+                        name: "Array".into(),
+                        args: vec![inner_expr],
+                    })));
                 }
                 Some(Box::new(tr(only)))
             }

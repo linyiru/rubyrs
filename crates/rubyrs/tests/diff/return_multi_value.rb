@@ -31,21 +31,24 @@ def mid_splat
 end
 puts mid_splat.inspect                          # [:first, 1, 2, :last]
 
-# --- Pure splat with Array inner: passes through unchanged ---
-# `return *arr` where arr is already an Array returns arr.
-# This matches CRuby (which evaluates `return *expr` as
-# `return Array(expr)` and Array() of an Array is the Array
-# itself). The typical real-world shape: `return *method`
-# where `method` already returns an Array.
+# --- Single-splat: lowers to Array(inner) call ---
+# CRuby's `return *expr` semantics is `return Array(expr)`:
+# Array of an Array is the same Array; scalar gets wrapped;
+# nil becomes []. The AST translation now emits a synthetic
+# `Array(inner)` call so the runtime's Kernel#Array produces
+# the right shape across every input type.
 def pure_splat
   return *[10, 20, 30]
 end
 puts pure_splat.inspect                         # [10, 20, 30]
-# DIVERGENCE (not pinned): `return *5` returns `5` in rubyrs
-# but `[5]` in CRuby — see the impl-site comment in
-# `collect_multi_return_value` (ast.rs). Inherits the same
-# gap as `[*5]` returning `5` instead of `[5]`. Closing it
-# needs Kernel#Array.
+def scalar_splat
+  return *5
+end
+puts scalar_splat.inspect                       # [5]
+def nil_splat
+  return *nil
+end
+puts nil_splat.inspect                          # []
 
 # --- Destructuring consumer ---
 def named_pair
