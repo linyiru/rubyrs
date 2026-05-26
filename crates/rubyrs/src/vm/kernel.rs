@@ -13,7 +13,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::Value;
 
-use super::Vm;
+use super::{PinGuard, Vm};
 
 impl Vm {
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
@@ -167,16 +167,27 @@ impl Vm {
                     let s = a.to_inspect(&self.heap, &self.interner);
                     let _ = writeln!(self.stdout, "{}", s);
                 }
-                let result = match args {
-                    [] => Value::Nil,
-                    [one] => one.clone(),
+                match args {
+                    [] => Some(Ok(Value::Nil)),
+                    [one] => Some(Ok(one.clone())),
                     many => {
-                        self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(many.to_vec()));
-                        Value::Array(id)
+                        // GC rooting: `args` is the `&[Value]` slice
+                        // backed by a Vec that `do_call` drained out
+                        // of `self.stack` — those Values are NOT in
+                        // the root set. Pin each element across
+                        // `maybe_gc` + `alloc` so the multi-arg `p` /
+                        // `pp` return Array can't reference a freed
+                        // slot under STRESS_GC=1. Same shape as the
+                        // seven sites from issue #90.
+                        let mut g = PinGuard::new(self);
+                        let elems: Vec<Value> = many.to_vec();
+                        for v in &elems { g.pin(v.clone()); }
+                        g.vm.maybe_gc();
+                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
+                        let id = g.vm.heap.alloc(HeapObj::Array(elems));
+                        Some(Ok(Value::Array(id)))
                     }
-                };
-                Some(Ok(result))
+                }
             }
             // `Integer(x)` / `Float(x)` / `String(x)` — strict
             // conversion functions. Unlike `to_i` / `to_f` (which
@@ -275,14 +286,33 @@ impl Vm {
                 }
                 match &args[0] {
                     Value::Nil => {
-                        self.maybe_gc();
+                        self.maybe_gc(); // allow: gc-rooting — allocates an empty Array (`Vec::new()`); no Value held across the alloc window.
+                        if let Err(t) = self.check_alloc() { return Some(Err(t)); }
                         let id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::new()));
                         Some(Ok(Value::Array(id)))
                     }
                     Value::Array(_) => Some(Ok(args[0].clone())),
-                    other => {
-                        self.maybe_gc();
-                        let id = self.heap.alloc(crate::heap::HeapObj::Array(vec![other.clone()]));
+                    _ => {
+                        // GC rooting: `args` was drained out of
+                        // `self.stack` in `do_call`, so `args[0]` is
+                        // a Rust local — NOT in the root set
+                        // (stack / pinned / frame locals / globals
+                        // / constants). Under STRESS_GC=1 every
+                        // alloc triggers mark+sweep, so the slot
+                        // referenced by `args[0]` would be reaped
+                        // between `maybe_gc` and `heap.alloc` and
+                        // the new one-element Array would point at
+                        // a recycled slot, surfacing as
+                        // `class_of called on non-Object slot`.
+                        // See issue #90, site #8. Mirrors the fix
+                        // applied at the 6 prior sites in commits
+                        // 86db73d / f2c3538 / 5946caa.
+                        let mut g = PinGuard::new(self);
+                        let elt = args[0].clone();
+                        g.pin(elt.clone());
+                        g.vm.maybe_gc();
+                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
+                        let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![elt]));
                         Some(Ok(Value::Array(id)))
                     }
                 }

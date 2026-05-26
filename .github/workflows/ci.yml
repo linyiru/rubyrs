@@ -40,6 +40,15 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: GC rooting lint (issue #90)
+        # Structural grep gate for the recurring "unrooted Value
+        # held across `self.maybe_gc` + `self.heap.alloc`" hazard
+        # — see issue #90 for the seven prior incidents this is
+        # meant to prevent recurrence of. Heuristic but cheap;
+        # every false-positive can be silenced with an inline
+        # `// allow: gc-rooting — <reason>` annotation.
+        run: bash scripts/lint-gc-rooting.sh
+
       - name: Clippy (workspace, -D warnings)
         # Catches the style / pedantic lints that `cargo build`
         # won't notice. The workspace is at zero warnings as of

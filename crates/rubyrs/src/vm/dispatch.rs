@@ -220,7 +220,7 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
             if &*name == "method" && args.len() == 1
                 && let Value::Sym(bound_name_id) = &args[0] {
-                    self.maybe_gc();
+                    self.maybe_gc(); // allow: gc-rooting — BoundMethod holds `recv: self_val.clone()` (cloned from `frames.last().self_val`, which stays rooted via `self.frames` for the whole alloc window) and a primitive `SymId`; no unrooted slot at risk.
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::BoundMethod {
                         recv: self_val.clone(),
