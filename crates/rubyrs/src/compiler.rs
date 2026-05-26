@@ -933,6 +933,18 @@ pub(crate) fn compile_expr(
                 b.emit(Op::StoreConst(pid));
             }
         }
+        Expr::AliasSingletonMethod(new_name, old_name) => {
+            // Counterpart to the existing alias_method compile-
+            // time intercept (which emits Op::AliasMethod against
+            // class_stack.last().methods). AST emits this variant
+            // only inside `class << X` body, where alias must
+            // target the singleton-method table instead.
+            let nid = interner.intern(new_name);
+            let oid = interner.intern(old_name);
+            b.emit(Op::AliasSingletonMethod(nid, oid));
+            // Like Op::AliasMethod, the handler pushes Nil itself;
+            // no trailing LoadNil here.
+        }
         Expr::ArrayLit(elems) => {
             for e in elems { compile_expr(b, e, protos, interner, cc); }
             b.emit(Op::NewArray(elems.len() as u16));

@@ -198,6 +198,14 @@ pub(crate) enum Expr {
         superclass: Option<String>,
         body: Vec<SExpr>,
     },
+    /// `alias new old` keyword form encountered INSIDE a
+    /// `class << X` body. Compiles to `Op::AliasSingletonMethod`
+    /// so the alias lands in the surrounding class's
+    /// singleton_methods, not its instance methods.
+    /// (Top-level / normal-class-body `alias` translates to
+    /// `Expr::Call(alias_method)` which routes through the
+    /// existing intercept emitting `Op::AliasMethod`.)
+    AliasSingletonMethod(String, String),
     ArrayLit(Vec<SExpr>),
     HashLit(Vec<(SExpr, SExpr)>),
     /// `begin..end` (exclusive=false) or `begin...end` (exclusive=true).
@@ -1990,8 +1998,49 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     continue;
                 }
             }
+            // `alias new old` keyword form INSIDE `class << X`
+            // body. Routes to `Op::AliasSingletonMethod` so the
+            // alias lands on X's singleton_methods rather than
+            // its instance methods (which is what the regular
+            // top-level translation would do). Tilt's tilt.rb:99
+            // `class << self; alias prefer register; end` is the
+            // motivating case — `register` is a class method of
+            // Tilt, `prefer` should also be a class method.
+            // IMPORTANT scope guard: `Op::AliasSingletonMethod`
+            // installs on `class_stack.last().singleton_methods`,
+            // which is only the correct target when the surrounding
+            // shape is `class << self` inside a class body — the
+            // existing class_stack entry IS X. For
+            // `class << SomeConst` / `class << obj`, the body runs
+            // in the same frame without any class_stack push, so
+            // the op would silently alias on the wrong receiver
+            // (or on toplevel). Those receivers still fall through
+            // to the existing unsupported-node SyntaxError.
+            let recv_is_self = matches!(&recv_expr.node, Expr::SelfExpr);
+            if recv_is_self
+                && let Some(alias_node) = bn.as_alias_method_node()
+                && let (Some(new_sym), Some(old_sym)) = (
+                    alias_node.new_name().as_symbol_node(),
+                    alias_node.old_name().as_symbol_node(),
+                )
+            {
+                let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
+                let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
+                out.push(sp(bn, Expr::AliasSingletonMethod(new_name, old_name)));
+                continue;
+            }
+            // Tighter error if we declined to handle alias due to
+            // the non-self receiver guard above — separate from
+            // the general "only def / attr_* / alias" message.
+            if bn.as_alias_method_node().is_some() && !recv_is_self {
+                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                    "class << <non-self>: `alias` is only supported when the receiver is `self` (inside a class body)".into()
+                ));
+                out.push(sp(bn, Expr::Nil));
+                continue;
+            }
             AST_ERRORS.with(|cell| cell.borrow_mut().push(
-                "class << X body: only `def` and `attr_reader`/`attr_writer`/`attr_accessor` are supported in the spike subset".into()
+                "class << X body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` (with `self` receiver) are supported in the spike subset".into()
             ));
             out.push(sp(bn, Expr::Nil));
         }
