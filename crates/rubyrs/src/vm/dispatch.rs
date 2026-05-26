@@ -3900,6 +3900,20 @@ impl Vm {
             return Ok(());
         }
 
+        // Mirror do_call's `String#encoding` intercept — without
+        // this, the block-form path (`"x".send(:encoding) { }` /
+        // `"x".encoding { }`) falls through to primitive_call,
+        // which doesn't handle "encoding" (the impl needs the Vm-
+        // side constants table), and raises NoMethodError. CRuby
+        // accepts a block on any method and just ignores it for
+        // primitives.
+        if matches!(&recv, Value::Str(_)) && &*name == "encoding" && args.is_empty() {
+            let key = self.interner.intern("Encoding::UTF_8");
+            let v = self.constants.get(&key).cloned()
+                .expect("ICE: Encoding::UTF_8 not in constants table — preamble didn't load");
+            self.stack.push(v);
+            return Ok(());
+        }
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
         // Mirror do_call's bigint_primitive hook. Without this,

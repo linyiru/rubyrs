@@ -60,11 +60,13 @@ puts Encoding::BINARY.name                      # ASCII-8BIT
 # BINARY is an alias for ASCII_8BIT — same instance.
 puts Encoding::BINARY.equal?(Encoding::ASCII_8BIT)  # true
 
-# --- String#b — receiver in our subset, ASCII-8BIT copy in CRuby ---
-# rubyrs doesn't tag encodings per-string, so the receiver
-# satisfies the contract callers (ERB's compiler at
-# lib/erb/compiler.rb:319) expect: a String whose bytes are
-# the same and whose subsequent regex matches work the same.
+# --- String#b — fresh copy in both rubyrs and CRuby ---
+# CRuby: a NEW String (copied bytes) with ASCII-8BIT encoding.
+# rubyrs: a NEW String (copied bytes); the ASCII-8BIT
+# distinction is a no-op because we don't tag encoding
+# per-string. Critical that this is a copy, NOT an alias —
+# mutating the result must not leak back to the receiver, and
+# a frozen receiver must yield an unfrozen result.
 b = "raw".b
 puts b                                          # raw
 puts b.length                                   # 3

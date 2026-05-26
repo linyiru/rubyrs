@@ -954,10 +954,13 @@ end
 ## to detect the source encoding from a magic comment). rubyrs
 ## stores raw bytes with no per-string encoding tag, so every
 ## String reports as UTF-8 and every encoding is treated as
-## ASCII-compatible / non-dummy. `Encoding.find(name)` builds an
-## instance keyed by name string — repeated calls with the same
-## name return the same instance via a class-variable cache, so
-## `s.encoding == Encoding.find("UTF-8")` works.
+## ASCII-compatible / non-dummy. `Encoding.find(name)` returns
+## the predefined constant for the standard names (singleton
+## identity stable across calls) and raises ArgumentError for
+## unknown names. Identity guarantee: `s.encoding ==
+## Encoding.find("UTF-8")` works because the find returns the
+## same `Encoding::UTF_8` instance the dispatch.rs intercept
+## reads.
 ##
 ## Predefined constants cover the names ERB / cgi/util / similar
 ## stdlib-shaped consumers reach for; add more as real targets
