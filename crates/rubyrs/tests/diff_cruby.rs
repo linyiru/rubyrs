@@ -146,6 +146,8 @@ fn run_diff(name: &str) {
 #[test] fn keyword_args() { run_diff("keyword_args"); }
 #[test] fn env_hash() { run_diff("env_hash"); }
 #[test] fn match_data() { run_diff("match_data"); }
+#[test] fn last_match_globals() { run_diff("last_match_globals"); }
+#[test] fn case_when_regex_globals() { run_diff("case_when_regex_globals"); }
 #[test] fn file_io() { run_diff("file_io"); }
 #[test] fn range_extras() { run_diff("range_extras"); }
 #[test] fn tap_then() { run_diff("tap_then"); }

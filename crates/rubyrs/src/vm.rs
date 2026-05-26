@@ -233,6 +233,19 @@ impl Clone for HostFnSlot {
     }
 }
 
+/// Side-channel record of the most recent successful regex match.
+/// Holds owned strings so the GC need not walk it; the cost is
+/// one `.to_string()` per capture group on each successful match.
+/// `caps[i]` is the i-th *parenthesised* group (1-indexed via
+/// `$1` etc.); `None` means the group did not participate. The
+/// vector length is always `re.captures_len() - 1` after a hit.
+#[cfg(feature = "regex")]
+#[derive(Debug, Clone)]
+pub(crate) struct LastMatch {
+    pub(crate) whole: String,
+    pub(crate) caps: Vec<Option<String>>,
+}
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     pub(crate) interner: Interner,
@@ -308,6 +321,19 @@ pub(crate) struct Vm {
     /// `--no-default-features`.
     #[cfg(feature = "regex")]
     pub(crate) regex_cache: HashMap<SymId, Rc<regex::Regex>>,
+    /// Last successful regex match — populated by `=~`,
+    /// `String#match`, and `Regexp#===` when they hit, cleared
+    /// when they miss. Source of truth for `$~` and `$1`..`$N`
+    /// (NumberedReferenceReadNode — any positive index, matching
+    /// CRuby; `$10`+ are valid too) reads in `LoadGlobal`. Owned
+    /// strings rather than
+    /// a heap ObjId so we don't have to wire a GC-walk root for
+    /// what is conceptually a fast side-channel; `$~` materialises
+    /// a fresh MatchData instance on demand. Cfg-gated on `regex`
+    /// — without the feature there are no successful matches to
+    /// record.
+    #[cfg(feature = "regex")]
+    pub(crate) last_match: Option<LastMatch>,
     /// Lazily-built ENV Hash, shared across every `ENV`
     /// reference. Set on first `LoadConst("ENV")` and reused
     /// thereafter so script code observes a single mutable
@@ -448,6 +474,8 @@ impl Vm {
             class_visibility_stack: vec![],
             #[cfg(feature = "regex")]
             regex_cache: HashMap::new(),
+            #[cfg(feature = "regex")]
+            last_match: None,
             env_hash: None,
             env_override: None,
             pid: None,
@@ -592,6 +620,45 @@ impl Vm {
                 path_str
             ),
         }))
+    }
+}
+
+/// MatchData materialization — shared between `String#match`
+/// (vm/string.rs) and the `$~` read path (vm/step.rs). Keeps one
+/// source of truth for the @whole/@caps ivar shape, the
+/// two-allocation cap accounting, and the "MatchData class not
+/// loaded → nil" fallback. Cfg-gated on `regex` along with every
+/// other consumer of `last_match`.
+#[cfg(feature = "regex")]
+impl Vm {
+    pub(crate) fn materialize_match_data(
+        &mut self,
+        whole: String,
+        caps: Vec<Value>,
+    ) -> Result<Value, Trap> {
+        self.maybe_gc();
+        self.check_alloc()?;
+        let caps_arr = self.heap.alloc(crate::heap::HeapObj::Array(caps));
+        let cls_id = self.interner.intern("MatchData");
+        let cls = match self.classes.get(&cls_id).cloned() {
+            Some(c) => c,
+            None => return Ok(Value::Nil),
+        };
+        // Second alloc — re-check the cap so a tight `heap.max_live`
+        // budget that admitted `caps_arr` but not the Instance traps
+        // cleanly rather than sneaking past the limit.
+        self.check_alloc()?;
+        let obj_id = self.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+            class: cls,
+            ivars: HashMap::new(),
+            singleton_class: None,
+        }));
+        let whole_ivar = self.interner.intern("@whole");
+        let caps_ivar = self.interner.intern("@caps");
+        let inst = self.heap.instance_mut(obj_id);
+        inst.ivars.insert(whole_ivar, Value::new_str(whole));
+        inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
+        Ok(Value::Object(obj_id))
     }
 }
 

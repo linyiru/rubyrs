@@ -8,14 +8,10 @@
 //! Stateless — no Vm access, just receiver + args + the
 //! resource cap.
 
-#[cfg(feature = "regex")]
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
-#[cfg(feature = "regex")]
-use crate::value::Instance;
 use crate::value::{RStr, Value};
 
 use super::{ruby_sprintf, Vm};
@@ -609,36 +605,32 @@ impl Vm {
                         let bound = s.to_string_lossy();
                         let captures = re.captures(&bound);
                         match captures {
-                            None => return Ok(Some(Value::Nil)),
+                            None => {
+                                // CRuby parity: a failed `match`
+                                // wipes the prior match's globals.
+                                self.last_match = None;
+                                return Ok(Some(Value::Nil));
+                            }
                             Some(caps) => {
                                 let whole = caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
                                 let mut group_vals: Vec<Value> = Vec::with_capacity(caps.len().saturating_sub(1));
+                                let mut last_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
                                 for i in 1..caps.len() {
-                                    group_vals.push(match caps.get(i) {
+                                    let m = caps.get(i);
+                                    last_caps.push(m.map(|m| m.as_str().to_string()));
+                                    group_vals.push(match m {
                                         Some(m) => Value::new_str(m.as_str().to_string()),
                                         None => Value::Nil,
                                     });
                                 }
-                                self.maybe_gc();
-                                let caps_arr = self.heap.alloc(HeapObj::Array(group_vals));
-                                let cls_id = self.interner.intern("MatchData");
-                                let cls = match self.classes.get(&cls_id).cloned() {
-                                    Some(c) => c,
-                                    None => return Ok(Some(Value::Nil)),
-                                };
-                                let obj_id = self.heap.alloc(HeapObj::Instance(Instance {
-                                    class: cls,
-                                    ivars: HashMap::new(),
-                                    singleton_class: None,
-                                }));
-                                let whole_ivar = self.interner.intern("@whole");
-                                let caps_ivar = self.interner.intern("@caps");
-                                {
-                                    let inst = self.heap.instance_mut(obj_id);
-                                    inst.ivars.insert(whole_ivar, Value::new_str(whole));
-                                    inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
-                                }
-                                return Ok(Some(Value::Object(obj_id)));
+                                // Side-channel for `$~` and `$1`..`$N`
+                                // (any positive index — multi-digit forms
+                                // like `$10` resolve through `LoadGlobal`).
+                                self.last_match = Some(crate::vm::LastMatch {
+                                    whole: whole.clone(),
+                                    caps: last_caps,
+                                });
+                                return Ok(Some(self.materialize_match_data(whole, group_vals)?));
                             }
                         }
                     }

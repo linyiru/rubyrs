@@ -13,6 +13,6 @@ class Foo                        # ClassNode (supported)
   def bar; end
   alias baz bar                  # AliasMethodNode (× 1)
   def quux
-    $1                           # NumberedReferenceReadNode (× 1)
+    $&                           # BackReferenceReadNode (× 1)
   end
 end

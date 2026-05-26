@@ -428,6 +428,67 @@ impl Vm {
                 // frame's proto filename, which Runtime::eval set
                 // to whatever the host passed).
                 let name = self.interner.resolve(name_id).clone();
+                // `$1`, `$2`, ..., `$10`, `$11`, ... — numbered
+                // capture references, written by ast.rs as
+                // `GVarRead("$N")` (the AST arm for
+                // `NumberedReferenceReadNode`). N-th group from the
+                // most recent successful match, or nil if no match
+                // or the group did not participate. CRuby allows
+                // any positive index (`$10` reads the 10th group),
+                // so accept all digits after `$` rather than just
+                // a single one. `$0` is excluded — it's a separate
+                // global (the script filename) handled below.
+                // Branched out of the `match` below so it can stay
+                // strictly statement-shaped (no allocator call
+                // needed — just clones a String).
+                #[cfg(feature = "regex")]
+                if name.len() >= 2
+                    && name.starts_with('$')
+                    && name.as_bytes()[1] != b'0'
+                    && name.as_bytes()[1..].iter().all(|c| c.is_ascii_digit())
+                {
+                    let n: usize = name[1..].parse().unwrap_or(0);
+                    let v = match &self.last_match {
+                        Some(m) if n >= 1 => match m.caps.get(n - 1) {
+                            Some(Some(cap)) => Value::new_str(cap.clone()),
+                            _ => Value::Nil,
+                        },
+                        _ => Value::Nil,
+                    };
+                    self.stack.push(v);
+                    return Ok(true);
+                }
+                // `$~` — MatchData of the last successful match,
+                // or nil. Materialises a fresh MatchData instance
+                // on each read (same `@whole`/`@caps` shape as
+                // `String#match`'s return value). Branched out so
+                // we can call `maybe_gc` + `check_alloc?` cleanly.
+                #[cfg(feature = "regex")]
+                if &*name == "$~" {
+                    // Borrow first: avoid cloning the whole
+                    // `LastMatch` (Vec + every capture String) just
+                    // to materialise. We only need to clone the
+                    // specific strings we hand to `Value::new_str`.
+                    let v = if self.last_match.is_some() {
+                        // Materialise capture Values up front so the
+                        // immutable borrow of `last_match` is dropped
+                        // before any `&mut self` calls (`maybe_gc`,
+                        // `check_alloc`, `heap.alloc`).
+                        let caps: Vec<Value> = self.last_match.as_ref().unwrap()
+                            .caps.iter()
+                            .map(|c| match c {
+                                Some(s) => Value::new_str(s.clone()),
+                                None => Value::Nil,
+                            })
+                            .collect();
+                        let whole_str = self.last_match.as_ref().unwrap().whole.clone();
+                        self.materialize_match_data(whole_str, caps)?
+                    } else {
+                        Value::Nil
+                    };
+                    self.stack.push(v);
+                    return Ok(true);
+                }
                 let v = match &*name {
                     // ADR 0017 Rule 1: the script never reads the
                     // host process's real PID. `Config::pid = Some(n)`

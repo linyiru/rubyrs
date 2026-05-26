@@ -573,6 +573,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_global_variable_write_node() {
         return sp(node, Expr::GVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
     }
+    // `$1`, `$2`, ..., `$10`, `$11`, ... (Prism's
+    // NumberedReferenceReadNode) — numbered capture references
+    // derived from the last successful regex match. Lowered to
+    // the same `GVarRead("$N")` shape as a regular global read;
+    // the LoadGlobal arm in vm/step.rs parses all trailing digits
+    // and reads from `Vm::last_match.caps[n - 1]`. Without the
+    // `regex` feature, last_match is always None, so these reads
+    // still resolve to nil (no need to AST-reject). Prism's
+    // `number()` returns u32 — multi-digit indices are supported,
+    // matching CRuby.
+    if let Some(n) = node.as_numbered_reference_read_node() {
+        return sp(node, Expr::GVarRead(format!("${}", n.number())));
+    }
     // Bare constant assignment: `FOO = expr` (top level or inside a
     // class/module body). Storage is a separate `Vm.constants` map
     // keyed by SymId — class names continue to live in `Vm.classes`,

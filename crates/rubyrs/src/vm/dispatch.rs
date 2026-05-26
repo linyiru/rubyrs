@@ -1647,7 +1647,27 @@ impl Vm {
                 }
                 #[cfg(feature = "regex")]
                 Value::Regex(re) => match arg {
-                    Value::Str(s) => s.with_str_lossy(|s| re.is_match(s)),
+                    // CRuby: `Regexp#===` (used by `case/when`) sets
+                    // `$~`/`$1`.. on hit and clears them on miss,
+                    // just like `=~`/`String#match`. Switch from
+                    // `is_match` to `captures` so the side-channel
+                    // sees the same view through every entry point.
+                    Value::Str(s) => s.with_str_lossy(|s| match re.captures(s) {
+                        Some(caps) => {
+                            let m0 = caps.get(0).unwrap();
+                            self.last_match = Some(crate::vm::LastMatch {
+                                whole: m0.as_str().to_string(),
+                                caps: (1..caps.len())
+                                    .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                                    .collect(),
+                            });
+                            true
+                        }
+                        None => {
+                            self.last_match = None;
+                            false
+                        }
+                    }),
                     _ => false,
                 },
                 _ => recv.ruby_eq(arg, &self.heap),
@@ -1656,17 +1676,32 @@ impl Vm {
             return Ok(());
         }
         // `=~` — Regex/String matching. Returns the byte offset of
-        // the first match, or nil. CRuby additionally sets `$~`
-        // / `$1` etc. capture variables; we don't model `$~`, so
-        // captures are accessed via `#match` only.
+        // the first match, or nil. On a hit, populate `last_match`
+        // (with captures) so `$~` and `$1`..`$N` (any positive
+        // index — multi-digit forms like `$10` work too) see the
+        // same match; on a miss, clear it (CRuby parity — a failed
+        // `=~` wipes the prior match's globals).
         if &*name == "=~" && args.len() == 1 {
             let result = match (&recv, &args[0]) {
                 #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
                     let bound = s.to_string_lossy();
-                    match re.find(&bound) {
-                        Some(m) => Value::Int(m.start() as i64),
-                        None => Value::Nil,
+                    match re.captures(&bound) {
+                        Some(caps) => {
+                            let m0 = caps.get(0).unwrap();
+                            let start = m0.start() as i64;
+                            self.last_match = Some(crate::vm::LastMatch {
+                                whole: m0.as_str().to_string(),
+                                caps: (1..caps.len())
+                                    .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                                    .collect(),
+                            });
+                            Value::Int(start)
+                        }
+                        None => {
+                            self.last_match = None;
+                            Value::Nil
+                        }
                     }
                 }
                 _ => Value::Nil,
