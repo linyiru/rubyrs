@@ -12,6 +12,7 @@
     "@cloudflare/workers-wasi": "^0.0.5"
   },
   "devDependencies": {
+    "workerd": "^1.20260526.1",
     "wrangler": "^3.0.0"
   }
 }

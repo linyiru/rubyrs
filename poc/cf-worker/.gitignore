@@ -1,3 +1,4 @@
 node_modules/
 .wrangler/
-wasm/*.wasm
+src/*.wasm
+workerd/dist/

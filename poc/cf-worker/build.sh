@@ -43,24 +43,76 @@ cargo build --release --target wasm32-wasip1 \
     --bin wasm_worker -p rubyrs --no-default-features
 
 RAW="$WORKSPACE_ROOT/target/wasm32-wasip1/release/wasm_worker.wasm"
-OUT_DIR="$SCRIPT_DIR/wasm"
+# Final artifact lands NEXT TO src/worker.js so both wrangler and
+# workerd can resolve `import "./rubyrs_worker.wasm"`. A historical
+# poc/cf-worker/wasm/ location worked for wrangler (default
+# CompiledWasm glob walks the project) but not for workerd, which
+# rejects `..`-containing module specifiers. Co-locating is the
+# minimum-friction shape that satisfies both runtimes.
+OUT_DIR="$SCRIPT_DIR/src"
 mkdir -p "$OUT_DIR"
 OUT="$OUT_DIR/rubyrs_worker.wasm"
+
+# Optional wasm-opt pass. Pick the level via `WASM_OPT_LEVEL`:
+#   skip     → no wasm-opt (default — see note below)
+#   -O2      → balanced speed/size
+#   -O3      → aggressive speed
+#   -Oz      → aggressive size
+#
+# Why default = skip: rubyrs PoC measurement found that `-Oz` on
+# the wasm32-wasip1 binary improves *workerd local* cold-start
+# (57→27 ms with wizer) but REGRESSES V8 execution perf on
+# Cloudflare Workers' edge (heavy loop 173 ms → 416 ms,
+# `puts 1+1` 8 ms → 60 ms). Working hypothesis: `-Oz`'s
+# aggressive size shrinks (function-deduplication, inlining
+# inhibition, instruction substitution) break V8's wasm
+# tier-up heuristics. Until that's debugged the conservative
+# default is no opt; the env var lets benchmarks opt in.
+#
+# Order: wasm-opt FIRST, then wizer. wasm-opt restructures code
+# (function indices, instruction layout); wizer snapshots linear
+# memory at init time AFTER seeing the final code shape, so
+# running it the other way around would have wasm-opt
+# invalidate the snapshot's function-index references.
+WIZER_IN="$RAW"
+WASM_OPT_LEVEL="${WASM_OPT_LEVEL:-skip}"
+if [ "$WASM_OPT_LEVEL" = "skip" ]; then
+    echo "[build.sh] wasm-opt skipped (WASM_OPT_LEVEL=skip)"
+elif command -v wasm-opt >/dev/null 2>&1; then
+    OPT="$WORKSPACE_ROOT/target/wasm32-wasip1/release/wasm_worker.opt.wasm"
+    echo "[build.sh] wasm-opt $WASM_OPT_LEVEL"
+    wasm-opt "$WASM_OPT_LEVEL" --enable-bulk-memory "$RAW" -o "$OPT"
+    WIZER_IN="$OPT"
+    echo "[build.sh]   $(wc -c < "$RAW") → $(wc -c < "$OPT") bytes"
+else
+    echo "[build.sh] wasm-opt not on PATH — skipping size pass (\`brew install binaryen\`)"
+fi
 
 if command -v wizer >/dev/null 2>&1; then
     # Wizer needs --allow-wasi --wasm-bulk-memory + the binary's
     # `wizer.initialize` export (lib.rs exports this). Skip if the
     # export is absent so we don't fail on bins without it.
-    if wasm-objdump -x "$RAW" 2>/dev/null | grep -q "wizer.initialize"; then
+    #
+    # Stage the objdump output to a tempfile rather than piping
+    # straight into `grep -q`. `grep -q` closes its stdin after
+    # the first match, which sends SIGPIPE upstream — under
+    # `set -o pipefail` (which we want everywhere else in this
+    # script) that turns the successful detection into a
+    # failure-coded pipe, and we'd silently fall through to the
+    # "wizer skipped" branch even when the export is present.
+    DUMP="$(mktemp -t rubyrs-wasm-dump.XXXXXX)"
+    trap 'rm -f "$DUMP"' EXIT
+    wasm-objdump -x "$WIZER_IN" > "$DUMP" 2>/dev/null || true
+    if grep -q "wizer.initialize" "$DUMP"; then
         echo "[build.sh] wizer pre-init pass"
-        wizer --allow-wasi --wasm-bulk-memory "$RAW" -o "$OUT"
+        wizer --allow-wasi --wasm-bulk-memory true "$WIZER_IN" -o "$OUT"
     else
         echo "[build.sh] wizer skipped (no wizer.initialize export in this bin)"
-        cp "$RAW" "$OUT"
+        cp "$WIZER_IN" "$OUT"
     fi
 else
     echo "[build.sh] wizer not on PATH — skipping pre-init pass (\`cargo install wizer-cli\`)"
-    cp "$RAW" "$OUT"
+    cp "$WIZER_IN" "$OUT"
 fi
 
 echo "[build.sh] $OUT ($(wc -c < "$OUT") bytes)"

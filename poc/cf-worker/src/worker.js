@@ -17,10 +17,36 @@
 //   - @cloudflare/workers-wasi: https://github.com/cloudflare/workers-wasi
 //   - WASM module bindings:    https://developers.cloudflare.com/workers/runtime-apis/webassembly/
 import { WASI } from "@cloudflare/workers-wasi";
-import wasmModule from "../wasm/rubyrs_worker.wasm";
+// Module specifier resolved by:
+//   - wrangler: walks `./` from worker.js's location (src/) at
+//               bundle time, so the wasm must sit alongside this
+//               file in src/. build.sh copies it there.
+//   - workerd:  capnp `modules` entry uses the same `./` name
+//               verbatim. workerd accepts `./` (same-directory
+//               relative) but rejects `..` (breakout) and bare
+//               specifiers (wrangler resolves those via the
+//               default CompiledWasm rule that workerd doesn't
+//               replicate).
+import wasmModule from "./rubyrs_worker.wasm";
+
+// Per-isolate hit counter used to distinguish "first request after
+// V8 isolate spawn" (cold) from subsequent reuses (warm). The
+// distinction is invisible from outside — Cloudflare's edge
+// load-balances opaquely across isolates and the public docs only
+// give a blended mean cold-start. Burying a counter in module
+// scope is the lightest-touch way to recover the partition: this
+// variable is initialised exactly once per V8 isolate (when
+// workerd first instantiates the JS module) and lives until that
+// isolate is evicted. Wrap the response with the counter via the
+// `x-rubyrs-invocation` header so the measurement harness can
+// bucket requests as invocation==1 vs >1.
+let isolateInvocations = 0;
 
 export default {
   async fetch(request) {
+    isolateInvocations += 1;
+    const invocation = isolateInvocations;
+
     if (request.method !== "POST") {
       return new Response(
         "POST Ruby source as the request body (text/plain).",
@@ -61,15 +87,19 @@ export default {
     const stdout = stdoutChunks.map((c) => decoder.decode(c)).join("");
     const stderr = stderrChunks.map((c) => decoder.decode(c)).join("");
 
+    // Attach the per-isolate invocation count to every response so
+    // the harness can bucket cold (1) vs warm (>1) without needing
+    // wrangler tail. Header is safe for both 200 and 500 paths.
+    const headers = {
+      "content-type": "text/plain",
+      "x-rubyrs-invocation": String(invocation),
+    };
     if (exitCode && exitCode !== 0) {
       return new Response(
         `rubyrs exited ${exitCode}\n\n${stderr || stdout}`,
-        { status: 500, headers: { "content-type": "text/plain" } },
+        { status: 500, headers },
       );
     }
-    return new Response(stdout, {
-      status: 200,
-      headers: { "content-type": "text/plain" },
-    });
+    return new Response(stdout, { status: 200, headers });
   },
 };
