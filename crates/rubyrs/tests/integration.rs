@@ -85,6 +85,51 @@ fn run_error_fixture(name: &str) {
 #[test] fn symbol_interp() { run_fixture("symbol_interp"); }
 #[test] fn gc_block() { run_fixture("gc_block"); }
 
+/// Malformed `RUBYRS_*` env-var values must trigger a stderr
+/// warning AND still let the script run with the default cap
+/// applied. Previously the parse failure was swallowed silently
+/// (`.and_then(|s| s.parse().ok())`), so a typo like
+/// `RUBYRS_MAX_FRAMES=oops` ran with the default cap and gave no
+/// hint that the env var had been ignored.
+#[test]
+fn env_cap_typo_warns_on_stderr() {
+    use std::fs;
+    let tmp = manifest_dir().join("target/_env_cap_test.rb");
+    fs::create_dir_all(tmp.parent().unwrap()).unwrap();
+    fs::write(&tmp, "puts \"ok\"\n").unwrap();
+
+    let out = Command::new(rubyrs_bin())
+        .env("RUBYRS_MAX_FRAMES", "oops")
+        .arg(&tmp)
+        .output()
+        .expect("failed to execute rubyrs");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "rubyrs exited non-zero; stderr:\n{}", stderr);
+    assert_eq!(stdout, "ok\n", "script body still ran with default cap");
+    assert!(
+        stderr.contains("RUBYRS_MAX_FRAMES")
+            && stderr.contains("oops")
+            && stderr.contains("warning"),
+        "expected typo warning in stderr; got:\n{}",
+        stderr
+    );
+
+    // A correctly-formed value must NOT warn.
+    let out_good = Command::new(rubyrs_bin())
+        .env("RUBYRS_MAX_FRAMES", "256")
+        .arg(&tmp)
+        .output()
+        .expect("failed to execute rubyrs");
+    let stderr_good = String::from_utf8_lossy(&out_good.stderr);
+    assert!(
+        !stderr_good.contains("warning"),
+        "well-formed value should not warn; got stderr:\n{}",
+        stderr_good
+    );
+}
+
 #[test] fn err_nomethod() { run_error_fixture("nomethod"); }
 #[test] fn err_wrong_args() { run_error_fixture("wrong_args"); }
 #[test] fn err_yield_no_block() { run_error_fixture("yield_no_block"); }

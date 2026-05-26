@@ -112,6 +112,38 @@ fn collect_wasi_env() -> Option<Vec<(String, String)>> {
     Some(out)
 }
 
+/// Parse a numeric env-var value, warning on stderr and
+/// returning `None` if the value is present-but-malformed.
+///
+/// Previously every `RUBYRS_*` cap used
+/// `env_lookup("X").and_then(|s| s.parse().ok())`, which
+/// silently dropped typos: `RUBYRS_MAX_FRAMES=oops rubyrs
+/// script.rb` ran with the default cap and gave no hint that
+/// the env var had been ignored. The user got a useless
+/// out-of-frames trap minutes later under load, or — worse —
+/// thought their cap was active.
+///
+/// Mirrors CRuby's `RUBYOPT` / `--enable-frozen-string-literal`
+/// stance: refuse to keep going *silently* when an explicit
+/// runtime knob is malformed; print one line and continue with
+/// the default, so the script still runs but the operator sees
+/// the warning in their CI / shell history.
+fn parse_env_cap<T: std::str::FromStr>(key: &str, raw: Option<&str>) -> Option<T> {
+    let s = raw?;
+    match s.parse::<T>() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            eprintln!(
+                "rubyrs: warning: invalid value for {}={:?}, ignoring (expected {})",
+                key,
+                s,
+                std::any::type_name::<T>(),
+            );
+            None
+        }
+    }
+}
+
 fn main() {
     let trace = Trace::new();
     trace.at("entry");
@@ -159,14 +191,13 @@ fn main() {
     // ENV, `$$ == 0`, and a silent stdout until they opt in.
     let cfg = Config {
         stress_gc: env_lookup("STRESS_GC").is_some(),
-        fuel: env_lookup("RUBYRS_FUEL").and_then(|s| s.parse().ok()),
-        max_heap_objects: env_lookup("RUBYRS_MAX_OBJECTS").and_then(|s| s.parse().ok()),
-        max_frames: env_lookup("RUBYRS_MAX_FRAMES").and_then(|s| s.parse().ok()),
-        deadline: env_lookup("RUBYRS_DEADLINE_MS")
-            .and_then(|s| s.parse::<u64>().ok())
+        fuel: parse_env_cap("RUBYRS_FUEL", env_lookup("RUBYRS_FUEL")),
+        max_heap_objects: parse_env_cap("RUBYRS_MAX_OBJECTS", env_lookup("RUBYRS_MAX_OBJECTS")),
+        max_frames: parse_env_cap("RUBYRS_MAX_FRAMES", env_lookup("RUBYRS_MAX_FRAMES")),
+        deadline: parse_env_cap::<u64>("RUBYRS_DEADLINE_MS", env_lookup("RUBYRS_DEADLINE_MS"))
             .map(std::time::Duration::from_millis),
-        max_symbols: env_lookup("RUBYRS_MAX_SYMBOLS").and_then(|s| s.parse().ok()),
-        max_value_bytes: env_lookup("RUBYRS_MAX_VALUE_BYTES").and_then(|s| s.parse().ok()),
+        max_symbols: parse_env_cap("RUBYRS_MAX_SYMBOLS", env_lookup("RUBYRS_MAX_SYMBOLS")),
+        max_value_bytes: parse_env_cap("RUBYRS_MAX_VALUE_BYTES", env_lookup("RUBYRS_MAX_VALUE_BYTES")),
         env: Some(host_env.iter().cloned().collect()),
         // `std::process::id()` panics on wasm32-wasip1 (wasi has no
         // process-ID concept). The runtime treats `pid: None` as
