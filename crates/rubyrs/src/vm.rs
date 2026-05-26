@@ -914,17 +914,17 @@ impl Vm {
         // &mut self calls (`trap`, `bigint_to_value`) are free to
         // re-borrow. The full base is re-borrowed only at the
         // single `pow` site below.
-        let (base_sign, base_bits, base_is_pow2) = {
+        let (base_sign, base_bits) = {
             let base_cow = match self.as_bigint_ref(recv) {
                 Some(v) => v,
                 None => return Ok(None),
             };
-            // count_ones == 1 ⇔ |base| is exactly a power of two.
-            // Used below for a tighter DoS estimator on the
-            // canonical `2 ** n` shape.
-            let is_pow2 = base_cow.magnitude().count_ones() == 1;
-            (base_cow.sign(), base_cow.bits(), is_pow2)
+            (base_cow.sign(), base_cow.bits())
         };
+        // `base_is_pow2` is only consulted by the positive-exp
+        // DoS estimator below. Defer the O(n) `count_ones()` scan
+        // until we know we're in that branch so Float / negative-
+        // exp / short-circuit paths don't pay for it.
         // Compute parity / sign / zero of the exponent up front so
         // every branch below dispatches on one vocabulary.
         let (exp_is_negative, exp_is_zero, exp_is_odd, exp_is_float) = match exp_arg {
@@ -1060,6 +1060,17 @@ impl Vm {
         // upper bound (log2(base) < base_bits for any base).
         // Ceil-div in u64; compare against `cap as u64` so the
         // check doesn't silently truncate on 32-bit targets.
+        // Compute power-of-two flag lazily here — earlier paths
+        // (Float exp, negative exp, |base|≤1 short-circuit) all
+        // return before reaching the estimator, so they avoid
+        // the O(n) `count_ones()` scan over the BigInt magnitude.
+        let base_is_pow2 = {
+            let base_cow = match self.as_bigint_ref(recv) {
+                Some(v) => v,
+                None => unreachable!("recv shape validated at fn entry"),
+            };
+            base_cow.magnitude().count_ones() == 1
+        };
         let est_bits: u64 = if base_is_pow2 {
             (base_bits.saturating_sub(1))
                 .saturating_mul(exp_u32 as u64)

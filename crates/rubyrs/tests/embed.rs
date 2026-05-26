@@ -2026,7 +2026,7 @@ fn bigint_pow_int_receiver_negative_bigint_exponent_returns_float() {
     // `recv OR exp is BigInt`, dispatch produces a Float
     // (which underflows toward 0 for |base|>1 since the BigInt
     // exponent is past f64 range — the helper coerces it to
-    // -Inf, and `2 ^ -Inf` = 0.0).
+    // -Inf, and `2 ** -Inf` = 0.0).
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
