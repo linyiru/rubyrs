@@ -115,3 +115,24 @@ end
 # `TIdem.tag` should still resolve via Outer's include chain
 # to Inner#tag.
 puts TIdem.tag                   # "inner" (Outer's include of Inner is walked)
+
+# Cross-class idempotency — a subclass explicitly re-prepending
+# a wrapper its superclass already installed should be a no-op
+# (not reorder or duplicate). Without walking the superclass
+# chain in the dedup check, the `prepend Wrap` below would
+# silently shadow Super's existing Wrap and corrupt resolution
+# (though the visible output is the same here because Wrap is
+# the only wrapper — the property locked by this assertion is
+# that the dedup walk reaches Super.singleton_prepends).
+class IdemSuper
+  def self.greet; "super.greet"; end
+  class << self
+    prepend Wrap
+  end
+end
+class IdemSub < IdemSuper
+  class << self
+    prepend Wrap                # already in Super's singleton chain — no-op
+  end
+end
+puts IdemSub.greet               # "intercepted-super.greet"

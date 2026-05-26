@@ -206,9 +206,12 @@ pub(crate) enum Op {
     /// but targets the singleton chain. Emitted only by the
     /// AST translation of `class << self; prepend Mod; end`.
     /// CRuby semantics: the prepended module's instance methods
-    /// take precedence over the class's own singleton methods —
-    /// `Object#singleton_method_or_via_prepend` is the
-    /// lookup story, implemented in `lookup_class_singleton_method`.
+    /// take precedence over the class's own singleton methods.
+    /// Lookup story implemented in
+    /// `lookup_class_singleton_method` — walks
+    /// `singleton_prepends` (transitive, with cycle defensiveness)
+    /// before the class's own `singleton_methods` at each
+    /// superclass level.
     SingletonChainPrepend,
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured

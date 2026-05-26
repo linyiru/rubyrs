@@ -458,13 +458,18 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     }
 }
 
-/// `target` is reachable via `cls`'s singleton-class chain — used
-/// to dedupe `class << self; prepend Mod; end` against modules
-/// already reachable transitively (e.g. one of the existing
-/// `singleton_prepends` itself includes/prepends `target`).
-/// CRuby's `prepend` is a no-op when the arg is already in the
-/// ancestor chain; without this check, a later `prepend M` would
-/// silently reorder the chain.
+/// `target` is reachable via `cls`'s singleton-class ancestor
+/// chain. Walks the superclass chain (each class's
+/// `singleton_prepends`) and recurses through each prepended
+/// module's own prepends/includes — so `class Sub < Super` sees
+/// `Super`'s singleton-prepends too. Used to dedupe
+/// `class << self; prepend Mod; end` against modules already
+/// reachable transitively.
+///
+/// CRuby's `prepend` is a no-op when the arg is anywhere in the
+/// ancestor chain; without the superclass walk, a subclass
+/// redundantly `prepend`-ing a parent-installed wrapper would
+/// reorder the chain.
 pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> bool {
     fn walks_through(
         node: &Rc<Class>,
@@ -481,11 +486,25 @@ pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> b
         }
         false
     }
-    let mut visited = std::collections::HashSet::new();
-    for pre in cls.singleton_prepends.borrow().iter() {
-        if walks_through(pre, target, &mut visited) { return true; }
+    // Two visited sets — same shape as the other ancestor walkers.
+    // `sc_visited` bails on superclass cycles; `inc_visited` is
+    // shared across the whole walk (full-chain dedup, same
+    // reasoning as `super_lookup` — a module reachable through
+    // multiple superclass levels needs to count as present once).
+    let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut current = cls.clone();
+    loop {
+        if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
+        for pre in current.singleton_prepends.borrow().iter() {
+            if walks_through(pre, target, &mut inc_visited) { return true; }
+        }
+        let parent = current.superclass.borrow().clone();
+        match parent {
+            Some(p) => current = p,
+            None => return false,
+        }
     }
-    false
 }
 
 /// Flatten a class's ancestor chain into a Vec in CRuby
