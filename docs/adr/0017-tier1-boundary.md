@@ -64,9 +64,10 @@ all four is in. Anything that fails any one is outside.
    *what* to write, never *where*; the where is the host's
    capability decision.
 
-   See "Current deviations" below — Tier 1 is the target state
-   and a small number of code paths (notably `ENV` reading the
-   host process via `std::env::vars()`) still need gating.
+   See "Closed deviations" below for the history of the small
+   number of code paths that previously violated this rule (now
+   all gated; the CLI binary is the worked example of an
+   explicit "host process is the sink" choice).
 
 3. **No regex.**
    `/pattern/` literals and the Regexp class move to Tier 2 (a
@@ -133,23 +134,26 @@ scope for rubyrs."
 | Bundler / RubyGems / Gemfile resolution | 4 (out-of-tree; this is `rubund`'s job) | Not interpreter scope. |
 | Rails, ActiveRecord, ActionPack | 4 (multi-year bet) | Roadmap-level; not a tier-1 commitment. |
 
-## Current deviations (target vs reality)
+## Closed deviations (historical record)
 
-This ADR specifies the *target* Tier-1 shape. As of writing
-(2026-05), a small number of code paths violate it and need
-follow-up gating PRs before the spec is fully enforced. Listing
-them explicitly so future contributors don't read the rules and
-assume the code already matches.
+This ADR specifies the *target* Tier-1 shape. The deviations
+listed at writing time (2026-05) have all been closed — the
+table below is kept as a record of what was fixed and where so
+future contributors can trace the rationale without re-deriving
+it. New deviations get added here as they are discovered; an
+"Open" status value is the signal that work is still pending.
 
-| Deviation | Verified at | Rule violated | Planned remediation |
-|-----------|-------------|---------------|---------------------|
-| `Kernel#puts` / `p` / `pp` / `print` write to `std::io::stdout()` by default when `Runtime::set_stdout` is not called | `crates/rubyrs/src/vm.rs:375` (`Vm::new` initialises `stdout: Box::new(std::io::stdout())`; consumed at the `write!`/`writeln!` sites in `crates/rubyrs/src/vm/kernel.rs`) | Rule 2 (host should control the sink) | Default stdout sink switches to a guarded one that requires `set_stdout` to be called; or document the default as part of the supported tier-1 capability surface. PR-shaped. |
-| `ENV` reading populates from `std::env::vars()` of the host process | `crates/rubyrs/src/vm/step.rs:342` (the `LoadConst("ENV")` arm) | Rules 1 + 2 (non-deterministic + capability leak) | New `Config::env: Option<HashMap<String, String>>` field; default `None` means script sees empty `ENV`; host explicitly injects the map. PR-shaped. |
-| `$$` global reads the host process's PID via `std::process::id()` | `crates/rubyrs/src/vm/step.rs:365` (the `LoadGlobal("$$")` arm) | Rule 1 (script-visible non-deterministic value) | Same shape as `ENV`: gate behind a `Config::pid` (host-injected) or simply make `$$` return a fixed sentinel in Tier 1 builds. PR-shaped. |
-| `Regexp` / `/pattern/` literals + `String#match` / `String#=~` are in Tier 1 today | `crates/rubyrs/src/value.rs` (`Value::Regex`), `crates/rubyrs/src/ast.rs` (`Expr::RegexLit`) | Rule 3 | Future `regex` Cargo feature (see PoC #2 — to be opened after this ADR merges). |
+| Deviation | Verified at | Rule violated | Status |
+|-----------|-------------|---------------|--------|
+| `Regexp` / `/pattern/` literals + `String#match` / `String#=~` were in Tier 1 | (was) `crates/rubyrs/src/value.rs` (`Value::Regex`), `crates/rubyrs/src/ast.rs` (`Expr::RegexLit`) | Rule 3 | **Closed (PR #86)**: `regex` Cargo feature gates the full chain (`Value::Regex`, `Op::LoadRegex`, `Expr::RegexLit`, `Vm::regex_cache`, and 11 dispatch arms). AST translation now emits a clear "rebuild with `--features regex`" trap. |
+| `Kernel#puts` / `p` / `pp` / `print` wrote to `std::io::stdout()` by default | (was) `crates/rubyrs/src/vm.rs:375` (`Vm::new` initialised `stdout: Box::new(std::io::stdout())`) | Rule 2 | **Closed (PR #88)**: `Vm::new` defaults to `std::io::sink()`. The CLI binary `rubyrs` calls `set_stdout(Box::new(std::io::stdout()))` explicitly so `rubyrs script.rb` keeps its CRuby-parity output; embed library users get the silent default until they opt in. |
+| `ENV` reading populated from `std::env::vars()` of the host process | (was) `crates/rubyrs/src/vm/step.rs:342` (the `LoadConst("ENV")` arm) | Rules 1 + 2 | **Closed (PR #88)**: `Config::env: Option<HashMap<String, String>>` injects an explicit map. `None` (default) → script sees empty ENV; `Some(m)` → script sees `m` only. CLI binary fills from `std::env::vars()`. |
+| `$$` global read the host process's PID via `std::process::id()` | (was) `crates/rubyrs/src/vm/step.rs:365` (the `LoadGlobal("$$")` arm) | Rule 1 | **Closed (PR #88)**: `Config::pid: Option<NonZeroU32>` injects an explicit PID. `None` (default) → `$$` returns `0` sentinel; `Some(n)` → returns `n`. CLI binary fills from `std::process::id()`. |
 
-Each deviation is its own small PR — none block this ADR from
-landing, but they are the work this spec lines up.
+The remediations landed in PR #86 (regex) and PR #88 (the three
+host-capability rows); both are linked in the Status column of
+the table above. New deviations get added here as they are
+discovered.
 
 ### Future risks (when implemented)
 
@@ -173,17 +177,17 @@ would import the rule violation along with the feature.
   tomorrow: Rails-capable bet" framing has architectural backing:
   Tier 1 is the today-shippable surface, the outer tiers stay
   honest about their bet-vs-promise status.
-- **Sandbox story is consistent (after the deviations land,
-  and after Tier-2/3 features exist to opt out of).** Hosts
-  running untrusted scripts get the documented guarantee: build
-  with `--no-default-features` (which today only opts out of
-  `cext`; future tier features will be additive options that
-  enable the larger surfaces), and every OS-touching capability
-  is in their hands. See the "Current deviations" table —
-  until those PRs ship, Tier 1 builds still default-leak
-  `stdout`, `ENV`, and `$$` to the host process. The spec is
-  the contract the deviations PRs (and the later Tier-2/3
-  feature PRs) are closing toward.
+- **Sandbox story is consistent at the library/embed layer.**
+  Library hosts running untrusted scripts construct a `Runtime`
+  with `Config::default()` — sink stdout, empty `ENV`, `$$ = 0`
+  — and explicitly inject any capability they want exposed via
+  `Config::env` / `Config::pid` / `Runtime::set_stdout`. The
+  CLI binary `rubyrs` is the worked example of an explicit
+  "host process is the sink" choice. Cargo-feature opt-outs
+  (today `cext` and `regex`; future tier features will be
+  additive) drop deeper surfaces. See the "Closed deviations"
+  table for the four leaks the previous Tier-1 implementation
+  had and how each one was closed.
 - **Reviewer + contributor checklist.** "Is this PR adding a
   syscall to Tier 1?" becomes a literal text-search check on the
   cfg gates.

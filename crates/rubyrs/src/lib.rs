@@ -6,6 +6,12 @@
 //! use rubyrs::{Runtime, Value};
 //!
 //! let mut rt = Runtime::new();
+//! // Per ADR 0017, `Runtime::new()` defaults its stdout sink to
+//! // `std::io::sink()`. Wire it up to wherever the host wants
+//! // script output to land before evaluating anything — the CLI
+//! // binary uses process stdout; library embedders typically
+//! // capture into a buffer.
+//! rt.set_stdout(Box::new(std::io::stdout()));
 //! rt.eval(r#"puts "hello, world""#, "inline").unwrap();
 //!
 //! // Register a host function callable from Ruby:
@@ -382,6 +388,19 @@ include!(concat!(env!("OUT_DIR"), "/prism_node_sets.rs"));
 
 /// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
 /// untrusted scripts.
+///
+/// **Construction**: use `Config::default()` with field-update syntax:
+/// ```no_run
+/// let _cfg = rubyrs::Config { fuel: Some(1_000_000), ..Default::default() };
+/// ```
+///
+/// Adding new fields is still source-breaking for downstream
+/// embedders using full struct literals. The fix is a dedicated
+/// builder API (`Config::builder().fuel(n).env(map).build()`)
+/// rather than `#[non_exhaustive]`, which forbids struct
+/// expressions cross-crate entirely and would have a much larger
+/// migration footprint here. Tracked as follow-up; see PR #88
+/// thread for the analysis.
 #[derive(Default)]
 pub struct Config {
     /// When true, every potential GC point triggers a full collection.
@@ -430,6 +449,40 @@ pub struct Config {
     /// reuse a Runtime across many short evaluations without each
     /// one inheriting the previous timer.
     pub deadline: Option<std::time::Duration>,
+    /// Host-injected ENV map. Closes the ADR 0017 deviation: with
+    /// the previous default, `LoadConst("ENV")` populated a Hash
+    /// from `std::env::vars()` of the host process — script-visible
+    /// non-deterministic value and a capability leak from the host's
+    /// environment into untrusted scripts.
+    ///
+    /// `None` (default) means the script sees an empty `ENV` Hash.
+    /// `Some(map)` means script-visible `ENV[k]` resolves against
+    /// `map` only. The host explicitly chooses what to expose; the
+    /// script never reads the host process directly.
+    ///
+    /// The CLI binary `rubyrs` sets this from `std::env::vars()` so
+    /// `rubyrs script.rb` behaves like CRuby; library/embed users
+    /// must opt in explicitly.
+    pub env: Option<std::collections::HashMap<String, String>>,
+    /// Host-injected PID for the `$$` global. Closes the ADR 0017
+    /// deviation: with the previous default, `$$` returned the host
+    /// process's PID via `std::process::id()` — script-visible
+    /// non-deterministic value.
+    ///
+    /// `None` (default) means `$$` returns `0` as a sentinel
+    /// (CRuby's `$$` is documented to always be a positive Integer;
+    /// `0` is a sentinel that won't collide with any real PID).
+    /// `Some(n)` means `$$` returns `n`.
+    ///
+    /// Typed as `Option<NonZeroU32>` to match `std::process::id()`'s
+    /// return type and enforce the "positive PID" contract at the
+    /// type level — `0` is reserved for the default sentinel and
+    /// negatives are impossible by construction (Copilot review PR #88).
+    ///
+    /// The CLI binary `rubyrs` sets this from `std::process::id()`
+    /// so `rubyrs script.rb` behaves like CRuby; embed users that
+    /// want the host PID exposed must opt in.
+    pub pid: Option<std::num::NonZeroU32>,
 }
 
 /// Read-only handle into the runtime's heap, passed to closures
@@ -538,6 +591,8 @@ impl Runtime {
         vm.heap.max_live = cfg.max_heap_objects;
         vm.max_symbols = cfg.max_symbols;
         vm.max_value_bytes = cfg.max_value_bytes;
+        vm.env_override = cfg.env;
+        vm.pid = cfg.pid.map(|n| n.get() as i64);
         let mut rt = Runtime {
             vm,
             deadline: cfg.deadline,
@@ -819,9 +874,16 @@ end
             .expect("ICE: failed to load built-in exception preamble");
     }
 
-    /// Replace the runtime's stdout sink. Lets a host capture `puts` /
-    /// `print` output (e.g. into a `Vec<u8>` buffer) instead of having
-    /// it go to the process stdout.
+    /// Replace the runtime's stdout sink.
+    ///
+    /// **Per ADR 0017 the default sink is `std::io::sink()`**, not
+    /// process stdout — `Runtime::new()` is silent until the host
+    /// calls this method to wire up where script output should go.
+    /// The CLI binary `rubyrs` (in `crates/rubyrs/src/main.rs`) wires
+    /// it to `std::io::stdout()`, which is why `rubyrs script.rb`
+    /// behaves like CRuby; library embedders choose their own sink
+    /// (`Vec<u8>` buffer, `tempfile::NamedTempFile`, a process pipe,
+    /// `std::io::sink()` itself when output should be discarded).
     pub fn set_stdout(&mut self, w: Box<dyn Write>) {
         self.vm.stdout = w;
     }

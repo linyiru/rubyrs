@@ -311,8 +311,22 @@ pub(crate) struct Vm {
     /// Lazily-built ENV Hash, shared across every `ENV`
     /// reference. Set on first `LoadConst("ENV")` and reused
     /// thereafter so script code observes a single mutable
-    /// snapshot of the process env.
+    /// snapshot of the env map the host provided via
+    /// `Config::env`. With `Config::env = None`, the lazy build
+    /// produces an empty Hash.
     pub(crate) env_hash: Option<ObjId>,
+    /// Host-injected ENV map (from `Config::env`). `None` means
+    /// "expose an empty ENV Hash" — the script's `ENV[k]` reads
+    /// see no host process env vars. ADR 0017 Rule 1+2 closure
+    /// for the previous `std::env::vars()` deviation. CLI binary
+    /// fills this from `std::env::vars()` to preserve `rubyrs
+    /// script.rb` ergonomics.
+    pub(crate) env_override: Option<HashMap<String, String>>,
+    /// Host-injected PID exposed to scripts via `$$` (from
+    /// `Config::pid`). `None` means `$$` returns `0` (sentinel).
+    /// ADR 0017 Rule 1 closure for the previous
+    /// `std::process::id()` deviation.
+    pub(crate) pid: Option<i64>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -435,11 +449,18 @@ impl Vm {
             #[cfg(feature = "regex")]
             regex_cache: HashMap::new(),
             env_hash: None,
+            env_override: None,
+            pid: None,
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),
             pinned: Vec::new(),
-            stdout: Box::new(std::io::stdout()),
+            // ADR 0017 Rule 2 closure: default sink is silent
+            // (`std::io::sink()`); hosts that want script output
+            // routed somewhere call `Runtime::set_stdout` explicitly.
+            // The CLI binary `rubyrs` wires it to process stdout in
+            // `main.rs` so `rubyrs script.rb` behaves like CRuby.
+            stdout: Box::new(std::io::sink()),
             stress_gc: env::var("STRESS_GC").is_ok(),
             fuel: None,
             max_frames: None,

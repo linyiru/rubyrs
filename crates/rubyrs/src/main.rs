@@ -21,6 +21,12 @@ fn main() {
     }
     let path = Path::new(&args[1]);
 
+    // The CLI binary IS the host, and it chooses to wire every
+    // ADR-0017-style capability (env, pid, stdout) through to the
+    // real host process so `rubyrs script.rb` behaves like CRuby.
+    // Library/embed users that construct a `Runtime` directly do
+    // NOT inherit these defaults — they get sandbox-friendly empty
+    // ENV, `$$ == 0`, and a silent stdout until they opt in.
     let cfg = Config {
         stress_gc: env::var("STRESS_GC").is_ok(),
         fuel: env::var("RUBYRS_FUEL").ok().and_then(|s| s.parse().ok()),
@@ -31,9 +37,12 @@ fn main() {
             .map(std::time::Duration::from_millis),
         max_symbols: env::var("RUBYRS_MAX_SYMBOLS").ok().and_then(|s| s.parse().ok()),
         max_value_bytes: env::var("RUBYRS_MAX_VALUE_BYTES").ok().and_then(|s| s.parse().ok()),
+        env: Some(env::vars().collect()),
+        pid: std::num::NonZeroU32::new(process::id()),
     };
 
     let mut rt = Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(std::io::stdout()));
     match rt.eval_file(path) {
         Ok(_) => {}
         Err(trap) => {
