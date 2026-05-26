@@ -19,6 +19,7 @@ AndNode
 ArrayNode
 AssocSplatNode
 AssocNode
+BackReferenceReadNode
 BeginNode
 BlockArgumentNode
 BlockNode
@@ -85,7 +86,6 @@ MultiTargetNode
 MultiWriteNode
 NextNode
 NilNode
-BackReferenceReadNode
 NumberedReferenceReadNode
 OptionalKeywordParameterNode
 OptionalParameterNode

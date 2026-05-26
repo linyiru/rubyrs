@@ -667,6 +667,7 @@ impl Vm {
                                         None => Value::Nil,
                                     });
                                 }
+                                drop(caps);
                                 // Side-channel for `$~` / `$1`..`$N`
                                 // (numbered) AND `$&` / `$+` / `` $` ``
                                 // / `$'` (BackReferenceReadNode) — the
@@ -676,7 +677,7 @@ impl Vm {
                                 self.last_match = Some(crate::vm::LastMatch {
                                     whole: whole.clone(),
                                     caps: last_caps,
-                                    input: bound.to_string(),
+                                    input: bound,
                                     m_start,
                                     m_end,
                                 });

@@ -2613,25 +2613,32 @@ impl Vm {
                     // just like `=~`/`String#match`. Switch from
                     // `is_match` to `captures` so the side-channel
                     // sees the same view through every entry point.
-                    Value::Str(s) => s.with_str_lossy(|input| match re.captures(input) {
-                        Some(caps) => {
-                            let m0 = caps.get(0).unwrap();
-                            self.last_match = Some(crate::vm::LastMatch {
-                                whole: m0.as_str().to_string(),
-                                caps: (1..caps.len())
+                    Value::Str(s) => {
+                        let bound = s.to_string_lossy();
+                        match re.captures(&bound) {
+                            Some(caps) => {
+                                let m0 = caps.get(0).unwrap();
+                                let (m_start, m_end) = (m0.start(), m0.end());
+                                let whole = m0.as_str().to_string();
+                                let last_caps: Vec<Option<String>> = (1..caps.len())
                                     .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-                                    .collect(),
-                                input: input.to_string(),
-                                m_start: m0.start(),
-                                m_end: m0.end(),
-                            });
-                            true
+                                    .collect();
+                                drop(caps);
+                                self.last_match = Some(crate::vm::LastMatch {
+                                    whole,
+                                    caps: last_caps,
+                                    input: bound,
+                                    m_start,
+                                    m_end,
+                                });
+                                true
+                            }
+                            None => {
+                                self.last_match = None;
+                                false
+                            }
                         }
-                        None => {
-                            self.last_match = None;
-                            false
-                        }
-                    }),
+                    }
                     _ => false,
                 },
                 _ => recv.ruby_eq(arg, &self.heap),
@@ -2654,12 +2661,15 @@ impl Vm {
                         Some(caps) => {
                             let m0 = caps.get(0).unwrap();
                             let (m_start, m_end) = (m0.start(), m0.end());
+                            let whole = m0.as_str().to_string();
+                            let last_caps: Vec<Option<String>> = (1..caps.len())
+                                .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                                .collect();
+                            drop(caps);
                             self.last_match = Some(crate::vm::LastMatch {
-                                whole: m0.as_str().to_string(),
-                                caps: (1..caps.len())
-                                    .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-                                    .collect(),
-                                input: bound.to_string(),
+                                whole,
+                                caps: last_caps,
+                                input: bound,
                                 m_start,
                                 m_end,
                             });
