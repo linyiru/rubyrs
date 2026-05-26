@@ -2368,21 +2368,41 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
             // `class << self` body: any remaining unsupported form
             // compiles to a runtime `raise NotImplementedError`
-            // instead of a parse-time SyntaxError. The raise fires
-            // when the surrounding scope executes (method body →
-            // at invocation; class body → at load). Specific
-            // shapes already handled above (def / attr_* / alias /
-            // prepend-Mod) bypass this path. See the
-            // SingletonChainPrepend arm above for the prepend
-            // recogniser; everything else (e.g. `include Mod`
-            // inside `class << self`, generic method calls, etc.)
-            // lands here.
+            // rather than a parse-time SyntaxError. The raise fires
+            // WHEN THE SURROUNDING SCOPE EXECUTES — not necessarily
+            // at method-call time. Two distinct scenarios:
             //
-            // `class << <non-self>` still hard-errors at parse
-            // time — that branch has no surrounding class_stack
-            // frame, so even silently emitting nil would do the
-            // wrong thing (the body's intended target receiver is
-            // lost).
+            //   1. Inside a `def` body: the raise sits in the
+            //      method body and only fires when the method is
+            //      invoked. Scripts that never call it load fine.
+            //
+            //   2. At class-body top level (`class Foo; class <<
+            //      self; unsupported; end; end`): the raise sits
+            //      in the class body and fires at LOAD time when
+            //      the enclosing `class` / `module` block executes.
+            //      The file load fails — matching the pre-PR
+            //      SyntaxError outcome ("file doesn't load") with
+            //      two differences:
+            //        - error class is NotImplementedError
+            //          (catchable by explicit
+            //          `rescue NotImplementedError`), not SyntaxError;
+            //        - NotImplementedError < ScriptError < Exception,
+            //          so a bare `rescue` does NOT catch it
+            //          (matches CRuby).
+            //
+            // Case (1) is a strict improvement (file loads); case
+            // (2) is roughly equivalent. The deferral is the right
+            // trade-off only when the unsupported form sits inside
+            // an infrequently-called method. Specific shapes already
+            // handled above (def / attr_* / alias / prepend-Mod)
+            // bypass this path; everything else (e.g. `include Mod`
+            // inside `class << self`, generic method calls) lands
+            // here.
+            //
+            // `class << <non-self>` still hard-errors at parse time —
+            // that branch has no surrounding class_stack frame, so
+            // even silently emitting nil would do the wrong thing
+            // (the body's intended target receiver is lost).
             if recv_is_self {
                 let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, and `prepend Mod` (single Module arg, with `self` receiver) are supported in the spike subset";
                 out.push(sp(bn, Expr::Call {
