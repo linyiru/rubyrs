@@ -564,6 +564,35 @@ impl Vm {
                         msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                     }));
                 }
+                // Reopened-primitive user override: `class String;
+                // def respond_to?; ...; end; end` installs a method
+                // on the primitive's preamble class. Value::Object
+                // self routes through `lookup_method_cached` at
+                // line ~320; Value::Class through
+                // `lookup_class_singleton_method` at ~343. Primitives
+                // (Str / Int / Sym / Array / Hash / ...) had no
+                // equivalent user-method lookup before the stub
+                // fired, so a user override on the primitive was
+                // silently shadowed. Resolve the primitive's class
+                // via `class_of` and check its method table; if a
+                // user `respond_to?` exists, invoke it instead of
+                // the stub.
+                //
+                // Documented narrower gap: this only fixes
+                // `respond_to?` specifically. Other bare calls in
+                // reopened-primitive method bodies (e.g.
+                // `class String; def trigger; custom_helper; end;
+                // end`) still surface NoMethodError because the
+                // no-recv path doesn't generally consult the
+                // primitive's class. Tracked as a separate broader
+                // gap in SUBSET.md.
+                if !matches!(&self_val, Value::Object(_) | Value::Class(_))
+                    && let Value::Class(cls) = self.class_of(&self_val)
+                    && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+                {
+                    self.invoke_method(m, self_val.clone(), args)?;
+                    return Ok(());
+                }
                 // Type: CRuby raises `TypeError: X is not a symbol nor
                 // a string` when arg[0] isn't a Symbol or String.
                 // Without this guard the call would silently fall

@@ -102,6 +102,21 @@ begin; "x".respond_to?(:a, true, :extra); rescue ArgumentError => e; puts e.mess
 begin; Object.new.respond_to?(123); rescue TypeError => e; puts e.message; end
 begin; respond_to?([:not_a_sym]); rescue TypeError => e; puts e.message; end
 
+# --- respond_to? user override on reopened primitive ---
+# Code-review caught that bare `respond_to?` calls inside a
+# reopened-primitive method body used to bypass the user's
+# override and return the stub result. The no-recv stub now
+# consults the primitive's class method table first.
+class String
+  def respond_to?(name, priv=false)
+    "USER_OVERRIDE"
+  end
+  def trigger_respond_to
+    respond_to?(:length)
+  end
+end
+puts "x".trigger_respond_to                     # "USER_OVERRIDE"
+
 # --- NotImplementedError class hierarchy (CRuby parity) ---
 # Subclass of ScriptError (NOT StandardError) so a bare `rescue`
 # does NOT catch it — that's CRuby's behaviour and we now match.
