@@ -246,3 +246,4 @@ fn run_diff(name: &str) {
 #[test] fn object_send() { run_diff("object_send"); }
 #[test] fn class_variables() { run_diff("class_variables"); }
 #[test] fn class_level_ivars() { run_diff("class_level_ivars"); }
+#[test] fn enumerable_stub() { run_diff("enumerable_stub"); }
