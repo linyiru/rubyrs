@@ -558,6 +558,36 @@ impl Vm {
                 let oid = g.vm.heap.alloc(HeapObj::Array(out));
                 Some(Value::Array(oid))
             }
+            // `Hash#each_key { |k| ... }` / `Hash#each_value { |v| ... }`
+            // — narrower variants of `each` that yield only one
+            // side of each pair. Same snapshot + break/return
+            // unwinding shape as `each` below; same return value
+            // (the receiver Hash). CRuby's no-block form returns
+            // an Enumerator, which Tier 1 doesn't model — the
+            // block-less path falls through to NoMethodError.
+            (Value::Hash(id), m @ ("each_key" | "each_value"), []) => {
+                let id = *id;
+                let key_only = m == "each_key";
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    let yielded = if key_only { k } else { v };
+                    g.vm.invoke_block(block, vec![yielded])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() { break; }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                        early = Some(r);
+                        break;
+                    }
+                }
+                Some(early.unwrap_or(Value::Hash(id)))
+            }
             (Value::Hash(id), "each", []) | (Value::Hash(id), "each_pair", []) => {
                 // CRuby yields each pair as a single 2-elem Array
                 // `[k, v]`. Two-param blocks (`|k, v|`) auto-splat
