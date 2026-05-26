@@ -545,8 +545,14 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         }
         // Dynamic-path fallback (rare): use the trailing name only,
         // matching the ConstantPathNode read fallback at line ~415.
+        // Force `absolute = true` here even when the path wasn't
+        // syntactically leading-`::` — the dynamic head means the
+        // user's `obj::X = ...` was never meant to land in the
+        // lexical scope, so the compiler-side alias would be wrong
+        // (would create a spurious `OuterModule::X` when this
+        // appears inside `module OuterModule`).
         if let Some(name_id) = target.name() {
-            return sp(node, Expr::ConstWrite(cid_to_string(name_id), absolute, Box::new(tr(&n.value()))));
+            return sp(node, Expr::ConstWrite(cid_to_string(name_id), true, Box::new(tr(&n.value()))));
         }
     }
     // Op-assign desugaring: `a += b` is translated to
@@ -752,50 +758,57 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let target = n.target();
         let absolute = is_constant_path_absolute(&target.as_node());
         let op = cid_to_string(n.binary_operator());
-        let make = |name: String| {
+        // `abs` parameter: leading-`::` form uses the computed
+        // `absolute`; dynamic-head fallback passes `true` so the
+        // collapsed bare-name write doesn't get class_path-aliased
+        // (the dynamic `obj::X += 1` was never meant to land in
+        // the lexical scope).
+        let make = |name: String, abs: bool| {
             let read = sp(node, Expr::ConstRead(name.clone()));
             let rhs = sp(node, Expr::Call {
                 receiver: Some(Box::new(read)),
                 name: op.clone(),
                 args: vec![tr(&n.value())],
             });
-            sp(node, Expr::ConstWrite(name, absolute, Box::new(rhs)))
+            sp(node, Expr::ConstWrite(name, abs, Box::new(rhs)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
-            return make(joined);
+            return make(joined, absolute);
         }
         if let Some(name_id) = target.name() {
-            return make(cid_to_string(name_id));
+            return make(cid_to_string(name_id), true);
         }
     }
     if let Some(n) = node.as_constant_path_or_write_node() {
         let target = n.target();
         let absolute = is_constant_path_absolute(&target.as_node());
-        let make = |name: String| {
+        // See ConstantPathOperatorWriteNode arm for the `abs`
+        // override rationale on the dynamic-head fallback.
+        let make = |name: String, abs: bool| {
             let read = sp(node, Expr::ConstRead(name.clone()));
-            let write = sp(node, Expr::ConstWrite(name, absolute, Box::new(tr(&n.value()))));
+            let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(&n.value()))));
             sp(node, Expr::Or(Box::new(read), Box::new(write)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
-            return make(joined);
+            return make(joined, absolute);
         }
         if let Some(name_id) = target.name() {
-            return make(cid_to_string(name_id));
+            return make(cid_to_string(name_id), true);
         }
     }
     if let Some(n) = node.as_constant_path_and_write_node() {
         let target = n.target();
         let absolute = is_constant_path_absolute(&target.as_node());
-        let make = |name: String| {
+        let make = |name: String, abs: bool| {
             let read = sp(node, Expr::ConstRead(name.clone()));
-            let write = sp(node, Expr::ConstWrite(name, absolute, Box::new(tr(&n.value()))));
+            let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(&n.value()))));
             sp(node, Expr::And(Box::new(read), Box::new(write)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
-            return make(joined);
+            return make(joined, absolute);
         }
         if let Some(name_id) = target.name() {
-            return make(cid_to_string(name_id));
+            return make(cid_to_string(name_id), true);
         }
     }
     if let Some(n) = node.as_multi_write_node() {
