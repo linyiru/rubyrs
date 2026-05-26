@@ -36,3 +36,4 @@ crates/rubyrs/examples/msgpack-cext/msgpack.so
 crates/rubyrs/examples/msgpack-cext/msgpack.bundle
 crates/rubyrs/examples/msgpack-cext/msgpack.bundle.lock
 crates/rubyrs/examples/msgpack-cext/msgpack.dll
+crates/rubyrs/examples/flori-json-cext/.build.lock

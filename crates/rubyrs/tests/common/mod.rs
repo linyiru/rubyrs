@@ -30,11 +30,12 @@ pub const RUBY_DLEXT: &str = std::cfg_select! {
 /// more than one test binary, `build.sh` adds its own `flock` +
 /// atomic-tmpfile-rename serialisation so parallel `cargo test`
 /// runs can't race on a half-written `.bundle`/`.so`. Currently
-/// applies to `msgpack-cext` (7 consumers) and `counter-cext`
-/// (2 consumers). The other examples are single-consumer today;
-/// any future test that points a second binary at one of them
-/// should add the same `flock` + atomic-rename pattern to that
-/// `build.sh` before relying on it. Centralising the build steps
+/// applies to `msgpack-cext` (7 consumers), `counter-cext`
+/// (2 consumers), and `flori-json-cext` (2 consumers:
+/// `cext_msgpack_cases` + `cext_flori_json`). The other examples
+/// are single-consumer today; any future test that points a
+/// second binary at one of them should add the same `flock` +
+/// atomic-rename pattern to that `build.sh` before relying on it. Centralising the build steps
 /// and assertions here means the existence checks, error messages,
 /// and `RUBY_DLEXT` computation only have to be maintained in
 /// one place — previously 12 sibling test files had inline copies.
