@@ -1029,14 +1029,27 @@ impl Vm {
             }
             return Ok(None);
         }
-        // Positive exp. BigInt exponent with |base|>1 → trap.
+        // Exponent identities — return cheap results before the
+        // DoS estimator (which itself adds a 32-byte header to
+        // est_bytes, so `big ** 0` under an aggressively tight
+        // `max_value_bytes` would otherwise trap even though the
+        // correct answer is the immediate `Int(1)`). Skip the pow
+        // allocation entirely for `** 0` and `** 1`.
+        if exp_is_zero {
+            return Ok(Some(Value::Int(1)));
+        }
+        if matches!(exp_arg, Value::Int(1)) {
+            return Ok(Some(recv.clone()));
+        }
+        // Positive exp from here on. BigInt exponent with |base|>1
+        // → trap (would need ≥ 2**63 bits).
         if matches!(exp_arg, Value::BigInt(_)) {
             return Err(self.trap(RubyError::ResourceExhausted {
                 msg: "integer ** BigInt exponent exceeds u32::MAX".to_string(),
             }));
         }
         let exp_i64 = match exp_arg {
-            Value::Int(n) => *n, // ≥ 0 (negative handled above)
+            Value::Int(n) => *n, // ≥ 2 (0, 1, negative handled above)
             _ => unreachable!("non-Int/BigInt/Float exp returned earlier"),
         };
         let exp_u32: u32 = match u32::try_from(exp_i64) {

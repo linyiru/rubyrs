@@ -2082,6 +2082,29 @@ fn bigint_pow_bigint_receiver_float_exponent_returns_float() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_pow_zero_and_one_exponent_skip_estimator() {
+    // `big ** 0` must always return 1 and `big ** 1` must return
+    // the receiver, regardless of cap. With the previous flow the
+    // estimator added a 32-byte BigInt-header overhead to
+    // est_bytes, so a sub-32-byte cap would trap `big ** 0` even
+    // though no allocation is actually needed. Pin both shapes
+    // under a minimal 16-byte cap.
+    let cfg = rubyrs::Config { max_value_bytes: Some(16), ..Default::default() };
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    // Build a `big` BigInt under a larger cap-free runtime first
+    // would change scope; instead use a small Int receiver where
+    // the demoted result still hits the identity short-circuits.
+    rt.eval(
+        "puts 7 ** 0\nputs 7 ** 1\nputs (-3) ** 0\nputs (-3) ** 1",
+        "pow_exp_identities.rb",
+    ).expect("** 0 and ** 1 must short-circuit before the cap check");
+    assert_eq!(buf.snapshot().trim(), "1\n7\n1\n-3");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_pow_pow2_estimator_avoids_2x_overshoot() {
     // The DoS estimator must use `(base_bits - 1) * exp + 1` for
     // power-of-two bases, not `base_bits * exp` — otherwise a
