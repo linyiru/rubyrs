@@ -12,6 +12,14 @@ publish = false
 [[bin]]
 name = "rubyrs-wasm-embed"
 path = "src/main.rs"
+# `build.rs` runs `Engine::precompile_module` to AOT-compile the
+# wizer'd rubyrs .wasm into a cwasm, which `main.rs` then embeds
+# via `include_bytes!`. Pinning the same wasmtime version here
+# and in [dependencies] is load-bearing — cwasm is version-stamped
+# and the runtime Engine refuses to deserialize a cwasm produced
+# by a different wasmtime version (silent UB risk, explicit error).
+[build-dependencies]
+wasmtime = "45.0"
 
 [dependencies]
 # Match the version `perf/wasm_check.sh` already validates in CI

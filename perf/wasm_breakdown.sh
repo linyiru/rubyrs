@@ -266,10 +266,19 @@ echo "  specific overhead above the macOS fork+exec floor."
 runtime_min() {
   # $1 = label, rest = command + args. Returns MIN of $RUNS runs
   # via the in-tree timer; prints nothing if the command is
-  # missing or every run failed.
+  # missing or the probe-run failed (e.g. baked embedder with no
+  # cwasm available, wasmer rejecting a wasm feature, etc.).
   local label="$1"; shift
   local first="$1"
   if ! command -v "$first" >/dev/null 2>&1 && [[ ! -x "$first" ]]; then
+    return
+  fi
+  # Probe-run once. The timer ALWAYS prints its sentinel line —
+  # the only reason to skip a row is if the child exited
+  # non-zero. Without this guard, a fast-failing child (e.g.
+  # embedder with empty baked cwasm) would record an artificially
+  # low wall time and silently misrepresent the row.
+  if ! "$@" >/dev/null 2>&1; then
     return
   fi
   local best=""
@@ -303,7 +312,18 @@ echo "=== cross-runtime comparison (MIN of $RUNS runs, same wizer'd .wasm) ==="
 echo ""
 runtime_min "wasmtime CLI (AOT cwasm):"    wasmtime run --allow-precompiled --dir "$PERF_TMPDIR" "$CWASM" "$SCRIPT"
 if [[ -x "$EMBED_BIN" ]]; then
-  runtime_min "rubyrs-wasm-embed (AOT cwasm):" "$EMBED_BIN" "$CWASM" "$SCRIPT"
+  # The embedder accepts either a baked-in cwasm (no env var, built
+  # via perf/build_embedder.sh) or an external one via
+  # RUBYRS_CWASM. Surface both rows so the trade-off is visible:
+  #   - Baked: single-binary ship shape, +~750 us cold start due to
+  #     larger binary (macOS dyld page-load + code-signing cost).
+  #   - External: two-file ship shape but faster cold start because
+  #     the cwasm mmaps from a separate file.
+  # The `runtime_min` helper passes env via the timer's inherited
+  # environment, so prefixing RUBYRS_CWASM=… on the line below
+  # only affects that one call.
+  runtime_min "embedder (baked cwasm):"      "$EMBED_BIN" "$SCRIPT"
+  RUBYRS_CWASM="$CWASM" runtime_min "embedder (RUBYRS_CWASM external):" "$EMBED_BIN" "$SCRIPT"
 fi
 if [[ -f "$WASMER_AOT" ]]; then
   runtime_min "wasmer (AOT .wasmu):"        wasmer run --volume "$PERF_TMPDIR:$PERF_TMPDIR" "$WASMER_AOT" -- "$SCRIPT"

@@ -1,24 +1,38 @@
-//! `rubyrs-wasm-embed` — PoC minimal embedder.
+//! `rubyrs-wasm-embed` — minimal embedder, single-binary shape.
 //!
-//! Links `wasmtime` and `wasmtime-wasi` as Rust libraries and runs
-//! a precompiled `rubyrs.cwasm` directly, deliberately skipping
-//! everything the `wasmtime` CLI does on top of the wasmtime core
-//! (argv parsing for the CLI's own flags, command dispatch through
-//! the `--{run,serve,compile,explore}` matcher, default Config
-//! plumbing, the file-config layer, signal handling, profiling
-//! hooks). The goal is to quantify how much of `wasmtime --run`'s
-//! ~5 ms init is the CLI's own framing vs the wasmtime runtime
-//! that any embedder still has to pay.
+//! Links `wasmtime` + `wasmtime-wasi` as Rust libraries and
+//! deserializes a baked-in `rubyrs.cwasm` to run a user script.
+//! The cwasm is produced at build time by `build.rs` calling
+//! `Engine::precompile_module` on a wizer-pre-initialized
+//! `rubyrs.wasm` and `include_bytes!`d into this binary, so the
+//! shipping artifact is a SINGLE executable — no external cwasm
+//! file required at runtime. ~14 MB on macOS arm64.
 //!
-//! Not a shipping artifact: deserialization of a `.cwasm` ties
-//! this binary to one specific wasmtime version + host arch.
-//! `Module::deserialize_file` is `unsafe` for the same reason — a
-//! mismatched / tampered file is a UB attack surface. Used here
-//! only against cwasm WE just compiled with the same wasmtime
-//! version.
+//! Two modes:
+//!
+//! * **Baked cwasm (default).** `cargo build` with
+//!   `RUBYRS_WIZER_WASM=<path>` set picks up that wizer'd wasm,
+//!   AOT-compiles it, embeds the result. Use
+//!   `perf/build_embedder.sh` to do the full pipeline
+//!   (rubyrs wasm32-wasip1 build → wasm-opt → wizer → wasm-opt
+//!   → build.rs precompile → cargo build embedder).
+//!
+//! * **External cwasm via `RUBYRS_CWASM=<path>`.** Overrides the
+//!   baked cwasm at runtime. Useful for dev iteration (rebuild
+//!   the rubyrs wasm without rebuilding the embedder) and for
+//!   testing alternative wasm builds without baking. Goes
+//!   through `Module::deserialize_file` (mmap) — slightly
+//!   slower than the baked path's `Module::deserialize` over a
+//!   `&'static [u8]` slice.
+//!
+//! `cargo build` always works (even on a clean checkout with no
+//! wasm pipeline): the build script falls back to a zero-byte
+//! stub and the runtime surfaces an actionable error if neither
+//! a baked nor external cwasm is available.
 //!
 //! Usage:
-//!   rubyrs-wasm-embed <rubyrs.cwasm> <script.rb> [arg ...]
+//!   rubyrs-wasm-embed <script.rb> [arg ...]
+//!   RUBYRS_CWASM=path/to/rubyrs.cwasm rubyrs-wasm-embed <script.rb>
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -27,19 +41,26 @@ use wasmtime::{Engine, Linker, Module, Store};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
+/// Baked-at-build-time cwasm. `build.rs` writes either:
+///   - the real AOT cwasm (when `RUBYRS_WIZER_WASM` was set), or
+///   - a zero-byte stub (when the env var was unset or the wasm
+///     wasn't found at build time).
+///
+/// Runtime distinguishes the two by length: empty → no baked
+/// cwasm available, fall back to `RUBYRS_CWASM` or error out.
+static EMBEDDED_CWASM: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/rubyrs.cwasm"));
+
 fn main() -> ExitCode {
     let mut argv = std::env::args_os().skip(1);
-    let cwasm_path: PathBuf = match argv.next() {
-        Some(p) => PathBuf::from(p),
-        None => {
-            eprintln!("usage: rubyrs-wasm-embed <rubyrs.cwasm> <script.rb> [arg ...]");
-            return ExitCode::from(2);
-        }
-    };
     let script_path: PathBuf = match argv.next() {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("usage: rubyrs-wasm-embed <rubyrs.cwasm> <script.rb> [arg ...]");
+            eprintln!("usage: rubyrs-wasm-embed <script.rb> [arg ...]");
+            eprintln!();
+            eprintln!("Optional env vars:");
+            eprintln!("  RUBYRS_CWASM=<path>   Use an external cwasm instead of the");
+            eprintln!("                        one baked at build time.");
             return ExitCode::from(2);
         }
     };
@@ -47,28 +68,46 @@ fn main() -> ExitCode {
 
     let engine = Engine::default();
 
-    // SAFETY: cwasm files are deserialized as raw machine code; a
-    // mismatched wasmtime version or a tampered file is UB. We
-    // restrict use to cwasm WE just compiled with the same wasmtime
-    // version (`perf/wasm_breakdown.sh` regenerates it every run).
-    let module = match unsafe { Module::deserialize_file(&engine, &cwasm_path) } {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!(
-                "rubyrs-wasm-embed: failed to deserialize {}: {e}",
-                cwasm_path.display()
-            );
-            return ExitCode::from(2);
+    // Resolve cwasm source. SAFETY on both branches: `Module::
+    // deserialize` is `unsafe` because cwasm files are raw machine
+    // code stamped with a wasmtime version + host arch — a
+    // mismatched or tampered file is UB. The baked path is safe
+    // by construction (build.rs and runtime link the same
+    // wasmtime version; the bytes are immutable from the user's
+    // perspective). The external path trusts the caller.
+    let module = if let Some(external) = std::env::var_os("RUBYRS_CWASM") {
+        let path = PathBuf::from(external);
+        match unsafe { Module::deserialize_file(&engine, &path) } {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "rubyrs-wasm-embed: failed to load RUBYRS_CWASM={}: {e}",
+                    path.display()
+                );
+                return ExitCode::from(2);
+            }
+        }
+    } else if EMBEDDED_CWASM.is_empty() {
+        eprintln!(
+            "rubyrs-wasm-embed: no cwasm available — this binary was \
+             built without RUBYRS_WIZER_WASM set, so no cwasm is baked in. \
+             Either run `perf/build_embedder.sh` (which sets the env var) or \
+             set `RUBYRS_CWASM=<path>` to load an external cwasm at runtime."
+        );
+        return ExitCode::from(2);
+    } else {
+        match unsafe { Module::deserialize(&engine, EMBEDDED_CWASM) } {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("rubyrs-wasm-embed: failed to deserialize baked cwasm: {e}");
+                return ExitCode::from(2);
+            }
         }
     };
 
-    // Mirror `wasmtime run --dir $PARENT cwasm script.rb`:
-    // - inherit stdio + env so script `puts`/`p` and `ENV[...]`
-    //   work transparently
-    // - argv = ["rubyrs", "<script-filename>", extras...]; rubyrs's
-    //   main reads args[1] as the script path
-    // - preopen the script's parent directory so `eval_file` can
-    //   open the script through the wasi sandbox
+    // Mirror what the rubyrs CLI's main() expects: argv[1] is the
+    // script path, inherit stdio + env, preopen the script's
+    // parent dir for `eval_file`.
     let script_parent = script_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -120,10 +159,6 @@ fn main() -> ExitCode {
     match start.call(&mut store, ()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            // wasi's `_start` surfaces `process::exit(N)` from the
-            // guest as a wasmtime error wrapping `I32Exit(N)`.
-            // Forward the code so callers see the same exit shape
-            // they would under `wasmtime run`.
             if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
                 let code = exit.0;
                 if code == 0 {
