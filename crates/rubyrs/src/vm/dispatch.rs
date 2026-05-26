@@ -2419,7 +2419,15 @@ impl Vm {
                 None => 10,
                 Some(Value::Int(b)) => *b,
                 Some(other) => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                    // Share the same class-name helper as the
+                    // BigInt-receiver path in `Vm::try_integer_digits`
+                    // so cross-profile error text agrees ("nil",
+                    // "true", "false" vs `Value::type_name`'s
+                    // "NilClass", "Boolean").
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        crate::vm::numeric::type_name_for_coerce(other),
+                    ),
                 })),
             };
             if base < 0 {

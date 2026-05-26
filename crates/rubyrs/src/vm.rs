@@ -1392,8 +1392,11 @@ impl Vm {
 
     /// `Integer#digits([base = 10])` — array of digits in the given
     /// base, least-significant first. Returns `Some(Value::Array)`
-    /// for Int/BigInt receivers; `Ok(None)` for non-Integer recv
-    /// (lets dispatch fall through to NoMethodError). Traps:
+    /// for BigInt receivers; `Ok(None)` for Int receivers (so the
+    /// i64 fast path in `vm/dispatch.rs::Integer#digits` runs
+    /// instead — keeps small Int×Int#digits off the BigInt
+    /// arithmetic path) and for non-Integer recv (lets dispatch
+    /// fall through to NoMethodError). Traps:
     /// - Negative receiver → ArgumentError "out of domain"
     ///   (CRuby raises Math::DomainError; the established subset
     ///   pattern at dispatch.rs:2402-2403 uses ArgumentError as
