@@ -1861,3 +1861,42 @@ fn range_size_with_i64_max_width_returns_zero() {
     ).expect("should succeed without panic");
     assert_eq!(buf.snapshot().trim(), "0");
 }
+
+#[test]
+fn config_default_picks_up_stress_gc_env() {
+    // Regression guard for PR #116 review: removing the
+    // `env::var("STRESS_GC")` read from `Vm::new` (to satisfy
+    // wizer's no-imports rule on wasm32-wasip1) silently broke
+    // ci.yml's "Run tests (STRESS_GC=1)" job — that step re-runs
+    // `cargo test` with the env var set, expecting every
+    // `Runtime::new()` in the suite to flip into stress mode for
+    // broader GC-rooting coverage. The compensating read lives in
+    // `Config::default()` instead; this test pins it so a future
+    // cleanup of `Config::default` doesn't re-introduce the silent
+    // CI coverage gap.
+    //
+    // SAFETY: `std::env::set_var` / `remove_var` are unsafe in 2024
+    // edition because they aren't thread-safe. No other test in the
+    // suite currently reads `STRESS_GC` at runtime (the
+    // `*_survives_stress_gc` tests hard-code the flag in Config and
+    // don't consult env), so the race window is empty today. If a
+    // future test starts reading the env, gate this behind a
+    // serial-test crate.
+    let prev = std::env::var("STRESS_GC").ok();
+    unsafe { std::env::remove_var("STRESS_GC") };
+    assert!(
+        !rubyrs::Config::default().stress_gc,
+        "Config::default().stress_gc must be false when STRESS_GC unset",
+    );
+
+    unsafe { std::env::set_var("STRESS_GC", "1") };
+    assert!(
+        rubyrs::Config::default().stress_gc,
+        "Config::default().stress_gc must be true when STRESS_GC=1 — the CI stress-mode gate relies on this",
+    );
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var("STRESS_GC", v) },
+        None => unsafe { std::env::remove_var("STRESS_GC") },
+    }
+}

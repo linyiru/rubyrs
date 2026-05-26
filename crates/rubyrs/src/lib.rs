@@ -403,7 +403,6 @@ include!(concat!(env!("OUT_DIR"), "/prism_node_sets.rs"));
 /// expressions cross-crate entirely and would have a much larger
 /// migration footprint here. Tracked as follow-up; see PR #88
 /// thread for the analysis.
-#[derive(Default)]
 pub struct Config {
     /// When true, every potential GC point triggers a full collection.
     /// Useful for catching root-set bugs in host code; rough on
@@ -485,6 +484,36 @@ pub struct Config {
     /// so `rubyrs script.rb` behaves like CRuby; embed users that
     /// want the host PID exposed must opt in.
     pub pid: Option<std::num::NonZeroU32>,
+}
+
+impl Default for Config {
+    /// Default Config. `stress_gc` auto-enables from the `STRESS_GC`
+    /// env var on non-wasi hosts so `STRESS_GC=1 cargo test` flips
+    /// every `Runtime::new()`-using test into stress mode — the
+    /// previous behavior, lost when `Vm::new` stopped reading the
+    /// env var to satisfy wizer's no-imports rule. The wizer path
+    /// does NOT go through `Config::default()` (it calls
+    /// `Runtime::new_default_impl` directly), so this env read can't
+    /// pollute the snapshot. The CLI binary explicitly reads
+    /// `STRESS_GC` again from main.rs for the same flag — both reads
+    /// agree, harmless.
+    fn default() -> Self {
+        #[cfg(not(target_os = "wasi"))]
+        let stress_gc = std::env::var("STRESS_GC").is_ok();
+        #[cfg(target_os = "wasi")]
+        let stress_gc = false;
+        Self {
+            stress_gc,
+            fuel: None,
+            max_heap_objects: None,
+            max_frames: None,
+            max_symbols: None,
+            max_value_bytes: None,
+            deadline: None,
+            env: None,
+            pid: None,
+        }
+    }
 }
 
 /// Read-only handle into the runtime's heap, passed to closures
