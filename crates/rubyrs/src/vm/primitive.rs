@@ -95,8 +95,29 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Str(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Bool(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Nil, "<=>", [_]) => Some(Value::Nil),
-        (Value::Class(c), "name", []) | (Value::Class(c), "to_s", []) | (Value::Class(c), "inspect", []) => {
-            Some(Value::new_str(c.name.clone()))
+        // Anonymous modules / classes carry an empty `name` field
+        // (the sentinel that `Module.new` writes when no constant
+        // assignment promotes a real name). CRuby's contract:
+        //   - `.name` returns `nil` for anonymous receivers.
+        //   - `.to_s` / `.inspect` return a placeholder
+        //     `"#<Module>"` / `"#<Class>"` rather than the empty
+        //     string. We don't render the object id like CRuby
+        //     does — that's a non-deterministic side that ADR 0017
+        //     keeps out of Tier 1.
+        (Value::Class(c), "name", []) => {
+            if c.name.is_empty() {
+                Some(Value::Nil)
+            } else {
+                Some(Value::new_str(c.name.clone()))
+            }
+        }
+        (Value::Class(c), "to_s", []) | (Value::Class(c), "inspect", []) => {
+            if c.name.is_empty() {
+                let kind = if c.is_module { "Module" } else { "Class" };
+                Some(Value::new_str(format!("#<{}>", kind)))
+            } else {
+                Some(Value::new_str(c.name.clone()))
+            }
         }
         // Class identity is `Rc::ptr_eq` — two `Value::Class` refer
         // to the same class iff they point at the same `Rc<Class>`.

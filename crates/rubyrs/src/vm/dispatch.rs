@@ -913,6 +913,49 @@ impl Vm {
                 }
             }
         }
+        // `Module.new` (no block) — returns a fresh anonymous
+        // Module. Empty name is the sentinel for "anonymous"
+        // that `Module#name` consults to return `nil`; `to_s` /
+        // `inspect` render `"#<Module>"` instead. The block-form
+        // `Module.new { |m| ... }` evaluates the block as the
+        // module body and lives in `do_call_block` — same shape
+        // as the existing `Hash.new` / `class_eval` intercepts.
+        //
+        // Documented divergence (NOT addressed here): CRuby
+        // assigns the module's name on first constant write
+        // (`M = Module.new` → `M.name == "M"`). rubyrs leaves
+        // the name empty until a future StoreConst hook lands;
+        // most real-world uses (`include` an anonymous helper)
+        // don't depend on the name-promote behaviour.
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Module"
+        {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len(),
+                    ),
+                }));
+            }
+            let m = std::rc::Rc::new(Class {
+                name: String::new(),
+                is_module: true,
+                ivars: std::cell::RefCell::new(HashMap::new()),
+                methods: std::cell::RefCell::new(HashMap::new()),
+                singleton_methods: std::cell::RefCell::new(HashMap::new()),
+                superclass: std::cell::RefCell::new(None),
+                includes: std::cell::RefCell::new(Vec::new()),
+                prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                class_vars: std::cell::RefCell::new(HashMap::new()),
+                #[cfg(feature = "cext")]
+                cext_alloc_func: std::cell::Cell::new(None),
+            });
+            self.stack.push(Value::Class(m));
+            return Ok(());
+        }
         if name_id == new_id
             && let Value::Class(cls) = &recv
             && cls.name.as_str() == "Hash"
@@ -3555,6 +3598,66 @@ impl Vm {
         // from Hash#initialize when both default-arg and block are
         // given). Mirror that explicitly so callers don't see the
         // misleading generic Class.new fallback behaviour.
+        // `Module.new { |m| ... }` — anonymous Module with the
+        // block evaluated as the module body (`class_eval`-style).
+        // The block also receives the new module as its sole arg
+        // for explicit-reference shapes like `Module.new { |m|
+        // m.define_method(:foo) { ... } }`. Sits BEFORE the
+        // `Hash.new` intercept so the Module-class-receiver path
+        // isn't swallowed by a hypothetical future shared
+        // pattern.
+        if &*name == "new"
+            && let Some(Value::Class(cls)) = &recv
+            && cls.name.as_str() == "Module"
+        {
+            if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                // User-defined Module.new singleton wins, parallel
+                // to the Hash precedence rule below.
+                let target_self = Value::Class(cls.clone());
+                return self.invoke_method_with_block(m, target_self, args, Some(block));
+            }
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len(),
+                    ),
+                }));
+            }
+            // Build the fresh module shell. Same field set as the
+            // no-block `do_call` arm; lifted here so the block can
+            // run inside the module body and the result push lands
+            // on this control path.
+            let new_mod = std::rc::Rc::new(Class {
+                name: String::new(),
+                is_module: true,
+                ivars: std::cell::RefCell::new(HashMap::new()),
+                methods: std::cell::RefCell::new(HashMap::new()),
+                singleton_methods: std::cell::RefCell::new(HashMap::new()),
+                superclass: std::cell::RefCell::new(None),
+                includes: std::cell::RefCell::new(Vec::new()),
+                prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                class_vars: std::cell::RefCell::new(HashMap::new()),
+                #[cfg(feature = "cext")]
+                cext_alloc_func: std::cell::Cell::new(None),
+            });
+            let mod_val = Value::Class(new_mod);
+            // `as_class_body=true` so `def name; …; end` inside
+            // the block lands on the module's methods table. Same
+            // machinery `class_eval` uses (`invoke_block_with_self`
+            // pushes the module onto class_stack + sets
+            // `is_class_body: true` on the new frame). The block
+            // receives `mod_val` as its sole positional arg —
+            // matches CRuby's `Module.new { |m| ... }` shape.
+            self.invoke_block_with_self(
+                block,
+                mod_val.clone(),
+                /*as_class_body=*/ true,
+                vec![mod_val],
+            )?;
+            return Ok(());
+        }
         if &*name == "new"
             && let Some(Value::Class(cls)) = &recv
             && cls.name.as_str() == "Hash"
