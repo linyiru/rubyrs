@@ -85,29 +85,22 @@ fi
 #    wasm-opt and wizer are OPTIONAL (graceful skip with a note);
 #    `wasmtime compile` is required because the headline AOT shape
 #    is what the breakdown is here to characterize.
-OPT="$PERF_TMPDIR/rubyrs.opt.wasm"
 WIZER="$PERF_TMPDIR/rubyrs.wizer.wasm"
 WIZER_OPT="$PERF_TMPDIR/rubyrs.wizer.opt.wasm"
 CWASM="$PERF_TMPDIR/rubyrs.cwasm"
 
-if command -v wasm-opt >/dev/null 2>&1; then
-  if ! wasm-opt -Oz "$RAW_WASM" -o "$OPT" >/dev/null; then
-    echo "wasm_breakdown: wasm-opt -Oz failed" >&2
-    exit 2
-  fi
-else
-  echo "[skip] wasm-opt not on PATH; using raw .wasm" >&2
-  OPT="$RAW_WASM"
-fi
-
+# Reorder vs the earlier `opt → wizer → opt` shape: do wizer
+# FIRST, then a single wasm-opt -Oz post-wizer. On Linux's
+# apt-installed binaryen (v116) the pre-wizer -Oz strips the
+# `wizer.initialize` export despite it being an export root,
+# breaking wizer with "the Wasm module does not have a
+# wizer-initialize export". Running wizer first sidesteps the
+# bug — by the time wasm-opt sees the .wasm, wizer.initialize
+# is genuinely dead (the snapshot is taken) and DCE is correct.
+# macOS binaryen (v123+) doesn't trigger this; reorder makes
+# the pipeline portable.
 if command -v wizer >/dev/null 2>&1; then
-  # `--allow-wasi` is the only flag we want. Earlier iterations
-  # tried `--wasm-bulk-memory true` (intended to enable bulk-mem
-  # opts in newer wizer), but wizer v11.0.3 parses the `true` as a
-  # positional arg on Linux, silently using it as the input file
-  # and then failing with "the Wasm module does not have a
-  # wizer-initialize export". Stick to the documented invocation.
-  if ! wizer --allow-wasi -o "$WIZER" "$OPT" 2>/dev/null; then
+  if ! wizer --allow-wasi -o "$WIZER" "$RAW_WASM" 2>/dev/null; then
     echo "wasm_breakdown: wizer pre-init failed" >&2
     exit 2
   fi
@@ -120,8 +113,18 @@ if command -v wizer >/dev/null 2>&1; then
     WIZER_OPT="$WIZER"
   fi
 else
+  # No wizer → fall back to the raw .wasm (optionally opt'd) for
+  # the wasmtime compile step. The breakdown still runs, just
+  # without the wizer snapshot benefit.
   echo "[skip] wizer not on PATH; cwasm will represent the no-wizer shape" >&2
-  WIZER_OPT="$OPT"
+  if command -v wasm-opt >/dev/null 2>&1; then
+    if ! wasm-opt -Oz "$RAW_WASM" -o "$WIZER_OPT" >/dev/null; then
+      echo "wasm_breakdown: wasm-opt -Oz failed on raw .wasm" >&2
+      exit 2
+    fi
+  else
+    WIZER_OPT="$RAW_WASM"
+  fi
 fi
 
 if ! wasmtime compile "$WIZER_OPT" -o "$CWASM" 2>/dev/null; then

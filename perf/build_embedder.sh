@@ -44,7 +44,7 @@ done
 # libloading + dlopen — wasi has neither. Matches
 # perf/wasm_check.sh's invocation so the wasm shape gated by CI
 # is the same shape baked into the embedder.
-echo "[1/5] cargo build --release --target wasm32-wasip1 --no-default-features -p rubyrs"
+echo "[1/4] cargo build --release --target wasm32-wasip1 --no-default-features -p rubyrs"
 cargo build --release --target wasm32-wasip1 --no-default-features -p rubyrs >&2
 
 RAW_WASM="target/wasm32-wasip1/release/rubyrs.wasm"
@@ -58,27 +58,30 @@ fi
 # fresh per-run mktemp would force a rebuild every time.
 PIPELINE_DIR="target/wasm-pipeline"
 mkdir -p "$PIPELINE_DIR"
-OPT="$PIPELINE_DIR/rubyrs.opt.wasm"
 WIZ="$PIPELINE_DIR/rubyrs.wizer.wasm"
 WIZ_OPT="$PIPELINE_DIR/rubyrs.wizer.opt.wasm"
 
-echo "[2/5] wasm-opt -Oz $RAW_WASM -> $OPT"
-wasm-opt -Oz "$RAW_WASM" -o "$OPT"
+# Pipeline reorder vs perf/wasm_check.sh: do `wizer` BEFORE
+# `wasm-opt -Oz` rather than after. The pre-wizer wasm-opt was
+# pure size reduction — wizer reads the .wasm regardless of
+# whether it's been opt'd — and on Linux's apt-installed
+# binaryen (v116) the `-Oz` DCE pass strips the
+# `wizer.initialize` export despite it being a roots-list entry,
+# breaking the next step with `the Wasm module does not have a
+# wizer-initialize export`. Doing wizer first avoids the issue
+# entirely: by the time wasm-opt sees the .wasm, the
+# wizer.initialize export is genuinely dead (wizer has consumed
+# it) and the DCE is correct. macOS brew binaryen (v123+)
+# doesn't have this bug; this reorder makes the pipeline
+# portable across both.
+echo "[2/4] wizer --allow-wasi $RAW_WASM -> $WIZ"
+wizer --allow-wasi -o "$WIZ" "$RAW_WASM"
 
-echo "[3/5] wizer --allow-wasi $OPT -> $WIZ"
-# Mirror `perf/wasm_check.sh`'s wizer invocation exactly —
-# `--allow-wasi` is the only flag needed for the rubyrs shape.
-# (Don't pass `--wasm-bulk-memory true`; wizer v11.0.3 parses
-# that as a positional arg on some platforms, which then becomes
-# a "module does not have wizer-initialize" error because the
-# *wrong* file got loaded as the input.)
-wizer --allow-wasi -o "$WIZ" "$OPT"
-
-echo "[4/5] wasm-opt -Oz $WIZ -> $WIZ_OPT"
+echo "[3/4] wasm-opt -Oz $WIZ -> $WIZ_OPT"
 wasm-opt -Oz "$WIZ" -o "$WIZ_OPT"
 
 WIZ_OPT_ABS="$(cd "$(dirname "$WIZ_OPT")" && pwd)/$(basename "$WIZ_OPT")"
-echo "[5/5] cargo build --release -p rubyrs-wasm-embed  (RUBYRS_WIZER_WASM=$WIZ_OPT_ABS)"
+echo "[4/4] cargo build --release -p rubyrs-wasm-embed  (RUBYRS_WIZER_WASM=$WIZ_OPT_ABS)"
 RUBYRS_WIZER_WASM="$WIZ_OPT_ABS" cargo build --release -p rubyrs-wasm-embed >&2
 
 EMBED_BIN="target/release/rubyrs-wasm-embed"
