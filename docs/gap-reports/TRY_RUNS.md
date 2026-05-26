@@ -58,7 +58,7 @@ the **stacked-blocker layers behind `require 'sinatra'`**, the
 same shape the fifth pass found inside tilt/string.rb. Each
 unblock surfaces the next; counting how many layers exist tells
 us the order-of-magnitude work that would be required if the
-roadmap ever changed mind.
+roadmap ever changed its mind.
 
 ### Probe driver
 
@@ -116,20 +116,27 @@ puts "REACHED-END"
 
 ### Stacked blockers found
 
-Each row is "what crashes if you DON'T preload it". `:Real gap`
+Each row is "what crashes if you DON'T preload it". `Real gap`
 means a genuine rubyrs missing built-in or unimplemented runtime
-behavior; `:Project shape` means sinatra references something
-its embedder is expected to provide.
+behavior; `Real bug` is a defect in code that exists today but
+behaves incorrectly; `Project shape` means sinatra references
+something its embedder is expected to provide.
+
+One observation kept passing through the table without being a
+blocker: a `Gem::Version.new(RUBY_VERSION)` call ends up doing
+`"3.4.1" <=> "3.0"` via String comparison, which rubyrs's Tier-1
+String impl gets right. Not in the table because it's not a
+blocker; called out here to record that this *did* go through
+the probe without surprise.
 
 | # | File / line | Symbol | Category | Notes |
 |---|---|---|---|---|
 | 1 | `sinatra/indifferent_hash.rb:189` | `Gem::Version` | Project shape | Used to gate `def except` on Ruby ≥3.0 (`Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.0")`). Embedder can stub trivially. |
-| 2 | (rubyrs/preamble comparable.rb via Gem::Version) | `Object#instance_variable_get` | **Real gap** | Missing built-in. Surfaced when a `<=>` implementation reaches for `o.instance_variable_get(:@s)` to compare opaque objects. Workaround: `attr_reader` exposing the field publicly. |
-| 3 | (Gem::Version.new(RUBY_VERSION) call) | `String <=> String` of "3.4.1" vs "3.0" | Works | Tier-1 String comparison gets it right ("3.4.1" > "3.0"). No gap. |
-| 4 | `sinatra/show_exceptions.rb:74` | `ERB` constant | Project shape | `TEMPLATE = ERB.new ...` at class body. Embedder must stub before requiring `show_exceptions`. |
-| 5 | (in ERB stub attempting `Class.allocate`) | `Class#allocate` | **Real gap** | Missing built-in. CRuby's `Class#allocate` returns a bare instance without calling `initialize`. Workaround: build the stub instance via `Object.new` + singleton-class `def`. |
-| 6 | `sinatra/base.rb:32` (`class Request < Rack::Request`, line `HEADER_PARAM = /.../.freeze`) | `Regexp#freeze` | **Real gap** | Missing built-in. CRuby regex literals are already frozen; rubyrs needs a no-op `Regexp#freeze` to no-op the explicit call. Workaround: monkey-patch. |
-| 7 | `sinatra/base.rb:64` (`alias secure? ssl?`) | `alias` ancestor lookup across nested-via-path superclass | **Real gap** | `class Sinatra::Request < Rack::Request; alias secure? ssl?; end` fails with `undefined method 'ssl?' for class 'Sinatra::Request'` — even though `Rack::Request#ssl?` IS defined. Minimal repro confirms it: top-level `class Child < Parent; alias x y` works, but moving Parent into `module Rack` makes the alias's method-lookup fail to walk the superclass chain. |
+| 2 | (probe driver's `Gem::Version#<=>` stub at `o.instance_variable_get(:@s)`) | `Object#instance_variable_get` | **Real gap** | Missing built-in. Surfaced when an embedder-written `<=>` reaches for `instance_variable_get` to compare opaque objects (a common CRuby idiom; the actual call site here was the probe's own `Gem::Version` stub, but the same shape appears in any introspection-heavy gem). Workaround in the probe: `attr_reader` exposing the field publicly. |
+| 3 | `sinatra/show_exceptions.rb:74` | `ERB` constant | Project shape | `TEMPLATE = ERB.new ...` at class body. Embedder must stub before requiring `show_exceptions`. |
+| 4 | (in ERB stub attempting `Class.allocate`) | `Class#allocate` | **Real gap** | Missing built-in. CRuby's `Class#allocate` returns a bare instance without calling `initialize`. Workaround: build the stub instance via `Object.new` + singleton-class `def`. |
+| 5 | `sinatra/base.rb:32` (`class Request < Rack::Request`, line `HEADER_PARAM = /.../.freeze`) | `Regexp#freeze` | **Real gap** | Missing built-in. CRuby regex literals are already frozen; rubyrs needs a no-op `Regexp#freeze` to no-op the explicit call. Workaround: monkey-patch. |
+| 6 | `sinatra/base.rb:64` (`alias secure? ssl?`) | `alias` ancestor lookup across nested-via-path superclass | **Real bug** | `class Sinatra::Request < Rack::Request; alias secure? ssl?; end` fails with `undefined method 'ssl?' for class 'Sinatra::Request'` — even though `Rack::Request#ssl?` IS defined. Minimal repro confirms it: top-level `class Child < Parent; alias x y` works, but moving Parent into `module Rack` makes the alias's method-lookup fail to walk the superclass chain. |
 
 ### What this tells us
 
@@ -148,11 +155,19 @@ entire pass-6 sweep across 11 files.
 In order of "smallest fix that closes the next blocker":
 
 1. **`Object#instance_variable_get` + `Object#instance_variable_set`** — well-defined CRuby built-ins, ~10 lines. Closes layer #2 and likely several others (introspection-heavy gems use these constantly). Tier 1 candidate.
-2. **`Class#allocate`** — bypass-initialize allocator. Closes layer #5; also load-bearing for any framework that stores per-instance C state via TypedData-equivalent. Tier 1.
-3. **`Regexp#freeze` as no-op** — one line. Closes layer #6. Mirrors how rubyrs already treats `String#freeze` (regex literals frozen-by-construction in CRuby 3.x). Tier 1.
-4. **`alias` ancestor lookup fix** — layer #7 is the only true bug; the minimal repro shows the lookup chain isn't walking nested-via-path superclasses. Without seeing the implementation: probably checks `self.classes[interned_name].methods` directly instead of walking `Class.superclass` chain. Modest scope; one regression test pinning the nested case.
+2. **`Class#allocate`** — bypass-initialize allocator. Closes layer #4; also load-bearing for any framework that stores per-instance C state via TypedData-equivalent. Tier 1.
+3. **`Regexp#freeze` as no-op** — one line. Closes layer #5. Mirrors how rubyrs already treats `String#freeze` (regex literals frozen-by-construction in CRuby 3.x). Tier 1.
+4. **`alias` ancestor lookup fix** — layer #6 is the only true bug; the minimal repro shows the lookup chain isn't walking nested-via-path superclasses. _Hypothesis (not yet verified against the implementation)_: alias-time method resolution may consult only the current class's method table rather than walking the `Class.superclass` chain. Modest scope expected; the actionable artifact here is the minimal repro itself, plus one regression test pinning the nested case once the cause is confirmed in code.
 
 ### Cumulative category histogram (sinatra/base.rb body itself, this pass)
+
+Two new categories are introduced in this pass on top of the
+original A–G legend (preserved as historical record at the
+bottom of this file). They are scoped to pass 7 and forward —
+older passes don't use them:
+
+- **Cat H** — real gap, fixable with a small Tier-1 PR. A genuine missing built-in or runtime feature; the codebase doesn't yet implement what CRuby's semantics require.
+- **Cat I** — real bug, needs investigation + regression test. A defect in code that already exists but behaves incorrectly under some shape (here: nested-via-path alias-time lookup).
 
 Counted against the 6 distinct blockers above:
 
@@ -160,12 +175,9 @@ Counted against the 6 distinct blockers above:
 |---|---:|---|
 | Cat B (require) | 0 | All resolved by PR #135 fallback against pre-stubs |
 | Cat D (AST node) | 0 | Pass-6 confirmed sinatra/lib AST-clean; body inherits that |
-| Cat F (project shape) | 3 | Gem::Version, ERB, Rack::Request method surface |
-| Cat H (NEW — real built-in / runtime gap) | 3 | `instance_variable_get`, `Class#allocate`, `Regexp#freeze` |
-| Cat I (NEW — real bug) | 1 | `alias` ancestor lookup w/ nested-via-path |
-
-The histogram introduces two new categories vs the original
-pass-1 legend (`G` was host-DSL only). **Cat H = "real gap, fixable with a small Tier-1 PR"** is the actionable bucket; **Cat I = "real bug, needs investigation + regression test"** is the only thing on this list that's a bug rather than an absence.
+| Cat F (project shape) | 3 | Gem::Version, ERB, Rack::Request method surface (the first two appear as table rows; the third is "Rack::Request needs `ssl?` / `request_method` / etc. methods for the alias targets to resolve" — embedder-shaped, not in the table but does count toward the bucket) |
+| Cat H (real built-in / runtime gap) | 3 | `instance_variable_get`, `Class#allocate`, `Regexp#freeze` |
+| Cat I (real bug) | 1 | `alias` ancestor lookup w/ nested-via-path |
 
 If the goal ever becomes "host real sinatra," it's not a one-PR effort — it's a roadmap shift, with each base.rb section likely exposing 2-3 more layers down the same shape this pass mapped for the first 64 lines.
 
