@@ -20,13 +20,30 @@ use crate::value::{Class, Method, Value};
 
 use super::Vm;
 
-/// One entry in the per-call-site inline cache.
-#[derive(Clone)]
-#[derive(Default)]
-pub(crate) struct CallCache {
-    pub(crate) class_ptr: usize, // 0 = empty
+/// One way of a per-call-site polymorphic inline cache.
+/// `class_ptr == 0` means the slot is unused.
+#[derive(Clone, Default)]
+pub(crate) struct CallCacheEntry {
+    pub(crate) class_ptr: usize,
     pub(crate) generation: u32,
     pub(crate) method: Option<Rc<Method>>,
+}
+
+/// Per-call-site polymorphic inline cache. CRuby's vm_ic carries
+/// a single class shape; rubyrs widens that to `IC_WAYS` so a call
+/// site whose receiver alternates among a small set of classes
+/// (`each` over a heterogeneous Array, `Each` block dispatching to
+/// instances of a couple of user classes, ...) keeps hitting the
+/// cache instead of thrashing on every iteration. A miss when all
+/// ways are full evicts via simple round-robin (`next_way`); the
+/// megamorphic case (> IC_WAYS distinct classes) degenerates to
+/// the same uncached walk the old single-slot cache did.
+pub(crate) const IC_WAYS: usize = 4;
+#[derive(Clone, Default)]
+pub(crate) struct CallCache {
+    pub(crate) ways: [CallCacheEntry; IC_WAYS],
+    /// Next slot to evict on a miss. Wraps modulo `IC_WAYS`.
+    pub(crate) next_way: u8,
 }
 
 
@@ -41,27 +58,37 @@ impl Vm {
     }
 
     /// Per-call-site cached lookup. `cache_id` is the slot from the
-    /// `Op::Call(...,cache_id)` instruction. Hit when both class
-    /// pointer and `method_gen` match what was cached.
+    /// `Op::Call(...,cache_id)` instruction. Hits when one of the
+    /// (up to `IC_WAYS`) cached entries matches the receiver class
+    /// AND the global `method_gen` hasn't bumped since the entry
+    /// was stored. A miss does an uncached walk and inserts at the
+    /// `next_way` slot (round-robin eviction).
     #[inline]
     pub(crate) fn lookup_method_cached(&mut self, cls: &Rc<Class>, name_id: SymId, cache_id: u16) -> Option<Rc<Method>> {
         let class_ptr = Rc::as_ptr(cls) as usize;
         let idx = cache_id as usize;
-        // Fast path
+        // Fast path: scan ways for a match.
         if idx < self.call_caches.len() {
-            let c = &self.call_caches[idx];
-            if c.class_ptr == class_ptr && c.generation == self.method_gen {
-                return c.method.clone();
+            let cc = &self.call_caches[idx];
+            let cur_gen = self.method_gen;
+            for w in &cc.ways {
+                if w.class_ptr == class_ptr && w.generation == cur_gen {
+                    return w.method.clone();
+                }
             }
         }
-        // Miss: walk the chain, populate slot
+        // Miss: walk the chain, populate next way.
         let m = self.lookup_method_uncached(cls, name_id);
         if idx < self.call_caches.len() {
-            self.call_caches[idx] = CallCache {
+            let cur_gen = self.method_gen;
+            let cc = &mut self.call_caches[idx];
+            let slot = (cc.next_way as usize) % IC_WAYS;
+            cc.ways[slot] = CallCacheEntry {
                 class_ptr,
-                generation: self.method_gen,
+                generation: cur_gen,
                 method: m.clone(),
             };
+            cc.next_way = ((slot + 1) % IC_WAYS) as u8;
         }
         m
     }
@@ -642,9 +669,12 @@ mod tests {
     #[test]
     fn call_cache_default_is_empty() {
         let c = CallCache::default();
-        assert_eq!(c.class_ptr, 0);
-        assert_eq!(c.generation, 0);
-        assert!(c.method.is_none());
+        for w in &c.ways {
+            assert_eq!(w.class_ptr, 0);
+            assert_eq!(w.generation, 0);
+            assert!(w.method.is_none());
+        }
+        assert_eq!(c.next_way, 0);
     }
 
     #[test]
@@ -726,11 +756,11 @@ mod tests {
         let method = mk_method();
         cls.methods.borrow_mut().insert(name, method.clone());
 
-        // First call: miss, walks the chain, fills slot 0.
+        // First call: miss, walks the chain, fills way 0.
         let first = vm.lookup_method_cached(&cls, name, 0).unwrap();
         assert!(Rc::ptr_eq(&first, &method));
-        assert_eq!(vm.call_caches[0].class_ptr, Rc::as_ptr(&cls) as usize);
-        assert_eq!(vm.call_caches[0].generation, vm.method_gen);
+        assert_eq!(vm.call_caches[0].ways[0].class_ptr, Rc::as_ptr(&cls) as usize);
+        assert_eq!(vm.call_caches[0].ways[0].generation, vm.method_gen);
 
         // Remove the method from the class so an uncached walk would
         // return None. The cache should still serve the stale entry
@@ -738,6 +768,81 @@ mod tests {
         cls.methods.borrow_mut().remove(&name);
         let second = vm.lookup_method_cached(&cls, name, 0);
         assert!(second.is_some(), "cached entry should serve until method_gen bump");
+    }
+
+    #[test]
+    fn lookup_method_cached_polymorphic_keeps_all_ways() {
+        // Receiver class alternates among IC_WAYS distinct classes,
+        // all defining the same method. Each class first hits its
+        // own way after a miss, and from then on every call stays
+        // on the fast path — verify by removing the methods AFTER
+        // priming and checking that cached lookups still succeed.
+        let (mut vm, _) = mk_vm();
+        vm.ensure_call_caches(1);
+        let name = vm.interner.intern("ping");
+        let mut classes: Vec<(Rc<Class>, Rc<Method>)> = Vec::new();
+        for i in 0..IC_WAYS {
+            let cls = mk_class(&format!("C{i}"), None);
+            let m = mk_method();
+            cls.methods.borrow_mut().insert(name, m.clone());
+            classes.push((cls, m));
+        }
+        // Prime — fills all IC_WAYS slots, one per class.
+        for (cls, m) in &classes {
+            let got = vm.lookup_method_cached(cls, name, 0).unwrap();
+            assert!(Rc::ptr_eq(&got, m));
+        }
+        // Strip the methods so uncached walks would return None.
+        for (cls, _) in &classes {
+            cls.methods.borrow_mut().remove(&name);
+        }
+        // All IC_WAYS classes still hit the cache.
+        for (cls, m) in &classes {
+            let got = vm.lookup_method_cached(cls, name, 0);
+            assert!(got.is_some(), "polymorphic IC should keep all {IC_WAYS} ways");
+            assert!(Rc::ptr_eq(&got.unwrap(), m));
+        }
+    }
+
+    #[test]
+    fn lookup_method_cached_megamorphic_evicts_lru_round_robin() {
+        // (IC_WAYS + 1) distinct classes — the oldest entry gets
+        // evicted on insertion of the (IC_WAYS+1)-th. Verify by
+        // showing the evicted class falls back to an uncached walk
+        // (None after method removal) while the others still hit.
+        let (mut vm, _) = mk_vm();
+        vm.ensure_call_caches(1);
+        let name = vm.interner.intern("ping");
+        let n = IC_WAYS + 1;
+        let mut classes: Vec<(Rc<Class>, Rc<Method>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let cls = mk_class(&format!("C{i}"), None);
+            let m = mk_method();
+            cls.methods.borrow_mut().insert(name, m.clone());
+            classes.push((cls, m));
+        }
+        // Prime in order; the last insertion evicts way 0.
+        for (cls, _) in &classes {
+            let _ = vm.lookup_method_cached(cls, name, 0);
+        }
+        // Strip every method so any uncached walk returns None.
+        for (cls, _) in &classes {
+            cls.methods.borrow_mut().remove(&name);
+        }
+        // Check the surviving ways FIRST — looking up the evicted
+        // class first would consume a cache slot (its uncached-walk
+        // result gets installed at next_way) and contaminate the
+        // remaining-way check that follows.
+        for (cls, m) in &classes[1..] {
+            let got = vm.lookup_method_cached(cls, name, 0);
+            assert!(got.is_some(), "non-evicted ways still serve from cache");
+            assert!(Rc::ptr_eq(&got.unwrap(), m));
+        }
+        // First class was evicted by the (IC_WAYS+1)-th insertion:
+        // cache miss + uncached walk = None now that the method is
+        // stripped.
+        let first_after = vm.lookup_method_cached(&classes[0].0, name, 0);
+        assert!(first_after.is_none(), "oldest entry should have been evicted");
     }
 
     #[test]
