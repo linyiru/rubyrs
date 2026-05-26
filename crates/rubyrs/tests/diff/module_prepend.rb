@@ -171,3 +171,19 @@ class DiM
   include DiB
 end
 puts DiM.new.diamond             # "C" (once, not twice)
+
+# Transitive-idempotency: `include M` is a no-op if M is already
+# reachable in the ancestor chain — even via transitive includes.
+# Without ancestor-aware dedup, `include ContainsM` then
+# `include M` would move M ahead of ContainsM and reorder lookup.
+module TI_M; def t; "M"; end; end
+module TI_Contains; include TI_M; end
+class TI_C
+  include TI_Contains
+  include TI_M       # already reachable via TI_Contains — no-op
+end
+# TI_Contains is "more recent" than TI_M (TI_M was already there
+# via TI_Contains), so dispatch order at TI_C should still be
+# [TI_C, TI_Contains, TI_M, ...] not [TI_C, TI_M, TI_Contains, ...].
+puts TI_C.ancestors[1].name == "TI_Contains"
+puts TI_C.ancestors[2].name == "TI_M"

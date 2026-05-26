@@ -428,12 +428,21 @@ impl Vm {
                         // separate chains — `lookup_method_uncached`
                         // walks prepends BEFORE the class's own
                         // methods, and includes AFTER.
-                        let mut chain = if is_prepend {
-                            target.prepends.borrow_mut()
-                        } else {
-                            target.includes.borrow_mut()
-                        };
-                        if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
+                        //
+                        // Idempotency check is full ancestor-chain,
+                        // not just the direct vec — CRuby treats
+                        // `include M` / `prepend M` as a no-op if
+                        // `M` is anywhere in ancestors (transitive
+                        // includes/prepends too). Without
+                        // `class_is_a`, `include ContainsM` then
+                        // `include M` would move `M` ahead of
+                        // `ContainsM` and reorder lookup.
+                        if !super::class_is_a(target, &src) {
+                            let mut chain = if is_prepend {
+                                target.prepends.borrow_mut()
+                            } else {
+                                target.includes.borrow_mut()
+                            };
                             chain.insert(0, src);
                         }
                     }
@@ -1494,12 +1503,15 @@ impl Vm {
                             ),
                         })),
                     };
-                    let mut chain = if is_prepend {
-                        target.prepends.borrow_mut()
-                    } else {
-                        target.includes.borrow_mut()
-                    };
-                    if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
+                    // Full ancestor-chain idempotency, same as the
+                    // no-receiver arm — see that comment for the
+                    // reorder hazard a shallow vec-check creates.
+                    if !super::class_is_a(target, &src) {
+                        let mut chain = if is_prepend {
+                            target.prepends.borrow_mut()
+                        } else {
+                            target.includes.borrow_mut()
+                        };
                         chain.insert(0, src);
                     }
                 }
