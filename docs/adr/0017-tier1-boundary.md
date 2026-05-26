@@ -141,7 +141,7 @@ listed at writing time (2026-05) have all been closed — the
 table below is kept as a record of what was fixed and where so
 future contributors can trace the rationale without re-deriving
 it. New deviations get added here as they are discovered; an
-"Open" status column is the signal that work is still pending.
+"Open" status value is the signal that work is still pending.
 
 | Deviation | Verified at | Rule violated | Status |
 |-----------|-------------|---------------|--------|

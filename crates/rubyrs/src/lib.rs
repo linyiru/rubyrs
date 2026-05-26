@@ -390,8 +390,8 @@ include!(concat!(env!("OUT_DIR"), "/prism_node_sets.rs"));
 /// untrusted scripts.
 ///
 /// **Construction**: use `Config::default()` with field-update syntax:
-/// ```ignore
-/// rubyrs::Config { fuel: Some(1_000_000), ..Default::default() }
+/// ```no_run
+/// let _cfg = rubyrs::Config { fuel: Some(1_000_000), ..Default::default() };
 /// ```
 ///
 /// Adding new fields is still source-breaking for downstream
