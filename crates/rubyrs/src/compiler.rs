@@ -305,6 +305,34 @@ pub(crate) fn compile_expr(
                 }
             }
         }
+        // `/pre #{x} post/` — same build sequence as InterpolatedStr,
+        // followed by `CompileRegex` which pops the assembled String
+        // and pushes a `Value::Regex`. Empty `/#{}/` (parts.is_empty())
+        // builds an empty pattern and then a regex that matches
+        // everywhere; CRuby behaves the same.
+        #[cfg(feature = "regex")]
+        Expr::InterpolatedRegex(parts) => {
+            if parts.is_empty() {
+                let id = interner.intern("");
+                b.emit(Op::LoadConstStr(id));
+            } else {
+                let to_s = interner.intern("to_s");
+                for (idx, p) in parts.iter().enumerate() {
+                    match &p.node {
+                        Expr::StrLit(_) => compile_expr(b, p, protos, interner, cc),
+                        _ => {
+                            compile_expr(b, p, protos, interner, cc);
+                            let cid = *cc as u16; *cc += 1;
+                            b.emit(Op::Call(to_s, 0, cid));
+                        }
+                    }
+                    if idx > 0 {
+                        b.emit(Op::BinOp(BinOpKind::Add));
+                    }
+                }
+            }
+            b.emit(Op::CompileRegex);
+        }
         Expr::BoolLit(true) => { b.emit(Op::LoadTrue); }
         Expr::BoolLit(false) => { b.emit(Op::LoadFalse); }
         Expr::Nil => { b.emit(Op::LoadNil); }

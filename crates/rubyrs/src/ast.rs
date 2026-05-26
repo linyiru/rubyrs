@@ -68,6 +68,16 @@ pub(crate) enum Expr {
     RegexLit(String),
     SymbolLit(String),
     InterpolatedStr(Vec<SExpr>),
+    /// `/pre #{x} post/` — interpolated regex literal. Lowered
+    /// like `InterpolatedStr` (concat all parts into a String via
+    /// `to_s` + `+`), then handed to `Op::CompileRegex`. The
+    /// interpolated parts are *re-evaluated* on every reach (the
+    /// content can change per call), but pattern compilation hits
+    /// `Vm::regex_cache` keyed by the assembled pattern's SymId,
+    /// so identical expansions only compile once. Cfg-gated on the
+    /// `regex` feature alongside `RegexLit`.
+    #[cfg(feature = "regex")]
+    InterpolatedRegex(Vec<SExpr>),
     BoolLit(bool),
     Nil,
     LVarRead(String),
@@ -563,6 +573,41 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }
         }).collect();
         return sp(node, Expr::InterpolatedStr(parts));
+    }
+    // `/pre #{x} post/` — same `parts()` shape as InterpolatedString;
+    // the per-part `to_s + +` build runs in the compiler, then
+    // `Op::CompileRegex` turns the resulting String into a Regex.
+    // Without the regex feature, emit the standard "regex feature
+    // not enabled" AST error (matching `RegexLit`'s behaviour).
+    if let Some(_n) = node.as_interpolated_regular_expression_node() {
+        #[cfg(feature = "regex")]
+        {
+            let parts: Vec<SExpr> = _n.parts().iter().map(|p| {
+                if let Some(es) = p.as_embedded_statements_node() {
+                    let stmts: Vec<SExpr> = es.statements()
+                        .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                        .unwrap_or_default();
+                    if stmts.len() == 1 { stmts.into_iter().next().unwrap() }
+                    else { Spanned::new(node_span(&p), seq_inner(stmts)) }
+                } else if let Some(ev) = p.as_embedded_variable_node() {
+                    tr(&ev.variable())
+                } else {
+                    tr(&p)
+                }
+            }).collect();
+            return sp(node, Expr::InterpolatedRegex(parts));
+        }
+        #[cfg(not(feature = "regex"))]
+        {
+            AST_ERRORS.with(|cell| {
+                cell.borrow_mut().push(
+                    "/#{...}/ interpolated regex literal: rubyrs was built without the \
+                     `regex` Cargo feature; rebuild with --features regex to \
+                     enable Regexp support (ADR 0017 Rule 3 / Tier 2)".to_string(),
+                );
+            });
+            return sp(node, Expr::Nil);
+        }
     }
     if node.as_true_node().is_some() { return sp(node, Expr::BoolLit(true)); }
     if node.as_false_node().is_some() { return sp(node, Expr::BoolLit(false)); }

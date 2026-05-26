@@ -1712,3 +1712,58 @@ fn adr_0017_config_pid_overrides_dollar_dollar() {
     assert_eq!(buf.snapshot().trim(), "42",
         "Config::pid Some(n) should expose that n through $$ verbatim");
 }
+
+#[test]
+fn interpolated_regex_invalid_pattern_returns_syntax_error_trap() {
+    // PR #99 review coverage: the InterpolatedRegex path documents
+    // that invalid runtime-assembled patterns surface as SyntaxError
+    // traps at `Op::CompileRegex` (mirroring `LoadRegex`). The
+    // existing literal-regex path already returns SyntaxError too,
+    // so this is a parity check not a divergence acknowledgement.
+    //
+    // CRuby raises RegexpError here ("end pattern with unmatched
+    // parenthesis"); the class differs from rubyrs's SyntaxError
+    // for both literal AND interpolated regex paths, which is why
+    // this lives as a host-API test rather than in diff_cruby.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        r#"
+        bad = "("
+        /#{bad}/
+        "#,
+        "bad_interpolated_regex.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::SyntaxError { .. }),
+        "expected SyntaxError trap from invalid interpolated regex, got {:?}",
+        err.err,
+    );
+}
+
+#[test]
+fn interpolated_regex_respects_max_symbols_cap() {
+    // PR #99 review coverage: dynamic patterns intern into the
+    // same interner used by `String#to_sym`, so the same
+    // `Config::max_symbols` cap that bounds `to_sym` must also
+    // bound interpolated regex pattern interning. Without the cap
+    // check inside `Op::CompileRegex`, untrusted scripts could
+    // build distinct patterns in a loop to grow the interner
+    // (and the SymId-keyed `regex_cache`) without bound.
+    let cfg = rubyrs::Config { max_symbols: Some(64), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        r#"
+        i = 0
+        while i < 10_000
+          /#{i}/
+          i += 1
+        end
+        "#,
+        "regex_symbol_storm.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted trap from regex-pattern symbol storm, got {:?}",
+        err.err,
+    );
+}
