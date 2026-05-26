@@ -383,16 +383,19 @@ include!(concat!(env!("OUT_DIR"), "/prism_node_sets.rs"));
 /// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
 /// untrusted scripts.
 ///
-/// **Construction**: use `Config::default()` and field-update syntax
-/// rather than a struct literal, e.g.
+/// **Construction**: use `Config::default()` with field-update syntax:
 /// ```ignore
 /// rubyrs::Config { fuel: Some(1_000_000), ..Default::default() }
 /// ```
-/// The struct is `#[non_exhaustive]` — adding new capability fields
-/// (each one a future ADR 0017 host-capability gate) is now an
-/// additive change rather than a source-breaking one.
+///
+/// Adding new fields is still source-breaking for downstream
+/// embedders using full struct literals. The fix is a dedicated
+/// builder API (`Config::builder().fuel(n).env(map).build()`)
+/// rather than `#[non_exhaustive]`, which forbids struct
+/// expressions cross-crate entirely and would have a much larger
+/// migration footprint here. Tracked as follow-up; see PR #88
+/// thread for the analysis.
 #[derive(Default)]
-#[non_exhaustive]
 pub struct Config {
     /// When true, every potential GC point triggers a full collection.
     /// Useful for catching root-set bugs in host code; rough on
