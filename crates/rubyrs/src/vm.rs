@@ -1213,8 +1213,23 @@ impl Vm {
                 // Compute the owned result in a borrow scope, then
                 // drop the borrow before calling bigint_to_value
                 // (&mut self). `+@` just hands back the receiver
-                // unchanged — no demote needed.
+                // unchanged — no demote needed. The identity
+                // shortcut is sound ONLY because every
+                // `Value::BigInt(id)` is allocated through
+                // `bigint_to_value`, which demotes any in-i64
+                // magnitude to `Value::Int(n)` — see the
+                // `debug_assert!` below. If a future cext/FFI path
+                // ever bypasses `bigint_to_value` and stores an
+                // in-i64 magnitude as `HeapObj::BigInt`, this
+                // shortcut would leak a non-canonical
+                // `Value::BigInt(small)` whose dispatch semantics
+                // drift from `Value::Int(small)`.
                 if name == "+@" {
+                    debug_assert!(
+                        i64::try_from(self.heap.bigint(*id)).is_err(),
+                        "non-canonical BigInt reached try_bigint_unary +@: \
+                         magnitude fits i64 but wasn't demoted by bigint_to_value",
+                    );
                     return Ok(Some(recv.clone()));
                 }
                 // `abs` on an already-non-negative BigInt is the
@@ -1226,6 +1241,11 @@ impl Vm {
                 if name == "abs" {
                     let sign = self.heap.bigint(*id).sign();
                     if sign != Sign::Minus {
+                        debug_assert!(
+                            i64::try_from(self.heap.bigint(*id)).is_err(),
+                            "non-canonical BigInt reached try_bigint_unary abs: \
+                             magnitude fits i64 but wasn't demoted by bigint_to_value",
+                        );
                         return Ok(Some(recv.clone()));
                     }
                 }
