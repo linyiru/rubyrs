@@ -584,7 +584,7 @@ impl Vm {
                             }
                             None => Vec::new(),
                         };
-                        let id = self.heap.alloc(HeapObj::Hash(pairs));
+                        let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         self.env_hash = Some(id);
                         id
                     };
@@ -1353,7 +1353,7 @@ impl Vm {
                 let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n);
                 let mut iter = flat.into_iter();
                 while let (Some(k), Some(v)) = (iter.next(), iter.next()) { pairs.push((k, v)); }
-                let id = self.heap.alloc(HeapObj::Hash(pairs));
+                let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                 self.stack.push(Value::Hash(id));
             }
             Op::PushRescue(off, slot, bind, filter_sym) => {

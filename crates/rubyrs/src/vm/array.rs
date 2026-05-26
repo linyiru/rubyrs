@@ -399,7 +399,7 @@ impl Vm {
                             }
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     ("count", []) => Some(Value::Int(self.heap.array(id).len() as i64)),

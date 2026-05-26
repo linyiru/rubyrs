@@ -739,6 +739,128 @@ impl Vm {
         }
 
         let new_id = self.interner.intern("new");
+        // `Hash.new` interception. The preamble defines a stub
+        // `class Hash; end` (lib.rs) that has no connection to the
+        // primitive `Value::Hash` storage — without this short-
+        // circuit, `Hash.new` falls through to the generic
+        // `Class.new` allocator below and returns a bare
+        // `Value::Object`, which then NoMethodErrors on every
+        // collection-style call (`.[]`, `.keys`, `.each`, ...).
+        //
+        // Three call shapes (CRuby semantics):
+        //   - `Hash.new`           → empty Hash, no default
+        //   - `Hash.new(default)`  → empty Hash, scalar default
+        //     (NOT yet modelled — falls through to no-default; the
+        //     scalar arg is silently ignored as a documented gap)
+        //   - `Hash.new { |h, k| block }` → empty Hash with default-
+        //     block stored alongside; `Hash#[]` invokes it on
+        //     missing keys with `(self, key)`.
+        //
+        // Tilt's `@lazy_map = Hash.new { |h, k| h[k] = [] }` (the
+        // motivating case) is the block form. Without default-
+        // block support the whole tilt-load chain stalls on the
+        // first `@lazy_map[ext]` access.
+        // `Hash[...]` class-method constructor. CRuby has three
+        // call shapes:
+        //   - `Hash[]`               → empty Hash
+        //   - `Hash[k1, v1, k2, v2]` → flat-pair form (even arity)
+        //   - `Hash[[[k, v], ...]]`  → 1 Array of 2-element pairs
+        //   - `Hash[{k => v, ...}]`  → 1 Hash (copy semantics)
+        // The flat-pair form is the most common; older gems prefer
+        // it over `pairs.to_h`. Without this intercept, `Hash[]`
+        // would NoMethodError on Class (no `[]` defined on
+        // Value::Class).
+        //
+        // Odd-arity (k without matching v) is ArgumentError in
+        // CRuby; mirror that.
+        if &*name == "[]"
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Hash"
+        {
+            self.maybe_gc();
+            self.check_alloc()?;
+            let pairs: Vec<(Value, Value)> = if args.len() == 1 {
+                match &args[0] {
+                    Value::Array(aid) => {
+                        // `Hash[[[k, v], ...]]`. Each element must be
+                        // a 2-element Array; anything else is
+                        // ArgumentError in CRuby (`invalid number of
+                        // elements (X for 2)`), but we follow the
+                        // common shape — non-pair elements are dropped
+                        // with TypeError. Stay strict only on the
+                        // outer Array shape.
+                        let outer = self.heap.array(*aid).clone();
+                        let mut out = Vec::with_capacity(outer.len());
+                        for elem in outer {
+                            if let Value::Array(pair_id) = elem {
+                                let pair = self.heap.array(pair_id);
+                                if pair.len() == 2 {
+                                    out.push((pair[0].clone(), pair[1].clone()));
+                                } else {
+                                    return Err(self.trap(RubyError::ArgumentError {
+                                        msg: format!("invalid number of elements ({} for 2)", pair.len()),
+                                    }));
+                                }
+                            } else {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: format!("wrong element type {} (expected array)", elem.type_name()),
+                                }));
+                            }
+                        }
+                        out
+                    }
+                    Value::Hash(hid) => self.heap.hash(*hid).clone(),
+                    _ => return Err(self.trap(RubyError::ArgumentError {
+                        msg: "odd number of arguments for Hash".into(),
+                    })),
+                }
+            } else if args.len() % 2 == 0 {
+                args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect()
+            } else {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "odd number of arguments for Hash".into(),
+                }));
+            };
+            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+            self.stack.push(Value::Hash(hid));
+            return Ok(());
+        }
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Hash"
+        {
+            // `Hash.new` without a block. CRuby shapes:
+            //   - 0 args: empty Hash, no default
+            //   - 1 arg:  empty Hash with scalar default; missing-
+            //             key lookup returns this value as-is (not
+            //             cached into the Hash).
+            //   - 2+ args: ArgumentError
+            // The block-form (`Hash.new { |h, k| ... }`) routes
+            // through `do_call_block` and has its own intercept
+            // (which raises ArgumentError when a scalar default is
+            // also given — CRuby refuses both at once).
+            if args.len() > 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+                }));
+            }
+            let default = args.first().cloned();
+            // Pin the default across maybe_gc — if it's a heap
+            // value (Array / Hash / String), it could be a
+            // temporary on its way to becoming the default and
+            // would otherwise be unrooted between args.first() and
+            // hash_set_default_value below.
+            let mut g = PinGuard::new(self);
+            if let Some(v) = &default { g.pin(v.clone()); }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+            if default.is_some() {
+                g.vm.heap.hash_set_default_value(hid, default);
+            }
+            g.vm.stack.push(Value::Hash(hid));
+            return Ok(());
+        }
         if name_id == new_id
             && let Value::Class(cls) = &recv {
                 // L3-F: cext-registered allocator path. When the class
@@ -2797,7 +2919,7 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                g.vm.heap.alloc(HeapObj::Hash(leftover))
+                g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(leftover)))
             };
             locals[kw_rest_slot] = Value::Hash(hid);
         }
@@ -3316,6 +3438,44 @@ impl Vm {
         // trigger GC before installing the block as the frame's
         // `block_arg`, so the gap is safe there too.
         //
+        // `Hash.new { |h, k| ... }` interception. Parallel to the
+        // no-block arm in `do_call`. The block becomes the Hash's
+        // default-block (stored in `HashObj.default_block` for GC
+        // and access). `Hash#[]` consults this slot on missing
+        // keys and invokes the block with `(self_hash, key)` —
+        // tilt's `Hash.new { |h, k| h[k] = [] }` auto-vivifies.
+        //
+        // `Hash.new(default) { block }` is an ArgumentError in
+        // CRuby ("wrong number of arguments (given 1, expected 0)"
+        // from Hash#initialize when both default-arg and block are
+        // given). Mirror that explicitly so callers don't see the
+        // misleading generic Class.new fallback behaviour.
+        if &*name == "new"
+            && let Some(Value::Class(cls)) = &recv
+            && cls.name.as_str() == "Hash"
+        {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                }));
+            }
+            // GC rooting: `block` was popped from the stack into a
+            // Rust-local ObjId above. Until `hash_set_default_block`
+            // installs it into the new Hash (which IS a GC root via
+            // `self.stack.push` below), the block is unreachable
+            // from the standard roots (stack / frames / pinned).
+            // `maybe_gc` could sweep it between the alloc and the
+            // store, leaving `hash_set_default_block` pointing at a
+            // freed slot. Pin across both maybe_gc + alloc.
+            let mut g = PinGuard::new(self);
+            g.pin(Value::Block(block));
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+            g.vm.heap.hash_set_default_block(hid, Some(block));
+            g.vm.stack.push(Value::Hash(hid));
+            return Ok(());
+        }
         // `instance_eval` / `class_eval` / `module_eval` — swap
         // `self` for the duration of the block. Intercepted here
         // so the receiver-type dispatch below can't claim them

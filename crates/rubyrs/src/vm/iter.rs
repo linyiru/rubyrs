@@ -102,7 +102,7 @@ impl Vm {
         let acc_id = if matches!(mode, IterMode::Select | IterMode::Reject) {
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
-            let rid = g.vm.heap.alloc(HeapObj::Hash(Vec::new()));
+            let rid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
             g.pin(Value::Hash(rid));
             Some(rid)
         } else { None };
@@ -667,7 +667,7 @@ impl Vm {
                 let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
                 g.pin(Value::Hash(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -706,7 +706,7 @@ impl Vm {
                 let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::with_capacity(snapshot.len())));
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::with_capacity(snapshot.len()))));
                 g.pin(Value::Hash(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -1290,7 +1290,7 @@ impl Vm {
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let result_id = g.vm.heap.alloc(HeapObj::Hash(Vec::new()));
+                let result_id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
                 g.pin(Value::Hash(result_id));
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
@@ -1721,7 +1721,7 @@ impl Vm {
                     g.pin(av.clone());
                     hash_pairs.push((gk, av));
                 }
-                let hid = g.vm.heap.alloc(HeapObj::Hash(hash_pairs));
+                let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(hash_pairs)));
                 Some(Value::Hash(hid))
             }
 

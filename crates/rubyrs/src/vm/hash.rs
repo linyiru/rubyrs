@@ -33,9 +33,72 @@ impl Vm {
                         }));
                     }
                     ("[]", [k]) => {
-                        let h = self.heap.hash(id);
-                        for (key, val) in h {
-                            if key.ruby_eq(k, &self.heap) { return Ok(Some(val.clone())); }
+                        // Direct hit first.
+                        {
+                            let h = self.heap.hash(id);
+                            for (key, val) in h {
+                                if key.ruby_eq(k, &self.heap) {
+                                    return Ok(Some(val.clone()));
+                                }
+                            }
+                        }
+                        // Missing key — invoke default-block if the
+                        // Hash was built via `Hash.new { |h, k| ... }`.
+                        // CRuby contract: block called with
+                        // `(self_hash, key)`; its return value becomes
+                        // the `[]` result. Common idiom is
+                        // `Hash.new { |h, k| h[k] = [] }` — block
+                        // mutates the Hash AND returns the value the
+                        // caller sees.
+                        // Scalar default (set by `Hash.new(value)`)
+                        // is checked BEFORE the block — but only one
+                        // of the two can be set at allocation time
+                        // (CRuby refuses both, and the Hash.new
+                        // intercept enforces that). Returned as-is,
+                        // NOT cached: `h[:missing]` returns the
+                        // default but doesn't add `:missing` to the
+                        // pairs.
+                        if let Some(v) = self.heap.hash_default_value(id) {
+                            return Ok(Some(v));
+                        }
+                        if let Some(block_id) = self.heap.hash_default_block(id) {
+                            let pre_frames = self.frames.len();
+                            let mut g = PinGuard::new(self);
+                            g.pin(Value::Hash(id));
+                            g.pin(k.clone());
+                            // Pin the block too — it lives on the
+                            // heap and could be swept across maybe_gc
+                            // sites in invoke_block / dispatch_until.
+                            g.pin(Value::Block(block_id));
+                            g.vm.invoke_block(block_id, vec![Value::Hash(id), k.clone()])?;
+                            g.vm.dispatch_until(pre_frames)?;
+                            // Non-local return from inside the block
+                            // (`def foo; h = Hash.new { return :early };
+                            // h[:x]; end` → foo returns :early). The
+                            // outer unwind machinery handles
+                            // method_return; we propagate by leaving
+                            // it set and returning Nil. The `[]` site
+                            // never observes our Nil because the
+                            // dispatch loop sees method_return first.
+                            if g.vm.method_return.is_some() {
+                                return Ok(Some(Value::Nil));
+                            }
+                            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                            // `break` from inside a stored Proc
+                            // (which is what a Hash default-block
+                            // is — not an iterator yield) is a
+                            // LocalJumpError in CRuby: there's no
+                            // loop body to break out of. Raise to
+                            // match. Clear the flag first so the
+                            // trap doesn't carry it into the outer
+                            // unwind state.
+                            if g.vm.break_signaled {
+                                g.vm.break_signaled = false;
+                                return Err(g.vm.trap(crate::error::RubyError::LocalJumpError {
+                                    msg: "break from proc-closure".into(),
+                                }));
+                            }
+                            return Ok(Some(r));
                         }
                         Some(Value::Nil)
                     }
@@ -185,7 +248,11 @@ impl Vm {
                     ("merge", [Value::Hash(other)]) => {
                         // CRuby: keys in `other` overwrite keys in `self`,
                         // and `other`'s key-order is appended after self's
-                        // (existing keys retain their position).
+                        // (existing keys retain their position). The
+                        // result inherits the RECEIVER's default-block
+                        // (`h.default_proc`), so
+                        // `Hash.new { |h, k| h[k] = [] }.merge(x)[:y]`
+                        // still auto-vivifies on the merged hash.
                         let mut out: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
                         for (k, v) in extra {
@@ -196,8 +263,38 @@ impl Vm {
                                 out.push((k, v));
                             }
                         }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(out));
+                        // GC rooting: snapshot the receiver's default-
+                        // block BEFORE alloc. The receiver `id` arrived
+                        // as a Rust-local ObjId from `do_call`'s recv-
+                        // pop; it isn't on the stack / in a frame /
+                        // pinned, so `maybe_gc` could sweep it AND
+                        // anything reachable only through it (the
+                        // default-block itself). That would leave us
+                        // copying a freed-slot ObjId onto the new
+                        // Hash. Pin both the receiver hash and (when
+                        // present) the default-block across the alloc.
+                        let default_block = self.heap.hash_default_block(id);
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        // Pin `*other` too — `extra` was a shallow clone
+                        // of its pairs (ObjIds, not deep copies), so any
+                        // nested heap children (Arrays / Strings /
+                        // Hashes / etc.) inside `extra` are reachable
+                        // ONLY through `*other`. Without this pin,
+                        // maybe_gc could sweep `*other` plus its
+                        // children, leaving the new merged Hash with
+                        // dangling ObjIds. Caught under STRESS_GC by
+                        // a probe like
+                        // `h.merge({a: [1,2,3,4,5]})` in a tight loop.
+                        g.pin(Value::Hash(*other));
+                        if let Some(bid) = default_block {
+                            g.pin(Value::Block(bid));
+                        }
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
+                        if default_block.is_some() {
+                            g.vm.heap.hash_set_default_block(nid, default_block);
+                        }
                         Some(Value::Hash(nid))
                     }
                     ("delete", [k]) => {
@@ -223,7 +320,7 @@ impl Vm {
                             if let Some(p) = pos { out[p].1 = v; } else { out.push((k, v)); }
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(out));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
                         Some(Value::Hash(nid))
                     }
                     // `h.compact` — return a new Hash with nil-value
@@ -234,7 +331,7 @@ impl Vm {
                             .cloned()
                             .collect();
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     // `h.compact!` — in-place compaction. Returns
@@ -256,7 +353,7 @@ impl Vm {
                             .cloned()
                             .collect();
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     // `h.slice(*keys)` — return a new Hash with only
@@ -272,7 +369,7 @@ impl Vm {
                             }
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     ("store", [k, v]) => {

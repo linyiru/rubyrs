@@ -56,6 +56,11 @@ pub enum RubyError {
     /// Mutating a frozen String (`freeze`d or interned). CRuby's
     /// FrozenError; rescued by `rescue FrozenError`.
     FrozenError { msg: String },
+    /// `break` from a stored Proc (e.g. a Hash default-block)
+    /// instead of an actively-yielded-to iterator block. CRuby
+    /// raises LocalJumpError because there's no loop body to
+    /// break out of. Rescued by `rescue LocalJumpError`.
+    LocalJumpError { msg: String },
     /// Integer `/` or `%` with a zero divisor. CRuby raises
     /// `ZeroDivisionError`; without this variant the Rust
     /// `i64::div` would panic the host process. Float `/ 0.0`
@@ -120,6 +125,7 @@ impl RubyError {
             RubyError::KeyError { .. } => "KeyError",
             RubyError::IndexError { .. } => "IndexError",
             RubyError::FrozenError { .. } => "FrozenError",
+            RubyError::LocalJumpError { .. } => "LocalJumpError",
             RubyError::ZeroDivisionError { .. } => "ZeroDivisionError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
             // Uncaught carries the actual class name from the script's
@@ -139,6 +145,7 @@ impl RubyError {
             | RubyError::KeyError { msg }
             | RubyError::IndexError { msg }
             | RubyError::FrozenError { msg }
+            | RubyError::LocalJumpError { msg }
             | RubyError::ZeroDivisionError { msg }
             | RubyError::ResourceExhausted { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),

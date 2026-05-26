@@ -794,6 +794,16 @@ class KeyError < IndexError
 end
 class ZeroDivisionError < StandardError
 end
+## LocalJumpError — raised when a control-flow keyword
+## (`break` / `next` / `return`) escapes the wrong scope. The
+## canonical case is `break` from inside a stored Proc (e.g. a
+## Hash default-block or any saved block): the block isn't
+## currently being yielded-to from an iterator, so there's no
+## loop body to break out of. CRuby raises LocalJumpError;
+## rubyrs raises it from the `Hash#[]` / `Hash#dig` default-
+## block paths.
+class LocalJumpError < StandardError
+end
 class FrozenError < RuntimeError
 end
 ## Intentionally `< Exception`, NOT `< StandardError`. A bare
