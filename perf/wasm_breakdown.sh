@@ -169,6 +169,26 @@ for i in $(seq 1 "$RUNS"); do
 done
 
 # 5. Extract MIN per label, MIN of wall-clock total.
+#
+# IMPORTANT — the per-checkpoint MINs come from independent runs.
+# Run #3 might have the fastest `entry` time and run #7 the
+# fastest `eval_done`; we report each label's MIN regardless of
+# which run it came from. The per-phase deltas (next-minus-prev
+# in the print loop below) are therefore "best-each" — they
+# answer "what's the floor each phase can hit", NOT "what does
+# a single fastest run look like phase by phase". On rare
+# occasions a later phase's MIN can dip below an earlier
+# phase's MIN's same-run-mate, producing a tiny negative delta
+# in the printed table; ignore those, they're a measurement
+# artifact, not a real bug.
+#
+# An alternative shape — find the single run with the lowest
+# wall total and report its checkpoints unchanged — was
+# considered (Copilot review PR #125). Deliberately not chosen
+# here: with MIN-of-25 runs, the per-phase floor is more
+# stable than any single run's snapshot, and the floors are
+# what we actually want to track over time as we tune the
+# embedder. Best-each is a wider net.
 extract_min() {
   # $1 = label
   awk -F'\t' -v label="$1" '
