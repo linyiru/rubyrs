@@ -366,8 +366,7 @@ impl Vm {
             // whitelist matches lookup.rs's `Value::Class(_)`
             // primitive-method set — keep both in lockstep.
             if matches!(&self_val, Value::Class(_))
-                && matches!(&*name, "new" | "name" | "method_defined?" | "instance_method" | "undef_method"
-                    | "private_constant" | "public_constant") {
+                && matches!(&*name, "new" | "name" | "method_defined?" | "instance_method" | "undef_method") {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 for a in args { self.stack.push(a); }
@@ -1890,35 +1889,6 @@ impl Vm {
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::Array(elems));
                     self.stack.push(Value::Array(id));
-                    return Ok(());
-                }
-                // `Module#private_constant(*syms)` /
-                // `Module#public_constant(*syms)` — stub. CRuby
-                // tags the named constants so external access
-                // (`Klass::FOO` from outside the class body)
-                // raises NameError; rubyrs doesn't model that
-                // enforcement yet. The call accepts Symbol /
-                // String args and returns the receiver — enough
-                // for tilt's `private_constant :BaseMapping` (and
-                // similar idioms in gems) to load, since
-                // internal references to the constant still work.
-                //
-                // Documented divergence: external `Klass::Foo`
-                // access remains permitted in rubyrs. A future
-                // PR can land a `private_constants` set on Class
-                // plus the constant-lookup gate without breaking
-                // this call-site contract.
-                ("private_constant", args) | ("public_constant", args)
-                    if args.iter().all(|a|
-                        matches!(a, Value::Sym(_) | Value::Str(_))
-                    ) =>
-                {
-                    // 0-arg form is a no-op returning the receiver
-                    // in CRuby — `Foo.private_constant.inspect`
-                    // prints "Foo". Accept it here so the stub
-                    // matches what `respond_to?` already
-                    // advertises.
-                    self.stack.push(Value::Class(cls.clone()));
                     return Ok(());
                 }
                 // `Module#constants` — Symbol Array of constant
