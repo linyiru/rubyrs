@@ -1123,13 +1123,38 @@ fn parse_directive(it: &mut std::str::Chars<'_>) -> Option<(char, Option<usize>)
             _ => None,
         }
     };
+    // Collapse (directive, endian) pairs to a single internal
+    // sentinel character the engine arms then match on. The
+    // unsigned forms (`L`/`S`/`Q`) alias to the existing
+    // unsigned-endian directives (`N`/`V`/`n`/`v`/`J`/`Q`).
+    // The signed forms (`l`/`s`) and the older `q` use
+    // dedicated sentinels — see the helper-comment table below.
+    //
+    // Native endian: rubyrs targets aarch64-apple-darwin (LE)
+    // and x86_64-linux (LE) — both little-endian — so omitting
+    // the modifier resolves to LE. CRuby itself returns
+    // platform-native here; matching the CI host's behaviour is
+    // sufficient for the Tier 1 protocol-compat scope (binary
+    // gem formats fix BE/LE explicitly with `>` / `<` anyway).
     let dir = match (dir_raw, endian) {
+        // Unsigned 32-bit.
         ('L', Some('>')) => 'N',
         ('L', Some('<')) => 'V',
-        ('L', None)      => 'V', // native = LE on our targets
+        ('L', None)      => 'V',
+        // Signed 32-bit. Uppercase sentinel = BE, lowercase = LE
+        // (`T` and `t` are free — CRuby doesn't use them).
+        ('l', Some('>')) => 'T',
+        ('l', Some('<')) => 't',
+        ('l', None)      => 't',
+        // Unsigned 16-bit.
         ('S', Some('>')) => 'n',
         ('S', Some('<')) => 'v',
         ('S', None)      => 'v',
+        // Signed 16-bit. `K` / `k` are free.
+        ('s', Some('>')) => 'K',
+        ('s', Some('<')) => 'k',
+        ('s', None)      => 'k',
+        // 64-bit (existing).
         ('Q', Some('>')) => 'J',
         ('Q', Some('<')) => 'Q',
         ('q', Some('>')) => 'j',
@@ -1192,31 +1217,68 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
                     out.push(Value::Int(if dir == 'c' { (b as i8) as i64 } else { b as i64 }));
                 }
             }
-            'n' | 'v' => {
+            'n' | 'v' | 'K' | 'k' => {
+                // n/v: unsigned 16-bit BE/LE. K/k: signed 16-bit
+                // BE/LE (from `s>`/`s<`/`s` — see parse_directive
+                // sentinel table).
                 let take = if n == usize::MAX { (input.len() - i) / 2 } else { n };
                 for _ in 0..take {
                     if i + 2 > input.len() { out.push(Value::Nil); break; }
-                    let v = if dir == 'n' {
-                        u16::from_be_bytes([input[i], input[i+1]])
-                    } else {
-                        u16::from_le_bytes([input[i], input[i+1]])
+                    let bytes = [input[i], input[i+1]];
+                    let v: i64 = match dir {
+                        'n' => u16::from_be_bytes(bytes) as i64,
+                        'v' => u16::from_le_bytes(bytes) as i64,
+                        'K' => i16::from_be_bytes(bytes) as i64,
+                        'k' => i16::from_le_bytes(bytes) as i64,
+                        _ => unreachable!(),
                     };
                     i += 2;
-                    out.push(Value::Int(v as i64));
+                    out.push(Value::Int(v));
                 }
             }
-            'N' | 'V' => {
+            'N' | 'V' | 'T' | 't' => {
+                // N/V: unsigned 32-bit BE/LE. T/t: signed 32-bit
+                // BE/LE (from `l>`/`l<`/`l`).
                 let take = if n == usize::MAX { (input.len() - i) / 4 } else { n };
                 for _ in 0..take {
                     if i + 4 > input.len() { out.push(Value::Nil); break; }
-                    let v = if dir == 'N' {
-                        u32::from_be_bytes([input[i], input[i+1], input[i+2], input[i+3]])
-                    } else {
-                        u32::from_le_bytes([input[i], input[i+1], input[i+2], input[i+3]])
+                    let bytes = [input[i], input[i+1], input[i+2], input[i+3]];
+                    let v: i64 = match dir {
+                        'N' => u32::from_be_bytes(bytes) as i64,
+                        'V' => u32::from_le_bytes(bytes) as i64,
+                        'T' => i32::from_be_bytes(bytes) as i64,
+                        't' => i32::from_le_bytes(bytes) as i64,
+                        _ => unreachable!(),
                     };
                     i += 4;
-                    out.push(Value::Int(v as i64));
+                    out.push(Value::Int(v));
                 }
+            }
+            // `H*` / `H<n>` — hex string, high nibble first (e.g.
+            // `"\xAB\xCD".unpack1("H*")` → `"abcd"`). `h` is the
+            // low-nibble-first variant. CRuby's count semantics:
+            // the count is in *nibbles*, not bytes; `*` consumes
+            // all bytes. Output is one String (multi-byte input
+            // produces a single hex String, NOT one per byte).
+            'H' | 'h' => {
+                let avail_bytes = input.len() - i;
+                let nibble_count = if n == usize::MAX { avail_bytes * 2 } else { n };
+                let byte_count = nibble_count.div_ceil(2).min(avail_bytes);
+                let mut hex = String::with_capacity(nibble_count);
+                let mut written = 0usize;
+                for b in &input[i..i + byte_count] {
+                    let (hi, lo) = if dir == 'H' { (b >> 4, b & 0xF) } else { (b & 0xF, b >> 4) };
+                    if written < nibble_count {
+                        hex.push(char::from_digit(hi as u32, 16).unwrap());
+                        written += 1;
+                    }
+                    if written < nibble_count {
+                        hex.push(char::from_digit(lo as u32, 16).unwrap());
+                        written += 1;
+                    }
+                }
+                i += byte_count;
+                out.push(Value::new_str(hex));
             }
             'q' | 'Q' | 'j' | 'J' => {
                 // q = i64 LE, Q = u64 LE, j = i64 BE, J = u64 BE.
@@ -1288,30 +1350,69 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                     out.push((i & 0xff) as u8);
                 }
             }
-            'n' | 'v' => {
+            'n' | 'v' | 'K' | 'k' => {
+                // K/k: signed 16-bit BE/LE — same bit pattern as
+                // the unsigned versions for the same i64
+                // narrowing (low-16 bits), so the only difference
+                // would surface on the unpack side. Kept distinct
+                // here for symmetry with unpack_bytes.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
                     let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
                     vi += 1;
                     let i = match v {
-                        Value::Int(n) => n as u16,
-                        _ => return Err("pack: expected Integer for n/v".into()),
+                        Value::Int(n) => n,
+                        _ => return Err("pack: expected Integer for n/v/s/S".into()),
                     };
-                    let b = if dir == 'n' { i.to_be_bytes() } else { i.to_le_bytes() };
-                    out.extend_from_slice(&b);
+                    let bytes: [u8; 2] = match dir {
+                        'n' | 'K' => (i as u16).to_be_bytes(),
+                        'v' | 'k' => (i as u16).to_le_bytes(),
+                        _ => unreachable!(),
+                    };
+                    out.extend_from_slice(&bytes);
                 }
             }
-            'N' | 'V' => {
+            'N' | 'V' | 'T' | 't' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
                     let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
                     vi += 1;
                     let i = match v {
-                        Value::Int(n) => n as u32,
-                        _ => return Err("pack: expected Integer for N/V".into()),
+                        Value::Int(n) => n,
+                        _ => return Err("pack: expected Integer for N/V/l/L".into()),
                     };
-                    let b = if dir == 'N' { i.to_be_bytes() } else { i.to_le_bytes() };
-                    out.extend_from_slice(&b);
+                    let bytes: [u8; 4] = match dir {
+                        'N' | 'T' => (i as u32).to_be_bytes(),
+                        'V' | 't' => (i as u32).to_le_bytes(),
+                        _ => unreachable!(),
+                    };
+                    out.extend_from_slice(&bytes);
+                }
+            }
+            // `H*` / `H<n>` — hex string, high nibble first.
+            // CRuby ignores non-hex characters silently (treated
+            // as 0). Trailing nibble on odd-length string left-
+            // shifts (high nibble = the lone digit). `*` packs
+            // every nibble; explicit count truncates.
+            'H' | 'h' => {
+                let v = values.get(vi).cloned().unwrap_or(Value::new_str(""));
+                vi += 1;
+                let s = match v {
+                    Value::Str(s) => s.to_string_lossy(),
+                    _ => return Err("pack: expected String for H/h".into()),
+                };
+                let nibbles: Vec<u8> = s
+                    .chars()
+                    .map(|c| c.to_digit(16).unwrap_or(0) as u8)
+                    .collect();
+                let want = if n == usize::MAX { nibbles.len() } else { n.min(nibbles.len()) };
+                let mut byte_idx = 0;
+                while byte_idx * 2 < want {
+                    let hi = nibbles[byte_idx * 2];
+                    let lo = if byte_idx * 2 + 1 < want { nibbles[byte_idx * 2 + 1] } else { 0 };
+                    let packed = if dir == 'H' { (hi << 4) | lo } else { (lo << 4) | hi };
+                    out.push(packed);
+                    byte_idx += 1;
                 }
             }
             'q' | 'Q' | 'j' | 'J' => {

@@ -225,3 +225,4 @@ fn run_diff(name: &str) {
 #[test] fn string_unpack1() { run_diff("string_unpack1"); }
 #[test] fn string_encoding_query() { run_diff("string_encoding_query"); }
 #[test] fn string_inspect_control() { run_diff("string_inspect_control"); }
+#[test] fn pack_directives_extra() { run_diff("pack_directives_extra"); }
