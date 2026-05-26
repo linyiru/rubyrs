@@ -1994,3 +1994,59 @@ fn bigint_pow_negative_exponent_returns_float() {
     rt.eval("puts (2 ** -2)", "pow_neg.rb").expect("Float reciprocal path");
     assert_eq!(buf.snapshot().trim(), "0.25");
 }
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_identity_bases_skip_u32_cap() {
+    // 0/±1 bases produce trivial results regardless of exponent
+    // size — they must short-circuit BEFORE the u32 conversion
+    // so `1 ** (u32::MAX as i64 + 1)` doesn't spuriously trap.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let huge = (u32::MAX as i64) + 1; // 4_294_967_296
+    rt.eval(
+        &format!("puts 1 ** {h}\nputs 0 ** {h}\nputs (-1) ** {h}\nputs (-1) ** ({h} + 1)",
+            h = huge),
+        "pow_identity_huge.rb",
+    ).expect("identity bases must skip the u32 cap");
+    assert_eq!(buf.snapshot().trim(), "1\n0\n1\n-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_bigint_exponent_traps() {
+    // `2 ** (2**63)` (BigInt exponent) must trap ResourceExhausted
+    // instead of falling through to NoMethodError. The doc comment
+    // promises a clean error.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "big = 2 ** 100; 2 ** big",
+        "pow_bigint_exp.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted for BigInt exponent, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_oversize_exponent_traps_for_real_bases() {
+    // For bases with |a| > 1, an exponent that doesn't fit u32
+    // must trap (the result would be astronomically large) —
+    // verifies numeric_call declines on u32-overflow so
+    // bigint_primitive can issue the trap.
+    let mut rt = rubyrs::Runtime::new();
+    let huge = (u32::MAX as i64) + 1;
+    let err = rt.eval(
+        &format!("2 ** {}", huge),
+        "pow_oversize_exp.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted for u32-overflow exp, got {:?}",
+        err.err,
+    );
+}

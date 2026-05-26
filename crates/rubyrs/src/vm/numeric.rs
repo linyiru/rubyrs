@@ -115,26 +115,40 @@ pub(crate) fn numeric_call(
             // divergence.
             "**" => {
                 if *b < 0 {
-                    let f = (*a as f64).powi(*b as i32);
-                    Some(Value::Float(f))
+                    // Negative exponent → Float reciprocal.
+                    // `powf(f64)` instead of `powi(i32)` so very
+                    // large negative exponents don't silently
+                    // truncate through `as i32`.
+                    Some(Value::Float((*a as f64).powf(*b as f64)))
+                } else if *a == 0 {
+                    // 0**0 == 1; 0**n (n>0) == 0. Exact regardless
+                    // of exp size — short-circuit before u32 cast.
+                    Some(Value::Int(if *b == 0 { 1 } else { 0 }))
+                } else if *a == 1 {
+                    Some(Value::Int(1))
+                } else if *a == -1 {
+                    // Parity decides: even exp → 1, odd → -1.
+                    Some(Value::Int(if *b & 1 == 0 { 1 } else { -1 }))
                 } else {
-                    let exp = (*b as u64).min(u32::MAX as u64) as u32;
-                    #[cfg(feature = "bignum")]
-                    {
-                        if let Some(v) = a.checked_pow(exp) {
-                            Some(Value::Int(v))
-                        } else {
-                            // Overflow → decline so bigint_primitive
-                            // can produce the real arbitrary-precision
-                            // value. The caller (do_call after
-                            // primitive_call returns None) routes
-                            // BigInt-aware ops through bigint_primitive.
-                            None
+                    // |a| > 1: any exp that doesn't fit u32
+                    // overflows i64 anyway. With bignum we decline
+                    // on either u32-overflow or i64-overflow so
+                    // bigint_primitive can produce the real value
+                    // (or trap ResourceExhausted with an honest
+                    // estimate). Without bignum, saturate.
+                    match u32::try_from(*b) {
+                        Ok(exp) => {
+                            #[cfg(feature = "bignum")]
+                            { a.checked_pow(exp).map(Value::Int) }
+                            #[cfg(not(feature = "bignum"))]
+                            { Some(Value::Int(a.saturating_pow(exp))) }
                         }
-                    }
-                    #[cfg(not(feature = "bignum"))]
-                    {
-                        Some(Value::Int(a.saturating_pow(exp)))
+                        Err(_) => {
+                            #[cfg(feature = "bignum")]
+                            { None }
+                            #[cfg(not(feature = "bignum"))]
+                            { Some(Value::Int(a.saturating_pow(u32::MAX))) }
+                        }
                     }
                 }
             }

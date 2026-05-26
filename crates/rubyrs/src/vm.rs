@@ -889,10 +889,20 @@ impl Vm {
         recv: &Value,
         exp_arg: &Value,
     ) -> Result<Option<Value>, Trap> {
+        use num_bigint::{BigInt, Sign};
         let base_big = match self.as_bigint(recv) {
             Some(v) => v,
             None => return Ok(None),
         };
+        // BigInt exponent: refuse explicitly. The result would need
+        // at least 2**63 bits of storage — any cap we care about
+        // would trip — so trap ResourceExhausted instead of
+        // falling through to NoMethodError.
+        if matches!(exp_arg, Value::BigInt(_)) {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: "integer ** BigInt exponent exceeds u32::MAX".to_string(),
+            }));
+        }
         // Negative exponent → Float (reciprocal); let
         // numeric_call's Float arm handle (matches Phase A's
         // documented Rational divergence — we give `0.5` where
@@ -903,6 +913,25 @@ impl Vm {
             Value::Int(_) => return Ok(None),
             _ => return Ok(None),
         };
+        // Short-circuit |base| ≤ 1 BEFORE the u32 conversion —
+        // these results are exact regardless of exponent size, so
+        // `1 ** (u32::MAX + 1)` (or any huge safe exp) shouldn't
+        // spuriously trap. bits() returns the magnitude width,
+        // so `<= 1` ⇔ value ∈ {-1, 0, 1}.
+        if base_big.bits() <= 1 {
+            let result = match base_big.sign() {
+                Sign::NoSign => {
+                    // 0**0 == 1; 0**n (n>0) == 0.
+                    if exp_i64 == 0 { BigInt::from(1) } else { BigInt::from(0) }
+                }
+                Sign::Plus => BigInt::from(1),
+                Sign::Minus => {
+                    // -1: parity decides sign.
+                    if exp_i64 & 1 == 0 { BigInt::from(1) } else { BigInt::from(-1) }
+                }
+            };
+            return Ok(Some(self.bigint_to_value(result)?));
+        }
         let exp_u32: u32 = match u32::try_from(exp_i64) {
             Ok(v) => v,
             Err(_) => {
@@ -911,21 +940,15 @@ impl Vm {
                 }));
             }
         };
-        // Special-case empty result: 0**0 == 1 in CRuby and
-        // BigInt; 0**n for n>0 = 0; 1**n = 1. BigInt::pow handles
-        // these correctly so we don't need early returns — but
-        // estimating bits for `0` or `1` would erroneously
-        // multiply by `exp` even though the result fits trivially.
-        // Cheap guards keep the cap check meaningful.
-        if base_big.bits() <= 1 {
-            return Ok(Some(self.bigint_to_value(base_big.pow(exp_u32))?));
-        }
         // Estimate result size and trap before allocating GBs.
+        // Ceil-div in u64; compare against `cap as u64` so the
+        // check doesn't silently truncate on 32-bit targets
+        // (wasm32) via `as usize`.
         let base_bits = base_big.bits();
         let est_bits: u64 = base_bits.saturating_mul(exp_u32 as u64);
-        let est_bytes: usize = ((est_bits / 8) + 1) as usize;
+        let est_bytes: u64 = est_bits.saturating_add(7) / 8;
         let cap = self.max_value_bytes.unwrap_or(1 << 20);
-        if est_bytes > cap {
+        if est_bytes > cap as u64 {
             return Err(self.trap(RubyError::ResourceExhausted {
                 msg: format!(
                     "integer ** exp would need ~{} bytes, exceeding cap {}",
