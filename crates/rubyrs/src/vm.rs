@@ -1629,6 +1629,22 @@ impl Vm {
         {
             return Ok(Some(v));
         }
+        // Arity guard for `digits` — CRuby raises ArgumentError
+        // ("wrong number of arguments (given N, expected 0..1)")
+        // for arities outside {0, 1}. Without this, `5.digits(10, 2)`
+        // falls through to NoMethodError despite `respond_to?(:digits)`
+        // being true. Fires for any Int/BigInt receiver.
+        if name == "digits"
+            && matches!(recv, Value::Int(_) | Value::BigInt(_))
+            && args.len() > 1
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            }));
+        }
         if name == "pow" && matches!(recv, Value::BigInt(_)) && args.len() != 2 && args.len() != 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(
