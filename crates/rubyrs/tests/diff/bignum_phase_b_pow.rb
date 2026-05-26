@@ -3,9 +3,10 @@
 # Pre-Phase-B, Int#** used saturating_pow and capped at i64::MAX;
 # `2 ** 100` returned 9_223_372_036_854_775_807 instead of the
 # real 1.27e30. Now: numeric_call declines on overflow, do_call
-# routes to bigint_primitive::try_bigint_pow which estimates
-# result size, traps ResourceExhausted if it would blow up, and
-# computes the precise BigInt result otherwise.
+# routes through Vm::bigint_primitive which calls Vm::try_bigint_pow
+# — the helper estimates result size, traps ResourceExhausted if
+# it would blow up, and computes the precise BigInt result
+# otherwise.
 
 # Int × Int small-exp result still fits i64 (fast path, no
 # allocation).

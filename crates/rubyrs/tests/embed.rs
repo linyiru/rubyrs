@@ -2116,6 +2116,29 @@ fn bigint_pow_identity_bases_with_bigint_exponent() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn pow_neg_exponent_negative_base_preserves_parity_via_abs_powf() {
+    // Negative-base + large-magnitude negative-exp must keep
+    // the sign decided by i64 parity rather than relying on
+    // f64-rounded `powf(neg, non-int-as-int)` which can NaN
+    // (or flip sign) on some libm impls. `(-2) ** -3` is a
+    // small enough case to assert exactly: -1/8 = -0.125.
+    // Then `(-2) ** -(2**60 + 1)` (odd huge) — past 2**53
+    // f64-mantissa — must stay non-positive (underflows to
+    // -0.0 or a tiny negative Float).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let odd_huge = (1_i64 << 60) | 1;
+    rt.eval(
+        &format!("puts (-2) ** -3\nv = (-2) ** -{odd}\nputs v <= 0.0\nputs !v.nan?",
+            odd = odd_huge),
+        "pow_neg_base_parity.rb",
+    ).expect("negative-base negative-exp must not NaN");
+    assert_eq!(buf.snapshot().trim(), "-0.125\ntrue\ntrue");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn pow_neg_exponent_minus_one_preserves_parity_beyond_f64_mantissa() {
     // (-1) ** (-huge_odd) must remain -1.0; casting the i64
     // exponent through f64 loses parity past 2**53, so the

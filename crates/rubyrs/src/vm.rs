@@ -1000,8 +1000,16 @@ impl Vm {
                     }
                     _ => unreachable!(),
                 };
+                // Compute on |base| so a negative base + non-
+                // integer / non-finite exp can't NaN out of
+                // libm's powf. Re-apply the sign from the
+                // already-computed base_sign + exp_is_odd, which
+                // preserve parity from the original i64 / BigInt
+                // rather than the f64 round.
                 let base_f = self.bigint_recv_to_f64_bounded(recv);
-                return Ok(Some(Value::Float(base_f.powf(exp_f))));
+                let mag = base_f.abs().powf(exp_f);
+                let signed = if base_sign == Sign::Minus && exp_is_odd { -mag } else { mag };
+                return Ok(Some(Value::Float(signed)));
             }
             return Ok(None);
         }

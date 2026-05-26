@@ -125,10 +125,18 @@ pub(crate) fn numeric_call(
                     } else if *a == -1 {
                         Some(Value::Float(if *b & 1 == 0 { 1.0 } else { -1.0 }))
                     } else {
-                        // `powf(f64)` instead of `powi(i32)` so very
-                        // large negative exponents don't silently
-                        // truncate through `as i32`.
-                        Some(Value::Float((*a as f64).powf(*b as f64)))
+                        // Compute powf on |a| so a negative base
+                        // doesn't combine with an f64-rounded
+                        // exponent to yield NaN (libm `powf`
+                        // returns NaN when the base is negative
+                        // and the exp isn't exactly representable
+                        // as an integer in f64). Re-apply the
+                        // sign from the original i64 parity so
+                        // `(-2) ** large_odd_neg` stays negative
+                        // regardless of f64 rounding past 2**53.
+                        let mag = (a.unsigned_abs() as f64).powf(*b as f64);
+                        let signed = if *a < 0 && *b & 1 != 0 { -mag } else { mag };
+                        Some(Value::Float(signed))
                     }
                 } else if *a == 0 {
                     // 0**0 == 1; 0**n (n>0) == 0. Exact regardless
