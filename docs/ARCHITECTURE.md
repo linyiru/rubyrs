@@ -3,7 +3,7 @@
 A ~11k-line interpreter, organised as a Cargo workspace
 (`crates/rubyrs` core + `crates/rubund` runner + `crates/rubyrs-cext`
 opaque-handle bridge + `crates/rubyrs-gapscan` tooling). Inside the
-core crate the VM is split CRuby-style across 17 `vm/*.rs` submodules,
+core crate the VM is split CRuby-style across 20 `vm/*.rs` submodules,
 each mirroring a CRuby compilation unit. The pipeline:
 
 ```
@@ -52,32 +52,38 @@ Three reasons this structure is the way it is:
 
 ### `vm/` submodules (CRuby-mirrored layout)
 
-The VM itself is split across 17 files. Each mirrors a CRuby
+The VM itself is split across 20 files. Each mirrors a CRuby
 compilation unit so the question "where would CRuby put this?"
 maps to the same intuition here. `vm.rs` holds only the `Vm`
 struct, `Frame`, `PinGuard`, `RescueHandler`, and the cext
 re-entrance thread-local; everything else lives in `vm/*.rs`.
+Line counts below are approximate snapshots and drift as the
+code grows — see `wc -l crates/rubyrs/src/vm.rs crates/rubyrs/src/vm/*.rs`
+for the live numbers.
 
 | File | Lines (~) | CRuby analogue | Role |
 |------|-----------|----------------|------|
-| `src/vm.rs` | 440 | (struct definitions in `vm_core.h` / `vm_eval.c`) | `Vm`, `Frame`, `PinGuard`, `RescueHandler`, `HostFn`, `CURRENT_VM_PTR` |
-| `vm/dispatch.rs` | 960 | `vm_eval.c` / `vm_insnhelper.c` | `do_call`, `do_call_block`, `invoke_method`, `invoke_method_with_block`, `invoke_block`, `cext_invoke_method`, `try_method_missing` |
-| `vm/step.rs` | 750 | `vm_exec.c` | `dispatch` / `dispatch_until` outer drivers + per-opcode `step` |
-| `vm/cext.rs` | 860 | `internal/value.h` + `vm_eval.c` | rb_funcallv callback installation, handle ↔ Value translation, `cext_dispatch`, `cext_require` |
-| `vm/iter.rs` | 1220 | `enum.c` | block-form Enumerable filter/aggregation family (`iter_*_filter`, `collection_call_block`) |
-| `vm/string.rs` | 690 | `string.c` | String primitives + Regex shims |
-| `vm/array.rs` | 550 | `array.c` | no-block Array methods |
-| `vm/hash.rs` | 230 | `hash.c` | Hash primitives |
-| `vm/range.rs` | 150 | `range.c` | Range primitives |
-| `vm/numeric.rs` | 200 | `numeric.c` | Int/Float primitives |
-| `vm/kernel.rs` | 265 | `object.c` (Kernel) | `puts` / `p` / `Integer()` / `Float()` / … |
-| `vm/fileops.rs` | 110 | `file.c` | `File.read` / `File.exist?` … |
-| `vm/raise.rs` | 200 | `eval.c` / `eval_error.c` | `normalize_exception`, `trap_to_exception`, `unwind_with_exception` |
-| `vm/lookup.rs` | 270 | `vm_method.c` + `class.c` | `CallCache`, `lookup_method_cached/uncached`, `responds_to`, `class_of`, `class_is_a`, `sym_primitive` |
-| `vm/gc.rs` | 175 | `gc.c` + `thread.c` + `vm.c` | `Vm::run`, `check_fuel`/`alloc`/`frames`, `trap`, `maybe_gc` |
-| `vm/primitive.rs` | 100 | (per-class C function tables) | `primitive_call` — typed fast-path dispatch for Int/Float/String/Symbol/Bool/Nil |
-| `vm/sprintf.rs` | 240 | `sprintf.c` | `ruby_sprintf` + width/prec parser |
-| `vm/util.rs` | 45 | (cross-cutting) | `value_cmp_v`, `vec_nil`, `visibility_from_name` |
+| `src/vm.rs` | 745 | (struct definitions in `vm_core.h` / `vm_eval.c`) | `Vm`, `Frame`, `PinGuard`, `RescueHandler`, `HostFn` |
+| `vm/dispatch.rs` | 4280 | `vm_eval.c` / `vm_insnhelper.c` | `do_call`, `do_call_block`, `invoke_method`, `invoke_method_with_block`, `invoke_block`, `cext_invoke_method`, `try_method_missing` |
+| `vm/iter.rs` | 2160 | `enum.c` | block-form Enumerable filter/aggregation family (`iter_*_filter`, `collection_call_block`) |
+| `vm/step.rs` | 1640 | `vm_exec.c` | `dispatch` / `dispatch_until` outer drivers + per-opcode `step` |
+| `vm/string.rs` | 1570 | `string.c` | String primitives + Regex shims |
+| `vm/kernel.rs` | 1250 | `object.c` (Kernel) | `puts` / `p` / `Integer()` / `Float()` / … |
+| `vm/cext.rs` | 1240 | `internal/value.h` + `vm_eval.c` | rb_funcallv callback installation, handle ↔ Value translation, `cext_dispatch`, `cext_require`, `CURRENT_VM_PTR` |
+| `vm/bignum.rs` | 1170 | `bignum.c` | `try_bigint_binop`, `try_bigint_pow`, `try_bigint_unary`, `try_bigint_pow_method`, `try_integer_digits`, `bigint_primitive`, `bigint_to_value`, `as_bigint{,_ref}`, `bigint_arith` |
+| `vm/lookup.rs` | 1040 | `vm_method.c` + `class.c` | `CallCache`, `lookup_method_cached/uncached`, `responds_to`, `class_of`, `class_is_a`, `sym_primitive` |
+| `vm/array.rs` | 880 | `array.c` | no-block Array methods |
+| `vm/numeric.rs` | 595 | `numeric.c` | Int/Float primitives, `apply_int_promote` (i64-overflow promotion for reduce-style accumulators) |
+| `vm/raise.rs` | 490 | `eval.c` / `eval_error.c` | `normalize_exception`, `trap_to_exception`, `unwind_with_exception` |
+| `vm/hash.rs` | 390 | `hash.c` | Hash primitives |
+| `vm/range.rs` | 375 | `range.c` | Range primitives |
+| `vm/gc.rs` | 335 | `gc.c` + `thread.c` + `vm.c` | `Vm::run`, `check_fuel`/`alloc`/`frames`, `trap`, `maybe_gc` |
+| `vm/sprintf.rs` | 265 | `sprintf.c` | `ruby_sprintf` + width/prec parser |
+| `vm/fileops.rs` | 175 | `file.c` | `File.read` / `File.exist?` … |
+| `vm/primitive.rs` | 130 | (per-class C function tables) | `primitive_call` — typed fast-path dispatch for Int/Float/String/Symbol/Bool/Nil |
+| `vm/util.rs` | 80 | (cross-cutting) | `value_cmp_v`, `vec_nil`, `visibility_from_name` |
+| `vm/match_data.rs` | 45 | `re.c` | `materialize_match_data` — shared MatchData ivar wiring (regex feature only) |
+| `vm/cext_wasi.rs` | 25 | (target-specific shim) | wasm32-wasi alt for `cext_require` (traps; WASI has no dynamic loader) |
 
 Cross-module dependency is acyclic. `ast` and `bytecode` and `intern`
 have no inter-module deps; `value` depends on `intern`; `heap` and
@@ -281,6 +287,15 @@ Reasoning:
    atomic commit, gated on the 79-test `diff_cruby` suite staying
    byte-identical to CRuby.
 
-`vm.rs` is now 440 lines, holding only the `Vm` struct, the
-per-frame and per-rescue records, the pin-stack RAII guard, and the
-thread-local pointer the cext re-entrance machinery needs.
+`vm.rs` is currently ~745 lines, holding the `Vm` struct, the
+per-frame and per-rescue records, and the pin-stack RAII guard.
+(The original ~440-line target reflected the immediate-post-split
+state; subsequent work landed a handful of helpers back in `vm.rs`
+that we've since pulled out — wasi `cext_require` →
+`vm/cext_wasi.rs`, MatchData materialization →
+`vm/match_data.rs`, `apply_int_promote` → `vm/numeric.rs`, and
+the entire BigInt cluster → `vm/bignum.rs`. The remaining gap is
+mostly utility helpers like `dig_step` / `user_cmp` that any
+`impl Vm` site can reach; further trimming is cosmetic rather than
+load-bearing.) The thread-local `CURRENT_VM_PTR` the cext
+re-entrance machinery needs lives in `vm/cext.rs`.
