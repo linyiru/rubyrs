@@ -13,7 +13,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{ObjId, Value};
 
-use super::{value_cmp_v, PinGuard, Vm};
+use super::{value_cmp_v_heap, PinGuard, Vm};
 
 impl Vm {
     /// Array#X methods that don't take a block. Returns
@@ -393,22 +393,48 @@ impl Vm {
                     }
                     ("sum", []) | ("sum", [Value::Int(_)]) => {
                         let init = match args { [Value::Int(n)] => *n, _ => 0 };
-                        let a = self.heap.array(id);
-                        let mut s: i64 = init;
-                        for v in a {
-                            match v {
-                                Value::Int(n) => s = s.wrapping_add(*n),
-                                _ => return Ok(None),
+                        // PinGuard the receiver Array for the whole
+                        // loop: each apply_int_promote / try_bigint_binop
+                        // call takes &mut self and may trigger
+                        // maybe_gc inside bigint_to_value. The
+                        // receiver Array is held in the `recv` local
+                        // (already popped from stack by dispatch),
+                        // so without an explicit pin the GC sweep
+                        // can reclaim it between iterations, panicking
+                        // the next array(id) call. Found via
+                        // STRESS_GC=1 on the bignum fixture.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let kind = crate::bytecode::BinOpKind::Add;
+                        let mut acc: Value = Value::Int(init);
+                        let len = g.vm.heap.array(id).len();
+                        for i in 0..len {
+                            let v = g.vm.heap.array(id)[i].clone();
+                            match (&acc, &v) {
+                                (Value::Int(x), Value::Int(y)) => {
+                                    acc = g.vm.apply_int_promote(kind, *x, *y)?;
+                                }
+                                _ => {
+                                    // Either acc or v (or both) is
+                                    // BigInt — try_bigint_binop handles
+                                    // any Int/BigInt mix.
+                                    #[cfg(feature = "bignum")]
+                                    if let Some(next) = g.vm.try_bigint_binop(kind, &acc, &v)? {
+                                        acc = next;
+                                        continue;
+                                    }
+                                    return Ok(None);
+                                }
                             }
                         }
-                        Some(Value::Int(s))
+                        Some(acc)
                     }
                     ("min", []) => {
                         let a = self.heap.array(id);
                         if a.is_empty() { return Ok(Some(Value::Nil)); }
                         let mut best = a[0].clone();
                         for v in &a[1..] {
-                            match value_cmp_v(v, &best, &self.interner) {
+                            match value_cmp_v_heap(v, &best, &self.interner, &self.heap) {
                                 Some(std::cmp::Ordering::Less) => best = v.clone(),
                                 Some(_) => {}
                                 None => return Ok(None),
@@ -421,7 +447,7 @@ impl Vm {
                         if a.is_empty() { return Ok(Some(Value::Nil)); }
                         let mut best = a[0].clone();
                         for v in &a[1..] {
-                            match value_cmp_v(v, &best, &self.interner) {
+                            match value_cmp_v_heap(v, &best, &self.interner, &self.heap) {
                                 Some(std::cmp::Ordering::Greater) => best = v.clone(),
                                 Some(_) => {}
                                 None => return Ok(None),
@@ -472,22 +498,46 @@ impl Vm {
                         Some(Value::Array(nid))
                     }
                     ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
-                        let a = self.heap.array(id).clone();
-                        if a.is_empty() { return Ok(Some(Value::Nil)); }
+                        if self.heap.array(id).is_empty() { return Ok(Some(Value::Nil)); }
                         let op_name = self.interner.resolve(*op_sym).clone();
                         let kind = match crate::bytecode::BinOpKind::from_op_name(&op_name) { Some(k) => k, None => return Ok(None) };
+                        // PinGuard the receiver Array: the Vec we
+                        // clone below holds the Values by value, but
+                        // any Value::BigInt element is just an ObjId
+                        // — the actual BigInt heap slot is only kept
+                        // live by the receiver Array's mark walk.
+                        // Without this pin, maybe_gc inside
+                        // apply_int_promote / bigint_to_value sweeps
+                        // unreached BigInt slots, leaving the cloned
+                        // Value::BigInt with dangling ObjIds. Found
+                        // via STRESS_GC=1 on the bignum fixture.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let a = g.vm.heap.array(id).clone();
                         let mut acc = a[0].clone();
                         for v in &a[1..] {
+                            // Int×Int fast path with overflow promotion;
+                            // once `acc` becomes BigInt (or `v` is one),
+                            // fall through to `try_bigint_binop` so the
+                            // fold continues in arbitrary precision
+                            // instead of bailing the whole primitive.
                             match (&acc, v) {
                                 (Value::Int(x), Value::Int(y)) => {
                                     if matches!(kind, crate::bytecode::BinOpKind::Div | crate::bytecode::BinOpKind::Mod) && *y == 0 {
-                                        return Err(self.trap(RubyError::ZeroDivisionError {
+                                        return Err(g.vm.trap(RubyError::ZeroDivisionError {
                                             msg: "divided by 0".to_string(),
                                         }));
                                     }
-                                    acc = kind.apply_int(*x, *y);
+                                    acc = g.vm.apply_int_promote(kind, *x, *y)?;
                                 }
-                                _ => return Ok(None),
+                                _ => {
+                                    #[cfg(feature = "bignum")]
+                                    if let Some(next) = g.vm.try_bigint_binop(kind, &acc, v)? {
+                                        acc = next;
+                                        continue;
+                                    }
+                                    return Ok(None);
+                                }
                             }
                         }
                         Some(acc)

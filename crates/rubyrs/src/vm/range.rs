@@ -143,11 +143,31 @@ impl Vm {
                     }
                 }
                 let (bi, ei) = (begin_int.unwrap(), end_int.unwrap());
-                let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
+                // count uses checked arithmetic — `ei - bi` overflows
+                // for ranges like `(i64::MIN..i64::MAX)`; treat any
+                // overflow as a size of 0 (matches the "empty" semantic
+                // that the rest of this match already returns for
+                // bi > end_inc). Pre-cycle-14 used `ei - bi + 1`
+                // unchecked, panicking in debug builds.
+                let count = if excl {
+                    ei.checked_sub(bi).map(|d| d.max(0)).unwrap_or(0)
+                } else {
+                    ei.checked_sub(bi).and_then(|d| d.checked_add(1)).map(|d| d.max(0)).unwrap_or(0)
+                };
                 match (name, args) {
                     ("begin", []) | ("first", []) | ("min", []) => Some(b.clone()),
                     ("end", []) | ("last", []) => Some(e.clone()),
-                    ("max", []) => Some(if excl { Value::Int(ei - 1) } else { e.clone() }),
+                    ("max", []) => Some(if excl {
+                        // ei - 1 overflows when ei == i64::MIN
+                        // (e.g. `(-2**63...-2**63).max`); treat as
+                        // empty range → nil, matching the
+                        // empty-range semantic that Range#sum/inject
+                        // already use for the same i64-edge case.
+                        match ei.checked_sub(1) {
+                            Some(v) => Value::Int(v),
+                            None => Value::Nil,
+                        }
+                    } else { e.clone() }),
                     ("size", []) | ("length", []) | ("count", []) => Some(Value::Int(count)),
                     ("exclude_end?", []) => Some(Value::Bool(excl)),
                     ("include?", [Value::Int(v)]) => {
@@ -157,6 +177,18 @@ impl Vm {
                     ("cover?", [Value::Int(v)]) => {
                         let in_r = if excl { *v >= bi && *v < ei } else { *v >= bi && *v <= ei };
                         Some(Value::Bool(in_r))
+                    }
+                    // BigInt arg with Int bounds: BigInt is always
+                    // outside the Int-bounded range UNLESS the
+                    // BigInt happens to fit i64 (in which case
+                    // bigint_to_value would have demoted it). So
+                    // any reachable Value::BigInt arg here is
+                    // outside the range — return false. (The
+                    // BigInt-bound branch below handles the
+                    // BigInt-bound case.)
+                    #[cfg(feature = "bignum")]
+                    ("include?", [Value::BigInt(_)]) | ("cover?", [Value::BigInt(_)]) => {
+                        Some(Value::Bool(false))
                     }
                     // `r.cover?(other_range)` — true iff the
                     // other range is fully within self. For Int
@@ -216,20 +248,97 @@ impl Vm {
                     }
                     ("sum", []) | ("sum", [Value::Int(_)]) => {
                         let init = match args { [Value::Int(n)] => *n, _ => 0 };
-                        let end_inc = if excl { ei - 1 } else { ei };
+                        // ei - 1 can overflow when ei == i64::MIN
+                        // (e.g. `(-2**63...-2**63)` — exclusive end
+                        // at the minimum). Treat that as an empty
+                        // range, same as `bi > end_inc`.
+                        let end_inc = if excl {
+                            match ei.checked_sub(1) {
+                                Some(v) => v,
+                                None => return Ok(Some(Value::Int(init))),
+                            }
+                        } else { ei };
                         if bi > end_inc { return Ok(Some(Value::Int(init))); }
-                        let n = end_inc - bi + 1;
-                        let s = n.wrapping_mul(bi.wrapping_add(end_inc)) / 2;
-                        Some(Value::Int(init.wrapping_add(s)))
+                        // n * (bi + end_inc) / 2 closed form. The
+                        // i64 fast path computes EVERY step with
+                        // checked_* (including `n = end_inc - bi + 1`,
+                        // which can overflow on extremely wide ranges
+                        // like `i64::MIN..i64::MAX`). On any overflow
+                        // we fall through to the BigInt branch (or
+                        // the wrapping legacy arm with bignum off).
+                        // The BigInt branch computes everything from
+                        // the endpoints in BigInt space — never
+                        // touches the i64 `n` — so a fast-path
+                        // overflow can't carry a wrapped value into
+                        // the precise calculation.
+                        if let Some(total) = (|| -> Option<i64> {
+                            let n_i64 = end_inc.checked_sub(bi)?.checked_add(1)?;
+                            let sum = bi.checked_add(end_inc)?;
+                            let prod = n_i64.checked_mul(sum)?;
+                            init.checked_add(prod / 2)
+                        })() {
+                            return Ok(Some(Value::Int(total)));
+                        }
+                        #[cfg(feature = "bignum")]
+                        {
+                            use num_bigint::BigInt;
+                            let big_bi = BigInt::from(bi);
+                            let big_end = BigInt::from(end_inc);
+                            // n = end_inc - bi + 1, computed in BigInt
+                            // so we don't inherit the i64 overflow from
+                            // the fast path above.
+                            let big_n = &big_end - &big_bi + 1;
+                            let big_sum = &big_bi + &big_end;
+                            let big_total = BigInt::from(init) + (big_n * big_sum) / 2;
+                            return Ok(Some(self.bigint_to_value(big_total)?));
+                        }
+                        #[cfg(not(feature = "bignum"))]
+                        {
+                            let n = end_inc.wrapping_sub(bi).wrapping_add(1);
+                            let s = n.wrapping_mul(bi.wrapping_add(end_inc)) / 2;
+                            Some(Value::Int(init.wrapping_add(s)))
+                        }
                     }
                     ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
-                        let end_inc = if excl { ei - 1 } else { ei };
+                        // ei - 1 can overflow when ei == i64::MIN
+                        // (exclusive end at the minimum); empty range.
+                        let end_inc = if excl {
+                            match ei.checked_sub(1) {
+                                Some(v) => v,
+                                None => return Ok(Some(Value::Nil)),
+                            }
+                        } else { ei };
                         if bi > end_inc { return Ok(Some(Value::Nil)); }
                         let op_name = self.interner.resolve(*op_sym).clone();
                         let kind = match crate::bytecode::BinOpKind::from_op_name(&op_name) { Some(k) => k, None => return Ok(None) };
                         let mut acc = Value::Int(bi);
-                        let mut i = bi + 1;
-                        while i <= end_inc {
+                        // bi + 1 can overflow when bi == i64::MAX
+                        // (e.g. `(i64::MAX..i64::MAX).inject(:+)`).
+                        // After the empty-range early returns above
+                        // we know bi <= end_inc, but bi == i64::MAX
+                        // still hits this. Treat that as a singleton:
+                        // acc already holds the only element.
+                        let mut i = match bi.checked_add(1) {
+                            Some(v) => v,
+                            None => return Ok(Some(acc)),
+                        };
+                        // Singleton inclusive range (e.g. `(1..1)`):
+                        // bi == end_inc, so i = bi + 1 > end_inc and
+                        // the loop body must NOT run. Without this
+                        // guard the loop runs anyway (i starts > end_inc
+                        // but the `if i == end_inc break` never fires),
+                        // incrementing i forever and hanging the host.
+                        // Real bug found by Copilot cycle 12.
+                        if i > end_inc { return Ok(Some(acc)); }
+                        // Single shared increment site. The BigInt
+                        // arm previously had its own `i += 1; continue;`
+                        // which double-incremented; now both arms
+                        // share the bottom-of-loop step. The
+                        // increment uses checked_add so a fold over
+                        // a range ending at i64::MAX terminates
+                        // cleanly instead of wrapping into an
+                        // infinite loop.
+                        loop {
                             match &acc {
                                 Value::Int(x) => {
                                     if matches!(kind, crate::bytecode::BinOpKind::Div | crate::bytecode::BinOpKind::Mod) && i == 0 {
@@ -237,11 +346,24 @@ impl Vm {
                                             msg: "divided by 0".to_string(),
                                         }));
                                     }
-                                    acc = kind.apply_int(*x, i);
+                                    acc = self.apply_int_promote(kind, *x, i)?;
                                 }
-                                _ => return Ok(None),
+                                _ => {
+                                    #[cfg(feature = "bignum")]
+                                    if let Some(next) = self.try_bigint_binop(kind, &acc, &Value::Int(i))? {
+                                        acc = next;
+                                    } else {
+                                        return Ok(None);
+                                    }
+                                    #[cfg(not(feature = "bignum"))]
+                                    return Ok(None);
+                                }
                             }
-                            i += 1;
+                            if i == end_inc { break; }
+                            i = match i.checked_add(1) {
+                                Some(v) => v,
+                                None => break, // overflow at end of range
+                            };
                         }
                         Some(acc)
                     }

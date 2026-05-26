@@ -41,8 +41,31 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 # stdlib / mri-compat tiers as well — they require larger surgery
 # and are explicitly out of scope for this PoC.)
 [features]
-default = ["cext", "regex"]
+default = ["cext", "regex", "bignum"]
 cext = ["dep:rubyrs-cext", "dep:libloading"]
+# `bignum` is the third tier boundary (PoC Phase A per ADR 0018's
+# BigInt placement decision). With this feature off:
+#   - the `num-bigint` dependency disappears (~80-120 KB save
+#     estimate; measured at merge time)
+#   - `Value::BigInt`, `HeapObj::BigInt`, `Op::LoadBigInt`, and
+#     the integer-literal overflow → BigInt promotion path all
+#     cfg out; arithmetic falls back to two's-complement
+#     `wrapping_*` (wraps on overflow rather than promoting; not
+#     saturating)
+#   - script-visible: integer literals beyond i64 (e.g.
+#     `9_223_372_036_854_775_808`) saturate to `i64::MAX` at the
+#     AST layer, and `+`/`-`/`*`/`/`/`%` results that overflow i64
+#     wrap modulo 2^64 instead of promoting to arbitrary precision
+# Phase A surface (today): `+`, `-`, `*`, `/`, `%`, comparison,
+# `to_s`, `inspect`, `class`. Phase B will add `**` (which still
+# saturates today, gated on the `primitive_call &mut Vm` plumbing
+# tracked separately), bit ops, unary `-@`/`+@`, `abs`, and Float
+# interop.
+# Integer is Tier-1 semantics in CRuby (Fixnum + Bignum unified),
+# so BigInt lives in Tier 1 (will move to `rubyrs-core` in
+# Phase 1 of ADR 0018). The default keeps it on so CLI / embed
+# behaviour matches CRuby for arithmetic.
+bignum = ["dep:num-bigint"]
 # `regex` is the second tier boundary (PoC for ADR 0015 / spec'd
 # by ADR 0017). With this feature off:
 #   - the `regex` crate dependency disappears (~300 KB save)
@@ -74,6 +97,10 @@ stdlib = []
 [dependencies]
 ruby-prism.workspace = true
 regex = { version = "1", optional = true }
+# Optional via the `bignum` feature. With bignum off, num_bigint is not
+# pulled in. ADR 0018 Phase 1 will switch this to `default-features =
+# false` when rubyrs-core extracts (num-bigint's `std` is opt-out).
+num-bigint = { version = "0.4", optional = true }
 # Optional via the `cext` feature. With cext off, neither dep is
 # pulled into the build.
 rubyrs-cext = { path = "../rubyrs-cext", version = "0.1.0", optional = true }

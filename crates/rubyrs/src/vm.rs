@@ -11,7 +11,7 @@ use crate::error::Trap;
 // only reachable through the cext feature's kernel-side `require`
 // arm (see vm/kernel.rs), so we gate on both — `--no-default-features`
 // on wasi would otherwise see the import as unused.
-#[cfg(all(feature = "cext", target_os = "wasi"))]
+#[cfg(any(all(feature = "cext", target_os = "wasi"), feature = "bignum"))]
 use crate::error::RubyError;
 use crate::heap::Heap;
 use crate::intern::{Interner, SymId};
@@ -40,7 +40,7 @@ pub(crate) use cext::with_vm_ptr_set;
 pub(crate) use lookup::{class_is_a, flatten_ancestors, CallCache};
 pub(crate) use primitive::primitive_call;
 pub(crate) use sprintf::ruby_sprintf;
-pub(crate) use util::{value_cmp_v, vec_nil, visibility_from_name};
+pub(crate) use util::{value_cmp_v, value_cmp_v_heap, vec_nil, visibility_from_name};
 
 // ---------- VM ----------
 
@@ -350,6 +350,14 @@ pub(crate) struct Vm {
     /// `--no-default-features`.
     #[cfg(feature = "regex")]
     pub(crate) regex_cache: HashMap<SymId, Rc<regex::Regex>>,
+    /// Parsed-BigInt cache for `Op::LoadBigInt`. Keyed by the
+    /// interned decimal-string SymId; first load decodes via
+    /// `BigInt::from_str`, subsequent loads return the cached
+    /// `Rc<BigInt>` (a fresh `HeapObj::BigInt(b.clone())` is
+    /// allocated per load so the heap-side identity stays
+    /// per-Value, but the parse work is amortised).
+    #[cfg(feature = "bignum")]
+    pub(crate) bigint_lit_cache: HashMap<SymId, Rc<num_bigint::BigInt>>,
     /// Last successful regex match — populated by `=~`,
     /// `String#match`, and `Regexp#===` when they hit, cleared
     /// when they miss. Source of truth for `$~` and `$1`..`$N`
@@ -523,6 +531,8 @@ impl Vm {
             regex_cache: HashMap::new(),
             #[cfg(feature = "regex")]
             last_match: None,
+            #[cfg(feature = "bignum")]
+            bigint_lit_cache: HashMap::new(),
             env_hash: None,
             env_override: None,
             pid: None,
@@ -618,7 +628,11 @@ impl Vm {
     }
 
     pub(crate) fn user_cmp(&mut self, a: &Value, b: &Value) -> Result<Option<std::cmp::Ordering>, Trap> {
-        if let Some(ord) = value_cmp_v(a, b, &self.interner) {
+        // Heap-aware fast path so Array#sort works on BigInt
+        // arrays — value_cmp_v alone would return None for any
+        // BigInt operand and force fall-through to the user `<=>`
+        // method dispatch, which doesn't exist for primitives.
+        if let Some(ord) = value_cmp_v_heap(a, b, &self.interner, &self.heap) {
             return Ok(Some(ord));
         }
         // Try the receiver's `<=>` method (user-defined). Only
@@ -707,6 +721,354 @@ impl Vm {
         inst.ivars.insert(whole_ivar, Value::new_str(whole));
         inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
         Ok(Value::Object(obj_id))
+    }
+}
+
+/// Dispatch helpers used by the reduce-style accumulators in
+/// `Array#sum`/`Range#sum`/`Array#inject`/`Range#inject`. Promotes
+/// to BigInt on overflow when the feature is on; falls back to
+/// wrapping when it's off. (The main `Op::BinOp` path doesn't go
+/// through this helper — it inlines the same logic in step.rs
+/// with the BinOpInt/BinOp fast paths because each instruction
+/// already has the operands unwrapped in locals; routing through
+/// a helper would add an avoidable match on the i64 fast path.
+/// If those two paths ever drift apart, refactor both onto this
+/// helper.)
+impl Vm {
+    /// Apply an Int×Int op, promoting to BigInt on Add/Sub/Mul
+    /// overflow when `bignum` is on. Use this instead of calling
+    /// `kind.apply_int` directly anywhere the result needs to be
+    /// pushed back as a Value.
+    pub(crate) fn apply_int_promote(
+        &mut self,
+        kind: crate::bytecode::BinOpKind,
+        x: i64,
+        y: i64,
+    ) -> Result<Value, Trap> {
+        if let Some(v) = kind.apply_int(x, y) {
+            return Ok(v);
+        }
+        // None can only happen under `feature = "bignum"`.
+        #[cfg(feature = "bignum")]
+        {
+            return self.bigint_arith(kind, &Value::Int(x), &Value::Int(y))
+                .expect("ICE: bigint_arith None for Int operands");
+        }
+        #[cfg(not(feature = "bignum"))]
+        unreachable!("apply_int returns None only when bignum is on");
+    }
+}
+
+/// Dispatch helper: tries Int/BigInt arithmetic or comparison
+/// for the `Op::BinOp` cold path (operands include at least one
+/// BigInt, or are non-Int shapes that this method declines).
+/// With `bignum` off this is a no-op that always returns `None`,
+/// so the caller falls through to `primitive_call` exactly as
+/// before.
+impl Vm {
+    pub(crate) fn try_bigint_binop(
+        &mut self,
+        kind: crate::bytecode::BinOpKind,
+        a: &Value,
+        b: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        #[cfg(not(feature = "bignum"))]
+        {
+            let _ = (kind, a, b);
+            Ok(None)
+        }
+        #[cfg(feature = "bignum")]
+        {
+            use crate::bytecode::BinOpKind;
+            // Decline unless at least one operand is a BigInt
+            // (Int×Int went through the fast path above already).
+            if !matches!(a, Value::BigInt(_)) && !matches!(b, Value::BigInt(_)) {
+                return Ok(None);
+            }
+            // Float ↔ BigInt mixed: coerce the BigInt to f64 (lossy
+            // at extreme magnitudes — matches CRuby's "Float wins
+            // on mix" rule and Integer#to_f's documented precision
+            // loss past 2^53). Without this branch, `2.0 + big`
+            // raised NoMethodError because primitive_call's Float
+            // arms only handle Int/Float rhs.
+            if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+                let to_f = |v: &Value| -> Option<f64> {
+                    match v {
+                        Value::Float(f) => Some(*f),
+                        Value::Int(n) => Some(*n as f64),
+                        Value::BigInt(id) => self.heap.bigint(*id).to_string().parse::<f64>().ok(),
+                        _ => None,
+                    }
+                };
+                let (af, bf) = match (to_f(a), to_f(b)) {
+                    (Some(x), Some(y)) => (x, y),
+                    _ => return Ok(None),
+                };
+                let result = match kind {
+                    BinOpKind::Add => Value::Float(af + bf),
+                    BinOpKind::Sub => Value::Float(af - bf),
+                    BinOpKind::Mul => Value::Float(af * bf),
+                    BinOpKind::Div => Value::Float(af / bf),
+                    BinOpKind::Mod => Value::Float(af.rem_euclid(bf)),
+                    BinOpKind::Lt => Value::Bool(af < bf),
+                    BinOpKind::Le => Value::Bool(af <= bf),
+                    BinOpKind::Gt => Value::Bool(af > bf),
+                    BinOpKind::Ge => Value::Bool(af >= bf),
+                    BinOpKind::Eq => Value::Bool(af == bf),
+                    BinOpKind::Ne => Value::Bool(af != bf),
+                };
+                return Ok(Some(result));
+            }
+            // Both operands must be integers (Int or BigInt); if
+            // not, decline and let primitive_call try (e.g. for
+            // String * BigInt later). Use `as_bigint_ref` to
+            // borrow heap-side BigInts rather than cloning — only
+            // Int→BigInt coercions allocate, and comparison ops
+            // run entirely from refs.
+            let ax_cow = match self.as_bigint_ref(a) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            let bx_cow = match self.as_bigint_ref(b) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            // Comparison ops return Bool directly (run against the
+            // borrowed BigInts via Cow's Deref impl — no clones).
+            match kind {
+                BinOpKind::Lt => return Ok(Some(Value::Bool(&*ax_cow < &*bx_cow))),
+                BinOpKind::Le => return Ok(Some(Value::Bool(&*ax_cow <= &*bx_cow))),
+                BinOpKind::Gt => return Ok(Some(Value::Bool(&*ax_cow > &*bx_cow))),
+                BinOpKind::Ge => return Ok(Some(Value::Bool(&*ax_cow >= &*bx_cow))),
+                BinOpKind::Eq => return Ok(Some(Value::Bool(&*ax_cow == &*bx_cow))),
+                BinOpKind::Ne => return Ok(Some(Value::Bool(&*ax_cow != &*bx_cow))),
+                _ => {}
+            }
+            drop(ax_cow);
+            drop(bx_cow);
+            // Arithmetic: delegate to bigint_arith which handles
+            // zero-division traps and CRuby-style floor div / mod.
+            match self.bigint_arith(kind, a, b) {
+                Some(res) => Ok(Some(res?)),
+                None => Ok(None),
+            }
+        }
+    }
+}
+
+/// BigInt method dispatch — covers the calls `primitive_call`
+/// can't satisfy (it's stateless; BigInt needs heap access for
+/// the decimal-string read). Hooked from `Vm::do_call` after
+/// the regular primitive paths. Phase A surface:
+/// - `to_s` / `inspect` — heap-read paths handled inline.
+/// - Operator method-call shape (`big.+(x)`, `big.send(:==, y)`)
+///   — name parsed by `BinOpKind::from_op_name`, then routed
+///   through `try_bigint_binop` so the answer matches the
+///   `Op::BinOp` path exactly.
+/// The expression-form arithmetic (`big + 1` compiled as
+/// `Op::BinOp`) still goes through `try_bigint_binop` directly
+/// without entering this helper.
+#[cfg(feature = "bignum")]
+impl Vm {
+    pub(crate) fn bigint_primitive(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, Trap> {
+        // Two entry conditions:
+        // - Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // - Recv is Int AND a BigInt is among args: covers the
+        //   inverse-receiver operator method-call shape `1.+(2**63)`,
+        //   which goes through the Int-side dispatch path and would
+        //   otherwise miss BigInt arithmetic entirely (the expression
+        //   form `1 + big` works because Op::BinOp already routes via
+        //   try_bigint_binop on either-operand-is-BigInt).
+        let recv_is_bigint = matches!(recv, Value::BigInt(_));
+        let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
+        if !recv_is_bigint && !arg_is_bigint {
+            return Ok(None);
+        }
+        // Phase A heap-read operations — only meaningful on a BigInt
+        // receiver (Int#to_s already handled by numeric_call).
+        if recv_is_bigint && args.is_empty() {
+            if let Value::BigInt(id) = recv {
+                use num_bigint::Sign;
+                let b = self.heap.bigint(*id);
+                match name {
+                    "to_s" | "inspect" => {
+                        // BigInt decimal can grow arbitrarily (consider
+                        // `n = 2 ** 1_000_000; n.to_s`), so the
+                        // String materialised here must obey the same
+                        // `Config::max_value_bytes` cap that other
+                        // primitive_call arms enforce. Without this
+                        // check a script could DoS the host by
+                        // converting a huge BigInt to string.
+                        let s = b.to_string();
+                        if let Some(max) = self.max_value_bytes
+                            && s.len() > max
+                        {
+                            return Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("value size {} bytes > cap {}", s.len(), max),
+                            }));
+                        }
+                        return Ok(Some(Value::new_str(s)));
+                    }
+                    // Pure read-only predicates — fit cleanly in
+                    // Phase A because they don't need heap mutation.
+                    // (CRuby Integer uniformity: any predicate the
+                    // i64 Int receiver supports should work on the
+                    // unified Integer class regardless of magnitude.)
+                    "to_i" => return Ok(Some(recv.clone())),
+                    "to_f" => {
+                        // Lossy at extreme magnitudes; matches CRuby.
+                        return Ok(Some(Value::Float(
+                            b.to_string().parse::<f64>().unwrap_or(f64::INFINITY)
+                        )));
+                    }
+                    "zero?" => return Ok(Some(Value::Bool(b.sign() == Sign::NoSign))),
+                    "positive?" => return Ok(Some(Value::Bool(b.sign() == Sign::Plus))),
+                    "negative?" => return Ok(Some(Value::Bool(b.sign() == Sign::Minus))),
+                    "even?" => return Ok(Some(Value::Bool((b & num_bigint::BigInt::from(1)) == num_bigint::BigInt::from(0)))),
+                    "odd?" => return Ok(Some(Value::Bool((b & num_bigint::BigInt::from(1)) != num_bigint::BigInt::from(0)))),
+                    _ => {}
+                }
+            }
+        }
+        // Operator method-call shape — `big.+(1)`, `1.+(big)`,
+        // `big.send(:==, x)`. Route through `try_bigint_binop` so
+        // the answer matches the `Op::BinOp` path exactly (same
+        // arithmetic / floor-div semantics, same comparison Bool,
+        // same overflow-promotion-then-demote rule).
+        if args.len() == 1
+            && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(name)
+            && let Some(v) = self.try_bigint_binop(kind, recv, &args[0])?
+        {
+            return Ok(Some(v));
+        }
+        // `<=>` — universal three-way comparison. Not in BinOpKind
+        // (it returns Int not Bool, so the BinOp machinery doesn't
+        // model it), so we handle it here for Int/BigInt operands.
+        // CRuby's Integer#<=> returns nil for incomparable rhs
+        // (e.g. `1 <=> "foo"`); we do the same by deferring to the
+        // numeric_call path via None.
+        if args.len() == 1 && name == "<=>" {
+            if let (Some(ax), Some(bx)) = (
+                self.as_bigint_ref(recv),
+                self.as_bigint_ref(&args[0]),
+            ) {
+                let ord = (&*ax).cmp(&*bx);
+                let n = match ord {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                };
+                return Ok(Some(Value::Int(n)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// BigInt arithmetic surface — shared by the i64-overflow promotion
+/// path in `Op::BinOp` / `Op::BinOpInt` and by the cold-path
+/// dispatch for already-BigInt operands. Cfg-gated on `bignum`
+/// alongside the `Value::BigInt` variant. ADR 0018 BigInt placement.
+#[cfg(feature = "bignum")]
+impl Vm {
+    /// Wraps a `BigInt` as a `Value`, demoting to `Value::Int` if
+    /// it fits in i64. Every arithmetic path that can produce a
+    /// BigInt result funnels through here so that
+    /// post-overflow-shrink results land as `Int(n)` (matching
+    /// CRuby's `Fixnum == Bignum` equality on the natural Int
+    /// path) rather than `BigInt(n)` with a different ObjId per
+    /// computation.
+    pub(crate) fn bigint_to_value(&mut self, b: num_bigint::BigInt) -> Result<Value, Trap> {
+        if let Ok(n) = i64::try_from(&b) {
+            return Ok(Value::Int(n));
+        }
+        self.maybe_gc();
+        self.check_alloc()?;
+        Ok(Value::BigInt(self.heap.alloc(crate::heap::HeapObj::BigInt(b))))
+    }
+
+    /// Resolves an Int / BigInt operand to its `num_bigint::BigInt`
+    /// form. Non-integer Values return `None` so the caller can
+    /// fall through to the regular dispatch path (e.g. method-missing
+    /// for `String + BigInt`). Owned form — clones the heap-side
+    /// BigInt because the caller will consume it (arithmetic moves).
+    /// For comparisons / read-only paths prefer `as_bigint_ref`.
+    pub(crate) fn as_bigint(&self, v: &Value) -> Option<num_bigint::BigInt> {
+        match v {
+            Value::Int(n) => Some(num_bigint::BigInt::from(*n)),
+            Value::BigInt(id) => Some(self.heap.bigint(*id).clone()),
+            _ => None,
+        }
+    }
+
+    /// Borrowed form of `as_bigint`. BigInt operands flow as
+    /// `Cow::Borrowed(&BigInt)` (no clone); Int operands wrap
+    /// in `Cow::Owned(BigInt::from(n))` because we have to
+    /// materialise the conversion somewhere. The borrowed result
+    /// is tied to `&self.heap`, so the caller must drop it before
+    /// any `&mut self` calls. Used by `try_bigint_binop` for
+    /// comparison ops where both sides run from refs.
+    pub(crate) fn as_bigint_ref<'a>(
+        &'a self,
+        v: &'a Value,
+    ) -> Option<std::borrow::Cow<'a, num_bigint::BigInt>> {
+        use std::borrow::Cow;
+        match v {
+            Value::Int(n) => Some(Cow::Owned(num_bigint::BigInt::from(*n))),
+            Value::BigInt(id) => Some(Cow::Borrowed(self.heap.bigint(*id))),
+            _ => None,
+        }
+    }
+
+    /// Performs Add/Sub/Mul/Div/Mod on Int/BigInt operands in
+    /// arbitrary precision. Returns `None` for operands that
+    /// aren't integers (the caller dispatches normally). Div/Mod
+    /// by zero returns `Some(Err(...))` for the trap.
+    pub(crate) fn bigint_arith(
+        &mut self,
+        kind: crate::bytecode::BinOpKind,
+        a: &Value,
+        b: &Value,
+    ) -> Option<Result<Value, Trap>> {
+        use crate::bytecode::BinOpKind;
+        use num_bigint::BigInt;
+        let ax = self.as_bigint(a)?;
+        let bx = self.as_bigint(b)?;
+        let result: BigInt = match kind {
+            BinOpKind::Add => ax + bx,
+            BinOpKind::Sub => ax - bx,
+            BinOpKind::Mul => ax * bx,
+            BinOpKind::Div | BinOpKind::Mod => {
+                use num_bigint::Sign;
+                if bx.sign() == Sign::NoSign {
+                    return Some(Err(self.trap(RubyError::ZeroDivisionError {
+                        msg: "divided by 0".to_string(),
+                    })));
+                }
+                // CRuby's Integer#/ floors toward negative infinity
+                // (BigInt's default `Div` truncates toward zero).
+                // Same correction for `%`: result has rhs's sign.
+                let (q, r) = (&ax / &bx, &ax % &bx);
+                let needs_correction = (r.sign() == Sign::Minus && bx.sign() == Sign::Plus)
+                    || (r.sign() == Sign::Plus && bx.sign() == Sign::Minus);
+                if matches!(kind, BinOpKind::Div) {
+                    if needs_correction { q - 1 } else { q }
+                } else {
+                    if needs_correction { r + &bx } else { r }
+                }
+            }
+            // Comparison ops are handled inline in
+            // `try_bigint_binop` (which returns Bool directly via
+            // BigInt's PartialOrd/PartialEq); they never reach this
+            // arithmetic match.
+            _ => return None,
+        };
+        Some(self.bigint_to_value(result))
     }
 }
 

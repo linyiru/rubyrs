@@ -228,6 +228,25 @@ impl Vm {
                 "times" | "upto" | "downto" |
                 "digits" | "bit_length" | "[]"
             ),
+            // Phase A BigInt subset — arithmetic + comparison +
+            // to_s/inspect + pure predicates that don't need
+            // heap mutation. Unary `-@`/`+@`, bit ops, `abs`,
+            // iteration helpers (`times`, `upto`, `downto`),
+            // `digits` and `bit_length` remain Phase B — each
+            // needs a `&mut Vm` heap path that the stateless
+            // `primitive_call` doesn't grant. The predicates
+            // below only READ the bigint to compute a Bool/Int,
+            // so they fit cleanly in the existing bigint_primitive
+            // shape.
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => matches!(name,
+                "+" | "-" | "*" | "/" | "%" |
+                "<" | "<=" | ">" | ">=" |
+                "to_s" | "inspect" |
+                "to_i" | "to_f" |
+                "zero?" | "positive?" | "negative?" |
+                "even?" | "odd?"
+            ),
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |
                 "<" | "<=" | ">" | ">=" |
@@ -339,6 +358,8 @@ impl Vm {
     pub(crate) fn class_of(&mut self, recv: &Value) -> Value {
         let name: &'static str = match recv {
             Value::Int(_) => "Integer",
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => "Integer", // unified with Fixnum since CRuby 2.4
             Value::Float(_) => "Float",
             Value::Str(_) => "String",
             Value::Sym(_) => "Symbol",

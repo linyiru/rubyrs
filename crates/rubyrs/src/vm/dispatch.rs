@@ -27,7 +27,7 @@ use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 #[cfg(all(feature = "cext", not(target_os = "wasi")))]
 use super::with_vm_ptr_set;
 use super::{
-    primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
+    primitive_call, value_cmp_v_heap, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
 };
 use crate::HostCtx;
 
@@ -575,12 +575,54 @@ impl Vm {
             return self.do_call(target_sym, new_argc, false, u16::MAX);
         }
 
+        // Int#+/-/* operator method-call BigInt-aware intercept.
+        // Op::BinOp's hot path inlines `apply_int.unwrap_or →
+        // bigint_arith`, but the method-call form (`a.+(b)` /
+        // `a.send(:+, b)`) goes through primitive_call which uses
+        // plain i64 ops that wrap on overflow. Route Int×Int
+        // operator names through `apply_int_promote` here so
+        // `a.send(:+, big_literal)` matches Op::BinOp's
+        // overflow-promotion behaviour exactly. With bignum off
+        // apply_int_promote falls back to wrapping so the
+        // pre-PR behaviour is preserved.
+        #[cfg(feature = "bignum")]
+        if args.len() == 1
+            && matches!(&recv, Value::Int(_))
+            && matches!(&args[0], Value::Int(_))
+            && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(&name)
+            && matches!(kind,
+                crate::bytecode::BinOpKind::Add
+                | crate::bytecode::BinOpKind::Sub
+                | crate::bytecode::BinOpKind::Mul
+            )
+        {
+            let (Value::Int(x), Value::Int(y)) = (&recv, &args[0]) else { unreachable!() };
+            let v = self.apply_int_promote(kind, *x, *y)?;
+            self.stack.push(v);
+            return Ok(());
+        }
+
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
             .map_err(|e| self.trap(e))? {
             self.stack.push(v);
             return Ok(());
         }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) {
+            self.stack.push(v);
+            return Ok(());
+        }
+        // BigInt method dispatch — `primitive_call` and friends
+        // are stateless and can't read the heap, so the BigInt
+        // surface is hooked here where `&mut self` is available.
+        // Covers `to_s` / `inspect` (heap read) AND the operator
+        // method-call shape (`big.+(1)`, `big.send(:==, x)`),
+        // routed through `try_bigint_binop` so method-call form
+        // matches the `Op::BinOp` semantics exactly. Without this
+        // route, `big.send(:==, other)` would fall through to
+        // `ruby_eq`'s Object-identity arm and miss canonical-value
+        // equality.
+        #[cfg(feature = "bignum")]
+        if let Some(v) = self.bigint_primitive(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());
         }
@@ -2076,13 +2118,32 @@ impl Vm {
                     // all work. Strings / Symbols compare
                     // lexicographically — handled below.
                     let r = self.heap.range(*rid);
-                    fn to_f64(v: &Value) -> Option<f64> {
+                    #[cfg(feature = "bignum")]
+                    let to_f64 = |v: &Value| -> Option<f64> {
+                        match v {
+                            Value::Int(n) => Some(*n as f64),
+                            Value::Float(f) => Some(*f),
+                            // BigInt-to-f64 via the decimal-string
+                            // round-trip — adequate for the
+                            // include?/cover? containment check
+                            // (Float comparison is already lossy),
+                            // and avoids importing a `ToPrimitive`
+                            // trait for one use. Without this arm a
+                            // BigInt-bounded range fails the to_f64
+                            // pass and falls into the lex fallback,
+                            // which also lacked BigInt support.
+                            Value::BigInt(id) => self.heap.bigint(*id).to_string().parse::<f64>().ok(),
+                            _ => None,
+                        }
+                    };
+                    #[cfg(not(feature = "bignum"))]
+                    let to_f64 = |v: &Value| -> Option<f64> {
                         match v {
                             Value::Int(n) => Some(*n as f64),
                             Value::Float(f) => Some(*f),
                             _ => None,
                         }
-                    }
+                    };
                     let excl = r.exclusive;
                     
                     match (to_f64(&r.begin), to_f64(&r.end), to_f64(arg)) {
@@ -2095,10 +2156,10 @@ impl Vm {
                             // compare using value_cmp_v if both bounds
                             // and the arg are the same comparable type.
                             let b = &r.begin; let e = &r.end;
-                            let ge_lo = value_cmp_v(arg, b, &self.interner)
+                            let ge_lo = value_cmp_v_heap(arg, b, &self.interner, &self.heap)
                                 .map(|o| o != std::cmp::Ordering::Less)
                                 .unwrap_or(false);
-                            let cmp_hi = value_cmp_v(arg, e, &self.interner);
+                            let cmp_hi = value_cmp_v_heap(arg, e, &self.interner, &self.heap);
                             let le_hi = match cmp_hi {
                                 Some(o) => if excl { o == std::cmp::Ordering::Less }
                                            else { o != std::cmp::Ordering::Greater },
@@ -3169,8 +3230,39 @@ impl Vm {
             return self.do_call_block(target_sym, new_argc, false, u16::MAX);
         }
 
+        // Mirror do_call's Int#+/-/* BigInt-aware intercept so
+        // block-form sends (`a.send(:+, big) { ... }`) match the
+        // expression form's overflow-promotion. Without this the
+        // block path falls through to numeric_call's plain `+`
+        // which wraps on overflow.
+        #[cfg(feature = "bignum")]
+        if args.len() == 1
+            && matches!(&recv, Value::Int(_))
+            && matches!(&args[0], Value::Int(_))
+            && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(&name)
+            && matches!(kind,
+                crate::bytecode::BinOpKind::Add
+                | crate::bytecode::BinOpKind::Sub
+                | crate::bytecode::BinOpKind::Mul
+            )
+        {
+            let (Value::Int(x), Value::Int(y)) = (&recv, &args[0]) else { unreachable!() };
+            let v = self.apply_int_promote(kind, *x, *y)?;
+            self.stack.push(v);
+            return Ok(());
+        }
+
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
+        // Mirror do_call's bigint_primitive hook. Without this,
+        // block-form calls on BigInt receivers (`big.send(:to_s) { ... }`)
+        // raise NoMethodError because primitive_call/sym_primitive
+        // are stateless and can't reach the BigInt heap.
+        #[cfg(feature = "bignum")]
+        if let Some(v) = self.bigint_primitive(&recv, &name, &args)? {
+            self.stack.push(v);
+            return Ok(());
+        }
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {
@@ -3381,6 +3473,15 @@ fn method_recv_identity(a: &Value, b: &Value) -> bool {
         (Value::Block(x), Value::Block(y)) => x == y,
         (Value::BoundMethod(x), Value::BoundMethod(y)) => x == y,
         (Value::UnboundMethod(x), Value::UnboundMethod(y)) => x == y,
+        // ObjId identity, matching `method_recv_hash`. Two BigInt
+        // Values are "the same receiver" only when they share an
+        // ObjId; canonical-value equality (e.g. comparing two
+        // independently-allocated 2^64 BigInts) is intentionally
+        // not the relation here — `bound_method == other` only
+        // collapses when the underlying receiver is literally the
+        // same heap slot.
+        #[cfg(feature = "bignum")]
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
         (Value::Class(x), Value::Class(y)) => Rc::ptr_eq(x, y),
         (Value::Str(x), Value::Str(y)) => Rc::ptr_eq(x, y),
         (Value::Int(x), Value::Int(y)) => x == y,
@@ -3400,6 +3501,11 @@ fn method_recv_hash(v: &Value) -> i64 {
         Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id)
         | Value::Block(id) | Value::BoundMethod(id) | Value::UnboundMethod(id)
         | Value::CurriedProc(id) => id.0 as i64,
+        // Two BigInts that hash-equal must collide via ObjId since
+        // the heap-side bigint value identity is the ObjId (we
+        // never share an ObjId across different BigInt values).
+        #[cfg(feature = "bignum")]
+        Value::BigInt(id) => id.0 as i64,
         Value::Class(c) => Rc::as_ptr(c) as i64,
         Value::Str(s) => Rc::as_ptr(s) as i64,
         Value::Int(n) => *n,

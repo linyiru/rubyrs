@@ -136,6 +136,15 @@ pub(crate) enum Expr {
     #[cfg(feature = "regex")]
     RegexLit(String),
     SymbolLit(String),
+    /// Integer literal that overflows `i64`. The string is the
+    /// canonical decimal representation built from Prism's
+    /// arbitrary-precision integer digits. The compiler interns
+    /// the string and emits `Op::LoadBigInt`; the runtime parses
+    /// + caches it. Cfg-gated on `bignum` — without the feature
+    /// the AST arm saturates to `i64::MIN`/`i64::MAX` instead.
+    /// ADR 0018 BigInt placement.
+    #[cfg(feature = "bignum")]
+    BigIntLit(String),
     InterpolatedStr(Vec<SExpr>),
     /// `/pre #{x} post/` — interpolated regex literal. Lowered
     /// like `InterpolatedStr` (concat all parts into a String via
@@ -572,37 +581,55 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return Spanned::new(span, seq_inner(stmts));
     }
     if let Some(n) = node.as_integer_node() {
-        // Prism's `IntegerNode::value()` returns an arbitrary-
-        // precision handle that only exposes `TryInto<i32>` and
-        // `to_u32_digits` (LSB-first u32 chunks + sign). Our
-        // subset is i64-only — build an i64 from the first two
-        // u32 digits (= one u64) and apply sign. Values that
-        // overflow i64 saturate to i64::MIN / i64::MAX, matching
-        // the existing `wrapping_*` arithmetic discipline rather
-        // than promoting to BigInt (BigInt is explicitly out of
-        // scope; see SUBSET.md).
+        // Prism's `IntegerNode::value()` exposes the digits as
+        // LSB-first u32 chunks + sign. Most literals fit in i64;
+        // those that don't promote to BigInt when the `bignum`
+        // feature is on, and saturate to `i64::MIN`/`i64::MAX`
+        // when it's off (matching the no-bignum `wrapping_*`
+        // arithmetic discipline).
         let int_value = n.value();
         let (negative, digits) = int_value.to_u32_digits();
-        let mut magnitude: u64 = 0;
-        let overflow = digits.len() > 2;
-        if !overflow {
+        // i64-fast-path check: at most two u32 chunks AND the
+        // 64-bit magnitude fits the signed range. Above that
+        // boundary we hand off to BigInt (or saturate).
+        let fits_i64_fast = digits.len() <= 2 && {
+            let mut magnitude: u64 = 0;
             for (i, d) in digits.iter().enumerate() {
                 magnitude |= (*d as u64) << (i * 32);
             }
-        }
-        let v: i64 = if overflow {
-            if negative { i64::MIN } else { i64::MAX }
-        } else if negative {
-            // u64 → i64 with sign: 2^63 maps to i64::MIN exactly;
-            // anything larger saturates there too.
-            if magnitude >= 1u64 << 63 { i64::MIN }
-            else { -(magnitude as i64) }
-        } else if magnitude > i64::MAX as u64 {
-            i64::MAX
-        } else {
-            magnitude as i64
+            if negative { magnitude <= (i64::MAX as u64) + 1 }
+            else        { magnitude <= i64::MAX as u64 }
         };
-        return sp(node, Expr::IntLit(v));
+        if fits_i64_fast {
+            let mut magnitude: u64 = 0;
+            for (i, d) in digits.iter().enumerate() {
+                magnitude |= (*d as u64) << (i * 32);
+            }
+            let v: i64 = if negative {
+                if magnitude == (i64::MAX as u64) + 1 { i64::MIN }
+                else { -(magnitude as i64) }
+            } else {
+                magnitude as i64
+            };
+            return sp(node, Expr::IntLit(v));
+        }
+        // Out-of-i64 literal. Build a BigInt from Prism's LSB-first
+        // u32 digits, format to decimal, emit a `BigIntLit`. The
+        // compiler interns the decimal string; the runtime parses
+        // + caches on first execution.
+        #[cfg(feature = "bignum")]
+        {
+            use num_bigint::{BigInt, Sign};
+            let sign = if negative { Sign::Minus } else { Sign::Plus };
+            let big = BigInt::from_slice(sign, digits);
+            return sp(node, Expr::BigIntLit(big.to_string()));
+        }
+        #[cfg(not(feature = "bignum"))]
+        {
+            // No bignum feature → saturate (legacy behaviour).
+            let v: i64 = if negative { i64::MIN } else { i64::MAX };
+            return sp(node, Expr::IntLit(v));
+        }
     }
     // Rational literal — `1000.0r`, `1/3r`, `0.5r`. CRuby keeps
     // exact-fraction arithmetic via a real `Rational` class;

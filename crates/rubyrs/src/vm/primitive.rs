@@ -82,7 +82,14 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         // NoMethodError. We have to enumerate per-lhs (rather
         // than a universal `(_, "<=>", _)`) so that user-defined
         // `<=>` on `Value::Object` still wins via the normal
-        // class-method-lookup path in `do_call`.
+        // class-method-lookup path in `do_call`. Also: skip the
+        // Int catch-all when rhs is a BigInt — the
+        // `Vm::bigint_primitive` hook in `do_call` handles the
+        // Int×BigInt case downstream; matching here would
+        // shadow it with a wrong `nil` (the Int and BigInt arms
+        // for `<=>` both want to compare numerically).
+        #[cfg(feature = "bignum")]
+        (Value::Int(_), "<=>", [Value::BigInt(_)]) => None,
         (Value::Int(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Float(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Str(_), "<=>", [_]) => Some(Value::Nil),

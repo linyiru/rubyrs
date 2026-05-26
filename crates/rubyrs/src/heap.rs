@@ -10,6 +10,12 @@ pub(crate) enum HeapObj {
     Array(Vec<Value>),
     Hash(Vec<(Value, Value)>),
     Range(RangeObj),
+    /// Arbitrary-precision integer (the heap-side of `Value::BigInt`).
+    /// Contains no nested `Value` — GC walk is a no-op for this
+    /// variant. Cfg-gated on the `bignum` feature alongside
+    /// `Value::BigInt`. ADR 0018 BigInt placement.
+    #[cfg(feature = "bignum")]
+    BigInt(num_bigint::BigInt),
     /// A `proc { ... }` value. Lives in the heap (P2-13) so blocks
     /// participate in mark-sweep — earlier `Rc<BlockHandle>` form
     /// cycled whenever a block's `captured` held the block itself.
@@ -230,6 +236,10 @@ impl Heap {
     pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
         if let HeapObj::Range(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Range") }
     }
+    #[cfg(feature = "bignum")]
+    pub(crate) fn bigint(&self, id: ObjId) -> &num_bigint::BigInt {
+        if let HeapObj::BigInt(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a BigInt") }
+    }
     pub(crate) fn block(&self, id: ObjId) -> &BlockHandle {
         if let HeapObj::Block(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a Block") }
     }
@@ -425,6 +435,15 @@ impl Heap {
                     worklist.push(*id);
                 }
             }
+            #[cfg(feature = "bignum")]
+            Value::BigInt(id) => {
+                // Leaf: HeapObj::BigInt holds no nested Values, so we
+                // just mark — pushing onto the worklist would only
+                // make the sweep loop re-visit a slot it has nothing
+                // to do for.
+                let i = id.0 as usize;
+                marks[i] = true;
+            }
             _ => {}
         }
     }
@@ -489,6 +508,8 @@ impl Value {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "Integer",
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => "Integer", // unified with Fixnum since CRuby 2.4
             Value::Float(_) => "Float",
             Value::Str(_) => "String",
             Value::Sym(_) => "Symbol",
@@ -510,6 +531,8 @@ impl Value {
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
             Value::Int(i) => i.to_string(),
+            #[cfg(feature = "bignum")]
+            Value::BigInt(id) => heap.bigint(*id).to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.to_string_lossy(),
             Value::Sym(id) => interner.resolve(*id).to_string(),
@@ -655,6 +678,25 @@ impl Value {
                     && x.end.ruby_eq(&y.end, heap)
             }
             (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
+            // BigInt × BigInt and BigInt ↔ Int — value equality so
+            // Array#include?, Hash key matching, and the Object#==
+            // fallback all see the same answer the BinOp == arm does
+            // (the BinOp path goes through try_bigint_binop which
+            // compares the underlying num_bigint::BigInt). Two
+            // separately-allocated `2**64` BigInts must hash-equal
+            // when treated as keys / collection members.
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(a), Value::BigInt(b)) => {
+                a == b || heap.bigint(*a) == heap.bigint(*b)
+            }
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(a), Value::Int(b)) => {
+                heap.bigint(*a) == &num_bigint::BigInt::from(*b)
+            }
+            #[cfg(feature = "bignum")]
+            (Value::Int(a), Value::BigInt(b)) => {
+                &num_bigint::BigInt::from(*a) == heap.bigint(*b)
+            }
             _ => false,
         }
     }
