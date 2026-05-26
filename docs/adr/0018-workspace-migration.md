@@ -19,9 +19,12 @@ crates/
 ```
 
 [ADR 0017](0017-tier1-boundary.md) settled *what* belongs inside
-Tier 1, and verified mechanically that gating works (PoC results:
-`cext` feature saves 255 KB, `regex` feature saves 1.78 MB —
-46% binary-size reduction on the smallest viable build).
+Tier 1. Two empirical PoCs verified the feature-gating mechanism
+itself: the `cext` gate (PRs #73 + #75) and the `regex` gate
+(PR #86), with binary-size savings measured at merge time and
+recorded in those PRs' descriptions (single-digit-MB territory
+on the smallest viable build; the absolute numbers shift with
+toolchain versions, so they live in the PRs rather than here).
 
 What neither ADR specifies: **how do we get from one
 `rubyrs` crate to the four-crate split without freezing feature
@@ -36,10 +39,12 @@ Today's reality:
 - `crates/rubyrs/src/` is **~19 k lines** across `vm/*.rs` +
   top-level modules. There are **54 `use std::` sites**, none
   of them annotated for which tier they should live in.
-- Feature work is *active* (PR #97/#99/#100/#98 in flight; gap
-  reports moving 1–2 pp per week). A long freeze would be
-  expensive and would also lose the contributor-attention
-  signal that says "this project is alive".
+- Feature work is *active* — gap reports have been moving 1–2
+  percentage points per week against real codebases (see
+  `docs/gap-reports/`), and multiple feature PRs are typically
+  open at any given time. A long freeze would be expensive and
+  would also lose the contributor-attention signal that says
+  "this project is alive".
 - The next architectural decision waiting on this — **BigInt /
   Integer-as-Bignum** — depends on which tier owns
   `num_bigint`. Integer is Tier-1 semantics; `num_bigint` is a
@@ -131,9 +136,10 @@ has no binary size; what we cap is the smallest shippable
 artefact a user could `cargo install` once the tiers are split):
 
 - **core-only binary size** ≤ 6 MB. ADR 0015's baseline was
-  ~4 MB on the pre-PoC tree. Today's `--no-default-features`
-  build on the same tree measures ~2.2 MB (PoC #2 / PR #86 saved
-  1.78 MB by gating `regex` out — see ADR 0017). The 6 MB
+  ~4 MB on the pre-PoC tree. The `regex` PoC (PR #86) measured
+  a single-digit-MB save on the smallest viable build at merge
+  time — concrete delta lives in that PR's description rather
+  than here, since it shifts with toolchain versions. The 6 MB
   ceiling is what we lock in for the post-extraction
   `rubyrs-core`-derived binary.
 - **core-only cold start** for `puts 1+2` ≤ 5 ms
