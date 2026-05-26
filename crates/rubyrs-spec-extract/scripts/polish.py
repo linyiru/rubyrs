@@ -384,7 +384,19 @@ def main():
     addressed = 0
     for kind, text, indent in split_blocks(src):
         if kind == "it":
-            cat = categorize(text)
+            # Categorize against the body ONLY (skip the opener
+            # line). Otherwise an `it "demonstrates push behavior"`
+            # description containing words like "push" could match
+            # the `.push\(\s*[^)]+,` body-pattern (no — that needs
+            # a parenthesized literal arg-list), but description
+            # phrases like "first(n)" or "min { ... }" used in
+            # human prose CAN match by coincidence. Splitting off
+            # `lines[1:]` excludes the `it "..." do` opener, so
+            # only the actual code inside the block contributes
+            # to categorization. Reviewer feedback PR #133.
+            lines_after_opener = text.split("\n", 1)
+            body = lines_after_opener[1] if len(lines_after_opener) > 1 else ""
+            cat = categorize(body)
             if cat:
                 first_line = text.splitlines()[0].strip()
                 out.append(f"{indent}# skipped ({cat}): {first_line}\n")

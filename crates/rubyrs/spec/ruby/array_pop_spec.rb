@@ -3,12 +3,16 @@
 # `rubyrs-spec-extract` v0.4 + `scripts/polish.py`.
 #
 # polish.py dropped `it` blocks containing fixture refs,
-# unimplemented Array method FORMS (multi-arg `Array#push`,
-# block-form `min { ... }`, count-form `first(n)`), or
-# `mock`/`should_receive`; each drop leaves a
-# `# skipped (<category>): ...` trace inline. Regenerate by
-# re-running the extractor + polish pipeline documented in
+# unimplemented Array method FORMS (e.g. multi-arg `Array#push`,
+# count-form `first(n)` / `last(n)` / `pop(n)` / `shift(n)`,
+# block-form `min { ... }` / `max { ... }` / `sort { ... }`),
+# or `mock`/`should_receive`; each drop leaves a
+# `# skipped (<category>): ...` trace inline. See
+# crates/rubyrs-spec-extract/scripts/polish.py DROP_PATTERNS
+# for the full set. Regenerate by re-running the extractor
+# + polish pipeline documented in
 # crates/rubyrs-spec-extract/README.md.
+
 describe "Array#pop" do
   it "removes and returns the last element of the array" do
     a = ["a", 1, nil, true]
