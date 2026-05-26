@@ -894,10 +894,65 @@ impl Vm {
             Some(v) => v,
             None => return Ok(None),
         };
-        // BigInt exponent: refuse explicitly. The result would need
-        // at least 2**63 bits of storage — any cap we care about
-        // would trip — so trap ResourceExhausted instead of
-        // falling through to NoMethodError.
+        // Short-circuit |base| ≤ 1 BEFORE classifying the exponent —
+        // these results are constant-size and depend only on
+        // sign + parity, so they're safe for ANY exponent shape
+        // (positive Int, negative Int, BigInt). bits() returns the
+        // magnitude width, so `<= 1` ⇔ value ∈ {-1, 0, 1}.
+        if base_big.bits() <= 1 {
+            // Compute parity of the exponent without losing
+            // information: i64 parity from low bit; BigInt parity
+            // from bit(0) (which reads the two's-complement low
+            // bit, matching magnitude parity for negative values).
+            let (exp_is_negative, exp_is_zero, exp_is_odd) = match exp_arg {
+                Value::Int(n) => (*n < 0, *n == 0, *n & 1 != 0),
+                Value::BigInt(id) => {
+                    let big = self.heap.bigint(*id);
+                    let s = big.sign();
+                    (s == Sign::Minus, s == Sign::NoSign, big.bit(0))
+                }
+                _ => return Ok(None),
+            };
+            match base_big.sign() {
+                Sign::NoSign => {
+                    // base == 0. 0**0 == 1; 0**n (n>0) == 0;
+                    // 0**n (n<0) is ZeroDivision in CRuby — let
+                    // the Float path handle as `inf` (documented
+                    // divergence) by declining.
+                    if exp_is_negative { return Ok(None); }
+                    let r = if exp_is_zero { BigInt::from(1) } else { BigInt::from(0) };
+                    return Ok(Some(self.bigint_to_value(r)?));
+                }
+                Sign::Plus => {
+                    // base == 1: always 1, even for negative
+                    // exponents (1.0 reciprocal). But CRuby
+                    // returns Rational for negative exp; the
+                    // documented divergence is Float. Keep
+                    // returning Int(1) for the canonical positive
+                    // case, decline negative to keep the Float
+                    // divergence centralised in numeric.rs.
+                    if exp_is_negative { return Ok(None); }
+                    return Ok(Some(self.bigint_to_value(BigInt::from(1))?));
+                }
+                Sign::Minus => {
+                    // base == -1: parity decides sign. Negative
+                    // exponent also has |result| = 1, so we can
+                    // return the Int form directly here too —
+                    // but to keep parity preservation simple and
+                    // not over-promise on the Rational divergence,
+                    // decline negative exponents and let numeric.rs
+                    // (which now also parity-handles ±1) return
+                    // the Float form.
+                    if exp_is_negative { return Ok(None); }
+                    let r = if exp_is_odd { BigInt::from(-1) } else { BigInt::from(1) };
+                    return Ok(Some(self.bigint_to_value(r)?));
+                }
+            }
+        }
+        // |base| > 1 from here on. A BigInt exponent at this point
+        // would need at least 2**63 bits of storage — any cap we
+        // care about would trip — so trap ResourceExhausted
+        // instead of falling through to NoMethodError.
         if matches!(exp_arg, Value::BigInt(_)) {
             return Err(self.trap(RubyError::ResourceExhausted {
                 msg: "integer ** BigInt exponent exceeds u32::MAX".to_string(),
@@ -907,31 +962,12 @@ impl Vm {
         // numeric_call's Float arm handle (matches Phase A's
         // documented Rational divergence — we give `0.5` where
         // CRuby gives `(1/2)`). Only the positive-Int exponent
-        // case is in scope here.
+        // case is in scope below.
         let exp_i64 = match exp_arg {
             Value::Int(n) if *n >= 0 => *n,
             Value::Int(_) => return Ok(None),
             _ => return Ok(None),
         };
-        // Short-circuit |base| ≤ 1 BEFORE the u32 conversion —
-        // these results are exact regardless of exponent size, so
-        // `1 ** (u32::MAX + 1)` (or any huge safe exp) shouldn't
-        // spuriously trap. bits() returns the magnitude width,
-        // so `<= 1` ⇔ value ∈ {-1, 0, 1}.
-        if base_big.bits() <= 1 {
-            let result = match base_big.sign() {
-                Sign::NoSign => {
-                    // 0**0 == 1; 0**n (n>0) == 0.
-                    if exp_i64 == 0 { BigInt::from(1) } else { BigInt::from(0) }
-                }
-                Sign::Plus => BigInt::from(1),
-                Sign::Minus => {
-                    // -1: parity decides sign.
-                    if exp_i64 & 1 == 0 { BigInt::from(1) } else { BigInt::from(-1) }
-                }
-            };
-            return Ok(Some(self.bigint_to_value(result)?));
-        }
         let exp_u32: u32 = match u32::try_from(exp_i64) {
             Ok(v) => v,
             Err(_) => {

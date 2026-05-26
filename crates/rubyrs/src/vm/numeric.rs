@@ -116,10 +116,20 @@ pub(crate) fn numeric_call(
             "**" => {
                 if *b < 0 {
                     // Negative exponent → Float reciprocal.
-                    // `powf(f64)` instead of `powi(i32)` so very
-                    // large negative exponents don't silently
-                    // truncate through `as i32`.
-                    Some(Value::Float((*a as f64).powf(*b as f64)))
+                    // ±1 bases have exact ±1.0 results decided by
+                    // exponent parity, but `(*b as f64)` loses
+                    // parity beyond 2**53 — short-circuit before
+                    // powf to keep (-1) ** large_odd correct.
+                    if *a == 1 {
+                        Some(Value::Float(1.0))
+                    } else if *a == -1 {
+                        Some(Value::Float(if *b & 1 == 0 { 1.0 } else { -1.0 }))
+                    } else {
+                        // `powf(f64)` instead of `powi(i32)` so very
+                        // large negative exponents don't silently
+                        // truncate through `as i32`.
+                        Some(Value::Float((*a as f64).powf(*b as f64)))
+                    }
                 } else if *a == 0 {
                     // 0**0 == 1; 0**n (n>0) == 0. Exact regardless
                     // of exp size — short-circuit before u32 cast.

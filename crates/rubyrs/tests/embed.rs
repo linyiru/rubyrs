@@ -2015,6 +2015,44 @@ fn bigint_pow_identity_bases_skip_u32_cap() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_pow_identity_bases_with_bigint_exponent() {
+    // |base| ≤ 1 must not trap on BigInt exponents — results are
+    // constant-size. Pin `1 ** big`, `0 ** big`, `(-1) ** big`
+    // (even and odd via parity-preserving bit(0)).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "big_even = 2 ** 100\n\
+         big_odd  = big_even + 1\n\
+         puts 1 ** big_even\n\
+         puts 0 ** big_even\n\
+         puts (-1) ** big_even\n\
+         puts (-1) ** big_odd",
+        "pow_bigint_exp_identity.rb",
+    ).expect("identity bases must accept BigInt exponents");
+    assert_eq!(buf.snapshot().trim(), "1\n0\n1\n-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_neg_exponent_minus_one_preserves_parity_beyond_f64_mantissa() {
+    // (-1) ** (-huge_odd) must remain -1.0; casting the i64
+    // exponent through f64 loses parity past 2**53, so the
+    // negative-exp arm has to short-circuit ±1 bases before powf.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let odd = (1_i64 << 60) | 1; // 2**60 + 1: way past f64 mantissa
+    rt.eval(
+        &format!("puts (-1) ** (-{odd})\nputs (-1) ** (-({odd} - 1))", odd = odd),
+        "pow_neg_exp_parity.rb",
+    ).expect("parity must survive f64 cast");
+    assert_eq!(buf.snapshot().trim(), "-1.0\n1.0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_pow_bigint_exponent_traps() {
     // `2 ** (2**63)` (BigInt exponent) must trap ResourceExhausted
     // instead of falling through to NoMethodError. The doc comment
