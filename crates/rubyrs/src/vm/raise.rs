@@ -345,6 +345,7 @@ mod tests {
             singleton_methods: RefCell::new(HashMap::new()),
             includes: RefCell::new(Vec::new()),
             prepends: RefCell::new(Vec::new()),
+            singleton_prepends: RefCell::new(Vec::new()),
             superclass: RefCell::new(superclass),
             class_vars: RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]

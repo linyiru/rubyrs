@@ -326,6 +326,17 @@ pub(crate) enum Expr {
     /// `Expr::Call(alias_method)` which routes through the
     /// existing intercept emitting `Op::AliasMethod`.)
     AliasSingletonMethod(String, String),
+    /// `prepend Mod` encountered INSIDE a `class << self` body
+    /// (only the self-receiver case — `class << OtherConst;
+    /// prepend M; end` still surfaces a SyntaxError). Compiles
+    /// to `Op::SingletonChainPrepend` which pushes the popped
+    /// module onto `class_stack.last().singleton_prepends`.
+    ///
+    /// Motivating case: tilt.rb's `finalize!` does
+    /// `class << self; prepend(Module.new { ... }); end` to
+    /// install an after-freeze guard layer in front of the
+    /// class's own singleton methods.
+    SingletonChainPrepend(Box<SExpr>),
     ArrayLit(Vec<SExpr>),
     HashLit(Vec<(SExpr, SExpr)>),
     /// `begin..end` (exclusive=false) or `begin...end` (exclusive=true).
@@ -2312,8 +2323,35 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 out.push(sp(bn, Expr::Nil));
                 continue;
             }
+            // `class << self; prepend Mod; end` — install Mod on
+            // X's singleton-class prepend chain. Same `self`-
+            // receiver gate as `alias`. The recogniser is purely
+            // syntactic: this arm matches any `class << self;
+            // prepend Mod; end` regardless of enclosing scope.
+            // The compiled `Op::SingletonChainPrepend` enforces
+            // the install-target check at runtime — it uses
+            // `class_stack.last()` when present, traps with
+            // SyntaxError otherwise (covers toplevel and any
+            // context where the surrounding self isn't a
+            // class/module). Tilt's finalize! is the motivating
+            // case (`prepend(Module.new { ... })`).
+            //
+            // Single-arg form only (matches CRuby's single-module
+            // prepend grammar in practice — `prepend(A, B)` is
+            // legal but rare).
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && cid_to_string(call.name()) == "prepend"
+                && let Some(args) = call.arguments()
+                && args.arguments().iter().count() == 1
+            {
+                let src = tr(&args.arguments().iter().next().unwrap());
+                out.push(sp(bn, Expr::SingletonChainPrepend(Box::new(src))));
+                continue;
+            }
             AST_ERRORS.with(|cell| cell.borrow_mut().push(
-                "class << X body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` (with `self` receiver) are supported in the spike subset".into()
+                "class << X body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, and `prepend Mod` (single Module arg, with `self` receiver) are supported in the spike subset".into()
             ));
             out.push(sp(bn, Expr::Nil));
         }

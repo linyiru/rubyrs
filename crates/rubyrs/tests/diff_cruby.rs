@@ -269,3 +269,4 @@ fn run_diff(name: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_pathname() { run_diff("stdlib_pathname"); }
 #[test] fn uninitialized_constant() { run_diff("uninitialized_constant"); }
+#[test] fn singleton_class_prepend() { run_diff("singleton_class_prepend"); }

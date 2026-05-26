@@ -1101,6 +1101,78 @@ impl Vm {
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
+            Op::SingletonChainPrepend => {
+                // Pop the module/class value and push it onto the
+                // surrounding class's `singleton_prepends` chain.
+                // The AST recogniser is purely syntactic (it matches
+                // any `class << self; prepend Mod; end` regardless
+                // of enclosing scope), so the install-target check
+                // is enforced HERE at runtime: use
+                // `class_stack.last()` when present; trap with
+                // SyntaxError otherwise (toplevel / class-eval
+                // contexts where there's no class on the stack).
+                //
+                // CRuby parity:
+                // 1. The arg must be a Module — Classes (i.e.
+                //    `is_module == false`) raise TypeError. Plain
+                //    non-Class values too.
+                // 2. Idempotency is ancestor-chain-aware, NOT just
+                //    direct-vec — if `M` is already reachable
+                //    transitively (e.g. via a prepended-of-prepend
+                //    chain), the explicit `prepend M` is a no-op.
+                //    Without this, the chain would reorder and
+                //    method resolution would diverge from CRuby.
+                let arg = self.stack.pop().expect("ICE: SingletonChainPrepend with empty stack");
+                let src = match arg {
+                    Value::Class(c) if c.is_module => c,
+                    Value::Class(_) => return Err(self.trap(RubyError::TypeError {
+                        msg: "wrong argument type Class (expected Module)".into(),
+                    })),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Module)",
+                            other.type_name(),
+                        ),
+                    })),
+                };
+                // Install target resolution: prefer the lexical
+                // class body on `class_stack` (the common case —
+                // `class C; class << self; prepend M; end; end`).
+                // Fall back to the current frame's `self` when
+                // `self` is itself a Class — that covers the
+                // method-body case (`class C; def self.install!;
+                // class << self; prepend M; end; end; end`), where
+                // CRuby installs on C's eigenclass because `self`
+                // inside `install!` is C. Only raise when neither
+                // path yields a class — toplevel / instance-method
+                // contexts where rubyrs doesn't model the
+                // eigenclass distinctly.
+                let target = self.class_stack.last().cloned().or_else(|| {
+                    self.frames.last().and_then(|f| match &f.self_val {
+                        Value::Class(c) => Some(c.clone()),
+                        _ => None,
+                    })
+                });
+                let target = match target {
+                    Some(c) => c,
+                    None => {
+                        return Err(self.trap(RubyError::SyntaxError {
+                            msg: "`class << self; prepend Mod; end` is not supported outside a class/module body (no singleton-class install target — main's / instance eigenclasses not modelled in rubyrs)".into(),
+                        }));
+                    }
+                };
+                // Ancestor-aware dedup: walk every module
+                // already in `singleton_prepends`, recursing
+                // through each one's own prepends/includes,
+                // and skip insertion if `src` is reachable
+                // anywhere. Matches the instance-side `prepend`
+                // recogniser's `class_is_a` gate.
+                if !super::lookup::singleton_chain_contains(&target, &src) {
+                    target.singleton_prepends.borrow_mut().insert(0, src);
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                }
+                self.stack.push(Value::Nil);
+            }
             Op::DefMethodBlock(name_id) => {
                 // Pop the BlockHandle the preceding `CreateBlock`
                 // pushed, then wrap it as a closure-method. We
@@ -1227,6 +1299,7 @@ impl Vm {
                     superclass: RefCell::new(parent.clone()),
                     includes: RefCell::new(Vec::new()),
                     prepends: RefCell::new(Vec::new()),
+                    singleton_prepends: RefCell::new(Vec::new()),
                     class_vars: RefCell::new(HashMap::new()),
                     #[cfg(feature = "cext")]
                     cext_alloc_func: std::cell::Cell::new(None),

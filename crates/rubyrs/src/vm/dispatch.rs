@@ -1932,10 +1932,14 @@ impl Vm {
         }
         // `obj.methods` — Array of Symbols of every method the
         // receiver can dispatch. For user instances walks the
-        // class chain (own + includes + superclass); for other
-        // shapes returns an empty Array (the subset doesn't
-        // expose Kernel-level methods individually). De-dups by
-        // SymId, sorted by interner string order for determinism.
+        // class chain (own + includes + superclass). For a Class
+        // receiver, walks the class-method chain — each level's
+        // `singleton_prepends` (recursing through each module's
+        // own prepends/includes) and `singleton_methods` — up
+        // the superclass chain. Other shapes return an empty
+        // Array (the subset doesn't expose Kernel-level methods
+        // individually). De-dups by SymId, sorted by interner
+        // string order for determinism.
         if &*name == "methods" && args.is_empty() {
             let mut names: Vec<crate::intern::SymId> = Vec::new();
             if let Value::Object(id) = &recv {
@@ -1960,6 +1964,51 @@ impl Vm {
                     }
                 }
                 walk(&cls, &mut names, &mut visited);
+                names.sort_by(|a, b| {
+                    self.interner.resolve(*a).cmp(self.interner.resolve(*b))
+                });
+            } else if let Value::Class(cls) = &recv {
+                // Walk a prepended module's transitive includes /
+                // prepends — same shape as `walk_module` in
+                // lookup.rs, but collects method names rather
+                // than searching for one.
+                fn walk_mod(
+                    m: &std::rc::Rc<crate::value::Class>,
+                    out: &mut Vec<crate::intern::SymId>,
+                    visited: &mut Vec<*const crate::value::Class>,
+                ) {
+                    let ptr = std::rc::Rc::as_ptr(m);
+                    if visited.contains(&ptr) { return; }
+                    visited.push(ptr);
+                    for pre in m.prepends.borrow().iter() {
+                        walk_mod(pre, out, visited);
+                    }
+                    for k in m.methods.borrow().keys() {
+                        if !out.contains(k) { out.push(*k); }
+                    }
+                    for inc in m.includes.borrow().iter() {
+                        walk_mod(inc, out, visited);
+                    }
+                }
+                let mut sc_visited: Vec<*const crate::value::Class> = Vec::new();
+                let mut mod_visited: Vec<*const crate::value::Class> = Vec::new();
+                let mut current = cls.clone();
+                loop {
+                    let ptr = std::rc::Rc::as_ptr(&current);
+                    if sc_visited.contains(&ptr) { break; }
+                    sc_visited.push(ptr);
+                    for pre in current.singleton_prepends.borrow().iter() {
+                        walk_mod(pre, &mut names, &mut mod_visited);
+                    }
+                    for k in current.singleton_methods.borrow().keys() {
+                        if !names.contains(k) { names.push(*k); }
+                    }
+                    let parent = current.superclass.borrow().clone();
+                    match parent {
+                        Some(p) => current = p,
+                        None => break,
+                    }
+                }
                 names.sort_by(|a, b| {
                     self.interner.resolve(*a).cmp(self.interner.resolve(*b))
                 });

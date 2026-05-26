@@ -248,6 +248,20 @@ pub struct Class {
     /// `lookup_method_uncached` and `class_is_a` so `is_a?(M)`
     /// returns true for prepended modules too.
     pub(crate) prepends: RefCell<Vec<Rc<Class>>>,
+    /// Modules prepended onto THIS class's singleton class —
+    /// `class << X; prepend Mod; end`. CRuby installs them on
+    /// X's eigenclass; we approximate by tracking the chain
+    /// here next to `singleton_methods`. Dispatched against
+    /// `Value::Class(c)` receivers in
+    /// `lookup_class_singleton_method`, walked before the
+    /// class's own `singleton_methods` at each superclass level.
+    /// Same reverse-order convention as `prepends`.
+    ///
+    /// Motivating case: tilt.rb's `finalize!` does
+    /// `class << self; prepend(Module.new { def lazy_map(*); ...; end }); end`
+    /// to install an "after-freeze" guard layer in front of the
+    /// class's own `register` / `lazy_map`.
+    pub(crate) singleton_prepends: RefCell<Vec<Rc<Class>>>,
     /// Class variables (`@@foo`) defined on this class. Tier 1
     /// simplification: stored directly on the class (no
     /// hierarchy walk on read/write), so subclass `@@foo` and
