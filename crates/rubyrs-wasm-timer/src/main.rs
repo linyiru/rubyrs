@@ -81,6 +81,24 @@ fn main() -> ExitCode {
     let mut cmd = Command::new(&prog);
     cmd.args(args);
     if let Some(dir) = cwd {
+        // Preflight the cwd before spawn. Without this, an
+        // invalid `--cwd` value (typo, mid-run cleanup that
+        // removed a tempdir) surfaces from `Command::status()` as
+        // an `io::Error` indistinguishable from "exec failed" —
+        // and the existing arm below blames the child program by
+        // name ("failed to exec rubyrs-wasm-embed: …"), sending
+        // debug effort at the wrong root cause. /code-review
+        // PR #125 caught this misleading error path. A dedicated
+        // check + message keeps the original `Command::status()`
+        // arm simple AND points anyone hitting this at the
+        // actual problem.
+        if !dir.is_dir() {
+            eprintln!(
+                "rubyrs-wasm-timer: --cwd {:?} is not a directory (or doesn't exist)",
+                dir
+            );
+            return ExitCode::from(2);
+        }
         cmd.current_dir(dir);
     }
     // stdin/stdout/stderr default to inheriting the parent's — no
