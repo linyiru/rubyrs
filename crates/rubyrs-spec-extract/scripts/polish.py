@@ -205,6 +205,20 @@ def split_blocks(src: str):
                 # methods on test fixtures (e.g.
                 # array_include_spec.rb's mock-based equality
                 # test).
+                #
+                # `kw_open_count` is ANCHORED to statement position
+                # (`^\s*`) rather than `\b...\b` anywhere — the
+                # bare-word match would treat method-call accessors
+                # like `some_var.class` / `obj.method.case` /
+                # `arr.begin` as block openers, incrementing depth
+                # without a matching `end` and ultimately
+                # swallowing the rest of the file into a single
+                # block. Reviewer feedback PR #133: this was a
+                # real bug — `some_var.class` is the most common
+                # offender in ruby/spec input. Single-line
+                # `def receiver.method(); ... end` is unaffected
+                # because the leading `def` IS at statement
+                # position.
                 do_count = len(re.findall(r"\bdo\b(?:\s*\|.*\|)?\s*$", l))
                 stmt_open_count = len(
                     re.findall(
@@ -214,7 +228,7 @@ def split_blocks(src: str):
                 )
                 kw_open_count = len(
                     re.findall(
-                        r"\b(?:class|module|def|case|begin|for)\b",
+                        r"^\s*(?:class|module|def|case|begin|for)\b",
                         l,
                     )
                 )
@@ -311,15 +325,33 @@ def rewrite_extractor_header(src: str, addressed: int) -> str:
         # `# skipped (<category>)` traces.)
         return src
     lines = src.splitlines(keepends=True)
-    # The extractor's header often starts on line 1, but if a
-    # spec begins with a leading blank line (or two — extractor
-    # output can vary by upstream shape), skip those before
-    # testing the opener. `start` is the first non-blank line
-    # index; if we still don't see the header there, leave the
+    # The extractor's header often starts on line 1, but
+    # upstream spec files (and therefore extractor output) can
+    # carry a preamble of shebang + magic comments BEFORE the
+    # extractor header. Reviewer feedback PR #133 caught that
+    # the v0.1 "skip leading blanks only" approach left these
+    # files with the stale header intact. Skip past:
+    #   - leading blank lines
+    #   - shebang line  (`^#!...`)
+    #   - magic comments (`# encoding: ...`, `# frozen_string_literal: ...`)
+    # …then look for the extractor header opener within the
+    # next contiguous `#` block. If still not found, leave the
     # file alone.
+    PREAMBLE_PATTERNS = (
+        re.compile(r"^#!"),
+        re.compile(r"^#\s*encoding\s*:", re.IGNORECASE),
+        re.compile(r"^#\s*frozen_string_literal\s*:", re.IGNORECASE),
+    )
     start = 0
-    while start < len(lines) and lines[start].strip() == "":
-        start += 1
+    while start < len(lines):
+        line = lines[start]
+        if line.strip() == "":
+            start += 1
+            continue
+        if any(p.match(line) for p in PREAMBLE_PATTERNS):
+            start += 1
+            continue
+        break
     if start >= len(lines) or not EXTRACTOR_HEADER_OPENER.match(lines[start]):
         return src
     # Header runs from `start` until the first non-`#` line
