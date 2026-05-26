@@ -464,20 +464,23 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
 /// within ONE class's singleton chain.
 ///
 /// Deliberately does NOT walk the superclass chain. In CRuby
-/// each class has its own eigenclass, and each eigenclass owns
-/// an independent prepends list — so
-/// `class Sub < Super; class << self; prepend Wrap; end; end`
-/// must INSERT Wrap on Sub's eigenclass even when Super's
-/// eigenclass already has Wrap. Method lookup then sees Wrap
-/// twice (once per eigenclass): `Sub.foo` runs Wrap (Sub's
-/// chain) → super → Wrap (Super's chain) → super → Super.foo.
-/// The `IdemSuper`/`IdemSub` fixture in
-/// `singleton_class_prepend.rb` locks that double-wrap.
+/// each class has its own eigenclass with an independent
+/// prepends list, so `class Sub < Super; class << self; prepend
+/// Wrap; end; end` must INSERT Wrap on Sub's eigenclass even
+/// when Super's eigenclass already has Wrap (CRuby's chain
+/// would then show Wrap twice via separate IClass wrappers).
+/// rubyrs's chain representation dedupes by Module identity in
+/// `super_lookup`, so the resulting cross-class behaviour
+/// collapses to a single wrap rather than CRuby's double-wrap
+/// — a known gap, noted in
+/// `crates/rubyrs/tests/diff/singleton_class_prepend.rb`. The
+/// fixture deliberately doesn't exercise that case.
 ///
 /// Dedup still applies WITHIN the local chain — repeated
 /// `prepend M` on the same class is a no-op, and `prepend M`
 /// when M is reachable through an already-prepended module's
-/// includes/prepends is also a no-op.
+/// includes/prepends is also a no-op. The TIdem block in the
+/// fixture locks the same-class transitive case.
 pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> bool {
     fn walks_through(
         node: &Rc<Class>,

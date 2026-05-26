@@ -2324,7 +2324,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 continue;
             }
             AST_ERRORS.with(|cell| cell.borrow_mut().push(
-                "class << X body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, and `prepend(Mod)` (with `self` receiver) are supported in the spike subset".into()
+                "class << X body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, and `prepend Mod` (single Module arg, with `self` receiver) are supported in the spike subset".into()
             ));
             out.push(sp(bn, Expr::Nil));
         }
