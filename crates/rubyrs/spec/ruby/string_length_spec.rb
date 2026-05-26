@@ -8,12 +8,12 @@
 #
 # Hand-fix on top of the extractor output: the shared body
 # calls `"".send(@method)` rather than `"".length` directly,
-# so v0.4 emits `"".length` verbatim. rubyrs doesn't
+# so v0.4 emits `"".send(:length)` verbatim. rubyrs doesn't
 # implement `Object#send` yet (subset gap surfaced by this
-# dogfood), so each `.length` is rewritten to `.length`
+# dogfood), so each `.send(:length)` is rewritten to `.length`
 # below. When `Object#send` lands, re-running the extractor
 # will produce a smaller diff (just the `:length` symbol
-# substitution) and this hand-fix line can be retired.
+# substitution) and this hand-fix step can be retired.
 #
 # Six of the upstream shared-body `it` blocks need features
 # rubyrs doesn't model — Encoding objects (`Encoding::UTF_32BE`,
