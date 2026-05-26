@@ -145,3 +145,26 @@ puts 1.respond_to?(:send)
 puts [].respond_to?(:__send__)
 puts Greeter.new.respond_to?(:send)
 puts nil.respond_to?(:send)
+
+# Bare `send(:foo)` inside a method body — CRuby treats it as
+# `self.send(:foo)`. The no_recv path must handle send too.
+class BareSelf
+  def foo; "from foo"; end
+  def via_send; send(:foo); end
+  def via_send_str; send("foo"); end
+  def via_send_block; [1, 2].send(:map) { |x| x + 10 }.inspect; end
+end
+bs = BareSelf.new
+puts bs.via_send
+puts bs.via_send_str
+puts bs.via_send_block
+
+# User `def send` on a class's singleton — `D.send(:foo)` should
+# invoke the user's `def self.send`, but `D.__send__(:foo)` should
+# always bypass to the built-in re-aim (reserved-name rule).
+class WithClassSend
+  def self.send(*a); "class-send intercepted #{a.inspect}"; end
+  def self.hidden; "real hidden"; end
+end
+puts WithClassSend.send(:hidden)
+puts WithClassSend.__send__(:hidden)

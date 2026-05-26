@@ -220,6 +220,59 @@ impl Vm {
                 self.stack.push(v);
                 return Ok(());
             }
+            // Bare `send(:foo)` / `__send__(:foo)` — CRuby treats
+            // these as `self.send(:foo)`. Resolve target and re-aim
+            // through `do_call` with `no_recv = true` so the call
+            // routes through the same implicit-self lookup path the
+            // bare-call arm uses below. User `def send` on the
+            // surrounding self wins for `send` (reserved-name rule
+            // applies only to `__send__`); when the lookup finds a
+            // user override, skip the recogniser so the normal
+            // implicit-self arm below invokes it.
+            //
+            // The visibility-bypass flag is irrelevant here — the
+            // no_recv arm doesn't enforce private/protected (calls
+            // with implicit-self are always allowed) — but we still
+            // set it for parity with the receiver-form arm, so any
+            // helper that later inspects the flag sees a consistent
+            // shape.
+            if matches!(&*name, "send" | "__send__") {
+                let frame_self = self.frames.last()
+                    .expect("ICE: do_call(no_recv) with empty frames")
+                    .self_val.clone();
+                let user_override = &*name == "send" && match &frame_self {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                    }
+                    Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                    _ => false,
+                };
+                if !user_override {
+                    if args.is_empty() {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "wrong number of arguments (given 0, expected 1+)".into(),
+                        }));
+                    }
+                    let target_sym = match &args[0] {
+                        Value::Sym(s) => Some(*s),
+                        Value::Str(s) => Some(s.with_str_lossy(|n| self.interner.intern(n))),
+                        _ => None,
+                    };
+                    if let Some(target_sym) = target_sym {
+                        let new_argc = args.len() - 1;
+                        self.bypass_visibility_once = true;
+                        for a in args.into_iter().skip(1) {
+                            self.stack.push(a);
+                        }
+                        return self.do_call(target_sym, new_argc, true, u16::MAX);
+                    }
+                    let inspected = args[0].to_inspect(&self.heap, &self.interner);
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} is not a symbol nor a string", inspected),
+                    }));
+                }
+            }
             // Bare `method(:foo)` — implicit-self capture. Same
             // shape as `obj.method(:foo)` (the receiver-form arm
             // below) but the receiver is the surrounding frame's
@@ -419,16 +472,18 @@ impl Vm {
         // Object arm (e.g. `send(:nonexistent)` raising
         // NoMethodError on a primitive) can't leak the bypass
         // into the next unrelated call.
-        let user_send_override = &*name == "send"
-            && matches!(&recv, Value::Object(_))
-            && {
-                if let Value::Object(id) = &recv {
-                    let cls = self.heap.class_of(*id);
-                    self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-                } else {
-                    false
-                }
-            };
+        let user_send_override = &*name == "send" && match &recv {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+            }
+            // `def self.send` on a class — singleton-method lookup
+            // walking the class's superclass chain. Falls through to
+            // the existing `Value::Class` arm which invokes the
+            // user's singleton `send`.
+            Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+            _ => false,
+        };
         if matches!(&*name, "send" | "__send__") && !user_send_override {
             if args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
@@ -2754,6 +2809,47 @@ impl Vm {
                 self.stack.push(v);
                 return Ok(());
             }
+            // Bare `send(:foo) { ... }` / `__send__(:foo) { ... }`
+            // — same re-aim as the no_recv arm in `do_call`. See
+            // there for the override + visibility rationale.
+            if matches!(&*name, "send" | "__send__") {
+                let frame_self = self.frames.last()
+                    .expect("ICE: do_call_block(no_recv) with empty frames")
+                    .self_val.clone();
+                let user_override = &*name == "send" && match &frame_self {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                    }
+                    Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                    _ => false,
+                };
+                if !user_override {
+                    if args.is_empty() {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "wrong number of arguments (given 0, expected 1+)".into(),
+                        }));
+                    }
+                    let target_sym = match &args[0] {
+                        Value::Sym(s) => Some(*s),
+                        Value::Str(s) => Some(s.with_str_lossy(|n| self.interner.intern(n))),
+                        _ => None,
+                    };
+                    if let Some(target_sym) = target_sym {
+                        let new_argc = args.len() - 1;
+                        self.bypass_visibility_once = true;
+                        self.stack.push(Value::Block(block));
+                        for a in args.into_iter().skip(1) {
+                            self.stack.push(a);
+                        }
+                        return self.do_call_block(target_sym, new_argc, true, u16::MAX);
+                    }
+                    let inspected = args[0].to_inspect(&self.heap, &self.interner);
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} is not a symbol nor a string", inspected),
+                    }));
+                }
+            }
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.class_of(*id);
@@ -2784,16 +2880,18 @@ impl Vm {
         // the block-less arm. User-`def send` override + visibility
         // bypass parity — same rules as the block-less arm; see
         // there for the rationale.
-        let user_send_override = &*name == "send"
-            && matches!(&recv, Value::Object(_))
-            && {
-                if let Value::Object(id) = &recv {
-                    let cls = self.heap.class_of(*id);
-                    self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-                } else {
-                    false
-                }
-            };
+        let user_send_override = &*name == "send" && match &recv {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+            }
+            // `def self.send` on a class — singleton-method lookup
+            // walking the class's superclass chain. Falls through to
+            // the existing `Value::Class` arm which invokes the
+            // user's singleton `send`.
+            Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+            _ => false,
+        };
         if matches!(&*name, "send" | "__send__") && !user_send_override {
             if args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
