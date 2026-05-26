@@ -2967,12 +2967,20 @@ impl Vm {
             }
             // Anything else (Int / Str / ...) is a real type error
             // — CRuby raises `TypeError: wrong argument type X
-            // (expected Proc)`. Mirror that instead of ICE-panicking.
+            // (expected Proc)`, where X is the class name (e.g.
+            // "Integer", "TrueClass", or a user class), NOT
+            // `type_name()`'s short tag ("Boolean", etc.). Use
+            // `class_of` so the message matches CRuby for booleans
+            // and user instances.
             other => {
+                let class_name = match self.class_of(&other) {
+                    Value::Class(c) => c.name.clone(),
+                    _ => other.type_name().to_string(),
+                };
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "wrong argument type {} (expected Proc)",
-                        other.type_name(),
+                        class_name,
                     ),
                 }));
             }

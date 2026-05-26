@@ -31,12 +31,14 @@ puts outer("a")                              # no block → "plain a"
 puts outer("b") { |n| "blocked #{n}" }       # block → "blocked b"
 
 # --- Non-Proc / non-Nil &arg is still a TypeError ---
-# (Previously also ICE'd; now raises like CRuby.)
-begin
-  greet("x", &42)
-rescue TypeError => e
-  puts "caught: #{e.message}"
-end
+# (Previously also ICE'd; now raises like CRuby.) The class
+# name in the message follows CRuby's `class_of`: booleans
+# report `TrueClass` / `FalseClass` (not the Rust-side
+# `Boolean` tag), and user instances report the declared class.
+begin; greet("x", &42);    rescue TypeError => e; puts e.message; end
+begin; greet("x", &"y");   rescue TypeError => e; puts e.message; end
+begin; greet("x", &true);  rescue TypeError => e; puts e.message; end
+begin; greet("x", &false); rescue TypeError => e; puts e.message; end
 
 # --- Curried Proc forwarded as &block ---
 # A curried Proc is still a Proc; `&curried_proc` must work
