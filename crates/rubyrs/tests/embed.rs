@@ -337,10 +337,105 @@ fn ruby_error_is_normalises_direct_and_uncaught_shapes() {
     assert!(!wrapped.err.is("ArgumentError"));
     // Bare name match — no hierarchy walk. RuntimeError is a
     // StandardError in CRuby, but `is("StandardError")` returns
-    // false here. Documented behaviour, not a bug.
+    // false here by design. For hierarchy-aware matching use
+    // `is_a` (see `ruby_error_is_a_walks_builtin_hierarchy`).
     let runtime = rt.eval(r#"raise "boom""#, "t.rb").unwrap_err();
     assert!(runtime.err.is("RuntimeError"));
     assert!(!runtime.err.is("StandardError"));
+}
+
+#[test]
+fn ruby_error_is_a_walks_builtin_hierarchy() {
+    // Hierarchy-aware variant of `is`. The static parent table
+    // in `error.rs::BUILTIN_EXCEPTION_PARENT` mirrors
+    // `preamble/exceptions.rb`; these assertions lock the walk
+    // shape for every chain that file documents. If
+    // `preamble/exceptions.rb` adds or reshapes a class, this
+    // test (along with the table) must be updated in step.
+
+    let mut rt = Runtime::new();
+
+    // Direct variants — start from a host-fn-raised Trap so the
+    // RubyError comes through unwrapped (not via Uncaught).
+    // Each fn name maps to one specific RubyError variant; using
+    // a closure-per-variant matches the `register_fn` signature
+    // (`Fn(&[Value]) -> Result<Value, Trap>`) without an extra
+    // factory helper.
+
+    // RuntimeError chain: RuntimeError < StandardError < Exception.
+    rt.register_fn("raise_runtime", |_| Err(rubyrs::Trap {
+        err: RubyError::RuntimeError { msg: "".into() },
+        backtrace: vec![],
+    }));
+    let e = rt.eval("raise_runtime", "t.rb").unwrap_err().err;
+    assert!(e.is_a("RuntimeError"), "self");
+    assert!(e.is_a("StandardError"), "direct parent");
+    assert!(e.is_a("Exception"), "grandparent root");
+    assert!(!e.is_a("ScriptError"), "different branch");
+    assert!(!e.is_a("KeyError"), "sibling/unrelated");
+
+    // KeyError chain: KeyError < IndexError < StandardError < Exception.
+    // Locks the *intermediate* hop — without the table this would skip.
+    rt.register_fn("raise_key", |_| Err(rubyrs::Trap {
+        err: RubyError::KeyError { msg: "".into() },
+        backtrace: vec![],
+    }));
+    let e = rt.eval("raise_key", "t.rb").unwrap_err().err;
+    assert!(e.is_a("KeyError"));
+    assert!(e.is_a("IndexError"), "intermediate parent");
+    assert!(e.is_a("StandardError"));
+    assert!(e.is_a("Exception"));
+
+    // FrozenError < RuntimeError < StandardError < Exception.
+    // The cross-branch hop (FrozenError under RuntimeError, not
+    // directly under StandardError) is the failure mode the
+    // static table closes.
+    rt.register_fn("raise_frozen", |_| Err(rubyrs::Trap {
+        err: RubyError::FrozenError { msg: "".into() },
+        backtrace: vec![],
+    }));
+    let e = rt.eval("raise_frozen", "t.rb").unwrap_err().err;
+    assert!(e.is_a("FrozenError"));
+    assert!(e.is_a("RuntimeError"), "parent");
+    assert!(e.is_a("StandardError"), "grandparent");
+    assert!(e.is_a("Exception"));
+
+    // ResourceExhausted is deliberately `< Exception` directly,
+    // NOT under StandardError (ADR 0008 — bare `rescue` must not
+    // swallow resource traps). Load-bearing for the security
+    // posture, so the assertion stays explicit.
+    rt.register_fn("raise_resource", |_| Err(rubyrs::Trap {
+        err: RubyError::ResourceExhausted { msg: "".into() },
+        backtrace: vec![],
+    }));
+    let e = rt.eval("raise_resource", "t.rb").unwrap_err().err;
+    assert!(e.is_a("ResourceExhausted"));
+    assert!(e.is_a("Exception"));
+    assert!(!e.is_a("StandardError"), "ADR 0008: must NOT be under StandardError");
+    assert!(!e.is_a("RuntimeError"));
+
+    // Uncaught path — the chain starts from class_name and walks
+    // the same table, so a script-raised RuntimeError matches
+    // StandardError just like a host-raised one would.
+    let wrapped = rt.eval(r#"raise "boom""#, "t.rb").unwrap_err().err;
+    assert!(wrapped.is_a("RuntimeError"));
+    assert!(wrapped.is_a("StandardError"), "Uncaught hierarchy walk");
+    assert!(wrapped.is_a("Exception"));
+
+    // User-defined subclass — class_name isn't in the static
+    // table, so the walk terminates at exact match only. This
+    // is the documented conservative behaviour; embedding hosts
+    // that need hierarchy walk on script-defined classes must
+    // consult the live `Runtime` class table directly.
+    let user = rt.eval(
+        r#"
+        class MyErr < StandardError; end
+        raise MyErr, "user"
+        "#,
+        "t.rb",
+    ).unwrap_err().err;
+    assert!(user.is_a("MyErr"), "exact match still works");
+    assert!(!user.is_a("StandardError"), "no walk for user-defined subclass");
 }
 
 #[test]

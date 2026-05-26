@@ -112,6 +112,40 @@ pub enum RubyError {
     Uncaught { class_name: String, message: String },
 }
 
+/// Built-in exception hierarchy parent table — `(child, parent)`.
+/// Mirrors `crates/rubyrs/src/preamble/exceptions.rb` (the
+/// runtime's actual source of truth). Used by
+/// [`RubyError::is_a`] for hierarchy walks without needing the
+/// live `Runtime` class table.
+///
+/// Maintenance note: when adding a built-in exception class to
+/// `preamble/exceptions.rb`, add the matching `(child, parent)`
+/// row here. The chain is walked iteratively, so leaves and
+/// intermediate nodes both belong here — only the root
+/// "Exception" is implicit (it has no parent and acts as the
+/// loop terminator). `tests/embed.rs::is_a_*` tests cover the
+/// expected chains and lock against drift.
+const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
+    ("StandardError", "Exception"),
+    ("RuntimeError", "StandardError"),
+    ("NoMethodError", "StandardError"),
+    ("ArgumentError", "StandardError"),
+    ("TypeError", "StandardError"),
+    ("NameError", "StandardError"),
+    ("ScriptError", "Exception"),
+    ("NotImplementedError", "ScriptError"),
+    ("IndexError", "StandardError"),
+    ("KeyError", "IndexError"),
+    ("ZeroDivisionError", "StandardError"),
+    ("RangeError", "StandardError"),
+    ("LocalJumpError", "StandardError"),
+    ("FrozenError", "RuntimeError"),
+    // Deliberately `< Exception`, NOT `< StandardError` — see
+    // ADR 0008: hosts must not be able to swallow their own
+    // resource trap via a bare `rescue` clause.
+    ("ResourceExhausted", "Exception"),
+];
+
 impl RubyError {
     /// Does this error correspond to the given Ruby exception class
     /// name? Handles both the direct host-side variant
@@ -136,13 +170,60 @@ impl RubyError {
     /// Note: comparison is exact, case-sensitive, and on the
     /// *bare* class name — passing `"StandardError"` won't match
     /// a `RuntimeError` even though RuntimeError is a descendant
-    /// in CRuby's class hierarchy. Class-hierarchy awareness is a
-    /// follow-up the runtime hasn't needed yet (rescue handlers
-    /// resolve by SymId equality, not chain walk).
+    /// in CRuby's class hierarchy. For hierarchy-aware matching
+    /// (`rescue StandardError => e` shape), use [`Self::is_a`]
+    /// instead.
     pub fn is(&self, class_name: &str) -> bool {
         match self {
             RubyError::Uncaught { class_name: cn, .. } => cn == class_name,
             other => other.class_name() == class_name,
+        }
+    }
+
+    /// Hierarchy-aware variant of [`Self::is`]. Returns `true` if
+    /// the error's Ruby-level class equals `class_name` OR is a
+    /// descendant of it per the built-in exception hierarchy
+    /// (mirrors `crates/rubyrs/src/preamble/exceptions.rb`, the
+    /// runtime's actual source of truth).
+    ///
+    /// ```ignore
+    /// // All true:
+    /// err_from_RuntimeError.is_a("RuntimeError");
+    /// err_from_RuntimeError.is_a("StandardError");
+    /// err_from_RuntimeError.is_a("Exception");
+    /// err_from_KeyError.is_a("IndexError");      // KeyError < IndexError
+    /// err_from_FrozenError.is_a("RuntimeError"); // FrozenError < RuntimeError
+    /// // False:
+    /// err_from_RuntimeError.is_a("ScriptError"); // different branch
+    /// err_from_ResourceExhausted.is_a("StandardError"); // deliberately < Exception, not StandardError
+    /// ```
+    ///
+    /// User-defined subclasses (`class MyError < StandardError`
+    /// inside a script that then `raise`s) are NOT in the static
+    /// table — for them this method falls back to the same exact
+    /// match `is` does. If `Uncaught.class_name` happens to BE a
+    /// known built-in (the script said `raise RuntimeError, "..."`),
+    /// the walk works because the chain starts at a known node.
+    /// Hosts that need full hierarchy walk on arbitrary script-
+    /// defined classes should query the live `Runtime` class
+    /// table directly via the embedding API.
+    pub fn is_a(&self, class_name: &str) -> bool {
+        let start = match self {
+            RubyError::Uncaught { class_name: cn, .. } => cn.as_str(),
+            other => other.class_name(),
+        };
+        let mut cur = start;
+        loop {
+            if cur == class_name {
+                return true;
+            }
+            match BUILTIN_EXCEPTION_PARENT
+                .iter()
+                .find(|(child, _)| *child == cur)
+            {
+                Some((_, parent)) => cur = parent,
+                None => return false,
+            }
         }
     }
 
