@@ -835,6 +835,53 @@ impl Vm {
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
+        // `String.new` / `String.new(s)` — Tier 1 primitive
+        // constructor. Without this intercept the generic
+        // `Class.new` allocator below would build a
+        // `Value::Object` (Instance with `class = String`), and
+        // every String primitive method (`length`, `<<`,
+        // `bytesize`, …) would `NoMethodError` because they
+        // pattern-match on `Value::Str`, not `Value::Object`.
+        //
+        // CRuby supports `String.new(s, encoding: …, capacity: …)`;
+        // the encoding model is Tier 3 (ADR 0017), so we cover
+        // only the positional `s` argument here. Anything else
+        // raises ArgumentError.
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "String"
+        {
+            match args.as_slice() {
+                [] => {
+                    self.stack.push(Value::new_str(""));
+                    return Ok(());
+                }
+                [Value::Str(s)] => {
+                    // Fresh, mutable copy — CRuby's `String.new(s)`
+                    // returns an unfrozen clone even if `s` was
+                    // frozen.
+                    let copy = s.to_string_lossy();
+                    self.stack.push(Value::new_str(copy));
+                    return Ok(());
+                }
+                [other] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name(),
+                        ),
+                    }));
+                }
+                _ => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+            }
+        }
         if name_id == new_id
             && let Value::Class(cls) = &recv
             && cls.name.as_str() == "Hash"
