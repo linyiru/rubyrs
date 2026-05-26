@@ -67,3 +67,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0015 — Concentric architecture via tiered Cargo features](0015-concentric-architecture.md)
 - [0016 — Method-object reflection chain](0016-method-reflection-chain.md)
 - [0017 — Tier-1 boundary specification](0017-tier1-boundary.md)
+- [0018 — Workspace migration plan for the concentric architecture](0018-workspace-migration.md)
