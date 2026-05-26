@@ -902,6 +902,296 @@ impl Vm {
             }
         }
     }
+
+    /// `**` exponentiation with BigInt promotion and DoS cap.
+    /// Returns:
+    /// - `Some(v)` for any Int/BigInt × {Int (non-negative), Float,
+    ///   negative Int, BigInt-when-|base|≤1} where we can produce a
+    ///   value. Float / negative-Int exponents on Int receivers are
+    ///   normally handled by numeric_call BEFORE reaching this fn;
+    ///   we cover them here only when the receiver is a BigInt
+    ///   (otherwise NoMethodError despite `respond_to?(:**)` being
+    ///   true) and for the |base|≤1 short-circuit.
+    /// - `Err(...)` for BigInt exponents with |base|>1 — the result
+    ///   would need at least 2^63 bits of storage so we trap
+    ///   `ResourceExhausted` rather than attempting to compute or
+    ///   silently falling through.
+    /// - `None` for operand shapes outside this branch's scope
+    ///   (non-integer recv, or Int recv + Float/negative exp where
+    ///   numeric_call handles it); the caller falls through.
+    ///
+    /// DoS protection: result bit count is approximately
+    /// `bit_length(base) * exp` (tight as `(bit_length-1) * exp + 1`
+    /// when |base| is a power of two). A few bytes of input can ask
+    /// for many GB of output, so we pre-estimate and trap
+    /// `ResourceExhausted` before calling `BigInt::pow`. The estimate
+    /// rounds up to the BigInt limb size (u64 = 8 bytes) plus a small
+    /// allocator-header overhead so the cap reflects actual heap
+    /// storage, not just the minimal bit count. Honours
+    /// `Config::max_value_bytes` (same cap that bounds String /
+    /// Array growth); falls back to a 1 MB safety ceiling when no
+    /// cap is configured.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_pow(
+        &mut self,
+        recv: &Value,
+        exp_arg: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        use num_bigint::{BigInt, Sign};
+        let recv_is_bigint = matches!(recv, Value::BigInt(_));
+        let exp_is_bigint = matches!(exp_arg, Value::BigInt(_));
+        // Float / negative-exp paths need to fire here whenever
+        // either operand is BigInt, since numeric_call only covers
+        // pure Int×Int. Without this, `2 ** -(2**100)` or
+        // `1 ** -(2**100)` (Int recv + negative BigInt exp) would
+        // fall through to NoMethodError.
+        let need_float_handling = recv_is_bigint || exp_is_bigint;
+        // Read base sign + bit-length via borrowed Cow — avoids
+        // the O(n) magnitude clone `as_bigint` would do for BigInt
+        // receivers. The Cow borrow ends with the block; later
+        // &mut self calls (`trap`, `bigint_to_value`) are free to
+        // re-borrow. The full base is re-borrowed only at the
+        // single `pow` site below.
+        let (base_sign, base_bits) = {
+            let base_cow = match self.as_bigint_ref(recv) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            (base_cow.sign(), base_cow.bits())
+        };
+        // `base_is_pow2` is only consulted by the positive-exp
+        // DoS estimator below. Defer the O(n) `count_ones()` scan
+        // until we know we're in that branch so Float / negative-
+        // exp / short-circuit paths don't pay for it.
+        // Compute parity / sign / zero of the exponent up front so
+        // every branch below dispatches on one vocabulary.
+        let (exp_is_negative, exp_is_zero, exp_is_odd, exp_is_float) = match exp_arg {
+            Value::Int(n) => (*n < 0, *n == 0, *n & 1 != 0, false),
+            Value::BigInt(id) => {
+                let big = self.heap.bigint(*id);
+                let s = big.sign();
+                (s == Sign::Minus, s == Sign::NoSign, big.bit(0), false)
+            }
+            Value::Float(_) => (false, false, false, true),
+            _ => return Ok(None),
+        };
+        // Float exponent: coerce base to f64 (bounded) and use
+        // powf. Int receivers go through numeric_call's Int×Float
+        // arm BEFORE reaching here, so this fires only for BigInt
+        // receivers (where the alternative would be NoMethodError
+        // despite `respond_to?(:**)` returning true).
+        if exp_is_float {
+            if !recv_is_bigint { return Ok(None); }
+            if let Value::Float(f) = exp_arg {
+                let base_f = self.bigint_recv_to_f64_bounded(recv);
+                return Ok(Some(Value::Float(base_f.powf(*f))));
+            }
+            unreachable!("exp_is_float ⇒ Value::Float(_)");
+        }
+        // Short-circuit |base| ≤ 1 — constant-size results,
+        // dispatch only on sign + parity, safe for any exp shape.
+        if base_bits <= 1 {
+            match base_sign {
+                Sign::NoSign => {
+                    // base == 0. 0**0 == 1; 0**n (n>0) == 0;
+                    // 0**n (n<0) raises ZeroDivisionError in CRuby
+                    // — match that for ALL operand shapes. The
+                    // previous behaviour returned `Float::INFINITY`
+                    // for BigInt-flavoured operands (and Int recv
+                    // × Int neg exp deferred to numeric.rs's powf,
+                    // which silently produced inf too). Both paths
+                    // now raise so the error surfaces explicitly
+                    // instead of poisoning downstream arithmetic.
+                    if exp_is_negative {
+                        return Err(self.trap(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        }));
+                    }
+                    let r = if exp_is_zero { BigInt::from(1) } else { BigInt::from(0) };
+                    return Ok(Some(self.bigint_to_value(r)?));
+                }
+                Sign::Plus => {
+                    // base == 1: always 1. Negative exp → Float(1.0)
+                    // for BigInt-flavoured operands (Int×Int still
+                    // defers to numeric.rs's parity-preserving ±1
+                    // arm).
+                    if exp_is_negative {
+                        if need_float_handling {
+                            return Ok(Some(Value::Float(1.0)));
+                        }
+                        return Ok(None);
+                    }
+                    return Ok(Some(self.bigint_to_value(BigInt::from(1))?));
+                }
+                Sign::Minus => {
+                    // base == -1: parity decides sign. Negative
+                    // exponent: |result| = 1, sign from parity.
+                    if exp_is_negative {
+                        if need_float_handling {
+                            return Ok(Some(Value::Float(if exp_is_odd { -1.0 } else { 1.0 })));
+                        }
+                        return Ok(None);
+                    }
+                    let r = if exp_is_odd { BigInt::from(-1) } else { BigInt::from(1) };
+                    return Ok(Some(self.bigint_to_value(r)?));
+                }
+            }
+        }
+        // |base| > 1 from here on.
+        // Negative Int / BigInt exp: Float reciprocal. Pure
+        // Int×Int neg-exp goes through numeric.rs first; we cover
+        // every other shape here (BigInt recv with any neg exp,
+        // OR Int recv with negative BigInt exp) so dispatch
+        // doesn't NoMethodError on `2 ** -(2**100)` and friends.
+        if exp_is_negative {
+            if need_float_handling {
+                let exp_f = match exp_arg {
+                    Value::Int(n) => *n as f64,
+                    // BigInt-negative exp: result tends toward 0
+                    // for |base|>1. Coerce via the bounded helper
+                    // (caps the intermediate string at f64-range,
+                    // ~310 bytes max).
+                    Value::BigInt(id) => {
+                        let big = self.heap.bigint(*id);
+                        Self::bigint_to_f64_bounded(big)
+                    }
+                    _ => unreachable!(),
+                };
+                // Compute on |base| so a negative base + non-
+                // integer / non-finite exp can't NaN out of
+                // libm's powf. Re-apply the sign from the
+                // already-computed base_sign + exp_is_odd, which
+                // preserve parity from the original i64 / BigInt
+                // rather than the f64 round.
+                let base_f = self.bigint_recv_to_f64_bounded(recv);
+                let mag = base_f.abs().powf(exp_f);
+                let signed = if base_sign == Sign::Minus && exp_is_odd { -mag } else { mag };
+                return Ok(Some(Value::Float(signed)));
+            }
+            return Ok(None);
+        }
+        // Exponent identities — return cheap results before the
+        // DoS estimator (which itself adds a 32-byte header to
+        // est_bytes, so `big ** 0` under an aggressively tight
+        // `max_value_bytes` would otherwise trap even though the
+        // correct answer is the immediate `Int(1)`). Skip the pow
+        // allocation entirely for `** 0` and `** 1`.
+        if exp_is_zero {
+            return Ok(Some(Value::Int(1)));
+        }
+        if matches!(exp_arg, Value::Int(1)) {
+            return Ok(Some(recv.clone()));
+        }
+        // Positive exp from here on. BigInt exponent with |base|>1
+        // → trap (would need ≥ 2**63 bits).
+        if matches!(exp_arg, Value::BigInt(_)) {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: "integer ** BigInt exponent exceeds u32::MAX".to_string(),
+            }));
+        }
+        let exp_i64 = match exp_arg {
+            Value::Int(n) => *n, // ≥ 2 (0, 1, negative handled above)
+            _ => unreachable!("non-Int/BigInt/Float exp returned earlier"),
+        };
+        let exp_u32: u32 = match u32::try_from(exp_i64) {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(self.trap(RubyError::ResourceExhausted {
+                    msg: format!("integer exponent {} exceeds u32::MAX", exp_i64),
+                }));
+            }
+        };
+        // Estimate result size and trap before allocating GBs.
+        // The true bit-length of `base ** exp` is
+        // `floor(exp * log2(|base|)) + 1`. For a power-of-two
+        // base, `log2(|base|) == base_bits - 1` exactly, so the
+        // tight bound is `(base_bits - 1) * exp + 1` — using
+        // `base_bits * exp` here would overshoot 2× on the
+        // canonical `2 ** n` shape (e.g. `2 ** 10_000_000`
+        // really is ~1.25MB but a `2 * 10_000_000 = 20M-bit`
+        // estimate would falsely trap a 2MB cap). For non-pow2
+        // bases we fall back to `base_bits * exp` as a safe
+        // upper bound (log2(base) < base_bits for any base).
+        // Ceil-div in u64; compare against `cap as u64` so the
+        // check doesn't silently truncate on 32-bit targets.
+        // Compute power-of-two flag lazily here — earlier paths
+        // (Float exp, negative exp, |base|≤1 short-circuit) all
+        // return before reaching the estimator, so they avoid
+        // the O(n) `count_ones()` scan over the BigInt magnitude.
+        let base_is_pow2 = {
+            let base_cow = match self.as_bigint_ref(recv) {
+                Some(v) => v,
+                None => unreachable!("recv shape validated at fn entry"),
+            };
+            base_cow.magnitude().count_ones() == 1
+        };
+        let est_bits: u64 = if base_is_pow2 {
+            (base_bits.saturating_sub(1))
+                .saturating_mul(exp_u32 as u64)
+                .saturating_add(1)
+        } else {
+            base_bits.saturating_mul(exp_u32 as u64)
+        };
+        // Round up to BigInt limb storage (u64 limbs = 8 bytes each)
+        // plus a small allocator-header overhead so the cap reflects
+        // actual heap storage rather than just the minimal bit count.
+        // This keeps `max_value_bytes` semantically aligned with the
+        // Array/String paths (which count backing-storage bytes) and
+        // closes a small word-boundary bypass on inputs that landed
+        // just under the previous min-bytes estimate.
+        const BIGINT_HEADER_BYTES: u64 = 32;
+        let est_limbs: u64 = est_bits.saturating_add(63) / 64;
+        let est_bytes: u64 = est_limbs.saturating_mul(8).saturating_add(BIGINT_HEADER_BYTES);
+        let cap = self.max_value_bytes.unwrap_or(1 << 20);
+        if est_bytes > cap as u64 {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!(
+                    "integer ** exp would need ~{} bytes, exceeding cap {}",
+                    est_bytes, cap
+                ),
+            }));
+        }
+        // Borrow base once more for the actual pow; `(&BigInt).pow`
+        // returns an owned BigInt without consuming the receiver,
+        // so a BigInt-receiver path computes pow against a
+        // borrowed magnitude rather than a clone.
+        let result = match self.as_bigint_ref(recv) {
+            Some(c) => (&*c).pow(exp_u32),
+            None => unreachable!("recv shape validated earlier"),
+        };
+        Ok(Some(self.bigint_to_value(result)?))
+    }
+
+    /// BigInt → f64 with the intermediate decimal string bounded
+    /// by a bits()-based pre-check. f64::MAX ≈ 2^1024, so any
+    /// BigInt past that is already out of f64 range — return ±∞
+    /// without materialising a string. Below the threshold the
+    /// decimal form is at most ~310 digits, well under any
+    /// `max_value_bytes` cap we care about. Centralises the
+    /// dispatch.rs Range coercion pattern in one place that the
+    /// `**` Float / negative-exp paths can share without
+    /// allocating O(magnitude) strings on a hostile big input.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn bigint_to_f64_bounded(b: &num_bigint::BigInt) -> f64 {
+        use num_bigint::Sign;
+        if b.bits() > 1024 {
+            return if b.sign() == Sign::Minus { f64::NEG_INFINITY } else { f64::INFINITY };
+        }
+        b.to_string().parse::<f64>().unwrap_or(f64::NAN)
+    }
+
+    /// Receiver-side helper around [`Self::bigint_to_f64_bounded`]:
+    /// borrows the BigInt out of the heap via `as_bigint_ref`,
+    /// then defers to the bounded coercion. Returns `NaN` if the
+    /// receiver isn't an integer (caller already validated this;
+    /// the NaN is a defensive fallback, not a reachable path).
+    #[cfg(feature = "bignum")]
+    pub(crate) fn bigint_recv_to_f64_bounded(&self, recv: &Value) -> f64 {
+        match self.as_bigint_ref(recv) {
+            Some(c) => Self::bigint_to_f64_bounded(&c),
+            None => f64::NAN,
+        }
+    }
 }
 
 /// BigInt method dispatch — covers the calls `primitive_call`
@@ -926,14 +1216,35 @@ impl Vm {
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>, Trap> {
-        // Two entry conditions:
-        // - Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
-        // - Recv is Int AND a BigInt is among args: covers the
-        //   inverse-receiver operator method-call shape `1.+(2**63)`,
-        //   which goes through the Int-side dispatch path and would
-        //   otherwise miss BigInt arithmetic entirely (the expression
-        //   form `1 + big` works because Op::BinOp already routes via
-        //   try_bigint_binop on either-operand-is-BigInt).
+        // Entry conditions, in order of precedence:
+        // 1. `**` exponentiation fires for ANY Int/BigInt operand
+        //    combo, including Int×Int — numeric_call's `**` arm
+        //    declines on i64 overflow so we get the chance to
+        //    promote here (`2 ** 100`). Handled before the guard
+        //    below so the Int×Int overflow case isn't filtered out.
+        // 2. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // 3. Recv is Int AND a BigInt is among args: covers the
+        //    inverse-receiver operator method-call shape
+        //    `1.+(2**63)`, which goes through the Int-side
+        //    dispatch path and would otherwise miss BigInt
+        //    arithmetic entirely (the expression form `1 + big`
+        //    works because Op::BinOp already routes via
+        //    try_bigint_binop on either-operand-is-BigInt).
+        if args.len() == 1 && name == "**" {
+            if let Some(v) = self.try_bigint_pow(recv, &args[0])? {
+                return Ok(Some(v));
+            }
+            // Fall through to the rest of bigint_primitive only if
+            // try_bigint_pow declined. Decline cases now narrow to
+            // Int recv × Int (positive) exp where numeric_call
+            // already produced a value, or operand shapes that
+            // aren't integer at all (the latter never reaches
+            // bigint_primitive in practice — primitive_call's Int
+            // arm would have matched first). Float and negative-Int
+            // exponents are handled inside try_bigint_pow itself
+            // for BigInt-flavoured operands; Int×Int Float/neg-exp
+            // is owned by numeric_call before we get here.
+        }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
         if !recv_is_bigint && !arg_is_bigint {

@@ -103,18 +103,85 @@ pub(crate) fn numeric_call(
             ">"  => Some(Value::Bool(a > b)),
             ">=" => Some(Value::Bool(a >= b)),
             "<=>" => Some(Value::Int(a.cmp(b) as i64)),
-            // Integer exponentiation. Positive exponent stays in i64
-            // (saturating on overflow, matching i64::saturating_pow).
-            // Negative exponent promotes to Float for the reciprocal,
-            // since we don't have Rational — CRuby would give `(1/2)`,
-            // we give `0.5`. Documented divergence.
-            "**" => Some(if *b >= 0 {
-                let exp = (*b as u64).min(u32::MAX as u64) as u32;
-                Value::Int(a.saturating_pow(exp))
-            } else {
-                let f = (*a as f64).powi(*b as i32);
-                Value::Float(f)
-            }),
+            // Integer exponentiation. Positive exponent uses
+            // `checked_pow` so overflow is detectable — with
+            // `bignum` on we DECLINE (return None) and let
+            // bigint_primitive promote to BigInt. Without
+            // `bignum`, fall back to `saturating_pow` so the
+            // pre-Phase-B behaviour is preserved.
+            // Negative exponent promotes to Float for the
+            // reciprocal, since we don't have Rational — CRuby
+            // would give `(1/2)`, we give `0.5`. Documented
+            // divergence.
+            "**" => {
+                if *b < 0 {
+                    // 0 ** negative is a divide-by-zero in CRuby
+                    // (the reciprocal of 0 is undefined). Match
+                    // by raising before falling into the Float
+                    // reciprocal arm — otherwise `(0_u64 as f64)
+                    // .powf(-1.0)` silently returns +Infinity,
+                    // which then propagates through user code
+                    // without surfacing the error.
+                    if *a == 0 {
+                        return Err(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        });
+                    }
+                    // Negative exponent → Float reciprocal.
+                    // ±1 bases have exact ±1.0 results decided by
+                    // exponent parity, but `(*b as f64)` loses
+                    // parity beyond 2**53 — short-circuit before
+                    // powf to keep (-1) ** large_odd correct.
+                    if *a == 1 {
+                        Some(Value::Float(1.0))
+                    } else if *a == -1 {
+                        Some(Value::Float(if *b & 1 == 0 { 1.0 } else { -1.0 }))
+                    } else {
+                        // Compute powf on |a| so a negative base
+                        // doesn't combine with an f64-rounded
+                        // exponent to yield NaN (libm `powf`
+                        // returns NaN when the base is negative
+                        // and the exp isn't exactly representable
+                        // as an integer in f64). Re-apply the
+                        // sign from the original i64 parity so
+                        // `(-2) ** large_odd_neg` stays negative
+                        // regardless of f64 rounding past 2**53.
+                        let mag = (a.unsigned_abs() as f64).powf(*b as f64);
+                        let signed = if *a < 0 && *b & 1 != 0 { -mag } else { mag };
+                        Some(Value::Float(signed))
+                    }
+                } else if *a == 0 {
+                    // 0**0 == 1; 0**n (n>0) == 0. Exact regardless
+                    // of exp size — short-circuit before u32 cast.
+                    Some(Value::Int(if *b == 0 { 1 } else { 0 }))
+                } else if *a == 1 {
+                    Some(Value::Int(1))
+                } else if *a == -1 {
+                    // Parity decides: even exp → 1, odd → -1.
+                    Some(Value::Int(if *b & 1 == 0 { 1 } else { -1 }))
+                } else {
+                    // |a| > 1: any exp that doesn't fit u32
+                    // overflows i64 anyway. With bignum we decline
+                    // on either u32-overflow or i64-overflow so
+                    // bigint_primitive can produce the real value
+                    // (or trap ResourceExhausted with an honest
+                    // estimate). Without bignum, saturate.
+                    match u32::try_from(*b) {
+                        Ok(exp) => {
+                            #[cfg(feature = "bignum")]
+                            { a.checked_pow(exp).map(Value::Int) }
+                            #[cfg(not(feature = "bignum"))]
+                            { Some(Value::Int(a.saturating_pow(exp))) }
+                        }
+                        Err(_) => {
+                            #[cfg(feature = "bignum")]
+                            { None }
+                            #[cfg(not(feature = "bignum"))]
+                            { Some(Value::Int(a.saturating_pow(u32::MAX))) }
+                        }
+                    }
+                }
+            }
             // Bitwise. Ruby uses arbitrary-precision Integer; we
             // truncate to i64. `<<` on a negative shift count is
             // CRuby's right-shift (and vice versa) — we mirror with
