@@ -137,6 +137,47 @@ def categorize_head(line: str):
     return None
 
 
+# Patterns for SINGLE-LINE string/comment stripping. Used by
+# `split_blocks`'s depth counter so `arr.push("end")` doesn't
+# trip the `\bend\b` end-counter and prematurely close blocks.
+# These are deliberately simple: no escape handling, no
+# interpolation parsing — just the most common shapes in
+# ruby/spec input. Heredocs span multiple lines and are NOT
+# stripped here (see KNOWN_LIMITATIONS in this module's
+# docstring).
+_LINE_COMMENT = re.compile(r"(?:^|(?<=[^\w#]))#.*$")
+_DOUBLE_STR = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"')
+_SINGLE_STR = re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'")
+_SYMBOL_LITERAL = re.compile(r":[a-zA-Z_]\w*[!?=]?")
+
+
+def _strip_strings_and_comments(line: str) -> str:
+    """Return `line` with string literals, line comments, and
+    symbol literals collapsed to empty placeholders. Used by
+    `split_blocks`'s depth counter so keyword-shaped tokens
+    inside strings/comments don't false-positive the `do`/`end`
+    accounting.
+
+    Order matters: strings BEFORE comments, so `# inside a
+    "string"` isn't truncated at the `#`. Symbols last, so
+    `"foo:bar"` doesn't get its `:bar` portion stripped.
+    Single-line forms only — multi-line heredocs / regex
+    literals pass through unchanged (a documented limit)."""
+    # Drop quoted-string contents first. The non-greedy `[^"\\]*`
+    # with `\\.` for escapes handles `"a \" b"` correctly.
+    s = _DOUBLE_STR.sub('""', line)
+    s = _SINGLE_STR.sub("''", s)
+    # Then line comments. Don't strip `#{...}` interpolations
+    # (those start with `#{`, which the look-behind in
+    # _LINE_COMMENT excludes). Pure `#` at line start or after
+    # whitespace becomes a comment.
+    s = _LINE_COMMENT.sub("", s)
+    # Finally symbols (`:end`, `:do`, etc.) — collapse to empty
+    # so the keyword inside the symbol can't match.
+    s = _SYMBOL_LITERAL.sub("", s)
+    return s
+
+
 # Match the opening line of an `it "..." do` or `before :sym do`
 # block. Indent captured so the skip trace lands at the same
 # column as the original block opener — without this the trace
@@ -228,16 +269,28 @@ def split_blocks(src: str):
                 # the trailing `do`) and only decrement once on
                 # `end`, leaking depth and ultimately swallowing
                 # the rest of the file. Reviewer feedback PR #133.
+                # Strip strings + comments BEFORE counting keywords
+                # so a string literal like `"end"` or a comment
+                # `# end of section` doesn't decrement depth and
+                # corrupt block boundaries. Reviewer feedback
+                # PR #133 caught this: `arr.push("end")` would
+                # otherwise trip `\bend\b` and prematurely close
+                # the `it` block. Single-line string/comment
+                # stripping only — heredocs span multiple lines
+                # and need a richer lexer; documented as a known
+                # limitation (see `KNOWN_LIMITATIONS` section
+                # below).
+                scan = _strip_strings_and_comments(l)
                 stmt_open_count = len(
                     re.findall(
                         r"^\s*(?:if|unless|while|until)\b",
-                        l,
+                        scan,
                     )
                 )
                 kw_open_count = len(
                     re.findall(
                         r"^\s*(?:class|module|def|case|begin|for)\b",
-                        l,
+                        scan,
                     )
                 )
                 # `if cond` / `unless cond` don't take an optional
@@ -248,13 +301,13 @@ def split_blocks(src: str):
                 trailing_do_after_stmt = bool(
                     re.search(
                         r"^\s*(?:while|until|for)\b.*\bdo\b(?:\s*\|.*\|)?\s*$",
-                        l,
+                        scan,
                     )
                 )
-                do_count = len(re.findall(r"\bdo\b(?:\s*\|.*\|)?\s*$", l))
+                do_count = len(re.findall(r"\bdo\b(?:\s*\|.*\|)?\s*$", scan))
                 if trailing_do_after_stmt:
                     do_count = 0  # already counted via stmt_open
-                end_count = len(re.findall(r"\bend\b", l))
+                end_count = len(re.findall(r"\bend\b", scan))
                 depth += do_count + stmt_open_count + kw_open_count - end_count
                 if depth == 0:
                     j += 1
