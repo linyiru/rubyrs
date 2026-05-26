@@ -21,6 +21,17 @@ impl Vm {
         Ok(
                 match (name, args) {
                     ("length", []) | ("size", []) => Some(Value::Int(self.heap.hash(id).len() as i64)),
+                    // `freeze` / `frozen?` — same pattern as Array.
+                    // No-ops; tilt's `EMPTY_HASH = {}.freeze` relies on
+                    // freeze being chainable (returning the receiver).
+                    // Wrong-arity raises ArgumentError, matching CRuby.
+                    ("freeze", []) => Some(Value::Hash(id)),
+                    ("frozen?", []) => Some(Value::Bool(false)),
+                    ("freeze" | "frozen?", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),
+                        }));
+                    }
                     ("[]", [k]) => {
                         let h = self.heap.hash(id);
                         for (key, val) in h {

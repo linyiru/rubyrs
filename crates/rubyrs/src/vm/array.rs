@@ -28,6 +28,23 @@ impl Vm {
         Ok(
                 match (name, args) {
                     ("length", []) | ("size", []) => Some(Value::Int(self.heap.array(id).len() as i64)),
+                    // `freeze` / `frozen?` — CRuby tracks an immutability
+                    // bit per object; rubyrs doesn't model it. Both are
+                    // no-ops that match CRuby's signature: `freeze`
+                    // returns the receiver (chainable, used by tilt's
+                    // `EMPTY_ARRAY = [].freeze` constant), `frozen?`
+                    // returns false (we never freeze). Real enforcement
+                    // is a documented gap in SUBSET.md. Wrong-arity
+                    // still raises ArgumentError, matching CRuby, so
+                    // caller bugs don't get misreported as missing
+                    // methods by the no-recv fall-through.
+                    ("freeze", []) => Some(Value::Array(id)),
+                    ("frozen?", []) => Some(Value::Bool(false)),
+                    ("freeze" | "frozen?", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),
+                        }));
+                    }
                     // `Array#shift` — remove and return the first
                     // element; `nil` if empty. In-place mutation.
                     ("shift", []) => {

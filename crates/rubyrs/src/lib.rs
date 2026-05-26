@@ -632,6 +632,18 @@ class TypeError < StandardError
 end
 class NameError < StandardError
 end
+## ScriptError — CRuby's ancestor for compile/load-time errors
+## (NotImplementedError, LoadError, SyntaxError). Subclasses
+## inherit from ScriptError → Exception in CRuby, NOT from
+## StandardError, so a bare `rescue` (which catches StandardError)
+## does NOT catch them. Important: stubbing this as a child of
+## StandardError would silently change rescue semantics for
+## existing CRuby code that relies on NotImplementedError NOT
+## being caught by `rescue` clauses.
+class ScriptError < Exception
+end
+class NotImplementedError < ScriptError
+end
 class IndexError < StandardError
 end
 class KeyError < IndexError

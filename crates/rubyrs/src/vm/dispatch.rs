@@ -419,6 +419,48 @@ impl Vm {
             // time. Bumps `method_gen` so any monomorphic inline
             // cache entry that thought the class lacked the
             // included/prepended methods invalidates.
+            // `private_constant :Foo, :Bar` / `public_constant ...` —
+            // visibility hints for module constants. CRuby uses them
+            // to prevent external `Tilt::EMPTY_HASH` access; rubyrs
+            // doesn't enforce constant visibility yet (separate gap),
+            // so the call is a no-op that returns the class. Returning
+            // self matches CRuby's chainable form. Required for tilt
+            // load (tilt.rb:11/14, tilt/mapping.rb:77/411 all use this).
+            //
+            // `autoload :Const, "path"` — CRuby's lazy-load hook: the
+            // constant materialises when first referenced. rubyrs
+            // doesn't model lazy loads (the embeddable host registers
+            // template engines eagerly), so this is a no-op returning
+            // nil (CRuby's actual return value for autoload). The
+            // constant simply won't exist until someone explicitly
+            // requires the target file. tilt's `register_lazy` calls
+            // autoload internally; the documented gap is that
+            // `Tilt['erb']` won't find the engine without a separate
+            // eager `require 'tilt/erb'`.
+            //
+            // Arity matches CRuby: exactly 2 args. Wrong arity still
+            // raises ArgumentError so caller bugs don't get hidden by
+            // the stub fast-path.
+            if &*name == "autoload"
+                && let Value::Class(_) = &self_val {
+                if args.len() != 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                    }));
+                }
+                self.stack.push(Value::Nil);
+                return Ok(());
+            }
+            // `private_constant` / `public_constant` accept any number
+            // of symbol args (CRuby; including zero, which is a no-op).
+            // We don't enforce that args are Symbols since the stub
+            // ignores them anyway; the documented gap is that wrong
+            // arg types silently no-op here instead of TypeError.
+            if matches!(&*name, "private_constant" | "public_constant")
+                && let Value::Class(_) = &self_val {
+                self.stack.push(self_val);
+                return Ok(());
+            }
             if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
                     let is_prepend = &*name == "prepend";
@@ -500,6 +542,75 @@ impl Vm {
                 // common preamble patterns (`private; def helper;`
                 // at the toplevel) parseable.
                 self.stack.push(Value::Nil);
+                return Ok(());
+            }
+            // `respond_to?(:foo)` / `respond_to?(:foo, true)` with no
+            // explicit receiver — implicit-self dispatch against the
+            // current frame's `self_val`. Mirrors the recv-bearing
+            // arm below (~line 2239); included here because the
+            // no-recv path runs FIRST and would NoMethodError before
+            // reaching that arm. Required by tilt.rb:143's
+            // `respond_to?(:deprecate_constant, true)` feature
+            // detection inside `class Tilt` body where self is a
+            // Class.
+            if &*name == "respond_to?" {
+                // Arity: CRuby raises ArgumentError on 0 args or 3+,
+                // before reaching method_missing / NoMethodError. The
+                // no-recv path runs FIRST so this guard is what users
+                // see for bare `respond_to?` calls inside a method
+                // body or class body.
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    }));
+                }
+                // Reopened-primitive user override: `class String;
+                // def respond_to?; ...; end; end` installs a method
+                // on the primitive's preamble class. Value::Object
+                // self routes through `lookup_method_cached` at
+                // line ~320; Value::Class through
+                // `lookup_class_singleton_method` at ~343. Primitives
+                // (Str / Int / Sym / Array / Hash / ...) had no
+                // equivalent user-method lookup before the stub
+                // fired, so a user override on the primitive was
+                // silently shadowed. Resolve the primitive's class
+                // via `class_of` and check its method table; if a
+                // user `respond_to?` exists, invoke it instead of
+                // the stub.
+                //
+                // Documented narrower gap: this only fixes
+                // `respond_to?` specifically. Other bare calls in
+                // reopened-primitive method bodies (e.g.
+                // `class String; def trigger; custom_helper; end;
+                // end`) still surface NoMethodError because the
+                // no-recv path doesn't generally consult the
+                // primitive's class. Tracked as a separate broader
+                // gap in SUBSET.md.
+                if !matches!(&self_val, Value::Object(_) | Value::Class(_))
+                    && let Value::Class(cls) = self.class_of(&self_val)
+                    && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+                {
+                    self.invoke_method(m, self_val.clone(), args)?;
+                    return Ok(());
+                }
+                // Type: CRuby raises `TypeError: X is not a symbol nor
+                // a string` when arg[0] isn't a Symbol or String.
+                // Without this guard the call would silently fall
+                // through to method_missing / NoMethodError, which
+                // misreports the failure as "method missing" instead
+                // of "wrong arg type" and confuses debugging.
+                let lookup_name: SymId = match &args[0] {
+                    Value::Sym(id) => *id,
+                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "{} is not a symbol nor a string",
+                            other.to_inspect(&self.heap, &self.interner),
+                        ),
+                    })),
+                };
+                let yes = self.responds_to(&self_val, lookup_name);
+                self.stack.push(Value::Bool(yes));
                 return Ok(());
             }
             // method_missing fallback (PoC #2). For Object self, look
@@ -1565,6 +1676,27 @@ impl Vm {
                     /* cache_id = */ u16::MAX,
                 );
             }
+        // Explicit-receiver no-op stubs — `Foo.private_constant :X`,
+        // `Foo.public_constant :X`, `Foo.autoload :X, "path"`.
+        // Counterparts to the no-recv arm above. See that arm for the
+        // rationale (visibility / lazy-load hooks rubyrs doesn't model
+        // yet). Tilt's `Tilt.autoload class_name, file` inside
+        // `register_lazy` is the canonical caller.
+        if &*name == "autoload"
+            && let Value::Class(_) = &recv {
+            if args.len() != 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                }));
+            }
+            self.stack.push(Value::Nil);
+            return Ok(());
+        }
+        if matches!(&*name, "private_constant" | "public_constant")
+            && let Value::Class(_) = &recv {
+            self.stack.push(recv);
+            return Ok(());
+        }
         if let Value::Class(target) = &recv
             && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
                 // Explicit-receiver form: `MyClass.include(Mod)` /
@@ -2360,17 +2492,41 @@ impl Vm {
         // `respond_to?` (we don't support that yet, but conceptually)
         // would shadow this. Accepts either a `Symbol` or a `String`
         // argument; anything else falls through to NoMethodError.
-        if &*name == "respond_to?" && args.len() == 1 {
-            let lookup_name: Option<SymId> = match &args[0] {
-                Value::Sym(id) => Some(*id),
-                Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
-                _ => None,
-            };
-            if let Some(id) = lookup_name {
-                let yes = self.responds_to(&recv, id);
-                self.stack.push(Value::Bool(yes));
-                return Ok(());
+        // `respond_to?(:foo)` or `respond_to?(:foo, include_private)`.
+        // CRuby's second arg toggles whether private methods count;
+        // we don't enforce method visibility precisely in the lookup
+        // path used here, so the bool is effectively ignored — the
+        // check passes through to `responds_to` which already walks
+        // the method table without filtering by visibility. Accepting
+        // the 2-arg form lets feature-detection patterns like
+        // `respond_to?(:deprecate_constant, true)` work without
+        // tripping NoMethodError.
+        if &*name == "respond_to?" {
+            // Arity check matches the no-recv path: CRuby raises
+            // ArgumentError on 0 args or 3+. Keeps the explicit-
+            // receiver shape (`obj.respond_to?()`) from misreporting
+            // as method_missing / NoMethodError.
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                }));
             }
+            // Type check matches the no-recv arm — CRuby raises
+            // `TypeError: X is not a symbol nor a string` for any
+            // other arg[0] type, before reaching method_missing.
+            let lookup_name: SymId = match &args[0] {
+                Value::Sym(id) => *id,
+                Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "{} is not a symbol nor a string",
+                        other.to_inspect(&self.heap, &self.interner),
+                    ),
+                })),
+            };
+            let yes = self.responds_to(&recv, lookup_name);
+            self.stack.push(Value::Bool(yes));
+            return Ok(());
         }
         if self.try_method_missing(&recv, name_id, args, None)? {
             return Ok(());

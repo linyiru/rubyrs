@@ -533,6 +533,38 @@ end
 - Test: `rescue_with_unresolved_class_does_not_catch` in
   `crates/rubyrs/tests/embed.rs`.
 
+### `freeze` doesn't actually freeze — `frozen?` always false
+
+```ruby
+EMPTY = [].freeze
+EMPTY << :x         # CRuby: FrozenError; rubyrs: silently mutates
+puts EMPTY.inspect  # rubyrs: [:x] — shared constant corrupted
+puts EMPTY.frozen?  # rubyrs: false (never tracked)
+```
+
+- CRuby tracks an immutability bit per object; `freeze` flips
+  it on, subsequent mutation methods raise `FrozenError`.
+  rubyrs doesn't model the bit at all.
+- `freeze` returns the receiver (so chainable patterns like
+  `EMPTY_HASH = {}.freeze` compile cleanly) and `frozen?`
+  returns `false`. Mutation methods (`<<`, `[]=`, `push`,
+  `delete`, ...) don't check.
+- Real risk: code that uses `EMPTY = [].freeze` as a shared
+  immutable sentinel will see that sentinel mutated by any
+  later mutation call. CRuby would have raised; rubyrs
+  silently corrupts.
+- Why we stub instead of implementing: real freeze tracking
+  needs an immutability bit on every heap-managed `HeapObj`
+  variant + a check in every mutator. Embeddable use cases
+  the host VM serves (template engines, config loaders,
+  short-lived scripts) generally don't rely on freeze as a
+  correctness mechanism; the stub unblocks common idioms
+  like `EMPTY_HASH = {}.freeze` without the per-mutator
+  enforcement cost.
+- Tests: `tilt_load_capabilities.rb` pins the chainable
+  return shape; the corruption divergence is NOT diff-pinned
+  (would lock in divergence) but is part of this contract.
+
 ### `ResourceExhausted` is host-only, not script-visible
 
 ```ruby
