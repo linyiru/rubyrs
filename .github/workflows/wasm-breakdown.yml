@@ -183,8 +183,23 @@ jobs:
           if ! strings "$WASM" | grep -qF "wizer.initialize"; then
             echo "rubyrs.wasm does NOT contain the literal 'wizer.initialize' string." >&2
             echo "Rust's #[unsafe(export_name = ...)] was either not honored or the export was DCE'd." >&2
-            exit 1
+            # Don't `exit 1` here — let the subsequent upload step
+            # capture the bad .wasm as an artifact so we can dissect
+            # it locally. The pipeline step that actually needs the
+            # export will fail later with the original error.
           fi
+
+      - name: Upload raw rubyrs.wasm for inspection
+        # Always run, so we get the file regardless of upstream
+        # build success — the whole point is to be able to compare
+        # the CI-produced .wasm with the local one byte-for-byte.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubyrs-wasm-raw-${{ matrix.os }}-${{ matrix.arch }}
+          path: target/wasm32-wasip1/release/rubyrs.wasm
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Pre-build the embedder (bakes cwasm via build_embedder.sh)
         # The breakdown harness benchmarks the EMBEDDER on top of
