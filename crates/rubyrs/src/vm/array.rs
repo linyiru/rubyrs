@@ -204,7 +204,16 @@ impl Vm {
                                 msg: "negative array size".into(),
                             }));
                         }
-                        let n = *n as usize;
+                        // `*n as usize` would silently truncate on
+                        // wasm32-wasip1 (usize is u32 there), turning
+                        // an `arr.first(2**32)` request into
+                        // `arr.first(0)`. `try_from` + `unwrap_or(MAX)`
+                        // keeps the contract "n bigger than usize means
+                        // n bigger than len means take the whole
+                        // thing", which is what CRuby does. Native
+                        // hosts (usize == u64) are unaffected because
+                        // we already trapped negatives above.
+                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
                         // Pin the receiver across maybe_gc: same rationale
                         // as `take`/`drop` — the receiver Array has been
                         // popped from the operand stack before this match
@@ -233,7 +242,12 @@ impl Vm {
                                 msg: "negative array size".into(),
                             }));
                         }
-                        let n = *n as usize;
+                        // Same wasm32 truncation guard as `first(n)`
+                        // above; combined with the `saturating_sub`
+                        // below, `n` beyond `usize::MAX` collapses to
+                        // start == 0, i.e. return the whole array —
+                        // matching CRuby's "n > len" semantics.
+                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Array(id));
                         let arr = g.vm.heap.array(id);

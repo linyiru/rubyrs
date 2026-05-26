@@ -27,6 +27,15 @@ puts a.last(99).inspect           # [10, 20, 30, 40, 50]
 puts a.first(5).inspect           # [10, 20, 30, 40, 50]
 puts a.last(5).inspect            # [10, 20, 30, 40, 50]
 
+# n > usize::MAX on wasm32 — guards against the i64→usize
+# truncation that `*n as usize` would have introduced on the
+# 32-bit wasi target (2**32 would wrap to 0 and `first(2**32)`
+# would silently return `[]` instead of the whole array).
+# Native hosts (usize == u64) pass this trivially; the wasm
+# diff matrix is where this case actually changes anything.
+puts a.first(4_294_967_296).inspect  # [10, 20, 30, 40, 50]
+puts a.last(4_294_967_296).inspect   # [10, 20, 30, 40, 50]
+
 # Empty receiver — even with positive n, returns [].
 puts [].first(3).inspect          # []
 puts [].last(3).inspect           # []
