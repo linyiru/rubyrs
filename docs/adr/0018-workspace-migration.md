@@ -114,9 +114,13 @@ it. Concretely:
   with the audit's mapped `alloc::`/`core::` import.
 - `rubyrs` (the CLI/facade crate) stays at `crates/rubyrs/`
   and shrinks to just `main.rs` + a paper-thin `lib.rs` that
-  re-exports `rubyrs_core::*`. Today's `cargo install rubyrs`
-  produces the same binary surface — verified by diffing
-  `cargo doc --no-deps` output before/after.
+  re-exports `rubyrs_core::*`. The extraction PR verifies two
+  surfaces stay intact:
+  - **Library API** (what `cargo add rubyrs` exposes) — diff
+    `cargo doc --no-deps -p rubyrs` output before/after.
+  - **CLI behaviour** (what `cargo install rubyrs` produces) —
+    run the existing diff_cruby suite against the new binary;
+    every fixture must still match CRuby byte-for-byte.
 - `cext` feature stays in `rubyrs` (the facade) because cext is
   a Tier-3 capability; it must not be in `core` even behind a
   feature flag (Rule 3).
@@ -158,13 +162,14 @@ Plus a fourth, specific to this migration:
   (`wasm32-unknown-unknown` — which genuinely has no `std`;
   `wasm32-wasip1` ships `std` and would silently let drift in)
   in **two passes** on every PR that touches `rubyrs-core`:
-  - `cargo check -p rubyrs-core --no-default-features` — the
-    pure minimum; catches direct `std` imports in core code
-  - `cargo check -p rubyrs-core` (default features on) —
-    catches `std` leaking in through a default-on dependency
-    like `bignum` (`num-bigint`'s `std` feature is opt-out, so
-    a future bump that flips it on by accident would
-    otherwise sneak past the first pass)
+  - `cargo check -p rubyrs-core --no-default-features --target
+    wasm32-unknown-unknown` — the pure minimum; catches direct
+    `std` imports in core code
+  - `cargo check -p rubyrs-core --target wasm32-unknown-unknown`
+    (default features on) — catches `std` leaking in through a
+    default-on dependency like `bignum` (`num-bigint`'s `std`
+    feature is opt-out, so a future bump that flips it on by
+    accident would otherwise sneak past the first pass)
 
   The two together — `#![no_std]` attribute as the in-source
   contract, plus both feature-shape variants on the bare-WASM
