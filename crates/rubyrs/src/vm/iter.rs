@@ -1324,9 +1324,12 @@ impl Vm {
             (Value::Array(id), "sort", []) | (Value::Array(id), "sort!", []) => {
                 // Block-form sort: the block is the comparator,
                 // called with `(a, b)` on every comparison and
-                // returning negative / zero / positive (Int) for
-                // ordering. CRuby's contract; no fancy
-                // type-coercion required.
+                // returning a value whose sign decides ordering
+                // (negative → prev<curr, zero → equal, positive →
+                // swap). Accepted result types: Int, Float, and (with
+                // `bignum`) BigInt — see the match below. CRuby's
+                // `rb_cmpint` coerces any numeric to an integer cmp
+                // axis; we replicate that for the types we model.
                 //
                 // Same insertion-sort shape as the no-block arms
                 // in `array_collection_call`, but each comparison
@@ -1369,13 +1372,14 @@ impl Vm {
                         g.vm.invoke_block(block, vec![a, b])?;
                         g.vm.dispatch_until(pre_frames)?;
                         // Non-local `return` from inside the
-                        // comparator block: push Nil and let the
-                        // outer dispatch loop's method_return check
-                        // unwind. `Ok(None)` would route through
-                        // do_call_block's fallthrough and eventually
-                        // hit NoMethodError (because `sort!` only
-                        // exists in the no-block path; there's no
-                        // primitive fallback for the block-form).
+                        // comparator block: return Some(Nil) so the
+                        // outer dispatch loop sees a primitive result
+                        // and runs its method_return unwind. `Ok(None)`
+                        // would mean "no primitive matched, fall
+                        // through" — which then routes through
+                        // do_call_block looking for another handler
+                        // and ends up at NoMethodError, because this
+                        // arm IS the block-form sort!/sort primitive.
                         // Empirically verified vs CRuby:
                         // `def foo; [3,1,2].sort!{return :x};
                         // :unreached; end; foo` → `:x`.
