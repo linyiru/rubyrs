@@ -18,7 +18,13 @@ use crate::heap::HeapObj;
 use crate::value::Instance;
 use crate::value::{RStr, Value};
 
-use super::{ruby_sprintf, PinGuard, Vm};
+use super::{ruby_sprintf, Vm};
+// PinGuard is only referenced from the `("scan", [Value::Regex(...)])`
+// arm, which is itself `cfg(feature = "regex")` via `Value::Regex`.
+// Without this gate, `--no-default-features` (the wasm32-wasip1
+// shape) sees an unused import and `-D warnings` blocks the build.
+#[cfg(feature = "regex")]
+use super::PinGuard;
 
 /// Try the Str primitive arms. Returns `Ok(Some(v))` on a
 /// handled call, `Ok(None)` if the receiver/method shape

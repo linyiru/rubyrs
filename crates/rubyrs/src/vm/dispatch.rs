@@ -839,10 +839,21 @@ impl Vm {
                     ),
                 }));
             }
-            self.maybe_gc();
-            self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::BoundMethod { recv: target, name_id: cap_name_id });
-            self.stack.push(Value::BoundMethod(id));
+            // GC rooting: `target` came from `args.swap_remove(0)`,
+            // which itself was drained from the operand stack at the
+            // top of `do_call`. It now lives only in this Rust local
+            // — not in `self.stack`, not in any frame's locals. The
+            // `maybe_gc` below would otherwise sweep its heap slot
+            // (Greeter.new in `kernel_instance_method.rb` under
+            // STRESS_GC=1), and the BoundMethod's `recv` would point
+            // at a Dead slot. Same fix shape as `Object#method` and
+            // `invoke_block` rest-slot in commit 86db73d.
+            let mut g = crate::vm::PinGuard::new(self);
+            g.pin(target.clone());
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let id = g.vm.heap.alloc(HeapObj::BoundMethod { recv: target, name_id: cap_name_id });
+            g.vm.stack.push(Value::BoundMethod(id));
             return Ok(());
         }
         // `m.to_proc` — explicit conversion to a Proc. Equivalent
