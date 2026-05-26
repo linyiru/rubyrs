@@ -193,6 +193,7 @@ impl Heap {
         let original = inst.class.clone();
         let sc = Rc::new(crate::value::Class {
             name: format!("#<Class:#<{}>>", original.name),
+            ivars: RefCell::new(HashMap::new()),
             methods: RefCell::new(HashMap::new()),
             // Eigenclasses have no per-class singleton-method
             // table of their own — `def self.foo` (master's
