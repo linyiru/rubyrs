@@ -458,13 +458,14 @@ pub(crate) struct Vm {
     /// transitively apply — anything that method itself calls
     /// runs through the normal check.
     pub(crate) bypass_visibility_once: bool,
-    /// Cached index into `protos` of the BoundMethod→Block
-    /// forwarder. Lazily built on first `&method_object`
-    /// coercion in `do_call_block`. The forwarder is a tiny
-    /// proto whose body does `captured[0].call(*args)`; one
-    /// instance is shared across every `&m` call site so the
-    /// allocation cost amortises to zero.
-    pub(crate) bound_method_forwarder_proto: Option<usize>,
+    /// Cached index into `protos` of the callable→Block
+    /// forwarder. Lazily built on first `&callable` coercion in
+    /// `do_call_block` (BoundMethod, CurriedProc, ...). The
+    /// forwarder is a tiny proto whose body does
+    /// `captured[0].call(*args)`; one instance is shared across
+    /// every `&` call site so the allocation cost amortises to
+    /// zero.
+    pub(crate) callable_forwarder_proto: Option<usize>,
     /// Cached proto for `Method#>>` / `Method#<<`. Body does
     /// `outer.call(inner.(*args))`; three-locals layout
     /// (outer / inner / rest-args). Shared across all composition
@@ -529,7 +530,7 @@ impl Vm {
             call_caches: Vec::new(),
             method_gen: 0,
             break_signaled: false,
-            bound_method_forwarder_proto: None,
+            callable_forwarder_proto: None,
             method_compose_forwarder_proto: None,
             sources: HashMap::new(),
             method_return: None,
