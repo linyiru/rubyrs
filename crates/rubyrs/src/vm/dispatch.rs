@@ -739,6 +739,41 @@ impl Vm {
         }
 
         let new_id = self.interner.intern("new");
+        // `Hash.new` interception. The preamble defines a stub
+        // `class Hash; end` (lib.rs) that has no connection to the
+        // primitive `Value::Hash` storage — without this short-
+        // circuit, `Hash.new` falls through to the generic
+        // `Class.new` allocator below and returns a bare
+        // `Value::Object`, which then NoMethodErrors on every
+        // collection-style call (`.[]`, `.keys`, `.each`, ...).
+        //
+        // Three call shapes (CRuby semantics):
+        //   - `Hash.new`           → empty Hash, no default
+        //   - `Hash.new(default)`  → empty Hash, scalar default
+        //     (NOT yet modelled — falls through to no-default; the
+        //     scalar arg is silently ignored as a documented gap)
+        //   - `Hash.new { |h, k| block }` → empty Hash with default-
+        //     block stored alongside; `Hash#[]` invokes it on
+        //     missing keys with `(self, key)`.
+        //
+        // Tilt's `@lazy_map = Hash.new { |h, k| h[k] = [] }` (the
+        // motivating case) is the block form. Without default-
+        // block support the whole tilt-load chain stalls on the
+        // first `@lazy_map[ext]` access.
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Hash"
+        {
+            // `Hash.new` without a block — empty Hash, no default.
+            // The block-form (`Hash.new { |h, k| ... }`) routes
+            // through `do_call_block` and has its own parallel
+            // intercept there; this arm never sees a block.
+            self.maybe_gc();
+            self.check_alloc()?;
+            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+            self.stack.push(Value::Hash(hid));
+            return Ok(());
+        }
         if name_id == new_id
             && let Value::Class(cls) = &recv {
                 // L3-F: cext-registered allocator path. When the class
@@ -2797,7 +2832,7 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                g.vm.heap.alloc(HeapObj::Hash(leftover))
+                g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(leftover)))
             };
             locals[kw_rest_slot] = Value::Hash(hid);
         }
@@ -3316,6 +3351,29 @@ impl Vm {
         // trigger GC before installing the block as the frame's
         // `block_arg`, so the gap is safe there too.
         //
+        // `Hash.new { |h, k| ... }` interception. Parallel to the
+        // no-block arm in `do_call`. The block becomes the Hash's
+        // default-block (stored in `HashObj.default_block` for GC
+        // and access). `Hash#[]` consults this slot on missing
+        // keys and invokes the block with `(self_hash, key)` —
+        // tilt's `Hash.new { |h, k| h[k] = [] }` auto-vivifies.
+        // The `args.is_empty()` check matches CRuby's signature;
+        // `Hash.new(default) { block }` is a TypeError in CRuby
+        // (can't specify both) and falls through here to the
+        // generic path which currently raises NoMethodError —
+        // documented as a narrow gap, fixable later if needed.
+        if &*name == "new"
+            && args.is_empty()
+            && let Some(Value::Class(cls)) = &recv
+            && cls.name.as_str() == "Hash"
+        {
+            self.maybe_gc();
+            self.check_alloc()?;
+            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+            self.heap.hash_set_default_block(hid, Some(block));
+            self.stack.push(Value::Hash(hid));
+            return Ok(());
+        }
         // `instance_eval` / `class_eval` / `module_eval` — swap
         // `self` for the duration of the block. Intercepted here
         // so the receiver-type dispatch below can't claim them

@@ -33,9 +33,36 @@ impl Vm {
                         }));
                     }
                     ("[]", [k]) => {
-                        let h = self.heap.hash(id);
-                        for (key, val) in h {
-                            if key.ruby_eq(k, &self.heap) { return Ok(Some(val.clone())); }
+                        // Direct hit first.
+                        {
+                            let h = self.heap.hash(id);
+                            for (key, val) in h {
+                                if key.ruby_eq(k, &self.heap) {
+                                    return Ok(Some(val.clone()));
+                                }
+                            }
+                        }
+                        // Missing key — invoke default-block if the
+                        // Hash was built via `Hash.new { |h, k| ... }`.
+                        // CRuby contract: block called with
+                        // `(self_hash, key)`; its return value becomes
+                        // the `[]` result. Common idiom is
+                        // `Hash.new { |h, k| h[k] = [] }` — block
+                        // mutates the Hash AND returns the value the
+                        // caller sees.
+                        if let Some(block_id) = self.heap.hash_default_block(id) {
+                            let pre_frames = self.frames.len();
+                            let mut g = PinGuard::new(self);
+                            g.pin(Value::Hash(id));
+                            g.pin(k.clone());
+                            // Pin the block too — it lives on the
+                            // heap and could be swept across maybe_gc
+                            // sites in invoke_block / dispatch_until.
+                            g.pin(Value::Block(block_id));
+                            g.vm.invoke_block(block_id, vec![Value::Hash(id), k.clone()])?;
+                            g.vm.dispatch_until(pre_frames)?;
+                            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                            return Ok(Some(r));
                         }
                         Some(Value::Nil)
                     }
@@ -197,7 +224,7 @@ impl Vm {
                             }
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(out));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
                         Some(Value::Hash(nid))
                     }
                     ("delete", [k]) => {
@@ -223,7 +250,7 @@ impl Vm {
                             if let Some(p) = pos { out[p].1 = v; } else { out.push((k, v)); }
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(out));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
                         Some(Value::Hash(nid))
                     }
                     // `h.compact` — return a new Hash with nil-value
@@ -234,7 +261,7 @@ impl Vm {
                             .cloned()
                             .collect();
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     // `h.compact!` — in-place compaction. Returns
@@ -256,7 +283,7 @@ impl Vm {
                             .cloned()
                             .collect();
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     // `h.slice(*keys)` — return a new Hash with only
@@ -272,7 +299,7 @@ impl Vm {
                             }
                         }
                         self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(pairs));
+                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     ("store", [k, v]) => {

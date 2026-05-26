@@ -8,7 +8,7 @@ use crate::value::{BlockHandle, Instance, ObjId, Value};
 pub(crate) enum HeapObj {
     Instance(Instance),
     Array(Vec<Value>),
-    Hash(Vec<(Value, Value)>),
+    Hash(HashObj),
     Range(RangeObj),
     /// Arbitrary-precision integer (the heap-side of `Value::BigInt`).
     /// Contains no nested `Value` — GC walk is a no-op for this
@@ -99,6 +99,28 @@ pub(crate) struct RangeObj {
     pub(crate) begin: Value,
     pub(crate) end: Value,
     pub(crate) exclusive: bool,
+}
+
+/// Heap representation of a Hash. Carries the key/value pairs and
+/// an optional default-block ObjId for `Hash.new { |h, k| ... }`-
+/// style auto-vivification. The block is a `Value::Block`'s id;
+/// `Hash#[]` invokes it with `(self_hash, key)` when the key is
+/// missing. GC walks the pairs and the default-block (if present)
+/// so neither dangles.
+///
+/// Constructor `HashObj::with_pairs(pairs)` keeps all 11 internal
+/// `HeapObj::Hash` allocations short — the `default_block` slot
+/// only becomes `Some` through the explicit `Hash.new { ... }`
+/// dispatch arm in `vm/dispatch.rs`.
+pub(crate) struct HashObj {
+    pub(crate) pairs: Vec<(Value, Value)>,
+    pub(crate) default_block: Option<ObjId>,
+}
+
+impl HashObj {
+    pub(crate) fn with_pairs(pairs: Vec<(Value, Value)>) -> Self {
+        Self { pairs, default_block: None }
+    }
 }
 
 pub(crate) enum Slot {
@@ -229,10 +251,28 @@ impl Heap {
         if let HeapObj::Array(a) = self.get_mut(id) { a } else { panic!("ICE: heap slot is not an Array") }
     }
     pub(crate) fn hash(&self, id: ObjId) -> &Vec<(Value, Value)> {
-        if let HeapObj::Hash(h) = self.get(id) { h } else { panic!("ICE: heap slot is not a Hash") }
+        if let HeapObj::Hash(h) = self.get(id) { &h.pairs } else { panic!("ICE: heap slot is not a Hash") }
     }
     pub(crate) fn hash_mut(&mut self, id: ObjId) -> &mut Vec<(Value, Value)> {
-        if let HeapObj::Hash(h) = self.get_mut(id) { h } else { panic!("ICE: heap slot is not a Hash") }
+        if let HeapObj::Hash(h) = self.get_mut(id) { &mut h.pairs } else { panic!("ICE: heap slot is not a Hash") }
+    }
+    /// Default-value block stored alongside the Hash by `Hash.new {
+    /// |h, k| ... }`. None for hash literals (`{}`) and the common
+    /// `Hash.new` no-arg form. `Hash#[]` checks this slot when the
+    /// key is missing — if present, invokes the block with `(self,
+    /// key)` and returns the result. Mirrors CRuby's `default_proc`
+    /// semantics, narrowed to the common shape (no static default
+    /// value yet, no `default=` assignment — both are deferred gaps).
+    pub(crate) fn hash_default_block(&self, id: ObjId) -> Option<ObjId> {
+        if let HeapObj::Hash(h) = self.get(id) { h.default_block } else { None }
+    }
+    /// Install the default-value block; one-shot at allocation
+    /// time from the `Hash.new { ... }` dispatch arm. The existing
+    /// 11 in-VM hash allocations all pass through allocation
+    /// directly with `default_block: None`, so this is only used
+    /// when the script explicitly opts in.
+    pub(crate) fn hash_set_default_block(&mut self, id: ObjId, block: Option<ObjId>) {
+        if let HeapObj::Hash(h) = self.get_mut(id) { h.default_block = block; }
     }
     pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
         if let HeapObj::Range(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Range") }
@@ -356,9 +396,18 @@ impl Heap {
                     }
                 }
                 Slot::Live(HeapObj::Hash(h)) => {
-                    for (k, v) in h {
+                    for (k, v) in &h.pairs {
                         Heap::visit_value(k, &mut self.marks, &mut worklist);
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    // Default-block is a heap-managed Block; without
+                    // a mark walk it would be swept while the Hash
+                    // still references it via `Hash.new { ... }`.
+                    if let Some(blk_id) = h.default_block
+                        && !self.marks[blk_id.0 as usize]
+                    {
+                        self.marks[blk_id.0 as usize] = true;
+                        worklist.push(blk_id);
                     }
                 }
                 Slot::Live(HeapObj::Range(r)) => {

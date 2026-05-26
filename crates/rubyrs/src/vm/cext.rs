@@ -319,7 +319,7 @@ fn cext_handle_to_value_d(
             g.vm.maybe_gc();
             // Review #27 — same Trap propagation as Array arm above.
             g.vm.check_alloc()?;
-            let id = g.vm.heap.alloc(HeapObj::Hash(entries));
+            let id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(entries)));
             Value::Hash(id)
         }
         // L3-B: an already-allocated Vm-heap Object. The wrap
