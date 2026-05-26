@@ -348,14 +348,28 @@ impl Vm {
                 "group_by" | "sort_by" | "sort"
             ),
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect"),
-            Value::Class(_) => matches!(name,
-                "new" | "name" | "to_s" | "inspect"
-                | "method_defined?" | "instance_method" | "undef_method"
-                | "superclass" | "ancestors" | "include?"
-                | "instance_methods" | "public_instance_methods"
-                | "private_instance_methods" | "protected_instance_methods"
-                | "constants"
-            ),
+            Value::Class(cls) => {
+                // Built-in class-level methods (`.new`, `.name`,
+                // `.ancestors`, ...) are hardcoded; user-defined
+                // class methods live in `singleton_methods` and
+                // in `singleton_prepends` (the
+                // `class << self; prepend Mod; end` chain).
+                // Without consulting both, `C.respond_to?(:foo)`
+                // would be false for any `def self.foo` or
+                // singleton-prepended method, even though `C.foo`
+                // dispatches successfully — diverges from CRuby.
+                if matches!(name,
+                    "new" | "name" | "to_s" | "inspect"
+                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "superclass" | "ancestors" | "include?"
+                    | "instance_methods" | "public_instance_methods"
+                    | "private_instance_methods" | "protected_instance_methods"
+                    | "constants"
+                ) {
+                    return true;
+                }
+                self.lookup_class_singleton_method(cls, name_id).is_some()
+            },
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
