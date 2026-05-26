@@ -157,6 +157,23 @@ pub(crate) fn string_call(
         (Value::Str(a), "encode", [_]) | (Value::Str(a), "force_encoding", [_]) => {
             Some(Value::Str(a.clone()))
         }
+        // `String#valid_encoding?` — rubyrs stores raw bytes
+        // viewed via `String::from_utf8_lossy` (invalid sequences
+        // become U+FFFD), so the effective character stream is
+        // always well-formed UTF-8 by construction. Returning
+        // true matches that observable behaviour. tilt's
+        // template.rb:120 reads this to decide whether to raise
+        // `Encoding::InvalidByteSequenceError`; with `true` the
+        // raise never fires and template loading proceeds.
+        (Value::Str(_), "valid_encoding?", []) => Some(Value::Bool(true)),
+        // `String#encoding` — CRuby returns an `Encoding` object;
+        // we return the name as a String since there's no per-
+        // string encoding tag and no Encoding class in scope.
+        // Real codebases use this for `str.encoding.to_s` formatting
+        // and `str.encoding == Encoding::UTF_8` comparisons — the
+        // latter requires `Encoding::UTF_8`, deferred until any
+        // real codebase needs it.
+        (Value::Str(_), "encoding", []) => Some(Value::new_str("UTF-8")),
         (Value::Str(a), "strip", []) => Some(Value::new_str(a.to_string_lossy().trim().to_string())),
         (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_start().to_string())),
         (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_end().to_string())),
