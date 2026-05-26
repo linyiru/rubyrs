@@ -324,6 +324,17 @@ impl Heap {
                                 }
                             }
                         }
+                        // Singleton-class ivars (PR #102 addendum).
+                        // `Vm.maybe_gc` walks the registered-class
+                        // table for class-level ivars; eigenclasses
+                        // attached to Instances live here on the
+                        // heap and need their own pass — without
+                        // it, a heap value stored in a singleton
+                        // class's ivar table could be swept while
+                        // the carrying Instance is still live.
+                        for v in sc.ivars.borrow().values() {
+                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                        }
                     }
                 }
                 Slot::Live(HeapObj::Array(a)) => {
