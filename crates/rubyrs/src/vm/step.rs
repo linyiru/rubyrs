@@ -1058,23 +1058,35 @@ impl Vm {
                         ),
                     })),
                 };
-                if let Some(target) = self.class_stack.last().cloned() {
-                    // Ancestor-aware dedup: walk every module
-                    // already in `singleton_prepends`, recursing
-                    // through each one's own prepends/includes,
-                    // and skip insertion if `src` is reachable
-                    // anywhere. Matches the instance-side `prepend`
-                    // recogniser's `class_is_a` gate.
-                    if !super::lookup::singleton_chain_contains(&target, &src) {
-                        target.singleton_prepends.borrow_mut().insert(0, src);
-                        self.method_gen = self.method_gen.wrapping_add(1);
+                let target = match self.class_stack.last().cloned() {
+                    Some(c) => c,
+                    None => {
+                        // `class << self; prepend Mod; end` at
+                        // toplevel — CRuby would install on main's
+                        // eigenclass, which rubyrs doesn't model.
+                        // Raising here is the honest signal:
+                        // silently swallowing would diverge from
+                        // CRuby observably (the prepend has no
+                        // effect on subsequent toplevel calls).
+                        // No real-world target in our subset uses
+                        // this shape; tilt's `class << self;
+                        // prepend ...` always sits inside a class
+                        // body.
+                        return Err(self.trap(RubyError::SyntaxError {
+                            msg: "`class << self; prepend Mod; end` at toplevel is not supported in the spike subset (would install on main's eigenclass, not modelled in rubyrs)".into(),
+                        }));
                     }
+                };
+                // Ancestor-aware dedup: walk every module
+                // already in `singleton_prepends`, recursing
+                // through each one's own prepends/includes,
+                // and skip insertion if `src` is reachable
+                // anywhere. Matches the instance-side `prepend`
+                // recogniser's `class_is_a` gate.
+                if !super::lookup::singleton_chain_contains(&target, &src) {
+                    target.singleton_prepends.borrow_mut().insert(0, src);
+                    self.method_gen = self.method_gen.wrapping_add(1);
                 }
-                // `class << self; prepend Mod; end` at toplevel —
-                // no enclosing class. Silent no-op, matching the
-                // AliasSingletonMethod toplevel fallback (CRuby
-                // installs on main's eigenclass; we don't model
-                // that distinctly).
                 self.stack.push(Value::Nil);
             }
             Op::DefMethodBlock(name_id) => {
