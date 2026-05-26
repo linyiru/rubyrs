@@ -241,6 +241,24 @@ pub(crate) fn numeric_call(
         (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => Some(Value::Int(a.wrapping_add(1))),
         (Value::Int(a), "pred", []) => Some(Value::Int(a.wrapping_sub(1))),
         (Value::Int(a), "to_f", []) => Some(Value::Float(*a as f64)),
+        // `Integer#chr` — single-byte binary String for the 0..255
+        // range. CRuby supports `chr(Encoding)` to widen the range
+        // (Unicode codepoints up to U+10FFFF for UTF-8); the
+        // encoding-aware form depends on an encoding model we don't
+        // model in Tier 1 (ADR 0017 row "Refinements, full pattern
+        // matching, full encoding model, ..." is Tier 3/4). The
+        // 0..255 byte form is the one msgpack / pack-style binary
+        // protocols actually reach for; out-of-range raises
+        // RangeError to match CRuby's message shape.
+        (Value::Int(a), "chr", []) => {
+            let n = *a;
+            if !(0..=255).contains(&n) {
+                return Err(RubyError::RangeError {
+                    msg: format!("{} out of char range", n),
+                });
+            }
+            Some(Value::new_str_bytes(vec![n as u8]))
+        }
 
         // Float × Float
         (Value::Float(a), op, [Value::Float(b)]) => match op {

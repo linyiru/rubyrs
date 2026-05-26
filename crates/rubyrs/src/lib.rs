@@ -794,6 +794,11 @@ class KeyError < IndexError
 end
 class ZeroDivisionError < StandardError
 end
+## RangeError — value out of an expected range. Raised by
+## `Integer#chr` on bytes outside `0..255`, and the various
+## numeric / Range arms that wrap a host-side `RubyError::RangeError`.
+class RangeError < StandardError
+end
 ## LocalJumpError — raised when a control-flow keyword
 ## (`break` / `next` / `return`) escapes the wrong scope. The
 ## canonical case is `break` from inside a stored Proc (e.g. a

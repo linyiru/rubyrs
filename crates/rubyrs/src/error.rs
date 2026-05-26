@@ -67,6 +67,11 @@ pub enum RubyError {
     /// is NOT an error in CRuby (returns `±Infinity` or `NaN`)
     /// and remains so here — only the Int×Int path traps.
     ZeroDivisionError { msg: String },
+    /// Value out of an expected range. CRuby's `RangeError` —
+    /// raised by e.g. `Integer#chr` on bytes outside `0..255`,
+    /// `Numeric#step` on negative step with no end, etc. Rescued
+    /// by `rescue RangeError`.
+    RangeError { msg: String },
     /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
     /// when a Runtime was configured with caps for untrusted scripts.
     ResourceExhausted { msg: String },
@@ -127,6 +132,7 @@ impl RubyError {
             RubyError::FrozenError { .. } => "FrozenError",
             RubyError::LocalJumpError { .. } => "LocalJumpError",
             RubyError::ZeroDivisionError { .. } => "ZeroDivisionError",
+            RubyError::RangeError { .. } => "RangeError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
             // Uncaught carries the actual class name from the script's
             // exception object; static-class machinery doesn't apply.
@@ -147,6 +153,7 @@ impl RubyError {
             | RubyError::FrozenError { msg }
             | RubyError::LocalJumpError { msg }
             | RubyError::ZeroDivisionError { msg }
+            | RubyError::RangeError { msg }
             | RubyError::ResourceExhausted { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),
             RubyError::NoMethodError { method, recv_type } => {
