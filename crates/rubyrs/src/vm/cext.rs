@@ -1011,6 +1011,7 @@ impl Vm {
                 let name_sym = self.interner.intern(&cls.joined_name);
                 let new_class = Rc::new(Class {
                     name: cls.joined_name.clone(),
+                    ivars: RefCell::new(HashMap::new()),
                     methods: RefCell::new(HashMap::new()),
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(None),

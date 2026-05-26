@@ -193,6 +193,7 @@ impl Heap {
         let original = inst.class.clone();
         let sc = Rc::new(crate::value::Class {
             name: format!("#<Class:#<{}>>", original.name),
+            ivars: RefCell::new(HashMap::new()),
             methods: RefCell::new(HashMap::new()),
             // Eigenclasses have no per-class singleton-method
             // table of their own — `def self.foo` (master's
@@ -322,6 +323,17 @@ impl Heap {
                                     Heap::visit_value(v, &mut self.marks, &mut worklist);
                                 }
                             }
+                        }
+                        // Singleton-class ivars (PR #102 addendum).
+                        // `Vm.maybe_gc` walks the registered-class
+                        // table for class-level ivars; eigenclasses
+                        // attached to Instances live here on the
+                        // heap and need their own pass — without
+                        // it, a heap value stored in a singleton
+                        // class's ivar table could be swept while
+                        // the carrying Instance is still live.
+                        for v in sc.ivars.borrow().values() {
+                            Heap::visit_value(v, &mut self.marks, &mut worklist);
                         }
                     }
                 }

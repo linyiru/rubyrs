@@ -169,6 +169,20 @@ pub struct BlockHandle {
 #[derive(Debug)]
 pub struct Class {
     pub(crate) name: String,
+    /// Class-level instance variables — the `@foo = ...` slots
+    /// that live ON the Class object itself (CRuby calls these
+    /// "class instance variables" to distinguish from `@@foo`
+    /// class-shared variables which we don't model). Written by
+    /// `@foo = expr` in a class body OR inside a singleton/class
+    /// method where `self` is `Value::Class(...)`, read by `@foo`
+    /// in the same contexts. Routes through the same `Op::LoadIvar`
+    /// / `Op::StoreIvar` handlers that work on `Value::Object`;
+    /// the handler picks the table based on receiver type.
+    /// Inheritance: NOT inherited — each class has its own slot,
+    /// matching CRuby. Use cases: `module Tilt; @default = ...;
+    /// class << self; attr_accessor :default; end; end` round-
+    /// trips, `Foo.instance_variable_set(...)` semantics later.
+    pub(crate) ivars: RefCell<HashMap<SymId, Value>>,
     pub(crate) methods: RefCell<HashMap<SymId, Rc<Method>>>,
     /// Per-class singleton-method table — `def self.foo; ...; end`
     /// inside a class body installs `foo` here. Dispatched against

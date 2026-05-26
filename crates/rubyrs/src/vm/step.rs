@@ -363,16 +363,29 @@ impl Vm {
             }
             Op::Pop => { self.stack.pop(); }
             Op::LoadIvar(name_id) => {
-                let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: LoadIvar no frame").self_val { Some(*id) } else { None };
-                let v = if let Some(id) = id_opt {
-                    self.heap.instance(id).ivars.get(&name_id).cloned().unwrap_or(Value::Nil)
-                } else { Value::Nil };
+                // `@foo` reads route to whichever table `self`
+                // carries: instance ivars for `Value::Object`,
+                // class-level ivars for `Value::Class` (the
+                // "class instance variable" CRuby spelling, used
+                // by `module Tilt; @default = ...` patterns).
+                // Anything else returns nil — matches CRuby's
+                // "uninitialized ivar reads as nil" rule.
+                let self_val = self.frames.last().expect("ICE: LoadIvar no frame").self_val.clone();
+                let v = match &self_val {
+                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned().unwrap_or(Value::Nil),
+                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
+                    _ => Value::Nil,
+                };
                 self.stack.push(v);
             }
             Op::StoreIvar(name_id) => {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
-                let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: StoreIvar no frame").self_val { Some(*id) } else { None };
-                if let Some(id) = id_opt { self.heap.instance_mut(id).ivars.insert(name_id, v); }
+                let self_val = self.frames.last().expect("ICE: StoreIvar no frame").self_val.clone();
+                match &self_val {
+                    Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v); }
+                    Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
+                    _ => { /* drop — CRuby raises but the toplevel/primitive cases are rare */ }
+                }
             }
             Op::LoadCvar(name_id) => {
                 // Surrounding class resolution order:
@@ -400,57 +413,73 @@ impl Vm {
                 }
             }
             Op::IncIvarNoPush(name_id) => {
-                let inst_id = if let Value::Object(id) = &self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val {
-                    Some(*id)
-                } else { None };
-                if let Some(inst_id) = inst_id {
-                    let cur = self.heap.instance(inst_id).ivars.get(&name_id).cloned();
-                    match cur {
-                        Some(Value::Int(n)) => {
-                            self.heap.instance_mut(inst_id).ivars.insert(name_id, Value::Int(n.wrapping_add(1)));
-                        }
-                        _ => {
-                            let cur_v = cur.unwrap_or(Value::Nil);
-                            self.stack.push(cur_v);
-                            self.stack.push(Value::Int(1));
-                            let plus_id = self.interner.intern("+");
-                            self.do_call(plus_id, 1, false, u16::MAX)?;
-                            let v = self.stack.pop().unwrap_or(Value::Nil);
-                            self.heap.instance_mut(inst_id).ivars.insert(name_id, v);
-                        }
+                // `@x = @x + 1` fast path, statement form. Mirrors
+                // Op::IncIvar but discards the result. Class-level
+                // ivars routed via `Value::Class` so the same
+                // pattern in a class method bumps the right table.
+                let self_val = self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val.clone();
+                let cur = match &self_val {
+                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
+                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
+                    _ => None,
+                };
+                let new_v = match cur {
+                    Some(Value::Int(n)) => Some(Value::Int(n.wrapping_add(1))),
+                    Some(_) | None => {
+                        // Slow path — call `+`.
+                        let cur_v = cur.unwrap_or(Value::Nil);
+                        self.stack.push(cur_v);
+                        self.stack.push(Value::Int(1));
+                        let plus_id = self.interner.intern("+");
+                        self.do_call(plus_id, 1, false, u16::MAX)?;
+                        Some(self.stack.pop().unwrap_or(Value::Nil))
+                    }
+                };
+                if let Some(v) = new_v {
+                    match &self_val {
+                        Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v); }
+                        Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
+                        _ => { /* drop */ }
                     }
                 }
             }
             Op::IncIvar(name_id) => {
-                let inst_id = if let Value::Object(id) = &self.frames.last().expect("ICE: IncIvar no frame").self_val {
-                    Some(*id)
-                } else { None };
-                if let Some(inst_id) = inst_id {
-                    let cur = self.heap.instance(inst_id).ivars.get(&name_id).cloned();
-                    match cur {
-                        Some(Value::Int(n)) => {
-                            let new_n = n.wrapping_add(1);
-                            self.heap.instance_mut(inst_id).ivars.insert(name_id, Value::Int(new_n));
-                            self.stack.push(Value::Int(new_n));
+                // `@x = @x + 1` fast path, expression form. Same as
+                // IncIvarNoPush but leaves the new value on stack.
+                let self_val = self.frames.last().expect("ICE: IncIvar no frame").self_val.clone();
+                let cur = match &self_val {
+                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
+                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
+                    _ => None,
+                };
+                let new_v: Value = match cur {
+                    Some(Value::Int(n)) => {
+                        let nv = Value::Int(n.wrapping_add(1));
+                        match &self_val {
+                            Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, nv.clone()); }
+                            Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, nv.clone()); }
+                            _ => {}
                         }
-                        _ => {
-                            // Slow path: @x is nil or non-Int — replicate full `@x = @x + 1`.
-                            let cur_v = cur.unwrap_or(Value::Nil);
-                            self.stack.push(cur_v);
-                            self.stack.push(Value::Int(1));
-                            let plus_id = self.interner.intern("+");
-                            self.do_call(plus_id, 1, false, u16::MAX)?;
-                            let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
-                            self.heap.instance_mut(inst_id).ivars.insert(name_id, v);
-                        }
+                        nv
                     }
-                } else {
-                    // Outside class context: nil + 1 — let CRuby semantics dictate
-                    self.stack.push(Value::Nil);
-                    self.stack.push(Value::Int(1));
-                    let plus_id = self.interner.intern("+");
-                    self.do_call(plus_id, 1, false, u16::MAX)?;
-                }
+                    _ => {
+                        // Slow path: replicate full `@x = @x + 1`.
+                        let cur_v = cur.unwrap_or(Value::Nil);
+                        self.stack.push(cur_v);
+                        self.stack.push(Value::Int(1));
+                        let plus_id = self.interner.intern("+");
+                        self.do_call(plus_id, 1, false, u16::MAX)?;
+                        let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
+                        match &self_val {
+                            Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v.clone()); }
+                            Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v.clone()); }
+                            _ => {}
+                        }
+                        // Slow path already left value on stack via do_call result.
+                        return Ok(true);
+                    }
+                };
+                self.stack.push(new_v);
             }
             Op::StoreConst(name_id) => {
                 // `FOO = expr` — compiler emitted Dup before this so
@@ -1115,6 +1144,7 @@ impl Vm {
                 };
                 let cls = self.classes.entry(name_id).or_insert_with(|| Rc::new(Class {
                     name: name_str,
+                    ivars: RefCell::new(HashMap::new()),
                     methods: RefCell::new(HashMap::new()),
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(parent.clone()),

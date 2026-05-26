@@ -141,6 +141,14 @@ impl Vm {
         // rooting, any global pointing at a heap object can be swept
         // between assignment and read.
         for v in self.globals.values() { roots.push(v.clone()); }
+        // Class-level instance variables (`@foo` on a Class
+        // value, e.g. `module Tilt; @default = ...; end`).
+        // Without rooting, a class ivar holding a heap-backed
+        // Array/Hash/String/Object could be swept between
+        // assignment and read from inside a class method.
+        for cls in self.classes.values() {
+            for v in cls.ivars.borrow().values() { roots.push(v.clone()); }
+        }
         for f in &self.frames {
             roots.push(f.self_val.clone());
             for v in f.locals.borrow().iter() { roots.push(v.clone()); }
