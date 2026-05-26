@@ -313,9 +313,19 @@ baseline_min() {
   for _ in $(seq 1 "$RUNS"); do
     local us
     us=$("$TIMER_BIN" "$@" 2>&1 1>/dev/null | awk -F'\t' '$1=="wasm-timer" && $2=="wall_us" { print $3 }')
-    if [[ -z "$best" ]] || [[ "$us" -lt "$best" ]]; then best=$us; fi
+    # Guard the integer comparison: an empty `us` (timer killed by
+    # an OOM watchdog, SIGPIPE on the parent stderr pipe, awk pipe
+    # disrupted) would otherwise drop into `[[ "" -lt "123" ]]`,
+    # which raises `[[: : syntax error: operand expected` on
+    # stderr. `[[` test failures are exempt from `set -e`, so the
+    # loop continues but `best` silently retains its prior value —
+    # a stale baseline gets printed with no warning. Match the
+    # `[[ -n "$us" ]] &&` guard `runtime_min` already has.
+    if [[ -n "$us" ]] && { [[ -z "$best" ]] || [[ "$us" -lt "$best" ]]; }; then
+      best=$us
+    fi
   done
-  printf "  %-22s %10s us\n" "$label" "$best"
+  printf "  %-22s %10s us\n" "$label" "${best:-N/A}"
 }
 
 echo ""
