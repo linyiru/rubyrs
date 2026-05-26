@@ -145,7 +145,7 @@ impl Vm {
     /// `respond_to?` itself, `==` / `!=`) are matched first
     /// regardless of receiver.
     pub(crate) fn responds_to(&self, recv: &Value, name_id: SymId) -> bool {
-        let name: &str = &self.interner.resolve(name_id).clone();
+        let name: &str = self.interner.resolve(name_id);
         // Universal — every receiver responds to these.
         // `send` / `__send__` go here because the `do_call`
         // recogniser handles them on any receiver type (primitive

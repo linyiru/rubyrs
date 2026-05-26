@@ -180,6 +180,33 @@ impl Vm {
         }
     }
 
+    /// Parse the first arg of a `send` / `__send__` call as the
+    /// target method name. Symbol passes through; String is
+    /// interned (CRuby's transparent `to_sym` on the name arg).
+    /// Anything else returns the CRuby-shape TypeError
+    /// (`<inspect> is not a symbol nor a string`); zero args
+    /// returns the CRuby-shape ArgumentError. Shared by all four
+    /// send-recogniser sites (`do_call` / `do_call_block`, each
+    /// with their no_recv and recv arms) so the validation +
+    /// error formatting can't drift between paths.
+    fn parse_send_target(&mut self, args: &[Value]) -> Result<SymId, Trap> {
+        if args.is_empty() {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1+)".into(),
+            }));
+        }
+        match &args[0] {
+            Value::Sym(s) => Ok(*s),
+            Value::Str(s) => Ok(s.with_str_lossy(|n| self.interner.intern(n))),
+            other => {
+                let inspected = other.to_inspect(&self.heap, &self.interner);
+                Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} is not a symbol nor a string", inspected),
+                }))
+            }
+        }
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         // Consume `bypass_visibility_once` at the dispatch
@@ -249,28 +276,13 @@ impl Vm {
                     _ => false,
                 };
                 if !user_override {
-                    if args.is_empty() {
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: "wrong number of arguments (given 0, expected 1+)".into(),
-                        }));
+                    let target_sym = self.parse_send_target(&args)?;
+                    let new_argc = args.len() - 1;
+                    self.bypass_visibility_once = true;
+                    for a in args.into_iter().skip(1) {
+                        self.stack.push(a);
                     }
-                    let target_sym = match &args[0] {
-                        Value::Sym(s) => Some(*s),
-                        Value::Str(s) => Some(s.with_str_lossy(|n| self.interner.intern(n))),
-                        _ => None,
-                    };
-                    if let Some(target_sym) = target_sym {
-                        let new_argc = args.len() - 1;
-                        self.bypass_visibility_once = true;
-                        for a in args.into_iter().skip(1) {
-                            self.stack.push(a);
-                        }
-                        return self.do_call(target_sym, new_argc, true, u16::MAX);
-                    }
-                    let inspected = args[0].to_inspect(&self.heap, &self.interner);
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: format!("{} is not a symbol nor a string", inspected),
-                    }));
+                    return self.do_call(target_sym, new_argc, true, u16::MAX);
                 }
             }
             // Bare `method(:foo)` — implicit-self capture. Same
@@ -485,34 +497,14 @@ impl Vm {
             _ => false,
         };
         if matches!(&*name, "send" | "__send__") && !user_send_override {
-            if args.is_empty() {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: "wrong number of arguments (given 0, expected 1+)".into(),
-                }));
+            let target_sym = self.parse_send_target(&args)?;
+            let new_argc = args.len() - 1;
+            self.bypass_visibility_once = true;
+            self.stack.push(recv);
+            for a in args.into_iter().skip(1) {
+                self.stack.push(a);
             }
-            let target_sym = match &args[0] {
-                Value::Sym(s) => Some(*s),
-                Value::Str(s) => Some(s.with_str_lossy(|n| self.interner.intern(n))),
-                _ => None,
-            };
-            if let Some(target_sym) = target_sym {
-                let new_argc = args.len() - 1;
-                self.bypass_visibility_once = true;
-                self.stack.push(recv);
-                for a in args.into_iter().skip(1) {
-                    self.stack.push(a);
-                }
-                return self.do_call(target_sym, new_argc, false, u16::MAX);
-            }
-            // CRuby: `<inspect(arg)> is not a symbol nor a string`.
-            // `Value::to_inspect` is the heap-aware Ruby-inspect
-            // equivalent (no dispatch re-entry), so the message
-            // renders arrays/hashes/instances close to CRuby's
-            // shape instead of falling back to a bare type_name.
-            let inspected = args[0].to_inspect(&self.heap, &self.interner);
-            return Err(self.trap(RubyError::TypeError {
-                msg: format!("{} is not a symbol nor a string", inspected),
-            }));
+            return self.do_call(target_sym, new_argc, false, u16::MAX);
         }
 
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
@@ -2825,29 +2817,14 @@ impl Vm {
                     _ => false,
                 };
                 if !user_override {
-                    if args.is_empty() {
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: "wrong number of arguments (given 0, expected 1+)".into(),
-                        }));
+                    let target_sym = self.parse_send_target(&args)?;
+                    let new_argc = args.len() - 1;
+                    self.bypass_visibility_once = true;
+                    self.stack.push(Value::Block(block));
+                    for a in args.into_iter().skip(1) {
+                        self.stack.push(a);
                     }
-                    let target_sym = match &args[0] {
-                        Value::Sym(s) => Some(*s),
-                        Value::Str(s) => Some(s.with_str_lossy(|n| self.interner.intern(n))),
-                        _ => None,
-                    };
-                    if let Some(target_sym) = target_sym {
-                        let new_argc = args.len() - 1;
-                        self.bypass_visibility_once = true;
-                        self.stack.push(Value::Block(block));
-                        for a in args.into_iter().skip(1) {
-                            self.stack.push(a);
-                        }
-                        return self.do_call_block(target_sym, new_argc, true, u16::MAX);
-                    }
-                    let inspected = args[0].to_inspect(&self.heap, &self.interner);
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: format!("{} is not a symbol nor a string", inspected),
-                    }));
+                    return self.do_call_block(target_sym, new_argc, true, u16::MAX);
                 }
             }
             let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
@@ -2893,30 +2870,15 @@ impl Vm {
             _ => false,
         };
         if matches!(&*name, "send" | "__send__") && !user_send_override {
-            if args.is_empty() {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: "wrong number of arguments (given 0, expected 1+)".into(),
-                }));
+            let target_sym = self.parse_send_target(&args)?;
+            let new_argc = args.len() - 1;
+            self.bypass_visibility_once = true;
+            self.stack.push(recv);
+            self.stack.push(Value::Block(block));
+            for a in args.into_iter().skip(1) {
+                self.stack.push(a);
             }
-            let target_sym = match &args[0] {
-                Value::Sym(s) => Some(*s),
-                Value::Str(s) => Some(s.with_str_lossy(|n| self.interner.intern(n))),
-                _ => None,
-            };
-            if let Some(target_sym) = target_sym {
-                let new_argc = args.len() - 1;
-                self.bypass_visibility_once = true;
-                self.stack.push(recv);
-                self.stack.push(Value::Block(block));
-                for a in args.into_iter().skip(1) {
-                    self.stack.push(a);
-                }
-                return self.do_call_block(target_sym, new_argc, false, u16::MAX);
-            }
-            let inspected = args[0].to_inspect(&self.heap, &self.interner);
-            return Err(self.trap(RubyError::TypeError {
-                msg: format!("{} is not a symbol nor a string", inspected),
-            }));
+            return self.do_call_block(target_sym, new_argc, false, u16::MAX);
         }
 
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
