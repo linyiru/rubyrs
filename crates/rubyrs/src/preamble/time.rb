@@ -202,7 +202,211 @@ class Time
   end
   alias_method :inspect, :to_s
 
+  # English locale constants for `%A` / `%a` / `%B` / `%b`
+  # directives. CRuby's strftime is locale-aware via `LC_TIME`;
+  # Tier 1 is C-locale-only (ADR 0017 Rule 1: no host locale
+  # peek). These arrays match the English / `LC_ALL=C` shape.
+  DAY_NAMES = [
+    "Sunday", "Monday", "Tuesday", "Wednesday",
+    "Thursday", "Friday", "Saturday",
+  ]
+  DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+  MONTH_NAMES = [
+    "January", "February", "March", "April",
+    "May", "June", "July", "August",
+    "September", "October", "November", "December",
+  ]
+  MONTH_ABBR = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ]
+
+  # `strftime(fmt)` — printf-style time formatter. Implements a
+  # useful subset of CRuby's directives; unknown directives pass
+  # through verbatim (matching CRuby's lenient default rather
+  # than the strict-error mode some libraries layer on top).
+  #
+  # Supported:
+  #   - Numerics: %Y %C %y %m %d %e %H %k %I %l %M %S %j %w %u %s
+  #   - Sub-second: %N (with width %3N / %6N / %9N), %L
+  #   - Names: %A %a %B %b %h %p %P
+  #   - Composites: %F %T %X %R %D %x %r %v %c
+  #   - Timezone (UTC-only Tier 1): %z (+0000), %:z (+00:00),
+  #     %::z (+00:00:00), %Z (UTC)
+  #   - Literals: %% %n %t
+  #
+  # Padding flags before the directive:
+  #   - `-` no padding
+  #   - `0` zero padding (default for most numerics)
+  #   - `_` space padding (default for %e, %k, %l)
+  #   - `^` uppercase the directive's output
+  #
+  # Width: optional digits between flag and directive (e.g.
+  # `%5Y` width-5 year, `%3N` truncated-to-milliseconds nsec).
+  def strftime(fmt)
+    d = decompose
+    out = String.new
+    i = 0
+    len = fmt.length
+    while i < len
+      ch = fmt[i]
+      if ch != "%"
+        out << ch
+        i += 1
+        next
+      end
+      # Past the `%`; parse optional flag.
+      i += 1
+      flag = nil
+      if i < len
+        case fmt[i]
+        when "-" then flag = :nopad;    i += 1
+        when "0" then flag = :zeropad;  i += 1
+        when "_" then flag = :spacepad; i += 1
+        when "^" then flag = :upper;    i += 1
+        end
+      end
+      # Parse optional width (decimal digits).
+      width = 0
+      width_str = String.new
+      while i < len
+        c = fmt[i]
+        break unless c >= "0" && c <= "9"
+        width_str << c
+        i += 1
+      end
+      width = width_str.to_i unless width_str.empty?
+      # Need a directive next.
+      if i >= len
+        out << "%"
+        break
+      end
+      dir = fmt[i]
+      i += 1
+      appended = case dir
+      when "%" then "%"
+      when "n" then "\n"
+      when "t" then "\t"
+      when "Y" then __strftime_pad_num(d[:year],  4, flag, width)
+      when "C" then __strftime_pad_num(d[:year] / 100, 2, flag, width)
+      when "y" then __strftime_pad_num(d[:year] % 100, 2, flag, width)
+      when "m" then __strftime_pad_num(d[:month], 2, flag, width)
+      when "d" then __strftime_pad_num(d[:day],   2, flag, width)
+      when "e" then __strftime_pad_num(d[:day],   2, flag || :spacepad, width)
+      when "H" then __strftime_pad_num(d[:hour],  2, flag, width)
+      when "k" then __strftime_pad_num(d[:hour],  2, flag || :spacepad, width)
+      when "I"
+        h12 = d[:hour] % 12
+        h12 = 12 if h12 == 0
+        __strftime_pad_num(h12, 2, flag, width)
+      when "l"
+        h12 = d[:hour] % 12
+        h12 = 12 if h12 == 0
+        __strftime_pad_num(h12, 2, flag || :spacepad, width)
+      when "M" then __strftime_pad_num(d[:min],   2, flag, width)
+      when "S" then __strftime_pad_num(d[:sec],   2, flag, width)
+      when "j"
+        doy = __strftime_day_of_year(d[:year], d[:month], d[:day])
+        __strftime_pad_num(doy, 3, flag, width)
+      when "w" then d[:wday].to_s
+      when "u" then (d[:wday] == 0 ? 7 : d[:wday]).to_s
+      when "s" then @sec.to_s
+      when "N"
+        # Nanoseconds with optional width (default 9). Width <
+        # 9 truncates the right (e.g. `%3N` = milliseconds);
+        # width > 9 right-pads with zeros.
+        w = width > 0 ? width : 9
+        full = sprintf("%09d", @nsec)
+        if w >= 9
+          full + ("0" * (w - 9))
+        else
+          full[0, w]
+        end
+      when "L" then sprintf("%03d", @nsec / 1_000_000)
+      when "p" then d[:hour] < 12 ? "AM" : "PM"
+      when "P" then d[:hour] < 12 ? "am" : "pm"
+      when "A" then DAY_NAMES[d[:wday]]
+      when "a" then DAY_ABBR[d[:wday]]
+      when "B" then MONTH_NAMES[d[:month] - 1]
+      when "b", "h" then MONTH_ABBR[d[:month] - 1]
+      when "z" then "+0000"
+      when "Z" then "UTC"
+      when ":"
+        # `%:z` and `%::z` — extended zone forms. Tier 1 is
+        # UTC-only so the offset string is fixed.
+        if i < len && fmt[i] == "z"
+          i += 1
+          "+00:00"
+        elsif i + 1 < len && fmt[i] == ":" && fmt[i + 1] == "z"
+          i += 2
+          "+00:00:00"
+        else
+          # Malformed — pass the `%:` through.
+          "%:"
+        end
+      when "F" then strftime("%Y-%m-%d")
+      when "T", "X" then strftime("%H:%M:%S")
+      when "R" then strftime("%H:%M")
+      when "D", "x" then strftime("%m/%d/%y")
+      when "r" then strftime("%I:%M:%S %p")
+      when "v" then strftime("%e-%^b-%Y")  # VMS date — uppercases the month abbr
+      when "c" then strftime("%a %b %e %H:%M:%S %Y")
+      else
+        # Unknown directive — CRuby passes the original `%X`
+        # through verbatim. We do the same; flags/width on
+        # unknown directives are dropped (the `%X` reconstruction
+        # ignores them — same as CRuby's behaviour).
+        "%" + dir
+      end
+      appended = appended.upcase if flag == :upper
+      out << appended
+    end
+    out
+  end
+
   private
+
+  # Numeric padding helper for `strftime` directives. `default_width`
+  # is the directive's own default; `width` (from the format
+  # string) overrides if non-zero. `flag` controls the pad char:
+  #   - `:nopad`    — no padding, just the digits + sign
+  #   - `:spacepad` — leading spaces
+  #   - `:zeropad` / nil — leading zeros (most numerics' default)
+  # Sign handling: negative magnitude renders as `-<digits>`, with
+  # the `-` inside the padding column (e.g. width=4, n=-5 →
+  # `"-005"` for zeropad, `"  -5"` for spacepad).
+  def __strftime_pad_num(n, default_width, flag, width)
+    w = width > 0 ? width : default_width
+    if flag == :nopad
+      return n.to_s
+    end
+    sign = n < 0 ? "-" : ""
+    digits = n.abs.to_s
+    pad_count = w - sign.length - digits.length
+    pad_count = 0 if pad_count < 0
+    pad_char = (flag == :spacepad) ? " " : "0"
+    sign + (pad_char * pad_count) + digits
+  end
+
+  # Day-of-year (1..366) for the given year/month/day. Uses a
+  # static `DAYS_IN_MONTH` lookup + a leap-year offset for
+  # March-or-later in leap years.
+  DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+  def __strftime_day_of_year(year, month, day)
+    leap_offset = (month > 2 && __strftime_leap?(year)) ? 1 : 0
+    prior = 0
+    m = 1
+    while m < month
+      prior += DAYS_IN_MONTH[m - 1]
+      m += 1
+    end
+    prior + day + leap_offset
+  end
+
+  def __strftime_leap?(year)
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+  end
 
   # Decompose `@sec` (Unix epoch UTC) into year/month/day/hour/
   # min/sec via Howard Hinnant's civil-from-days algorithm. The

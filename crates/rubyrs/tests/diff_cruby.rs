@@ -114,6 +114,7 @@ fn run_diff(name: &str) {
 #[test] fn kernel_sprintf() { run_diff("kernel_sprintf"); }
 #[test] fn module_new() { run_diff("module_new"); }
 #[test] fn time_basics() { run_diff("time_basics"); }
+#[test] fn time_strftime() { run_diff("time_strftime"); }
 #[test] fn enumerable_by() { run_diff("enumerable_by"); }
 #[test] fn super_call() { run_diff("super_call"); }
 #[test] fn return_nonlocal() { run_diff("return_nonlocal"); }
