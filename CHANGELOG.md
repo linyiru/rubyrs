@@ -7,6 +7,37 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Added
+- **`String#unpack1(fmt)` — first-element shorthand for
+  `String#unpack`.** Idiomatic when a binary-protocol parser
+  knows the format produces one value and wants to skip
+  `.unpack(...).first` (msgpack-ruby's 32-bit frame-length
+  reads, ad-hoc binary parsers). Same engine as `#unpack`;
+  the result Vec's first element or `nil` if empty. The
+  Ruby-3.1+ `offset:` kwarg is not implemented — rare in
+  real-world Ruby; SUBSET-documented. Fixture
+  `tests/diff/string_unpack1.rb`.
+- **`Array#pack` / `String#unpack` signed-int + hex-string
+  directives.** Extends the A6a unsigned + endian-modifier
+  set with three families that real binary-protocol parsers
+  routinely reach for:
+  - Signed 16-bit `s` / `s<` / `s>` and signed 32-bit `l` /
+    `l<` / `l>`. Round-trip negative numbers through 2- and
+    4-byte LE/BE encoding without forcing callers to
+    reinterpret unsigned output.
+  - Hex strings `H` (high-nibble first) and `h` (low-nibble
+    first). Encode/decode hex digests without going through
+    manual `bytes.map { |b| "%02x" % b }.join`. CRuby's
+    count semantics: count is in nibbles, `*` is "rest of
+    input"; odd-length hex pads the trailing nibble with 0
+    on the appropriate side.
+
+  Internally extends `parse_directive`'s sentinel-character
+  scheme from A6a — signed forms get fresh letters CRuby
+  itself doesn't use as directives (`T` / `t` for 32-bit
+  BE/LE, `K` / `k` for 16-bit BE/LE). Fixture
+  `tests/diff/pack_directives_extra.rb` covers sign-extreme
+  round-trips, hex pack/unpack symmetry, odd-length nibble
+  padding, and `H<n>` explicit-count truncation.
 - **`Kernel.instance_method(:name)` + `RUBY_VERSION` /
   `RUBY_PLATFORM` constants.** Gemfile-shape prelude scripts
   routinely probe `Kernel.instance_method(:require)` and
@@ -1018,6 +1049,85 @@ won't be fixed until we have a clear use case demanding parity.
   `"ICE: ..."` to make the distinction explicit when one fires.
 
 ### Fixed
+- **Block-local variables now fresh on every invocation.** A
+  variable first-assigned inside a `do ... end` block body
+  (or a `proc { }` / `lambda { }` body) previously kept its
+  value across iterations and across `.call` invocations.
+  CRuby resets such block-locals to `nil` per invocation;
+  rubyrs was treating every block slot as parent-shared, so
+  `proc { n ||= 0; n += 1 }.call` counted `1, 2, 3, ...`
+  instead of CRuby's `1, 1, 1, ...`; `y = 100 if cond` inside
+  `.each` kept `y` at the previous iteration's value when
+  `cond` was false instead of returning `nil`. Cause: block
+  protos extend the parent's locals map but their slots
+  live in the same `Rc<RefCell<Vec<Value>>>` shared with the
+  parent; `invoke_block`'s "fill-with-Nil" path only ran on
+  the first invocation. Fix: snapshot the post-param
+  `n_locals` value as `Proto.block_body_local_start` at
+  compile time; `invoke_block` resets slots
+  `[block_body_local_start, n_locals)` to `Value::Nil`
+  before binding params on every call. Outer-scope vars
+  (slot index < parent.n_locals at compile time) and block
+  params keep their values across invocations because their
+  slot indices sit below the threshold. Surfaced during
+  the `string_high_byte_literal` fixture authoring — the
+  `if`-modifier shape exposed the leak. Fixture
+  `tests/diff/block_local_freshness.rb` covers 8 scenarios
+  (if-modifier in `.each`, proc counter, outer-shared
+  regression guard, block params, lambda calls, mixed
+  block-local + outer-shared, conditional-introduced
+  locals, `||=` on block-locals).
+- **`String#inspect` control-character escapes match CRuby.**
+  The previous implementation escaped only
+  `\\ \" \n \r \t \0` and dropped every other control byte
+  onto the inspect output verbatim. `"\x00".inspect`
+  rendered as `"\0"` where CRuby produces `" "`;
+  bytes like `\a` `\b` `\v` `\f` `\e` came out as raw
+  control characters, garbling `puts arr.inspect`-based
+  binary dumps. Now matches CRuby 3.4's full table — eight
+  named escapes (`\a \b \t \n \v \f \r \e`) plus `\u00NN`
+  with uppercase hex for the remaining low control bytes and
+  `\x7F`. Extracted the shared escape table into
+  `pub(crate) fn heap::inspect_escape_into` so the two
+  copies in `heap.rs` (Array#inspect element path) and
+  `vm/string.rs` (String#inspect primitive arm) can't drift
+  apart again. Fixture
+  `tests/diff/string_inspect_control.rb` pins 8 named-
+  escape cases, 4 `\u00NN` cases, mixed in-string cases,
+  the `\\`/`\"` named forms, and an `Array#inspect`-of-
+  strings-with-control-bytes case to verify the shared
+  helper covers both call sites.
+- **String literal high-byte preservation.** `"\xFF\xFF"` and
+  other `\xNN` escapes producing non-UTF-8 byte sequences
+  previously had each invalid byte substituted with U+FFFD
+  (`\xEF\xBF\xBD`) at AST translation time, so a 2-byte
+  literal became a 6-byte string and any binary-protocol
+  parser reading literal bytes (msgpack framing, hex
+  digests, BinData-style ad-hoc parsers) got garbage. Cause:
+  `String::from_utf8_lossy` on Prism's `n.unescaped()` plus
+  the interner being `Rc<str>`-keyed (UTF-8 only) routed
+  invalid bytes through substitution. Fix: AST translation
+  validates UTF-8 first — Ok keeps the existing fast path
+  (`Expr::StrLit(String)`, interner-shared); Err takes a
+  new `Expr::StrLitBytes(Vec<u8>)` path that the compiler
+  emits as `Op::LoadConstStrBytes(u32)` indexing into a
+  fresh per-Proto `byte_literals: Vec<Rc<[u8]>>` pool. The
+  runtime arm clones the Rc'd bytes into a fresh Vec each
+  load so script-side mutations (`<<` / `concat`) don't
+  bleed across loads sharing the same pool entry. Panic
+  budget `vm/step.rs` bumped 64 → 65 (one new ICE-class
+  invariant on the LoadConstStrBytes frame lookup, matching
+  every other `LoadConst*` arm in the file). Fixture
+  `tests/diff/string_high_byte_literal.rb` covers 2-byte
+  raw inputs, mixed printable + high-byte strings, literal-
+  vs-pack equivalence, `H*` round-trip via literal input,
+  signed-int unpack from literal, and the valid-UTF-8 fast
+  path. One pre-existing divergence is documented in-
+  fixture rather than asserted: `String#length` on a
+  high-byte literal still counts U+FFFD-replaced chars via
+  `from_utf8_lossy` because rubyrs doesn't model String
+  encoding tags (this commit fixes byte preservation, not
+  the per-char length semantic).
 - **GC rooting holes around `maybe_gc` — 6 latent sites flushed
   out by the first all-green STRESS_GC=1 CI run.** Master CI's
   STRESS_GC=1 step had been blocked by the prior-stage panic-
@@ -1250,6 +1360,20 @@ won't be fixed until we have a clear use case demanding parity.
   root list. `STRESS_GC=1 cargo test` exercises this in CI.
 
 ### Internal
+- **A6d (`msgpack/bigint.rb` round-trip) becomes a regular
+  `diff_cruby` fixture.** PR #89's lexical constant scoping
+  (dual-write into bare AND prefixed keys) closed the nested-
+  module namespace gap that had forced A6d to ship as a Rust
+  integration test (`tests/cext_msgpack_bigint.rs`) reaching
+  the methods through a top-level `Bigint` workaround.
+  `MessagePack::Bigint.to_msgpack_ext` now resolves cleanly
+  through the proper nested path, so the workaround can
+  retire. New fixture `tests/diff/cext_msgpack_bigint.rb`
+  runs the same 8 i64-range cases with their bytes asserted
+  byte-identical against CRuby on the same `bigint.rb`;
+  net `+63 / -151` lines (the Rust integration test deleted).
+  First concrete downstream simplification PR #89's dual-
+  write enables.
 - **GC rooting lint gate ([issue #90](https://github.com/linyiru/rubyrs/issues/90)).**
   After seven prior structurally-identical GC-rooting incidents
   in three discovery rounds (`86db73d` / `f2c3538` / `5946caa`)
