@@ -35,6 +35,30 @@ cargo run --release -p rubyrs-spec-extract \
 cargo test -p rubyrs --test ruby_spec
 ```
 
+For batches that touch core classes (Array, String, Integer)
+the extractor output is usually one polish step away from
+landing — the `it` blocks that reference upstream fixtures
+(`ArraySpecs.recursive_array`, `MyArray[...]`) or methods
+rubyrs doesn't yet implement (`Array#push`, `Array#min { ... }`,
+count-form `Array#first(n)`) load but error at run time, masking
+the PASSes around them. The companion
+`scripts/polish.py` removes those `it` blocks, leaving a
+`# skipped (fixture-dependent): ...` trace per drop so the
+diff stays auditable. Pipeline shape:
+
+```bash
+cargo run --release -p rubyrs-spec-extract \
+  -- /path/to/ruby-spec/core/array/length_spec.rb \
+  --shared /path/to/ruby-spec/core/array/shared/length.rb \
+  | crates/rubyrs-spec-extract/scripts/polish.py \
+  > crates/rubyrs/spec/ruby/array_length_spec.rb
+```
+
+Adding a new pattern to drop is one regex line in `polish.py`'s
+`DROP_PATTERNS`; the `# skipped` comments make future revisits
+(e.g., when `Array#push` lands as a feature) easy to find and
+re-evaluate.
+
 ## What the extractor recognises (current: v0.4)
 
 The recogniser shipped incrementally. Patterns in italics

@@ -59,6 +59,22 @@ spec/
     │
     ├── array_take_spec.rb         # core/array — extractor v0.3
     ├── array_compact_spec.rb      # core/array — extractor v0.3
+    │
+    │ # core/array batch: extractor v0.4 + scripts/polish.py
+    │ # (drops fixture-dependent + unimplemented-method `it`
+    │ # blocks, leaving auditable `# skipped` traces). Adds 9
+    │ # files covering the head/tail/length surface; the polish
+    │ # step is documented in spec-extract/README.md.
+    ├── array_empty_spec.rb
+    ├── array_first_spec.rb
+    ├── array_include_spec.rb
+    ├── array_last_spec.rb
+    ├── array_length_spec.rb
+    ├── array_pop_spec.rb
+    ├── array_reverse_spec.rb
+    ├── array_shift_spec.rb
+    ├── array_size_spec.rb
+    │
     └── hash_keys_spec.rb          # core/hash  — extractor v0.3
 ```
 
@@ -66,7 +82,7 @@ The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **132 examples across 26
+"Future work" below). Current total: **146 examples across 35
 files**, all passing.
 
 ## DSL the helper provides
