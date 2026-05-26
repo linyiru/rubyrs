@@ -164,6 +164,17 @@ add a fixture name (without `.rb`) to expand coverage; the file
 header documents selection rules. Both scripts run in the `wasm`
 CI lane after the build step.
 
+Perf gate (wasm-specific wall-time ratchet — sibling to the
+native `perf/check.sh`):
+
+```bash
+bash perf/wasm_check.sh
+```
+
+Budgets in `perf/wasm_baselines.tsv`. Same absolute-baseline
+policy as the host gate: bump a budget with a comment explaining
+*what grew*; never silently to make CI green.
+
 Notes:
 - The `build.rs` ships a tiny `__wasi_init_tp` no-op stub so Rust std's
   threading init resolves at link time.
