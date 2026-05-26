@@ -777,8 +777,18 @@ impl Vm {
             && let Value::Class(cls) = &recv
             && cls.name.as_str() == "Hash"
         {
-            self.maybe_gc();
-            self.check_alloc()?;
+            // GC rooting: `args` came from `self.stack.drain(...)`
+            // and is a Rust-local Vec with no GC root, so any heap-
+            // shaped element (Array / Hash for the `Hash[[[k,v],...]]`
+            // and `Hash[{…}]` shapes) gets swept if `maybe_gc` runs
+            // before we finish reading their pairs. Pin every arg
+            // across the entire alloc + pair-extract window. Repro
+            // pre-fix: `Hash[[[:x, 10], [:y, 20]]]` under STRESS_GC=1
+            // tripped `ICE: use-after-free` on the inner-pair walk.
+            let mut g = PinGuard::new(self);
+            for a in &args { g.pin(a.clone()); }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
             let pairs: Vec<(Value, Value)> = if args.len() == 1 {
                 match &args[0] {
                     Value::Array(aid) => {
@@ -789,40 +799,40 @@ impl Vm {
                         // common shape — non-pair elements are dropped
                         // with TypeError. Stay strict only on the
                         // outer Array shape.
-                        let outer = self.heap.array(*aid).clone();
+                        let outer = g.vm.heap.array(*aid).clone();
                         let mut out = Vec::with_capacity(outer.len());
                         for elem in outer {
                             if let Value::Array(pair_id) = elem {
-                                let pair = self.heap.array(pair_id);
+                                let pair = g.vm.heap.array(pair_id);
                                 if pair.len() == 2 {
                                     out.push((pair[0].clone(), pair[1].clone()));
                                 } else {
-                                    return Err(self.trap(RubyError::ArgumentError {
+                                    return Err(g.vm.trap(RubyError::ArgumentError {
                                         msg: format!("invalid number of elements ({} for 2)", pair.len()),
                                     }));
                                 }
                             } else {
-                                return Err(self.trap(RubyError::TypeError {
+                                return Err(g.vm.trap(RubyError::TypeError {
                                     msg: format!("wrong element type {} (expected array)", elem.type_name()),
                                 }));
                             }
                         }
                         out
                     }
-                    Value::Hash(hid) => self.heap.hash(*hid).clone(),
-                    _ => return Err(self.trap(RubyError::ArgumentError {
+                    Value::Hash(hid) => g.vm.heap.hash(*hid).clone(),
+                    _ => return Err(g.vm.trap(RubyError::ArgumentError {
                         msg: "odd number of arguments for Hash".into(),
                     })),
                 }
             } else if args.len().is_multiple_of(2) {
                 args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect()
             } else {
-                return Err(self.trap(RubyError::ArgumentError {
+                return Err(g.vm.trap(RubyError::ArgumentError {
                     msg: "odd number of arguments for Hash".into(),
                 }));
             };
-            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
-            self.stack.push(Value::Hash(hid));
+            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+            g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
         if name_id == new_id
