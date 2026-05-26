@@ -1860,6 +1860,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             ));
             out.push(sp(bn, Expr::Nil));
         }
+        // Pin the trailing value to nil so the synthetic receiver
+        // LVarWrite (when `needs_local`) doesn't leak as the body's
+        // result. Empty bodies (`class << X; end`) and zero-arg
+        // attr_* (`class << X; attr_accessor; end`) would otherwise
+        // return the receiver value — CRuby returns nil for the
+        // empty case. We don't try to match CRuby's attr_*
+        // return-Array shape (`[]` for zero-arg); nil is the
+        // user-friendly common case and the spec for `class << X`
+        // generally is "evaluates to the last expression in body";
+        // every supported entry's last op is already nil-pushing
+        // (Def → LoadNil, expanded attr_* → LoadNil), so this only
+        // changes the rare zero-arg/empty edge.
+        out.push(sp(node, Expr::Nil));
         return sp(node, Expr::Begin {
             body: out,
             rescue: vec![],
