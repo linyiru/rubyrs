@@ -270,6 +270,7 @@ fn run_diff(name: &str) {
 #[test] fn class_cref_walk() { run_diff("class_cref_walk"); }
 #[test] fn module_nesting() { run_diff("module_nesting"); }
 #[test] fn defined_constant_path() { run_diff("defined_constant_path"); }
+#[test] fn random_class() { run_diff("random_class"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_pathname() { run_diff("stdlib_pathname"); }
 #[cfg(feature = "stdlib")]

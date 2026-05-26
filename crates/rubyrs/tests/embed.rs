@@ -2288,3 +2288,24 @@ fn bigint_pow_oversize_exponent_traps_for_real_bases() {
         err.err,
     );
 }
+
+#[test]
+fn random_new_no_arg_raises_in_tier1_deterministic_mode() {
+    // Documented divergence from CRuby: per ADR 0017 row 131
+    // the Tier 1 `Random` class is seeded-only. CRuby's
+    // `Random.new` falls through to system entropy; rubyrs
+    // raises ArgumentError because Tier 1 forbids the entropy
+    // capability. Pinned here so a future refactor can't quietly
+    // re-introduce a default-seed path.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("Random.new", "random_no_arg.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected Uncaught ArgumentError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "ArgumentError");
+    assert!(
+        message.contains("Tier 1 Random.new requires an explicit Integer seed"),
+        "unexpected message: {}",
+        message,
+    );
+}

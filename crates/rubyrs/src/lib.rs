@@ -1094,6 +1094,18 @@ end
 "#;
         self.eval(PREAMBLE, "<rubyrs:preamble>")
             .expect("ICE: failed to load built-in exception preamble");
+        // Tier 1 seeded `Random` class. Lives in its own file so
+        // the preamble stays focused on exception-hierarchy +
+        // class-shell shapes; PRNG logic is meaty enough that
+        // inlining it as a const string buries the algorithm.
+        // ADR 0017 row 131 puts the seeded mode in Tier 1, so
+        // this loads unconditionally — not gated behind
+        // `--features stdlib`.
+        self.eval(
+            include_str!("preamble/random.rb"),
+            "<rubyrs:preamble:random>",
+        )
+            .expect("ICE: failed to load Random preamble");
     }
 
     /// Replace the runtime's stdout sink.
