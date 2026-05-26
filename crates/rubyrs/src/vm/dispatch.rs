@@ -2415,6 +2415,19 @@ impl Vm {
         //     Math::DomainError isn't modelled in this subset —
         //     same convention as other numeric-out-of-domain
         //     arms elsewhere in `Vm::do_call`).
+        // CRuby precedence: negative receiver raises
+        // Math::DomainError BEFORE any arity / base check. Mirror
+        // the order with the substitute ArgumentError, so user
+        // code's `rescue ArgumentError` catches the negative-recv
+        // path regardless of the other args' validity. Under
+        // bignum the equivalent check in `bigint_primitive` fires
+        // before this dispatcher runs, but keep this guard for
+        // the no-bignum profile and as defense-in-depth.
+        if let Value::Int(n) = &recv && &*name == "digits" && *n < 0 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "out of domain".to_string(),
+            }));
+        }
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(

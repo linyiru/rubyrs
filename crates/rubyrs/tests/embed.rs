@@ -2256,6 +2256,44 @@ fn digits_int_path_error_semantics_match_bignum_profile() {
     }
 }
 
+#[test]
+fn digits_negative_recv_takes_precedence_over_arity_and_base_errors() {
+    // CRuby precedence: a negative `Integer#digits` receiver
+    // raises Math::DomainError BEFORE any arity / base validation.
+    // Pre-fix rubyrs checked arity / base type / base sign / base
+    // < 2 first, so each shape surfaced a different error class.
+    // Match CRuby's precedence so user code's `rescue ArgumentError`
+    // catches the negative-recv path regardless of the other args'
+    // shapes. Substitute is ArgumentError "out of domain" (same
+    // convention as other numeric-out-of-domain arms in
+    // Vm::do_call). Runs in both profiles.
+    let mut rt = rubyrs::Runtime::new();
+    for script in [
+        "(-5).digits(10, 2)",     // would have been arity error
+        "(-5).digits(-2)",        // would have been "negative radix"
+        "(-5).digits(\"foo\")",   // would have been TypeError
+        "(-5).digits(1)",         // would have been "invalid radix 1"
+        "(-5).digits",            // pure negative-recv, no other badness
+    ] {
+        let err = rt.eval(script, "digits_precedence.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError (out-of-domain substitute) for {:?}, got {:?}",
+            script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg, "out of domain",
+            "wrong message for {:?} — expected the negative-recv check to fire first",
+            script,
+        );
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn digits_negative_recv_raises_argument_error_substitute() {

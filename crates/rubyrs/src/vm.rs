@@ -1671,13 +1671,38 @@ impl Vm {
         {
             return Ok(Some(v));
         }
+        // CRuby precedence: a negative receiver for `Integer#digits`
+        // raises `Math::DomainError: out of domain` BEFORE any
+        // arity / base validation. Match that ordering by checking
+        // recv sign first, ahead of the arity guard and digits
+        // dispatch below. The Math::DomainError substitute is
+        // ArgumentError (same convention as other numeric-out-of-
+        // domain arms in Vm::do_call). Concrete examples (CRuby vs
+        // pre-fix rubyrs): `(-5).digits(10, 2)` should raise
+        // "out of domain", not the arity error;
+        // `(-5).digits("foo")` should raise "out of domain", not
+        // a TypeError on the base; etc.
+        if name == "digits" {
+            let neg_recv = match recv {
+                Value::Int(n) => *n < 0,
+                Value::BigInt(id) => self.heap.bigint(*id).sign() == num_bigint::Sign::Minus,
+                _ => false,
+            };
+            if neg_recv {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "out of domain".to_string(),
+                }));
+            }
+        }
         // `Integer#digits` produces a `Value::Array`, which needs
         // heap allocation — can't live in stateless `numeric_call`.
         // Fires for ANY Int/BigInt receiver (recv-side check is in
         // the helper, which now narrows to BigInt only — Int
         // receivers continue through and hit dispatch.rs's i64
         // fast path). Sits ahead of the recv-or-arg guard so Int
-        // receivers don't get filtered out.
+        // receivers don't get filtered out. By the time we reach
+        // here, `recv` is non-negative (the precedence check above
+        // already trapped the negative case).
         if name == "digits" && (args.is_empty() || args.len() == 1)
             && let Some(v) = self.try_integer_digits(recv, args)?
         {
