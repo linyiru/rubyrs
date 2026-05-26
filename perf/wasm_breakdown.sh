@@ -251,14 +251,44 @@ MAIN_END_US=$PREV
 # mmap + symbol resolution, wasi-libc startup (allocator, stdio,
 # __environ population), C `_start` dispatch into Rust `main`.
 #
-# Subtract the LAST checkpoint (`done`, captured after the
-# eval-result match returns) rather than `eval_done` so this
-# figure doesn't also absorb stdout flush + drop time after the
-# eval finishes. With `done` in place the gap between the last
-# checkpoint and process exit is just the implicit `Drop` chain
-# + the `main()` epilogue — sub-microsecond on every measured
-# platform, well inside the MIN-of-N jitter floor.
-PRE_ENTRY_US=$((WALL_US - MAIN_END_US))
+# Compute this per-run rather than as `min(wall) - min(done)` —
+# the per-checkpoint MIN approach (used elsewhere in this script
+# for the breakdown table) can pull each side's MIN from a
+# different iteration, producing a "negative pre-entry" artifact
+# when the fastest `done` happens in a run with a noisier wall.
+# Parsing wall + `done` from the SAME log per run keeps the
+# subtraction wall-consistent: each candidate is a real run's
+# real pre-entry budget; we then take the MIN of those.
+#
+# `done` is the LAST in-`main()` checkpoint (captured after the
+# eval-result match returns), so wall - done is strictly the
+# pre-`main()` budget plus a sub-microsecond drop-chain tail.
+PRE_ENTRY_US=$(
+  for f in "$PERF_TMPDIR"/run.*.txt; do
+    awk -F'\t' '
+      $1 == "trace-startup" && $2 == "done" { gsub(/us/, "", $3); done_us = $3 }
+      $1 == "wasm-timer"    && $2 == "wall_us" { wall_us = $3 }
+      END {
+        if (done_us != "" && wall_us != "") {
+          diff = wall_us - done_us
+          if (diff < 0) diff = 0   # clamp defensively; should not happen
+                                   # with per-run subtraction, but
+                                   # leaves no chance of the printed
+                                   # "wasmtime+wasi+load" going negative
+                                   # if the trace format ever changes.
+          print diff
+        }
+      }
+    ' "$f"
+  done | sort -n | head -1
+)
+if [[ -z "$PRE_ENTRY_US" ]]; then
+  # Defensive fallback for runs where the `done` checkpoint was
+  # missing (e.g. a future change disables `trace-startup` mid-run).
+  # The old min-of-mins formula is approximate but always defined.
+  PRE_ENTRY_US=$((WALL_US - MAIN_END_US))
+  if [[ "$PRE_ENTRY_US" -lt 0 ]]; then PRE_ENTRY_US=0; fi
+fi
 
 echo ""
 printf "  %-22s %10s\n" "wall total (MIN):" "$WALL_US us"
