@@ -203,7 +203,9 @@ Notes:
     - `wasmtime compile` `.cwasm` (AOT, from optimised .wasm):
       ~4.4 MB on disk (machine code, not bytecode); cold start
       ~7-10 ms with `--allow-precompiled` (no JIT cost per
-      invocation — this is what the perf gate measures)
+      invocation — this is what the perf gate measures). NOT a
+      portable shipping artifact: wasmtime-version + host-arch
+      specific; consumers must regenerate per environment.
   The size has grown vs. earlier PoC numbers as more of the Ruby
   subset landed; the Bignum / require-relative / Symbol features
   each pulled in additional code paths.

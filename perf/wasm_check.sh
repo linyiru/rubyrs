@@ -74,13 +74,17 @@ fi
 # Layered for two reasons:
 #   1. wasm-opt -Oz shrinks the deliverable binary ~21% (1.48 MB →
 #      1.17 MB locally) and is what an embedder downstream would
-#      want to ship; running it here keeps the cwasm we measure
-#      against the realistic shipping shape.
+#      want to ship if they distribute the .wasm. Running it here
+#      keeps the upstream input to the AOT step matching what a
+#      consumer would actually deploy.
 #   2. `wasmtime compile` AOT-compiles to a `.cwasm` that wasmtime
 #      can `run --allow-precompiled` against — bypasses JIT for
 #      every measured invocation, so the gate fences the "cold
 #      start with pre-compiled module" path (the headline cold-
 #      start story) rather than the every-invocation JIT cost.
+#      Note that the .cwasm itself is NOT a shipping artifact —
+#      it's wasmtime-version + host-arch specific machine code
+#      and must be regenerated per consumer environment.
 #
 # Local PoC: this combo drops the wasmtime startup_floor from
 # ~20 ms steady (raw .wasm) to ~10 ms (.cwasm) — and from a
@@ -97,9 +101,28 @@ fi
 #   3. wasmtime compile is fast enough (~0.5s) that caching the
 #      output across runs isn't worth the surprise.
 # A dedicated subdir under `$TMPDIR` is plenty for the gate's
-# lifetime; `mktemp -d` picks a non-colliding path on macOS+Linux.
-PERF_TMPDIR="$(mktemp -d -t rubyrs-wasm-perf.XXXXXX)"
+# lifetime. Use the positional template form (`mktemp -d <prefix>XXXXXX`)
+# rather than `-t` — BSD mktemp (macOS) and GNU mktemp (Linux)
+# disagree on what `-t` means: BSD takes it as a literal prefix and
+# adds its own randomization, embedding "XXXXXX" in the dir name on
+# macOS. Positional template is portable.
+#
+# Wrap mktemp itself in an exit-2 path: a read-only $TMPDIR / full
+# disk / restrictive sandbox makes it fail, and `set -e` would
+# otherwise abort with an opaque non-zero code (no "setup error"
+# diagnostic), violating the 0/1/2 contract the header documents.
+PERF_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/rubyrs-wasm-perf.XXXXXX")" || {
+  echo "wasm_check: mktemp -d failed (TMPDIR=${TMPDIR:-/tmp}); cannot stage AOT artifacts" >&2
+  exit 2
+}
+# Cover SIGINT/SIGTERM too — `trap '...' EXIT` alone doesn't fire
+# on signals (bash takes the default signal action and exits
+# without running EXIT). Without the extra signal handlers a
+# Ctrl-C during wasm-opt (2-10s) or wasmtime compile leaves the
+# tempdir orphaned. The trap re-raises after cleanup so the exit
+# code stays honest.
 trap 'rm -rf "$PERF_TMPDIR"' EXIT
+trap 'rm -rf "$PERF_TMPDIR"; trap - INT TERM; kill -INT $$' INT TERM
 
 # wasm-opt is OPTIONAL — if `wasm-opt` isn't on PATH the script
 # proceeds with the raw .wasm. Skipping it costs ~10% of the
