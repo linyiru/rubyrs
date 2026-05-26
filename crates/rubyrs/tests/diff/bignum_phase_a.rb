@@ -142,8 +142,9 @@ puts huge <=> huge
 puts [9_223_372_036_854_775_808].sum
 puts [10, 9_223_372_036_854_775_808, 100].sum
 
-# Range#sum with width that overflows `end_inc - bi` in i64
-# (-2^62 .. 2^62 has width 2^63 + 1, exceeding i64::MAX). Pre-
-# cycle-9 the `n = end_inc - bi + 1` line outside the checked
-# closure could wrap before the fast-path detector ran.
-puts (-4_611_686_018_427_387_904 .. 4_611_686_018_427_387_904).sum
+# Range#sum where the closed-form product `n * (bi + end_inc)`
+# overflows i64 even though `end_inc - bi` fits. n = 4e9,
+# bi + end_inc ≈ 4e9, n*sum ≈ 1.6e19 > i64::MAX (≈9.2e18). The
+# fast path must detect this via checked_mul and fall through
+# to the BigInt branch; pre-cycle-9 the wrap was silent.
+puts (1..4_000_000_000).sum

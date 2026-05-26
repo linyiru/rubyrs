@@ -356,17 +356,19 @@ impl Vm {
                     }
                     ("sum", []) | ("sum", [Value::Int(_)]) => {
                         let init = match args { [Value::Int(n)] => *n, _ => 0 };
-                        let a = self.heap.array(id).clone();
-                        // Same overflow-promotion shape as inject:
-                        // start in i64 fast path, promote to BigInt
-                        // on overflow, continue summing in arbitrary
-                        // precision. Without this, `[2**62, 2**62,
-                        // 2**62].sum` would wrap silently even with
-                        // bignum on — divergence from Op::BinOp +.
+                        // Iterate by index and clone each element
+                        // just-in-time: we need the heap borrow to
+                        // end before `apply_int_promote` / `try_bigint_binop`
+                        // take `&mut self`, but cloning the whole
+                        // backing Vec up front would be O(n) extra
+                        // work. Pre-cycle-10 the impl cloned the
+                        // entire Vec — same issue Copilot flagged.
                         let kind = crate::bytecode::BinOpKind::Add;
                         let mut acc: Value = Value::Int(init);
-                        for v in &a {
-                            match (&acc, v) {
+                        let len = self.heap.array(id).len();
+                        for i in 0..len {
+                            let v = self.heap.array(id)[i].clone();
+                            match (&acc, &v) {
                                 (Value::Int(x), Value::Int(y)) => {
                                     acc = self.apply_int_promote(kind, *x, *y)?;
                                 }
@@ -379,7 +381,7 @@ impl Vm {
                                     // bailed on a BigInt element like
                                     // `[2**63].sum`.
                                     #[cfg(feature = "bignum")]
-                                    if let Some(next) = self.try_bigint_binop(kind, &acc, v)? {
+                                    if let Some(next) = self.try_bigint_binop(kind, &acc, &v)? {
                                         acc = next;
                                         continue;
                                     }
