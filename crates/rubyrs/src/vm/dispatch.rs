@@ -2956,8 +2956,39 @@ impl Vm {
             return self.do_call_block(target_sym, new_argc, false, u16::MAX);
         }
 
+        // Mirror do_call's Int#+/-/* BigInt-aware intercept so
+        // block-form sends (`a.send(:+, big) { ... }`) match the
+        // expression form's overflow-promotion. Without this the
+        // block path falls through to numeric_call's plain `+`
+        // which wraps on overflow.
+        #[cfg(feature = "bignum")]
+        if args.len() == 1
+            && matches!(&recv, Value::Int(_))
+            && matches!(&args[0], Value::Int(_))
+            && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(&name)
+            && matches!(kind,
+                crate::bytecode::BinOpKind::Add
+                | crate::bytecode::BinOpKind::Sub
+                | crate::bytecode::BinOpKind::Mul
+            )
+        {
+            let (Value::Int(x), Value::Int(y)) = (&recv, &args[0]) else { unreachable!() };
+            let v = self.apply_int_promote(kind, *x, *y)?;
+            self.stack.push(v);
+            return Ok(());
+        }
+
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
+        // Mirror do_call's bigint_primitive hook. Without this,
+        // block-form calls on BigInt receivers (`big.send(:to_s) { ... }`)
+        // raise NoMethodError because primitive_call/sym_primitive
+        // are stateless and can't reach the BigInt heap.
+        #[cfg(feature = "bignum")]
+        if let Some(v) = self.bigint_primitive(&recv, &name, &args)? {
+            self.stack.push(v);
+            return Ok(());
+        }
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {
