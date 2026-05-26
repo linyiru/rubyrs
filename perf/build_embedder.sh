@@ -74,8 +74,17 @@ WIZ_OPT="$PIPELINE_DIR/rubyrs.wizer.opt.wasm"
 # it) and the DCE is correct. macOS brew binaryen (v123+)
 # doesn't have this bug; this reorder makes the pipeline
 # portable across both.
-echo "[2/4] wizer --allow-wasi $RAW_WASM -> $WIZ"
-wizer --allow-wasi -o "$WIZ" "$RAW_WASM"
+echo "[2/4] wizer $RAW_WASM -> $WIZ"
+# `--init-func wizer.initialize` is load-bearing for wizer v11+:
+# v11 changed the default expected export name from
+# `wizer.initialize` (dot) to `wizer-initialize` (hyphen) — see
+# https://github.com/bytecodealliance/wizer/releases for v11.0.x
+# notes. Our lib.rs still uses `#[unsafe(export_name =
+# "wizer.initialize")]` (Rust idiom; both forms are valid wasm
+# export names), so we have to TELL wizer which form to look for.
+# v10 also accepts this flag, so the override is portable across
+# wizer versions.
+wizer --allow-wasi --init-func wizer.initialize -o "$WIZ" "$RAW_WASM"
 
 echo "[3/4] wasm-opt -Oz $WIZ -> $WIZ_OPT"
 wasm-opt -Oz "$WIZ" -o "$WIZ_OPT"

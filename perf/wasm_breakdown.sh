@@ -100,7 +100,11 @@ CWASM="$PERF_TMPDIR/rubyrs.cwasm"
 # macOS binaryen (v123+) doesn't trigger this; reorder makes
 # the pipeline portable.
 if command -v wizer >/dev/null 2>&1; then
-  if ! wizer --allow-wasi -o "$WIZER" "$RAW_WASM" 2>/dev/null; then
+  # `--init-func wizer.initialize` for wizer v11+ compatibility —
+  # v11 renamed the default expected export from `wizer.initialize`
+  # (dot) to `wizer-initialize` (hyphen). Our source still emits
+  # the dot form so we override here. v10 also accepts this flag.
+  if ! wizer --allow-wasi --init-func wizer.initialize -o "$WIZER" "$RAW_WASM" 2>/dev/null; then
     echo "wasm_breakdown: wizer pre-init failed" >&2
     exit 2
   fi
