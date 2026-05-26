@@ -1,0 +1,252 @@
+name: wasm-breakdown
+
+# Cross-host cold-start measurement. NOT a gate — produces numbers
+# we look at, not pass/fail. Triggered manually (workflow_dispatch)
+# or on push to wasm-spike branches when the embedder / harness
+# changes.
+#
+# Result goes to the job summary so it's visible without
+# downloading artifacts, AND is uploaded as a text file so we can
+# diff against later runs.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'master'
+      - 'spike/wasm-**'
+    paths:
+      - 'perf/wasm_breakdown.sh'
+      - 'perf/build_embedder.sh'
+      - 'crates/rubyrs-wasm-embed/**'
+      - 'crates/rubyrs-wasm-timer/**'
+      - 'crates/rubyrs/src/main.rs'
+      - '.github/workflows/wasm-breakdown.yml'
+  # Weekly cron keeps the harness validated on master even when
+  # nothing in the path filter changed — catches regressions
+  # caused by GHA runner image updates (new binaryen / wasmtime
+  # default behavior, kernel changes affecting spawn cost),
+  # upstream tool releases the harness downloads (wasmer install
+  # script changes), and Rust toolchain drift on the pinned 1.95
+  # channel. Sunday 12:00 UTC keeps the run off Monday-morning
+  # CI peak; the workflow is non-gating so a failure on weekend
+  # just sends a notification rather than blocking work.
+  schedule:
+    - cron: '0 12 * * 0'
+
+jobs:
+  measure:
+    name: Cold-start breakdown (${{ matrix.os }}, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      # GitHub-hosted runners. Matrix on (os, arch) so we get both
+      # x86_64 (Linux baseline, contrasts cleanly with macOS arm64
+      # we already have locally) and arm64 Linux (apples-to-apples
+      # for Apple-Silicon dev boxes). macOS-15 row uses Apple
+      # arm64 runners — same architecture as the local dev box,
+      # different OS so the spawn floor can be compared
+      # directly with our home measurements.
+      matrix:
+        # Each row carries the host triples + a sha256 for every
+        # tool tarball we download. Pinning the hashes brings the
+        # supply-chain hygiene of `.github/workflows/ci.yml` (which
+        # verifies wizer + wasmtime sha256 on its single x86_64
+        # row) to all three matrix hosts. Values produced by
+        # `curl -sL <url> | shasum -a 256` against the upstream
+        # release artifacts; bump alongside the version pin.
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+            host_triple: x86_64-unknown-linux-gnu
+            wasi_sdk_triple: x86_64-linux
+            wasmtime_triple: x86_64-linux
+            wasmtime_sha256: 9d92e6dc04630f617e0e5d532327a5a917ac4898587e07f4fb7a5fc7fffef760
+            wizer_triple: x86_64-linux
+            wizer_sha256: 36016e7f846f38ad09f22eb4bafb99068f038c431eb9613ddf59e31ad8a21414
+            wasm3_url: https://github.com/wasm3/wasm3/releases/download/v0.5.0/wasm3-linux-x64.elf
+            wasm3_sha256: 905292b6700413dd7f2293e0f44dbc853a743ef2d0a6d0043490acf34526e4de
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            host_triple: aarch64-unknown-linux-gnu
+            wasi_sdk_triple: arm64-linux
+            wasmtime_triple: aarch64-linux
+            wasmtime_sha256: 4a27083ba8d3c64526b2d469f50e6539cb4c1dd9d08336e0d8953bca616737e3
+            wizer_triple: aarch64-linux
+            wizer_sha256: 73bffcbaf736ef24109a48cac431d070c43cb2ee8a14a840576f7aec0133d8d6
+            # No prebuilt wasm3 for linux-arm64 in v0.5.0; the row
+            # will be skipped automatically by perf/wasm_breakdown.sh
+            # (its `command -v wasm3` guard).
+            wasm3_url: ''
+            wasm3_sha256: ''
+          - os: macos-15
+            arch: arm64
+            host_triple: aarch64-apple-darwin
+            wasi_sdk_triple: arm64-macos
+            wasmtime_triple: aarch64-macos
+            wasmtime_sha256: 8c589a1feb6578ddfd76d4ee07bac551d7f3069d6cef9b2ae5e87e630b5198db
+            wizer_triple: aarch64-macos
+            wizer_sha256: 7c54896b456b6ca024af6005ebc5538282dee7cd9f0c9c1155855d29b9c461b1
+            # wasm3 macOS arm64 prebuilt also unavailable.
+            wasm3_url: ''
+            wasm3_sha256: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (wasm32-wasip1 target)
+        # Same toolchain pin as the existing `wasm` job in
+        # ci.yml — must match `rust-toolchain.toml` so the
+        # wasm32-wasip1 std lands on the same channel cargo runs
+        # under (otherwise: E0463 `can't find crate for core`).
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          targets: wasm32-wasip1
+
+      - name: Cache cargo + wasi-sdk
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            /tmp/wasi-sdk-install
+          key: ${{ matrix.os }}-${{ matrix.arch }}-wasm-bd-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.arch }}-wasm-bd-
+
+      - name: Install wasi-sdk 24
+        run: |
+          set -euo pipefail
+          DIR="/tmp/wasi-sdk-install/wasi-sdk-24.0-${{ matrix.wasi_sdk_triple }}"
+          if [ ! -d "$DIR" ]; then
+            mkdir -p /tmp/wasi-sdk-install
+            curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-${{ matrix.wasi_sdk_triple }}.tar.gz \
+              | tar -xz -C /tmp/wasi-sdk-install
+          fi
+          echo "WASI_SDK_PATH=$DIR" >> "$GITHUB_ENV"
+
+      - name: Install binaryen (wasm-opt)
+        # Linux: apt has binaryen. macOS: brew.
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y binaryen
+          else
+            brew install binaryen
+          fi
+
+      - name: Install wizer
+        # Matches the version pinned in ci.yml. Per-matrix sha256
+        # verification (computed against upstream release tarballs;
+        # bump alongside the version pin) hardens the supply-chain
+        # path even on this non-gating workflow.
+        run: |
+          set -euo pipefail
+          WIZER_VERSION=v11.0.3
+          TARBALL="wizer-${WIZER_VERSION}-${{ matrix.wizer_triple }}.tar.xz"
+          URL="https://github.com/bytecodealliance/wizer/releases/download/${WIZER_VERSION}/${TARBALL}"
+          curl -sSLo "$TARBALL" "$URL"
+          # `shasum -a 256 -c` is portable across macOS (BSD
+          # shasum) and Linux (perl/coreutils shasum). `sha256sum
+          # -c` is Linux-only.
+          echo "${{ matrix.wizer_sha256 }}  ${TARBALL}" | shasum -a 256 -c -
+          tar xf "$TARBALL"
+          mkdir -p "$HOME/.local/bin"
+          install -m 755 "wizer-${WIZER_VERSION}-${{ matrix.wizer_triple }}/wizer" "$HOME/.local/bin/wizer"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install wasmtime
+        run: |
+          set -euo pipefail
+          WASMTIME_VERSION=v45.0.0
+          TARBALL="wasmtime-${WASMTIME_VERSION}-${{ matrix.wasmtime_triple }}.tar.xz"
+          URL="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${TARBALL}"
+          curl -sSLo "$TARBALL" "$URL"
+          echo "${{ matrix.wasmtime_sha256 }}  ${TARBALL}" | shasum -a 256 -c -
+          tar xf "$TARBALL"
+          mkdir -p "$HOME/.local/bin"
+          install -m 755 "wasmtime-${WASMTIME_VERSION}-${{ matrix.wasmtime_triple }}/wasmtime" "$HOME/.local/bin/wasmtime"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install wasmer (Linux only, prebuilt)
+        # wasmer's official install script writes to ~/.wasmer.
+        # macOS skip: brew install wasmer also works but the test
+        # already has macOS local numbers and we'd rather keep the
+        # Linux runner clean.
+        #
+        # Pragmatic exception to the sha256 policy elsewhere: the
+        # `get.wasmer.io` installer is wasmer's documented release
+        # channel and pins the version itself; reproducing its
+        # exact behaviour with `curl + sha256 + tar` would mean
+        # tracking wasmer's release URL scheme by hand (which
+        # changes across triples). Since this row is non-gating
+        # and the wasmer install is downstream of the
+        # cargo + wasmtime + wizer that ARE pinned, the trade-off
+        # is acceptable. Revisit if wasmer starts producing
+        # different numbers run-to-run.
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          curl -sSfL https://get.wasmer.io | sh
+          echo "$HOME/.wasmer/bin" >> "$GITHUB_PATH"
+
+      - name: Install wasm3 (when prebuilt exists)
+        # v0.5.0 only ships linux-x64.elf as a prebuilt. arm64 and
+        # macOS rows skip the wasm3 install; perf/wasm_breakdown.sh
+        # `command -v wasm3` check then leaves the row out.
+        if: matrix.wasm3_url != ''
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -sSLo "$HOME/.local/bin/wasm3" "${{ matrix.wasm3_url }}"
+          echo "${{ matrix.wasm3_sha256 }}  $HOME/.local/bin/wasm3" | shasum -a 256 -c -
+          chmod +x "$HOME/.local/bin/wasm3"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Pre-build the embedder (bakes cwasm via build_embedder.sh)
+        # The breakdown harness benchmarks the EMBEDDER on top of
+        # everything else, so we want it built before the timed
+        # rows. Doing it here also keeps the breakdown step's wall
+        # time small enough to read at a glance.
+        run: |
+          set -euo pipefail
+          ./perf/build_embedder.sh
+
+      - name: Tool versions (for the record)
+        # Pin numbers in the job summary so a year from now we can
+        # tell which wasmtime / wasmer / wasm3 produced this row.
+        # Each tool gets one short line — anything more goes to
+        # the artifact.
+        run: |
+          set -euo pipefail
+          echo "## Tool versions" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          { uname -a; rustc --version; wasmtime --version; wizer --version; wasm-opt --version | head -1; } >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          { wasmer --version 2>/dev/null || echo "wasmer not installed"; } >> "$GITHUB_STEP_SUMMARY"
+          { wasm3 --help 2>&1 | head -1 || echo "wasm3 not installed"; } >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run wasm_breakdown.sh
+        # RUNS=25 is the same default the local PoC settled on —
+        # enough samples to push MIN under jitter floor without
+        # making the workflow take more than a minute or two.
+        env:
+          RUNS: "25"
+        run: |
+          set -o pipefail
+          ./perf/wasm_breakdown.sh 2>&1 | tee breakdown.log
+
+      - name: Append breakdown to job summary
+        run: |
+          set -euo pipefail
+          echo "## Cold-start breakdown (${{ matrix.os }} ${{ matrix.arch }})" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat breakdown.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload breakdown log
+        uses: actions/upload-artifact@v7
+        with:
+          name: breakdown-${{ matrix.os }}-${{ matrix.arch }}
+          path: breakdown.log
+          retention-days: 30

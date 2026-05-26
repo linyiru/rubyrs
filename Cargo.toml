@@ -7,6 +7,41 @@
 [profile.release]
 lto = "thin"
 
+# Size-optimized profile for shipping artifacts where cold-start
+# wall time tracks binary size. Used by `perf/build_embedder.sh`
+# to produce the single-binary `rubyrs-wasm-embed`. Default
+# `release` stays the same for everyday throughput-optimized
+# builds (rubyrs CLI, tests, perf gates).
+#
+# History: an earlier revision also set `opt-level = "z"`,
+# `lto = "fat"`, `codegen-units = 1`. Measured against the
+# baseline `release` profile on three hosts (macOS arm64, Linux
+# arm64, Linux x86_64), the z-mode build was 3-19% SLOWER at
+# cold start despite being 56% smaller. The size reduction
+# comes from suppressing inlining and using shorter call
+# sequences — exactly the costs that hurt the wasmtime crate's
+# initialization path on every spawn. `opt-level = "z"` is the
+# wrong knob when the bottleneck is launch-time code execution
+# rather than dyld page load.
+#
+# Knobs that stayed — all "free" wins (no runtime perf cost):
+#   - panic = "abort": removes unwinding metadata + landing
+#     pads, ~5-15% smaller binaries. The embedder doesn't catch
+#     panics anyway — guest traps surface through wasmtime's
+#     Result, not Rust panics. `inherits = "release"` keeps the
+#     LTO + opt-level=3 + codegen-units settings from the parent
+#     profile intact.
+#   - strip = "symbols": removes debug + symbol table after
+#     linking. ~15-20% smaller artifact, no runtime impact.
+#   - debug = false: no debug info emitted in the first place
+#     (strip after-the-fact is more thorough but starts from a
+#     bigger object file; both together cover macOS dSYM too).
+[profile.release-min]
+inherits = "release"
+panic = "abort"
+strip = "symbols"
+debug = false
+
 [workspace]
 resolver = "3"
 members = [
@@ -15,6 +50,8 @@ members = [
     "crates/rubund",
     "crates/rubyrs-gapscan",
     "crates/rubyrs-spec-extract",
+    "crates/rubyrs-wasm-timer",
+    "crates/rubyrs-wasm-embed",
 ]
 
 # Shared metadata — individual crates pick these up with

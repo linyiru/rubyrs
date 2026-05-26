@@ -181,7 +181,15 @@ if command -v wizer >/dev/null 2>&1; then
     # it imports wasi syscalls; our wizer.initialize itself does
     # NOT call any imports (per wizer's rule), but the import
     # table includes wasi for `_start` use later.
-    if ! wizer --allow-wasi "$OPT_WASM" -o "$WIZER_WASM_OUT" >/dev/null 2>&1; then
+    #
+    # `--init-func wizer.initialize` is load-bearing for wizer
+    # v11+ (CI's pinned version): v11 changed the default
+    # expected export name from `wizer.initialize` (dot) to
+    # `wizer-initialize` (hyphen). Our `crates/rubyrs/src/lib.rs`
+    # still uses the dot form via `#[unsafe(export_name =
+    # "wizer.initialize")]`, so we have to tell wizer which name
+    # to look up. v10 accepts the flag too — portable override.
+    if ! wizer --allow-wasi --init-func wizer.initialize "$OPT_WASM" -o "$WIZER_WASM_OUT" >/dev/null 2>&1; then
         echo "wasm_check: wizer pre-init failed on $OPT_WASM" >&2
         exit 2
     fi
