@@ -149,11 +149,13 @@ it. New deviations get added here as they are discovered; an
 | `Kernel#puts` / `p` / `pp` / `print` wrote to `std::io::stdout()` by default | (was) `crates/rubyrs/src/vm.rs:375` (`Vm::new` initialised `stdout: Box::new(std::io::stdout())`) | Rule 2 | **Closed (PR #88)**: `Vm::new` defaults to `std::io::sink()`. The CLI binary `rubyrs` calls `set_stdout(Box::new(std::io::stdout()))` explicitly so `rubyrs script.rb` keeps its CRuby-parity output; embed library users get the silent default until they opt in. |
 | `ENV` reading populated from `std::env::vars()` of the host process | (was) `crates/rubyrs/src/vm/step.rs:342` (the `LoadConst("ENV")` arm) | Rules 1 + 2 | **Closed (PR #88)**: `Config::env: Option<HashMap<String, String>>` injects an explicit map. `None` (default) → script sees empty ENV; `Some(m)` → script sees `m` only. CLI binary fills from `std::env::vars()`. |
 | `$$` global read the host process's PID via `std::process::id()` | (was) `crates/rubyrs/src/vm/step.rs:365` (the `LoadGlobal("$$")` arm) | Rule 1 | **Closed (PR #88)**: `Config::pid: Option<NonZeroU32>` injects an explicit PID. `None` (default) → `$$` returns `0` sentinel; `Some(n)` → returns `n`. CLI binary fills from `std::process::id()`. |
+| Stdlib lenient-stub require path drifted from "feature-absent surface" toward Tier-3 behaviour-in-Tier-1 | (was) `crates/rubyrs/src/vm/kernel.rs` (an unconditional `stdlib_vendor::stdlib_vendor_source` call after the stub-dedup, with an embedded Pathname.rb that defined real path-string methods on a Tier 1 build) | Rule 2 | **Closed (commit `06a7833`)**: `stdlib` Cargo feature (default OFF) gates the entire `stdlib_vendor` module + the require-side `compile_and_run_source` wire-up. Default Tier 1 build keeps the lenient stub at its "feature-absent surface": `require 'pathname'` materialises the constant shell, calls raise `NoMethodError`. `--features stdlib` opts the full-features build into the embedded pure-Ruby implementations (`Pathname` today, more under the same gate later). |
+| `Class#name` reopen identity: top-level `Bar` and a separately-scoped `module Foo; class Bar; end; end` collapsed to a single `Class` object because the class table was keyed by bare `SymId` | (was) `crates/rubyrs/src/vm/step.rs` (the `Op::DefClass` arm: `self.classes.entry(name_id)`) | Rule 1 (deterministic identity) — re-running the same script with the two `class Bar` blocks in reversed order yielded a different method table on the surviving Class | **Closed (commits `51d18fa`, `55a0a8a`, `9e0f4db`)**: Step 1 keyed the class table by the qualified `SymId` when one is supplied, so `Foo::Bar` and top-level `Bar` get independent slots; Step 2 added `Op::LoadConstChain` + per-Proto `const_chains` so bare-name reads inside a class/module body walk the CRuby cref chain instead of jumping straight to the bare slot; Step 3 unwrapped the now-set-once `Class.name` field back to plain `String`. Locked down by `class_qualified_separates.rb` and `class_cref_walk.rb`. |
 
-The remediations landed in PR #86 (regex) and PR #88 (the three
-host-capability rows); both are linked in the Status column of
-the table above. New deviations get added here as they are
-discovered.
+The remediations landed in PR #86 (regex), PR #88 (the three
+host-capability rows), commit `06a7833` (the stdlib feature gate),
+and commits `51d18fa` / `55a0a8a` / `9e0f4db` (the class-identity
+refactor). New deviations get added here as they are discovered.
 
 ### Future risks (when implemented)
 

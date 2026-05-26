@@ -105,30 +105,71 @@ These are landed and locked down by tests:
   `RUBYRS_FUEL`, `RUBYRS_MAX_OBJECTS`, `RUBYRS_MAX_FRAMES` (commit
   `9172868`)
 
+## Recently landed (since the last ROADMAP refresh)
+
+Items the original "Near term" list pinned that have shipped, with
+the diff_cruby fixture or test that locks each one down:
+
+- **`Range`** — `range_basics`, `range_enumerable`, `range_extras`
+- **`Enumerable`** — `enumerable_filter`, `enumerable_aggregate`,
+  `enumerable_by`, `enumerable_advanced`, `range_enumerable`,
+  `hash_enumerable`
+- **`String` methods** (split / gsub / sub / strip / upcase / chars /
+  start_with? / end_with? / slice / etc.) — `string_basics`,
+  `string_transform`, `string_search`, `string_slice`, `string_format`,
+  `percent_literals`, `frozen_strings`, `string_mutation`
+- **`Module` + `include`** — `modules`, `module_introspection`,
+  `module_constants_included`, `module_include_typecheck`,
+  `module_prepend`
+- **Class inheritance + `super`** — `inheritance`, `super_call`,
+  `super_splat`, `def_self_method`
+- **`attr_reader / writer / accessor`** — `attr_accessor`
+- **Per-call-site polymorphic inline cache** — 4-way IC with round-
+  robin eviction; unit tests in `vm::lookup::tests::*` cover the
+  polymorphic and megamorphic paths
+- **Real qualified-name class identity** — `class_qualified_separates`
+  + cref-walk `class_cref_walk`; class table now keyed by qualified
+  SymId, bare const reads inside a body walk `Op::LoadConstChain`
+- **Rescue parity round** — `rescue_multi_class` (`rescue A, B`),
+  `rescue_constant_path` (`rescue Foo::Bar`), `rescue_by_class`,
+  `rescue_primitive`, `inline_rescue`
+- **`require` + `$LOAD_PATH` walking** — `require_xpkg`, `load_path`,
+  `source_location`, `source_line`
+- **Stdlib lenient stubs + Pathname vendor pilot** — gated behind the
+  `stdlib` Cargo feature per ADR 0017 row 125; `stdlib_pathname`
+  fixture is `#[cfg(feature = "stdlib")]`
+- **BigInt Phase A** — `bignum_phase_a` + Float×BigInt coercion,
+  Range edge arithmetic, msgpack BigInt wire protocol
+
 ## Near term
 
 In rough order of ROI for the embedding / DSL use case:
 
-1. **`Range`** (`1..10`, `1...10`, `each`, `to_a`, `include?`,
-   `each_with_index`)
-2. **More `Enumerable`**: `select`, `reject`, `inject`/`reduce`, `find`,
-   `any?`, `all?`, `include?`, `count`, `sort`, `sort_by`
-3. **`String` methods**: `split`, `gsub`, `sub`, `chomp`, `strip`,
-   `upcase`, `downcase`, `chars`, `start_with?`, `end_with?`
-4. **`Module` + `include`** — at minimum enough to mix `Enumerable` once
-5. **Class inheritance + `super`** — `class Foo < Bar` and method override
-6. **`attr_reader / writer / accessor`** as built-in macros
-7. **P2-A Pivot demo + benchmark**: pick a Ruby DSL (Brewfile leading
+1. **`Module.nesting` reflection API** — cref chains already exist at
+   compile time (`Op::LoadConstChain`'s `Vec<SymId>`); exposing them
+   via a frame-attached `nesting_snapshot` is small and unblocks a
+   class of Sinatra/Rack-style introspection code
+2. **Qualified ConstantPathWrite** (`Foo::Bar = 1`) — check whether
+   AST handles `ConstantPathWriteNode` or if it falls through; emit a
+   `Op::StoreConst(qual)` path
+3. **Stdlib vendor expansion** (under `--features stdlib`) — `Set`,
+   `StringIO`, `SecureRandom` (seeded mode only, per ADR 0017 line 131);
+   reuse the `compile_and_run_source` infrastructure from the
+   Pathname pilot
+4. **`HostCtx`-v2 Array/Hash allocation** — let host fns allocate
+   structured return values; the missing piece of the host embedding
+   surface
+5. **BigInt Phase B** — `**`, bit ops, unary `-@`/`+@`, `abs`,
+   tighter Float interop
+6. **P2-A Pivot demo + benchmark**: pick a Ruby DSL (Brewfile leading
    candidate) and demonstrate it running on rubyrs.wasm under wasmtime
    with cold start + memory numbers vs CRuby and ruby.wasm. This is the
    *decision gate* for the embedding-niche thesis
-8. **P2-B Spec ingestion v0.1** — `tools/spec_extract` from ruby/spec,
+7. **P2-B Spec ingestion v0.1** — `tools/spec_extract` from ruby/spec,
    first SPEC_STATUS.md report
-9. **P2-C Exception class hierarchy + `ensure` + `return / break / next`**
-10. **Method dispatch inline cache** (per-call-site monomorphic IC) — was
-    P1-B in the original brief; deferred because `BinOp` fast path already
-    skips the hot dispatch on integer ops. Becomes the bottleneck once
-    class-method-heavy code dominates the benchmark mix
+8. **Bytecode peephole sweep** — DefClass-then-Dup-then-StoreConst is
+   one obvious fusion; IC-stats counters (cargo feature `ic-stats`)
+   to validate the 4-way IC's hit rate on real workloads
 
 ## Medium term
 
