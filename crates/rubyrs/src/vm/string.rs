@@ -593,16 +593,29 @@ impl Vm {
                         let bound = s.to_string_lossy();
                         let captures = re.captures(&bound);
                         match captures {
-                            None => return Ok(Some(Value::Nil)),
+                            None => {
+                                // CRuby parity: a failed `match`
+                                // wipes the prior match's globals.
+                                self.last_match = None;
+                                return Ok(Some(Value::Nil));
+                            }
                             Some(caps) => {
                                 let whole = caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
                                 let mut group_vals: Vec<Value> = Vec::with_capacity(caps.len().saturating_sub(1));
+                                let mut last_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
                                 for i in 1..caps.len() {
-                                    group_vals.push(match caps.get(i) {
+                                    let m = caps.get(i);
+                                    last_caps.push(m.map(|m| m.as_str().to_string()));
+                                    group_vals.push(match m {
                                         Some(m) => Value::new_str(m.as_str().to_string()),
                                         None => Value::Nil,
                                     });
                                 }
+                                // Side-channel for `$1`..`$9` / `$~`.
+                                self.last_match = Some(crate::vm::LastMatch {
+                                    whole: whole.clone(),
+                                    caps: last_caps,
+                                });
                                 self.maybe_gc();
                                 let caps_arr = self.heap.alloc(HeapObj::Array(group_vals));
                                 let cls_id = self.interner.intern("MatchData");

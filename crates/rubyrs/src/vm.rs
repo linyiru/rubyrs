@@ -233,6 +233,19 @@ impl Clone for HostFnSlot {
     }
 }
 
+/// Side-channel record of the most recent successful regex match.
+/// Holds owned strings so the GC need not walk it; the cost is
+/// one `.to_string()` per capture group on each successful match.
+/// `caps[i]` is the i-th *parenthesised* group (1-indexed via
+/// `$1` etc.); `None` means the group did not participate. The
+/// vector length is always `re.captures_len() - 1` after a hit.
+#[cfg(feature = "regex")]
+#[derive(Debug, Clone)]
+pub(crate) struct LastMatch {
+    pub(crate) whole: String,
+    pub(crate) caps: Vec<Option<String>>,
+}
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     pub(crate) interner: Interner,
@@ -301,6 +314,17 @@ pub(crate) struct Vm {
     /// `--no-default-features`.
     #[cfg(feature = "regex")]
     pub(crate) regex_cache: HashMap<SymId, Rc<regex::Regex>>,
+    /// Last successful regex match — populated by `=~` and
+    /// `String#match` when they hit, cleared when they miss.
+    /// Source of truth for `$1`..`$9` (NumberedReferenceReadNode)
+    /// and `$~` reads in `LoadGlobal`. Owned strings rather than
+    /// a heap ObjId so we don't have to wire a GC-walk root for
+    /// what is conceptually a fast side-channel; `$~` materialises
+    /// a fresh MatchData instance on demand. Cfg-gated on `regex`
+    /// — without the feature there are no successful matches to
+    /// record.
+    #[cfg(feature = "regex")]
+    pub(crate) last_match: Option<LastMatch>,
     /// Lazily-built ENV Hash, shared across every `ENV`
     /// reference. Set on first `LoadConst("ENV")` and reused
     /// thereafter so script code observes a single mutable
@@ -440,6 +464,8 @@ impl Vm {
             class_visibility_stack: vec![],
             #[cfg(feature = "regex")]
             regex_cache: HashMap::new(),
+            #[cfg(feature = "regex")]
+            last_match: None,
             env_hash: None,
             env_override: None,
             pid: None,

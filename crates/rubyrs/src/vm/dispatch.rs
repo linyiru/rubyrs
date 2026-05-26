@@ -1626,17 +1626,31 @@ impl Vm {
             return Ok(());
         }
         // `=~` — Regex/String matching. Returns the byte offset of
-        // the first match, or nil. CRuby additionally sets `$~`
-        // / `$1` etc. capture variables; we don't model `$~`, so
-        // captures are accessed via `#match` only.
+        // the first match, or nil. On a hit, populate `last_match`
+        // (with captures) so `$1`..`$9` / `$~` see the same match;
+        // on a miss, clear it (CRuby parity — a failed `=~` wipes
+        // the prior match's globals).
         if &*name == "=~" && args.len() == 1 {
             let result = match (&recv, &args[0]) {
                 #[cfg(feature = "regex")]
                 (Value::Regex(re), Value::Str(s)) | (Value::Str(s), Value::Regex(re)) => {
                     let bound = s.to_string_lossy();
-                    match re.find(&bound) {
-                        Some(m) => Value::Int(m.start() as i64),
-                        None => Value::Nil,
+                    match re.captures(&bound) {
+                        Some(caps) => {
+                            let m0 = caps.get(0).unwrap();
+                            let start = m0.start() as i64;
+                            self.last_match = Some(crate::vm::LastMatch {
+                                whole: m0.as_str().to_string(),
+                                caps: (1..caps.len())
+                                    .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                                    .collect(),
+                            });
+                            Value::Int(start)
+                        }
+                        None => {
+                            self.last_match = None;
+                            Value::Nil
+                        }
                     }
                 }
                 _ => Value::Nil,
