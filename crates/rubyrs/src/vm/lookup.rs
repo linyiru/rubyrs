@@ -610,10 +610,21 @@ impl Vm {
                     flatten_prepended_module(inc, out, visited);
                 }
             }
+            // `inc_visited` is shared across ALL superclass steps —
+            // not fresh per step like `lookup_method_uncached`. The
+            // difference: `lookup_method_uncached` searches for a
+            // method, so a module transitively included at multiple
+            // superclass levels needs to be walked at each level.
+            // `super_lookup` builds an ancestor *chain* and finds
+            // the next-after-defining method; a module appearing
+            // multiple times in the chain would let `super` resolve
+            // back to the same module method (or otherwise pick
+            // the wrong "next" implementation), so we need full-
+            // chain dedup like `flatten_ancestors`.
+            let mut inc_visited = std::collections::HashSet::new();
             let mut cur = cls.clone();
             loop {
                 if !sc_visited.insert(Rc::as_ptr(&cur)) { break; }
-                let mut inc_visited = std::collections::HashSet::new();
                 for pre in cur.singleton_prepends.borrow().iter() {
                     flatten_prepended_module(pre, &mut chain, &mut inc_visited);
                 }
