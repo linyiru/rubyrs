@@ -4,13 +4,11 @@ use std::rc::Rc;
 
 use crate::bytecode::Proto;
 use crate::error::Trap;
-// `RubyError` is only referenced from the wasi-only `cext_require`
-// alt below; the import is gated so the non-wasi build doesn't
-// trip an unused-import lint under `-D warnings`. The wasi alt is
-// only reachable through the cext feature's kernel-side `require`
-// arm (see vm/kernel.rs), so we gate on both — `--no-default-features`
-// on wasi would otherwise see the import as unused.
-#[cfg(any(all(feature = "cext", target_os = "wasi"), feature = "bignum"))]
+// `RubyError` is only referenced from the bignum binop paths below;
+// the wasi-only `cext_require` alt that previously also needed it
+// moved to `vm/cext_wasi.rs`. Keep the gate aligned with the
+// remaining bignum consumers.
+#[cfg(feature = "bignum")]
 use crate::error::RubyError;
 use crate::heap::Heap;
 use crate::intern::{Interner, SymId};
@@ -19,6 +17,8 @@ use crate::value::{Class, Method, ObjId, Value, Visibility};
 mod array;
 #[cfg(feature = "cext")]
 mod cext;
+#[cfg(all(feature = "cext", target_os = "wasi"))]
+mod cext_wasi;
 mod dispatch;
 mod fileops;
 mod gc;
@@ -728,26 +728,6 @@ impl Vm {
 
 }
 
-
-#[cfg(all(feature = "cext", target_os = "wasi"))]
-impl Vm {
-    /// wasm32-wasi alt for [`Vm::cext_require`]. WASI has no dynamic
-    /// loader, so any `require "path/to/some.so"` from Ruby on wasi
-    /// has no way to succeed; we trap with a precise message instead
-    /// of silently returning Nil. Native targets get the dlopen-based
-    /// implementation in `vm/cext.rs`. Only reachable through the
-    /// cext feature's kernel-side `require` arm; with the feature
-    /// off, kernel.rs emits its own no-cext error and never calls
-    /// into here.
-    pub(crate) fn cext_require(&mut self, path_str: &str) -> Result<Value, Trap> {
-        Err(self.trap(RubyError::RuntimeError {
-            msg: format!(
-                "require: C-ext loading is not supported on wasm32-wasi (attempted to load {})",
-                path_str
-            ),
-        }))
-    }
-}
 
 /// MatchData materialization — shared between `String#match`
 /// (vm/string.rs) and the `$~` read path (vm/step.rs). Keeps one
