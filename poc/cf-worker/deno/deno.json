@@ -1,0 +1,14 @@
+{
+  "_comment": [
+    "Scoped Deno config so deno commands run from this subdir do not",
+    "pick up the parent package.json (workerd, wrangler, esbuild, ...).",
+    "The parent's npm tree pulls a vitest/turbo/rolldown forest that",
+    "deno tries to materialise under --node-modules-dir=auto. An empty",
+    "imports block plus the local nodeModulesDir setting keeps Deno",
+    "self-contained to this subdir."
+  ],
+  "imports": {
+    "@bjorn3/browser_wasi_shim": "npm:@bjorn3/browser_wasi_shim@^0.4.2"
+  },
+  "nodeModulesDir": "auto"
+}
