@@ -210,6 +210,110 @@ errored: RuntimeError
 }
 
 #[test]
+fn require_satisfied_by_all_caps_constant() {
+    // Pins the upper-of-input probe in
+    // `require_satisfied_by_existing_constant`.
+    //
+    // The original `require_satisfied_by_pre_registered_module_no_ops`
+    // test exercised only the camel path (`rack` → `Rack`) and
+    // the case-insensitive walk (`ipaddr` → `IPAddr`); the
+    // upper-of-input shape (`json` → `JSON`, `uri` → `URI`)
+    // wasn't pinned. This test defines a constant under an
+    // ALL-CAPS name and requires its lowercase form — with the
+    // camelized form `Foo` deliberately ABSENT — so the require
+    // can only succeed via the upper probe or the
+    // case-insensitive walk.
+    //
+    // Note: the case-insensitive walk would also catch
+    // `FOO`/`foo`, so this test pins the union behavior rather
+    // than the upper-of-input branch in isolation. That's an
+    // acceptable contract: what matters end-to-end is "this
+    // requires returns true", and either probe being broken
+    // alone would only be caught if the OTHER also fails to
+    // cover the case. To isolate the upper-of-input branch
+    // would require white-box testing the helper directly;
+    // pinning the integration-level contract here matches the
+    // rest of this file's style.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_all_caps_driver.rb");
+    fs::write(&driver_path,
+        r#"
+# Define ONLY the all-caps form — no camelized Foo.
+module FOO; end
+
+r1 = require "foo"
+r2 = require "foo/subpath"
+
+puts "foo-allcaps=#{r1}"
+puts "foo-subpath=#{r2}"
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    assert_eq!(
+        stdout, "foo-allcaps=true\nfoo-subpath=true\n",
+        "all-caps fallback mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
+fn require_rejects_leading_underscore_path() {
+    // Pins the leading-underscore guard added per Copilot
+    // review on PR #135. `snake_to_camel_case("_rack")` would
+    // otherwise return `"Rack"` (the empty segment before the
+    // first `_` contributes nothing) and over-match — so
+    // `require "_rack"` would silently succeed against a
+    // host-registered `Rack`. The guard rejects any first-seg
+    // char that isn't ASCII alphabetic so `_rack` falls through
+    // to cext_require, matching the diagnostic shape any other
+    // unrecoverable require produces.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_underscore_driver.rb");
+    fs::write(&driver_path,
+        r#"
+module Rack; end
+
+begin
+  require "_rack"
+  puts "leaked-true"
+rescue RuntimeError => e
+  puts "rejected: #{e.class}"
+end
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    assert_eq!(
+        stdout.trim(), "rejected: RuntimeError",
+        "leading-underscore guard mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
 fn require_missing_rb_falls_back_to_cext_or_errors() {
     // Path with no .rb sibling and no cext sibling should
     // error out cleanly (RuntimeError-shape via the cext
