@@ -54,7 +54,7 @@ describe "String#length" do
   # "+1 per invalid byte" semantics.
 
   # Skipped — upstream shared/length.rb:46–49
-  #   "adds 1 (and not 2) for a incomplete surrogate in UTF-16"
+  #   "adds 1 (and not 2) for an incomplete surrogate in UTF-16"
   # Needs `force_encoding("UTF-16LE"/"UTF-16BE")`.
 
   # Skipped — upstream shared/length.rb:51–54
