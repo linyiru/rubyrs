@@ -640,7 +640,7 @@ impl Vm {
                         // must be set so the cext can rb_funcall back
                         // and rb_data_typed_object_wrap can locate
                         // the Vm to allocate on its heap.
-                        let class_name = cls.name.borrow().clone();
+                        let class_name = cls.name.clone();
                         let qualified = format!("{}::allocate", class_name);
                         let vm_ptr: *mut Vm = g.vm;
                         let raw = super::cext::with_vm_ptr_set(vm_ptr, || {
@@ -733,7 +733,7 @@ impl Vm {
                         // cases and raises ArgumentError on a
                         // mismatch.
                         let cext_init_reg = g.vm.cext_instance_methods
-                            .get(&*cls.name.borrow())
+                            .get(cls.name.as_str())
                             .and_then(|t| t.get(&init_id).cloned())
                             .filter(|reg| reg.arity == -1 || (0..=5).contains(&reg.arity));
                         if let Some(reg) = cext_init_reg {
@@ -856,7 +856,7 @@ impl Vm {
             // on the same class, which works correctly.
             #[cfg(all(feature = "cext", not(target_os = "wasi")))]
             {
-                if let Some(table) = self.cext_instance_methods.get(&*cls.name.borrow())
+                if let Some(table) = self.cext_instance_methods.get(cls.name.as_str())
                     && let Some(reg) = table.get(&name_id).cloned() {
                         // Pin recv + args across the cext call
                         // (review #4 on PR #27). cext_dispatch may
@@ -952,13 +952,13 @@ impl Vm {
                 let target_self = recv.clone();
                 return self.invoke_method(m, target_self, args);
             }
-            if cls.name.borrow().as_str() == "File"
+            if cls.name.as_str() == "File"
                 && let Some(v) = self.file_class_dispatch(&name, &args)? {
                     self.stack.push(v);
                     return Ok(());
                 }
             #[cfg(feature = "cext")]
-            if let Some(table) = self.cext_class_methods.get(&*cls.name.borrow())
+            if let Some(table) = self.cext_class_methods.get(cls.name.as_str())
                 && let Some(host) = table.get(&name_id).cloned() {
                     // Stash Vm pointer for the singleton-method's
                     // C body — same rationale as the top-level
@@ -1080,12 +1080,12 @@ impl Vm {
             // the is_a check here gives `Kernel.instance_method(:foo)
             //   .bind(any_value)` the same shape without forcing a
             // synthetic Kernel-ancestor onto every primitive class.
-            if cap_class.name.borrow().as_str() != "Kernel"
+            if cap_class.name.as_str() != "Kernel"
                 && !super::class_is_a(&target_class, &cap_class) {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "bind argument must be an instance of {} (got {})",
-                        cap_class.name.borrow(), target_class.name.borrow(),
+                        cap_class.name, target_class.name,
                     ),
                 }));
             }
@@ -1731,10 +1731,10 @@ impl Vm {
                             }
                         }
                     };
-                    let own_prefix = format!("{}::", cls.name.borrow());
+                    let own_prefix = format!("{}::", cls.name);
                     collect(&own_prefix, &mut names);
                     for inc in cls.includes.borrow().iter() {
-                        let inc_prefix = format!("{}::", inc.name.borrow());
+                        let inc_prefix = format!("{}::", inc.name);
                         collect(&inc_prefix, &mut names);
                     }
                     names.sort();
@@ -1842,10 +1842,10 @@ impl Vm {
                 }
                 ("instance_method", [Value::Sym(sid)]) => {
                     let found = self.lookup_method_uncached(cls, *sid).is_some();
-                    if !found && !is_primitive_class_name(&cls.name.borrow()) {
+                    if !found && !is_primitive_class_name(&cls.name) {
                         let mname = self.interner.resolve(*sid).to_string();
                         return Err(self.trap(RubyError::NameError {
-                            msg: format!("undefined method '{}' for class '{}'", mname, cls.name.borrow()),
+                            msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
                         }));
                     }
                     let cls_owned = cls.clone();
@@ -2995,7 +2995,7 @@ impl Vm {
             // and user instances.
             other => {
                 let class_name = match self.class_of(&other) {
-                    Value::Class(c) => c.name.borrow().clone(),
+                    Value::Class(c) => c.name.clone(),
                     _ => other.type_name().to_string(),
                 };
                 return Err(self.trap(RubyError::TypeError {
@@ -3252,7 +3252,7 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
     if vm.lookup_method_uncached(cls, sid).is_some() {
         return true;
     }
-    let sentinel: Option<Value> = match cls.name.borrow().as_str() {
+    let sentinel: Option<Value> = match cls.name.as_str() {
         "Integer" => Some(Value::Int(0)),
         "Float" => Some(Value::Float(0.0)),
         "String" => Some(Value::new_str("")),
@@ -3270,7 +3270,7 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
         // Aggregate / opaque primitives: keep the previously-
         // permissive answer so the gem helper path doesn't trip
         // on Kernel-shared method probes.
-        None => is_primitive_class_name(&cls.name.borrow()),
+        None => is_primitive_class_name(&cls.name),
     }
 }
 

@@ -425,7 +425,7 @@ impl Vm {
                                 let is_module = *is_module;
                                 self.classes.entry(cid).or_insert_with(|| {
                                     std::rc::Rc::new(crate::value::Class {
-                                        name: std::cell::RefCell::new(cname.to_string()),
+                                        name: cname.to_string(),
                                         is_module,
                                         methods: std::cell::RefCell::new(std::collections::HashMap::new()),
                                         singleton_methods: std::cell::RefCell::new(std::collections::HashMap::new()),

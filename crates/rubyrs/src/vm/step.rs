@@ -1008,7 +1008,7 @@ impl Vm {
                         // correctly.
                         let cls_ref = self.class_stack.last().cloned();
                         if let Some(cls) = &cls_ref
-                            && self.primitive_class_responds_to(&cls.name.borrow(), old_id) {
+                            && self.primitive_class_responds_to(&cls.name, old_id) {
                             let synth = self.synth_primitive_forwarder(cls, old_id);
                             cls.methods.borrow_mut().insert(new_id, synth);
                             self.method_gen = self.method_gen.wrapping_add(1);
@@ -1025,7 +1025,7 @@ impl Vm {
                         // "Class" }` was misleading.
                         let name = self.interner.resolve(old_id).to_string();
                         let ctx = self.class_stack.last()
-                            .map(|c| format!("class `{}'", c.name.borrow()))
+                            .map(|c| format!("class `{}'", c.name))
                             .unwrap_or_else(|| "main".to_string());
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method `{}' for {}", name, ctx),
@@ -1067,7 +1067,7 @@ impl Vm {
                         // singleton/instance distinction is rarely
                         // load-bearing in real error logs.)
                         let ctx = self.class_stack.last()
-                            .map(|c| format!("class `{}'", c.name.borrow()))
+                            .map(|c| format!("class `{}'", c.name))
                             .unwrap_or_else(|| "main".to_string());
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method `{}' for {}", name, ctx),
@@ -1200,7 +1200,7 @@ impl Vm {
                 let table_key = if qual_id.0 == u32::MAX { name_id } else { qual_id };
                 let name_str = self.interner.resolve(table_key).to_string();
                 let cls = self.classes.entry(table_key).or_insert_with(|| Rc::new(Class {
-                    name: std::cell::RefCell::new(name_str),
+                    name: name_str,
                     is_module,
                     ivars: RefCell::new(HashMap::new()),
                     methods: RefCell::new(HashMap::new()),

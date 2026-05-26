@@ -395,7 +395,7 @@ fn cext_value_to_cvalue_d(
         // an rb_funcall, then operates on the returned class
         // handle (typical pattern: `cls.name` to dispatch-by-type
         // — exactly what mini-json's generator does).
-        Value::Class(c) => rubyrs_cext::CValue::Class(c.name.borrow().clone()),
+        Value::Class(c) => rubyrs_cext::CValue::Class(c.name.clone()),
         // L3-J: Symbol crossing Vm → cext as CValue::Symbol carrying
         // the symbol's name. msgpack's no-registration Symbol pack
         // path (`Packer#write(:foo)`) and any cext that takes a
@@ -1010,7 +1010,7 @@ impl Vm {
             for cls in state.registered_classes {
                 let name_sym = self.interner.intern(&cls.joined_name);
                 let new_class = Rc::new(Class {
-                    name: std::cell::RefCell::new(cls.joined_name.clone()),
+                    name: cls.joined_name.clone(),
                     is_module: false,
                     ivars: RefCell::new(HashMap::new()),
                     methods: RefCell::new(HashMap::new()),

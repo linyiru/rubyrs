@@ -210,7 +210,7 @@ impl Vm {
                     // the eigenclass's synthetic
                     // `#<Class:#<Foo>>`. Handles both Instance
                     // and TypedData like its caller.
-                    Value::Object(id) => self.heap.real_class_of(*id).name.borrow().clone(),
+                    Value::Object(id) => self.heap.real_class_of(*id).name.clone(),
                     _ => exc.type_name().to_string(),
                 };
                 let message = match &exc {
@@ -338,7 +338,7 @@ mod tests {
 
     fn mk_class(name: &str, superclass: Option<Rc<Class>>) -> Rc<Class> {
         Rc::new(Class {
-            name: std::cell::RefCell::new(name.to_string()),
+            name: name.to_string(),
             is_module: false,
             ivars: RefCell::new(HashMap::new()),
             methods: RefCell::new(HashMap::new()),
@@ -395,7 +395,7 @@ mod tests {
             other => panic!("expected Object, got {other:?}"),
         };
         // Class is RuntimeError.
-        assert_eq!(*vm.heap.class_of(id).name.borrow(), "RuntimeError");
+        assert_eq!(vm.heap.class_of(id).name, "RuntimeError");
         // `@message` is the original string.
         let msg_sym = vm.interner.intern("@message");
         let stored = vm.heap.instance(id).ivars.get(&msg_sym).cloned()

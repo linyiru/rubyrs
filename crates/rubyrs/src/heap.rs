@@ -192,7 +192,7 @@ impl Heap {
         }
         let original = inst.class.clone();
         let sc = Rc::new(crate::value::Class {
-            name: std::cell::RefCell::new(format!("#<Class:#<{}>>", original.name.borrow())),
+            name: format!("#<Class:#<{}>>", original.name),
             is_module: false,
             ivars: RefCell::new(HashMap::new()),
             methods: RefCell::new(HashMap::new()),
@@ -516,7 +516,7 @@ impl Value {
             Value::Bool(true) => "true".into(),
             Value::Bool(false) => "false".into(),
             Value::Nil => "".into(),
-            Value::Class(c) => c.name.borrow().clone(),
+            Value::Class(c) => c.name.clone(),
             // Use class_of so TypedData-backed Objects (L3-B) print
             // safely too — `heap.instance(*id)` would panic on
             // those slots (review #1).
@@ -524,7 +524,7 @@ impl Value {
             // doesn't surface the eigenclass here even when one
             // exists. Use `real_class_of` for the same reason
             // `Object#class` does.
-            Value::Object(id) => format!("#<{}>", heap.real_class_of(*id).name.borrow()),
+            Value::Object(id) => format!("#<{}>", heap.real_class_of(*id).name),
             Value::Array(id) => {
                 let a = heap.array(*id);
                 let parts: Vec<String> = a.iter().map(|v| v.to_inspect(heap, interner)).collect();
