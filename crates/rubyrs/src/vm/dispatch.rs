@@ -999,6 +999,32 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
+            // `Module.nesting` — CRuby reflection returning the
+            // lexical scope chain at the call site, innermost-first.
+            // Resolves through the current frame's proto's
+            // `lexical_scope` (built at compile time from
+            // `b.class_path`). Each SymId is looked up in
+            // `self.classes`; missing entries are skipped (a top-
+            // level `module` whose body hasn't run yet at the call
+            // site can't appear here in practice — class_path is
+            // set ONLY when we're already inside the body, so the
+            // class table already has the entry by the time
+            // `Module.nesting` runs).
+            if cls.name.as_str() == "Module" && &*name == "nesting" && args.is_empty() {
+                let frame = self.frames.last().expect("ICE: Module.nesting no frame");
+                let lex = self.protos[frame.proto_idx].lexical_scope.clone();
+                let mut items: Vec<Value> = Vec::with_capacity(lex.len());
+                for sym in lex {
+                    if let Some(c) = self.classes.get(&sym).cloned() {
+                        items.push(Value::Class(c));
+                    }
+                }
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(items));
+                self.stack.push(Value::Array(id));
+                return Ok(());
+            }
             #[cfg(feature = "cext")]
             if let Some(table) = self.cext_class_methods.get(cls.name.as_str())
                 && let Some(host) = table.get(&name_id).cloned() {
@@ -2770,6 +2796,7 @@ impl Vm {
                 block_body_local_start: u16::MAX,
                 byte_literals: Vec::new(),
                 const_chains: Vec::new(),
+                lexical_scope: Vec::new(),
             };
             let idx = self.protos.len();
             self.protos.push(proto);
@@ -2854,6 +2881,7 @@ impl Vm {
                 block_body_local_start: u16::MAX,
                 byte_literals: Vec::new(),
                 const_chains: Vec::new(),
+                lexical_scope: Vec::new(),
             };
             let idx = self.protos.len();
             self.protos.push(proto);
@@ -3429,6 +3457,7 @@ impl Vm {
             block_body_local_start: u16::MAX,
             byte_literals: vec![],
             const_chains: vec![],
+            lexical_scope: vec![],
         };
         let idx = self.protos.len();
         self.protos.push(proto);

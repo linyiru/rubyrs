@@ -514,4 +514,18 @@ pub(crate) struct Proto {
     /// Top-level reads (empty class_path at emit time) keep using
     /// `Op::LoadConst(SymId)` directly — no chain needed.
     pub(crate) const_chains: Vec<Vec<crate::intern::SymId>>,
+    /// Lexical class/module nesting at the point this proto was
+    /// compiled, expressed as qualified-name SymIds in
+    /// **innermost-first** order. For a proto compiled inside
+    /// `module A; module B; class C; ...; end; end; end` the value
+    /// is `[sym("A::B::C"), sym("A::B"), sym("A")]`. Top-level
+    /// protos and `<main>` get an empty vec.
+    ///
+    /// Read by `Module.nesting` reflection: at call time we resolve
+    /// each SymId through `Vm.classes` and return the resulting
+    /// Array. Class bodies, method bodies, and blocks all inherit
+    /// the surrounding scope through the compiler's `class_path`,
+    /// so `Module.nesting` inside a block defined in a method body
+    /// inside a class body still reports the full chain.
+    pub(crate) lexical_scope: Vec<crate::intern::SymId>,
 }

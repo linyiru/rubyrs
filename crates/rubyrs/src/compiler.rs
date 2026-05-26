@@ -138,7 +138,7 @@ impl ProtoBuilder {
             _ => panic!("ICE: patch_jump on non-jump op at {}", at),
         }
     }
-    pub(crate) fn build(self, name: String, params: Vec<String>, n_required_positional: u16) -> Proto {
+    pub(crate) fn build(self, name: String, params: Vec<String>, n_required_positional: u16, lexical_scope: Vec<crate::intern::SymId>) -> Proto {
         Proto {
             name, params, n_required_positional,
             rest_param: None,
@@ -155,8 +155,25 @@ impl ProtoBuilder {
             block_body_local_start: u16::MAX,
             byte_literals: self.byte_literals,
             const_chains: self.const_chains,
+            lexical_scope,
         }
     }
+}
+
+/// Build the qualified-SymId chain used by `Module.nesting` from a
+/// compile-time `class_path`. Innermost-first, matching CRuby's
+/// output: for `class_path = ["A", "B", "C"]` the result is
+/// `[sym("A::B::C"), sym("A::B"), sym("A")]`. The top-level proto
+/// (empty class_path) returns an empty vec, which `Module.nesting`
+/// reports as `[]` — also matching CRuby.
+fn build_lexical_scope(
+    class_path: &[String],
+    interner: &mut crate::intern::Interner,
+) -> Vec<crate::intern::SymId> {
+    (0..class_path.len())
+        .rev()
+        .map(|i| interner.intern(&class_path[..=i].join("::")))
+        .collect()
 }
 
 /// Build the cref chain a bare-name constant read should walk at
@@ -1479,8 +1496,9 @@ pub(crate) fn compile_proto_kind(
     }
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
+    let lex = build_lexical_scope(&b.class_path, interner);
     let idx = protos.len();
-    protos.push(b.build(name, params, n_required_positional));
+    protos.push(b.build(name, params, n_required_positional, lex));
     idx
 }
 
@@ -1724,7 +1742,8 @@ pub(crate) fn compile_block(
     // are visible (and DESTRUCTIVE) to anything the parent
     // happens to bind into the same index later.
     let block_n_locals = b.n_locals;
-    protos.push(b.build("<block>".into(), proto_params, proto_param_count as u16));
+    let lex = build_lexical_scope(&b.class_path, interner);
+    protos.push(b.build("<block>".into(), proto_params, proto_param_count as u16, lex));
     // Stamp the body-local-reset range on the just-built block
     // Proto. `build()` defaults this to `u16::MAX` (no reset)
     // because that's correct for every non-block builder; the
