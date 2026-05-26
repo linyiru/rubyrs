@@ -731,41 +731,6 @@ impl Vm {
 }
 
 
-/// Dispatch helpers used by the reduce-style accumulators in
-/// `Array#sum`/`Range#sum`/`Array#inject`/`Range#inject`. Promotes
-/// to BigInt on overflow when the feature is on; falls back to
-/// wrapping when it's off. (The main `Op::BinOp` path doesn't go
-/// through this helper — it inlines the same logic in step.rs
-/// with the BinOpInt/BinOp fast paths because each instruction
-/// already has the operands unwrapped in locals; routing through
-/// a helper would add an avoidable match on the i64 fast path.
-/// If those two paths ever drift apart, refactor both onto this
-/// helper.)
-impl Vm {
-    /// Apply an Int×Int op, promoting to BigInt on Add/Sub/Mul
-    /// overflow when `bignum` is on. Use this instead of calling
-    /// `kind.apply_int` directly anywhere the result needs to be
-    /// pushed back as a Value.
-    pub(crate) fn apply_int_promote(
-        &mut self,
-        kind: crate::bytecode::BinOpKind,
-        x: i64,
-        y: i64,
-    ) -> Result<Value, Trap> {
-        if let Some(v) = kind.apply_int(x, y) {
-            return Ok(v);
-        }
-        // None can only happen under `feature = "bignum"`.
-        #[cfg(feature = "bignum")]
-        {
-            self.bigint_arith(kind, &Value::Int(x), &Value::Int(y))
-                .expect("ICE: bigint_arith None for Int operands")
-        }
-        #[cfg(not(feature = "bignum"))]
-        unreachable!("apply_int returns None only when bignum is on");
-    }
-}
-
 /// Dispatch helper: tries Int/BigInt arithmetic or comparison
 /// for the `Op::BinOp` cold path (operands include at least one
 /// BigInt, or are non-Int shapes that this method declines).
