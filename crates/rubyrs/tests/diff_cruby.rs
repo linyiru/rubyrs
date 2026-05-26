@@ -272,3 +272,4 @@ fn run_diff(name: &str) {
 #[test] fn uninitialized_constant() { run_diff("uninitialized_constant"); }
 #[test] fn singleton_class_prepend() { run_diff("singleton_class_prepend"); }
 #[test] fn tilt_load_capabilities() { run_diff("tilt_load_capabilities"); }
+#[test] fn private_constant() { run_diff("private_constant"); }
