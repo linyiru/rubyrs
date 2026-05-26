@@ -449,13 +449,23 @@ impl Vm {
                 // we can call `maybe_gc` + `check_alloc?` cleanly.
                 #[cfg(feature = "regex")]
                 if &*name == "$~" {
-                    let v = if let Some(m) = self.last_match.clone() {
-                        let caps: Vec<Value> = m.caps.iter()
+                    // Borrow first: avoid cloning the whole
+                    // `LastMatch` (Vec + every capture String) just
+                    // to materialise. We only need to clone the
+                    // specific strings we hand to `Value::new_str`.
+                    let v = if self.last_match.is_some() {
+                        // Materialise capture Values up front so the
+                        // immutable borrow of `last_match` is dropped
+                        // before any `&mut self` calls (`maybe_gc`,
+                        // `check_alloc`, `heap.alloc`).
+                        let caps: Vec<Value> = self.last_match.as_ref().unwrap()
+                            .caps.iter()
                             .map(|c| match c {
                                 Some(s) => Value::new_str(s.clone()),
                                 None => Value::Nil,
                             })
                             .collect();
+                        let whole_str = self.last_match.as_ref().unwrap().whole.clone();
                         self.maybe_gc();
                         self.check_alloc()?;
                         let caps_arr = self.heap.alloc(crate::heap::HeapObj::Array(caps));
@@ -463,6 +473,12 @@ impl Vm {
                         match self.classes.get(&cls_id).cloned() {
                             None => Value::Nil,
                             Some(cls) => {
+                                // Second alloc — re-check the cap so
+                                // a tight `heap.max_live` budget that
+                                // admitted `caps_arr` but not the
+                                // Instance traps cleanly rather than
+                                // sneaking past the limit.
+                                self.check_alloc()?;
                                 let obj_id = self.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
                                     class: cls,
                                     ivars: HashMap::new(),
@@ -471,7 +487,7 @@ impl Vm {
                                 let whole_ivar = self.interner.intern("@whole");
                                 let caps_ivar = self.interner.intern("@caps");
                                 let inst = self.heap.instance_mut(obj_id);
-                                inst.ivars.insert(whole_ivar, Value::new_str(m.whole));
+                                inst.ivars.insert(whole_ivar, Value::new_str(whole_str));
                                 inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
                                 Value::Object(obj_id)
                             }

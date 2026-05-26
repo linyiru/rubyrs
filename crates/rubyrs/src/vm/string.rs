@@ -617,12 +617,19 @@ impl Vm {
                                     caps: last_caps,
                                 });
                                 self.maybe_gc();
+                                self.check_alloc()?;
                                 let caps_arr = self.heap.alloc(HeapObj::Array(group_vals));
                                 let cls_id = self.interner.intern("MatchData");
                                 let cls = match self.classes.get(&cls_id).cloned() {
                                     Some(c) => c,
                                     None => return Ok(Some(Value::Nil)),
                                 };
+                                // Second alloc — re-check the cap so
+                                // a tight `heap.max_live` budget that
+                                // admitted `caps_arr` but not the
+                                // Instance traps cleanly rather than
+                                // sneaking past the limit.
+                                self.check_alloc()?;
                                 let obj_id = self.heap.alloc(HeapObj::Instance(Instance {
                                     class: cls,
                                     ivars: HashMap::new(),
