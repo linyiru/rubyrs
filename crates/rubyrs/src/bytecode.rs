@@ -185,7 +185,15 @@ pub(crate) enum Op {
     /// the receiver isn't a `Value::Object` (consistent with
     /// `Op::DefObjectSingletonMethod`'s restriction).
     DefObjectSingletonMethodBlock(SymId),
-    DefClass(SymId, u32),
+    /// Args: bare name SymId, proto index, fully-qualified name
+    /// SymId. The third arg holds the lexical-path-prefixed name
+    /// (`"Foo::Bar"`) used to stamp `Class.name` on first
+    /// construction — so `Class#name` / `#to_s` / `#inspect`
+    /// report the qualified form CRuby does. `SymId(u32::MAX)`
+    /// is the "no path" sentinel: top-level `class Foo`
+    /// classes use the bare SymId for their name field
+    /// (already-equal to the first arg's resolution).
+    DefClass(SymId, u32, SymId),
     NewArray(u16),
     NewHash(u16),
     /// Pops two values (begin, end). u8 nonzero = exclusive (`...`).

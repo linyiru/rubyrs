@@ -919,18 +919,30 @@ pub(crate) fn compile_expr(
                 b.emit(Op::LoadNil);
             }
             let name_id = interner.intern(name);
-            b.emit(Op::DefClass(name_id, proto_idx as u32));
+            // Compute the qualified name (`Foo::Bar`) when this
+            // class is being defined inside a `module Foo` /
+            // `class Foo` body. Drives both `Op::DefClass`'s
+            // qual-name slot (for `Class#name` to report the
+            // qualified form) AND the `Op::StoreConst` alias
+            // below (for `Foo::Bar` external resolution).
+            // `SymId(u32::MAX)` sentinel = "no prefix" (top
+            // level or already-qualified name).
+            let qual_id = if !b.class_path.is_empty() && !name.contains("::") {
+                let prefixed = format!("{}::{}", b.class_path.join("::"), name);
+                interner.intern(&prefixed)
+            } else {
+                crate::intern::SymId(u32::MAX)
+            };
+            b.emit(Op::DefClass(name_id, proto_idx as u32, qual_id));
             // Alias under the prefixed path so `Foo::Bar.new` from
             // outside resolves. Skipped when class_path is empty
             // (top-level — no prefix needed) or when name already
             // looks like a path (defensive — Expr::Class names are
             // bare in our AST today, but stay safe). Idempotent on
             // re-open: same Class value stored.
-            if !b.class_path.is_empty() && !name.contains("::") {
+            if qual_id.0 != u32::MAX {
                 b.emit(Op::LoadConst(name_id));
-                let prefixed = format!("{}::{}", b.class_path.join("::"), name);
-                let pid = interner.intern(&prefixed);
-                b.emit(Op::StoreConst(pid));
+                b.emit(Op::StoreConst(qual_id));
             }
         }
         Expr::AliasSingletonMethod(new_name, old_name) => {

@@ -240,3 +240,4 @@ fn run_diff(name: &str) {
 #[test] fn rational_literal() { run_diff("rational_literal"); }
 #[test] fn cext_msgpack_pure_ruby_load() { run_diff("cext_msgpack_pure_ruby_load"); }
 #[test] fn alias_singleton_keyword() { run_diff("alias_singleton_keyword"); }
+#[test] fn class_qualified_name() { run_diff("class_qualified_name"); }

@@ -978,14 +978,27 @@ impl Vm {
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
-            Op::DefClass(name_id, p_idx) => {
+            Op::DefClass(name_id, p_idx, qual_id) => {
                 // Pop superclass (Nil for "default to Object", a Class for `class Foo < Bar`).
                 let parent_val = self.stack.pop().expect("ICE: DefClass without superclass slot");
                 let parent = match parent_val {
                     Value::Class(c) => Some(c),
                     _ => None, // Nil -> default; treat as no explicit parent for now
                 };
-                let name_str = self.interner.resolve(name_id).to_string();
+                // Use the qualified name for `Class.name` when the
+                // class is being defined inside a module/class body
+                // (`module Foo; class Bar; ...; end; end` →
+                // qual_id = SymId for "Foo::Bar"). Top-level
+                // classes leave the third arg as the u32::MAX
+                // sentinel and fall back to the bare name. Only
+                // takes effect on first creation — class re-open
+                // (`or_insert_with` short-circuits) keeps whatever
+                // name the original define stamped.
+                let name_str = if qual_id.0 == u32::MAX {
+                    self.interner.resolve(name_id).to_string()
+                } else {
+                    self.interner.resolve(qual_id).to_string()
+                };
                 let cls = self.classes.entry(name_id).or_insert_with(|| Rc::new(Class {
                     name: name_str,
                     methods: RefCell::new(HashMap::new()),

@@ -88,7 +88,7 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         (Value::Str(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Bool(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Nil, "<=>", [_]) => Some(Value::Nil),
-        (Value::Class(c), "name", []) | (Value::Class(c), "to_s", []) => {
+        (Value::Class(c), "name", []) | (Value::Class(c), "to_s", []) | (Value::Class(c), "inspect", []) => {
             Some(Value::new_str(c.name.clone()))
         }
         // Class identity is `Rc::ptr_eq` — two `Value::Class` refer
