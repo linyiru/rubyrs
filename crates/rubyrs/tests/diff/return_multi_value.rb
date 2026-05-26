@@ -30,6 +30,17 @@ def mid_splat
   return :first, *[1, 2], :last
 end
 puts mid_splat.inspect                          # [:first, 1, 2, :last]
+# Splat-middle with scalar/nil inner — Array(inner) wrap applies
+# to splat chunks too, so `*5` contributes `[5]` and `*nil`
+# contributes `[]` into the Array#+ chain.
+def scalar_mid_splat
+  return :first, *5, :last
+end
+puts scalar_mid_splat.inspect                   # [:first, 5, :last]
+def nil_mid_splat
+  return :first, *nil, :last
+end
+puts nil_mid_splat.inspect                      # [:first, :last]
 
 # --- Single-splat: lowers to Array(inner) call ---
 # CRuby's `return *expr` semantics is `return Array(expr)`:

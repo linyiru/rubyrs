@@ -1527,7 +1527,20 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                         if !buf.is_empty() {
                             chunks.push(sp(span_node, Expr::ArrayLit(std::mem::take(&mut buf))));
                         }
-                        chunks.push(tr(&inner));
+                        // Wrap splat inner in `Array(inner)` so the
+                        // subsequent `Array#+` chain always concats
+                        // Array against Array — `return :first, *5, :last`
+                        // becomes `[:first] + Array(5) + [:last]` →
+                        // `[:first, 5, :last]`, matching CRuby. Without
+                        // the wrap, scalars/nil would push bare values
+                        // and `Array#+` would TypeError on the non-
+                        // Array RHS.
+                        let inner_expr = tr(&inner);
+                        chunks.push(sp(span_node, Expr::Call {
+                            receiver: None,
+                            name: "Array".into(),
+                            args: vec![inner_expr],
+                        }));
                     } else {
                         buf.push(tr(n));
                     }
