@@ -2363,9 +2363,9 @@ fn sprintf_alt_form_suppresses_prefix_for_zero_value() {
     // CRuby suppresses the alt-form prefix when the value is
     // zero: `'%#x' % 0` → `"0"`, not `"0x0"`. Same for
     // `'%#o' % 0` (`"0"`, not `"00"`), `'%#b' % 0` (`"0"`,
-    // not `"0b0"`). Pin both Int(0) and BigInt(0) paths plus
-    // the standard non-zero alt rendering as the negative
-    // half of the contract.
+    // not `"0b0"`). All literals here take the Int(0) path;
+    // non-zero alt rendering pinned as the negative half of
+    // the contract.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
@@ -2394,27 +2394,25 @@ fn sprintf_alt_form_suppresses_prefix_for_zero_value() {
 
 #[cfg(feature = "bignum")]
 #[test]
-fn sprintf_alt_form_suppresses_prefix_for_bigint_zero() {
-    // Same suppression rule applies to the BigInt(0) path —
-    // exercised only when bignum is on and BigInt(0) actually
-    // exists as a Value (normally demote-on-fit would convert
-    // it to Int(0) in user code, but the helper code-path
-    // still needs the check for hand-built BigInt zero values
-    // from FFI / preamble paths).
+fn sprintf_alt_form_zero_via_bignum_arithmetic_still_suppressed() {
+    // Regression guard for the bignum profile: expressions
+    // that route through the BigInt arithmetic path but reduce
+    // to zero (`(2 ** 100) % (2 ** 100)`) demote to Int(0) per
+    // the canonical-BigInt invariant, so the formatter sees
+    // Int(0) and the alt prefix must still be suppressed.
+    // The BigInt(0) formatting arm itself isn't reachable from
+    // user code (demote-on-fit), but the `b.sign() != NoSign`
+    // guard in `format_radix_any` defends against hand-built
+    // BigInt(0) values from FFI / preamble paths; that guard
+    // is exercised structurally rather than dynamically here.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
-    // `2 ** 100 - 2 ** 100` materialises a BigInt subtraction
-    // that demotes to Int(0); use `(2 ** 100) % (2 ** 100)`
-    // for the same effect. Both paths route through the Int(0)
-    // arm in practice, so the meaningful coverage is shared
-    // with the sibling test above. This test just pins that
-    // the bignum profile produces the same output.
     rt.eval(
         "puts '%#x' % ((2 ** 100) % (2 ** 100))\n\
          puts '%#o' % ((2 ** 100) % (2 ** 100))\n\
          puts '%#b' % ((2 ** 100) % (2 ** 100))",
-        "sprintf_alt_bigint_zero.rb",
+        "sprintf_alt_bignum_arith_zero.rb",
     ).expect("eval");
     let out = buf.snapshot();
     assert_eq!(out.trim(), "0\n0\n0");
