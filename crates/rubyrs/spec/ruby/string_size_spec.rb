@@ -9,18 +9,14 @@
 #   https://github.com/ruby/spec/blob/448cb340/core/string/size_spec.rb
 #   https://github.com/ruby/spec/blob/448cb340/core/string/shared/length.rb
 #
-# Same `.send(@method)` → `.size` hand-fix as
-# string_length_spec.rb (rubyrs doesn't implement `Object#send`
-# yet — see that file's header for the full note).
-
 describe "String#size" do
   it "returns the length of self" do
-    assert_eq("".size, 0)
-    assert_eq("\x00".size, 1)
-    assert_eq("one".size, 3)
-    assert_eq("two".size, 3)
-    assert_eq("three".size, 5)
-    assert_eq("four".size, 4)
+    assert_eq("".send(:size), 0)
+    assert_eq("\x00".send(:size), 1)
+    assert_eq("one".send(:size), 3)
+    assert_eq("two".send(:size), 3)
+    assert_eq("three".send(:size), 5)
+    assert_eq("four".send(:size), 4)
   end
 
   # Skipped — upstream shared/length.rb:13–18 needs
