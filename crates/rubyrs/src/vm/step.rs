@@ -217,8 +217,8 @@ impl Vm {
                 // emitted by different call sites collapses to
                 // one compiled Regex).
                 let pat_val = self.stack.pop().unwrap_or(Value::Nil);
-                let pat = match &pat_val {
-                    Value::Str(s) => s.to_string_lossy(),
+                let s = match &pat_val {
+                    Value::Str(s) => s.clone(),
                     other => {
                         // Defensive: the compiler always emits a
                         // string-producing sequence before this op,
@@ -234,32 +234,43 @@ impl Vm {
                         }));
                     }
                 };
-                // ResourceCap: respect `Config::max_symbols` the
-                // same way `String#to_sym` does. Dynamic patterns
-                // generated in a hot loop (e.g. `1000.times { |i| /#{i}/ }`)
-                // would otherwise grow the interner — and the
-                // SymId-keyed `regex_cache` — without bound. Skip
-                // the check when the pattern is already interned;
-                // a cache hit costs no new symbol.
-                if let Some(max) = self.max_symbols
-                    && !self.interner.contains(&pat) && self.interner.len() >= max {
-                        return Err(self.trap(RubyError::ResourceExhausted {
-                            msg: format!("interner exhausted: {} symbols", max),
-                        }));
+                // `with_str_lossy` is the borrowed fast path — for
+                // valid UTF-8 strings (the common case for regex
+                // patterns) the closure sees a `&str` backed by the
+                // RubyStr's RefCell content without an owning copy.
+                // Cache hits never allocate a String; only the cold
+                // path (cache miss → intern → compile) needs to
+                // materialise an owned String (interner takes one
+                // anyway). Error formatting is also rare and reads
+                // through the same borrow.
+                let regex_rc = s.with_str_lossy::<Result<Rc<regex::Regex>, Trap>>(|pat| {
+                    // ResourceCap: respect `Config::max_symbols` the
+                    // same way `String#to_sym` does. Dynamic patterns
+                    // generated in a hot loop (e.g.
+                    // `1000.times { |i| /#{i}/ }`) would otherwise
+                    // grow the interner — and the SymId-keyed
+                    // `regex_cache` — without bound. Skip the check
+                    // when the pattern is already interned; a cache
+                    // hit costs no new symbol.
+                    if let Some(max) = self.max_symbols
+                        && !self.interner.contains(pat) && self.interner.len() >= max {
+                            return Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("interner exhausted: {} symbols", max),
+                            }));
+                        }
+                    let id = self.interner.intern(pat);
+                    if let Some(r) = self.regex_cache.get(&id) {
+                        return Ok(r.clone());
                     }
-                let id = self.interner.intern(&pat);
-                let regex_rc = if let Some(r) = self.regex_cache.get(&id) {
-                    r.clone()
-                } else {
-                    let compiled = regex::Regex::new(&pat).map_err(|e| {
+                    let compiled = regex::Regex::new(pat).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", pat, e),
                         })
                     })?;
                     let rc = Rc::new(compiled);
                     self.regex_cache.insert(id, rc.clone());
-                    rc
-                };
+                    Ok(rc)
+                })?;
                 self.stack.push(Value::Regex(regex_rc));
             }
             Op::LoadSymbol(id) => {
