@@ -1,0 +1,22 @@
+[package]
+name = "rubyrs-wasm-timer"
+description = "Sub-millisecond wall-clock timer for perf/wasm_breakdown.sh — execs a child and prints ns-precision elapsed time. Lives in-tree because /usr/bin/time -p rounds to 10 ms on macOS and `python3 -c ...` adds 1-2 ms of interpreter startup."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "rubyrs-wasm-timer"
+path = "src/main.rs"
+
+# Slim binary: no dependencies, no allocator tricks needed —
+# `std::process::Command` + `Instant` is all we want. Override
+# release profile per-crate would be nice (opt-level = "s",
+# panic = "abort") but that has to live in workspace
+# `[profile.release]`; the existing `lto = "thin"` is fine for
+# this tool too.
+[dependencies]

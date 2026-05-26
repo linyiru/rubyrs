@@ -36,17 +36,26 @@ SCRIPT_INLINE="${SCRIPT_INLINE:-puts 1 + 2}"
 
 # Setup checks — every missing tool is a setup error (exit 2), same
 # convention as `perf/wasm_check.sh`.
-for tool in wasmtime cargo python3; do
+for tool in wasmtime cargo; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "wasm_breakdown: required tool not found: $tool" >&2
     exit 2
   fi
 done
-# We need ns-precision wall timing (the whole point of this script
-# is to characterize sub-10ms phases). macOS `/usr/bin/time -p`
-# rounds to 10 ms, so we wrap wasmtime in a python3 timer instead —
-# `time.time_ns()` is available everywhere python3 is.
-TIMER='import subprocess,sys,time; t=time.time_ns(); rc=subprocess.run(sys.argv[1:]).returncode; print((time.time_ns()-t)//1000, file=sys.stderr); sys.exit(rc)'
+
+# We need ns-precision wall timing — macOS `/usr/bin/time -p` rounds
+# to 10 ms, useless at sub-10 ms scale. Use the in-tree
+# `rubyrs-wasm-timer` binary: ~50-200 us own overhead vs python's
+# 1-2 ms interpreter init, so the wasmtime+wasi measurement is
+# closer to a "naked" host-spawn reading.
+TIMER_BIN="target/release/rubyrs-wasm-timer"
+if [[ ! -x "$TIMER_BIN" ]]; then
+  echo "[build] cargo build --release -p rubyrs-wasm-timer" >&2
+  if ! cargo build --release -p rubyrs-wasm-timer >&2; then
+    echo "wasm_breakdown: failed to build rubyrs-wasm-timer" >&2
+    exit 2
+  fi
+fi
 
 PERF_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/rubyrs-wasm-breakdown.XXXXXX")" || {
   echo "wasm_breakdown: mktemp -d failed" >&2
@@ -128,14 +137,11 @@ for i in $(seq 1 "$RUNS"); do
   # `--dir "$PERF_TMPDIR"` grants wasmtime read access to the
   # tempdir holding the script (wasi sandboxes the filesystem;
   # without an explicit grant, `eval_file` gets `No such file`).
-  # The python3 wrapper prints `<wall_us>\n` to stderr after the
-  # child exits — appended after the rubyrs trace lines in the
-  # same file. The wall measurement INCLUDES python3's own
-  # subprocess.run dispatch (~1-2 ms), which we accept: the
-  # alternative (gdate + arithmetic) is non-portable. The python
-  # overhead is roughly constant across runs, so MIN-of-N filters
-  # it the same way it filters wasmtime jitter.
-  python3 -c "$TIMER" wasmtime run --allow-precompiled \
+  # rubyrs-wasm-timer captures Instant::now() right before its
+  # `Command::status` call and prints a sentinel line on stderr
+  # after the child exits — appended after the rubyrs trace
+  # lines in the same file.
+  "$TIMER_BIN" wasmtime run --allow-precompiled \
     --dir "$PERF_TMPDIR" \
     "$CWASM" "$SCRIPT" \
     >/dev/null 2>"$PERF_TMPDIR/run.$i.txt" || {
@@ -155,12 +161,12 @@ extract_min() {
 }
 
 extract_wall_us_min() {
-  # Python wrapper appends a bare integer (microseconds) on its
-  # own line at the end of stderr — pick the last numeric-only
-  # line per run (any trace line is `trace-startup\t...`).
-  for f in "$PERF_TMPDIR"/run.*.txt; do
-    awk '/^[0-9]+$/ { last=$1 } END { if (last != "") print last }' "$f"
-  done | sort -n | head -1
+  # rubyrs-wasm-timer appends one line per run:
+  #   `wasm-timer\twall_us\t<microseconds>`
+  # Distinct sentinel from the trace-startup lines so we can grep
+  # unambiguously even if wasmtime adds verbose stderr.
+  awk -F'\t' '$1=="wasm-timer" && $2=="wall_us" { print $3 }' \
+    "$PERF_TMPDIR"/run.*.txt | sort -n | head -1
 }
 
 LABELS=("entry" "args" "env_collected" "runtime_ready" "eval_done")
@@ -214,3 +220,32 @@ printf "  %-22s %10s\n" "  wasmtime+wasi+load:" "$PRE_ENTRY_US us  ← runtime-s
 echo ""
 echo "  '${SCRIPT_INLINE}' end-to-end via wasmtime run --allow-precompiled."
 echo "  Set RUNS=N or SCRIPT_INLINE='...' to vary."
+
+# 8. Layered baselines so the reader can decompose the runtime-shape
+#    ceiling further. Without these, "wasmtime+wasi+load: 7800 us"
+#    is an opaque blob; with them, it's:
+#       /usr/bin/true:    ~1000 us (macOS fork+exec+dyld floor)
+#       wasmtime --version: ~5500 us (above + wasmtime init)
+#       full cwasm run:     ~8000 us (above + cwasm mmap + wasi init
+#                                     + rubyrs main)
+#    which makes "what can I actually attack?" obvious.
+baseline_min() {
+  # $1 = label, rest = command + args
+  local label="$1"; shift
+  local best=""
+  for _ in $(seq 1 "$RUNS"); do
+    local us
+    us=$("$TIMER_BIN" "$@" 2>&1 1>/dev/null | awk -F'\t' '$1=="wasm-timer" && $2=="wall_us" { print $3 }')
+    if [[ -z "$best" ]] || [[ "$us" -lt "$best" ]]; then best=$us; fi
+  done
+  printf "  %-22s %10s us\n" "$label" "$best"
+}
+
+echo ""
+echo "=== process-spawn baselines (MIN of $RUNS runs, same timer) ==="
+echo ""
+baseline_min "/usr/bin/true:" /usr/bin/true
+baseline_min "wasmtime --version:" wasmtime --version
+echo ""
+echo "  Subtract '/usr/bin/true' from any row to get the host-runtime-"
+echo "  specific overhead above the macOS fork+exec floor."
