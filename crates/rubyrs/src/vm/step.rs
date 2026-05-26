@@ -415,29 +415,32 @@ impl Vm {
                 // frame's proto filename, which Runtime::eval set
                 // to whatever the host passed).
                 let name = self.interner.resolve(name_id).clone();
-                // `$1`..`$9` — numbered capture references, written
-                // by ast.rs as `GVarRead("$N")` (the AST arm for
+                // `$1`, `$2`, ..., `$10`, `$11`, ... — numbered
+                // capture references, written by ast.rs as
+                // `GVarRead("$N")` (the AST arm for
                 // `NumberedReferenceReadNode`). N-th group from the
                 // most recent successful match, or nil if no match
-                // or the group did not participate. CRuby supports
-                // up to `$9` in literal-numbered form; higher
-                // indices use the `${10}` long form which we don't
-                // model. Branched out of the `match` below so it
-                // can stay strictly statement-shaped (no allocator
-                // call needed — just clones a String).
+                // or the group did not participate. CRuby allows
+                // any positive index (`$10` reads the 10th group),
+                // so accept all digits after `$` rather than just
+                // a single one. `$0` is excluded — it's a separate
+                // global (the script filename) handled below.
+                // Branched out of the `match` below so it can stay
+                // strictly statement-shaped (no allocator call
+                // needed — just clones a String).
                 #[cfg(feature = "regex")]
-                if name.len() == 2
+                if name.len() >= 2
                     && name.starts_with('$')
-                    && name.as_bytes()[1].is_ascii_digit()
                     && name.as_bytes()[1] != b'0'
+                    && name.as_bytes()[1..].iter().all(|c| c.is_ascii_digit())
                 {
-                    let n = (name.as_bytes()[1] - b'0') as usize;
+                    let n: usize = name[1..].parse().unwrap_or(0);
                     let v = match &self.last_match {
-                        Some(m) => match m.caps.get(n - 1) {
+                        Some(m) if n >= 1 => match m.caps.get(n - 1) {
                             Some(Some(cap)) => Value::new_str(cap.clone()),
                             _ => Value::Nil,
                         },
-                        None => Value::Nil,
+                        _ => Value::Nil,
                     };
                     self.stack.push(v);
                     return Ok(true);
