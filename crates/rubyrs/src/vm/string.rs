@@ -444,17 +444,7 @@ pub(crate) fn string_call(
             let raw = s.to_string_lossy();
             let mut out = String::with_capacity(raw.len() + 2);
             out.push('"');
-            for c in raw.chars() {
-                match c {
-                    '\\' => out.push_str("\\\\"),
-                    '"'  => out.push_str("\\\""),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    '\0' => out.push_str("\\0"),
-                    _ => out.push(c),
-                }
-            }
+            crate::heap::inspect_escape_into(&raw, &mut out);
             out.push('"');
             Some(Value::new_str(out))
         }

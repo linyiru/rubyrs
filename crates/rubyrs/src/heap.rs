@@ -415,6 +415,47 @@ impl Heap {
     }
 }
 
+/// Escape `raw` for inclusion in a Ruby `String#inspect`/`#to_inspect`
+/// representation, appending to `out` (caller wraps in the `"` quotes).
+///
+/// Matches CRuby's string-inspect rules:
+/// - `\\`, `"` → `\\` / `\"`
+/// - `\a` (0x07)      → `\a`
+/// - `\b` (0x08)      → `\b`
+/// - `\t` (0x09)      → `\t`
+/// - `\n` (0x0A)      → `\n`
+/// - `\v` (0x0B)      → `\v`
+/// - `\f` (0x0C)      → `\f`
+/// - `\r` (0x0D)      → `\r`
+/// - `\e` (0x1B)      → `\e`
+/// - other control bytes (0x00-0x06, 0x0E-0x1A, 0x1C-0x1F, 0x7F)
+///   get `\u00NN` with uppercase hex - the CRuby UTF-8 default.
+///   In particular the null byte renders as `\u0000`, NOT `\0`
+///   (the previously-shipped rubyrs divergence this helper closes).
+/// - everything else is pushed verbatim - printable ASCII + valid
+///   UTF-8 multibyte chars stay as-is, same shape as CRuby.
+pub(crate) fn inspect_escape_into(raw: &str, out: &mut String) {
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"'  => out.push_str("\\\""),
+            '\x07' => out.push_str("\\a"),
+            '\x08' => out.push_str("\\b"),
+            '\x09' => out.push_str("\\t"),
+            '\x0A' => out.push_str("\\n"),
+            '\x0B' => out.push_str("\\v"),
+            '\x0C' => out.push_str("\\f"),
+            '\x0D' => out.push_str("\\r"),
+            '\x1B' => out.push_str("\\e"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7F => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+}
+
 impl Value {
     /// Build a `Value::Str` from anything stringy. Centralises the
     /// `Rc<RefCell<String>>` wrap so call sites don't repeat the
@@ -542,23 +583,15 @@ impl Value {
     pub(crate) fn to_inspect(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
             Value::Str(s) => {
-                // Same escape set as String#inspect — keep both
-                // entry points consistent so `puts arr.inspect`
-                // and `arr.map(&:inspect)` agree on output.
+                // Both `Array#inspect` (this path, via to_inspect on
+                // each element) and `String#inspect` (the primitive
+                // arm in vm/string.rs) share the same escape rules —
+                // funnel both through the `inspect_escape_into`
+                // helper so they can't drift apart.
                 let raw = s.to_string_lossy();
                 let mut out = String::with_capacity(raw.len() + 2);
                 out.push('"');
-                for c in raw.chars() {
-                    match c {
-                        '\\' => out.push_str("\\\\"),
-                        '"'  => out.push_str("\\\""),
-                        '\n' => out.push_str("\\n"),
-                        '\r' => out.push_str("\\r"),
-                        '\t' => out.push_str("\\t"),
-                        '\0' => out.push_str("\\0"),
-                        _ => out.push(c),
-                    }
-                }
+                inspect_escape_into(&raw, &mut out);
                 out.push('"');
                 out
             },
