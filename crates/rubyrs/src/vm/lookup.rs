@@ -105,10 +105,24 @@ impl Vm {
     pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
         // Recursive helper that walks one node's prepends, own
         // methods, then includes (transitively, in dispatch order).
-        // Returns `Some` on the first hit.
-        fn walk_module(m: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+        // Returns `Some` on the first hit. `visited` carries an
+        // Rc-pointer set across the recursion to keep diamond
+        // includes O(unique-modules) and to bail on cyclic graphs
+        // (cext or direct manipulation can construct
+        // `A.includes B; B.includes A` even though CRuby raises
+        // `ArgumentError: cyclic include detected` at insertion —
+        // rubyrs doesn't enforce that today, so the walker stays
+        // defensive).
+        fn walk_module(
+            m: &Rc<Class>,
+            name_id: SymId,
+            visited: &mut std::collections::HashSet<*const Class>,
+        ) -> Option<Rc<Method>> {
+            if !visited.insert(Rc::as_ptr(m)) {
+                return None;
+            }
             for pre in m.prepends.borrow().iter() {
-                if let Some(found) = walk_module(pre, name_id) {
+                if let Some(found) = walk_module(pre, name_id, visited) {
                     return Some(found);
                 }
             }
@@ -116,17 +130,27 @@ impl Vm {
                 return Some(found);
             }
             for inc in m.includes.borrow().iter() {
-                if let Some(found) = walk_module(inc, name_id) {
+                if let Some(found) = walk_module(inc, name_id, visited) {
                     return Some(found);
                 }
             }
             None
         }
+        // Two separate visited sets:
+        // - `sc_visited` protects against superclass-chain cycles.
+        // - The inner set (fresh per superclass step) protects
+        //   against include/prepend graph cycles + diamonds at
+        //   ONE level. We can't share one set: a module
+        //   transitively included at multiple superclass levels
+        //   (rare but legal) needs to be walked at each level.
+        let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
         let mut current = cls.clone();
         loop {
-            // `walk_module` already walks prepends → own → includes
-            // at each level, so no duplicate prepends scan here.
-            if let Some(m) = walk_module(&current, name_id) {
+            if !sc_visited.insert(Rc::as_ptr(&current)) {
+                return None;
+            }
+            let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            if let Some(m) = walk_module(&current, name_id, &mut inc_visited) {
                 return Some(m);
             }
             let parent = current.superclass.borrow().clone();
@@ -315,8 +339,18 @@ impl Vm {
 /// superclass chain (or `child == ancestor`).
 #[allow(dead_code)] // wired up in the next commit (rescue ClassName filter)
 pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
-    fn walks_through(node: &Rc<Class>, target: &Rc<Class>) -> bool {
+    fn walks_through(
+        node: &Rc<Class>,
+        target: &Rc<Class>,
+        visited: &mut std::collections::HashSet<*const Class>,
+    ) -> bool {
         if Rc::ptr_eq(node, target) { return true; }
+        if !visited.insert(Rc::as_ptr(node)) {
+            // Cycle — same defensiveness as `walk_module` /
+            // `flatten_ancestors`. Without it, a cyclic
+            // include/prepend graph stack-overflows `is_a?`.
+            return false;
+        }
         // Recurse through both prepends and includes — CRuby
         // `is_a?(M)` is true for any module reachable via either
         // chain transitively. Without the prepend recursion,
@@ -324,16 +358,22 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
         // would report `c.is_a?(N) == false` even though
         // dispatch finds N's methods.
         for pre in node.prepends.borrow().iter() {
-            if walks_through(pre, target) { return true; }
+            if walks_through(pre, target, visited) { return true; }
         }
         for inc in node.includes.borrow().iter() {
-            if walks_through(inc, target) { return true; }
+            if walks_through(inc, target, visited) { return true; }
         }
         false
     }
+    // Two separate visited sets — same rationale as
+    // `lookup_method_uncached`: superclass-chain cycles vs.
+    // include/prepend-graph cycles need independent protection.
+    let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
     let mut current = child.clone();
     loop {
-        if walks_through(&current, ancestor) { return true; }
+        if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
+        let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        if walks_through(&current, ancestor, &mut inc_visited) { return true; }
         let parent = current.superclass.borrow().clone();
         match parent {
             Some(p) => current = p,
