@@ -8,7 +8,7 @@ This crate implements Layer 4 of the testing strategy
 ([`docs/TESTING.md`](https://github.com/linyiru/rubyrs/blob/master/docs/TESTING.md)).
 The current release is v0.4 — see the "What the extractor
 recognises" table below for the exact pattern set, and
-"Known limitations of v0.2" for the documented trade-offs.
+"Known limitations" for the documented trade-offs.
 The hand-translated specs in
 [`crates/rubyrs/spec/ruby/`](https://github.com/linyiru/rubyrs/tree/master/crates/rubyrs/spec/ruby)
 (from PRs #48 / #52 / #55) remain the reference shape;
@@ -185,7 +185,7 @@ substitute (the recogniser's outer match consumes the full
 range; v0.2's documented Cluster E limitation). For the
 inside-`should ==` case the human polish step still applies.
 
-## Known limitations of v0.2 (post-/code-review hardening)
+## Known limitations
 
 These aren't bugs — they're deliberate trade-offs the
 `/code-review` pass surfaced and we documented rather than
