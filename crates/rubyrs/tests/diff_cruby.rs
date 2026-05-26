@@ -165,6 +165,8 @@ fn run_diff(name: &str) {
 #[test] fn bignum_phase_b_unary() { run_diff("bignum_phase_b_unary"); }
 #[cfg(feature = "bignum")]
 #[test] fn bignum_phase_b_pow_mod() { run_diff("bignum_phase_b_pow_mod"); }
+#[cfg(feature = "bignum")]
+#[test] fn bignum_phase_b_digits() { run_diff("bignum_phase_b_digits"); }
 #[test] fn file_io() { run_diff("file_io"); }
 #[test] fn range_extras() { run_diff("range_extras"); }
 #[test] fn tap_then() { run_diff("tap_then"); }
