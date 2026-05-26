@@ -142,11 +142,29 @@ Run (needs wasmtime or equivalent):
 wasmtime run --dir=. target/wasm32-wasip1/release/rubyrs.wasm script.rb
 ```
 
+End-to-end smoke (build + run + stdout diff against the `smoke.expected`
+golden, which is generated from CRuby):
+
+```bash
+export WASI_SDK_PATH=/opt/wasi-sdk-24.0-arm64-macos   # adjust path
+bash crates/rubyrs/tests/wasm/smoke.sh
+```
+
+The same script runs in the `wasm` CI lane after the build step.
+
 Notes:
 - The `build.rs` ships a tiny `__wasi_init_tp` no-op stub so Rust std's
   threading init resolves at link time.
-- The resulting `.wasm` is ~650 KB; cold start under wasmtime is ~12 ms
-  on Apple Silicon.
+- The resulting `.wasm` is ~1.4 MB on Rust 1.95 / wasi-sdk 24 (stripped
+  release). Cold start under wasmtime stays under ~20 ms on Apple
+  Silicon. The size has grown vs. earlier PoC numbers as more of the
+  Ruby subset landed; the Bignum / require-relative / Symbol features
+  each pulled in additional code paths.
+- `std::process::id()` panics on wasm32-wasip1 (wasi has no PID
+  concept). `crates/rubyrs/src/main.rs` cfg-gates the call so the
+  `pid` field is `None` on wasi; the runtime treats that as "host
+  didn't provide one", and `$$` surfaces a clear trap rather than
+  crashing the interpreter.
 
 ## Profiling
 

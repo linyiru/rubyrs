@@ -38,7 +38,14 @@ fn main() {
         max_symbols: env::var("RUBYRS_MAX_SYMBOLS").ok().and_then(|s| s.parse().ok()),
         max_value_bytes: env::var("RUBYRS_MAX_VALUE_BYTES").ok().and_then(|s| s.parse().ok()),
         env: Some(env::vars().collect()),
+        // `std::process::id()` panics on wasm32-wasip1 (wasi has no
+        // process-ID concept). The runtime treats `pid: None` as
+        // "host did not provide one" — `$$` in script then surfaces
+        // a no-pid trap rather than crashing the interpreter.
+        #[cfg(not(target_os = "wasi"))]
         pid: std::num::NonZeroU32::new(process::id()),
+        #[cfg(target_os = "wasi")]
+        pid: None,
     };
 
     let mut rt = Runtime::with_config(cfg);

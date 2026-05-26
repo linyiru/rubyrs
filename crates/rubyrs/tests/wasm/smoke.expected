@@ -1,0 +1,8 @@
+hello from wasm
+55
+[1, 4, 9]
+a=1
+b=2
+rescued: boom
+broke at 4, value 40
+14
