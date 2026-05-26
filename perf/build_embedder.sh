@@ -66,7 +66,13 @@ echo "[2/5] wasm-opt -Oz $RAW_WASM -> $OPT"
 wasm-opt -Oz "$RAW_WASM" -o "$OPT"
 
 echo "[3/5] wizer --allow-wasi $OPT -> $WIZ"
-wizer --allow-wasi --wasm-bulk-memory true -o "$WIZ" "$OPT"
+# Mirror `perf/wasm_check.sh`'s wizer invocation exactly —
+# `--allow-wasi` is the only flag needed for the rubyrs shape.
+# (Don't pass `--wasm-bulk-memory true`; wizer v11.0.3 parses
+# that as a positional arg on some platforms, which then becomes
+# a "module does not have wizer-initialize" error because the
+# *wrong* file got loaded as the input.)
+wizer --allow-wasi -o "$WIZ" "$OPT"
 
 echo "[4/5] wasm-opt -Oz $WIZ -> $WIZ_OPT"
 wasm-opt -Oz "$WIZ" -o "$WIZ_OPT"

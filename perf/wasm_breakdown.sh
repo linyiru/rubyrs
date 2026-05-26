@@ -101,7 +101,13 @@ else
 fi
 
 if command -v wizer >/dev/null 2>&1; then
-  if ! wizer --allow-wasi --wasm-bulk-memory true -o "$WIZER" "$OPT" 2>/dev/null; then
+  # `--allow-wasi` is the only flag we want. Earlier iterations
+  # tried `--wasm-bulk-memory true` (intended to enable bulk-mem
+  # opts in newer wizer), but wizer v11.0.3 parses the `true` as a
+  # positional arg on Linux, silently using it as the input file
+  # and then failing with "the Wasm module does not have a
+  # wizer-initialize export". Stick to the documented invocation.
+  if ! wizer --allow-wasi -o "$WIZER" "$OPT" 2>/dev/null; then
     echo "wasm_breakdown: wizer pre-init failed" >&2
     exit 2
   fi
