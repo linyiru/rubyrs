@@ -41,6 +41,19 @@ u2 = Encoding.find("UTF-8")
 puts u1.equal?(u2)                              # true
 puts u1.equal?(Encoding::UTF_8)                 # true
 
+# --- find normalizes input — case-insensitive + aliases ---
+# CRuby Encoding.find is case-insensitive; magic-comment regex
+# captures commonly produce lowercase ("utf-8"). It also
+# accepts "ASCII" → US-ASCII and "BINARY" → ASCII-8BIT as
+# the canonical aliases. CRuby does NOT fold '_' → '-' (so
+# "UTF_8" raises) and does NOT accept "UTF8" — verified vs
+# CRuby 3.4. The stub mirrors that exactly.
+puts Encoding.find("utf-8").equal?(Encoding::UTF_8)        # true
+puts Encoding.find("ascii").equal?(Encoding::US_ASCII)     # true
+puts Encoding.find("Ascii").equal?(Encoding::US_ASCII)     # true
+puts Encoding.find("BINARY").equal?(Encoding::ASCII_8BIT)  # true
+puts Encoding.find("binary").equal?(Encoding::ASCII_8BIT)  # true
+
 # --- Encoding.find raises ArgumentError on unknown names ---
 # Matches CRuby's contract. Returning a fresh `.new` instance
 # would break `Encoding.find("X").equal?(Encoding.find("X"))`

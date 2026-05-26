@@ -985,9 +985,18 @@ class Encoding
   ## breaking trap of returning two different `.new` instances for
   ## the same name).
   def self.find(name)
-    case name.to_s
+    # Case-insensitive only — match CRuby's actual behaviour.
+    # ERB and similar consumers feed values from magic-comment
+    # regex captures ("utf-8", "UTF-8", ...); without
+    # normalization, lowercase magic comments would surprise
+    # users with ArgumentError. CRuby does NOT fold '_' → '-'
+    # (it rejects "UTF_8") and does NOT accept "UTF8" (the
+    # un-hyphenated form), but does fold "ASCII" → US-ASCII
+    # and "BINARY" → ASCII-8BIT — verified empirically vs
+    # CRuby 3.4.
+    case name.to_s.upcase
     when "UTF-8" then UTF_8
-    when "US-ASCII" then US_ASCII
+    when "US-ASCII", "ASCII" then US_ASCII
     when "ASCII-8BIT", "BINARY" then ASCII_8BIT
     else raise ArgumentError, "unknown encoding name - " + name.to_s
     end
