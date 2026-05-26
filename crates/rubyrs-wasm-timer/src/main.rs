@@ -14,7 +14,13 @@
 //!    construction + Instant capture + fork/exec), measured by
 //!    spawning `/bin/true`.
 //!
-//! Usage: `rubyrs-wasm-timer <prog> [args...]`
+//! Usage: `rubyrs-wasm-timer [--cwd PATH] <prog> [args...]`
+//!
+//! `--cwd` lets the harness time runtimes whose wasi shim has no
+//! preopen-dir flag (wasm3, current_executable, etc.). Setting it
+//! via `Command::current_dir` happens BEFORE the Instant::now()
+//! anchor — so the measurement still reflects just the subprocess
+//! wall time, not the cwd switch in this binary.
 //!
 //! Streams the child's stdout/stderr through unchanged (timer prints
 //! a sentinel `wasm-timer\twall_us\t<N>` line on its OWN stderr after
@@ -39,21 +45,39 @@ use std::os::unix::process::ExitStatusExt;
 
 fn main() -> ExitCode {
     let mut args = env::args_os().skip(1);
-    let prog = match args.next() {
-        Some(p) => p,
-        None => {
-            eprintln!("usage: rubyrs-wasm-timer <prog> [args...]");
-            eprintln!();
-            eprintln!("Execs <prog> with the remaining args, streams its");
-            eprintln!("stdio through, and on exit prints a single line to");
-            eprintln!("stderr: `wasm-timer\\twall_us\\t<microseconds>`.");
-            eprintln!("Exits with the child's exit code (128+sig on signal).");
-            return ExitCode::from(2);
+    let mut cwd: Option<std::path::PathBuf> = None;
+    let prog: std::ffi::OsString = loop {
+        match args.next() {
+            Some(arg) if arg == "--cwd" => {
+                match args.next() {
+                    Some(p) => cwd = Some(std::path::PathBuf::from(p)),
+                    None => {
+                        eprintln!("rubyrs-wasm-timer: --cwd requires a path");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            Some(arg) => break arg,
+            None => {
+                eprintln!("usage: rubyrs-wasm-timer [--cwd PATH] <prog> [args...]");
+                eprintln!();
+                eprintln!("Execs <prog> with the remaining args, streams its");
+                eprintln!("stdio through, and on exit prints a single line to");
+                eprintln!("stderr: `wasm-timer\\twall_us\\t<microseconds>`.");
+                eprintln!("`--cwd PATH` runs the child from PATH (chdir is");
+                eprintln!("applied BEFORE the timer anchor so it doesn't");
+                eprintln!("inflate the reported figure).");
+                eprintln!("Exits with the child's exit code (128+sig on signal).");
+                return ExitCode::from(2);
+            }
         }
     };
 
     let mut cmd = Command::new(&prog);
     cmd.args(args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
     // stdin/stdout/stderr default to inheriting the parent's — no
     // explicit `stdio()` needed. Don't capture: we want the child's
     // output to flow straight through to its real consumer (the

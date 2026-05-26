@@ -250,33 +250,91 @@ echo ""
 echo "  Subtract '/usr/bin/true' from any row to get the host-runtime-"
 echo "  specific overhead above the macOS fork+exec floor."
 
-# 9. Same cwasm + same script through the in-tree embedder, when
-#    present. Side-by-side comparison answers "how much of the
-#    wasmtime CLI cold-start is the CLI's own framing vs the
-#    wasmtime runtime?" Skip silently if the embedder isn't built —
-#    breakdowns shouldn't fail just because the optional PoC is
-#    absent.
-EMBED_BIN="target/release/rubyrs-wasm-embed"
-if [[ -x "$EMBED_BIN" ]]; then
-  echo ""
-  echo "=== alternative host: rubyrs-wasm-embed (MIN of $RUNS runs) ==="
-  echo ""
-  EMBED_BEST=""
-  for _ in $(seq 1 "$RUNS"); do
-    us=$("$TIMER_BIN" "$EMBED_BIN" "$CWASM" "$SCRIPT" 2>&1 1>/dev/null \
-          | awk -F'\t' '$1=="wasm-timer" && $2=="wall_us" { print $3 }')
-    if [[ -z "$EMBED_BEST" ]] || [[ "$us" -lt "$EMBED_BEST" ]]; then EMBED_BEST=$us; fi
-  done
-  printf "  %-22s %10s us\n" "rubyrs-wasm-embed:" "$EMBED_BEST"
-  if [[ -n "$EMBED_BEST" ]] && [[ "$EMBED_BEST" -gt 0 ]]; then
-    DIFF=$((WALL_US - EMBED_BEST))
-    PCT=$((DIFF * 100 / WALL_US))
-    printf "  %-22s %10d us  (%d%% of CLI total)\n" \
-      "vs wasmtime CLI:" "$DIFF" "$PCT"
+# 9. Cross-runtime comparison. Same wizer'd .wasm, different host
+#    runtimes — answers "would another wasm runtime cold-start
+#    faster than wasmtime?" Each row needs its own input shape
+#    (cwasm format is wasmtime-specific; wasmer has its own AOT
+#    via `wasmer compile`; wasm3 takes raw .wasm and interprets).
+#
+#    Rows are skipped silently if the runtime / artifact isn't
+#    present. Build deps:
+#      rubyrs-wasm-embed   `cargo build --release -p rubyrs-wasm-embed`
+#      wasmer (AOT .wasmu) `wasmer compile -o $TMP/rubyrs.wasmu $WIZER_OPT_WASM`
+#      wasmer (JIT .wasm)  brew install wasmer
+#      wasm3 (interp)      brew install wasm3
+
+runtime_min() {
+  # $1 = label, rest = command + args. Returns MIN of $RUNS runs
+  # via the in-tree timer; prints nothing if the command is
+  # missing or every run failed.
+  local label="$1"; shift
+  local first="$1"
+  if ! command -v "$first" >/dev/null 2>&1 && [[ ! -x "$first" ]]; then
+    return
   fi
-  echo ""
-  echo "  Embedder skips the wasmtime CLI's argv parsing, command"
-  echo "  dispatch, file-config layer, and signal handling. Same"
-  echo "  cwasm; difference is pure CLI tax. Build with:"
-  echo "    cargo build --release -p rubyrs-wasm-embed"
+  local best=""
+  for _ in $(seq 1 "$RUNS"); do
+    local us
+    us=$("$TIMER_BIN" "$@" 2>&1 1>/dev/null \
+          | awk -F'\t' '$1=="wasm-timer" && $2=="wall_us" { print $3 }')
+    if [[ -n "$us" ]] && { [[ -z "$best" ]] || [[ "$us" -lt "$best" ]]; }; then
+      best=$us
+    fi
+  done
+  if [[ -n "$best" ]]; then
+    printf "  %-32s %10s us\n" "$label" "$best"
+  fi
+}
+
+EMBED_BIN="target/release/rubyrs-wasm-embed"
+WASMER_AOT="$PERF_TMPDIR/rubyrs.wasmu"
+if command -v wasmer >/dev/null 2>&1; then
+  # Pre-compile for wasmer once so the AOT row times the cold-load
+  # path, matching what wasmtime cwasm does. Silent on failure —
+  # if wasmer rejects the wasm (newer features etc.), just skip
+  # the AOT row and let the JIT row carry that runtime's data.
+  # Suppress wasmer's "Compiler: cranelift / Target: ..." chatter
+  # by routing both streams to /dev/null.
+  wasmer compile -o "$WASMER_AOT" "$WIZER_OPT" >/dev/null 2>&1 || true
 fi
+
+echo ""
+echo "=== cross-runtime comparison (MIN of $RUNS runs, same wizer'd .wasm) ==="
+echo ""
+runtime_min "wasmtime CLI (AOT cwasm):"    wasmtime run --allow-precompiled --dir "$PERF_TMPDIR" "$CWASM" "$SCRIPT"
+if [[ -x "$EMBED_BIN" ]]; then
+  runtime_min "rubyrs-wasm-embed (AOT cwasm):" "$EMBED_BIN" "$CWASM" "$SCRIPT"
+fi
+if [[ -f "$WASMER_AOT" ]]; then
+  runtime_min "wasmer (AOT .wasmu):"        wasmer run --volume "$PERF_TMPDIR:$PERF_TMPDIR" "$WASMER_AOT" -- "$SCRIPT"
+fi
+runtime_min "wasmer (JIT .wasm):"          wasmer run --volume "$PERF_TMPDIR:$PERF_TMPDIR" "$WIZER_OPT" -- "$SCRIPT"
+
+# wasm3 has no preopen-dir flag and its wasi shim restricts the
+# guest to the host process's cwd. The timer's `--cwd` switch
+# lets us cd into the tempdir BEFORE the timer anchor, so the
+# measurement excludes our chdir. wasm3 then sees the script via
+# the basename and resolves it through its in-process wasi shim.
+if command -v wasm3 >/dev/null 2>&1; then
+  wasm3_best=""
+  wasm3_script_base="$(basename "$SCRIPT")"
+  wasm3_wasm_base="$(basename "$WIZER_OPT")"
+  # $WIZER_OPT already lives in $PERF_TMPDIR (pipeline step above),
+  # so the cwd-based wasm3 invocation can address it by basename.
+  for _ in $(seq 1 "$RUNS"); do
+    wasm3_us=$("$TIMER_BIN" --cwd "$PERF_TMPDIR" wasm3 "$wasm3_wasm_base" "$wasm3_script_base" 2>&1 1>/dev/null \
+          | awk -F'\t' '$1=="wasm-timer" && $2=="wall_us" { print $3 }')
+    if [[ -n "$wasm3_us" ]] && { [[ -z "$wasm3_best" ]] || [[ "$wasm3_us" -lt "$wasm3_best" ]]; }; then
+      wasm3_best=$wasm3_us
+    fi
+  done
+  if [[ -n "$wasm3_best" ]]; then
+    printf "  %-32s %10s us\n" "wasm3 (interpreter):" "$wasm3_best"
+  fi
+fi
+
+echo ""
+echo "  Same wizer-pre-initialized .wasm in every row. The wasmtime"
+echo "  cwasm and wasmer .wasmu are AOT-compiled artifacts of that"
+echo "  .wasm; wasm3 and 'wasmer (JIT)' load the .wasm itself."
+echo "  Embedder source: crates/rubyrs-wasm-embed/."
