@@ -983,7 +983,10 @@ end
                 backtrace: vec![],
             });
         }
-        let (prog, ast_errors) = ast::tr_with_errors(&parse_result.node());
+        let (prog, ast_errors) = ast::tr_with_errors_on_source(
+            &parse_result.node(),
+            parse_result.source(),
+        );
         if !ast_errors.is_empty() {
             // AST translation hit one or more Prism nodes the
             // language subset doesn't cover. Surface as a

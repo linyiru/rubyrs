@@ -12,6 +12,63 @@ use crate::error::Span;
 // SyntaxError Trap before any compile/exec happens.
 thread_local! {
     static AST_ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Source bytes for the in-flight translation. Set by
+    /// `tr_with_errors_on_source`'s guard before `tr` runs;
+    /// cleared on guard drop. Read by `Expr::SourceLine`'s
+    /// arm to compute line numbers from Prism `Location`
+    /// start pointers (count of `\n` in the prefix). Storing
+    /// the slice as a raw `(ptr, len)` pair avoids the
+    /// lifetime gymnastics of `RefCell<Option<&'static [u8]>>`;
+    /// the guard ensures the slice outlives every read.
+    static AST_SOURCE: std::cell::Cell<Option<(*const u8, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+/// RAII guard for the AST_SOURCE thread-local. Held across the
+/// `tr` call so the SourceLine arm can derive line numbers
+/// from `Location` start pointers without threading `source`
+/// through every `tr` recursion. Drop clears the slot so
+/// subsequent translations on the same thread don't see stale
+/// pointers.
+pub(crate) struct SourceGuard;
+
+impl SourceGuard {
+    pub(crate) fn new(source: &[u8]) -> Self {
+        AST_SOURCE.with(|c| c.set(Some((source.as_ptr(), source.len()))));
+        Self
+    }
+}
+
+impl Drop for SourceGuard {
+    fn drop(&mut self) {
+        AST_SOURCE.with(|c| c.set(None));
+    }
+}
+
+/// Number of `\n` bytes in the source prefix ending at
+/// `loc_start_ptr` — i.e., the 1-based line number of the
+/// position the Prism Location's start pointer points at.
+/// Returns 0 when the SourceGuard isn't set (callers that
+/// invoke `tr` without `tr_with_errors_on_source`) — same
+/// stub value the previous SourceLine implementation
+/// returned.
+#[inline]
+fn line_of(loc_start_ptr: *const u8) -> i64 {
+    AST_SOURCE.with(|c| match c.get() {
+        Some((base, len)) => {
+            // SAFETY: `loc_start_ptr` came from Prism's parse
+            // of the same source the guard was constructed
+            // from, so it lies within [base, base+len].
+            // Pointer arithmetic stays within the allocation.
+            let offset = unsafe { loc_start_ptr.offset_from(base) };
+            if offset < 0 || (offset as usize) > len {
+                return 0;
+            }
+            let prefix = unsafe { std::slice::from_raw_parts(base, offset as usize) };
+            // 1-based line numbers: count newlines + 1.
+            (prefix.iter().filter(|&&b| b == b'\n').count() + 1) as i64
+        }
+        None => 0,
+    })
 }
 
 /// Translate a Prism root node, returning the SExpr plus any
@@ -24,6 +81,18 @@ pub(crate) fn tr_with_errors(node: &Node<'_>) -> (SExpr, Vec<String>) {
     let prog = tr(node);
     let errs = AST_ERRORS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
     (prog, errs)
+}
+
+/// Same as `tr_with_errors` but also threads the source bytes
+/// through `AST_SOURCE` so `Expr::SourceLine` resolves real
+/// line numbers. Callers that have the source on hand
+/// (`Runtime::eval`, `kernel::load_ruby_source_from_canon`)
+/// use this variant. The non-source variant is kept for
+/// test harnesses that compile snippets without source
+/// access.
+pub(crate) fn tr_with_errors_on_source(node: &Node<'_>, source: &[u8]) -> (SExpr, Vec<String>) {
+    let _guard = SourceGuard::new(source);
+    tr_with_errors(node)
 }
 
 // ---------- IR ----------
@@ -697,16 +766,28 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return sp(node, Expr::SourceFile);
     }
     if node.as_source_line_node().is_some() {
-        // Tier 1 stub: Prism's `Location` doesn't expose
-        // pre-computed line numbers and the AST translator
-        // doesn't carry the source bytes needed to derive
-        // them from byte offsets. Return 0 as a documented
-        // placeholder. Real-world `__LINE__` use is
-        // overwhelmingly in diagnostic strings; the divergence
-        // surfaces as `0` instead of the line number but the
-        // script proceeds. Promoting to real line tracking
-        // needs source-bytes threading into `tr`; deferred.
-        return sp(node, Expr::SourceLine(0));
+        // Derive the 1-based line number from the Prism
+        // Location's start pointer + the source bytes the
+        // SourceGuard threaded in. Without an active guard
+        // (test harnesses that call `tr` directly), falls
+        // back to `0` — matches the prior stub value, no
+        // behaviour change for callers that don't pass
+        // source.
+        let loc = node.location();
+        // Reach the raw start pointer via the public
+        // `as_slice` shape: `Location::as_slice` panics
+        // if end < start, but for a SourceLineNode start
+        // == end (zero-length location at the keyword
+        // position), so we can't rely on it. Use the
+        // private start ptr via a 1-byte read offset.
+        // SAFETY: Prism guarantees `loc.start` points into
+        // the parsed source, so taking the raw `*const u8`
+        // value through a zero-length slice is well-defined.
+        let line = {
+            let s = loc.as_slice();
+            line_of(s.as_ptr())
+        };
+        return sp(node, Expr::SourceLine(line));
     }
     if let Some(n) = node.as_class_variable_read_node() {
         return sp(node, Expr::CvarRead(cid_to_string(n.name())));

@@ -665,7 +665,10 @@ impl Vm {
                 .map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("; ");
             return Err(self.trap(RubyError::SyntaxError { msg }));
         }
-        let (prog, ast_errors) = crate::ast::tr_with_errors(&parse_result.node());
+        let (prog, ast_errors) = crate::ast::tr_with_errors_on_source(
+            &parse_result.node(),
+            parse_result.source(),
+        );
         if !ast_errors.is_empty() {
             return Err(self.trap(RubyError::SyntaxError {
                 msg: ast_errors.join("; "),
