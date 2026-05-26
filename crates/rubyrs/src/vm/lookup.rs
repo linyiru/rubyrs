@@ -258,7 +258,7 @@ impl Vm {
         }
         match recv {
             Value::Int(_) => matches!(name,
-                "+" | "-" | "*" | "/" | "%" | "**" |
+                "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
                 "<" | "<=" | ">" | ">=" |
                 "&" | "|" | "^" | "<<" | ">>" | "~" |
                 "to_s" | "inspect" |
@@ -269,10 +269,11 @@ impl Vm {
                 "digits" | "bit_length" | "[]"
             ),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
-            // unary (`-@`/`+@`/`abs`) — arithmetic, comparison,
-            // to_s/inspect, pure predicates, exponentiation (auto-
-            // promote / DoS-capped), and unary sign/magnitude. Bit
-            // ops, iteration helpers (`times`, `upto`, `downto`),
+            // unary (`-@`/`+@`/`abs`) + Phase B.5 `pow(exp, mod)` —
+            // arithmetic, comparison, to_s/inspect, pure predicates,
+            // exponentiation (auto-promote / DoS-capped), unary
+            // sign/magnitude, and modular exponentiation. Bit ops,
+            // iteration helpers (`times`, `upto`, `downto`),
             // `digits` and `bit_length` remain unshipped Phase B
             // groups — each needs a `&mut Vm` heap path that the
             // stateless `primitive_call` doesn't grant. The
@@ -281,7 +282,7 @@ impl Vm {
             // bigint_primitive shape.
             #[cfg(feature = "bignum")]
             Value::BigInt(_) => matches!(name,
-                "+" | "-" | "*" | "/" | "%" | "**" |
+                "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
                 "-@" | "+@" | "abs" |
                 "<" | "<=" | ">" | ">=" |
                 "to_s" | "inspect" |

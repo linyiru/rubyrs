@@ -113,6 +113,50 @@ pub(crate) fn numeric_call(
                 String::from_utf8(buf).expect("ASCII digits + sign"),
             ))
         }
+        // `Integer#pow(exp)` — 1-arg form is an alias for `**` for
+        // numeric exponents (Int / Float / BigInt under bignum).
+        // Sits BEFORE the broader `(Int, op, [Int])` arm because
+        // that arm's inner-match `_ => None` fallthrough would
+        // otherwise consume the (Int, "pow", [Int]) shape and
+        // prevent the top-level alias from firing. Delegating to
+        // `**` keeps ZeroDivisionError / identity short-circuits /
+        // demote-on-fit centralised. Non-numeric exponents (String,
+        // Symbol, nil, …) raise TypeError matching CRuby — the
+        // `**` operator's own dispatch would otherwise surface
+        // NoMethodError, which is the wrong error class.
+        (Value::Int(_), "pow", [arg]) => {
+            let acceptable = match arg {
+                Value::Int(_) | Value::Float(_) => true,
+                #[cfg(feature = "bignum")]
+                Value::BigInt(_) => true,
+                _ => false,
+            };
+            if !acceptable {
+                return Err(RubyError::TypeError {
+                    msg: format!(
+                        "{} can't be coerced into Integer",
+                        type_name_for_coerce(arg),
+                    ),
+                });
+            }
+            return numeric_call(recv, "**", args, _max_value_bytes);
+        }
+        // Arity guard for `pow` — CRuby raises ArgumentError with
+        // the exact "wrong number of arguments (given N, expected
+        // 1..2)" message for 0 or >2 args. Without this arm those
+        // shapes fall through to NoMethodError despite
+        // `respond_to?(:pow)` returning true. The 2-arg arms below
+        // catch the valid `[exp, mod]` shape; this guard catches
+        // 0, 3+ (1-arg is handled above). The pattern matches any
+        // `args` slice because the count check is in the guard.
+        (Value::Int(_), "pow", args_slice) if args_slice.len() != 2 => {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1..2)",
+                    args_slice.len(),
+                ),
+            });
+        }
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
@@ -236,6 +280,62 @@ pub(crate) fn numeric_call(
             )),
             _ => None,
         },
+        // 2-arg form `pow(exp, mod)` — under `bignum`, declined here
+        // so bigint_primitive's modpow path handles it (full
+        // Integer×Integer×Integer coverage including BigInt).
+        // Without `bignum`, implement square-and-multiply with i128
+        // intermediates so `respond_to?(:pow)` stays consistent with
+        // dispatch on the no-bignum profile. CRuby semantics:
+        // ZeroDivisionError on mod==0, RangeError on neg exp,
+        // floor-mod (same sign as modulus) on the result.
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(a), "pow", [Value::Int(exp), Value::Int(modulus)]) => {
+            if *modulus == 0 {
+                return Err(RubyError::ZeroDivisionError { msg: "divided by 0".to_string() });
+            }
+            if *exp < 0 {
+                return Err(RubyError::RangeError {
+                    msg: "Integer#pow() 1st argument cannot be negative when 2nd argument specified".to_string(),
+                });
+            }
+            // i128 arithmetic: b ∈ [0, |m|) and b² fits since
+            // |m| ≤ 2^63 ⇒ b² ≤ 2^126 < i128::MAX.
+            let m_abs: i128 = (*modulus as i128).unsigned_abs() as i128;
+            let mut result: i128 = if m_abs == 1 { 0 } else { 1 };
+            let mut base: i128 = (*a as i128).rem_euclid(m_abs);
+            let mut e: i64 = *exp;
+            while e > 0 {
+                if e & 1 == 1 {
+                    result = (result * base).rem_euclid(m_abs);
+                }
+                e >>= 1;
+                if e > 0 {
+                    base = (base * base).rem_euclid(m_abs);
+                }
+            }
+            // Adjust for floor-mod: result has same sign as modulus.
+            let adjusted = if *modulus < 0 && result != 0 { result - m_abs } else { result };
+            Some(Value::Int(adjusted as i64))
+        }
+        // Non-Integer exponent (with mod given) — match CRuby's
+        // distinct "1st argument is integer" message. Kept ahead
+        // of the "all arguments are integers" arm so the more
+        // specific message wins.
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "pow", [exp, _]) if !matches!(exp, Value::Int(_)) => {
+            return Err(RubyError::TypeError {
+                msg: "Integer#pow() 2nd argument not allowed unless a 1st argument is integer".to_string(),
+            });
+        }
+        // Non-Integer modulus (exp is Int) — CRuby's "all arguments
+        // are integers" message. This fires when the exponent passed
+        // the integer check above but the modulus did not.
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "pow", [_, _]) => {
+            return Err(RubyError::TypeError {
+                msg: "Integer#pow() 2nd argument not allowed unless all arguments are integers".to_string(),
+            });
+        }
         (Value::Int(a), "to_s", []) | (Value::Int(a), "inspect", []) => {
             Some(Value::new_str(a.to_string()))
         }
@@ -424,6 +524,33 @@ pub(crate) fn numeric_call(
         (Value::Float(a), "truncate", []) => Some(Value::Int(a.trunc() as i64)),
         _ => None,
     })
+}
+
+/// Ruby class-name for the `"<X> can't be coerced into Integer"`
+/// TypeError that `Integer#pow(non_numeric)` raises (matches CRuby
+/// exactly for the common types). Stateless so it lives here next
+/// to the pow alias; the bigint_primitive path uses the same fn
+/// via `super::numeric::type_name_for_coerce` rather than
+/// duplicating. Symbols fall back to the class name `"Symbol"`
+/// instead of CRuby's `:symname` (inspect form) because numeric.rs
+/// has no heap access to resolve the SymId — minor divergence
+/// limited to the error message text on a non-numeric exponent.
+pub(crate) fn type_name_for_coerce(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_) => "Integer",
+        Value::Float(_) => "Float",
+        #[cfg(feature = "bignum")]
+        Value::BigInt(_) => "Integer",
+        Value::Str(_) => "String",
+        Value::Sym(_) => "Symbol",
+        Value::Nil => "nil",
+        Value::Bool(true) => "true",
+        Value::Bool(false) => "false",
+        Value::Array(_) => "Array",
+        Value::Hash(_) => "Hash",
+        Value::Range(_) => "Range",
+        _ => "Object",
+    }
 }
 
 // Float#inspect — kept private here because it's a single-line

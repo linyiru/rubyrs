@@ -1285,6 +1285,110 @@ impl Vm {
             _ => Ok(None),
         }
     }
+
+    /// `Integer#pow(exp[, mod])`. 1-arg form is exactly `recv ** exp`
+    /// — delegated to `try_bigint_pow`. 2-arg form is modular
+    /// exponentiation: computes `(recv ** exp) mod modulus` without
+    /// materialising the intermediate (so the DoS cap that bounds
+    /// the plain `**` path is unnecessary here — the result is
+    /// already bounded by `|modulus|`).
+    ///
+    /// CRuby semantics for the 2-arg form:
+    /// - `modulus == 0` → ZeroDivisionError.
+    /// - `exp < 0` → RangeError (modular inverse may not exist; we
+    ///   don't compute it).
+    /// - Otherwise the result follows Ruby's floor-mod convention
+    ///   (same sign as `modulus`). `num_bigint::BigInt::modpow`
+    ///   already returns a value with the same sign as the modulus,
+    ///   matching this convention exactly — no post-adjustment.
+    /// - `exp` and `modulus` must both be Integer (Int / BigInt);
+    ///   Float / String etc. raise TypeError.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_pow_method(
+        &mut self,
+        recv: &Value,
+        args: &[Value],
+    ) -> Result<Option<Value>, Trap> {
+        use num_bigint::Sign;
+        // 1-arg form ≡ `recv ** exp`. Reuse try_bigint_pow's full
+        // shape handling (Float exp, negative exp, BigInt exp,
+        // DoS cap, identity short-circuits, ZeroDivisionError on
+        // 0**-n, etc.). Non-numeric exponents (String, Symbol,
+        // nil, …) raise TypeError matching CRuby — `try_bigint_pow`
+        // would otherwise decline (`Ok(None)`) and dispatch would
+        // surface NoMethodError, which is the wrong error class.
+        // Mirrors the Int-receiver guard in numeric.rs::pow.
+        if args.len() == 1 {
+            let arg = &args[0];
+            let acceptable = matches!(arg, Value::Int(_) | Value::Float(_) | Value::BigInt(_));
+            if !acceptable {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "{} can't be coerced into Integer",
+                        crate::vm::numeric::type_name_for_coerce(arg),
+                    ),
+                }));
+            }
+            return self.try_bigint_pow(recv, arg);
+        }
+        // 2-arg form: pow(exp, mod). Validate shapes first using
+        // immutable borrows (no clones). The error paths short-
+        // circuit before the modpow allocation; the success path
+        // borrows the three BigInts via `as_bigint_ref` (Cow) and
+        // runs `modpow` inside the borrow scope so BigInt operands
+        // don't pay an O(n) clone before the computation.
+        //
+        // All Cow-dependent work (shape checks, sign reads, modpow)
+        // runs inside one labelled block so each operand is borrowed
+        // exactly once. Int operands still pay one `BigInt::from(n)`
+        // alloc per `as_bigint_ref` call (unavoidable); BigInt
+        // operands stay as `Cow::Borrowed` (no clone). The block
+        // exits with Ok(Some(result)) / Ok(None) (decline) / Err
+        // (trap). Trap construction (which needs `&mut self`)
+        // happens AFTER the borrows expire, when the block returns.
+        let pre: Result<Option<num_bigint::BigInt>, RubyError> = 'classify: {
+            let Some(base) = self.as_bigint_ref(recv) else {
+                // Non-Integer recv → decline so dispatch falls
+                // through to NoMethodError (Float etc. have no
+                // `.pow(exp, mod)`).
+                break 'classify Ok(None);
+            };
+            // Match CRuby's exact TypeError message text so user
+            // code pattern-matching on `e.message` keeps working.
+            let Some(exp) = self.as_bigint_ref(&args[0]) else {
+                break 'classify Err(RubyError::TypeError {
+                    msg: "Integer#pow() 2nd argument not allowed unless a 1st argument is integer".to_string(),
+                });
+            };
+            let Some(modulus) = self.as_bigint_ref(&args[1]) else {
+                break 'classify Err(RubyError::TypeError {
+                    msg: "Integer#pow() 2nd argument not allowed unless all arguments are integers".to_string(),
+                });
+            };
+            // Sign checks read the held Cows directly (no extra
+            // borrow / no extra `BigInt::from(n)` for Int operands).
+            if modulus.sign() == Sign::NoSign {
+                break 'classify Err(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                });
+            }
+            if exp.sign() == Sign::Minus {
+                break 'classify Err(RubyError::RangeError {
+                    msg: "Integer#pow() 1st argument cannot be negative when 2nd argument specified".to_string(),
+                });
+            }
+            // BigInt::modpow returns a value with the same sign as
+            // modulus — matches Ruby's floor-mod semantics exactly,
+            // no post-adjustment.
+            Ok(Some(base.modpow(&exp, &modulus)))
+        };
+        // Borrows expired with the block. Safe to call &mut self.
+        match pre {
+            Ok(None) => Ok(None),
+            Ok(Some(result)) => Ok(Some(self.bigint_to_value(result)?)),
+            Err(err) => Err(self.trap(err)),
+        }
+    }
 }
 
 /// BigInt method dispatch — covers the calls `primitive_call`
@@ -1320,8 +1424,15 @@ impl Vm {
         //    under `bignum` so this arm can promote to the
         //    BigInt 2^63. Also sits ahead of the recv-or-arg-is-
         //    BigInt guard for the same reason as `**`.
-        // 3. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
-        // 4. Recv is Int AND a BigInt is among args: covers the
+        // 3. `pow(exp[, mod])` method form — 1-arg aliases `**`;
+        //    2-arg routes through `BigInt::modpow` for modular
+        //    exponentiation. Fires for any Integer recv (including
+        //    Int×Int×Int), so it sits ahead of the recv-or-arg
+        //    guard. No DoS cap on the 2-arg form: modpow never
+        //    materialises the intermediate, and the result is
+        //    bounded by |mod|.
+        // 4. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // 5. Recv is Int AND a BigInt is among args: covers the
         //    inverse-receiver operator method-call shape
         //    `1.+(2**63)`, which goes through the Int-side
         //    dispatch path and would otherwise miss BigInt
@@ -1354,6 +1465,30 @@ impl Vm {
             && let Some(v) = self.try_bigint_unary(recv, name)?
         {
             return Ok(Some(v));
+        }
+        // `pow(exp[, mod])` method form — 1-arg is an alias for `**`,
+        // 2-arg is modular exponentiation via BigInt::modpow. Fires
+        // ahead of the recv-or-arg guard so Int×Int×Int shapes work
+        // too. No DoS cap needed for the 2-arg form: modpow never
+        // materialises the intermediate, and the result is bounded
+        // by |mod|.
+        if name == "pow" && (args.len() == 1 || args.len() == 2)
+            && let Some(v) = self.try_bigint_pow_method(recv, args)?
+        {
+            return Ok(Some(v));
+        }
+        // Arity guard for BigInt receivers — numeric.rs's arity
+        // guard only catches Int×*, so `big.pow` / `big.pow(1,2,3)`
+        // would otherwise fall through to NoMethodError despite
+        // `respond_to?(:pow)` being true. Match CRuby's exact
+        // ArgumentError message text.
+        if name == "pow" && matches!(recv, Value::BigInt(_)) && args.len() != 2 && args.len() != 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1..2)",
+                    args.len(),
+                ),
+            }));
         }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));

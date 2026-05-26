@@ -774,6 +774,7 @@ pub(crate) fn cext_dispatch(
                     "TypeError"         => RubyError::TypeError { msg },
                     "NameError"         => RubyError::NameError { msg },
                     "ZeroDivisionError" => RubyError::ZeroDivisionError { msg },
+                    "RangeError"        => RubyError::RangeError { msg },
                     other => RubyError::RuntimeError {
                         msg: format!("{}: {}", other, msg),
                     },

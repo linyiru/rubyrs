@@ -2170,6 +2170,289 @@ fn bigint_unary_neg_demotes_when_result_fits_int() {
     );
 }
 
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_method_works_under_no_bignum_profile() {
+    // Both 1-arg and 2-arg `Integer#pow` must work on the no-bignum
+    // profile too — `respond_to?(:pow)` is whitelisted
+    // unconditionally, so dispatch needs to match. 1-arg delegates
+    // to `**` (numeric.rs alias). 2-arg uses an i128 square-and-
+    // multiply since BigInt isn't available.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 5.pow(3)\n\
+         puts 5.pow(3, 7)\n\
+         puts 7.pow(8, 5)\n\
+         puts (-5).pow(3, 7)\n\
+         puts 5.pow(3, -7)",
+        "pow_no_bignum.rb",
+    ).expect("pow must work without bignum");
+    // 5³=125; 125 mod 7 = 6; 7⁸ mod 5 = 1; (-5)³=-125, -125 floor-mod 7 = 1
+    // (since -125 = 7*-18 + 1); 125 floor-mod -7 = -1.
+    assert_eq!(buf.snapshot().trim(), "125\n6\n1\n1\n-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_arity_guard_fires_for_bigint_receiver() {
+    // numeric.rs's arity guard only catches Int receivers — BigInt
+    // receivers go through bigint_primitive's separate dispatch
+    // path. Mirror the guard there so `big.pow` / `big.pow(1,2,3)`
+    // raise CRuby's exact ArgumentError instead of NoMethodError.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [
+        ("big = 2 ** 100; big.pow", 0),
+        ("big = 2 ** 100; big.pow(1, 2, 3)", 3),
+    ] {
+        let err = rt.eval(script, "bigint_pow_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 1..2)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[test]
+fn pow_one_arg_non_numeric_raises_type_error() {
+    // CRuby: `5.pow("x")` raises `TypeError: String can't be
+    // coerced into Integer`. Pre-fix the 1-arg pow alias
+    // recursed unconditionally to `**`, which (separately) only
+    // surfaces NoMethodError for non-numeric args — so pow's
+    // delegate inherited that wrong error class. Validate the
+    // arg type at the pow boundary and raise TypeError directly.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, class_name) in [
+        ("5.pow(\"x\")", "String"),
+        ("5.pow(nil)", "nil"),
+        ("5.pow(true)", "true"),
+        ("5.pow([1])", "Array"),
+        ("5.pow({a: 1})", "Hash"),
+    ] {
+        let err = rt.eval(script, "pow_typeerr.rb").unwrap_err();
+        assert!(
+            err.err.is("TypeError"),
+            "expected TypeError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::TypeError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("{} can't be coerced into Integer", class_name),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_one_arg_non_numeric_raises_type_error_for_bigint_receiver() {
+    // Same fix on the BigInt receiver path — `(2 ** 100).pow("x")`
+    // routes through `try_bigint_pow_method`'s 1-arg branch, which
+    // mirrors the Int-side guard.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "(2 ** 100).pow(\"x\")",
+        "bigint_pow_typeerr.rb",
+    ).unwrap_err();
+    assert!(err.err.is("TypeError"), "got {:?}", err.err);
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(msg, "String can't be coerced into Integer");
+}
+
+#[test]
+fn pow_arity_zero_or_too_many_args_raise_argument_error() {
+    // CRuby: `5.pow` and `5.pow(1, 2, 3)` raise ArgumentError
+    // ("wrong number of arguments (given N, expected 1..2)").
+    // Without the explicit arity guard those shapes fall through
+    // to NoMethodError despite `respond_to?(:pow)` being true.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [("5.pow", 0), ("5.pow(1, 2, 3)", 3), ("5.pow(1, 2, 3, 4, 5)", 5)] {
+        let err = rt.eval(script, "pow_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 1..2)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[test]
+fn pow_one_arg_accepts_float_exponent() {
+    // `5.pow(1.5)` must mirror `5 ** 1.5` — both routes through
+    // the same `**` arm. Previously the `pow` alias only fired
+    // for `[Int]` exponents, so Float exp NoMethodErrored despite
+    // being supported by `**`. Pin across both profiles.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 5.pow(1.5)\nputs 9.pow(0.5)",
+        "pow_float_exp.rb",
+    ).expect("Int#pow(Float) must work");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    let a: f64 = lines[0].parse().expect("Float output");
+    let b: f64 = lines[1].parse().expect("Float output");
+    // 5^1.5 ≈ 11.180339887; 9^0.5 = 3.0.
+    assert!((a - 11.180_339_887).abs() < 1e-6);
+    assert!((b - 3.0).abs() < 1e-12);
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_no_bignum_two_arg_distinguishes_exp_vs_mod_type_errors() {
+    // CRuby uses two distinct TypeError messages depending on
+    // which arg is non-Integer: "...1st argument is integer" when
+    // the exp is non-Int, "...all arguments are integers" when the
+    // mod is non-Int. The no-bignum 2-arg path must match exactly
+    // (the bignum path already does).
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(1.5, 7)", "exp_float.rb").unwrap_err();
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        other => panic!("expected TypeError, got {:?}", other),
+    };
+    assert!(
+        msg.contains("a 1st argument is integer"),
+        "wrong message for non-Int exp: {}",
+        msg,
+    );
+    let err = rt.eval("5.pow(3, 1.5)", "mod_float.rb").unwrap_err();
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        other => panic!("expected TypeError, got {:?}", other),
+    };
+    assert!(
+        msg.contains("all arguments are integers"),
+        "wrong message for non-Int mod: {}",
+        msg,
+    );
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_no_bignum_error_shapes_match_cruby() {
+    let mut rt = rubyrs::Runtime::new();
+    assert!(
+        rt.eval("5.pow(-1, 7)", "no_bignum_neg_exp.rb").unwrap_err().err.is("RangeError"),
+    );
+    assert!(
+        rt.eval("5.pow(3, 0)", "no_bignum_zero_mod.rb").unwrap_err().err.is("ZeroDivisionError"),
+    );
+    assert!(
+        rt.eval("5.pow(1.5, 7)", "no_bignum_float_exp.rb").unwrap_err().err.is("TypeError"),
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_huge_exponent_skips_dos_cap() {
+    // `2.pow(huge_exp, mod)` must succeed even when `2 ** huge_exp`
+    // would blow far past any reasonable max_value_bytes — modpow
+    // never materialises the intermediate, so the cap on the
+    // pre-modulo `**` path doesn't apply. Pin under a tight 1 KB
+    // cap that `2 ** 100_000` would trip (12.5 KB real magnitude).
+    let cfg = rubyrs::Config { max_value_bytes: Some(1024), ..Default::default() };
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 2.pow(100_000, 1_000_000_007)",
+        "pow_mod_huge.rb",
+    ).expect("modpow must not trip the unmodulated `**` DoS cap");
+    let v: i64 = buf.snapshot().trim().parse().expect("result must be Int");
+    assert!((0..1_000_000_007).contains(&v),
+        "result {} not in [0, mod)", v);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_negative_exponent_raises_range_error() {
+    // CRuby: `5.pow(-1, 7)` raises RangeError. Modular inverse may
+    // not exist and we don't compute it — match by raising rather
+    // than silently producing an unrelated value.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(-1, 7)", "pow_neg_exp_with_mod.rb").unwrap_err();
+    assert!(
+        err.err.is("RangeError"),
+        "expected RangeError, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_zero_modulus_raises_zero_division() {
+    // CRuby: `5.pow(3, 0)` raises ZeroDivisionError ("divided by 0").
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(3, 0)", "pow_zero_mod.rb").unwrap_err();
+    assert!(
+        err.err.is("ZeroDivisionError"),
+        "expected ZeroDivisionError, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_non_integer_args_raise_type_error() {
+    // CRuby: `5.pow(1.5, 7)` raises TypeError. Same for
+    // `5.pow(3, 1.5)`. Pin the type-shape contract.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(1.5, 7)", "pow_float_exp.rb").unwrap_err();
+    assert!(err.err.is("TypeError"), "expected TypeError, got {:?}", err.err);
+    let err = rt.eval("5.pow(3, 1.5)", "pow_float_mod.rb").unwrap_err();
+    assert!(err.err.is("TypeError"), "expected TypeError, got {:?}", err.err);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_result_demotes_when_fits_int() {
+    // The result is always strictly bounded by |mod|. When |mod|
+    // fits i64, the result fits too — `bigint_to_value` should
+    // demote so the embedding-facing `Value` is `Value::Int`, not
+    // `Value::BigInt`. Pins demote-on-fit through the modpow path.
+    let mut rt = rubyrs::Runtime::new();
+    let v = rt.eval(
+        "(2 ** 100).pow(50, 1_000_000_007)",
+        "pow_mod_demote.rb",
+    ).expect("eval must succeed");
+    assert!(
+        matches!(v, Value::Int(_)),
+        "expected Value::Int (mod fits i64), got {:?}", v,
+    );
+}
+
 #[test]
 fn pow_zero_to_negative_exponent_raises_zero_division() {
     // CRuby: `0 ** -1` raises `ZeroDivisionError: divided by 0`
