@@ -80,13 +80,16 @@ and that the C-ext require wall (Cat B) and project-helper holes
 (Cat F) were load-bearing. This pass tested both predictions:
 
 - **Multi-step investment paid off**: tilt/string.rb sat behind
-  *three* blockers (Object ancestor stub, module `prepend`,
-  block-arg ICE). The previous pass moved it from C to D by
-  closing the first layer; this pass closes the remaining two
-  layers AND a downstream layer that only became visible after
-  the first two cleared. The pattern: each multi-step file
-  surfaces another layer per unblock, and pass-count movement
-  arrives only when the LAST one closes.
+  a *load-path* layer (require_relative — closed in PR #66, the
+  C→D move recorded in the fourth pass) and then *three more
+  AST/VM layers* after that — `class << self; prepend(...)`,
+  Object as an ancestor in the lookup chain, and the block-arg
+  ICE on the inner `evaluate(..., &block)` forwarding. This pass
+  closes the three post-require_relative layers (PR #105, #107,
+  #109) AND a fourth that only became visible after the first
+  two cleared. The pattern: each multi-step file surfaces
+  another layer per unblock, and pass-count movement arrives
+  only when the LAST one closes.
 - **Cat B partially fell to a stub strategy**: rather than
   building real `Time` / `Logger` modules, PR #107's stdlib
   require stub treats common stdlib `require` calls as no-ops
