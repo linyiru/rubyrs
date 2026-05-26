@@ -597,8 +597,10 @@ the contract. Inputs whose Ruby literal exceeds `i64::MAX` /
 `i64::MIN` (e.g. `2**100`) saturate at the parser before bigint.rb
 sees them; that's a Tier 2 boundary, not a Tier 1 bug.
 
-See [`tests/cext_msgpack_bigint.rs`](../crates/rubyrs/tests/cext_msgpack_bigint.rs)
-for the eight-case acceptance suite.
+See [`tests/diff/cext_msgpack_bigint.rb`](../crates/rubyrs/tests/diff/cext_msgpack_bigint.rb)
+for the eight-case acceptance suite (a regular diff_cruby
+fixture: each value's pack bytes and round-trip equality are
+asserted byte-for-byte against CRuby on the same `bigint.rb`).
 
 ## Permanently out of scope at every tier
 

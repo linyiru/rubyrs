@@ -221,3 +221,4 @@ fn run_diff(name: &str) {
 #[test] fn mutex_stub() { run_diff("mutex_stub"); }
 #[test] fn kernel_instance_method() { run_diff("kernel_instance_method"); }
 #[test] fn constant_scoping() { run_diff("constant_scoping"); }
+#[test] fn cext_msgpack_bigint() { run_diff("cext_msgpack_bigint"); }
