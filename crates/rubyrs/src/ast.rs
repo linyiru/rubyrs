@@ -1470,22 +1470,83 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         }
         return sp(node, Expr::Call { receiver, name, args });
     }
+    // `return`, `next`, `break` all collapse multi-arg forms
+    // into a single value the same way CRuby does:
+    //   - zero args: None (yields nil at the consumer)
+    //   - one arg: that single value
+    //   - two-or-more args: an Array literal wrapping them all
+    // CRuby treats `return a, b` as `return [a, b]` (same shape
+    // as a `[a, b]` literal). Without the Array-wrap, the
+    // multi-arg form silently dropped everything past the first
+    // value — broke destructuring assignments like
+    // `x, y = some_method` where the method used `return a, b`.
+    // Motivating case: MRI's `lib/erb/compiler.rb:466`
+    // (`return enc, frozen` consumed by `*magic_comment` splat).
+    fn collect_multi_return_value(args: Option<ruby_prism::ArgumentsNode<'_>>, span_node: &Node<'_>) -> Option<Box<SExpr>> {
+        let a = args?;
+        let arg_nodes: Vec<_> = a.arguments().iter().collect();
+        match arg_nodes.len() {
+            0 => None,
+            // Single arg: pass through directly (no Array wrap).
+            // `return val` and `return *val` collapse to the same
+            // shape as CRuby — bare expression, or splat-expression
+            // (the splat-only form acts as Array(value) which we
+            // model by treating the inner as the bare return value).
+            1 => {
+                let only = &arg_nodes[0];
+                if let Some(sn) = only.as_splat_node()
+                    && let Some(inner) = sn.expression() {
+                    return Some(Box::new(tr(&inner)));
+                }
+                Some(Box::new(tr(only)))
+            }
+            // 2+ args: build an Array. With splats, mirror the
+            // `[a, *b, c]` handling in the array-literal arm —
+            // chunk non-splats into ArrayLit groups, splats stay
+            // bare, chain them with `Array#+`.
+            _ => {
+                let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
+                if !has_splat {
+                    let elems: Vec<SExpr> = arg_nodes.iter().map(|n| tr(n)).collect();
+                    return Some(Box::new(sp(span_node, Expr::ArrayLit(elems))));
+                }
+                let mut chunks: Vec<SExpr> = Vec::new();
+                let mut buf: Vec<SExpr> = Vec::new();
+                for n in &arg_nodes {
+                    if let Some(sn) = n.as_splat_node()
+                        && let Some(inner) = sn.expression() {
+                        if !buf.is_empty() {
+                            chunks.push(sp(span_node, Expr::ArrayLit(std::mem::take(&mut buf))));
+                        }
+                        chunks.push(tr(&inner));
+                    } else {
+                        buf.push(tr(n));
+                    }
+                }
+                if !buf.is_empty() {
+                    chunks.push(sp(span_node, Expr::ArrayLit(buf)));
+                }
+                let mut it = chunks.into_iter();
+                let first = it.next().unwrap_or_else(|| sp(span_node, Expr::ArrayLit(vec![])));
+                let acc = it.fold(first, |lhs, rhs| sp(span_node, Expr::Call {
+                    receiver: Some(Box::new(lhs)),
+                    name: "+".into(),
+                    args: vec![rhs],
+                }));
+                Some(Box::new(acc))
+            }
+        }
+    }
     if let Some(n) = node.as_return_node() {
-        let val = n.arguments().and_then(|a| {
-            a.arguments().iter().next().map(|first| Box::new(tr(&first)))
-        });
+        let val = collect_multi_return_value(n.arguments(), node);
         return sp(node, Expr::Return(val));
     }
     if let Some(n) = node.as_next_node() {
-        let val = n.arguments().and_then(|a| {
-            a.arguments().iter().next().map(|first| Box::new(tr(&first)))
-        });
+        let val = collect_multi_return_value(n.arguments(), node);
         return sp(node, Expr::Next(val));
     }
     if let Some(n) = node.as_break_node() {
-        let val = n.arguments().and_then(|a| {
-            a.arguments().iter().next().map(|first| Box::new(tr(&first)))
-        });
+        let val = collect_multi_return_value(n.arguments(), node);
         return sp(node, Expr::Break(val));
     }
     // `defined?(expr)` — returns a string describing the kind
