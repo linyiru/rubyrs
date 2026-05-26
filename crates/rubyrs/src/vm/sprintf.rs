@@ -132,11 +132,14 @@ pub(crate) fn ruby_sprintf(
                 }
                 body
             }
-            // Base-N specifiers. BigInt args render via
-            // `format_radix_bigint`; Int args via the i64 helper.
-            // Both render negative magnitudes as `-<digits>`
-            // rather than CRuby's `..f`-prefixed two's-complement
-            // form — documented divergence (see `format_radix_int`
+            // Base-N specifiers route through `format_radix_any`,
+            // which dispatches on arg shape: BigInt args render
+            // via `num_bigint::BigInt::to_str_radix` on the
+            // magnitude; everything else coerces to i64 and
+            // defers to `format_radix_int`. Both branches render
+            // negative magnitudes as `-<digits>` rather than
+            // CRuby's `..f`-prefixed two's-complement form —
+            // documented divergence (see `format_radix_int`
             // comment). For BigInt, the divergence applies the
             // same way.
             'x' => format_radix_any(arg, heap, 16, false, flag_hash)?,

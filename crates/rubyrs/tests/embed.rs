@@ -2365,15 +2365,20 @@ fn sprintf_radix_int_min_does_not_panic() {
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {
-    // CRuby renders negative integers in non-decimal bases with
-    // an `..f`-prefixed two's-complement form (e.g. `(-256).to_s(16)
-    // == "-100"` for to_s but `"%x" % -256 == "..f00"` for sprintf).
-    // Wait — to_s actually IS `-<magnitude>`, sprintf is the
-    // `..f` form. We match CRuby for to_s exactly (no divergence
-    // there) and diverge for sprintf (documented).
+    // Two distinct CRuby behaviours for negative integers in
+    // non-decimal bases:
+    //   - `Integer#to_s(radix)` returns `-<magnitude>`:
+    //     `(-256).to_s(16) == "-100"`. We match this exactly.
+    //   - `sprintf '%x' % -256` returns `"..f00"` (CRuby's
+    //     two's-complement infinite-ones notation). We diverge
+    //     here and render `-<magnitude>` instead — documented
+    //     in the sibling
+    //     `sprintf_bigint_radix_negative_uses_minus_magnitude_divergence`
+    //     test and in `format_radix_int`'s source comment.
     //
-    // This test pins to_s — both Int and BigInt receivers should
-    // produce `-<magnitude>` for negative inputs.
+    // This test pins the `to_s` half — Int and BigInt receivers
+    // both produce `-<magnitude>` for negative inputs, matching
+    // CRuby byte-for-byte.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
