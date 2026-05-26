@@ -555,6 +555,33 @@ impl Vm {
                                 });
                             }
                             Some(Ok(Value::Bool(true)))
+                        } else if self.require_satisfied_by_existing_constant(&path_str) {
+                            // Lenient fallback: if the namespace
+                            // constant the require asks for is
+                            // already defined on this Vm (either by
+                            // an embedder pre-registering it or by
+                            // earlier script code), treat the
+                            // require as satisfied instead of going
+                            // down the cext-lookup path. Lets a
+                            // host pre-register `module Rack` so
+                            // that `require 'rack'` (and
+                            // `require 'rack/show_exceptions'`)
+                            // inside a gem source no-op cleanly
+                            // instead of crashing on the C-ext
+                            // lookup — Rack is pure Ruby in modern
+                            // versions, so the cext path would
+                            // always fail for it. Mirrors the
+                            // loaded_stdlib_stubs dedup pattern
+                            // immediately above: Bool(true) on
+                            // first observation, Bool(false)
+                            // thereafter, matching CRuby's
+                            // loaded-features semantics.
+                            let already_loaded = self.loaded_stdlib_stubs.contains(&*path_str);
+                            if already_loaded {
+                                return Some(Ok(Value::Bool(false)));
+                            }
+                            self.loaded_stdlib_stubs.insert(path_str.to_string());
+                            Some(Ok(Value::Bool(true)))
                         } else {
                             #[cfg(feature = "cext")]
                             { Some(self.cext_require(&path_str)) }
@@ -698,6 +725,77 @@ impl Vm {
             })),
         };
         self.load_ruby_source_from_canon(canon)
+    }
+
+    /// Does an existing class/module on this Vm already satisfy
+    /// the given `require` path?
+    ///
+    /// Maps `path_str`'s first segment (everything before the
+    /// first `/`) to a Ruby constant name in the two shapes
+    /// embedders / scripts commonly use:
+    ///
+    ///   - `snake_case` → `CamelCase` (`rack` → `Rack`,
+    ///     `active_record` → `ActiveRecord`)
+    ///   - input itself UPPER-cased (`json` → `JSON`,
+    ///     `uri` → `URI`) — captures the all-caps abbreviation
+    ///     convention CRuby uses for several stdlib names
+    ///
+    /// Looks both up in `self.classes`. Returns true if either
+    /// shape resolves to a defined class or module. Only the
+    /// **first** segment is checked, so `require 'rack/cors'`
+    /// matches if `Rack` exists — consistent with how Rubygems
+    /// treats `<gem>/<subfile>` paths.
+    ///
+    /// Deliberately conservative: only fires for paths that don't
+    /// match a `.rb` file or `is_stdlib_stub_name`. Used as the
+    /// last fallback before `cext_require`, so it costs nothing
+    /// in the happy path.
+    fn require_satisfied_by_existing_constant(&mut self, path_str: &str) -> bool {
+        let first_seg = match path_str.split('/').next() {
+            Some(s) if !s.is_empty() => s,
+            _ => return false,
+        };
+        // Skip relative / absolute paths and anything that looks
+        // like a real filesystem name — those should go through
+        // the .rb / cext path, not this fallback.
+        if first_seg.starts_with('.') || first_seg.contains('\\') {
+            return false;
+        }
+        // Skip if the segment isn't a valid leading-identifier
+        // shape: a require path that begins with a digit or
+        // special char isn't going to camelize cleanly anyway.
+        if !first_seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+            return false;
+        }
+        let camel = snake_to_camel_case(first_seg);
+        let upper = first_seg.to_ascii_uppercase();
+        let camel_id = self.interner.intern(&camel);
+        if self.classes.contains_key(&camel_id) {
+            return true;
+        }
+        if upper != camel {
+            let upper_id = self.interner.intern(&upper);
+            if self.classes.contains_key(&upper_id) {
+                return true;
+            }
+        }
+        // Case-insensitive fallback — covers names where Ruby's
+        // canonical capitalization doesn't follow either of the
+        // two shapes above. Stdlib's `IPAddr` (file `ipaddr.rb`)
+        // is the textbook example: `snake_to_camel_case("ipaddr")`
+        // returns `Ipaddr` and `"ipaddr".to_ascii_uppercase()`
+        // returns `IPADDR`, neither of which matches. Walking the
+        // classes table and ASCII-lowercase-comparing each
+        // resolved name catches that. Cost is O(n) only on
+        // double-miss; n stays modest in practice (a few hundred
+        // classes at most for a typical embedded Vm).
+        for sym_id in self.classes.keys() {
+            let name = self.interner.resolve(*sym_id);
+            if name.eq_ignore_ascii_case(first_seg) {
+                return true;
+            }
+        }
+        false
     }
 
     /// `require "path.rb"` — load a Ruby source file by literal
@@ -1133,6 +1231,25 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util"
     )
+}
+
+/// Convert a snake_case Ruby file/require token to CamelCase
+/// using Rubygems / Bundler's standard heuristic: split on `_`,
+/// capitalize each part, concat. `rack` → `Rack`, `active_record`
+/// → `ActiveRecord`, `my_lib_v2` → `MyLibV2`. Empty input yields
+/// empty output (caller filters those before invoking).
+fn snake_to_camel_case(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for part in input.split('_') {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            for c in first.to_uppercase() {
+                out.push(c);
+            }
+            out.extend(chars);
+        }
+    }
+    out
 }
 
 /// Strict base-aware integer parser used by `Kernel#Integer(str,

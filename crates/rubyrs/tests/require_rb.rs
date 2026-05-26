@@ -134,6 +134,82 @@ puts "counter=" + TRACK_LOG.length.to_s
 }
 
 #[test]
+fn require_satisfied_by_pre_registered_module_no_ops() {
+    // Embedder-flavour case: a host or earlier script defines
+    // a top-level module/class whose name is the camelized form
+    // of the require path. The require should treat that as
+    // already-loaded — Bool(true) on first observation,
+    // Bool(false) thereafter — and NOT fall through to
+    // cext_require (which would error with "cannot find C ext").
+    //
+    // Exercises three angles in one driver:
+    //   1. snake_to_camel match (`module Rack` satisfies
+    //      `require "rack"`)
+    //   2. subpath match (`require "rack/show_exceptions"` is
+    //      also satisfied because the first segment maps to
+    //      the same already-defined `Rack`)
+    //   3. case-insensitive fallback for non-conventional
+    //      capitalization (`class IPAddr` satisfies
+    //      `require "ipaddr"` — `snake_to_camel_case("ipaddr")`
+    //      returns `Ipaddr`, neither shape matches `IPAddr`
+    //      directly, so the case-insensitive walk has to
+    //      catch it)
+    //   4. unknown paths still error
+    //   5. dedup semantics — second require returns false
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_existing_const_driver.rb");
+    fs::write(&driver_path,
+        r#"
+module Rack; end
+class IPAddr; end
+
+r1 = require "rack"
+r2 = require "rack"
+r3 = require "rack/show_exceptions"
+r4 = require "ipaddr"
+
+begin
+  require "definitely_not_a_real_module_xyz_abc_999"
+  reject = "loaded-unexpectedly"
+rescue RuntimeError => e
+  reject = "errored: #{e.class}"
+end
+
+puts "rack-first=#{r1}"
+puts "rack-second=#{r2}"
+puts "rack-subpath=#{r3}"
+puts "ipaddr-canonical=#{r4}"
+puts reject
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    let expected = "\
+rack-first=true
+rack-second=false
+rack-subpath=true
+ipaddr-canonical=true
+errored: RuntimeError
+";
+    assert_eq!(
+        stdout, expected,
+        "fallback behavior mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
 fn require_missing_rb_falls_back_to_cext_or_errors() {
     // Path with no .rb sibling and no cext sibling should
     // error out cleanly (RuntimeError-shape via the cext
