@@ -332,18 +332,20 @@ echo "=== cross-runtime comparison (MIN of $RUNS runs, same wizer'd .wasm) ==="
 echo ""
 runtime_min "wasmtime CLI (AOT cwasm):"    wasmtime run --allow-precompiled --dir "$PERF_TMPDIR" "$CWASM" "$SCRIPT"
 if [[ -x "$EMBED_BIN" ]]; then
-  # The embedder accepts either a baked-in cwasm (no env var, built
-  # via perf/build_embedder.sh) or an external one via
-  # RUBYRS_CWASM. Surface both rows so the trade-off is visible:
-  #   - Baked: single-binary ship shape, +~750 us cold start due to
-  #     larger binary (macOS dyld page-load + code-signing cost).
-  #   - External: two-file ship shape but faster cold start because
-  #     the cwasm mmaps from a separate file.
-  # The `runtime_min` helper passes env via the timer's inherited
-  # environment, so prefixing RUBYRS_CWASM=… on the line below
-  # only affects that one call.
+  # Only the baked-cwasm row is shown for the embedder.
+  # `RUBYRS_CWASM` (external override) USED to be a useful
+  # benchmark comparison, but the embedder now trims wasmtime's
+  # features down to `runtime + std + cranelift`, which means
+  # its `Module::deserialize` rejects cwasm produced by the full-
+  # feature `wasmtime compile` CLI (`module was compiled with GC
+  # however GC is disabled in the host` and similar). The baked
+  # cwasm in build.rs uses the same trimmed feature set, so it
+  # rounds-trips correctly. External cwasm is still supported at
+  # runtime — but only when produced with a matching feature
+  # set, which isn't the case for the CLI-built cwasm this
+  # script uses elsewhere. Skipping the row keeps the comparison
+  # apples-to-apples.
   runtime_min "embedder (baked cwasm):"      "$EMBED_BIN" "$SCRIPT"
-  RUBYRS_CWASM="$CWASM" runtime_min "embedder (RUBYRS_CWASM external):" "$EMBED_BIN" "$SCRIPT"
 fi
 if [[ -f "$WASMER_AOT" ]]; then
   runtime_min "wasmer (AOT .wasmu):"        wasmer run --volume "$PERF_TMPDIR:$PERF_TMPDIR" "$WASMER_AOT" -- "$SCRIPT"
