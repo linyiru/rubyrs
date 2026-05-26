@@ -132,6 +132,20 @@ fn parse_node_list(path: &std::path::Path) -> BTreeSet<String> {
 fn extract_as_node_accessors(src: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for (start, _) in src.match_indices("as_") {
+        // Word-boundary guard: the "as_" must not be in the
+        // middle of a longer identifier. Without this,
+        // `as_alias_method_node` would also match starting at
+        // its internal "as_" (the trailing "as" of "alias"),
+        // yielding a spurious "MethodNode" accessor. Boundary
+        // = preceded by non-identifier char (or start of file).
+        if start > 0 {
+            let prev = src[..start].chars().next_back();
+            if let Some(c) = prev
+                && (c.is_ascii_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+        }
         let tail = &src[start..];
         let end = tail
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
