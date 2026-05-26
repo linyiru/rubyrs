@@ -171,16 +171,23 @@ impl Vm {
                 "digits" | "bit_length" | "[]"
             ),
             // Phase A BigInt subset — arithmetic + comparison +
-            // to_s/inspect/class. Unary `-@`/`+@`, bit ops,
-            // iteration helpers, and digits/bit_length/abs are
-            // deferred to Phase B (each needs a `&mut Vm` heap
-            // path that the stateless `primitive_call` doesn't
-            // grant; the helper plumbing lands with Phase B).
+            // to_s/inspect + pure predicates that don't need
+            // heap mutation. Unary `-@`/`+@`, bit ops, `abs`,
+            // iteration helpers (`times`, `upto`, `downto`),
+            // `digits` and `bit_length` remain Phase B — each
+            // needs a `&mut Vm` heap path that the stateless
+            // `primitive_call` doesn't grant. The predicates
+            // below only READ the bigint to compute a Bool/Int,
+            // so they fit cleanly in the existing bigint_primitive
+            // shape.
             #[cfg(feature = "bignum")]
             Value::BigInt(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" |
                 "<" | "<=" | ">" | ">=" |
-                "to_s" | "inspect"
+                "to_s" | "inspect" |
+                "to_i" | "to_f" |
+                "zero?" | "positive?" | "negative?" |
+                "even?" | "odd?"
             ),
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |
