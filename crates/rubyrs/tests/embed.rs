@@ -639,6 +639,56 @@ fn syntax_error_message_is_human_readable() {
 }
 
 #[test]
+fn syntax_error_via_require_relative_is_human_readable() {
+    // Companion to `syntax_error_message_is_human_readable`. The
+    // Debug-leak fix touched two call sites — `Runtime::eval` and
+    // the `require_relative` load path in vm/kernel.rs's
+    // `compile_and_run_source`. The eval site is covered above;
+    // this case exercises the require_relative path so a future
+    // edit that re-introduces the leak in `compile_and_run_source`
+    // (e.g. copy-paste of `format!("{:?}", e)` during a refactor)
+    // also fails CI.
+    //
+    // Drops a malformed `.rb` into the OS temp dir, then evals a
+    // Ruby snippet that `require_relative`s its absolute path —
+    // rubyrs's path-resolution joins through Rust's `Path::join`,
+    // which treats an absolute argument as the full path, so this
+    // works regardless of the caller's anchor file.
+    use std::io::Write;
+    let mut tmp = std::env::temp_dir();
+    // Per-test-process file name to avoid races between parallel
+    // cargo-test invocations sharing the same temp dir.
+    tmp.push(format!("rubyrs_bad_syntax_{}.rb", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&tmp).expect("write temp .rb");
+        // Same shape as the eval-path test; multiple cascading
+        // Prism diagnostics, all of which would have been
+        // pointer-formatted under the bug.
+        write!(f, "def x(").unwrap();
+    }
+    // Strip the `.rb` so the require_relative path matches
+    // require's convention of "name without extension".
+    let path_no_ext = tmp.with_extension("");
+    let snippet = format!(
+        "require_relative {:?}",
+        path_no_ext.to_string_lossy(),
+    );
+    let mut rt = Runtime::new();
+    let err = rt.eval(&snippet, "(syntax_err_via_require)").unwrap_err();
+    // Cleanup before assertions so a failing assertion still
+    // leaves /tmp tidy.
+    let _ = std::fs::remove_file(&tmp);
+    let RubyError::SyntaxError { msg } = &err.err else {
+        panic!("expected SyntaxError, got {:?}", err.err);
+    };
+    assert!(!msg.contains("Diagnostic {"), "Debug-format leaked: {msg}");
+    assert!(!msg.contains("PhantomData"), "Debug-format leaked: {msg}");
+    assert!(!msg.contains("0x"), "raw pointer leaked: {msg}");
+    assert!(msg.contains("expected"), "missing diagnostic text: {msg}");
+    assert!(msg.starts_with("L1:"), "missing L<line>:<col> prefix: {msg}");
+}
+
+#[test]
 fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     // P0-4: prior to this change, any Prism node the AST translator
     // didn't handle (case/when, regex literal, lambda, etc.) hit
