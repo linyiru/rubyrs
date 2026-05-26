@@ -784,9 +784,15 @@ impl Vm {
 /// BigInt method dispatch — covers the calls `primitive_call`
 /// can't satisfy (it's stateless; BigInt needs heap access for
 /// the decimal-string read). Hooked from `Vm::do_call` after
-/// the regular primitive paths. Phase A supports `to_s` /
-/// `inspect`; arithmetic + comparison are routed through
-/// `Op::BinOp` → `try_bigint_binop` and don't reach here.
+/// the regular primitive paths. Phase A surface:
+/// - `to_s` / `inspect` — heap-read paths handled inline.
+/// - Operator method-call shape (`big.+(x)`, `big.send(:==, y)`)
+///   — name parsed by `BinOpKind::from_op_name`, then routed
+///   through `try_bigint_binop` so the answer matches the
+///   `Op::BinOp` path exactly.
+/// The expression-form arithmetic (`big + 1` compiled as
+/// `Op::BinOp`) still goes through `try_bigint_binop` directly
+/// without entering this helper.
 #[cfg(feature = "bignum")]
 impl Vm {
     pub(crate) fn bigint_primitive(
@@ -893,8 +899,10 @@ impl Vm {
                     if needs_correction { r + &bx } else { r }
                 }
             }
-            // Comparison ops handled separately — the caller routes
-            // those through `bigint_cmp` for the Bool/Int return.
+            // Comparison ops are handled inline in
+            // `try_bigint_binop` (which returns Bool directly via
+            // BigInt's PartialOrd/PartialEq); they never reach this
+            // arithmetic match.
             _ => return None,
         };
         Some(self.bigint_to_value(result))

@@ -94,7 +94,8 @@ pub enum Value {
     /// Cfg-gated on the `bignum` feature (ADR 0018's BigInt
     /// placement decision — Tier-1 semantics, Tier-1 implementation
     /// dep). With `--no-default-features`, the variant disappears
-    /// and arithmetic falls back to i64-saturating `wrapping_*`.
+    /// and arithmetic falls back to i64 two's-complement `wrapping_*`
+    /// (wraps on overflow rather than promoting).
     #[cfg(feature = "bignum")]
     BigInt(ObjId),
     /// 64-bit float. Mixed arithmetic with Int promotes the Int

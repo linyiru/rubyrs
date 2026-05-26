@@ -49,12 +49,13 @@ cext = ["dep:rubyrs-cext", "dep:libloading"]
 #     estimate; measured at merge time)
 #   - `Value::BigInt`, `HeapObj::BigInt`, `Op::LoadBigInt`, and
 #     the integer-literal overflow → BigInt promotion path all
-#     cfg out; arithmetic falls back to today's i64-saturating
-#     `wrapping_*` discipline
+#     cfg out; arithmetic falls back to two's-complement
+#     `wrapping_*` (wraps on overflow rather than promoting; not
+#     saturating)
 #   - script-visible: integer literals beyond i64 (e.g.
-#     `9_223_372_036_854_775_808`) and `+`/`-`/`*`/`/`/`%` results
-#     that overflow i64 saturate / wrap instead of promoting to a
-#     real arbitrary-precision Integer
+#     `9_223_372_036_854_775_808`) saturate to `i64::MAX` at the
+#     AST layer, and `+`/`-`/`*`/`/`/`%` results that overflow i64
+#     wrap modulo 2^64 instead of promoting to arbitrary precision
 # Phase A surface (today): `+`, `-`, `*`, `/`, `%`, comparison,
 # `to_s`, `inspect`, `class`. Phase B will add `**` (which still
 # saturates today, gated on the `primitive_call &mut Vm` plumbing
