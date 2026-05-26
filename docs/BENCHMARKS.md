@@ -49,6 +49,45 @@ reflect different deployment shapes:
 This is the strongest signal for our target niche (CLI tools,
 serverless / edge runtimes, embedded scripting).
 
+## P2-A pivot: rubyrs.wasm vs ruby.wasm on a real DSL
+
+The product-niche signal in WebAssembly shape. Both implementations
+get the *same* Brewfile-style DSL workload
+([`crates/rubyrs/tests/wasm/brewfile_dsl.rb`](../crates/rubyrs/tests/wasm/brewfile_dsl.rb)
+— ~50 lines of declarations, a class def, two `.each` loops, a
+conditional) and run under the *same* `wasmtime` engine. The
+question P2-A asks is: **is the embedding niche big enough to be
+worth building toward?**
+
+Reproduce locally via `bash perf/p2a_compare.sh` once ruby.wasm 3.4
+is unpacked at the path the script documents.
+
+Apple M-series, wasmtime 45.0.0, ruby.wasm 3.4 `wasi-minimal`,
+rubyrs.wasm release + `wasm-opt -Oz`, MIN of 5 runs:
+
+| Shape | rubyrs | ruby.wasm 3.4 minimal | Ratio |
+|-------|-------:|----------------------:|------:|
+| **Raw .wasm wall** (no AOT)   | 30 ms  | 180 ms | **6.0× faster** |
+| **AOT .cwasm wall**           | 10 ms  |  80 ms | **8.0× faster** |
+| **Raw .wasm size**            | 1.14 MB | 24.14 MB | **21.2× smaller** |
+| **AOT .cwasm size**           | 4.27 MB | 33.12 MB | **7.8× smaller** |
+
+The cross-runtime ratios are the P2-A decision signal: rubyrs is
+~6-8× faster end-to-end and 7-21× smaller for the same DSL workload
+under the same engine. Cold-start floor and binary-shipment cost
+are both dominated by the wasm bundle itself — ruby.wasm pays for
+the full MRI runtime + stdlib even in its minimal build, where
+rubyrs ships just the Tier 1 interpreter + Prism parser.
+
+This is the embedding-niche thesis empirically: if your host
+shipping path includes the runtime (CLI tools, serverless workers,
+edge functions, plug-in scripting), the size difference dominates
+and the wall-time difference is gravy. If your host has Ruby
+already installed and just hosts a long-running process, ruby.wasm
+or native MRI wins on throughput (see "Throughput" below where
+rubyrs still trails CRuby's interpreter ~1.76× on a 1M-iteration
+loop). The two niches don't overlap.
+
 ## Throughput
 
 1M iteration loop computing fizzbuzz string lengths.

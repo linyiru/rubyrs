@@ -140,34 +140,35 @@ the diff_cruby fixture or test that locks each one down:
   fixture is `#[cfg(feature = "stdlib")]`
 - **BigInt Phase A** — `bignum_phase_a` + Float×BigInt coercion,
   Range edge arithmetic, msgpack BigInt wire protocol
+- **`Module.nesting` reflection** — `module_nesting` fixture; reuses
+  the per-Proto `lexical_scope` chain that `Op::LoadConstChain`
+  already needs
+- **Qualified `defined?(Foo::Bar)`** — `defined_constant_path` fixture;
+  the AST `defined?` arm now flattens ConstantPath and
+  `__defined_const?` walks both `Vm.classes` and `Vm.constants`
+- **P2-A pivot demo** — Brewfile-shape DSL on the wasm gate
+  (`tests/wasm/brewfile_dsl.rb` + `wasm_baselines.tsv` row);
+  cross-runtime measurement script (`perf/p2a_compare.sh`) +
+  documented numbers in BENCHMARKS.md showing rubyrs is 6-8× faster
+  and 7-21× smaller than ruby.wasm 3.4 wasi-minimal on the same
+  workload under the same wasmtime engine
 
 ## Near term
 
 In rough order of ROI for the embedding / DSL use case:
 
-1. **`Module.nesting` reflection API** — cref chains already exist at
-   compile time (`Op::LoadConstChain`'s `Vec<SymId>`); exposing them
-   via a frame-attached `nesting_snapshot` is small and unblocks a
-   class of Sinatra/Rack-style introspection code
-2. **Qualified ConstantPathWrite** (`Foo::Bar = 1`) — check whether
-   AST handles `ConstantPathWriteNode` or if it falls through; emit a
-   `Op::StoreConst(qual)` path
-3. **Stdlib vendor expansion** (under `--features stdlib`) — `Set`,
+1. **Stdlib vendor expansion** (under `--features stdlib`) — `Set`,
    `StringIO`, `SecureRandom` (seeded mode only, per ADR 0017 line 131);
    reuse the `compile_and_run_source` infrastructure from the
    Pathname pilot
-4. **`HostCtx`-v2 Array/Hash allocation** — let host fns allocate
+2. **`HostCtx`-v2 Array/Hash allocation** — let host fns allocate
    structured return values; the missing piece of the host embedding
    surface
-5. **BigInt Phase B** — `**`, bit ops, unary `-@`/`+@`, `abs`,
+3. **BigInt Phase B** — `**`, bit ops, unary `-@`/`+@`, `abs`,
    tighter Float interop
-6. **P2-A Pivot demo + benchmark**: pick a Ruby DSL (Brewfile leading
-   candidate) and demonstrate it running on rubyrs.wasm under wasmtime
-   with cold start + memory numbers vs CRuby and ruby.wasm. This is the
-   *decision gate* for the embedding-niche thesis
-7. **P2-B Spec ingestion v0.1** — `tools/spec_extract` from ruby/spec,
+4. **P2-B Spec ingestion v0.1** — `tools/spec_extract` from ruby/spec,
    first SPEC_STATUS.md report
-8. **Bytecode peephole sweep** — DefClass-then-Dup-then-StoreConst is
+5. **Bytecode peephole sweep** — DefClass-then-Dup-then-StoreConst is
    one obvious fusion; IC-stats counters (cargo feature `ic-stats`)
    to validate the 4-way IC's hit rate on real workloads
 
@@ -216,21 +217,21 @@ haven't yet.
   zero benefit for the current target use cases.
 - **Cheap shims often suffice.** `attr_accessor` / `attr_reader` /
   `attr_writer` are the dominant real-world consumers of "define
-  methods at class-load time"; implementing them as built-in
-  macros (Near term #6) covers the common case without any
-  general metaprogramming support.
+  methods at class-load time"; the built-in-macro implementation
+  (shipped — see Recently landed) covers the common case without
+  any general metaprogramming support.
 
 ### What we'd do, when the time comes
 
 In rough order of effort vs. payoff. Each level subsumes the
 previous — you'd implement them as a sequence, not in parallel.
 
-1. **`attr_*` as built-in macros.** Already on Near term #6.
-   Recognised at class-definition time, expand to compile-time
-   method emission. Doesn't introduce any runtime metaprogramming
-   surface. Closes a large fraction of the apparent gap surfaced
-   by gapscan's bareword report (Jekyll: 32 `attr_reader`
-   occurrences alone).
+1. **`attr_*` as built-in macros.** Already shipped (see Recently
+   landed). Recognised at class-definition time, expand to
+   compile-time method emission. Doesn't introduce any runtime
+   metaprogramming surface. Closes a large fraction of the
+   apparent gap surfaced by gapscan's bareword report (Jekyll: 32
+   `attr_reader` occurrences alone).
 2. **`define_method :literal_name`.** When both receiver and name
    are static literals at compile time, lower to the same
    bytecode as `def`. No runtime support needed; the cache stays
@@ -238,9 +239,9 @@ previous — you'd implement them as a sequence, not in parallel.
 3. **`send` / `public_send` with literal symbols.** Same shape as
    above: a sugar over direct dispatch when the symbol is a
    compile-time literal. Falls back to a trap otherwise.
-4. **`Module.new { ... }` + `include`.** Once Near term #4
-   (`Module` + `include`) lands, supporting anonymous modules is
-   mostly already there.
+4. **`Module.new { ... }` + `include`.** `Module` + `include`
+   has shipped (see Recently landed); supporting anonymous modules
+   on top of that is a small follow-up.
 5. **`method_missing` proper.** The hard one. Requires:
    (a) every method dispatch to check the class chain and fall to
    `method_missing` on miss; (b) the IC to handle the
