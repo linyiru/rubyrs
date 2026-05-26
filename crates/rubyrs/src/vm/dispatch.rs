@@ -257,6 +257,28 @@ impl Vm {
                 self.invoke_method(m, self_val.clone(), args)?;
                 return Ok(());
             }
+            // Bare `new(...)` inside a class singleton method
+            // (`def self.from_msgpack_ext(data); ...; new(sec, 0);
+            // end`) resolves to `self.new(...)`, where `self` is
+            // the class being defined. CRuby reaches `Class#new`
+            // through the class-of-class method chain; rubyrs
+            // models class-instance allocation as a hard-coded
+            // arm on the receiver-form `do_call` path (the
+            // `name_id == new_id` block further down), which the
+            // bare-call branch never reaches without an explicit
+            // bridge. Vendored msgpack-ruby `lib/msgpack/
+            // timestamp.rb`'s `from_msgpack_ext` factories
+            // surfaced this — they instantiate via bare `new` in
+            // every type-tag branch. Push self_val + the original
+            // args back onto the stack and re-enter `do_call`
+            // with `no_recv=false` so the receiver-form arms
+            // (including allocator hooks via cext) take over.
+            if matches!(&self_val, Value::Class(_)) && &*name == "new" {
+                let argc = args.len();
+                self.stack.push(self_val.clone());
+                for a in args { self.stack.push(a); }
+                return self.do_call(name_id, argc, /*no_recv=*/false, cache_id);
+            }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());
