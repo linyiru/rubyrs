@@ -62,12 +62,12 @@ pub(crate) enum Expr {
     InterpolatedStr(Vec<SExpr>),
     /// `/pre #{x} post/` — interpolated regex literal. Lowered
     /// like `InterpolatedStr` (concat all parts into a String via
-    /// `to_s` + `+`), then compiled into a `Value::Regex` at the
-    /// point of evaluation. Each `eval` re-compiles because the
-    /// interpolated content can change per call; the regex_cache
-    /// keys on the assembled pattern string so repeated identical
-    /// expansions still hit the cache. Cfg-gated on the `regex`
-    /// feature alongside `RegexLit`.
+    /// `to_s` + `+`), then handed to `Op::CompileRegex`. The
+    /// interpolated parts are *re-evaluated* on every reach (the
+    /// content can change per call), but pattern compilation hits
+    /// `Vm::regex_cache` keyed by the assembled pattern's SymId,
+    /// so identical expansions only compile once. Cfg-gated on the
+    /// `regex` feature alongside `RegexLit`.
     #[cfg(feature = "regex")]
     InterpolatedRegex(Vec<SExpr>),
     BoolLit(bool),
