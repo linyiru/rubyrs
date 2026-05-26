@@ -780,9 +780,16 @@ end
 ## bind.call paths. We claim a recent CRuby version to opt into
 ## the modern branches. RUBY_PLATFORM identifies the host
 ## interpreter — "rubyrs" makes it obvious in any platform-
-## conditional code that this isn't CRuby.
+## conditional code that this isn't CRuby. RUBY_ENGINE follows
+## CRuby's convention — "ruby" for MRI; engine-specific gems
+## (msgpack's Factory::Pool, sidekiq, etc.) gate behaviour on
+## `RUBY_ENGINE == "ruby"`, and reporting the canonical value
+## opts into those branches. The truthful "rubyrs" engine tag
+## lives in RUBY_PLATFORM for the rare consumer that wants to
+## detect us specifically.
 RUBY_VERSION = "3.4.0".freeze
 RUBY_PLATFORM = "rubyrs".freeze
+RUBY_ENGINE = "ruby".freeze
 ## Comparable — a stub class (we don't have Modules in this subset)
 ## that holds the six derived comparison methods plus `between?`
 ## and `clamp`, each defined in terms of `<=>`. `include Comparable`

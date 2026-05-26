@@ -83,6 +83,15 @@ pub(crate) enum Op {
     /// Same as `IncIvar` but does *not* push the resulting value.
     IncIvarNoPush(SymId),
     LoadConst(SymId),
+    /// Same lookup as `LoadConst` but missing → `Value::Nil` instead
+    /// of raising `NameError`. Used by `FOO ||= ...` / `FOO &&= ...`
+    /// where CRuby's special op-write semantics ask "is the
+    /// constant truthy?" — a strict read here would raise before
+    /// the short-circuit assignment can run, breaking the lazy-
+    /// init idiom (`UNSET ||= default`). Not exposed to user code
+    /// directly; the AST translator emits this only for op-write
+    /// read positions.
+    LoadConstOrNil(SymId),
     /// Pop top of stack, store as the value of constant `SymId`.
     /// Caller is responsible for emitting `Dup` first when the
     /// expression's value should also remain on the stack (CRuby's

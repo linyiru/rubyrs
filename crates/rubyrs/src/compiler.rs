@@ -412,6 +412,10 @@ pub(crate) fn compile_expr(
             let id = interner.intern(name);
             b.emit(Op::LoadConst(id));
         }
+        Expr::ConstReadOrNil(name) => {
+            let id = interner.intern(name);
+            b.emit(Op::LoadConstOrNil(id));
+        }
         Expr::ConstWrite(name, absolute, val) => {
             // CRuby: a constant assignment leaves the assigned value
             // on the stack as the expression's result. Same pattern

@@ -264,3 +264,4 @@ fn run_diff(name: &str) {
 #[test] fn rescue_constant_path() { run_diff("rescue_constant_path"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_pathname() { run_diff("stdlib_pathname"); }
+#[test] fn uninitialized_constant() { run_diff("uninitialized_constant"); }
