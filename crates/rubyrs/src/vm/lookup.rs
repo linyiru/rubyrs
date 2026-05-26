@@ -269,14 +269,14 @@ impl Vm {
                 "digits" | "bit_length" | "[]"
             ),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
-            // unary (`-@`/`+@`/`abs`) + Phase B.5 `pow(exp, mod)` —
+            // unary (`-@`/`+@`/`abs`) + Phase B.5 `pow(exp, mod)` +
+            // Phase B.5 leftover (`bit_length`, `digits`) —
             // arithmetic, comparison, to_s/inspect, pure predicates,
             // exponentiation (auto-promote / DoS-capped), unary
-            // sign/magnitude, and modular exponentiation. Bit ops,
-            // iteration helpers (`times`, `upto`, `downto`),
-            // `digits` and `bit_length` remain unshipped Phase B
-            // groups — each needs a `&mut Vm` heap path that the
-            // stateless `primitive_call` doesn't grant. The
+            // sign/magnitude, modular exponentiation, two's-
+            // complement bit count, and base-N digit decomposition.
+            // Bit ops and iteration helpers (`times`, `upto`,
+            // `downto`) remain unshipped Phase B groups. The
             // predicates below only READ the bigint to compute a
             // Bool/Int, so they fit cleanly in the existing
             // bigint_primitive shape.
@@ -288,7 +288,8 @@ impl Vm {
                 "to_s" | "inspect" |
                 "to_i" | "to_f" |
                 "zero?" | "positive?" | "negative?" |
-                "even?" | "odd?"
+                "even?" | "odd?" |
+                "bit_length" | "digits"
             ),
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |
