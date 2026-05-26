@@ -1632,23 +1632,27 @@ fn gemfile_dsl_real_hosting_end_to_end() {
 // binary `rubyrs` overrides all three; library users do not
 // inherit those overrides.
 // Two complementary tests for the default-stdout policy. Together
-// they verify the indirection works end-to-end:
+// they cover the spec contract from two sides; neither alone
+// catches every regression, and the gap is documented.
 //
 //   - `adr_0017_default_stdout_does_not_panic` — `Runtime::new`
-//     without a `set_stdout` call accepts `puts` without erroring.
-//     Cannot directly assert "no bytes left the process" without
-//     intercepting fd 1 (would require a new dev-dep like `gag`
-//     or fork-and-pipe scaffolding); the source-level guarantee
-//     is `vm.rs::Vm::new`'s `stdout: Box::new(std::io::sink())`,
-//     and the smoke test below catches the most likely regression
-//     (someone swaps in `stdout()` and `puts` start panicking on
-//     a non-tty test runner).
+//     without a `set_stdout` call accepts `puts` and `Runtime::eval`
+//     returns `Ok`. The test is intentionally weak: rubyrs's
+//     `puts` impl in `vm/kernel.rs` silently swallows
+//     `write!`/`writeln!` errors via `let _ = …`, so even if the
+//     default sink were swapped back to `std::io::stdout()` on a
+//     closed-stdio fixture this test would still pass. The strict
+//     "default truly drops bytes" assertion requires intercepting
+//     fd 1 (a new dev-dep like `gag` or fork-and-pipe scaffolding)
+//     and is left as a known gap; the source-level guarantee is
+//     `vm.rs::Vm::new`'s `stdout: Box::new(std::io::sink())`.
 //
 //   - `adr_0017_set_stdout_routes_writes_to_host_sink` — after
 //     `set_stdout(buf)`, `puts X` lands in `buf`. Catches the
-//     other regression class — set_stdout silently no-oping — and
-//     proves the host-controlled-sink path the spec depends on
-//     is actually wired.
+//     regression class the first test cannot — `set_stdout`
+//     silently no-oping or being mis-wired — and proves the
+//     host-controlled-sink path the spec depends on is actually
+//     wired end-to-end.
 #[test]
 fn adr_0017_default_stdout_does_not_panic() {
     let mut rt = rubyrs::Runtime::new();
