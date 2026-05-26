@@ -605,26 +605,58 @@ impl Vm {
     /// Hash receivers use `ruby_eq` key lookup; Array uses Int
     /// index (negative wraps from end). Anything else → nil so
     /// the caller can short-circuit cleanly.
-    pub(crate) fn dig_step(&self, recv: &Value, key: &Value) -> Result<Value, Trap> {
-        Ok(match recv {
+    pub(crate) fn dig_step(&mut self, recv: &Value, key: &Value) -> Result<Value, Trap> {
+        match recv {
             Value::Hash(id) => {
-                let h = self.heap.hash(*id);
-                h.iter()
-                    .find(|(k, _)| k.ruby_eq(key, &self.heap))
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or(Value::Nil)
+                let id = *id;
+                // Direct hit first.
+                {
+                    let h = self.heap.hash(id);
+                    if let Some(v) = h.iter()
+                        .find(|(k, _)| k.ruby_eq(key, &self.heap))
+                        .map(|(_, v)| v.clone())
+                    {
+                        return Ok(v);
+                    }
+                }
+                // Missing key — CRuby's `Hash#dig` walks via `[]`
+                // per step, which fires the default-block on a
+                // hash built with `Hash.new { |h, k| ... }`.
+                // Without this, nested auto-vivify hashes diverge:
+                // `Hash.new { |h, k| h[k] = {} }.dig(:x, :y)` would
+                // return nil instead of triggering :x's block.
+                // Mirrors the `Hash#[]` missing-key arm (pin
+                // receiver + key + block across the dispatch).
+                if let Some(block_id) = self.heap.hash_default_block(id) {
+                    let pre_frames = self.frames.len();
+                    let mut g = PinGuard::new(self);
+                    g.pin(Value::Hash(id));
+                    g.pin(key.clone());
+                    g.pin(Value::Block(block_id));
+                    g.vm.invoke_block(block_id, vec![Value::Hash(id), key.clone()])?;
+                    g.vm.dispatch_until(pre_frames)?;
+                    if g.vm.method_return.is_some() {
+                        return Ok(Value::Nil);
+                    }
+                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                    if g.vm.break_signaled {
+                        g.vm.break_signaled = false;
+                    }
+                    return Ok(r);
+                }
+                Ok(Value::Nil)
             }
             Value::Array(id) => {
                 if let Value::Int(i) = key {
                     let a = self.heap.array(*id);
                     let idx = if *i < 0 { a.len() as i64 + *i } else { *i };
-                    a.get(idx as usize).cloned().unwrap_or(Value::Nil)
+                    Ok(a.get(idx as usize).cloned().unwrap_or(Value::Nil))
                 } else {
-                    Value::Nil
+                    Ok(Value::Nil)
                 }
             }
-            _ => Value::Nil,
-        })
+            _ => Ok(Value::Nil),
+        }
     }
 
     pub(crate) fn user_cmp(&mut self, a: &Value, b: &Value) -> Result<Option<std::cmp::Ordering>, Trap> {

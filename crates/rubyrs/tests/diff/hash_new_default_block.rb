@@ -89,6 +89,18 @@ puts merged.inspect                             # {a: 1}
 puts merged[:new_key]                           # base-new_key (block fired)
 puts merged.inspect                             # {a: 1, new_key: "base-new_key"}
 
+# --- Hash#dig consults default-block per step ---
+# CRuby's `Hash#dig` walks via `[]` at each level, so a default-
+# block fires on missing keys during the dig. Without this,
+# nested auto-vivify patterns silently return nil at the dig
+# site instead of materialising the intermediate level.
+nested = Hash.new { |hh, k| hh[k] = {leaf: "from-block"} }
+puts nested.dig(:foo, :leaf)                   # "from-block" (block fires for :foo)
+puts nested.dig(:bar, :leaf)                   # "from-block" (block fires again, separate key)
+# After the digs, the block-materialised entries persist in the
+# hash because the block mutates `hh`.
+puts nested.keys.sort.inspect                  # [:bar, :foo]
+
 # --- non-local return from default-block ---
 # `return` from inside the default-block exits the enclosing
 # method with the return value, propagating through the `[]`
