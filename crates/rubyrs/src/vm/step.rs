@@ -1185,14 +1185,21 @@ impl Vm {
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
                 // The compiler emits the SymId of the class to filter
-                // by — for bare `rescue` that's `StandardError`. If the
-                // class hasn't been loaded into `self.classes` yet
-                // (e.g. `rescue MyUndefinedError`), `filter_class`
-                // becomes `None` and the handler will fail every
-                // match check in `unwind_with_exception`. That's
-                // closer to CRuby's behaviour than silently catching
-                // everything would be.
-                let filter = self.classes.get(&filter_sym).cloned();
+                // by — for bare `rescue` that's `StandardError`, for
+                // `rescue Foo::Bar` the qualified-form SymId stamped
+                // by the lexical dual-write. We resolve through the
+                // same fallback chain as `Op::LoadConst`: `classes`
+                // first (bare names + dual-write copies), then
+                // `constants` (where user `Foo::Bar = …` aliases land).
+                // If neither hits, `filter_class` stays `None` and
+                // the handler fails every match check — closer to
+                // CRuby than silently catching everything.
+                let filter = self.classes.get(&filter_sym).cloned().or_else(|| {
+                    match self.constants.get(&filter_sym) {
+                        Some(Value::Class(c)) => Some(c.clone()),
+                        _ => None,
+                    }
+                });
                 self.frames.last_mut().expect("ICE: PushRescue no frame").rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
                     filter_class: filter, loop_depth_at_push: loop_depth,

@@ -261,3 +261,4 @@ fn run_diff(name: &str) {
 #[test] fn module_prepend() { run_diff("module_prepend"); }
 #[test] fn block_arg_nil() { run_diff("block_arg_nil"); }
 #[test] fn rescue_multi_class() { run_diff("rescue_multi_class"); }
+#[test] fn rescue_constant_path() { run_diff("rescue_constant_path"); }

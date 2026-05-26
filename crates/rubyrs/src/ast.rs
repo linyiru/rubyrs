@@ -2312,23 +2312,23 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             let var = rc.reference().and_then(|r| {
                 r.as_local_variable_target_node().map(|lvt| cid_to_string(lvt.name()))
             });
-            // Extract class filter names. We accept ConstantReadNode
-            // (`MyError`) directly. ConstantPathNode (`Foo::Bar`)
-            // is a follow-up — for now we resolve it to the last
-            // segment so `rescue Gem::LoadError` at least matches
-            // a top-level `LoadError` class if defined.
+            // Extract class filter names. ConstantReadNode
+            // (`MyError`) maps to its bare name. ConstantPathNode
+            // (`Foo::Bar`) flattens to the dotted form via
+            // `flatten_constant_path` — the same qualified key
+            // that the lexical dual-write stamps on classes
+            // defined inside a module/class body, so
+            // `rescue Foo::Bar` resolves to exactly that nested
+            // class (not to a top-level `Bar` that happens to
+            // share the trailing segment).
             let mut classes: Vec<String> = Vec::new();
             for exc in rc.exceptions().iter() {
                 if let Some(c) = exc.as_constant_read_node() {
                     classes.push(cid_to_string(c.name()));
-                } else if let Some(cp) = exc.as_constant_path_node() {
-                    // Use the trailing name. Better than nothing
-                    // until P1-10b adds proper qualified-class
-                    // resolution. `cp.name()` is `Option<ConstantId>`
-                    // because Prism allows dynamic constant paths.
-                    if let Some(name_id) = cp.name() {
-                        classes.push(cid_to_string(name_id));
-                    }
+                } else if exc.as_constant_path_node().is_some()
+                    && let Some(joined) = flatten_constant_path(&exc)
+                {
+                    classes.push(joined);
                 }
                 // Anything else (dynamic expression in rescue
                 // position) is dropped silently for now.

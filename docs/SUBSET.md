@@ -554,14 +554,6 @@ end
 - Tests: `resource_exhausted_cannot_be_swallowed_by_bare_rescue`
   and `resource_exhausted_is_uncatchable_even_with_rescue_exception`.
 
-### `Foo::Bar` constant-path in `rescue`
-
-- We extract only the trailing segment (`Bar`) and look it up
-  at the top level. If `Foo::Bar` shadows a top-level `Bar`
-  with different semantics, the rescue may behave unexpectedly.
-- Most real Bundler / Gemfile uses (`rescue Gem::LoadError`) work
-  if the trailing name is defined at the top level.
-
 ## Deferred to outer tiers
 
 Features whose absence is a tier-assignment decision per
