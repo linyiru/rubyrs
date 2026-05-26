@@ -169,10 +169,13 @@ pub(crate) fn string_call(
         // `String#encoding` — CRuby returns an `Encoding` object;
         // we return the name as a String since there's no per-
         // string encoding tag and no Encoding class in scope.
-        // Real codebases use this for `str.encoding.to_s` formatting
-        // and `str.encoding == Encoding::UTF_8` comparisons — the
-        // latter requires `Encoding::UTF_8`, deferred until any
-        // real codebase needs it.
+        // Real codebases commonly use `str.encoding.to_s` for
+        // formatting; that works in both. Direct
+        // `str.encoding == Encoding::UTF_8` comparisons are NOT
+        // supported — even if `Encoding::UTF_8` were added later,
+        // the comparison would compare String vs Encoding-object
+        // and diverge from CRuby. Sticking to `.to_s` or
+        // `.to_s == "UTF-8"` is the portable form.
         (Value::Str(_), "encoding", []) => Some(Value::new_str("UTF-8")),
         (Value::Str(a), "strip", []) => Some(Value::new_str(a.to_string_lossy().trim().to_string())),
         (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_start().to_string())),
