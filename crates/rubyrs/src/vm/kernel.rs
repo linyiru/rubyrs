@@ -590,6 +590,33 @@ impl Vm {
                                 });
                             }
                             Some(Ok(Value::Bool(true)))
+                        } else if self.require_satisfied_by_existing_constant(&path_str) {
+                            // Lenient fallback: if the namespace
+                            // constant the require asks for is
+                            // already defined on this Vm (either by
+                            // an embedder pre-registering it or by
+                            // earlier script code), treat the
+                            // require as satisfied instead of going
+                            // down the cext-lookup path. Lets a
+                            // host pre-register `module Rack` so
+                            // that `require 'rack'` (and
+                            // `require 'rack/show_exceptions'`)
+                            // inside a gem source no-op cleanly
+                            // instead of crashing on the C-ext
+                            // lookup — Rack is pure Ruby in modern
+                            // versions, so the cext path would
+                            // always fail for it. Mirrors the
+                            // loaded_stdlib_stubs dedup pattern
+                            // immediately above: Bool(true) on
+                            // first observation, Bool(false)
+                            // thereafter, matching CRuby's
+                            // loaded-features semantics.
+                            let already_loaded = self.loaded_stdlib_stubs.contains(&*path_str);
+                            if already_loaded {
+                                return Some(Ok(Value::Bool(false)));
+                            }
+                            self.loaded_stdlib_stubs.insert(path_str.to_string());
+                            Some(Ok(Value::Bool(true)))
                         } else {
                             #[cfg(feature = "cext")]
                             { Some(self.cext_require(&path_str)) }
@@ -733,6 +760,158 @@ impl Vm {
             })),
         };
         self.load_ruby_source_from_canon(canon)
+    }
+
+    /// Does an existing class/module on this Vm already satisfy
+    /// the given `require` path?
+    ///
+    /// Maps `path_str`'s first segment (everything before the
+    /// first `/`) to a Ruby constant name in the two shapes
+    /// embedders / scripts commonly use:
+    ///
+    ///   - `snake_case` → `CamelCase` (`rack` → `Rack`,
+    ///     `active_record` → `ActiveRecord`)
+    ///   - input itself UPPER-cased (`json` → `JSON`,
+    ///     `uri` → `URI`) — captures the all-caps abbreviation
+    ///     convention CRuby uses for several stdlib names
+    ///
+    /// Looks both up in `self.classes`. Returns true if either
+    /// shape resolves to a defined class or module. Only the
+    /// **first** segment is checked, so `require 'rack/cors'`
+    /// matches if `Rack` exists — consistent with how Rubygems
+    /// treats `<gem>/<subfile>` paths.
+    ///
+    /// Deliberately conservative: only fires for paths that don't
+    /// match a `.rb` file or `is_stdlib_stub_name`. Used as the
+    /// last fallback before `cext_require`, so it costs nothing
+    /// in the happy path.
+    #[cfg(not(target_os = "wasi"))]
+    fn require_satisfied_by_existing_constant(&mut self, path_str: &str) -> bool {
+        // Walk EVERY segment, not just the first. Reject empty,
+        // `.`, `..` — those are filesystem traversal shapes that
+        // should never be lenient-fallback'd against an existing
+        // constant. Without this, `require "rack/../missing"`
+        // would map first_seg = "rack" and silently no-op against
+        // `module Rack`, bypassing the file/cext failure path
+        // for filesystem-shaped require strings. Also rejects
+        // `rack//foo` (empty mid-segment) and `rack/`
+        // (empty trailing — though `split` includes the empty
+        // trailing here).
+        let segs: Vec<&str> = path_str.split('/').collect();
+        if segs.is_empty() {
+            return false;
+        }
+        for seg in &segs {
+            if seg.is_empty() || *seg == "." || *seg == ".." {
+                return false;
+            }
+        }
+        let first_seg = segs[0];
+        // Skip relative / absolute paths and anything that looks
+        // like a real filesystem name — those should go through
+        // the .rb / cext path, not this fallback.
+        if first_seg.starts_with('.') || first_seg.contains('\\') {
+            return false;
+        }
+        // Ruby constants must start with an uppercase ASCII
+        // letter, which means the require-path token's first
+        // segment must start with an ASCII alphabetic. A leading
+        // underscore is REJECTED (not allowed-and-stripped) on
+        // purpose: `snake_to_camel_case("_rack")` would otherwise
+        // collapse to `Rack` (the empty segment before the first
+        // `_` contributes nothing), making `require "_rack"`
+        // over-match whenever `Rack` is defined. Likewise a
+        // leading digit / symbol can't camelize to a valid
+        // constant. Bail out so the require falls through to
+        // cext_require, which will produce the same diagnostic
+        // shape it would for any path with no .rb / cext sibling.
+        if !first_seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            return false;
+        }
+        // Empty-snake-segment guard. The alphabetic check above
+        // only inspects the first char, so it rejects `_rack`
+        // (leading underscore) but lets `rack_`, `rack__foo`,
+        // and `rack_foo_` through — all of which collapse to
+        // valid Ruby constant names because `snake_to_camel_case`
+        // drops empty parts from its `_`-split (`["rack", ""]`
+        // → capitalize each → `["Rack", ""]` → concat →
+        // `"Rack"`). Without this guard a developer who mistypes
+        // `require "rack_"` against an embedder-registered
+        // `module Rack` would silently match, hiding the typo
+        // until a later `Rack_::Something` NameError far from
+        // the source of the mistake. Reject any `first_seg`
+        // that yields an empty segment when split on `_` so
+        // these shapes fall through to cext_require with the
+        // standard diagnostic.
+        if first_seg.split('_').any(|s| s.is_empty()) {
+            return false;
+        }
+        // Core-class blocklist. `self.classes` is populated by
+        // the preamble (`crates/rubyrs/src/lib.rs` ~750-1100) with
+        // every built-in class/module name — `Object`, `String`,
+        // `Array`, `Hash`, `Integer`, the exception hierarchy,
+        // `Enumerable`, `Comparable`, `File`, `Mutex`, `Kernel`,
+        // etc. Without this guard, `require "string"` would
+        // silently succeed because `String` is always in
+        // `self.classes`, masking a genuinely missing dependency.
+        // We're only meant to fire when an EMBEDDER or earlier
+        // script code registered the name; the preamble doesn't
+        // count.
+        //
+        // The list is the union of every class/module the
+        // preamble defines, normalized to lowercase for the
+        // first-segment compare. Keep in sync with the preamble
+        // when new core classes land. ASCII-lowercase compare
+        // matches the case-insensitive walk's normalization
+        // shape — `require "OBJECT"` is rejected the same as
+        // `require "object"`.
+        if is_core_preamble_class_name(first_seg) {
+            return false;
+        }
+        // Interner growth guard: untrusted Ruby could otherwise
+        // call `require "<unique-name>"` in a rescue loop to
+        // grow the interner past `Config::max_symbols` — each
+        // miss path here used to intern the camel/upper
+        // candidates even when nothing in `self.classes` matched.
+        // `Interner::contains()` checks for an existing entry
+        // without creating one, so miss paths create no new
+        // symbols; on the legitimate-match path a constant in
+        // `self.classes` necessarily has its SymId already
+        // interned (interning is the only way it got there),
+        // so this guard never blocks a real hit.
+        let camel = snake_to_camel_case(first_seg);
+        if !camel.is_empty() && self.interner.contains(&camel) {
+            let camel_id = self.interner.intern(&camel);
+            if self.classes.contains_key(&camel_id) {
+                return true;
+            }
+        }
+        let upper = first_seg.to_ascii_uppercase();
+        if upper != camel && self.interner.contains(&upper) {
+            let upper_id = self.interner.intern(&upper);
+            if self.classes.contains_key(&upper_id) {
+                return true;
+            }
+        }
+        // Case-insensitive fallback — covers names where Ruby's
+        // canonical capitalization doesn't follow either of the
+        // two shapes above. Stdlib's `IPAddr` (file `ipaddr.rb`)
+        // is the textbook example: `snake_to_camel_case("ipaddr")`
+        // returns `Ipaddr` and `"ipaddr".to_ascii_uppercase()`
+        // returns `IPADDR`, neither of which matches. Walking the
+        // classes table and ASCII-lowercase-comparing each
+        // resolved name catches that. Only uses `Interner::resolve`
+        // — no `intern` calls — so the symbol-cap guard above
+        // doesn't need to repeat. Cost is O(n) only on
+        // double-miss; n stays modest in practice (a few hundred
+        // classes at most for a typical embedded Vm).
+        for sym_id in self.classes.keys() {
+            let name = self.interner.resolve(*sym_id);
+            if name.eq_ignore_ascii_case(first_seg) {
+                return true;
+            }
+        }
+        false
     }
 
     /// `require "path.rb"` — load a Ruby source file by literal
@@ -1168,6 +1347,65 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util"
     )
+}
+
+/// ASCII-lowercase name → "is this the preamble-defined core
+/// class for that name?" Used by
+/// `Vm::require_satisfied_by_existing_constant` to block
+/// `require "string"` / `require "array"` from silently
+/// succeeding against the preamble's `class String` /
+/// `class Array`. Anything an embedder or user script defines
+/// later isn't on this list and still triggers the lenient
+/// fallback.
+///
+/// Sources from `crates/rubyrs/src/lib.rs` (~750-1100): every
+/// `class Foo` / `module Foo` in the preamble. Keep in sync if
+/// new core classes land. Normalized to lowercase to share
+/// shape with the case-insensitive walk's compare so
+/// `require "OBJECT"` is rejected too.
+#[cfg(not(target_os = "wasi"))]
+fn is_core_preamble_class_name(lowered_first_seg: &str) -> bool {
+    matches!(
+        lowered_first_seg.to_ascii_lowercase().as_str(),
+        // value classes
+        "object" | "integer" | "float" | "string" | "symbol"
+        | "array" | "hash" | "range" | "trueclass" | "falseclass"
+        | "nilclass" | "proc" | "method" | "unboundmethod"
+        | "module" | "class" | "file" | "mutex" | "kernel"
+        | "matchdata" | "comparable" | "enumerable"
+        // exception hierarchy
+        | "exception" | "standarderror" | "runtimeerror"
+        | "nomethoderror" | "argumenterror" | "typeerror"
+        | "nameerror" | "scripterror" | "notimplementederror"
+        | "indexerror" | "keyerror" | "zerodivisionerror"
+        | "rangeerror" | "localjumperror" | "frozenerror"
+        | "resourceexhausted"
+    )
+}
+
+/// Convert a snake_case Ruby file/require token to CamelCase
+/// using Rubygems / Bundler's standard heuristic: split on `_`,
+/// capitalize each part, concat. `rack` → `Rack`, `active_record`
+/// → `ActiveRecord`, `my_lib_v2` → `MyLibV2`. Empty input yields
+/// empty output (caller filters those before invoking).
+///
+/// Gated to non-wasi: the only caller
+/// (`Vm::require_satisfied_by_existing_constant`) is itself
+/// non-wasi, so under CI's `RUSTFLAGS=-D warnings` this helper
+/// would otherwise trip a dead-code warning on wasm32-wasip1.
+#[cfg(not(target_os = "wasi"))]
+fn snake_to_camel_case(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for part in input.split('_') {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            for c in first.to_uppercase() {
+                out.push(c);
+            }
+            out.extend(chars);
+        }
+    }
+    out
 }
 
 /// Strict base-aware integer parser used by `Kernel#Integer(str,

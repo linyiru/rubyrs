@@ -134,6 +134,371 @@ puts "counter=" + TRACK_LOG.length.to_s
 }
 
 #[test]
+fn require_satisfied_by_pre_registered_module_no_ops() {
+    // Embedder-flavour case: a host or earlier script defines
+    // a top-level module/class whose name is the camelized form
+    // of the require path. The require should treat that as
+    // already-loaded — Bool(true) on first observation,
+    // Bool(false) thereafter — and NOT fall through to
+    // cext_require (which would error with "cannot find C ext").
+    //
+    // Exercises three angles in one driver:
+    //   1. snake_to_camel match (`module Rack` satisfies
+    //      `require "rack"`)
+    //   2. subpath match (`require "rack/show_exceptions"` is
+    //      also satisfied because the first segment maps to
+    //      the same already-defined `Rack`)
+    //   3. case-insensitive fallback for non-conventional
+    //      capitalization (`class IPAddr` satisfies
+    //      `require "ipaddr"` — `snake_to_camel_case("ipaddr")`
+    //      returns `Ipaddr`, neither shape matches `IPAddr`
+    //      directly, so the case-insensitive walk has to
+    //      catch it)
+    //   4. unknown paths still error
+    //   5. dedup semantics — second require returns false
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_existing_const_driver.rb");
+    fs::write(&driver_path,
+        r#"
+module Rack; end
+class IPAddr; end
+
+r1 = require "rack"
+r2 = require "rack"
+r3 = require "rack/show_exceptions"
+r4 = require "ipaddr"
+
+begin
+  require "definitely_not_a_real_module_xyz_abc_999"
+  reject = "loaded-unexpectedly"
+rescue RuntimeError => e
+  reject = "errored: #{e.class}"
+end
+
+puts "rack-first=#{r1}"
+puts "rack-second=#{r2}"
+puts "rack-subpath=#{r3}"
+puts "ipaddr-canonical=#{r4}"
+puts reject
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    let expected = "\
+rack-first=true
+rack-second=false
+rack-subpath=true
+ipaddr-canonical=true
+errored: RuntimeError
+";
+    assert_eq!(
+        stdout, expected,
+        "fallback behavior mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
+fn require_satisfied_by_all_caps_constant() {
+    // Pins the upper-of-input probe in
+    // `require_satisfied_by_existing_constant`.
+    //
+    // The original `require_satisfied_by_pre_registered_module_no_ops`
+    // test exercised only the camel path (`rack` → `Rack`) and
+    // the case-insensitive walk (`ipaddr` → `IPAddr`); the
+    // upper-of-input shape (`json` → `JSON`, `uri` → `URI`)
+    // wasn't pinned. This test defines a constant under an
+    // ALL-CAPS name and requires its lowercase form — with the
+    // camelized form `Foo` deliberately ABSENT — so the require
+    // can only succeed via the upper probe or the
+    // case-insensitive walk.
+    //
+    // Note: the case-insensitive walk would also catch
+    // `FOO`/`foo`, so this test pins the union behavior rather
+    // than the upper-of-input branch in isolation. That's an
+    // acceptable contract: what matters end-to-end is "this
+    // requires returns true", and either probe being broken
+    // alone would only be caught if the OTHER also fails to
+    // cover the case. To isolate the upper-of-input branch
+    // would require white-box testing the helper directly;
+    // pinning the integration-level contract here matches the
+    // rest of this file's style.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_all_caps_driver.rb");
+    fs::write(&driver_path,
+        r#"
+# Define ONLY the all-caps form — no camelized Foo.
+module FOO; end
+
+r1 = require "foo"
+r2 = require "foo/subpath"
+
+puts "foo-allcaps=#{r1}"
+puts "foo-subpath=#{r2}"
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    assert_eq!(
+        stdout, "foo-allcaps=true\nfoo-subpath=true\n",
+        "all-caps fallback mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
+fn require_rejects_leading_underscore_path() {
+    // Pins the leading-underscore guard added per Copilot
+    // review on PR #135. `snake_to_camel_case("_rack")` would
+    // otherwise return `"Rack"` (the empty segment before the
+    // first `_` contributes nothing) and over-match — so
+    // `require "_rack"` would silently succeed against a
+    // host-registered `Rack`. The guard rejects any first-seg
+    // char that isn't ASCII alphabetic so `_rack` falls through
+    // to cext_require, matching the diagnostic shape any other
+    // unrecoverable require produces.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_underscore_driver.rb");
+    fs::write(&driver_path,
+        r#"
+module Rack; end
+
+begin
+  require "_rack"
+  puts "leaked-true"
+rescue RuntimeError => e
+  puts "rejected: #{e.class}"
+end
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    assert_eq!(
+        stdout.trim(), "rejected: RuntimeError",
+        "leading-underscore guard mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
+fn require_rejects_empty_snake_segments() {
+    // Pins the symmetric extension of the leading-underscore
+    // guard (see `require_rejects_leading_underscore_path`).
+    // `snake_to_camel_case` drops empty parts from its `_`-split,
+    // so `rack_` collapses to `Rack` (`["rack", ""]` → capitalize
+    // each → `["Rack", ""]` → concat → `"Rack"`); same for
+    // `rack__foo` → `"RackFoo"` and `rack_foo_` → `"RackFoo"`.
+    // Without this guard a developer who mistypes `require
+    // "rack_"` against an embedder-registered `module Rack`
+    // would silently no-op, hiding the typo until a later
+    // `Rack_::Something` NameError far from the source. The
+    // guard rejects any `first_seg` that yields an empty
+    // segment when split on `_`, so the three shapes below
+    // fall through to cext_require with the standard
+    // "cannot find" diagnostic — and the well-formed control
+    // case `require "rack"` keeps working.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_empty_snake_seg_driver.rb");
+    fs::write(&driver_path,
+        // Use `r##"..."##` (two-hash delimiter) so the Ruby
+        // template can contain `"#{...}"` interpolations
+        // starting immediately after a `"` — otherwise Rust's
+        // raw-string parser sees `"#` and terminates the
+        // literal early.
+        r##"
+module Rack; end
+module RackFoo; end
+
+# Each malformed shape must reject; the well-formed `rack` must
+# still succeed via the normal snake-to-camel path.
+[
+  ["rack_",      :reject],   # trailing underscore
+  ["rack__foo",  :reject],   # double interior underscore
+  ["rack_foo_",  :reject],   # trailing on multi-segment
+  ["rack",       :accept],   # control — must still succeed
+].each do |(p, expected)|
+  begin
+    r = require p
+    actual = (r == true || r == false) ? :accept : :other
+  rescue RuntimeError
+    actual = :reject
+  end
+  puts "name=#{p} expected=#{expected} actual=#{actual}"
+end
+"##
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    let expected = "\
+name=rack_ expected=reject actual=reject
+name=rack__foo expected=reject actual=reject
+name=rack_foo_ expected=reject actual=reject
+name=rack expected=accept actual=accept
+";
+    assert_eq!(
+        stdout, expected,
+        "empty-snake-segment guard mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
+fn require_rejects_path_traversal_in_subsegments() {
+    // Pins the per-segment validation added per Copilot review
+    // on PR #135. Without it, `require "rack/../missing"` would
+    // see `first_seg == "rack"` (which matches the pre-defined
+    // `module Rack`) and silently no-op against the namespace
+    // constant, bypassing the filesystem-shaped failure path.
+    // The guard now rejects any path containing empty, `.`, or
+    // `..` segments before consulting the constant table.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_traversal_driver.rb");
+    fs::write(&driver_path,
+        r#"
+module Rack; end
+
+[
+  "rack/../missing",   # parent-traversal mid-path
+  "rack/./foo",        # current-dir mid-path
+  "rack//empty",       # empty mid-segment
+].each do |p|
+  begin
+    require p
+    puts "leaked: #{p}"
+  rescue RuntimeError => e
+    puts "rejected: #{p}"
+  end
+end
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    let expected = "\
+rejected: rack/../missing
+rejected: rack/./foo
+rejected: rack//empty
+";
+    assert_eq!(
+        stdout, expected,
+        "path-traversal guard mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
+fn require_does_not_match_core_preamble_classes() {
+    // Pins the core-class blocklist added per Copilot review on
+    // PR #135. `self.classes` always contains `String`, `Array`,
+    // `Hash`, `Integer`, etc. from the preamble — without this
+    // blocklist, `require "string"` / `require "array"` would
+    // silently succeed via the case-insensitive walk (or via
+    // the upper-of-input probe for `require "STRING"`), masking
+    // a genuinely missing dependency. The blocklist ensures
+    // these paths fall through to cext_require with the standard
+    // "cannot find" diagnostic.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_core_class_block_driver.rb");
+    fs::write(&driver_path,
+        r#"
+# No user-defined modules here — the preamble's String / Array /
+# Hash / Integer / Object / Exception are the ONLY classes by
+# these names. require must NOT short-circuit on them.
+[
+  "string", "array", "hash", "integer", "object", "exception",
+].each do |p|
+  begin
+    require p
+    puts "leaked: #{p}"
+  rescue RuntimeError => e
+    puts "rejected: #{p}"
+  end
+end
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    let expected = "\
+rejected: string
+rejected: array
+rejected: hash
+rejected: integer
+rejected: object
+rejected: exception
+";
+    assert_eq!(
+        stdout, expected,
+        "core-class blocklist mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
 fn require_missing_rb_falls_back_to_cext_or_errors() {
     // Path with no .rb sibling and no cext sibling should
     // error out cleanly (RuntimeError-shape via the cext
