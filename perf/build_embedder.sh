@@ -90,10 +90,14 @@ echo "[3/4] wasm-opt -Oz $WIZ -> $WIZ_OPT"
 wasm-opt -Oz "$WIZ" -o "$WIZ_OPT"
 
 WIZ_OPT_ABS="$(cd "$(dirname "$WIZ_OPT")" && pwd)/$(basename "$WIZ_OPT")"
-echo "[4/4] cargo build --release -p rubyrs-wasm-embed  (RUBYRS_WIZER_WASM=$WIZ_OPT_ABS)"
-RUBYRS_WIZER_WASM="$WIZ_OPT_ABS" cargo build --release -p rubyrs-wasm-embed >&2
+echo "[4/4] cargo build --profile release-min -p rubyrs-wasm-embed  (RUBYRS_WIZER_WASM=$WIZ_OPT_ABS)"
+# `release-min` is the workspace profile defined in the root
+# Cargo.toml — opt-level=z, fat LTO, single CGU, panic=abort,
+# strip=symbols. Trades ~30-60s extra build time for ~30% smaller
+# binary and the corresponding dyld-load saving at cold start.
+RUBYRS_WIZER_WASM="$WIZ_OPT_ABS" cargo build --profile release-min -p rubyrs-wasm-embed >&2
 
-EMBED_BIN="target/release/rubyrs-wasm-embed"
+EMBED_BIN="target/release-min/rubyrs-wasm-embed"
 if [[ ! -x "$EMBED_BIN" ]]; then
   echo "build_embedder: $EMBED_BIN not produced — see cargo output above" >&2
   exit 2

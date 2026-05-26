@@ -200,7 +200,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload breakdown log
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: breakdown-${{ matrix.os }}-${{ matrix.arch }}
           path: breakdown.log

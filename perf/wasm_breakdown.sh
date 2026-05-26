@@ -308,7 +308,14 @@ runtime_min() {
   fi
 }
 
-EMBED_BIN="target/release/rubyrs-wasm-embed"
+# perf/build_embedder.sh produces the embedder at
+# target/release-min/ (size-optimized profile). Fall back to the
+# legacy `target/release/` path if a developer built it manually
+# with `cargo build --release` instead.
+EMBED_BIN="target/release-min/rubyrs-wasm-embed"
+if [[ ! -x "$EMBED_BIN" ]] && [[ -x "target/release/rubyrs-wasm-embed" ]]; then
+  EMBED_BIN="target/release/rubyrs-wasm-embed"
+fi
 WASMER_AOT="$PERF_TMPDIR/rubyrs.wasmu"
 if command -v wasmer >/dev/null 2>&1; then
   # Pre-compile for wasmer once so the AOT row times the cold-load

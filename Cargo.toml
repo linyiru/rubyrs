@@ -7,6 +7,41 @@
 [profile.release]
 lto = "thin"
 
+# Size-optimized profile for shipping artifacts where cold-start
+# wall time tracks binary size. Used by `perf/build_embedder.sh`
+# to produce the single-binary `rubyrs-wasm-embed`. Default
+# `release` stays the same for everyday throughput-optimized
+# builds (rubyrs CLI, tests, perf gates).
+#
+# Knobs and what each one buys:
+#   - opt-level = "z": optimize for binary size (vs default "3"
+#     which favours speed). Trades ~5-10% throughput for
+#     measurable binary shrink in the wasmtime crate dependency
+#     tree.
+#   - lto = "fat": cross-crate LTO instead of thin. Catches the
+#     dead code that thin LTO misses across the wasmtime crate
+#     surface (it's a big crate; thin's per-CGU view leaves
+#     stuff behind that whole-program analysis prunes).
+#   - codegen-units = 1: single CGU lets the optimizer see the
+#     full crate at once. Slower builds, smaller output.
+#   - panic = "abort": removes unwinding metadata + landing
+#     pads, ~5-15% smaller binaries. The embedder doesn't catch
+#     panics anyway — guest traps surface through wasmtime's
+#     Result, not Rust panics.
+#   - strip = "symbols": removes debug + symbol table after
+#     linking. ~15-20% smaller artifact, no runtime impact.
+#   - debug = false: no debug info emitted in the first place
+#     (strip after-the-fact is more thorough but starts from a
+#     bigger object file; both together cover macOS dSYM too).
+[profile.release-min]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+
 [workspace]
 resolver = "3"
 members = [
