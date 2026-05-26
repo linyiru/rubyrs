@@ -2050,6 +2050,32 @@ fn bigint_pow_bigint_receiver_float_exponent_returns_float() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_pow_huge_bigint_float_coercion_skips_string_alloc() {
+    // BigInt → f64 must NOT materialise a decimal string for
+    // BigInts past f64 range — Copilot flagged that a script
+    // could trigger an unbounded allocation via `huge ** 0.5`.
+    // The bits()-based pre-check (> 1024 ⇒ ±∞ directly) caps
+    // any intermediate string at ~310 digits. Build a BigInt
+    // far past 2**1024, then exercise the Float and negative-Int
+    // exp paths. Both must produce ±∞ Floats without trapping.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    // 2 ** 5000 ≈ 625 bytes of magnitude, fits the 64 KB cap; its
+    // bits() == 5001 puts it well past the 1024 f64 threshold.
+    rt.eval(
+        "big = 2 ** 5000\n\
+         puts (big ** 0.5).infinite?\n\
+         puts (big ** -1).zero?",
+        "bigint_huge_to_f64.rb",
+    ).expect("must not trap or NoMethodError");
+    // 0.5 of +∞ is still +∞; -1 reciprocal of +∞ is 0.0.
+    assert_eq!(buf.snapshot().trim(), "1\ntrue");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_pow_identity_bases_with_bigint_exponent() {
     // |base| ≤ 1 must not trap on BigInt exponents — results are
     // constant-size. Pin `1 ** big`, `0 ** big`, `(-1) ** big`

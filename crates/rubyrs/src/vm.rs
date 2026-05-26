@@ -892,49 +892,49 @@ impl Vm {
         exp_arg: &Value,
     ) -> Result<Option<Value>, Trap> {
         use num_bigint::{BigInt, Sign};
-        let base_big = match self.as_bigint(recv) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
-        // BigInt → f64 via decimal-string round-trip — mirrors the
-        // dispatch.rs Range coercion pattern, avoids pulling in
-        // num-traits just for `ToPrimitive::to_f64`. Adequate
-        // precision for the Float ** Float fallback (f64.powf is
-        // already lossy past 2**53).
-        let base_to_f64 = || -> f64 {
-            base_big.to_string().parse::<f64>().unwrap_or(f64::NAN)
+        // Read base sign + bit-length via borrowed Cow — avoids
+        // the O(n) magnitude clone `as_bigint` would do for BigInt
+        // receivers. The Cow borrow ends with the block; later
+        // &mut self calls (`trap`, `bigint_to_value`) are free to
+        // re-borrow. The full base is re-borrowed only at the
+        // single `pow` site below.
+        let (base_sign, base_bits) = {
+            let base_cow = match self.as_bigint_ref(recv) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            (base_cow.sign(), base_cow.bits())
         };
-        // Float exponent: coerce base to f64 and use powf. Int
-        // receivers go through numeric_call's Int×Float arm BEFORE
-        // reaching here, so this fires only for BigInt receivers
-        // (where the alternative would be NoMethodError despite
-        // `respond_to?(:**)` returning true).
-        if let Value::Float(f) = exp_arg {
-            if recv_is_bigint {
-                return Ok(Some(Value::Float(base_to_f64().powf(*f))));
-            }
-            return Ok(None);
-        }
-        // Short-circuit |base| ≤ 1 BEFORE classifying the exponent —
-        // these results are constant-size and depend only on
-        // sign + parity, so they're safe for ANY exponent shape
-        // (positive Int, negative Int, BigInt). bits() returns the
-        // magnitude width, so `<= 1` ⇔ value ∈ {-1, 0, 1}.
         // Compute parity / sign / zero of the exponent up front so
-        // every branch below can dispatch on the same vocabulary
-        // without re-matching exp_arg.
-        let (exp_is_negative, exp_is_zero, exp_is_odd) = match exp_arg {
-            Value::Int(n) => (*n < 0, *n == 0, *n & 1 != 0),
+        // every branch below dispatches on one vocabulary.
+        let (exp_is_negative, exp_is_zero, exp_is_odd, exp_is_float) = match exp_arg {
+            Value::Int(n) => (*n < 0, *n == 0, *n & 1 != 0, false),
             Value::BigInt(id) => {
                 let big = self.heap.bigint(*id);
                 let s = big.sign();
-                (s == Sign::Minus, s == Sign::NoSign, big.bit(0))
+                (s == Sign::Minus, s == Sign::NoSign, big.bit(0), false)
             }
+            Value::Float(_) => (false, false, false, true),
             _ => return Ok(None),
         };
-        if base_big.bits() <= 1 {
-            match base_big.sign() {
+        // Float exponent: coerce base to f64 (bounded) and use
+        // powf. Int receivers go through numeric_call's Int×Float
+        // arm BEFORE reaching here, so this fires only for BigInt
+        // receivers (where the alternative would be NoMethodError
+        // despite `respond_to?(:**)` returning true).
+        if exp_is_float {
+            if !recv_is_bigint { return Ok(None); }
+            if let Value::Float(f) = exp_arg {
+                let base_f = self.bigint_recv_to_f64_bounded(recv);
+                return Ok(Some(Value::Float(base_f.powf(*f))));
+            }
+            unreachable!("exp_is_float ⇒ Value::Float(_)");
+        }
+        // Short-circuit |base| ≤ 1 — constant-size results,
+        // dispatch only on sign + parity, safe for any exp shape.
+        if base_bits <= 1 {
+            match base_sign {
                 Sign::NoSign => {
                     // base == 0. 0**0 == 1; 0**n (n>0) == 0;
                     // 0**n (n<0) is ZeroDivision in CRuby — we
@@ -988,12 +988,16 @@ impl Vm {
                     Value::Int(n) => *n as f64,
                     // BigInt-negative exp on a |base|>1 receiver:
                     // result is sub-normal Float (~0). Coerce via
-                    // string round-trip too (BigInt → f64).
-                    Value::BigInt(id) => self.heap.bigint(*id).to_string()
-                        .parse::<f64>().unwrap_or(f64::NEG_INFINITY),
+                    // the bounded helper (caps the intermediate
+                    // string at f64-range, ~310 bytes max).
+                    Value::BigInt(id) => {
+                        let big = self.heap.bigint(*id);
+                        Self::bigint_to_f64_bounded(big)
+                    }
                     _ => unreachable!(),
                 };
-                return Ok(Some(Value::Float(base_to_f64().powf(exp_f))));
+                let base_f = self.bigint_recv_to_f64_bounded(recv);
+                return Ok(Some(Value::Float(base_f.powf(exp_f))));
             }
             return Ok(None);
         }
@@ -1019,7 +1023,6 @@ impl Vm {
         // Ceil-div in u64; compare against `cap as u64` so the
         // check doesn't silently truncate on 32-bit targets
         // (wasm32) via `as usize`.
-        let base_bits = base_big.bits();
         let est_bits: u64 = base_bits.saturating_mul(exp_u32 as u64);
         let est_bytes: u64 = est_bits.saturating_add(7) / 8;
         let cap = self.max_value_bytes.unwrap_or(1 << 20);
@@ -1031,8 +1034,46 @@ impl Vm {
                 ),
             }));
         }
-        let result = base_big.pow(exp_u32);
+        // Borrow base once more for the actual pow; `(&BigInt).pow`
+        // returns an owned BigInt without consuming the receiver,
+        // so a BigInt-receiver path computes pow against a
+        // borrowed magnitude rather than a clone.
+        let result = match self.as_bigint_ref(recv) {
+            Some(c) => (&*c).pow(exp_u32),
+            None => unreachable!("recv shape validated earlier"),
+        };
         Ok(Some(self.bigint_to_value(result)?))
+    }
+
+    /// BigInt → f64 with the intermediate decimal string bounded
+    /// by a bits()-based pre-check. f64::MAX ≈ 2^1024, so any
+    /// BigInt past that is already out of f64 range — return ±∞
+    /// without materialising a string. Below the threshold the
+    /// decimal form is at most ~310 digits, well under any
+    /// `max_value_bytes` cap we care about. Centralises the
+    /// dispatch.rs Range coercion pattern in one place that the
+    /// `**` Float / negative-exp paths can share without
+    /// allocating O(magnitude) strings on a hostile big input.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn bigint_to_f64_bounded(b: &num_bigint::BigInt) -> f64 {
+        use num_bigint::Sign;
+        if b.bits() > 1024 {
+            return if b.sign() == Sign::Minus { f64::NEG_INFINITY } else { f64::INFINITY };
+        }
+        b.to_string().parse::<f64>().unwrap_or(f64::NAN)
+    }
+
+    /// Receiver-side helper around [`Self::bigint_to_f64_bounded`]:
+    /// borrows the BigInt out of the heap via `as_bigint_ref`,
+    /// then defers to the bounded coercion. Returns `NaN` if the
+    /// receiver isn't an integer (caller already validated this;
+    /// the NaN is a defensive fallback, not a reachable path).
+    #[cfg(feature = "bignum")]
+    pub(crate) fn bigint_recv_to_f64_bounded(&self, recv: &Value) -> f64 {
+        match self.as_bigint_ref(recv) {
+            Some(c) => Self::bigint_to_f64_bounded(&c),
+            None => f64::NAN,
+        }
     }
 }
 
