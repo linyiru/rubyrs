@@ -1487,11 +1487,26 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let arg_nodes: Vec<_> = a.arguments().iter().collect();
         match arg_nodes.len() {
             0 => None,
-            // Single arg: pass through directly (no Array wrap).
-            // `return val` and `return *val` collapse to the same
-            // shape as CRuby — bare expression, or splat-expression
-            // (the splat-only form acts as Array(value) which we
-            // model by treating the inner as the bare return value).
+            // Single arg, no splat: pass through directly.
+            //
+            // Single arg, splat form `return *val`: CRuby's actual
+            // semantics is `return Array(val)` — wraps scalars
+            // (`*5` → `[5]`), expands Array (`*[1,2]` → `[1,2]`),
+            // empty-array for nil (`*nil` → `[]`). We pass `val`
+            // through unchanged: matches CRuby when `val` is
+            // already an Array (the typical real-world shape,
+            // e.g. `return *some_method_returning_array`),
+            // diverges on scalar wrap.
+            //
+            // DIVERGENCE: `def f; return *5; end; f` returns `5`
+            // in rubyrs, `[5]` in CRuby. Inherits the same gap
+            // as the wider `[*x]` array-literal arm (rubyrs's
+            // splat passes through bare values rather than
+            // delegating to `Kernel#Array`). Documented in
+            // SUBSET.md / `Kernel#Array` line item. Closing this
+            // requires a Kernel#Array implementation and either
+            // a new opcode or an AST-level Call rewrite — out of
+            // this PR's scope.
             1 => {
                 let only = &arg_nodes[0];
                 if let Some(sn) = only.as_splat_node()

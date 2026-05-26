@@ -31,12 +31,21 @@ def mid_splat
 end
 puts mid_splat.inspect                          # [:first, 1, 2, :last]
 
-# --- Pure splat: `return *arr` is the same as `return arr` ---
-# (CRuby: a single arg with splat doesn't add an extra wrap.)
+# --- Pure splat with Array inner: passes through unchanged ---
+# `return *arr` where arr is already an Array returns arr.
+# This matches CRuby (which evaluates `return *expr` as
+# `return Array(expr)` and Array() of an Array is the Array
+# itself). The typical real-world shape: `return *method`
+# where `method` already returns an Array.
 def pure_splat
   return *[10, 20, 30]
 end
 puts pure_splat.inspect                         # [10, 20, 30]
+# DIVERGENCE (not pinned): `return *5` returns `5` in rubyrs
+# but `[5]` in CRuby — see the impl-site comment in
+# `collect_multi_return_value` (ast.rs). Inherits the same
+# gap as `[*5]` returning `5` instead of `[5]`. Closing it
+# needs Kernel#Array.
 
 # --- Destructuring consumer ---
 def named_pair
