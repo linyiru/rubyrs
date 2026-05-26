@@ -116,27 +116,39 @@ fn main() -> ExitCode {
         }
     };
 
-    // Mirror what the rubyrs CLI's main() expects: argv[1] is the
-    // script path, inherit stdio + env, preopen the script's
-    // parent dir for `eval_file`.
+    // Match `wasmtime run --dir <parent> <script>`'s observable
+    // shape so script-side behavior (`__FILE__`, trap backtraces,
+    // relative-path resolution from the script's own location)
+    // doesn't differ between the embedder and the CLI:
+    //
+    //   - Preopen the script's parent directory at the SAME path
+    //     on the guest as it has on the host. Earlier iteration
+    //     mapped the parent to `.` which forced the script path
+    //     in argv[1] to be a bare filename, hiding the user's
+    //     directory layout from the guest.
+    //   - Pass the FULL script path as argv[1] (preserved by
+    //     `to_string_lossy()`, matching the extra-args treatment
+    //     above), so `args[1]` inside the rubyrs guest CLI is the
+    //     same string the user typed at the host.
     let script_parent = script_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let script_filename = script_path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| script_path.to_string_lossy().into_owned());
+    let parent_guest_path = script_parent.to_string_lossy().into_owned();
+    let script_arg = script_path.to_string_lossy().into_owned();
 
-    let mut wasi_argv: Vec<String> = vec!["rubyrs".to_string(), script_filename];
+    let mut wasi_argv: Vec<String> = vec!["rubyrs".to_string(), script_arg];
     wasi_argv.extend(extra_args);
 
     let mut wasi_builder = WasiCtxBuilder::new();
     wasi_builder.inherit_stdio().inherit_env().args(&wasi_argv);
-    if let Err(e) =
-        wasi_builder.preopened_dir(&script_parent, ".", DirPerms::READ, FilePerms::READ)
-    {
+    if let Err(e) = wasi_builder.preopened_dir(
+        &script_parent,
+        &parent_guest_path,
+        DirPerms::READ,
+        FilePerms::READ,
+    ) {
         eprintln!(
             "rubyrs-wasm-embed: preopen {} failed: {e}",
             script_parent.display()
