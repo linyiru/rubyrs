@@ -275,7 +275,7 @@ impl Vm {
                 }
                 match &args[0] {
                     Value::Nil => {
-                        self.maybe_gc();
+                        self.maybe_gc(); // allow: gc-rooting — allocates an empty Array (`Vec::new()`); no Value held across the alloc window.
                         let id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::new()));
                         Some(Ok(Value::Array(id)))
                     }
