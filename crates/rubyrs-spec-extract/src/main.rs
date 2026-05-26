@@ -19,6 +19,10 @@
 
 use std::process::ExitCode;
 
+fn print_usage() {
+    eprintln!("usage: rubyrs-spec-extract <path/to/spec.rb> [--shared <path>]...");
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let mut consumer_path: Option<String> = None;
@@ -33,6 +37,19 @@ fn main() -> ExitCode {
                 };
                 shared_paths.push(p);
             }
+            "-h" | "--help" => {
+                print_usage();
+                return ExitCode::SUCCESS;
+            }
+            // Reject anything else that looks like a flag so a
+            // typo (`--shraed`) or `--help` doesn't get swallowed
+            // as the consumer path and turn into a confusing
+            // "cannot read --help" error.
+            _ if arg.starts_with('-') => {
+                eprintln!("rubyrs-spec-extract: unknown flag: {arg}");
+                print_usage();
+                return ExitCode::from(2);
+            }
             _ if consumer_path.is_none() => consumer_path = Some(arg),
             _ => {
                 eprintln!("rubyrs-spec-extract: unexpected positional arg: {arg}");
@@ -42,7 +59,7 @@ fn main() -> ExitCode {
     }
 
     let Some(path) = consumer_path else {
-        eprintln!("usage: rubyrs-spec-extract <path/to/spec.rb> [--shared <path>]...");
+        print_usage();
         return ExitCode::from(2);
     };
 
@@ -102,6 +119,21 @@ fn main() -> ExitCode {
             for e in &sh_errors {
                 eprintln!("  - {e}");
             }
+        }
+    }
+
+    // Warn (don't fail) when the same shared name was supplied
+    // by more than one `--shared` file. The registry keeps the
+    // first definition, so the user should know that ordering
+    // decided which body got inlined.
+    let dups = rubyrs_spec_extract::shared_duplicates(&shared_specs);
+    if !dups.is_empty() {
+        eprintln!(
+            "rubyrs-spec-extract: {} duplicate shared-example name(s) across --shared files; keeping first definition seen:",
+            dups.len()
+        );
+        for name in &dups {
+            eprintln!("  - {name}");
         }
     }
 
