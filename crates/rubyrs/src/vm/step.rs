@@ -22,6 +22,24 @@ use crate::value::{BlockHandle, Class, Method, Value, Visibility};
 use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm};
 
 impl Vm {
+    /// The class that owns the current `@@cvar` context, if any.
+    /// Resolution mirrors CRuby's "current cref" walk:
+    ///   - frame.self_val is `Value::Class(c)` (class body or
+    ///     `def self.foo`) → c
+    ///   - frame.self_val is `Value::Object(id)` (instance
+    ///     method body) → `heap.real_class_of(id)`
+    ///   - anything else (toplevel, block-in-toplevel,
+    ///     primitive recv) → None, falling through to
+    ///     `Vm.toplevel_cvars` at the call site
+    pub(crate) fn surrounding_class(&self) -> Option<Rc<Class>> {
+        let frame = self.frames.last()?;
+        match &frame.self_val {
+            Value::Class(c) => Some(c.clone()),
+            Value::Object(id) => Some(self.heap.real_class_of(*id)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
             // Non-local return unwind. `Op::ReturnMethod` sets
@@ -355,6 +373,31 @@ impl Vm {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
                 let id_opt = if let Value::Object(id) = &self.frames.last().expect("ICE: StoreIvar no frame").self_val { Some(*id) } else { None };
                 if let Some(id) = id_opt { self.heap.instance_mut(id).ivars.insert(name_id, v); }
+            }
+            Op::LoadCvar(name_id) => {
+                // Surrounding class resolution order:
+                //   - class body / `def self.foo`: self_val IS the
+                //     class → use it directly.
+                //   - instance method: self_val is an Object →
+                //     `heap.real_class_of` gives the class.
+                //   - toplevel / block-in-toplevel: no class on
+                //     hand → fall back to Vm.toplevel_cvars.
+                // Tier 1: no hierarchy walk — each class's
+                // `class_vars` is independent of parent/child.
+                let cls_opt = self.surrounding_class();
+                let v = match cls_opt {
+                    Some(cls) => cls.class_vars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
+                    None => self.toplevel_cvars.get(&name_id).cloned().unwrap_or(Value::Nil),
+                };
+                self.stack.push(v);
+            }
+            Op::StoreCvar(name_id) => {
+                let v = self.stack.pop().expect("ICE: StoreCvar stack underflow");
+                let cls_opt = self.surrounding_class();
+                match cls_opt {
+                    Some(cls) => { cls.class_vars.borrow_mut().insert(name_id, v); }
+                    None => { self.toplevel_cvars.insert(name_id, v); }
+                }
             }
             Op::IncIvarNoPush(name_id) => {
                 let inst_id = if let Value::Object(id) = &self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val {
@@ -1076,6 +1119,7 @@ impl Vm {
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(parent.clone()),
                     includes: RefCell::new(Vec::new()),
+                    class_vars: RefCell::new(HashMap::new()),
                     #[cfg(feature = "cext")]
                     cext_alloc_func: std::cell::Cell::new(None),
                 })).clone();

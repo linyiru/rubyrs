@@ -9,11 +9,15 @@
 # still-Missing replacement candidates.
 
 class Foo                        # ClassNode (supported)
-  @@count = 0                    # ClassVariableWriteNode (× 1)
   def bar
     1i                           # ImaginaryNode (× 1)
   end
   def quux
     $&                           # BackReferenceReadNode (× 1)
+  end
+  def loop
+    for x in [1, 2, 3]           # ForNode (× 1)
+      puts x
+    end
   end
 end

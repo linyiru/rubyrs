@@ -190,6 +190,17 @@ pub struct Class {
     /// methods but before the superclass chain. `Class#ancestors`
     /// renders them between the class itself and its superclass.
     pub(crate) includes: RefCell<Vec<Rc<Class>>>,
+    /// Class variables (`@@foo`) defined on this class. Tier 1
+    /// simplification: stored directly on the class (no
+    /// hierarchy walk on read/write), so subclass `@@foo` and
+    /// parent `@@foo` are independent rather than aliased.
+    /// CRuby's read/write-walk-up-the-chain semantics would
+    /// share `@@foo` across descendants; we don't model that
+    /// because mainstream uses (Sinatra `@@eats_errors`,
+    /// dry-struct caches, etc.) keep class vars on a single
+    /// class anyway. Documented divergence — recorded in
+    /// SUBSET.md when this lands.
+    pub(crate) class_vars: RefCell<HashMap<SymId, Value>>,
     /// L3-F: optional cext-side allocator. When `Klass.new(args)` is
     /// dispatched and this is `Some(fn)`, the host calls `fn(klass)`
     /// to produce the instance handle (typically a

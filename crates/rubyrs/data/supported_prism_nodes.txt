@@ -28,6 +28,11 @@ BreakNode
 CallNode
 CaseNode
 ClassNode
+ClassVariableAndWriteNode
+ClassVariableOperatorWriteNode
+ClassVariableOrWriteNode
+ClassVariableReadNode
+ClassVariableWriteNode
 ConstantAndWriteNode
 ConstantOperatorWriteNode
 ConstantOrWriteNode

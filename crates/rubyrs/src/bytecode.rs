@@ -66,6 +66,17 @@ pub(crate) enum Op {
     Pop,
     LoadIvar(SymId),
     StoreIvar(SymId),
+    /// `@@name` read. Resolves the surrounding class at runtime
+    /// (frame.self_val is either a Value::Class or
+    /// Value::Object; toplevel falls through to `Vm.toplevel_cvars`
+    /// — a single fallback table so toplevel `@@foo` warnings
+    /// don't trap). Missing names return `Value::Nil` (lenient
+    /// default, like ivars).
+    LoadCvar(SymId),
+    /// `@@name = expr` write. Stores into the surrounding
+    /// class's `class_vars` table or the toplevel fallback
+    /// when no class is on the stack.
+    StoreCvar(SymId),
     /// Fast path for `@name = @name + 1`. Same shape as IncLocal but on
     /// self's ivar table.
     IncIvar(SymId),

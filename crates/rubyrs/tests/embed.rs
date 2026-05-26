@@ -620,20 +620,22 @@ fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     // arbitrary third-party Ruby — that's a denial-of-service waiting
     // to happen.
     //
-    // `@@count = 0` (ClassVariableWriteNode) is currently outside
-    // the supported subset and reaches the unsupported-node
-    // fallback. We expect a SyntaxError Trap back, not a SIGABRT.
-    // (Previous canaries: `case`, then `Foo::Bar = 1` — both
-    // landed as supported. Pick something genuinely unimplemented
-    // each time the gap closes.)
+    // `for x in [...]` (ForNode) — old-style imperative
+    // for-loop, vanishingly rare in real-world Ruby (Rubocop
+    // even flags it). Currently outside the supported subset
+    // and reaches the unsupported-node fallback. We expect a
+    // SyntaxError Trap back, not a SIGABRT.
+    // (Previous canaries: `case`, `Foo::Bar = 1`, `@@count` —
+    // all landed as supported. Pick something genuinely
+    // unimplemented each time the gap closes.)
     let mut rt = Runtime::new();
     let err = rt.eval(
         r#"
-        class Foo
-          @@count = 0
+        for x in [1, 2, 3]
+          puts x
         end
         "#,
-        "cvar_write.rb",
+        "for_loop.rb",
     ).unwrap_err();
     assert!(
         matches!(err.err, RubyError::SyntaxError { .. }),

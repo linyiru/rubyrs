@@ -290,6 +290,14 @@ pub(crate) struct Vm {
     /// fall through to this table.
     pub(crate) globals: HashMap<SymId, Value>,
     pub(crate) toplevel_methods: HashMap<SymId, Rc<Method>>,
+    /// Toplevel `@@foo` fallback. CRuby raises RuntimeError on
+    /// class-variable use outside a class body; rubyrs takes the
+    /// lenient route consistent with our ivar / global handling.
+    /// Inside a class body / instance method / class method, the
+    /// surrounding `Rc<Class>` owns the cvar; this table catches
+    /// the toplevel-only `@@x` writes scripts occasionally use
+    /// for cache-like state at file scope.
+    pub(crate) toplevel_cvars: HashMap<SymId, Value>,
     pub(crate) host_fns: HashMap<SymId, HostFnSlot>,
     /// C-ext singleton-method dispatch table. Indexed by
     /// `(class joined name, method SymId)`. Populated by
@@ -478,6 +486,7 @@ impl Vm {
             cache_counter: 0,
             globals: HashMap::new(),
             toplevel_methods: HashMap::new(),
+            toplevel_cvars: HashMap::new(),
             host_fns: HashMap::new(),
             #[cfg(feature = "cext")]
             cext_class_methods: HashMap::new(),

@@ -94,7 +94,11 @@ fn classify_returns_expected_for_known_classes() {
     assert_eq!(classify("ArgumentsNode"), Classification::RidesAlong);
     assert_eq!(classify("RescueNode"), Classification::RidesAlong);
     assert_eq!(classify("BackReferenceReadNode"), Classification::Missing);
-    assert_eq!(classify("ClassVariableWriteNode"), Classification::Missing);
+    // ForNode is still outside the subset (the old-style
+    // imperative-for loop; rubocop deters its use anyway).
+    // ClassVariableWriteNode used to be in this list and
+    // landed as supported alongside the cvar PR.
+    assert_eq!(classify("ForNode"), Classification::Missing);
     // Sanity: a name that is not a Prism node at all also lands in
     // Missing (caller's job to validate using `unknown_classes_in`).
     assert_eq!(classify("NotARealNode"), Classification::Missing);
@@ -130,20 +134,17 @@ fn fixture_exercises_exact_missing_class_set() {
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    // Exact set, exact counts. AliasMethodNode and
-    // NumberedReferenceReadNode both landed (this branch + a
-    // concurrent PR on master), so the fixture now uses
-    // BackReferenceReadNode (`$&`) and ImaginaryNode (`1i`)
-    // as the two non-CVarWrite tripwires — both single-token
-    // leaves, no Missing children, still not-supported.
-    // (`$~` was an early swap candidate too, but Prism classes
-    // it as GlobalVariableReadNode, which is already Supported.)
+    // Exact set, exact counts. ClassVariableWriteNode landed in
+    // the cvar PR; ForNode (`for x in […]`) replaces it as the
+    // third tripwire — old-style imperative loop, rare enough
+    // in real code that rubocop flags it, won't accidentally
+    // land soon.
     let expected: std::collections::BTreeSet<&str> =
-        ["BackReferenceReadNode", "ImaginaryNode", "ClassVariableWriteNode"]
+        ["BackReferenceReadNode", "ImaginaryNode", "ForNode"]
             .into_iter()
             .collect();
     assert_eq!(names, expected, "Missing-class set drifted");
-    for cls in ["BackReferenceReadNode", "ImaginaryNode", "ClassVariableWriteNode"] {
+    for cls in ["BackReferenceReadNode", "ImaginaryNode", "ForNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
@@ -174,8 +175,10 @@ fn json_roundtrip_preserves_essentials() {
 #[test]
 fn diff_detects_closed_and_new_gaps() {
     // Synthetic before/after: before has BackReferenceReadNode missing, after
-    // does not — closed gap. After introduces ClassVariableWriteNode
-    // — new gap.
+    // does not — closed gap. After introduces ForNode — new gap.
+    // (ClassVariableWriteNode used to be the "new gap" probe but
+    // landed as supported in the cvar PR; ForNode replaces it as
+    // a still-unsupported old-imperative-Ruby canary.)
     let mut before = Report::default();
     before.total_nodes = 10;
     before.histogram.insert(
@@ -203,7 +206,7 @@ fn diff_detects_closed_and_new_gaps() {
         },
     );
     after.histogram.insert(
-        "ClassVariableWriteNode".to_string(),
+        "ForNode".to_string(),
         rubyrs_gapscan::NodeStat {
             count: 2,
             ..Default::default()
@@ -214,7 +217,7 @@ fn diff_detects_closed_and_new_gaps() {
     assert_eq!(d.supported_delta, 5);
     assert_eq!(d.missing_delta, -3);
     assert_eq!(d.closed_missing_classes, vec![("BackReferenceReadNode".to_string(), 5)]);
-    assert_eq!(d.new_missing_classes, vec![("ClassVariableWriteNode".to_string(), 2)]);
+    assert_eq!(d.new_missing_classes, vec![("ForNode".to_string(), 2)]);
 }
 
 #[test]

@@ -170,6 +170,18 @@ impl Vm {
                     for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
                 }
             }
+            // Class variables (`@@foo`) hold arbitrary Values
+            // (Array/Hash/Object); without rooting them, a
+            // `@@items = []; ...; @@items << x` pattern under
+            // STRESS_GC=1 sweeps the array between the write
+            // and the next iteration's read.
+            for v in cls.class_vars.borrow().values() {
+                roots.push(v.clone());
+            }
+        }
+        // Toplevel `@@foo` fallback (no class on hand).
+        for v in self.toplevel_cvars.values() {
+            roots.push(v.clone());
         }
         for m in self.toplevel_methods.values() {
             if let Some(cl) = &m.closure {

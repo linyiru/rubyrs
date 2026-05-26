@@ -124,6 +124,20 @@ pub(crate) enum Expr {
     /// class_path alias for those so they stay at top-level only.
     /// Bare-name writes and relative-path writes pass false.
     ConstWrite(String, bool, Box<SExpr>),
+    /// `@@name` — class variable read. Looks up `name` in the
+    /// surrounding class's `class_vars` table at runtime; missing
+    /// names return `nil` (CRuby raises NameError, but lenient
+    /// default matches our ivar / global behaviour and avoids
+    /// breaking gem-shim probes). Compiles to `Op::LoadCvar`.
+    CvarRead(String),
+    /// `@@name = expr` — class variable write. Stores into the
+    /// surrounding class's `class_vars` table. Tier 1 doesn't
+    /// walk the class hierarchy (`@@foo` on a subclass is
+    /// independent of parent's). Documented divergence; the
+    /// mainstream "cache a default instance" use cases
+    /// (Sinatra `@@eats_errors`) stay on a single class.
+    /// Compiles to `Op::StoreCvar`.
+    CvarWrite(String, Box<SExpr>),
     Call {
         receiver: Option<Box<SExpr>>,
         name: String,
@@ -661,6 +675,47 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_instance_variable_write_node() {
         return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+    }
+    // `@@foo` read / `@@foo = expr` write — class variables.
+    // Tier 1 stores them per-class without hierarchy walk; see
+    // Class.class_vars + Op::Load/StoreCvar comments.
+    if let Some(n) = node.as_class_variable_read_node() {
+        return sp(node, Expr::CvarRead(cid_to_string(n.name())));
+    }
+    if let Some(n) = node.as_class_variable_write_node() {
+        return sp(node, Expr::CvarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+    }
+    // `@@x += y` etc. — desugar to `@@x = @@x + y` (or whichever
+    // binary op). Same shape we use for the local-variable op-
+    // write family.
+    if let Some(n) = node.as_class_variable_operator_write_node() {
+        let name = cid_to_string(n.name());
+        let op = cid_to_string(n.binary_operator());
+        let read = sp(node, Expr::CvarRead(name.clone()));
+        let rhs = tr(&n.value());
+        let combined = sp(node, Expr::Call {
+            receiver: Some(Box::new(read)),
+            name: op,
+            args: vec![rhs],
+        });
+        return sp(node, Expr::CvarWrite(name, Box::new(combined)));
+    }
+    // `@@x ||= y` — assign-if-falsy. CRuby: read; if truthy
+    // return it, else assign rhs. Use Or-then-Write shape.
+    if let Some(n) = node.as_class_variable_or_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::CvarRead(name.clone()));
+        let rhs = tr(&n.value());
+        let or_expr = sp(node, Expr::Or(Box::new(read), Box::new(rhs)));
+        return sp(node, Expr::CvarWrite(name, Box::new(or_expr)));
+    }
+    // `@@x &&= y` — assign-if-truthy.
+    if let Some(n) = node.as_class_variable_and_write_node() {
+        let name = cid_to_string(n.name());
+        let read = sp(node, Expr::CvarRead(name.clone()));
+        let rhs = tr(&n.value());
+        let and_expr = sp(node, Expr::And(Box::new(read), Box::new(rhs)));
+        return sp(node, Expr::CvarWrite(name, Box::new(and_expr)));
     }
     // `$foo` read / `$foo = expr` write — global variables.
     // Spike subset: plain user globals go through `Vm.globals`;

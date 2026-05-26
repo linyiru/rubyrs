@@ -382,6 +382,19 @@ pub(crate) fn compile_expr(
             b.emit(Op::Dup);
             b.emit(Op::StoreIvar(id));
         }
+        Expr::CvarRead(name) => {
+            let id = interner.intern(name);
+            b.emit(Op::LoadCvar(id));
+        }
+        Expr::CvarWrite(name, val) => {
+            compile_expr(b, val, protos, interner, cc);
+            let id = interner.intern(name);
+            // Mirror IVarWrite's "leave value on stack" shape so
+            // `(@@foo = 1)` is a usable expression — same as
+            // CRuby (assignment expressions return their RHS).
+            b.emit(Op::Dup);
+            b.emit(Op::StoreCvar(id));
+        }
         Expr::ConstRead(name) => {
             let id = interner.intern(name);
             b.emit(Op::LoadConst(id));
