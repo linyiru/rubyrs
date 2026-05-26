@@ -21,6 +21,144 @@ use crate::value::{BlockHandle, Class, Method, Value, Visibility};
 
 use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm};
 
+/// Translate Onigmo-specific regex constructs into something the
+/// Rust `regex` crate accepts. The crate is by design less
+/// expressive than Onigmo (no backreferences, no `\G`, no
+/// look-behind, ...) — the trade-off is linear-time matching and
+/// no catastrophic backtracking.
+///
+/// Currently handled:
+/// - `\G` (match-at-last-position anchor) — context-aware:
+///   * Outside a character class: dropped entirely. CRuby uses
+///     it for stateful scanning where the engine remembers the
+///     end of the previous match; the rubyrs subset mostly
+///     slices the input from the current cursor before matching,
+///     so the surrounding structural anchors carry the intent.
+///   * Inside a character class (`/[\G]/`): translated to bare
+///     `G` so the literal-G semantic survives — CRuby treats
+///     `\G` in a class as literal G, but the Rust regex crate
+///     rejects the escape verbatim.
+///
+/// Motivating case: MRI's `lib/erb/compiler.rb:460`
+/// (`/\G<%#(.*)%>/`) — without translation the LoadRegex op
+/// raises SyntaxError on the `\G`.
+///
+/// Returns a `Cow<'_, str>`: borrowed (zero-alloc fast path) when
+/// the pattern doesn't contain `\G` at all (the overwhelmingly
+/// common case), owned String when translation happened.
+///
+/// Other Onigmo features (`\K`, `(?<=...)`, named-group backrefs
+/// like `\k<name>`, etc.) still surface as the regex crate's
+/// SyntaxError. Adding translations is per-feature on demand.
+#[cfg(feature = "regex")]
+fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
+    // Fast path: most regexes don't use `\G`. Skip the whole
+    // scan + allocation when the source can't possibly contain
+    // the anchor.
+    if !src.contains("\\G") {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    // Tracks whether we are inside an outer character class
+    // (single bool, not a depth counter — POSIX subclasses like
+    // `[:alpha:]` are skipped as a unit below so they never
+    // re-toggle). `\G` is only stripped when it's the Onigmo
+    // anchor (outside any `[...]`). Inside a character class —
+    // `/[\G]/` — `\G` is a literal `G` in every regex dialect,
+    // and dropping the `\\G` would change it to an empty
+    // character class (regex compile error) or collapse it
+    // with neighbours.
+    //
+    // POSIX classes (`[:digit:]`, `[:alpha:]`, etc.) need their
+    // own pass: the inner `]` that closes `:digit:]` would
+    // otherwise prematurely flip `in_class` to false on a
+    // pattern like `/[[:digit:]\G]/`. We detect `[:`,
+    // `[=`, `[.` after entering a class and skip past the
+    // matching `:]`/`=]`/`.]` as a unit.
+    // Accumulate as raw bytes so multibyte UTF-8 sequences pass
+    // through unchanged. `out.push(c as char)` would write each
+    // byte as a separate Latin-1 codepoint, mangling any non-
+    // ASCII pattern text (CJK literals, U+FFFD from invalid-byte
+    // recovery, etc.). All structural tokens we look for (`\`,
+    // `G`, `[`, `]`, `:`, `=`, `.`) are single-byte ASCII so
+    // operating at the byte level is safe — UTF-8 multibyte
+    // bytes are all 0x80+, never confusable with ASCII.
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(src.len());
+    let mut i = 0;
+    let mut in_class = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' && i + 1 < bytes.len() {
+            let next = bytes[i + 1];
+            // `\G` outside a char class → drop entirely (Onigmo
+            // anchor with no Rust regex equivalent).
+            // `\G` inside a char class → CRuby treats as literal
+            // `G`. The Rust regex crate rejects the `\G` escape
+            // even inside a class, so we translate to bare `G`
+            // (`/[\G]/` → `/[G]/`).
+            if next == b'G' {
+                if in_class {
+                    out.push(b'G');
+                }
+                i += 2;
+                continue;
+            }
+            // Other escapes pass through unchanged. `next` is
+            // always ASCII (\d, \s, \., \\, ...); if a multibyte
+            // codepoint somehow followed a `\` we'd want to copy
+            // all of its bytes — but Ruby/Onigmo doesn't allow
+            // `\<multibyte>` as an escape, so the next byte
+            // being ASCII is invariant.
+            out.push(c);
+            out.push(next);
+            i += 2;
+            continue;
+        }
+        // POSIX / collating-class skip — only inside a class,
+        // and only when the `[` is followed by `:`, `=`, or `.`.
+        // Find the matching closer (`:]`, `=]`, `.]`) and copy
+        // the whole token verbatim so neither `in_class` nor
+        // `\G` handling re-fires inside it.
+        if in_class
+            && c == b'['
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b':' | b'=' | b'.')
+        {
+            let opener = bytes[i + 1];
+            let close = [opener, b']'];
+            // Search forward for the closer.
+            let mut j = i + 2;
+            while j + 1 < bytes.len() && &bytes[j..j + 2] != close {
+                j += 1;
+            }
+            // Copy `[` through the closing `]` if found, else
+            // bail out and just copy the `[` to let the regex
+            // crate report its own error.
+            if j + 1 < bytes.len() && &bytes[j..j + 2] == close {
+                out.extend_from_slice(&bytes[i..j + 2]);
+                i = j + 2;
+                continue;
+            }
+        }
+        // Outer character-class bracket tracking. POSIX inner
+        // classes are skipped above so their `]` doesn't reach
+        // this branch.
+        if c == b'[' && !in_class {
+            in_class = true;
+        } else if c == b']' && in_class {
+            in_class = false;
+        }
+        out.push(c);
+        i += 1;
+    }
+    // SAFETY: input was a &str (valid UTF-8) and every byte
+    // operation above either copies an input run verbatim or
+    // pushes ASCII (`G`). No way to produce invalid UTF-8.
+    std::borrow::Cow::Owned(
+        String::from_utf8(out).expect("ICE: preprocess_regex_pattern produced invalid UTF-8")
+    )
+}
+
 impl Vm {
     /// Lazily allocate the `$LOAD_PATH` Array on first access.
     /// Idempotent — subsequent calls return the same ObjId so
@@ -265,7 +403,8 @@ impl Vm {
                     r.clone()
                 } else {
                     let src = self.interner.resolve(id).clone();
-                    let compiled = regex::Regex::new(&src).map_err(|e| {
+                    let translated = preprocess_regex_pattern(&src);
+                    let compiled = regex::Regex::new(&translated).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", src, e),
                         })
@@ -330,7 +469,8 @@ impl Vm {
                     if let Some(r) = self.regex_cache.get(&id) {
                         return Ok(r.clone());
                     }
-                    let compiled = regex::Regex::new(pat).map_err(|e| {
+                    let translated = preprocess_regex_pattern(pat);
+                    let compiled = regex::Regex::new(&translated).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", pat, e),
                         })
