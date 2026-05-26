@@ -53,7 +53,7 @@ class WrongType
       prepend 42
     end
   rescue TypeError => e
-    puts "type ok"
+    puts "type ok: #{e.message}"
   end
 end
 
@@ -86,7 +86,7 @@ class CType
       prepend NotAModule
     end
   rescue TypeError => e
-    puts "class-arg ok"
+    puts "class-arg ok: #{e.message}"
   end
 end
 
