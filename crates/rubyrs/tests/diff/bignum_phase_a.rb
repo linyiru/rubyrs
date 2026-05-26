@@ -163,3 +163,51 @@ puts (5..5).inject(:*)
 puts 9_223_372_036_854_775_807.+(1)
 puts 9_223_372_036_854_775_807.send(:+, 1)
 puts 1_000_000_000.send(:*, 1_000_000_000).send(:*, 1_000_000_000)
+
+# === /code-review post-merge findings (commit batch on top of cycle 13) ===
+
+# Array#min/#max/#sort across Int/BigInt — pre-fix used
+# value_cmp_v which had no BigInt arm and returned None, surfacing
+# as NoMethodError. Now goes through value_cmp_v_heap.
+puts [9_223_372_036_854_775_808, 5].min
+puts [5, 9_223_372_036_854_775_808].max
+puts [9_223_372_036_854_775_808, 5, 100].sort.inspect
+
+# Range#include? / #cover? with BigInt arg on Int-bounded range —
+# any reachable BigInt at this point is genuinely outside i64
+# range, so the answer is always false (BigInt that would have
+# fit i64 was demoted via bigint_to_value).
+puts (1..10).include?(9_223_372_036_854_775_808)
+puts (1..10).cover?(9_223_372_036_854_775_808)
+
+# BigInt Phase A predicates — pure read-only methods that don't
+# need heap mutation but were missing from the cycle-13 surface.
+big = 9_999_999_999_999_999_999
+puts big.zero?
+puts big.positive?
+puts(-1_000_000_000_000_000_000_000_000.positive?)  # negative BigInt (literal-promoted)
+puts(-1_000_000_000_000_000_000_000_000.negative?)
+puts big.even?
+puts big.odd?
+puts big.to_i
+puts big.respond_to?(:zero?)
+puts big.respond_to?(:to_i)
+
+# Block-form send on BigInt — pre-fix raised NoMethodError because
+# do_call_block lacked the bigint_primitive hook do_call had.
+puts big.send(:to_s, &proc{|x| x})
+puts 1.send(:+, 9_223_372_036_854_775_808, &proc{|x| x})
+
+# `<=>` cross-direction (Int recv with BigInt rhs). The Int <=>
+# catch-all in primitive.rs has a carve-out for BigInt rhs so
+# bigint_primitive's <=> branch can fire. Pin that ordering with
+# a fixture (was only covered for big <=> small before).
+puts(1 <=> 9_999_999_999_999_999_999)
+puts(9_999_999_999_999_999_999 <=> 1)
+puts(9_999_999_999_999_999_999 <=> 9_999_999_999_999_999_999)
+
+# sprintf %d / %+d on BigInt. Pre-fix raised TypeError with the
+# self-contradictory "no implicit conversion of Integer to Integer".
+puts '%d' % big
+puts '%+d' % big
+puts ('|%20d|' % big)

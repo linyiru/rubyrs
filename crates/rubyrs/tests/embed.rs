@@ -1828,3 +1828,36 @@ fn bigint_to_s_respects_max_value_bytes_cap() {
         err.err,
     );
 }
+
+#[cfg(feature = "bignum")]
+#[test]
+fn range_max_with_i64_min_exclusive_returns_nil() {
+    // Regression cover for the /code-review finding: Range#max
+    // with an exclusive endpoint computes `ei - 1`. Pre-fix this
+    // panicked in debug for ei == i64::MIN; treated as an empty
+    // range (Nil) now.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // (-2**63 ... -2**63).max  — exclusive, endpoint == i64::MIN
+        "puts((-9_223_372_036_854_775_808...-9_223_372_036_854_775_808).max.inspect)",
+        "range_max_min_excl.rb",
+    ).expect("should succeed without panic");
+    assert_eq!(buf.snapshot().trim(), "nil");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn range_size_with_i64_max_width_returns_zero() {
+    // Pre-fix `ei - bi + 1` panicked in debug when bi == i64::MIN
+    // and ei == i64::MAX (width 2^64). Treat overflow as 0.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (-9_223_372_036_854_775_808..9_223_372_036_854_775_807).size",
+        "range_size_max_width.rb",
+    ).expect("should succeed without panic");
+    assert_eq!(buf.snapshot().trim(), "0");
+}
