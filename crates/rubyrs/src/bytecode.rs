@@ -20,6 +20,16 @@ pub(crate) enum Op {
     /// (Int + Int) doesn't fire on Float receivers.
     LoadConstFloat(f64),
     LoadConstStr(SymId),
+    /// String literal whose Prism-unescaped bytes aren't valid
+    /// UTF-8 (typically `\xNN` escapes producing high-byte
+    /// sequences — `"\xFF\xFF"`, binary protocol literals,
+    /// hex-string sentinels). Indexes into the current Proto's
+    /// `byte_literals` table; runtime constructs a fresh
+    /// `Value::Str` from the stored `Rc<[u8]>` so the raw bytes
+    /// survive the round-trip. The valid-UTF-8 path keeps using
+    /// `LoadConstStr(SymId)` so Symbol-shaped strings still hit
+    /// the global interner.
+    LoadConstStrBytes(u32),
     /// `/pattern/` literal — looks up an Rc<Regex> in the Vm's
     /// `regex_cache`, compiling it from the interned source the
     /// first time. A compile-time bad pattern surfaces as a
@@ -344,4 +354,13 @@ pub(crate) struct Proto {
     pub(crate) op_spans: Vec<Span>,
     /// Source filename — used by Trap backtrace formatting.
     pub(crate) filename: Rc<str>,
+    /// Per-proto pool of binary string literals — bytes from
+    /// `\xNN` escapes that aren't valid UTF-8. Indexed by
+    /// `Op::LoadConstStrBytes(u32)`. The global interner (which
+    /// keys on `Rc<str>`) can't hold non-UTF-8 bytes, so binary
+    /// literals get their own per-Proto store; deduplication
+    /// within a single Proto isn't attempted (binary literals
+    /// are usually small and rare). Valid-UTF-8 literals still
+    /// go through the interner via `Op::LoadConstStr(SymId)`.
+    pub(crate) byte_literals: Vec<std::rc::Rc<[u8]>>,
 }

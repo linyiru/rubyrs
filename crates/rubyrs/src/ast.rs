@@ -50,6 +50,14 @@ pub(crate) enum Expr {
     IntLit(i64),
     FloatLit(f64),
     StrLit(String),
+    /// String literal whose Prism-unescaped bytes aren't valid
+    /// UTF-8. Holds the raw bytes so high-byte escapes
+    /// (`"\xFF\xFF"`) survive lossless — the previous
+    /// `from_utf8_lossy` route substituted invalid sequences with
+    /// U+FFFD, expanding each `\xFF` to 3 bytes and breaking
+    /// binary-protocol use. The valid-UTF-8 path still uses
+    /// `StrLit(String)`.
+    StrLitBytes(Vec<u8>),
     /// `/pattern/` literal — Ruby regular expression. Source is
     /// kept as a String for interning; compilation happens at the
     /// VM layer (with caching). Cfg-gated on the `regex` feature
@@ -442,7 +450,18 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return sp(node, Expr::FloatLit(n.value()));
     }
     if let Some(n) = node.as_string_node() {
-        return sp(node, Expr::StrLit(String::from_utf8_lossy(n.unescaped()).into_owned()));
+        // Prism's `unescaped()` returns the raw post-escape byte
+        // sequence — `\xFF` produces a single 0xFF byte. We try
+        // UTF-8 first (the overwhelmingly common case for
+        // source-level string literals); if validation fails the
+        // literal carries high-byte content that the interner
+        // (UTF-8 only) can't hold, so we take the binary-literal
+        // path and preserve raw bytes via `StrLitBytes`.
+        let raw = n.unescaped();
+        return match std::str::from_utf8(raw) {
+            Ok(s) => sp(node, Expr::StrLit(s.to_string())),
+            Err(_) => sp(node, Expr::StrLitBytes(raw.to_vec())),
+        };
     }
     if let Some(n) = node.as_symbol_node() {
         return sp(node, Expr::SymbolLit(String::from_utf8_lossy(n.unescaped()).into_owned()));

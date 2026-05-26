@@ -2181,6 +2181,7 @@ impl Vm {
                 ],
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<synthetic>".into(),
+                byte_literals: Vec::new(),
             };
             let idx = self.protos.len();
             self.protos.push(proto);
@@ -2258,6 +2259,7 @@ impl Vm {
                 ],
                 op_spans: vec![Span::ZERO; 6],
                 filename: "<synthetic>".into(),
+                byte_literals: Vec::new(),
             };
             let idx = self.protos.len();
             self.protos.push(proto);

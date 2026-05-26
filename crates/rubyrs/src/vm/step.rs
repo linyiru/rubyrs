@@ -191,6 +191,19 @@ impl Vm {
                 let s = self.interner.resolve(id).clone();
                 self.stack.push(Value::new_str(s.to_string()));
             }
+            Op::LoadConstStrBytes(idx) => {
+                // Binary-literal pool lives on the current proto
+                // (the interner is UTF-8-only). Clone the Rc<[u8]>
+                // slot into a fresh Vec<u8> so each load yields an
+                // independent String — mutations via `<<` /
+                // `concat` shouldn't bleed into the pool entry that
+                // future loads share.
+                let bytes: Vec<u8> = {
+                    let proto_idx = self.frames.last().expect("ICE: LoadConstStrBytes no frame").proto_idx;
+                    self.protos[proto_idx].byte_literals[idx as usize].to_vec()
+                };
+                self.stack.push(Value::new_str_bytes(bytes));
+            }
             #[cfg(feature = "regex")]
             Op::LoadRegex(id) => {
                 let regex_rc = if let Some(r) = self.regex_cache.get(&id) {

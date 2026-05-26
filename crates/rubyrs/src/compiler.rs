@@ -58,6 +58,11 @@ pub(crate) struct ProtoBuilder {
     /// an empty stack so `next` in a block reaches the iteration
     /// driver, not an enclosing `while` in the parent proto.
     pub(crate) loop_next_jumps: Vec<Vec<usize>>,
+    /// Per-proto pool for binary string literals (`"\xNN..."`
+    /// inputs where the unescaped bytes aren't valid UTF-8).
+    /// Flushed into `Proto.byte_literals` on emit. See
+    /// `Op::LoadConstStrBytes` for the runtime side.
+    pub(crate) byte_literals: Vec<std::rc::Rc<[u8]>>,
     /// Lexical class/module nesting at the point this proto is
     /// being compiled. Empty at the toplevel, `["Foo"]` inside
     /// `module Foo; ... end`, `["Foo", "Bar"]` inside
@@ -88,6 +93,7 @@ impl ProtoBuilder {
             loop_break_jumps: vec![],
             loop_next_jumps: vec![],
             class_path: vec![],
+            byte_literals: vec![],
         };
         for p in params { b.local_slot(p); }
         b
@@ -139,6 +145,7 @@ impl ProtoBuilder {
             code: self.code,
             op_spans: self.op_spans,
             filename: self.filename,
+            byte_literals: self.byte_literals,
         }
     }
 }
@@ -259,6 +266,17 @@ pub(crate) fn compile_expr(
         Expr::IntLit(i) => { b.emit(Op::LoadConstInt(*i)); }
         Expr::FloatLit(f) => { b.emit(Op::LoadConstFloat(*f)); }
         Expr::StrLit(s) => { let id = interner.intern(s); b.emit(Op::LoadConstStr(id)); }
+        Expr::StrLitBytes(bytes) => {
+            // Bytes path — interner can't hold non-UTF-8, so the
+            // pool lives per-Proto on the current builder. No
+            // dedup attempt (binary literals are rare and usually
+            // small; the simple pool keeps Op::LoadConstStrBytes
+            // a single index without an extra hash probe per
+            // emit).
+            let idx = b.byte_literals.len() as u32;
+            b.byte_literals.push(std::rc::Rc::from(bytes.as_slice()));
+            b.emit(Op::LoadConstStrBytes(idx));
+        }
         #[cfg(feature = "regex")]
         Expr::RegexLit(src) => { let id = interner.intern(src); b.emit(Op::LoadRegex(id)); }
         Expr::SymbolLit(s) => { let id = interner.intern(s); b.emit(Op::LoadSymbol(id)); }
@@ -1274,6 +1292,7 @@ fn literal_to_value(e: &Expr, interner: &mut Interner) -> Value {
         Expr::IntLit(n) => Value::Int(*n),
         Expr::FloatLit(f) => Value::Float(*f),
         Expr::StrLit(s) => Value::new_str(s.as_str()),
+        Expr::StrLitBytes(bytes) => Value::new_str_bytes(bytes.clone()),
         Expr::SymbolLit(s) => {
             let id = interner.intern(s);
             Value::Sym(id)
@@ -1328,6 +1347,10 @@ pub(crate) fn compile_block(
         // codebases rarely do this; blocks are inherited for
         // consistency, not because we expect it to fire often.
         class_path: parent.class_path.clone(),
+        // Blocks get a fresh per-Proto binary-literal pool. The
+        // emitted bytecode embeds indices that the runtime
+        // resolves through the block's own Proto.
+        byte_literals: vec![],
     };
     let param_start = b.n_locals;
     // Slot layout in two phases:

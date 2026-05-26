@@ -272,7 +272,15 @@ jobs:
           # StoreGlobal stack-underflow ICE asserts). All sites are
           # ICE-class `.expect("ICE: ...")` invariant checks; not
           # user-reachable.
-          check crates/rubyrs/src/vm/step.rs         64
+          #
+          # Bumped 64 → 65 by the binary string-literal commit
+          # (`feat(vm): preserve raw bytes in \xNN string literals
+          # via Op::LoadConstStrBytes`). The new Op consults the
+          # current frame's `proto_idx` to index the per-Proto
+          # byte_literals pool, gated by `.expect("ICE:
+          # LoadConstStrBytes no frame")` — same invariant pattern
+          # as every other LoadConst* arm in step.rs.
+          check crates/rubyrs/src/vm/step.rs         65
           check crates/rubyrs/src/vm/iter.rs         10
           check crates/rubyrs/src/vm/cext.rs          6
           # Bumped 3 → 10 by PR #78 (break/next through ensure).
