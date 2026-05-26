@@ -348,8 +348,11 @@ impl Vm {
             // and only falls through to the cext path when the
             // `.rb` lookup fails.
             //
-            // Gem / LOAD_PATH walking still deferred — only
-            // literal-path / cwd-relative resolution.
+            // `$LOAD_PATH` walking is in place
+            // (see `ruby_source_candidates`); `load` and
+            // `autoload` are still deferred. Auto-populated
+            // stdlib/gem paths are NOT pre-seeded — scripts
+            // opt in by mutating `$LOAD_PATH` themselves.
             "require" => match args {
                 [Value::Str(path)] => {
                     #[cfg(not(target_os = "wasi"))]
