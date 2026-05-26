@@ -964,21 +964,29 @@ end
 ## need them. `Encoding::BINARY` is the canonical CRuby alias
 ## for `ASCII_8BIT`.
 class Encoding
-  ## Avoid a `@@cache` Hash for the find lookup — preamble eval
-  ## happens BEFORE the host applies per-Runtime `max_value_bytes`
-  ## caps, but the Hash mutation would still count against any
-  ## tiny caps used in resource-limit tests. A case-over-name with
-  ## the four predefined constants gives stable identity for the
-  ## standard names (so `Encoding.find("UTF-8").equal?(Encoding::UTF_8)`)
-  ## without any allocator pressure during preamble load. Unknown
-  ## names fall through to `.new` — uncached, but acceptable for
-  ## the subset (real codebases only `find` the standard names).
+  ## `Encoding.find(name)` returns the singleton instance for each
+  ## of the four predefined encoding names. Identity is stable for
+  ## the standard names — `Encoding.find("UTF-8").equal?(Encoding::UTF_8)`
+  ## — because we return the same constant on every call. There is
+  ## NO Hash cache; a case-over-name dispatch hits the four named
+  ## constants directly.
+  ##
+  ## Why no Hash cache: `Runtime::with_config` applies `Config`
+  ## (including `max_value_bytes`) BEFORE `load_preamble` runs, so
+  ## any Hash mutation inside the preamble would count against tiny
+  ## caps used in resource-limit tests and fail preamble load
+  ## entirely.
+  ##
+  ## Unknown names raise `ArgumentError`, matching CRuby's
+  ## `Encoding.find("missing")` shape (and avoiding the equality-
+  ## breaking trap of returning two different `.new` instances for
+  ## the same name).
   def self.find(name)
     case name.to_s
     when "UTF-8" then UTF_8
     when "US-ASCII" then US_ASCII
     when "ASCII-8BIT", "BINARY" then ASCII_8BIT
-    else new(name.to_s)
+    else raise ArgumentError, "unknown encoding name - " + name.to_s
     end
   end
 

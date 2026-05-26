@@ -721,17 +721,21 @@ impl Vm {
         }
 
         // `String#encoding` — returns the preamble's
-        // `Encoding::UTF_8` instance. Intercepted here (rather than
-        // in `primitive::string_call`) because materialising the
-        // Encoding object needs Vm access for the joined-name
+        // `Encoding::UTF_8` instance. Intercepted here (rather
+        // than in `primitive::string_call`) because materialising
+        // the Encoding object needs Vm access for the joined-name
         // constants table; `string_call` is a free function.
-        // Falls through to Nil if the preamble hasn't loaded
-        // (e.g. minimal test harness) — a louder failure than
-        // silently returning a String surprises downstream
-        // callers (ERB's `enc.dummy?` etc.).
+        //
+        // ICE if the constant is missing — this would only happen
+        // when the preamble didn't load (e.g. a misconfigured test
+        // harness), and silently returning Nil leaves downstream
+        // callers (`enc.dummy?` etc.) with a NoMethodError far
+        // from the root cause. Panic surfaces the actual
+        // bootstrap failure.
         if matches!(&recv, Value::Str(_)) && &*name == "encoding" && args.is_empty() {
             let key = self.interner.intern("Encoding::UTF_8");
-            let v = self.constants.get(&key).cloned().unwrap_or(Value::Nil);
+            let v = self.constants.get(&key).cloned()
+                .expect("ICE: Encoding::UTF_8 not in constants table — preamble didn't load");
             self.stack.push(v);
             return Ok(());
         }

@@ -30,14 +30,27 @@ puts s.encoding.to_s                            # UTF-8
 puts s.encoding.dummy?                          # false
 puts s.encoding.ascii_compatible?               # true
 
-# --- Encoding.find returns the cached instance ---
+# --- Encoding.find returns the singleton instance ---
 # Repeated calls with the same name return the SAME instance
-# (Encoding has a class-variable cache keyed by name string).
-# This is critical for the `enc == Encoding::UTF_8` idiom.
+# because the case-over-name dispatch hits the predefined
+# constant directly (no Hash cache — see the rationale in the
+# preamble). This is critical for the `enc == Encoding::UTF_8`
+# idiom.
 u1 = Encoding.find("UTF-8")
 u2 = Encoding.find("UTF-8")
 puts u1.equal?(u2)                              # true
 puts u1.equal?(Encoding::UTF_8)                 # true
+
+# --- Encoding.find raises ArgumentError on unknown names ---
+# Matches CRuby's contract. Returning a fresh `.new` instance
+# would break `Encoding.find("X").equal?(Encoding.find("X"))`
+# (two unrelated instances) and silently let unsupported
+# encodings appear to work.
+begin
+  Encoding.find("NOT-A-REAL-ENCODING")
+rescue ArgumentError => e
+  puts e.message                                # unknown encoding name - NOT-A-REAL-ENCODING
+end
 
 # --- Predefined constants ---
 puts Encoding::UTF_8.name                       # UTF-8

@@ -184,13 +184,16 @@ pub(crate) fn string_call(
         // access for the constants table). The string_call
         // free-function context can't reach Vm state.
         //
-        // `String#b` — CRuby: a copy of the receiver with
-        // ASCII-8BIT encoding. We don't tag encodings per-string,
-        // so the receiver itself satisfies the contract callers
-        // (ERB's compiler at lib/erb/compiler.rb:319) expect: a
-        // String whose bytes are the same and whose subsequent
-        // regex matches work the same.
-        (Value::Str(_), "b", []) => Some(recv.clone()),
+        // `String#b` — CRuby: a NEW String (a copy of the
+        // receiver's bytes) with ASCII-8BIT encoding. Returning
+        // `recv.clone()` would share the underlying RStr Rc and
+        // make `.b` an alias — mutations to the result would leak
+        // back to the original, and a frozen receiver would yield
+        // a frozen result. Copy the bytes into a fresh RStr so
+        // the result is independent and unfrozen. We don't tag
+        // encodings per-string, so the ASCII-8BIT distinction is
+        // a no-op for our subset.
+        (Value::Str(a), "b", []) => Some(Value::new_str_bytes(a.content.borrow().clone())),
         (Value::Str(a), "strip", []) => Some(Value::new_str(a.to_string_lossy().trim().to_string())),
         (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_start().to_string())),
         (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_end().to_string())),

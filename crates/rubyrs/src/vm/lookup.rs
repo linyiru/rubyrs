@@ -310,7 +310,7 @@ impl Vm {
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
                 "sub" | "gsub" | "tr" | "squeeze" |
-                "encode" | "force_encoding" | "valid_encoding?" | "encoding" |
+                "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
                 "unpack" | "unpack1" | "bytes" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
