@@ -223,3 +223,4 @@ fn run_diff(name: &str) {
 #[test] fn constant_scoping() { run_diff("constant_scoping"); }
 #[test] fn cext_msgpack_bigint() { run_diff("cext_msgpack_bigint"); }
 #[test] fn string_unpack1() { run_diff("string_unpack1"); }
+#[test] fn string_encoding_query() { run_diff("string_encoding_query"); }

@@ -122,6 +122,8 @@ per match, no groups → match-string), `tr(from, to)`,
 `sub` / `gsub` (see below), `to_i` / `to_f` / `to_sym`,
 `encode` / `force_encoding` (no-op stubs — the subset has no
 encoding tag; see "String encoding stubs" below),
+`valid_encoding?` (always true), `encoding` (returns the
+String name `"UTF-8"`; see "String encoding stubs" below),
 `unpack(format)` (subset — see "Pack/Unpack"),
 interpolation `"... #{expr} ..."`.
 
@@ -371,6 +373,23 @@ The subset stores raw bytes with no per-string encoding tag
 explicitly out of scope. The methods exist for compatibility
 with library code that defensively normalises at boundaries
 (`s.force_encoding("UTF-8")`).
+
+Query-side stubs:
+
+- `String#valid_encoding?` — always returns `true`. The
+  receiver is viewed via `String::from_utf8_lossy`, so the
+  observable character stream is well-formed UTF-8 by
+  construction. CRuby can return `false` for malformed
+  byte sequences in encoding-tagged strings; we can't
+  model that.
+- `String#encoding` — returns the encoding NAME as a
+  `String` (`"UTF-8"`). CRuby returns an `Encoding`
+  object. The portable usage shape is `.encoding.to_s`
+  or `.encoding.to_s == "UTF-8"`. Direct
+  `str.encoding == Encoding::UTF_8` does NOT work — even
+  if `Encoding::UTF_8` were added later, the comparison
+  would be String-vs-Encoding-object and diverge from
+  CRuby.
 
 ### Object reflection
 

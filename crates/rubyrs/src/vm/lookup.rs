@@ -184,7 +184,8 @@ impl Vm {
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
                 "sub" | "gsub" | "tr" | "squeeze" |
-                "encode" | "force_encoding" | "unpack" | "unpack1" | "bytes" |
+                "encode" | "force_encoding" | "valid_encoding?" | "encoding" |
+                "unpack" | "unpack1" | "bytes" |
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
