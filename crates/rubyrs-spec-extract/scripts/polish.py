@@ -6,8 +6,9 @@ flavour of upstream ruby/spec into the micro-runner's `assert_eq`
 shape — but a finished spec usually still has `it` (or top-level
 `before`) blocks whose BODY references fixtures the micro-runner
 doesn't ship (`ArraySpecs.recursive_array`, `MyArray[...]`) or
-rubyrs methods that aren't implemented yet (`Array#push`,
-`Array#min { ... }`). Those blocks load but fail at run time,
+rubyrs methods that aren't implemented in a specific form (`Array#min { ... }`
+block-comparator, count-form `Array#first(n)`, multi-arg
+`Array#push(a, b, c)`). Those blocks load but fail at run time,
 masking the genuine PASSes around them.
 
 This script reads a spec file on stdin, walks `it "..." do … end`
@@ -71,9 +72,16 @@ DROP_PATTERNS = [
     (r"\.max\(\s*[^)\s]", "method-not-implemented"),
     (r"\.pop\(\s*[^)\s]", "method-not-implemented"),
     (r"\.shift\(\s*[^)\s]", "method-not-implemented"),
-    # `Array#push` / `#unshift` not yet in rubyrs (only `<<` is).
-    (r"\.push\b", "method-not-implemented"),
-    (r"\.unshift\b", "method-not-implemented"),
+    # `Array#push` MULTI-ARG form is not yet in rubyrs — single-arg
+    # `.push(x)` works, but `.push(a, b, c)` raises NoMethodError.
+    # Match only the multi-arg shape: open paren + non-`)` content
+    # + `,` (the comma is what makes it multi-arg). Single-arg
+    # `[1].push(2)` does NOT match — `.push(\d+)` has no comma.
+    (r"\.push\(\s*[^)]+,", "method-not-implemented"),
+    # Note (was wrong): `\.unshift\b` and `\.inject\s*\(` rules were
+    # removed after PR #133 review confirmed both methods are
+    # implemented (unshift: single AND multi-arg; inject: block AND
+    # symbol forms). The previous rules dropped runnable specs.
     # `Array#sort` with comparator block — zero-arg sort works,
     # block form doesn't.
     (r"\.sort\s*(\{|\s+do\b)", "method-not-implemented"),
@@ -81,7 +89,6 @@ DROP_PATTERNS = [
     # zero-arg `min`/`max` work; block form doesn't.
     (r"\.min\s*(\{|\s+do\b)", "method-not-implemented"),
     (r"\.max\s*(\{|\s+do\b)", "method-not-implemented"),
-    (r"\.inject\s*\(", "method-not-implemented"),
     # NOTE: a v0.1 entry here dropped any block containing
     # `.instance_of?(Array)`, on the theory that subclass-vs-Array
     # checks weren't in the micro-runner surface. rubyrs DOES

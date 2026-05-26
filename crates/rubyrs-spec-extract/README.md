@@ -41,9 +41,10 @@ landing. The companion `scripts/polish.py` removes:
 
   - **`it` blocks** whose body matches a `DROP_PATTERNS` entry —
     fixtures (`ArraySpecs.recursive_array`, `MyArray[...]`),
-    unimplemented methods (`Array#push`, `Array#min { ... }`,
-    count-form `Array#first(n)`), `mock`/`should_receive`, and
-    `FrozenError`/`.freeze` checks.
+    unimplemented method FORMS (`Array#min { ... }` block-
+    comparator, count-form `Array#first(n)`, multi-arg
+    `Array#push(a, b, c)` — single-arg `.push(x)` is fine),
+    `mock`/`should_receive`, and `FrozenError`/`.freeze` checks.
   - **Top-level `before`/`after` hook blocks** the extractor's
     v0.3 `before :each` lifter didn't pick up (multi-arg,
     non-flat context, `before :all`, `after :each`) — these
@@ -69,8 +70,8 @@ cargo run --release -p rubyrs-spec-extract \
 
 Adding a new pattern to drop is one regex line in `polish.py`'s
 `DROP_PATTERNS`; the `# skipped` comments make future revisits
-(e.g., when `Array#push` lands as a feature) easy to find and
-re-evaluate.
+(e.g., when multi-arg `Array#push` lands as a feature) easy to
+find and re-evaluate.
 
 ## What the extractor recognises (current: v0.4)
 

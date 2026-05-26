@@ -3,10 +3,12 @@
 # `rubyrs-spec-extract` v0.4 + `scripts/polish.py`.
 #
 # polish.py dropped `it` blocks containing fixture refs,
-# unimplemented Array methods, or `mock`/`should_receive`;
-# each drop leaves a `# skipped (<category>): ...` trace
-# inline. Regenerate by re-running the extractor + polish
-# pipeline documented in crates/rubyrs-spec-extract/README.md.
+# unimplemented Array method FORMS (multi-arg `Array#push`,
+# block-form `min { ... }`, count-form `first(n)`), or
+# `mock`/`should_receive`; each drop leaves a
+# `# skipped (<category>): ...` trace inline. Regenerate by
+# re-running the extractor + polish pipeline documented in
+# crates/rubyrs-spec-extract/README.md.
 
 describe "Array#length" do
   it "returns the number of elements" do
