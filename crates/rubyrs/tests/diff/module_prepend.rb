@@ -149,3 +149,25 @@ end
 # Chain at T: [Inner, Outer, T, ...]. Inner is the first match.
 puts T.new.call                  # "Inner"
 puts T.new.is_a?(Inner)          # true (prepend-of-prepend reachability)
+
+# Class-method super — `def self.foo; super; end` walks the
+# superclass chain looking at each class's singleton_methods.
+class CSBase
+  def self.greet; "csbase"; end
+end
+class CSSub < CSBase
+  def self.greet; "cssub:" + super; end
+end
+puts CSSub.greet                 # "cssub:csbase"
+
+# Diamond include — module shared via two routes should appear
+# once in the linearization. Without dedup, super resolution
+# would revisit the shared module.
+module DiC; def diamond; "C"; end; end
+module DiA; include DiC; end
+module DiB; include DiC; end
+class DiM
+  include DiA
+  include DiB
+end
+puts DiM.new.diamond             # "C" (once, not twice)

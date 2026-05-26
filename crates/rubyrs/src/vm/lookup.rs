@@ -66,15 +66,6 @@ impl Vm {
         m
     }
 
-    /// Plain method lookup walking the class chain, with no cache touch.
-    /// Used for paths that don't benefit from caching (e.g. `initialize`
-    /// resolution during `Class.new`).
-    ///
-    /// Lookup order at each class in the chain: own methods → included
-    /// modules (recursively, depth-first; a module's own includes are
-    /// part of the walk) → superclass. Mirrors CRuby's ancestor walk
-    /// where `Person.ancestors == [Person, IncludedB, IncludedA, Object,
-    /// Kernel, BasicObject]` and `include` chains compose transitively
     /// Walk `cls`'s `singleton_methods` table, then the superclass
     /// chain's, returning the first hit. CRuby's metaclass model
     /// gives `Sub < Super` a singleton class whose parent is
@@ -100,14 +91,16 @@ impl Vm {
         }
     }
 
-    /// (`module M; include N; end; class C; include M; end` ⇒ C
-    /// resolves N's methods).
+    /// Plain method lookup walking the class chain, with no cache
+    /// touch. Used for paths that don't benefit from caching (e.g.
+    /// `initialize` resolution during `Class.new`).
     ///
-    /// Prepend chain: `Module#prepend` puts modules ahead of the
-    /// class's own methods, so the walk order at each chain node is
-    /// prepends → own methods → includes → superclass. Prepended
-    /// modules also walk their own prepends/includes (so a prepended
-    /// `module M; include N; end` still resolves `N`'s methods).
+    /// Lookup order at each class in the chain (CRuby ancestor walk):
+    /// **prepends (transitive) → own methods → included modules
+    /// (transitive) → superclass**. Prepended and included modules
+    /// also walk their own prepends/includes recursively, so
+    /// `module M; include N; end; class C; include M; end` resolves
+    /// `N`'s methods on a `C` instance.
     #[inline]
     pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
         // Recursive helper that walks one node's prepends, own
@@ -355,29 +348,50 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
 /// Transitive means a prepended/included module's own
 /// prepends/includes are walked too.
 ///
+/// Deduplicates by Rc pointer using a `HashSet`: a diamond-
+/// shaped include/prepend graph (`M includes A; M includes B;
+/// A includes C; B includes C`) yields `[..., C]` once,
+/// matching CRuby's linearization. The same visited set
+/// guards against cyclic graphs (`A includes B; B includes A`)
+/// which would otherwise recurse unboundedly.
+///
 /// Used by `super` (Op::Super / Op::ApplySuper) to find the
 /// next ancestor after `defining_class`. Walking the chain
 /// every super call is fine — super isn't a hot path in any
 /// rubyrs spec we run today.
 pub(crate) fn flatten_ancestors(cls: &Rc<Class>) -> Vec<Rc<Class>> {
-    fn flatten_module(m: &Rc<Class>, out: &mut Vec<Rc<Class>>) {
+    fn flatten_module(
+        m: &Rc<Class>,
+        out: &mut Vec<Rc<Class>>,
+        visited: &mut std::collections::HashSet<*const Class>,
+    ) {
+        if !visited.insert(Rc::as_ptr(m)) {
+            return;
+        }
         for pre in m.prepends.borrow().iter() {
-            flatten_module(pre, out);
+            flatten_module(pre, out, visited);
         }
         out.push(m.clone());
         for inc in m.includes.borrow().iter() {
-            flatten_module(inc, out);
+            flatten_module(inc, out, visited);
         }
     }
     let mut out: Vec<Rc<Class>> = Vec::new();
+    let mut visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
     let mut current = cls.clone();
     loop {
+        if !visited.insert(Rc::as_ptr(&current)) {
+            // Cycle through the superclass chain — CRuby blocks
+            // it at class-definition time, but bail rather than
+            // spin if user code somehow constructs one.
+            return out;
+        }
         for pre in current.prepends.borrow().iter() {
-            flatten_module(pre, &mut out);
+            flatten_module(pre, &mut out, &mut visited);
         }
         out.push(current.clone());
         for inc in current.includes.borrow().iter() {
-            flatten_module(inc, &mut out);
+            flatten_module(inc, &mut out, &mut visited);
         }
         let parent = current.superclass.borrow().clone();
         match parent {
@@ -416,6 +430,41 @@ impl Vm {
                 }));
             }
         };
+        // Class-method super — `def self.foo; super; end`. The
+        // receiver IS the class, defining_class is the class
+        // itself, and the inherited method lives in the
+        // superclass's `singleton_methods` table (mirror of how
+        // `lookup_class_singleton_method` walks the superclass
+        // chain). The instance-method ancestor walk wouldn't find
+        // it because the methods aren't in `methods` and a class's
+        // own class is "Class", not its inheritance chain.
+        if let Value::Class(cls) = &self_val {
+            let mut chain: Vec<Rc<Class>> = Vec::new();
+            let mut cur = cls.clone();
+            loop {
+                chain.push(cur.clone());
+                let parent = cur.superclass.borrow().clone();
+                match parent {
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+            let m = chain.iter()
+                .position(|c| Rc::ptr_eq(c, &defining))
+                .map(|i| i + 1)
+                .and_then(|i| chain.get(i..))
+                .and_then(|tail| tail.iter().find_map(|c| {
+                    c.singleton_methods.borrow().get(&name_id).cloned()
+                }));
+            return match m {
+                Some(m) => Ok((m, self_val)),
+                None => Err(self.trap(crate::error::RubyError::NoMethodError {
+                    method: format!("super: no superclass method `{}'",
+                        self.interner.resolve(name_id)),
+                    recv_type: self_val.type_name(),
+                })),
+            };
+        }
         let recv_cls = match &self_val {
             Value::Object(id) => self.heap.class_of(*id),
             other => match self.class_of(other) {
