@@ -314,6 +314,26 @@ pub(crate) fn cid_to_string(id: ruby_prism::ConstantId<'_>) -> String {
     String::from_utf8_lossy(id.as_slice()).into_owned()
 }
 
+/// Decode an `attr_*` method name into `(do_reader, do_writer)`
+/// flags. Returns `None` for any other name. Shared by the
+/// compiler's class-body intercept (compiler.rs, normal `class
+/// Foo; attr_*; end`) and the AST-level `class << X; attr_*; end`
+/// expansion below, so both sites agree on which methods get
+/// synthesised. The actual reader/writer body shape
+/// (`def name; @name; end` / `def name=(v); @name = v; end`) is
+/// still spelled out at each call site — bytecode emission and
+/// SExpr construction don't share a representation. If the
+/// desugar EVER changes (e.g. to add type checks), update both
+/// sites in lockstep.
+pub(crate) fn attr_reader_writer_flags(name: &str) -> Option<(bool, bool)> {
+    match name {
+        "attr_reader"   => Some((true,  false)),
+        "attr_writer"   => Some((false, true)),
+        "attr_accessor" => Some((true,  true)),
+        _ => None,
+    }
+}
+
 /// True iff a `ConstantPathNode` chain is rooted at top-level
 /// (leading `::`). `Foo::Bar` is relative, `::Bar` and
 /// `::Foo::Bar` are absolute. Used by `ConstantPathWriteNode`
@@ -1768,11 +1788,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 && call.receiver().is_none()
             {
                 let name = cid_to_string(call.name());
-                let is_attr = matches!(name.as_str(),
-                    "attr_reader" | "attr_writer" | "attr_accessor");
-                if is_attr {
-                    let do_reader = name != "attr_writer";
-                    let do_writer = name != "attr_reader";
+                // Decode via the shared helper (paired with
+                // compiler.rs's normal-class-body attr_* arm).
+                if let Some((do_reader, do_writer)) = attr_reader_writer_flags(&name) {
                     let mut all_sym_args = true;
                     let sym_names: Vec<String> = call.arguments()
                         .map(|args| args.arguments().iter().filter_map(|a| {

@@ -28,8 +28,11 @@ class Foo
   end
 end
 
-# Reader returns nil before any write (the documented divergence —
-# CRuby would too here since we never set @label).
+# Reader returns nil before any write — same in both interpreters
+# since `@label` was never set. The divergence noted above only
+# shows up AFTER a write (CRuby would round-trip; we still return
+# nil); this fixture stays inside the pre-write region so stdout
+# matches byte-for-byte.
 puts Foo.label.inspect
 puts Foo.version.inspect
 
