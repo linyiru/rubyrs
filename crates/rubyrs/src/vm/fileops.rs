@@ -114,12 +114,58 @@ impl Vm {
                     .unwrap_or_default();
                 Value::new_str(ext)
             }
-            ("expand_path", [p]) => {
+            ("expand_path", [p]) | ("expand_path", [p, _]) => {
+                // `File.expand_path(path, base=cwd)`. CRuby
+                // doesn't require the path to exist — it just
+                // resolves relative paths and `..`/`.`
+                // components. Our previous `canonicalize`-only
+                // shape would silently fall back to the raw
+                // input when the path was missing, which trips
+                // gem entry-point setup like
+                // `$LOAD_PATH.unshift File.expand_path("..",
+                // __dir__)`. Re-implement the lexical resolver:
+                //   1. If path is absolute, use as-is.
+                //   2. Else join with base (defaults to cwd).
+                //   3. Manually collapse `.` and `..` segments.
+                //   4. Try canonicalize for the "follows
+                //      symlinks" guarantee; fall back to the
+                //      lexically-resolved form when the file
+                //      doesn't exist (CRuby's behavior).
+                use std::path::{Component, Path, PathBuf};
                 let path = path_arg(p)?;
-                let abs = std::fs::canonicalize(&path)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or(path);
-                Value::new_str(abs)
+                let base: String = match args.get(1) {
+                    Some(Value::Str(s)) => s.to_string_lossy(),
+                    _ => std::env::current_dir()
+                        .map(|d| d.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| ".".to_string()),
+                };
+                let p_path = Path::new(&path);
+                let joined: PathBuf = if p_path.is_absolute() {
+                    p_path.to_path_buf()
+                } else {
+                    let mut b = PathBuf::from(&base);
+                    // `~` is the home-directory shortcut CRuby
+                    // expands. Not modelled — leaves it as-is.
+                    b.push(p_path);
+                    b
+                };
+                // Collapse Components into a normalised PathBuf
+                // without touching the filesystem.
+                let mut resolved = PathBuf::new();
+                for c in joined.components() {
+                    match c {
+                        Component::ParentDir => { resolved.pop(); }
+                        Component::CurDir => {}
+                        other => resolved.push(other.as_os_str()),
+                    }
+                }
+                // If the path exists, prefer `canonicalize`'s
+                // symlink-resolved form (matches CRuby on
+                // existent files); otherwise return the
+                // lexically resolved form.
+                let final_path = std::fs::canonicalize(&resolved)
+                    .unwrap_or(resolved);
+                Value::new_str(final_path.to_string_lossy().into_owned())
             }
             _ => return Ok(None),
         }))

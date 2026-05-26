@@ -372,6 +372,28 @@ impl Vm {
                 for a in args { self.stack.push(a); }
                 return self.do_call(name_id, argc, /*no_recv=*/false, cache_id);
             }
+            // `__dir__` — returns the directory of the source
+            // file the call lexically appears in. CRuby
+            // canonicalizes to an absolute path; rubyrs uses
+            // the proto's stored filename verbatim (whatever
+            // the loader passed, typically already absolute
+            // when require resolves it; relative for inline
+            // eval). The filename comes from the currently-
+            // running proto, which is where the `__dir__`
+            // literal lives. Lets vendored Ruby helpers do
+            // `$LOAD_PATH.unshift __dir__` without needing
+            // any further plumbing.
+            if &*name == "__dir__" && args.is_empty() {
+                use std::path::Path;
+                let fname = self.frames.last()
+                    .map(|f| self.protos[f.proto_idx].filename.to_string())
+                    .unwrap_or_default();
+                let dir = Path::new(&fname).parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| ".".to_string());
+                self.stack.push(Value::new_str(dir));
+                return Ok(());
+            }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());

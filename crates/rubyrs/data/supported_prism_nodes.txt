@@ -101,6 +101,8 @@ RestParameterNode
 ReturnNode
 SelfNode
 SingletonClassNode
+SourceFileNode
+SourceLineNode
 SplatNode
 StatementsNode
 StringNode

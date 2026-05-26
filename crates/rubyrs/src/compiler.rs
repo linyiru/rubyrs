@@ -382,6 +382,19 @@ pub(crate) fn compile_expr(
             b.emit(Op::Dup);
             b.emit(Op::StoreIvar(id));
         }
+        Expr::SourceFile => {
+            // Materialise the current proto's filename as a
+            // string literal — CRuby's `__FILE__` reports the
+            // file the literal lexically appears in. `b.filename`
+            // is `Rc<str>` from the surrounding compile call;
+            // intern + LoadConstStr it.
+            let fname: String = b.filename.to_string();
+            let id = interner.intern(&fname);
+            b.emit(Op::LoadConstStr(id));
+        }
+        Expr::SourceLine(n) => {
+            b.emit(Op::LoadConstInt(*n));
+        }
         Expr::CvarRead(name) => {
             let id = interner.intern(name);
             b.emit(Op::LoadCvar(id));

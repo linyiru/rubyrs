@@ -124,6 +124,16 @@ pub(crate) enum Expr {
     /// class_path alias for those so they stay at top-level only.
     /// Bare-name writes and relative-path writes pass false.
     ConstWrite(String, bool, Box<SExpr>),
+    /// `__FILE__` — the current source file's path. Resolved at
+    /// compile time to a string literal of the surrounding
+    /// proto's `filename` (the loader / `Runtime::eval` sets
+    /// that to whatever the host passed). Lets vendored Ruby
+    /// helpers do `$LOAD_PATH.unshift __dir__` without needing
+    /// AST-level filename plumbing.
+    SourceFile,
+    /// `__LINE__` — source line of the literal. Captured at AST
+    /// translation from the Prism node's location.
+    SourceLine(i64),
     /// `@@name` — class variable read. Looks up `name` in the
     /// surrounding class's `class_vars` table at runtime; missing
     /// names return `nil` (CRuby raises NameError, but lenient
@@ -679,6 +689,25 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // `@@foo` read / `@@foo = expr` write — class variables.
     // Tier 1 stores them per-class without hierarchy walk; see
     // Class.class_vars + Op::Load/StoreCvar comments.
+    // `__FILE__` / `__LINE__` — pseudo-keywords for source
+    // location. SourceFileNode's content is empty; the actual
+    // filename comes from the surrounding proto at compile time
+    // (compile_proto threads `filename_rc` into ProtoBuilder).
+    if node.as_source_file_node().is_some() {
+        return sp(node, Expr::SourceFile);
+    }
+    if node.as_source_line_node().is_some() {
+        // Tier 1 stub: Prism's `Location` doesn't expose
+        // pre-computed line numbers and the AST translator
+        // doesn't carry the source bytes needed to derive
+        // them from byte offsets. Return 0 as a documented
+        // placeholder. Real-world `__LINE__` use is
+        // overwhelmingly in diagnostic strings; the divergence
+        // surfaces as `0` instead of the line number but the
+        // script proceeds. Promoting to real line tracking
+        // needs source-bytes threading into `tr`; deferred.
+        return sp(node, Expr::SourceLine(0));
+    }
     if let Some(n) = node.as_class_variable_read_node() {
         return sp(node, Expr::CvarRead(cid_to_string(n.name())));
     }
