@@ -16,6 +16,28 @@ use crate::value::Value;
 use super::{PinGuard, Vm};
 
 impl Vm {
+    pub(crate) fn is_builtin_name(name: &str) -> bool {
+        matches!(
+            name,
+            "puts"
+                | "p"
+                | "pp"
+                | "print"
+                | "require"
+                | "require_relative"
+                | "Integer"
+                | "Float"
+                | "String"
+                | "Array"
+                | "__method__"
+                | "__callee__"
+                | "block_given?"
+                | "__defined_ivar?"
+                | "__defined_method?"
+                | "__defined_const?"
+        )
+    }
+
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
         match name {
             "puts" => {

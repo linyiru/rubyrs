@@ -317,6 +317,7 @@ pub struct Instance {
 pub struct Method {
     pub(crate) params: Vec<String>,
     pub(crate) proto_idx: usize,
+    pub(crate) fixed_arity: Option<FixedArity>,
     /// Class whose method table holds this Method instance — i.e.
     /// the class the `def` literally lives inside. `super` uses
     /// this class's *superclass* as the starting point for the
@@ -350,6 +351,12 @@ pub struct Method {
     /// `def name ... end` have `None` here and follow the normal
     /// fresh-locals path.
     pub(crate) closure: Option<MethodClosure>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FixedArity {
+    pub(crate) required: u16,
+    pub(crate) n_locals: u16,
 }
 
 #[derive(Debug, Clone)]

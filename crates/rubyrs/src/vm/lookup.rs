@@ -39,6 +39,7 @@ pub(crate) struct CallCacheEntry {
 /// megamorphic case (> IC_WAYS distinct classes) degenerates to
 /// the same uncached walk the old single-slot cache did.
 pub(crate) const IC_WAYS: usize = 4;
+const TOPLEVEL_METHOD_CACHE_KEY: usize = usize::MAX;
 #[derive(Clone, Default)]
 pub(crate) struct CallCache {
     pub(crate) ways: [CallCacheEntry; IC_WAYS],
@@ -91,6 +92,52 @@ impl Vm {
             cc.next_way = ((slot + 1) % IC_WAYS) as u8;
         }
         m
+    }
+
+    pub(crate) fn lookup_toplevel_method_cached(
+        &mut self,
+        name_id: SymId,
+        cache_id: u16,
+    ) -> Option<Rc<Method>> {
+        let idx = cache_id as usize;
+        if idx < self.call_caches.len() {
+            let cc = &self.call_caches[idx];
+            let cur_gen = self.method_gen;
+            for w in &cc.ways {
+                if w.class_ptr == TOPLEVEL_METHOD_CACHE_KEY && w.generation == cur_gen {
+                    return w.method.clone();
+                }
+            }
+        }
+
+        let m = self.toplevel_methods.get(&name_id).cloned();
+        if idx < self.call_caches.len() {
+            let cur_gen = self.method_gen;
+            let cc = &mut self.call_caches[idx];
+            let slot = (cc.next_way as usize) % IC_WAYS;
+            cc.ways[slot] = CallCacheEntry {
+                class_ptr: TOPLEVEL_METHOD_CACHE_KEY,
+                generation: cur_gen,
+                method: m.clone(),
+            };
+            cc.next_way = ((slot + 1) % IC_WAYS) as u8;
+        }
+        m
+    }
+
+    pub(crate) fn lookup_toplevel_method_cache_hit(&self, cache_id: u16) -> Option<Rc<Method>> {
+        let idx = cache_id as usize;
+        if idx >= self.call_caches.len() {
+            return None;
+        }
+        let cc = &self.call_caches[idx];
+        let cur_gen = self.method_gen;
+        for w in &cc.ways {
+            if w.class_ptr == TOPLEVEL_METHOD_CACHE_KEY && w.generation == cur_gen {
+                return w.method.clone();
+            }
+        }
+        None
     }
 
     /// Walk `cls`'s singleton_prepends → `singleton_methods` →
@@ -802,6 +849,7 @@ mod tests {
         Rc::new(Method {
             params: Vec::new(),
             proto_idx: 0,
+            fixed_arity: None,
             defining_class: None,
             visibility: Cell::new(Visibility::Public),
             closure: None,
