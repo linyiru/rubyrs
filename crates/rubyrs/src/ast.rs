@@ -1714,36 +1714,116 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         if needs_local {
             out.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
         }
+        // Closure helper: make a `def recv.name(params) body` SExpr
+        // rewriting the receiver-less Def into a singleton-method
+        // form. Reused for both real DefNodes in the body and for
+        // synthetic Defs we generate when expanding `attr_*` calls.
+        let mk_singleton_def = |bn: &Node<'_>, def_translated: Expr| -> Option<SExpr> {
+            if let Expr::Def {
+                name, params, defaults, rest, kw_params, kw_rest,
+                block_param, receiver: _, body,
+            } = def_translated {
+                let receiver = if needs_local {
+                    sp(bn, Expr::LVarRead(synth_local.clone()))
+                } else {
+                    recv_expr.clone()
+                };
+                Some(sp(bn, Expr::Def {
+                    name, params, defaults, rest, kw_params, kw_rest,
+                    block_param,
+                    receiver: Some(Box::new(receiver)),
+                    body,
+                }))
+            } else {
+                None
+            }
+        };
         for bn in &body_nodes {
             if bn.as_def_node().is_some() {
                 let translated = tr(bn);
-                if let Expr::Def {
-                    name, params, defaults, rest, kw_params, kw_rest,
-                    block_param, receiver: _, body,
-                } = translated.node {
-                    let receiver = if needs_local {
-                        sp(bn, Expr::LVarRead(synth_local.clone()))
-                    } else {
-                        recv_expr.clone()
-                    };
-                    out.push(sp(bn, Expr::Def {
-                        name, params, defaults, rest, kw_params, kw_rest,
-                        block_param,
-                        receiver: Some(Box::new(receiver)),
-                        body,
-                    }));
+                if let Some(s) = mk_singleton_def(bn, translated.node) {
+                    out.push(s);
                 } else {
                     AST_ERRORS.with(|cell| cell.borrow_mut().push(
                         "class << X: internal — def translated unexpectedly".into()
                     ));
                     out.push(sp(bn, Expr::Nil));
                 }
-            } else {
-                AST_ERRORS.with(|cell| cell.borrow_mut().push(
-                    "class << X body: only `def` statements are supported in the spike subset".into()
-                ));
-                out.push(sp(bn, Expr::Nil));
+                continue;
             }
+            // `attr_reader :foo` / `attr_writer :foo` / `attr_accessor :foo`
+            // inside `class << X` body. CRuby installs reader/writer
+            // methods on X's singleton class. We desugar each symbol
+            // arg into one or two synthetic `def X.foo; @foo; end` /
+            // `def X.foo=(val); @foo = val; end` Defs and route them
+            // through the existing singleton-rewrite path above.
+            //
+            // Caveat: ivar persistence on Class receivers diverges
+            // from CRuby (class-level @foo on a Class value doesn't
+            // currently round-trip across method calls — separate gap).
+            // The reader returns nil instead of CRuby's last-written
+            // value. Tilt's template.rb:503 only checks
+            // `extract_fixed_locals.nil?`, so nil-vs-false is moot.
+            if let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+            {
+                let name = cid_to_string(call.name());
+                let is_attr = matches!(name.as_str(),
+                    "attr_reader" | "attr_writer" | "attr_accessor");
+                if is_attr {
+                    let do_reader = name != "attr_writer";
+                    let do_writer = name != "attr_reader";
+                    let mut all_sym_args = true;
+                    let sym_names: Vec<String> = call.arguments()
+                        .map(|args| args.arguments().iter().filter_map(|a| {
+                            a.as_symbol_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())
+                        }).collect())
+                        .unwrap_or_default();
+                    let expected = call.arguments().map(|a| a.arguments().iter().count()).unwrap_or(0);
+                    if sym_names.len() != expected { all_sym_args = false; }
+                    if !all_sym_args {
+                        AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                            "class << X body: attr_* with non-symbol args is not supported".into()
+                        ));
+                        out.push(sp(bn, Expr::Nil));
+                        continue;
+                    }
+                    for sym_name in sym_names {
+                        let ivar_name = format!("@{}", sym_name);
+                        if do_reader {
+                            let body = vec![sp(bn, Expr::IVarRead(ivar_name.clone()))];
+                            let def = Expr::Def {
+                                name: sym_name.clone(),
+                                params: vec![], defaults: vec![], rest: None,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                        if do_writer {
+                            let setter_name = format!("{sym_name}=");
+                            let body = vec![sp(bn, Expr::IVarWrite(
+                                ivar_name.clone(),
+                                Box::new(sp(bn, Expr::LVarRead("val".into()))),
+                            ))];
+                            let def = Expr::Def {
+                                name: setter_name,
+                                params: vec!["val".into()], defaults: vec![], rest: None,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                    }
+                    continue;
+                }
+            }
+            AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                "class << X body: only `def` and `attr_reader`/`attr_writer`/`attr_accessor` are supported in the spike subset".into()
+            ));
+            out.push(sp(bn, Expr::Nil));
         }
         return sp(node, Expr::Begin {
             body: out,
