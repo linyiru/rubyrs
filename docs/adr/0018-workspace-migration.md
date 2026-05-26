@@ -125,12 +125,19 @@ phases are additive.
 ### Phase 2 — CI ratchets land (immediately after Phase 1)
 
 The three benchmarks ADR 0015 Rule 7 names become gating CI
-checks:
+checks. All three are measured on the **facade binary built with
+the `core`-tier feature set only** (a library crate by itself
+has no binary size; what we cap is the smallest shippable
+artefact a user could `cargo install` once the tiers are split):
 
-- **`rubyrs-core` binary size** ≤ 6 MB (today the equivalent
-  `--no-default-features` build is ~2.1 MB; ample headroom)
-- **`rubyrs-core` cold start** for `puts 1+2` ≤ 5 ms
-- **`rubyrs-core` embed RSS** ≤ 8 MB
+- **core-only binary size** ≤ 6 MB. ADR 0015's baseline was
+  ~4 MB on the pre-PoC tree. Today's `--no-default-features`
+  build on the same tree measures ~2.2 MB (PoC #2 / PR #86 saved
+  1.78 MB by gating `regex` out — see ADR 0017). The 6 MB
+  ceiling is what we lock in for the post-extraction
+  `rubyrs-core`-derived binary.
+- **core-only cold start** for `puts 1+2` ≤ 5 ms
+- **core-only embed RSS** ≤ 8 MB
 
 Plus a fourth, specific to this migration:
 
