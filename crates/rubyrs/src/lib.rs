@@ -474,10 +474,15 @@ pub struct Config {
     /// `0` is a sentinel that won't collide with any real PID).
     /// `Some(n)` means `$$` returns `n`.
     ///
+    /// Typed as `Option<NonZeroU32>` to match `std::process::id()`'s
+    /// return type and enforce the "positive PID" contract at the
+    /// type level — `0` is reserved for the default sentinel and
+    /// negatives are impossible by construction (Copilot review PR #88).
+    ///
     /// The CLI binary `rubyrs` sets this from `std::process::id()`
     /// so `rubyrs script.rb` behaves like CRuby; embed users that
     /// want the host PID exposed must opt in.
-    pub pid: Option<i64>,
+    pub pid: Option<std::num::NonZeroU32>,
 }
 
 /// Read-only handle into the runtime's heap, passed to closures
@@ -587,7 +592,7 @@ impl Runtime {
         vm.max_symbols = cfg.max_symbols;
         vm.max_value_bytes = cfg.max_value_bytes;
         vm.env_override = cfg.env;
-        vm.pid = cfg.pid;
+        vm.pid = cfg.pid.map(|n| n.get() as i64);
         let mut rt = Runtime {
             vm,
             deadline: cfg.deadline,

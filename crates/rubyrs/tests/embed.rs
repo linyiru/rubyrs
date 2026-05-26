@@ -1705,7 +1705,7 @@ fn adr_0017_config_env_overrides_inject_into_script() {
 #[test]
 fn adr_0017_config_pid_overrides_dollar_dollar() {
     let buf = SharedBuf::new();
-    let cfg = rubyrs::Config { pid: Some(42), ..Default::default() };
+    let cfg = rubyrs::Config { pid: std::num::NonZeroU32::new(42), ..Default::default() };
     let mut rt = rubyrs::Runtime::with_config(cfg);
     rt.set_stdout(Box::new(buf.clone()));
     rt.eval(r#"puts $$"#, "embed-test").expect("$$ read should succeed");
