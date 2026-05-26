@@ -70,6 +70,25 @@ puts Encoding::BINARY.equal?(Encoding::ASCII_8BIT)  # true
 b = "raw".b
 puts b                                          # raw
 puts b.length                                   # 3
+# Non-aliasing: mutating the .b result MUST NOT modify the
+# original. If String#b accidentally returned the receiver
+# (shared Rc), this assertion fails.
+src = "abc"
+copy = src.b
+copy << "XYZ"
+puts src                                        # abc — unchanged
+puts copy                                       # abcXYZ
+# Frozen receiver → unfrozen .b result. CRuby's .b is
+# explicitly "return new String", so frozen state doesn't
+# carry over.
+frozen = "locked".freeze
+unfrozen = frozen.b
+puts frozen.frozen?                             # true
+puts unfrozen.frozen?                           # false
+unfrozen << "_"                                 # would FrozenError if aliased
+puts unfrozen                                   # locked_
+# respond_to?(:b) — feature-detection parity with dispatch.
+puts "x".respond_to?(:b)                        # true
 
 # --- Comparison ---
 # `s.encoding == Encoding::UTF_8` is the canonical idiom for
