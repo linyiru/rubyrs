@@ -130,17 +130,18 @@ fn fixture_exercises_exact_missing_class_set() {
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    // Exact set, exact counts. ConstantPathWriteNode landed
-    // (`Foo::Bar = expr`), so the fixture swapped it for
-    // ClassVariableWriteNode (`@@count = 0`) — same shape of
-    // tripwire, no Missing children, distinct from the other
-    // two exemplars.
+    // Exact set, exact counts. AliasMethodNode and
+    // NumberedReferenceReadNode both landed (this branch + a
+    // concurrent PR on master), so the fixture now uses
+    // BackReferenceReadNode (`$&`) and ImaginaryNode (`1i`)
+    // as the two non-CVarWrite tripwires — both single-token
+    // leaves, no Missing children, still not-supported.
     let expected: std::collections::BTreeSet<&str> =
-        ["BackReferenceReadNode", "AliasMethodNode", "ClassVariableWriteNode"]
+        ["BackReferenceReadNode", "ImaginaryNode", "ClassVariableWriteNode"]
             .into_iter()
             .collect();
     assert_eq!(names, expected, "Missing-class set drifted");
-    for cls in ["BackReferenceReadNode", "AliasMethodNode", "ClassVariableWriteNode"] {
+    for cls in ["BackReferenceReadNode", "ImaginaryNode", "ClassVariableWriteNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }

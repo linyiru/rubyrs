@@ -230,6 +230,7 @@ fn run_diff(name: &str) {
 #[test] fn pack_directives_extra() { run_diff("pack_directives_extra"); }
 #[test] fn string_high_byte_literal() { run_diff("string_high_byte_literal"); }
 #[test] fn singleton_class_attr() { run_diff("singleton_class_attr"); }
+#[test] fn alias_keyword() { run_diff("alias_keyword"); }
 #[test] fn kernel_array_coerce() { run_diff("kernel_array_coerce"); }
 #[test] fn kernel_p_multi_arg() { run_diff("kernel_p_multi_arg"); }
 #[test] fn block_local_freshness() { run_diff("block_local_freshness"); }
