@@ -93,6 +93,14 @@ regex = ["dep:regex"]
 # place Tier 1 core grows a Tier 3 surface; the default build
 # stays minimal per ADR 0017.
 stdlib = []
+# `trace-startup` instruments the CLI binary's `main()` with phase
+# timestamps (entry → args → env → runtime → eval → done) printed to
+# stderr as `trace-startup\t<label>\t<microseconds>us`. Used by
+# `perf/wasm_breakdown.sh` to break down the cold-start budget into
+# wasmtime-init / wasi-init / rubyrs-startup / script-eval buckets so
+# we know which knob to turn next. Zero-cost when off: the `Trace`
+# struct is zero-sized and `at()` is an empty `#[inline(always)]`.
+trace-startup = []
 
 [dependencies]
 ruby-prism.workspace = true

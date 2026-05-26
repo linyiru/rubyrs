@@ -4,6 +4,55 @@ use std::process;
 
 use rubyrs::{Config, Runtime};
 
+/// Cold-start phase tracer for the `trace-startup` feature.
+///
+/// Zero-sized struct when the feature is off — every `at()` call is
+/// an inlined no-op, so production binaries pay nothing. When the
+/// feature is on, the constructor anchors `Instant::now()` at
+/// process entry and each `at(label)` emits a tab-separated line on
+/// stderr:
+///
+///   `trace-startup\t<label>\t<microseconds>us`
+///
+/// The format is intentionally machine-parseable and goes to
+/// stderr so it doesn't collide with the script's `puts` output on
+/// stdout. `perf/wasm_breakdown.sh` consumes it.
+#[cfg(feature = "trace-startup")]
+struct Trace {
+    start: std::time::Instant,
+}
+#[cfg(not(feature = "trace-startup"))]
+struct Trace;
+
+impl Trace {
+    #[cfg(feature = "trace-startup")]
+    fn new() -> Self {
+        Self { start: std::time::Instant::now() }
+    }
+    #[cfg(not(feature = "trace-startup"))]
+    #[inline(always)]
+    fn new() -> Self {
+        Self
+    }
+
+    #[cfg(feature = "trace-startup")]
+    fn at(&self, label: &str) {
+        // `eprintln!` on wasi calls `fd_write` to fd 2 — that import
+        // is fine to use at runtime (we're past wizer at this point;
+        // `wizer.initialize` never invokes `Trace`). Sub-microsecond
+        // overhead per print is good enough for ~10 ms-scale phase
+        // budgets — measurement noise dominates.
+        eprintln!(
+            "trace-startup\t{}\t{}us",
+            label,
+            self.start.elapsed().as_micros()
+        );
+    }
+    #[cfg(not(feature = "trace-startup"))]
+    #[inline(always)]
+    fn at(&self, _label: &str) {}
+}
+
 /// Read wasi env via raw `environ_get` syscall, bypassing Rust std's
 /// `env::vars()` — which on wasm32-wasip1 reads `__environ` from
 /// wasi-libc, a global pointer set up during the C runtime startup.
@@ -64,7 +113,10 @@ fn collect_wasi_env() -> Option<Vec<(String, String)>> {
 }
 
 fn main() {
+    let trace = Trace::new();
+    trace.at("entry");
     let args: Vec<String> = env::args().collect();
+    trace.at("args");
     if args.len() < 2 {
         eprintln!("usage: rubyrs <file.rb>");
         eprintln!();
@@ -89,6 +141,7 @@ fn main() {
         collect_wasi_env().unwrap_or_else(|| env::vars().collect());
     #[cfg(not(target_os = "wasi"))]
     let host_env: Vec<(String, String)> = env::vars().collect();
+    trace.at("env_collected");
 
     // Lookup helper for the ENV-driven config caps. Walks `host_env`
     // once per cap (small; the env is typically <50 entries). Using
@@ -145,8 +198,11 @@ fn main() {
     };
     #[cfg(not(target_os = "wasi"))]
     let mut rt = Runtime::with_config(cfg);
+    trace.at("runtime_ready");
     rt.set_stdout(Box::new(std::io::stdout()));
-    match rt.eval_file(path) {
+    let result = rt.eval_file(path);
+    trace.at("eval_done");
+    match result {
         Ok(_) => {}
         Err(trap) => {
             eprint!("{}", rt.format_trap(&trap));
