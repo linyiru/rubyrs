@@ -750,6 +750,7 @@ impl Vm {
     /// match a `.rb` file or `is_stdlib_stub_name`. Used as the
     /// last fallback before `cext_require`, so it costs nothing
     /// in the happy path.
+    #[cfg(not(target_os = "wasi"))]
     fn require_satisfied_by_existing_constant(&mut self, path_str: &str) -> bool {
         let first_seg = match path_str.split('/').next() {
             Some(s) if !s.is_empty() => s,
@@ -761,19 +762,41 @@ impl Vm {
         if first_seg.starts_with('.') || first_seg.contains('\\') {
             return false;
         }
-        // Skip if the segment isn't a valid leading-identifier
-        // shape: a require path that begins with a digit or
-        // special char isn't going to camelize cleanly anyway.
-        if !first_seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+        // Ruby constants must start with an uppercase ASCII
+        // letter, which means the require-path token's first
+        // segment must start with an ASCII alphabetic. A leading
+        // underscore is REJECTED (not allowed-and-stripped) on
+        // purpose: `snake_to_camel_case("_rack")` would otherwise
+        // collapse to `Rack` (the empty segment before the first
+        // `_` contributes nothing), making `require "_rack"`
+        // over-match whenever `Rack` is defined. Likewise a
+        // leading digit / symbol can't camelize to a valid
+        // constant. Bail out so the require falls through to
+        // cext_require, which will produce the same diagnostic
+        // shape it would for any path with no .rb / cext sibling.
+        if !first_seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
             return false;
         }
+        // Interner growth guard: untrusted Ruby could otherwise
+        // call `require "<unique-name>"` in a rescue loop to
+        // grow the interner past `Config::max_symbols` — each
+        // miss path here used to intern the camel/upper
+        // candidates even when nothing in `self.classes` matched.
+        // `Interner::contains()` checks for an existing entry
+        // without creating one, so miss paths create no new
+        // symbols; on the legitimate-match path a constant in
+        // `self.classes` necessarily has its SymId already
+        // interned (interning is the only way it got there),
+        // so this guard never blocks a real hit.
         let camel = snake_to_camel_case(first_seg);
-        let upper = first_seg.to_ascii_uppercase();
-        let camel_id = self.interner.intern(&camel);
-        if self.classes.contains_key(&camel_id) {
-            return true;
+        if !camel.is_empty() && self.interner.contains(&camel) {
+            let camel_id = self.interner.intern(&camel);
+            if self.classes.contains_key(&camel_id) {
+                return true;
+            }
         }
-        if upper != camel {
+        let upper = first_seg.to_ascii_uppercase();
+        if upper != camel && self.interner.contains(&upper) {
             let upper_id = self.interner.intern(&upper);
             if self.classes.contains_key(&upper_id) {
                 return true;
@@ -786,7 +809,9 @@ impl Vm {
         // returns `Ipaddr` and `"ipaddr".to_ascii_uppercase()`
         // returns `IPADDR`, neither of which matches. Walking the
         // classes table and ASCII-lowercase-comparing each
-        // resolved name catches that. Cost is O(n) only on
+        // resolved name catches that. Only uses `Interner::resolve`
+        // — no `intern` calls — so the symbol-cap guard above
+        // doesn't need to repeat. Cost is O(n) only on
         // double-miss; n stays modest in practice (a few hundred
         // classes at most for a typical embedded Vm).
         for sym_id in self.classes.keys() {
@@ -1238,6 +1263,12 @@ fn is_stdlib_stub_name(name: &str) -> bool {
 /// capitalize each part, concat. `rack` → `Rack`, `active_record`
 /// → `ActiveRecord`, `my_lib_v2` → `MyLibV2`. Empty input yields
 /// empty output (caller filters those before invoking).
+///
+/// Gated to non-wasi: the only caller
+/// (`Vm::require_satisfied_by_existing_constant`) is itself
+/// non-wasi, so under CI's `RUSTFLAGS=-D warnings` this helper
+/// would otherwise trip a dead-code warning on wasm32-wasip1.
+#[cfg(not(target_os = "wasi"))]
 fn snake_to_camel_case(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for part in input.split('_') {
