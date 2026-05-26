@@ -571,6 +571,35 @@ impl Vm {
                     };
                     Value::Hash(id)
                 } else {
+                    // CRuby raises `NameError: uninitialized constant
+                    // <name>` for missing constants — silent-nil here
+                    // masks real user errors AND lets downstream code
+                    // see a Nil where a class/module was expected
+                    // (e.g. `nil.new` instead of NameError, which is
+                    // confusing to debug). Match CRuby.
+                    //
+                    // Op-write read positions (`FOO ||= ...`) need
+                    // silent-nil — they use `Op::LoadConstOrNil`
+                    // instead.
+                    let name = self.interner.resolve(name_id).clone();
+                    return Err(self.trap(crate::error::RubyError::NameError {
+                        msg: format!("uninitialized constant {}", name),
+                    }));
+                };
+                self.stack.push(v);
+            }
+            Op::LoadConstOrNil(name_id) => {
+                // Silent-nil variant of `LoadConst`. See the op's
+                // doc comment in bytecode.rs — only the AST `||=`
+                // read position emits this. No ENV intercept:
+                // `ENV ||= ...` is not idiomatic, and any sane
+                // ENV access goes through `LoadConst` where the
+                // intercept lives.
+                let v = if let Some(c) = self.classes.get(&name_id).cloned() {
+                    Value::Class(c)
+                } else if let Some(v) = self.constants.get(&name_id).cloned() {
+                    v
+                } else {
                     Value::Nil
                 };
                 self.stack.push(v);

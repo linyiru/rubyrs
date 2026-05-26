@@ -83,6 +83,19 @@ pub(crate) enum Op {
     /// Same as `IncIvar` but does *not* push the resulting value.
     IncIvarNoPush(SymId),
     LoadConst(SymId),
+    /// Same lookup as `LoadConst` but missing → `Value::Nil`
+    /// instead of raising `NameError`. Emitted by the AST
+    /// translator ONLY for the `||=` read position (`FOO ||=
+    /// default` and the `Foo::Bar ||= default` path form). CRuby
+    /// special-cases `||=` so the lazy-init idiom works; every
+    /// other op-write (`&&=`, `+=`, ...) uses strict `LoadConst`
+    /// and raises NameError on undefined. Not exposed to user
+    /// code directly. No ENV intercept (unlike `LoadConst`) —
+    /// `ENV ||= ...` isn't an idiomatic shape and the
+    /// short-circuit makes the missing intercept invisible in
+    /// practice (ENV always resolves via `LoadConst` on every
+    /// other read site).
+    LoadConstOrNil(SymId),
     /// Pop top of stack, store as the value of constant `SymId`.
     /// Caller is responsible for emitting `Dup` first when the
     /// expression's value should also remain on the stack (CRuby's
