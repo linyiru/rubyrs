@@ -716,6 +716,53 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(true);
                 }
+                // `$&` (whole match) / `$+` (last non-nil capture)
+                // / `` $` `` (pre-match) / `$'` (post-match) — the
+                // BackReferenceReadNode family, all derived from
+                // `last_match`. nil if no match has happened yet
+                // (or the last one failed). Pre/post-match read the
+                // input slice directly from `LastMatch::input`.
+                #[cfg(feature = "regex")]
+                match &*name {
+                    "$&" => {
+                        let v = match &self.last_match {
+                            Some(m) => Value::new_str(m.whole.clone()),
+                            None => Value::Nil,
+                        };
+                        self.stack.push(v);
+                        return Ok(true);
+                    }
+                    "$+" => {
+                        // CRuby: last non-nil capture from the last
+                        // successful match — `nil` if no match or no
+                        // group participated.
+                        let v = match &self.last_match {
+                            Some(m) => m.caps.iter().rev().find_map(|c| c.as_ref())
+                                .map(|s| Value::new_str(s.clone()))
+                                .unwrap_or(Value::Nil),
+                            None => Value::Nil,
+                        };
+                        self.stack.push(v);
+                        return Ok(true);
+                    }
+                    "$`" => {
+                        let v = match &self.last_match {
+                            Some(m) => Value::new_str(m.input[..m.m_start].to_string()),
+                            None => Value::Nil,
+                        };
+                        self.stack.push(v);
+                        return Ok(true);
+                    }
+                    "$'" => {
+                        let v = match &self.last_match {
+                            Some(m) => Value::new_str(m.input[m.m_end..].to_string()),
+                            None => Value::Nil,
+                        };
+                        self.stack.push(v);
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
                 // `$~` — MatchData of the last successful match,
                 // or nil. Materialises a fresh MatchData instance
                 // on each read (same `@whole`/`@caps` shape as

@@ -85,6 +85,7 @@ MultiTargetNode
 MultiWriteNode
 NextNode
 NilNode
+BackReferenceReadNode
 NumberedReferenceReadNode
 OptionalKeywordParameterNode
 OptionalParameterNode

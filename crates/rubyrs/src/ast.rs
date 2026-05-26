@@ -906,6 +906,16 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_numbered_reference_read_node() {
         return sp(node, Expr::GVarRead(format!("${}", n.number())));
     }
+    // `$~`, `$&`, `` $` ``, `$'`, `$+` — special regex match
+    // globals (Prism's BackReferenceReadNode). All five route
+    // through the same GVarRead → LoadGlobal path as the
+    // numbered backrefs; the actual values live on
+    // `Vm::last_match` and are materialised in vm/step.rs.
+    // `$+` is the one motivating real-world use (ERB's
+    // detect_magic_comment uses it after a regex match).
+    if let Some(n) = node.as_back_reference_read_node() {
+        return sp(node, Expr::GVarRead(cid_to_string(n.name())));
+    }
     // Bare constant assignment: `FOO = expr` (top level or inside a
     // class/module body). Storage is a separate `Vm.constants` map
     // keyed by SymId — class names continue to live in `Vm.classes`,

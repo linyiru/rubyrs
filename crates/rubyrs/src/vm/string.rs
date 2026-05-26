@@ -654,7 +654,9 @@ impl Vm {
                                 return Ok(Some(Value::Nil));
                             }
                             Some(caps) => {
-                                let whole = caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
+                                let m0 = caps.get(0).unwrap();
+                                let (m_start, m_end) = (m0.start(), m0.end());
+                                let whole = m0.as_str().to_string();
                                 let mut group_vals: Vec<Value> = Vec::with_capacity(caps.len().saturating_sub(1));
                                 let mut last_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
                                 for i in 1..caps.len() {
@@ -665,12 +667,18 @@ impl Vm {
                                         None => Value::Nil,
                                     });
                                 }
-                                // Side-channel for `$~` and `$1`..`$N`
-                                // (any positive index — multi-digit forms
-                                // like `$10` resolve through `LoadGlobal`).
+                                // Side-channel for `$~` / `$1`..`$N`
+                                // (numbered) AND `$&` / `$+` / `` $` ``
+                                // / `$'` (BackReferenceReadNode) — the
+                                // input + span lets us derive
+                                // pre/post-match without re-running
+                                // the regex.
                                 self.last_match = Some(crate::vm::LastMatch {
                                     whole: whole.clone(),
                                     caps: last_caps,
+                                    input: bound.to_string(),
+                                    m_start,
+                                    m_end,
                                 });
                                 return Ok(Some(self.materialize_match_data(whole, group_vals)?));
                             }
