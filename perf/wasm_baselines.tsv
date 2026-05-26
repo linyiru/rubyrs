@@ -19,36 +19,50 @@
 #
 # What the gate actually measures
 # -------------------------------
-# `perf/wasm_check.sh` takes the MIN wall across 3 runs — that's the
-# stable steady-state floor (the same min-of-N pattern host
-# `baselines.tsv` uses for the same reason). On wasmtime the first
-# run typically populates `~/.cache/wasmtime` and subsequent runs hit
-# warm-cache, so MIN is essentially "warm-cache steady startup,"
-# not literal cold-cache startup. We use steady-state because:
-#   1. CI runners cache between jobs differently, making cold-cache
-#      numbers unreproducible.
-#   2. The regression signal we want is "did the rubyrs interpreter
-#      get slower under wasi", and steady-state isolates that from
-#      wasmtime's own cache-warmup variance.
-# If literal cold-cache measurement is ever needed, that's a separate
-# workload (run wasmtime with --disable-cache or clear the cache
-# between runs) and a separate row.
+# `perf/wasm_check.sh` builds a `.cwasm` ahead of time (raw .wasm →
+# wasm-opt -Oz → `wasmtime compile`) and times each workload via
+# `wasmtime run --allow-precompiled $CWASM`. There is no per-run
+# JIT step — the cwasm carries pre-JIT'd machine code — so the
+# `~/.cache/wasmtime` warm-up cycle that affected raw-.wasm
+# measurements no longer applies; every one of the 3 timed runs
+# is essentially the same shape (load .cwasm + run script).
+#
+# MIN-of-3 (same reducer as host `baselines.tsv`) is still useful
+# despite that: it filters CI spawn jitter, OS page-cache warm-up
+# of the .cwasm file itself, `/usr/bin/time`'s 10 ms-granularity
+# rounding, and other host-level noise that the JIT-elimination
+# can't address.
+#
+# The regression signal we want is "did the rubyrs interpreter
+# get slower under wasi". Pre-compiling to .cwasm isolates that
+# from wasmtime's own JIT cost; min-of-3 then strips spawn
+# jitter from the resulting wall.
 #
 # Initial calibration (Apple M-series, wasmtime 45.0.0,
-# rubyrs.wasm release build, MIN of 3 runs each):
-#   startup_floor.rb   ~10 ms steady (first run can be ~180 ms with
-#                                     wasmtime's wasm-cache cold).
+# rubyrs.wasm release build, wasm-opt -Oz + wasmtime compile AOT,
+# MIN of 3 runs each):
+#   startup_floor.rb   ~7-10 ms (sub-`/usr/bin/time` granularity;
+#                                first run is now flat — no JIT
+#                                step in the wasmtime path because
+#                                we measure against the .cwasm).
 #   fizzbuzz_1m.rb     ~510 ms.
 #
+# AOT-compiled `.cwasm` means the `startup_floor` story compares
+# favourably to native rubyrs (~2 ms) AND wins against MRI
+# (`ruby --yjit` cold start ~80 ms on the same Mac). The wall
+# the gate measures is now end-to-end "wasmtime spawn + load
+# precompiled module + run script", with no per-run JIT cost.
+#
 # CI is on ubuntu-latest x86_64, where wasmtime + wasi-portable
-# code typically run 1.5-2× slower than Apple Silicon native. Budgets
-# below sit at ~3× the local M-series observed wall — that's the
-# same headroom envelope the host `baselines.tsv` uses (~2× local
-# to absorb CI's slowdown plus jitter), bumped slightly because
-# wasmtime startup variance is larger than native's.
+# code typically run 1.5-2× slower than Apple Silicon native.
+# Budgets below sit at ~10× the local M-series observed wall —
+# the headroom is bigger than the native `baselines.tsv`'s ~2×
+# because the startup_floor budget is now much smaller (single-
+# digit ms) where measurement granularity + spawn jitter
+# dominate; absolute ms headroom matters more than the ratio.
 #
 # Expect a re-cal commit if/when the wasmtime version pinned in
 # CI bumps or the wasi-sdk shape changes.
 
-crates/rubyrs/tests/wasm/startup_floor.rb	300	wasmtime startup floor + rubyrs init (warm-cache steady)
-crates/rubyrs/benches/fizzbuzz_1m.rb	2500	1M fizzbuzz under wasi
+crates/rubyrs/tests/wasm/startup_floor.rb	100	AOT cwasm startup floor + rubyrs init
+crates/rubyrs/benches/fizzbuzz_1m.rb	2500	1M fizzbuzz under wasi (AOT cwasm)

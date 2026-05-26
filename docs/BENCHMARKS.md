@@ -32,13 +32,22 @@ Trivial program: `puts 1 + 2`. Time to first output.
 | Implementation | Wall time |
 |----------------|-----------|
 | rubyrs (native) | **1.5 ms** |
-| rubyrs.wasm via wasmtime | 12.7 ms |
+| rubyrs.wasm via wasmtime (raw, JIT each run) | 12.7 ms |
+| rubyrs.cwasm via wasmtime (AOT, `--allow-precompiled`) | **~7 ms** |
 | CRuby 3.4 (no YJIT) | 77 ms |
 | CRuby 3.4 + YJIT | 78 ms |
 
-rubyrs is ~50× faster cold-start than CRuby. This is the strongest signal
-for our target niche (CLI tools, serverless / edge runtimes, embedded
-scripting).
+rubyrs is ~50× faster cold-start than CRuby. The two wasm rows
+reflect different deployment shapes:
+  * raw `.wasm` (12.7 ms) — what you ship to embedders, includes
+    wasmtime's per-run JIT.
+  * AOT `.cwasm` (~7 ms) — wasmtime compiles the module ahead of
+    time (`wasmtime compile` then `wasmtime run
+    --allow-precompiled`); the `.cwasm` is host-arch + wasmtime-
+    version specific so it's generated per consumer, not shipped.
+    `perf/wasm_check.sh` measures this shape.
+This is the strongest signal for our target niche (CLI tools,
+serverless / edge runtimes, embedded scripting).
 
 ## Throughput
 
@@ -127,12 +136,24 @@ Memory:
 /usr/bin/time -lp ./target/release/rubyrs crates/rubyrs/benches/fizzbuzz_1m.rb
 ```
 
-WASM:
+WASM (raw `.wasm`, JIT each run — the 12.7 ms column above):
 
 ```bash
 # After WASI SDK setup (see DEVELOPMENT.md)
 hyperfine 'wasmtime run --dir=. \
   target/wasm32-wasip1/release/rubyrs.wasm crates/rubyrs/benches/fizzbuzz_1m.rb'
+```
+
+WASM (AOT `.cwasm` — the ~7 ms column above; matches the
+`perf/wasm_check.sh` measurement shape):
+
+```bash
+# After WASI SDK setup (see DEVELOPMENT.md). Needs binaryen (wasm-opt)
+# and wasmtime on PATH; the perf gate script automates this pipeline.
+wasm-opt -Oz target/wasm32-wasip1/release/rubyrs.wasm -o /tmp/rubyrs.opt.wasm
+wasmtime compile /tmp/rubyrs.opt.wasm -o /tmp/rubyrs.cwasm
+hyperfine 'wasmtime run --allow-precompiled --dir=. /tmp/rubyrs.cwasm \
+  crates/rubyrs/benches/fizzbuzz_1m.rb'
 ```
 
 ## Methodology notes

@@ -6,6 +6,20 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Changed
+- **Wasm perf gate now measures AOT-precompiled `.cwasm`** instead
+  of raw `.wasm` + per-run JIT. `perf/wasm_check.sh`'s build prelude
+  runs `wasm-opt -Oz` (optional; install `binaryen` to enable the
+  ~21% size pass) → `wasmtime compile` → measures via `wasmtime run
+  --allow-precompiled`. `startup_floor.rb` budget tightened
+  300 ms → 100 ms now that JIT cost is eliminated up front. The
+  ~7 ms cwasm cold start beats raw-`.wasm` (12.7 ms) and CRuby
+  (~78 ms) on the same Mac. Build artifacts live in a per-invocation
+  `mktemp -d` (cleaned via trap on EXIT/INT/TERM); `.cwasm` is host-
+  arch + wasmtime-version specific so it's NOT a shipping artifact.
+  Raw-`.wasm` numbers in README and BENCHMARKS.md kept alongside
+  the new cwasm column for shipping-shape clarity.
+
 ### Added
 - **`String#unpack1(fmt)` — first-element shorthand for
   `String#unpack`.** Idiomatic when a binary-protocol parser

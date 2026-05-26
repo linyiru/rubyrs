@@ -11,13 +11,17 @@
 # the runs, and fail if it exceeds the row's `max_wall_ms`.
 #
 # MIN-of-3 is the steady-state floor — drops both CI jitter
-# spikes AND wasmtime's first-run wasm-cache cold population
-# (subsequent runs hit `~/.cache/wasmtime`, so the warm-cache
-# wall is what `min` picks). This measures rubyrs interpreter
-# cost under wasi, not wasmtime's own cache-warmup time. If a
-# future row needs literal cold-cache measurement, add it as
-# its own row that clears the cache or passes `--disable-cache`
-# between runs — see `perf/wasm_baselines.tsv` for the rationale.
+# spikes AND OS-level noise (page-cache warm-up of the .cwasm,
+# wasmtime's own runtime cold start, process-spawn variance,
+# `/usr/bin/time` 10ms-granularity rounding). Because the gate
+# measures against the pre-compiled `.cwasm` produced by the
+# build prelude below (wasm-opt → wasmtime compile) with
+# `--allow-precompiled`, JIT cost has already been eliminated;
+# there is no longer a per-run wasm-cache warm-up cycle for
+# min-of-3 to filter. This means each of the 3 timed runs is
+# essentially the same shape (load .cwasm + run script), and
+# the MIN reducer is mostly there to absorb spawn/timer
+# granularity jitter.
 #
 # Why no RSS gate: peak-RSS under wasmtime conflates the host VM's
 # resident size with the guest's linear-memory working set, and
@@ -62,14 +66,104 @@ if [[ ! -x /usr/bin/time ]]; then
   exit 2
 fi
 
+# Build pipeline for the artifact the gate actually times:
+#
+#   raw .wasm  --[wasm-opt -Oz]-->  .opt.wasm  --[wasmtime compile]-->  .cwasm
+#                  (optional)                          (always)
+#
+# Layered for two reasons:
+#   1. wasm-opt -Oz shrinks the deliverable binary ~21% (1.48 MB →
+#      1.17 MB locally) and is what an embedder downstream would
+#      want to ship if they distribute the .wasm. Running it here
+#      keeps the upstream input to the AOT step matching what a
+#      consumer would actually deploy.
+#   2. `wasmtime compile` AOT-compiles to a `.cwasm` that wasmtime
+#      can `run --allow-precompiled` against — bypasses JIT for
+#      every measured invocation, so the gate fences the "cold
+#      start with pre-compiled module" path (the headline cold-
+#      start story) rather than the every-invocation JIT cost.
+#      Note that the .cwasm itself is NOT a shipping artifact —
+#      it's wasmtime-version + host-arch specific machine code
+#      and must be regenerated per consumer environment.
+#
+# Local PoC: this combo drops the wasmtime startup_floor from
+# ~20 ms steady (raw .wasm) to ~10 ms (.cwasm) — and from a
+# 200 ms first-run cold to ~10 ms (no more per-run JIT). See
+# `perf/wasm_baselines.tsv` for the budget rationale.
+#
+# Derived build artifacts live in a per-invocation tempdir
+# (cleaned via `trap` on EXIT), not next to the input `$WASM`.
+# Reasons:
+#   1. `$WASM` may point at a read-only / shared path under some
+#      embedding setups; writing next to it would fail outright.
+#   2. Leaving `.opt.wasm` / `.cwasm` siblings next to the source
+#      surprises local runs and bloats incremental dev workflows.
+#   3. wasmtime compile is fast enough (~0.5s) that caching the
+#      output across runs isn't worth the surprise.
+# A dedicated subdir under `$TMPDIR` is plenty for the gate's
+# lifetime. Use the positional template form (`mktemp -d <prefix>XXXXXX`)
+# rather than `-t` — BSD mktemp (macOS) and GNU mktemp (Linux)
+# disagree on what `-t` means: BSD takes it as a literal prefix and
+# adds its own randomization, embedding "XXXXXX" in the dir name on
+# macOS. Positional template is portable.
+#
+# Wrap mktemp itself in an exit-2 path: a read-only $TMPDIR / full
+# disk / restrictive sandbox makes it fail, and `set -e` would
+# otherwise abort with an opaque non-zero code (no "setup error"
+# diagnostic), violating the 0/1/2 contract the header documents.
+PERF_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/rubyrs-wasm-perf.XXXXXX")" || {
+  echo "wasm_check: mktemp -d failed (TMPDIR=${TMPDIR:-/tmp}); cannot stage AOT artifacts" >&2
+  exit 2
+}
+# Cover SIGINT/SIGTERM too — `trap '...' EXIT` alone doesn't fire
+# on signals (bash takes the default signal action and exits
+# without running EXIT). Without the extra signal handlers a
+# Ctrl-C during wasm-opt (2-10s) or wasmtime compile leaves the
+# tempdir orphaned. The trap re-raises after cleanup so the exit
+# code stays honest.
+trap 'rm -rf "$PERF_TMPDIR"' EXIT
+trap 'rm -rf "$PERF_TMPDIR"; trap - INT TERM; kill -INT $$' INT TERM
+
+# wasm-opt is OPTIONAL — if `wasm-opt` isn't on PATH the script
+# proceeds with the raw .wasm. Skipping it costs ~10% of the
+# binary-size win but doesn't break the gate.
+if ! command -v wasm-opt >/dev/null 2>&1; then
+  echo "wasm_check: wasm-opt not on PATH — skipping the -Oz size pass (install \`binaryen\` to enable)"
+  OPT_WASM="$WASM"
+else
+  OPT_WASM="$PERF_TMPDIR/rubyrs.opt.wasm"
+  echo "[wasm_check] wasm-opt -Oz $WASM -> $OPT_WASM"
+  # wasm-opt failure is a SETUP error (broken build tool, bad
+  # input wasm, etc.), not a perf regression. Catch and exit 2
+  # per the documented 0/1/2 contract instead of letting
+  # `set -e` propagate wasm-opt's exit code (typically 1, which
+  # would be misclassified as "budget exceeded").
+  if ! wasm-opt -Oz "$WASM" -o "$OPT_WASM" >/dev/null; then
+    echo "wasm_check: wasm-opt -Oz failed on $WASM" >&2
+    exit 2
+  fi
+fi
+
+CWASM="$PERF_TMPDIR/rubyrs.cwasm"
+echo "[wasm_check] wasmtime compile $OPT_WASM -> $CWASM"
+# wasmtime compile failure (incompatible subcommand, malformed
+# wasm, etc.) is likewise a setup error — same 0/1/2 contract
+# reasoning as the wasm-opt arm above.
+if ! wasmtime compile "$OPT_WASM" -o "$CWASM" >/dev/null; then
+  echo "wasm_check: wasmtime compile failed on $OPT_WASM" >&2
+  exit 2
+fi
+
 # `/usr/bin/time` parsing differs by platform (same shape as the
 # host check.sh). Only wall is consumed here; RSS lines are ignored.
+# All wasmtime invocations below use `--allow-precompiled` so the
+# AOT `.cwasm` path is exercised end-to-end.
 PLATFORM="$(uname -s)"
 measure_wall_ms() {
   local script="$1"
   local out rc=0
   if [[ "$PLATFORM" == "Darwin" ]]; then
-    out=$(LC_ALL=C /usr/bin/time wasmtime run --dir=. "$WASM" "$script" 2>&1 >/dev/null) || rc=$?
+    out=$(LC_ALL=C /usr/bin/time wasmtime run --allow-precompiled --dir=. "$CWASM" "$script" 2>&1 >/dev/null) || rc=$?
     if (( rc != 0 )); then
       echo "wasm_check: workload \`$script\` exited with status $rc under wasmtime" >&2
       [[ -n "$out" ]] && echo "$out" | sed 's/^/  | /' >&2
@@ -91,7 +185,7 @@ measure_wall_ms() {
       printf "%d\n", ms;
     }'
   else
-    out=$(LC_ALL=C /usr/bin/time -v wasmtime run --dir=. "$WASM" "$script" 2>&1 >/dev/null) || rc=$?
+    out=$(LC_ALL=C /usr/bin/time -v wasmtime run --allow-precompiled --dir=. "$CWASM" "$script" 2>&1 >/dev/null) || rc=$?
     if (( rc != 0 )); then
       echo "wasm_check: workload \`$script\` exited with status $rc under wasmtime" >&2
       [[ -n "$out" ]] && echo "$out" | sed 's/^/  | /' >&2
