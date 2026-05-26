@@ -76,9 +76,12 @@ parallel.
 This ADR is itself Phase 0's first deliverable. Phase 0 also
 produces:
 
-- A **`std`-usage audit** in `docs/MUTABLE_LAYERS.md` (the file
-  already exists for related layering notes) listing every one
-  of the 54 `use std::` sites and tagging each:
+- A **`std`-usage audit** in a new `docs/STD_AUDIT.md` (separate
+  from `docs/MUTABLE_LAYERS.md`, which is specifically about
+  interior-mutability layers in the metaprogramming runtime —
+  mixing the two topics would make both docs harder to find
+  later). The audit lists every one of the 54 `use std::` sites
+  and tags each:
   - `tier-1-replaceable` (use `core::` or `alloc::` instead)
   - `tier-2-host-io` (legitimately needs `std`, belongs in
     `rubyrs-language` or above)
@@ -131,10 +134,19 @@ checks:
 
 Plus a fourth, specific to this migration:
 
-- **`no_std` ratchet**: `cargo check -p rubyrs-core
-  --no-default-features --target wasm32-wasip1` must pass on
-  every PR that touches `rubyrs-core`. This is what prevents
-  `std` from drifting back in.
+- **`no_std` ratchet**: the actual enforcement is the
+  `#![no_std]` attribute on the `rubyrs-core` crate root — once
+  it's there, the compiler rejects any `use std::*` import. To
+  catch drift early (before someone tries to embed in a truly
+  `std`-less environment), CI also runs `cargo check -p
+  rubyrs-core --no-default-features --target
+  wasm32-unknown-unknown` on every PR that touches
+  `rubyrs-core`. That target genuinely has no `std`
+  (`wasm32-wasip1` does ship `std`, so it would not catch the
+  drift this ratchet exists to prevent). The two together —
+  `#![no_std]` attribute as the in-source contract, plus the
+  bare-WASM target as the build-time canary — make the
+  guarantee mechanical.
 
 CI scripts live in `.github/workflows/`. Phase 2 is one PR.
 
