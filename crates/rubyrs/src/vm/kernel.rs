@@ -138,6 +138,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
+                        "sprintf" | "format" |
                         "Integer" | "Float" | "String" | "Array" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
                     );
@@ -395,6 +396,47 @@ impl Vm {
                     let _ = write!(self.stdout, "{}", s);
                 }
                 Some(Ok(Value::Nil))
+            }
+            // `Kernel#sprintf` / `Kernel#format` — printf-style
+            // formatter. Same engine `String#%` uses (`ruby_sprintf`
+            // in vm/sprintf.rs), just routed through the no-recv
+            // Kernel dispatch. `format` is the documented alias.
+            // First arg is the format String; remaining args are
+            // positional substitutions.
+            "sprintf" | "format" => {
+                if args.is_empty() {
+                    // CRuby's exact message — verified against MRI
+                    // 3.x for `sprintf` with no args.
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: "too few arguments".into(),
+                    })));
+                }
+                let fmt = match &args[0] {
+                    Value::Str(s) => s.to_string_lossy(),
+                    other => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into String",
+                                other.type_name(),
+                            ),
+                        })));
+                    }
+                };
+                let fmt_args = &args[1..];
+                let out = match crate::vm::ruby_sprintf(
+                    &fmt, fmt_args, &self.heap, &self.interner,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => return Some(Err(self.trap(e))),
+                };
+                if let Some(max) = self.max_value_bytes
+                    && out.len() > max
+                {
+                    return Some(Err(self.trap(RubyError::ResourceExhausted {
+                        msg: format!("sprintf would exceed {} bytes", max),
+                    })));
+                }
+                Some(Ok(Value::new_str(out)))
             }
             // `require` — supports two file kinds:
             //
