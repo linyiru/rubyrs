@@ -115,6 +115,18 @@ pub(crate) fn numeric_call(
             // divergence.
             "**" => {
                 if *b < 0 {
+                    // 0 ** negative is a divide-by-zero in CRuby
+                    // (the reciprocal of 0 is undefined). Match
+                    // by raising before falling into the Float
+                    // reciprocal arm — otherwise `(0_u64 as f64)
+                    // .powf(-1.0)` silently returns +Infinity,
+                    // which then propagates through user code
+                    // without surfacing the error.
+                    if *a == 0 {
+                        return Err(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        });
+                    }
                     // Negative exponent → Float reciprocal.
                     // ±1 bases have exact ±1.0 results decided by
                     // exponent parity, but `(*b as f64)` loses

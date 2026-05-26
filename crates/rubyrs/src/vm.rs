@@ -956,15 +956,18 @@ impl Vm {
             match base_sign {
                 Sign::NoSign => {
                     // base == 0. 0**0 == 1; 0**n (n>0) == 0;
-                    // 0**n (n<0) is ZeroDivision in CRuby — we
-                    // realise the Float divergence (`inf`) for any
-                    // BigInt-flavoured operand (Int recv × Int neg
-                    // exp still defers to numeric.rs's Float arm).
+                    // 0**n (n<0) raises ZeroDivisionError in CRuby
+                    // — match that for ALL operand shapes. The
+                    // previous behaviour returned `Float::INFINITY`
+                    // for BigInt-flavoured operands (and Int recv
+                    // × Int neg exp deferred to numeric.rs's powf,
+                    // which silently produced inf too). Both paths
+                    // now raise so the error surfaces explicitly
+                    // instead of poisoning downstream arithmetic.
                     if exp_is_negative {
-                        if need_float_handling {
-                            return Ok(Some(Value::Float(f64::INFINITY)));
-                        }
-                        return Ok(None);
+                        return Err(self.trap(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        }));
                     }
                     let r = if exp_is_zero { BigInt::from(1) } else { BigInt::from(0) };
                     return Ok(Some(self.bigint_to_value(r)?));

@@ -2080,6 +2080,43 @@ fn bigint_pow_bigint_receiver_float_exponent_returns_float() {
     assert!(rel < 1e-6, "expected ~{}, got {} (rel error {})", expected, v, rel);
 }
 
+#[test]
+fn pow_zero_to_negative_exponent_raises_zero_division() {
+    // CRuby: `0 ** -1` raises `ZeroDivisionError: divided by 0`
+    // because the reciprocal of 0 is undefined. Previous rubyrs
+    // routed through `(0_u64 as f64).powf(-1.0) = +Infinity` and
+    // silently returned `Float::INFINITY`, poisoning downstream
+    // arithmetic. Match CRuby and raise instead.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("0 ** -1", "pow_zero_neg.rb").unwrap_err();
+    assert!(
+        err.err.is("ZeroDivisionError"),
+        "expected ZeroDivisionError (direct or Uncaught-wrapped), got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_zero_to_negative_bigint_exponent_raises_zero_division() {
+    // Same divergence fix on the BigInt-flavoured path: when the
+    // exponent is a (negative) BigInt and recv is Int(0), dispatch
+    // goes through try_bigint_pow's |base|≤1 short-circuit. That
+    // arm previously returned `Float::INFINITY` for BigInt-flavoured
+    // operands. Now it raises ZeroDivisionError uniformly with the
+    // Int×Int path.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "neg_big = 0 - (2 ** 100); 0 ** neg_big",
+        "pow_zero_neg_bigint.rb",
+    ).unwrap_err();
+    assert!(
+        err.err.is("ZeroDivisionError"),
+        "expected ZeroDivisionError (direct or Uncaught-wrapped), got {:?}",
+        err.err,
+    );
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_pow_zero_and_one_exponent_skip_estimator() {
