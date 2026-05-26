@@ -1389,12 +1389,17 @@ impl Vm {
                         // type, not the operand types — those are
                         // both Integer in the common probe.
                         //
-                        // BigInt path: with `bignum` enabled,
-                        // `2**100 <=> 0` legitimately returns a
-                        // BigInt for very large differences. Compare
-                        // its sign against 0 just like Int. Without
-                        // this, `arr.sort { |a, b| (a * 2**100) <=>
-                        // (b * 2**100) }` would ArgumentError.
+                        // BigInt path: with `bignum` enabled, a
+                        // comparator that subtracts large-magnitude
+                        // operands legitimately returns a BigInt —
+                        // e.g. `(a * 2**100) - (b * 2**100)` yields
+                        // a BigInt result that's still semantically
+                        // a sign-bearing integer. CRuby's `<=>`
+                        // itself returns small -1/0/1, but `<=>`
+                        // isn't the only valid comparator return;
+                        // the `(a-b)` shape (idiomatic for floats
+                        // and ints alike) is what produces BigInt.
+                        // Sort by sign, same as Int.
                         let ord = match &result {
                             Value::Int(n) if *n > 0 => std::cmp::Ordering::Greater,
                             Value::Int(n) if *n < 0 => std::cmp::Ordering::Less,

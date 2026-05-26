@@ -61,12 +61,13 @@ rescue ArgumentError => e
 end
 
 # --- BigInt comparator result is treated as Integer ---
-# CRuby: `2**100 <=> 0` returns a BigInt Integer; sort should
-# accept any Integer (including BigInt) as the comparator
-# result. Without the BigInt arm, this would raise
-# ArgumentError on the very first comparison.
+# CRuby's `<=>` itself always returns small -1/0/1, but `<=>`
+# isn't the only valid comparator shape — the `(a - b)` form
+# (idiomatic in C-flavored sort-by-difference comparisons) DOES
+# yield a BigInt when the operands overflow i64. Without the
+# BigInt arm, the very first comparison would ArgumentError.
 big = 2 ** 100
-puts [3, 1, 2].sort { |a, b| (a * big) <=> (b * big) }.inspect
+puts [3, 1, 2].sort { |a, b| (a * big) - (b * big) }.inspect
 
 # --- Float comparator result ---
 # CRuby's rb_cmpint accepts any numeric that compares against
