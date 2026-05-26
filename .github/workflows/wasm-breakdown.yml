@@ -158,6 +158,34 @@ jobs:
           chmod +x "$HOME/.local/bin/wasm3"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Diagnose — does the raw wasm export wizer.initialize?
+        # Triage step. Previous CI runs failed with `the Wasm module
+        # does not have a wizer-initialize export` despite the
+        # source clearly declaring `#[unsafe(export_name =
+        # "wizer.initialize")]`. Build the .wasm and grep its
+        # export section before doing anything else, so we can
+        # tell whether the issue is (a) Rust not emitting the
+        # export on this host, vs (b) a downstream tool stripping
+        # it. Failure here STOPS the workflow with the diagnostic
+        # in the log; the message includes which file we looked
+        # at so it's reproducible by hand.
+        run: |
+          set -euo pipefail
+          cargo build --release --target wasm32-wasip1 --no-default-features -p rubyrs
+          WASM=target/wasm32-wasip1/release/rubyrs.wasm
+          ls -la "$WASM"
+          echo "--- wizer-related strings in $WASM ---"
+          strings "$WASM" | grep -E "wizer\." | head -5 || echo "  (no wizer.* strings found)"
+          # Quick export grep without wasm-tools. Wasm export
+          # entries are stored as length-prefixed UTF-8 strings —
+          # rough `strings` is enough for the "is it there"
+          # question.
+          if ! strings "$WASM" | grep -qF "wizer.initialize"; then
+            echo "rubyrs.wasm does NOT contain the literal 'wizer.initialize' string." >&2
+            echo "Rust's #[unsafe(export_name = ...)] was either not honored or the export was DCE'd." >&2
+            exit 1
+          fi
+
       - name: Pre-build the embedder (bakes cwasm via build_embedder.sh)
         # The breakdown harness benchmarks the EMBEDDER on top of
         # everything else, so we want it built before the timed
