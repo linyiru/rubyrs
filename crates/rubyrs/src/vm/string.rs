@@ -607,7 +607,9 @@ impl Vm {
                                         None => Value::Nil,
                                     });
                                 }
-                                // Side-channel for `$1`..`$9` / `$~`.
+                                // Side-channel for `$~` and `$1`..`$N`
+                                // (any positive index — multi-digit forms
+                                // like `$10` resolve through `LoadGlobal`).
                                 self.last_match = Some(crate::vm::LastMatch {
                                     whole: whole.clone(),
                                     caps: last_caps,

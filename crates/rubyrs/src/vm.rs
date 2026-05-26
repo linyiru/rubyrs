@@ -314,10 +314,12 @@ pub(crate) struct Vm {
     /// `--no-default-features`.
     #[cfg(feature = "regex")]
     pub(crate) regex_cache: HashMap<SymId, Rc<regex::Regex>>,
-    /// Last successful regex match — populated by `=~` and
-    /// `String#match` when they hit, cleared when they miss.
-    /// Source of truth for `$1`..`$9` (NumberedReferenceReadNode)
-    /// and `$~` reads in `LoadGlobal`. Owned strings rather than
+    /// Last successful regex match — populated by `=~`,
+    /// `String#match`, and `Regexp#===` when they hit, cleared
+    /// when they miss. Source of truth for `$~` and `$1`..`$N`
+    /// (NumberedReferenceReadNode — any positive index, matching
+    /// CRuby; `$10`+ are valid too) reads in `LoadGlobal`. Owned
+    /// strings rather than
     /// a heap ObjId so we don't have to wire a GC-walk root for
     /// what is conceptually a fast side-channel; `$~` materialises
     /// a fresh MatchData instance on demand. Cfg-gated on `regex`

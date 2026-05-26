@@ -1647,9 +1647,10 @@ impl Vm {
         }
         // `=~` — Regex/String matching. Returns the byte offset of
         // the first match, or nil. On a hit, populate `last_match`
-        // (with captures) so `$1`..`$9` / `$~` see the same match;
-        // on a miss, clear it (CRuby parity — a failed `=~` wipes
-        // the prior match's globals).
+        // (with captures) so `$~` and `$1`..`$N` (any positive
+        // index — multi-digit forms like `$10` work too) see the
+        // same match; on a miss, clear it (CRuby parity — a failed
+        // `=~` wipes the prior match's globals).
         if &*name == "=~" && args.len() == 1 {
             let result = match (&recv, &args[0]) {
                 #[cfg(feature = "regex")]

@@ -77,8 +77,8 @@ ModuleNode
 MultiTargetNode
 MultiWriteNode
 NextNode
-NumberedReferenceReadNode
 NilNode
+NumberedReferenceReadNode
 OptionalKeywordParameterNode
 OptionalParameterNode
 OrNode
