@@ -300,11 +300,13 @@ fn format_radix_any(
         //
         // Bound: `digits_upper_bound(bits, radix) + sign_byte + prefix`
         // via the shared [`super::bignum::bignum_digits_upper_bound`]
-        // helper (scaled-integer `log2(radix)` table, ~tight to ±1
-        // char). Earlier revisions used the integer
-        // `floor(log2(radix))` which over-estimated by ~10% for
-        // radix 10 — enough to false-trap rendered values that
-        // would actually fit under a tight cap.
+        // helper, which uses `floor(log2(radix) * 64)` (power-of-two
+        // exact path + f64 fallback) as a tight integer lower
+        // bound on `log2(base)` — within ±1 char of the true digit
+        // count across radix 2..=36. Earlier revisions used the
+        // integer `floor(log2(radix))` which over-estimated by
+        // ~10% for radix 10 — enough to false-trap rendered values
+        // that would actually fit under a tight cap.
         // `sign_byte` is 1 iff negative, `prefix` is 0 / 1 (octal
         // `#`) / 2 (`0x`/`0b` `#`).
         let digits_est = super::bignum::bignum_digits_upper_bound(b.bits(), radix);

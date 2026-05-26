@@ -969,16 +969,14 @@ impl Vm {
         // PRE-allocation cap check: `to_str_radix(2)` on a 1M-bit
         // BigInt allocates ~1 MB before we get a chance to inspect
         // its length. Estimate the rendered length first via
-        // `bits()` and trap before the alloc. Bound:
-        // `ceil(bits / log2_per_digit) + sign_byte` where
-        // `log2_per_digit = max(1, floor(log2(radix)))` is a
-        // lower bound on `log2(base)` (dividing by a smaller log
-        // gives a safe upper bound on the count without
-        // floating-point). `sign_byte = 1` iff the BigInt is
-        // negative, else 0 (avoids systematic over-estimate that
-        // would false-trap non-negative values landing exactly
-        // on the cap). Mirrored by the 0-arg arm so both paths
-        // share the protection.
+        // `bits()` and trap before the alloc. See
+        // [`Vm::check_bigint_to_s_cap`] for the bound — it
+        // delegates to [`bignum_digits_upper_bound`], which uses a
+        // scaled-integer `floor(log2(radix) * 64)` lower bound on
+        // `log2(base)` (power-of-two exact path + f64 fallback for
+        // radices 3/5/6/7/…/36) plus a 1-byte sign accounting.
+        // Mirrored by the 0-arg arm so both paths share the
+        // protection.
         if name == "to_s" && args.len() == 1
             && let Value::BigInt(id) = recv
         {
