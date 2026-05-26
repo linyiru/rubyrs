@@ -75,6 +75,15 @@ pub fn extract_with_shared(source: &str, shared: &[SharedSpec<'_>]) -> String {
     extract_inner(source, &registry)
 }
 
+/// Names that appeared in more than one [`SharedSpec`]. When this
+/// list is non-empty, only the first definition seen contributed
+/// to the inlined body. The CLI surfaces these to stderr so a user
+/// supplying multiple `--shared` files notices accidental shadowing
+/// instead of having `--shared` order silently decide.
+pub fn shared_duplicates(shared: &[SharedSpec<'_>]) -> Vec<String> {
+    build_shared_registry(shared).duplicates
+}
+
 /// Recognise `expr.should == val` and rewrite to
 /// `assert_eq(expr, val)`, then strip `require_relative` lines
 /// the micro-runner can't load. Everything else passes through.
@@ -144,7 +153,20 @@ fn extract_inner(source: &str, registry: &SharedRegistry) -> String {
         }))
         .collect();
     all_subs.extend(lifter.substitutions);
-    all_subs.extend(inliner.substitutions);
+    // Same overlap guard as the recogniser subs above: an
+    // `it_behaves_like` nested inside a liftable `before :each`
+    // body would have the inliner emit a substitution INSIDE a
+    // delete range. `apply_substitutions` assumes non-overlapping
+    // ranges, so the inlined substitution must drop out — the
+    // body is about to be wiped by the delete anyway.
+    all_subs.extend(
+        inliner
+            .substitutions
+            .into_iter()
+            .filter(|s| !consumed.iter().any(|(dstart, dend)| {
+                s.start >= *dstart && s.end <= *dend
+            })),
+    );
 
     let rewritten = apply_substitutions(source, all_subs);
     let stripped = strip_require_relative(&rewritten);
@@ -918,6 +940,10 @@ struct SharedRegistry {
     /// lifetime — simpler to clone the body once than thread
     /// extra lifetimes through every visitor).
     entries: std::collections::HashMap<String, String>,
+    /// Shared-example names that appeared in more than one
+    /// `SharedSpec`. Surfaced to the CLI so the user knows the
+    /// inlined body depends only on the first definition seen.
+    duplicates: Vec<String>,
 }
 
 impl SharedRegistry {
@@ -937,7 +963,7 @@ fn build_shared_registry(specs: &[SharedSpec<'_>]) -> SharedRegistry {
         let root = parsed.node();
         let mut collector = SharedSpecCollector {
             source: spec.source,
-            entries: &mut registry.entries,
+            registry: &mut registry,
         };
         collector.visit(&root);
     }
@@ -953,7 +979,7 @@ fn build_shared_registry(specs: &[SharedSpec<'_>]) -> SharedRegistry {
 ///      with a symbol name would be misclassified.
 struct SharedSpecCollector<'a> {
     source: &'a str,
-    entries: &'a mut std::collections::HashMap<String, String>,
+    registry: &'a mut SharedRegistry,
 }
 
 impl<'pr> Visit<'pr> for SharedSpecCollector<'_> {
@@ -1002,7 +1028,23 @@ impl SharedSpecCollector<'_> {
         let block = block_node.as_block_node()?;
         let body = block.body()?;
         let body_text = slice(self.source, &body);
-        self.entries.insert(shared_name, body_text);
+        // Keep-first: a later `SharedSpec` shadowing an earlier
+        // definition is almost always an oversight (two shared
+        // files vendored under the same name). Surface the
+        // collision name so the CLI can warn instead of silently
+        // letting `--shared` ordering decide the body.
+        use std::collections::hash_map::Entry;
+        match self.registry.entries.entry(shared_name) {
+            Entry::Occupied(o) => {
+                // Keep-first: surface the collision so the CLI
+                // can warn instead of letting `--shared` order
+                // silently decide.
+                self.registry.duplicates.push(o.key().clone());
+            }
+            Entry::Vacant(v) => {
+                v.insert(body_text);
+            }
+        }
         Some(())
     }
 }
