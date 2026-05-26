@@ -415,6 +415,67 @@ pub(crate) fn string_call(
             }
             Some(Value::Int(if saw_digit { sign.wrapping_mul(n) } else { 0 }))
         }
+        // `String#to_i(radix)` — same lenient parse as the no-arg
+        // form but reading digits in the given base. Radix 0 means
+        // "auto-detect" from a `0x`/`0o`/`0b`/`0d` prefix (CRuby).
+        // Radix 2..=36 parses with that exact base (lowercase or
+        // uppercase digits). Out-of-range raises ArgumentError to
+        // match `Integer#to_s`'s shape. Mirrors the `Integer#to_s
+        // (radix)` arm in `numeric.rs` so `to_s(r).to_i(r)` round-
+        // trips for the supported range.
+        (Value::Str(a), "to_i", [Value::Int(radix)]) => {
+            let r = *radix;
+            // CRuby accepts 0 (auto-detect) and 2..=36; anything
+            // else raises ArgumentError.
+            if r != 0 && !(2..=36).contains(&r) {
+                return Err(RubyError::ArgumentError {
+                    msg: format!("invalid radix {}", r),
+                });
+            }
+            let a_ref = a.to_string_lossy();
+            let s = a_ref.trim_start();
+            let (sign, mut rest) = match s.as_bytes().first() {
+                Some(b'-') => (-1i64, &s[1..]),
+                Some(b'+') => (1i64, &s[1..]),
+                _ => (1i64, s),
+            };
+            // Resolve the actual radix. Radix 0 inspects the
+            // optional CRuby prefix; explicit radices skip the
+            // prefix unless it matches (e.g. `to_i(16)` accepts
+            // `"0xff"`, `to_i(2)` accepts `"0b1010"`).
+            let mut effective_r: u32 = if r == 0 { 10 } else { r as u32 };
+            let bytes = rest.as_bytes();
+            if bytes.len() >= 2 && bytes[0] == b'0' {
+                let (prefix_r, prefix_len) = match bytes[1] {
+                    b'x' | b'X' => (16u32, 2),
+                    b'b' | b'B' => (2u32, 2),
+                    b'o' | b'O' => (8u32, 2),
+                    b'd' | b'D' => (10u32, 2),
+                    _ => (0u32, 0),
+                };
+                if prefix_r != 0 && (r == 0 || r as u32 == prefix_r) {
+                    effective_r = prefix_r;
+                    rest = &rest[prefix_len..];
+                }
+            }
+            let mut n: i64 = 0;
+            let mut saw_digit = false;
+            for c in rest.chars() {
+                if let Some(d) = c.to_digit(effective_r) {
+                    saw_digit = true;
+                    n = n.wrapping_mul(effective_r as i64)
+                         .wrapping_add(d as i64);
+                } else if c == '_' && saw_digit {
+                    // CRuby tolerates `_` as a digit separator
+                    // INSIDE a numeric literal (e.g. `"1_000".to_i`
+                    // → 1000). Leading `_` is treated as garbage.
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            Some(Value::Int(if saw_digit { sign.wrapping_mul(n) } else { 0 }))
+        }
         (Value::Str(a), "to_f", []) => {
             // CRuby's leniency: trim leading whitespace, parse what
             // we can, return 0.0 for "garbage". Rust's stdlib
