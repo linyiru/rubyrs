@@ -314,6 +314,118 @@ end
 }
 
 #[test]
+fn require_rejects_path_traversal_in_subsegments() {
+    // Pins the per-segment validation added per Copilot review
+    // on PR #135. Without it, `require "rack/../missing"` would
+    // see `first_seg == "rack"` (which matches the pre-defined
+    // `module Rack`) and silently no-op against the namespace
+    // constant, bypassing the filesystem-shaped failure path.
+    // The guard now rejects any path containing empty, `.`, or
+    // `..` segments before consulting the constant table.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_traversal_driver.rb");
+    fs::write(&driver_path,
+        r#"
+module Rack; end
+
+[
+  "rack/../missing",   # parent-traversal mid-path
+  "rack/./foo",        # current-dir mid-path
+  "rack//empty",       # empty mid-segment
+].each do |p|
+  begin
+    require p
+    puts "leaked: #{p}"
+  rescue RuntimeError => e
+    puts "rejected: #{p}"
+  end
+end
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    let expected = "\
+rejected: rack/../missing
+rejected: rack/./foo
+rejected: rack//empty
+";
+    assert_eq!(
+        stdout, expected,
+        "path-traversal guard mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
+fn require_does_not_match_core_preamble_classes() {
+    // Pins the core-class blocklist added per Copilot review on
+    // PR #135. `self.classes` always contains `String`, `Array`,
+    // `Hash`, `Integer`, etc. from the preamble — without this
+    // blocklist, `require "string"` / `require "array"` would
+    // silently succeed via the case-insensitive walk (or via
+    // the upper-of-input probe for `require "STRING"`), masking
+    // a genuinely missing dependency. The blocklist ensures
+    // these paths fall through to cext_require with the standard
+    // "cannot find" diagnostic.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_core_class_block_driver.rb");
+    fs::write(&driver_path,
+        r#"
+# No user-defined modules here — the preamble's String / Array /
+# Hash / Integer / Object / Exception are the ONLY classes by
+# these names. require must NOT short-circuit on them.
+[
+  "string", "array", "hash", "integer", "object", "exception",
+].each do |p|
+  begin
+    require p
+    puts "leaked: #{p}"
+  rescue RuntimeError => e
+    puts "rejected: #{p}"
+  end
+end
+"#
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    let expected = "\
+rejected: string
+rejected: array
+rejected: hash
+rejected: integer
+rejected: object
+rejected: exception
+";
+    assert_eq!(
+        stdout, expected,
+        "core-class blocklist mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
 fn require_missing_rb_falls_back_to_cext_or_errors() {
     // Path with no .rb sibling and no cext sibling should
     // error out cleanly (RuntimeError-shape via the cext

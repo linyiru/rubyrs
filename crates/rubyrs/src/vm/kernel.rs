@@ -752,10 +752,26 @@ impl Vm {
     /// in the happy path.
     #[cfg(not(target_os = "wasi"))]
     fn require_satisfied_by_existing_constant(&mut self, path_str: &str) -> bool {
-        let first_seg = match path_str.split('/').next() {
-            Some(s) if !s.is_empty() => s,
-            _ => return false,
-        };
+        // Walk EVERY segment, not just the first. Reject empty,
+        // `.`, `..` — those are filesystem traversal shapes that
+        // should never be lenient-fallback'd against an existing
+        // constant. Without this, `require "rack/../missing"`
+        // would map first_seg = "rack" and silently no-op against
+        // `module Rack`, bypassing the file/cext failure path
+        // for filesystem-shaped require strings. Also rejects
+        // `rack//foo` (empty mid-segment) and `rack/`
+        // (empty trailing — though `split` includes the empty
+        // trailing here).
+        let segs: Vec<&str> = path_str.split('/').collect();
+        if segs.is_empty() {
+            return false;
+        }
+        for seg in &segs {
+            if seg.is_empty() || *seg == "." || *seg == ".." {
+                return false;
+            }
+        }
+        let first_seg = segs[0];
         // Skip relative / absolute paths and anything that looks
         // like a real filesystem name — those should go through
         // the .rb / cext path, not this fallback.
@@ -775,6 +791,28 @@ impl Vm {
         // cext_require, which will produce the same diagnostic
         // shape it would for any path with no .rb / cext sibling.
         if !first_seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            return false;
+        }
+        // Core-class blocklist. `self.classes` is populated by
+        // the preamble (`crates/rubyrs/src/lib.rs` ~750-1100) with
+        // every built-in class/module name — `Object`, `String`,
+        // `Array`, `Hash`, `Integer`, the exception hierarchy,
+        // `Enumerable`, `Comparable`, `File`, `Mutex`, `Kernel`,
+        // etc. Without this guard, `require "string"` would
+        // silently succeed because `String` is always in
+        // `self.classes`, masking a genuinely missing dependency.
+        // We're only meant to fire when an EMBEDDER or earlier
+        // script code registered the name; the preamble doesn't
+        // count.
+        //
+        // The list is the union of every class/module the
+        // preamble defines, normalized to lowercase for the
+        // first-segment compare. Keep in sync with the preamble
+        // when new core classes land. ASCII-lowercase compare
+        // matches the case-insensitive walk's normalization
+        // shape — `require "OBJECT"` is rejected the same as
+        // `require "object"`.
+        if is_core_preamble_class_name(first_seg) {
             return false;
         }
         // Interner growth guard: untrusted Ruby could otherwise
@@ -1255,6 +1293,40 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "bigdecimal" | "monitor" | "erb"
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util"
+    )
+}
+
+/// ASCII-lowercase name → "is this the preamble-defined core
+/// class for that name?" Used by
+/// `Vm::require_satisfied_by_existing_constant` to block
+/// `require "string"` / `require "array"` from silently
+/// succeeding against the preamble's `class String` /
+/// `class Array`. Anything an embedder or user script defines
+/// later isn't on this list and still triggers the lenient
+/// fallback.
+///
+/// Sources from `crates/rubyrs/src/lib.rs` (~750-1100): every
+/// `class Foo` / `module Foo` in the preamble. Keep in sync if
+/// new core classes land. Normalized to lowercase to share
+/// shape with the case-insensitive walk's compare so
+/// `require "OBJECT"` is rejected too.
+#[cfg(not(target_os = "wasi"))]
+fn is_core_preamble_class_name(lowered_first_seg: &str) -> bool {
+    matches!(
+        lowered_first_seg.to_ascii_lowercase().as_str(),
+        // value classes
+        "object" | "integer" | "float" | "string" | "symbol"
+        | "array" | "hash" | "range" | "trueclass" | "falseclass"
+        | "nilclass" | "proc" | "method" | "unboundmethod"
+        | "module" | "class" | "file" | "mutex" | "kernel"
+        | "matchdata" | "comparable" | "enumerable"
+        // exception hierarchy
+        | "exception" | "standarderror" | "runtimeerror"
+        | "nomethoderror" | "argumenterror" | "typeerror"
+        | "nameerror" | "scripterror" | "notimplementederror"
+        | "indexerror" | "keyerror" | "zerodivisionerror"
+        | "rangeerror" | "localjumperror" | "frozenerror"
+        | "resourceexhausted"
     )
 }
 
