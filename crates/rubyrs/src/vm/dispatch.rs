@@ -451,12 +451,19 @@ impl Vm {
                 self.stack.push(Value::Nil);
                 return Ok(());
             }
-            // `private_constant` / `public_constant` accept any number
-            // of symbol args (CRuby; including zero, which is a no-op).
-            // We don't enforce that args are Symbols since the stub
-            // ignores them anyway; the documented gap is that wrong
-            // arg types silently no-op here instead of TypeError.
-            if matches!(&*name, "private_constant" | "public_constant")
+            // `private_constant` / `public_constant` /
+            // `deprecate_constant` accept any number of symbol args
+            // (CRuby; including zero, which is a no-op). We don't
+            // enforce that args are Symbols since the stub ignores
+            // them anyway; the documented gap is that wrong arg
+            // types silently no-op here instead of TypeError.
+            // `deprecate_constant` would emit a deprecation warning
+            // in CRuby when the constant is read; rubyrs doesn't
+            // model deprecation warnings, so the read path returns
+            // the value silently (visibility unaffected).
+            // Motivating use: MRI `lib/erb.rb:264`
+            // (`deprecate_constant :Revision`).
+            if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
                 && let Value::Class(_) = &self_val {
                 self.stack.push(self_val);
                 return Ok(());
@@ -1902,7 +1909,7 @@ impl Vm {
             self.stack.push(Value::Nil);
             return Ok(());
         }
-        if matches!(&*name, "private_constant" | "public_constant")
+        if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
             && let Value::Class(_) = &recv {
             self.stack.push(recv);
             return Ok(());
