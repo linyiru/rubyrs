@@ -1325,50 +1325,56 @@ impl Vm {
         // runs `modpow` inside the borrow scope so BigInt operands
         // don't pay an O(n) clone before the computation.
         //
-        // recv must be Integer; non-Integer recv returns None so
-        // dispatch can fall through to NoMethodError (Float etc.
-        // have no `.pow(exp, mod)`).
-        if self.as_bigint_ref(recv).is_none() { return Ok(None); }
-        // Exp and mod must both be Integer (CRuby raises TypeError
-        // — not ArgumentError — for non-Integer shapes). Match
-        // CRuby's exact message text so user code pattern-matching
-        // on `e.message` keeps working.
-        if self.as_bigint_ref(&args[0]).is_none() {
-            return Err(self.trap(RubyError::TypeError {
-                msg: "Integer#pow() 2nd argument not allowed unless a 1st argument is integer".to_string(),
-            }));
-        }
-        if self.as_bigint_ref(&args[1]).is_none() {
-            return Err(self.trap(RubyError::TypeError {
-                msg: "Integer#pow() 2nd argument not allowed unless all arguments are integers".to_string(),
-            }));
-        }
-        // Pre-compute modulus sign and exp sign for the trap arms
-        // (avoids holding a Cow across the &mut self trap call).
-        let modulus_sign = self.as_bigint_ref(&args[1]).unwrap().sign();
-        let exp_sign = self.as_bigint_ref(&args[0]).unwrap().sign();
-        if modulus_sign == Sign::NoSign {
-            return Err(self.trap(RubyError::ZeroDivisionError {
-                msg: "divided by 0".to_string(),
-            }));
-        }
-        if exp_sign == Sign::Minus {
-            return Err(self.trap(RubyError::RangeError {
-                msg: "Integer#pow() 1st argument cannot be negative when 2nd argument specified".to_string(),
-            }));
-        }
-        // All validated. Borrow scope: hold three Cows, run modpow,
-        // drop borrows. BigInt::modpow returns a value with the
-        // same sign as modulus — matches Ruby's floor-mod semantics
-        // exactly, no post-adjustment.
-        let result = {
-            let base = self.as_bigint_ref(recv).unwrap();
-            let exp = self.as_bigint_ref(&args[0]).unwrap();
-            let modulus = self.as_bigint_ref(&args[1]).unwrap();
-            base.modpow(&exp, &modulus)
+        // All Cow-dependent work (shape checks, sign reads, modpow)
+        // runs inside one labelled block so each operand is borrowed
+        // exactly once. Int operands still pay one `BigInt::from(n)`
+        // alloc per `as_bigint_ref` call (unavoidable); BigInt
+        // operands stay as `Cow::Borrowed` (no clone). The block
+        // exits with Ok(Some(result)) / Ok(None) (decline) / Err
+        // (trap). Trap construction (which needs `&mut self`)
+        // happens AFTER the borrows expire, when the block returns.
+        let pre: Result<Option<num_bigint::BigInt>, RubyError> = 'classify: {
+            let Some(base) = self.as_bigint_ref(recv) else {
+                // Non-Integer recv → decline so dispatch falls
+                // through to NoMethodError (Float etc. have no
+                // `.pow(exp, mod)`).
+                break 'classify Ok(None);
+            };
+            // Match CRuby's exact TypeError message text so user
+            // code pattern-matching on `e.message` keeps working.
+            let Some(exp) = self.as_bigint_ref(&args[0]) else {
+                break 'classify Err(RubyError::TypeError {
+                    msg: "Integer#pow() 2nd argument not allowed unless a 1st argument is integer".to_string(),
+                });
+            };
+            let Some(modulus) = self.as_bigint_ref(&args[1]) else {
+                break 'classify Err(RubyError::TypeError {
+                    msg: "Integer#pow() 2nd argument not allowed unless all arguments are integers".to_string(),
+                });
+            };
+            // Sign checks read the held Cows directly (no extra
+            // borrow / no extra `BigInt::from(n)` for Int operands).
+            if modulus.sign() == Sign::NoSign {
+                break 'classify Err(RubyError::ZeroDivisionError {
+                    msg: "divided by 0".to_string(),
+                });
+            }
+            if exp.sign() == Sign::Minus {
+                break 'classify Err(RubyError::RangeError {
+                    msg: "Integer#pow() 1st argument cannot be negative when 2nd argument specified".to_string(),
+                });
+            }
+            // BigInt::modpow returns a value with the same sign as
+            // modulus — matches Ruby's floor-mod semantics exactly,
+            // no post-adjustment.
+            Ok(Some(base.modpow(&exp, &modulus)))
         };
-        // Borrows ended. Safe to call &mut self for demote-on-fit.
-        Ok(Some(self.bigint_to_value(result)?))
+        // Borrows expired with the block. Safe to call &mut self.
+        match pre {
+            Ok(None) => Ok(None),
+            Ok(Some(result)) => Ok(Some(self.bigint_to_value(result)?)),
+            Err(err) => Err(self.trap(err)),
+        }
     }
 }
 
