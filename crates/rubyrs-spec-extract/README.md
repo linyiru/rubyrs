@@ -37,14 +37,27 @@ cargo test -p rubyrs --test ruby_spec
 
 For batches that touch core classes (Array, String, Integer)
 the extractor output is usually one polish step away from
-landing — the `it` blocks that reference upstream fixtures
-(`ArraySpecs.recursive_array`, `MyArray[...]`) or methods
-rubyrs doesn't yet implement (`Array#push`, `Array#min { ... }`,
-count-form `Array#first(n)`) load but error at run time, masking
-the PASSes around them. The companion
-`scripts/polish.py` removes those `it` blocks, leaving a
-`# skipped (fixture-dependent): ...` trace per drop so the
-diff stays auditable. Pipeline shape:
+landing. The companion `scripts/polish.py` removes:
+
+  - **`it` blocks** whose body matches a `DROP_PATTERNS` entry —
+    fixtures (`ArraySpecs.recursive_array`, `MyArray[...]`),
+    unimplemented methods (`Array#push`, `Array#min { ... }`,
+    count-form `Array#first(n)`), `mock`/`should_receive`, and
+    `FrozenError`/`.freeze` checks.
+  - **Top-level `before`/`after` hook blocks** the extractor's
+    v0.3 `before :each` lifter didn't pick up (multi-arg,
+    non-flat context, `before :all`, `after :each`) — these
+    would otherwise file-level-trap with `undefined method
+    \`before\` for NilClass`.
+
+Each drop leaves a `# skipped (<category>): ...` trace at the
+original block's indentation. Categories: `fixture` /
+`mock` / `frozen-state` / `method-not-implemented` for `it`
+blocks; `before-not-lifted` / `after-not-supported` for hook
+blocks. `git grep "# skipped (method-not-implemented)"` finds
+every block that would unlock when one feature PR lands.
+
+Pipeline shape:
 
 ```bash
 cargo run --release -p rubyrs-spec-extract \

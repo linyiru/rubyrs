@@ -61,12 +61,14 @@ spec/
     ├── array_compact_spec.rb      # core/array — extractor v0.3
     │
     │ # core/array batch: extractor v0.4 + scripts/polish.py
-    │ # (drops fixture-dependent + unimplemented-method `it`
-    │ # blocks, leaving auditable `# skipped (<category>): ...`
-    │ # traces at the dropped block's indentation). Adds 9
-    │ # files covering the head/tail/length surface; the polish
-    │ # step is documented in
-    │ # ../../rubyrs-spec-extract/README.md.
+    │ # drops `it` blocks matching DROP_PATTERNS (fixture /
+    │ # mock / frozen-state / method-not-implemented) and
+    │ # top-level `before`/`after` hooks the lifter didn't
+    │ # pick up (before-not-lifted / after-not-supported).
+    │ # Each drop leaves `# skipped (<category>): it "..." do`
+    │ # at the original indentation. Adds 9 files covering the
+    │ # head/tail/length surface; the polish step is documented
+    │ # in ../../rubyrs-spec-extract/README.md.
     ├── array_empty_spec.rb
     ├── array_first_spec.rb
     ├── array_include_spec.rb
