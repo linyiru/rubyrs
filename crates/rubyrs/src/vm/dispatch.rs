@@ -918,6 +918,27 @@ impl Vm {
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
+        // User-defined `def self.new` takes precedence over the
+        // built-in allocator. CRuby's `Class#new` is itself a
+        // normal Ruby method (delegating to `allocate` +
+        // `initialize`); any user override should win. Without
+        // this check, e.g. `module Tilt; def self.new(file, ...);
+        // @default_mapping.new(file, ...); end; end; Tilt.new("x")`
+        // never enters the override — the hardcoded allocator
+        // below returns a generic `#<Tilt>` Instance instead.
+        // Mirrored in `do_call_block` for the block-form path.
+        //
+        // Documented gap: `def self.new ... super ... end` still
+        // hits the allocator via super only if Class's builtin
+        // `new` is reachable through super_lookup — which it
+        // isn't today. Override-without-super covers the tilt
+        // entry-point (and the common DSL builder pattern); the
+        // super-into-allocator case is a separable follow-up.
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
+            return self.invoke_method(m, recv.clone(), args);
+        }
         if name_id == new_id
             && let Value::Class(cls) = &recv {
                 // L3-F: cext-registered allocator path. When the class
