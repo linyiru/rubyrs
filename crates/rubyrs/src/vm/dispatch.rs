@@ -846,12 +846,14 @@ impl Vm {
         // silently bypassed the override and returned an empty
         // `{}` from the hardcoded Hash path.
         //
-        // The block-form path (`do_call_block`) already routes
+        // The block-form path (`do_call_block`) generally routes
         // user `self.new` overrides through its general
-        // Value::Class singleton-method dispatch arm, so no
-        // mirrored check is needed there — this no-block path
-        // is the only one with hardcoded `.new` shortcuts that
-        // bypassed singleton resolution.
+        // Value::Class singleton-method dispatch arm, so most
+        // classes don't need a mirrored check there. The one
+        // exception is `do_call_block`'s `Hash.new { block }`
+        // intercept, which fires before that generic arm — it
+        // carries the same singleton pre-check pattern as this
+        // one for parity.
         //
         // Documented gap: `def self.new ... super ... end` still
         // hits the allocator via super only if Class's builtin
@@ -3540,21 +3542,22 @@ impl Vm {
             && let Some(Value::Class(cls)) = &recv
             && cls.name.as_str() == "Hash"
         {
-            // Same precedence rule as the no-block path
-            // (do_call:874): a user `def self.new` on Hash
-            // (reopened class) wins over the built-in default-
-            // block intercept. CRuby treats `Class#new` as a
-            // regular method; a reopen-and-override is just
-            // normal method-resolution and should be honoured
-            // in block-form too. Without this check, `class
-            // Hash; def self.new(&b); ...; end; end;
-            // Hash.new { ... }` silently returned `{}` from
-            // the hardcoded intercept below.
+            // Same precedence rule as `do_call`'s Hash.new no-
+            // block path: a user `def self.new` on Hash (reopened
+            // class) wins over the built-in default-block
+            // intercept. CRuby treats `Class#new` as a regular
+            // method; a reopen-and-override is just normal
+            // method-resolution and should be honoured in block-
+            // form too. Without this check, `class Hash; def
+            // self.new(&b); ...; end; end; Hash.new { ... }`
+            // silently returned `{}` from the hardcoded intercept
+            // below.
             //
-            // The generic Value::Class singleton-method dispatch
-            // arm at line 3705 would catch this for non-Hash
-            // classes, but it fires AFTER this Hash intercept,
-            // so Hash specifically needs the explicit pre-check.
+            // `do_call_block`'s generic Value::Class singleton-
+            // method dispatch arm further down would catch this
+            // for non-Hash classes, but it fires AFTER this Hash
+            // intercept, so Hash specifically needs the explicit
+            // pre-check.
             if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
                 let target_self = Value::Class(cls.clone());
                 return self.invoke_method_with_block(m, target_self, args, Some(block));
