@@ -191,6 +191,13 @@ impl Vm {
         for v in self.toplevel_cvars.values() {
             roots.push(v.clone());
         }
+        // `$LOAD_PATH` Array (lazily allocated; `None` until
+        // first read). The Array's String elements are
+        // Rc-backed; the mark walk through Value::Array picks
+        // them up via the normal Array-children visit.
+        if let Some(id) = self.load_path {
+            roots.push(Value::Array(id));
+        }
         for m in self.toplevel_methods.values() {
             if let Some(cl) = &m.closure {
                 for v in cl.captured.borrow().iter() { roots.push(v.clone()); }

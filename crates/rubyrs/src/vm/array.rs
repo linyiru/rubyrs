@@ -44,6 +44,43 @@ impl Vm {
                         let a = self.heap.array_mut(id);
                         Some(a.pop().unwrap_or(Value::Nil))
                     }
+                    // `Array#unshift(v)` / `prepend(v)` — insert at
+                    // front, return receiver. Variadic in CRuby
+                    // (`unshift(a, b, c)` inserts all at once in
+                    // order); rubyrs accepts the single-arg form
+                    // first (the common shape — `$LOAD_PATH.unshift
+                    // dir` everywhere) and the variadic form via
+                    // the next arm. Byte-cap enforcement mirrors
+                    // `push`.
+                    ("unshift", [v]) | ("prepend", [v]) => {
+                        let new_len = self.heap.array(id).len().saturating_add(1);
+                        if let Some(max) = self.max_value_bytes
+                            && new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array.unshift would exceed {max} bytes"),
+                                }));
+                            }
+                        self.heap.array_mut(id).insert(0, v.clone());
+                        Some(Value::Array(id))
+                    }
+                    ("unshift", many) | ("prepend", many) if !many.is_empty() => {
+                        let new_len = self.heap.array(id).len().saturating_add(many.len());
+                        if let Some(max) = self.max_value_bytes
+                            && new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array.unshift would exceed {max} bytes"),
+                                }));
+                            }
+                        // CRuby semantics: unshift(a, b, c) leaves
+                        // [a, b, c, ...rest] (args appear in
+                        // call-order at the front). Splice in one
+                        // shot rather than `insert` per element so
+                        // the relative order is preserved.
+                        let a = self.heap.array_mut(id);
+                        let owned: Vec<Value> = many.to_vec();
+                        a.splice(0..0, owned);
+                        Some(Value::Array(id))
+                    }
                     ("push", [v]) | ("<<", [v]) => {
                         // P2-14c: refuse a push that would make this
                         // Array's storage exceed the per-value byte

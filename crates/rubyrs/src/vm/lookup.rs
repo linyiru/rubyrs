@@ -200,6 +200,7 @@ impl Vm {
             Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name"),
             Value::Array(_) => matches!(name,
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
+                "unshift" | "prepend" |
                 "shift" | "pop" | "reverse_each" |
                 "first" | "last" | "empty?" | "include?" |
                 "count" | "sum" | "min" | "max" | "sort" | "tally" |

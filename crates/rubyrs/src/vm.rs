@@ -298,6 +298,13 @@ pub(crate) struct Vm {
     /// the toplevel-only `@@x` writes scripts occasionally use
     /// for cache-like state at file scope.
     pub(crate) toplevel_cvars: HashMap<SymId, Value>,
+    /// Heap-allocated `$LOAD_PATH` / `$:` Array. Lazily
+    /// initialised on first read so cold-eval scripts that
+    /// never touch it pay zero startup cost. Scripts can
+    /// `$LOAD_PATH.unshift(dir)` — mutations on this ObjId
+    /// land in the same heap Array the require dispatcher
+    /// later reads from. GC-rooted in `maybe_gc`.
+    pub(crate) load_path: Option<ObjId>,
     pub(crate) host_fns: HashMap<SymId, HostFnSlot>,
     /// C-ext singleton-method dispatch table. Indexed by
     /// `(class joined name, method SymId)`. Populated by
@@ -487,6 +494,7 @@ impl Vm {
             globals: HashMap::new(),
             toplevel_methods: HashMap::new(),
             toplevel_cvars: HashMap::new(),
+            load_path: None,
             host_fns: HashMap::new(),
             #[cfg(feature = "cext")]
             cext_class_methods: HashMap::new(),

@@ -564,7 +564,12 @@ impl Vm {
     ///      'rack/show_exceptions'` from
     ///      `<root>/sinatra/show_exceptions.rb` finds
     ///      `<root>/rack/show_exceptions.rb`).
-    ///   4. raw input as last-resort defensive fallback when
+    ///   4. each `$LOAD_PATH` entry + name.rb (in order;
+    ///      scripts opt into this by `$LOAD_PATH.unshift(dir)`
+    ///      at boot). Approximates CRuby's `$LOAD_PATH` walk
+    ///      for hand-managed source trees + gem-vendor
+    ///      layouts.
+    ///   5. raw input as last-resort defensive fallback when
     ///      auto-`.rb` extension was applied but didn't match.
     ///
     /// Shared by `require_ruby` (for the actual load) and the
@@ -591,6 +596,18 @@ impl Vm {
                 candidates.push(dir.join(&rb_form));
                 if let Some(parent) = dir.parent() {
                     candidates.push(parent.join(&rb_form));
+                }
+            }
+            // `$LOAD_PATH` walk. The Array is populated by the
+            // script's own `$LOAD_PATH.unshift(dir)` calls; if
+            // it was never touched (lazy `Vm.load_path` still
+            // `None`) this is a zero-cost no-op.
+            if let Some(lp_id) = self.load_path {
+                for entry in self.heap.array(lp_id).iter() {
+                    if let Value::Str(s) = entry {
+                        let dir = s.to_string_lossy();
+                        candidates.push(PathBuf::from(dir).join(&rb_form));
+                    }
                 }
             }
         }

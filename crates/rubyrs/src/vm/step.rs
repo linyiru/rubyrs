@@ -22,6 +22,24 @@ use crate::value::{BlockHandle, Class, Method, Value, Visibility};
 use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm};
 
 impl Vm {
+    /// Lazily allocate the `$LOAD_PATH` Array on first access.
+    /// Idempotent — subsequent calls return the same ObjId so
+    /// script mutations (`$LOAD_PATH.unshift(dir)`) land on
+    /// the slot the require dispatcher later reads.
+    /// `check_alloc` enforces heap caps before allocating;
+    /// `maybe_gc` may sweep between calls but `Vm.load_path`
+    /// is a GC root (rooted in `gc.rs`) so the slot survives.
+    pub(crate) fn ensure_load_path(&mut self) -> Result<crate::value::ObjId, Trap> {
+        if let Some(id) = self.load_path {
+            return Ok(id);
+        }
+        self.maybe_gc();
+        self.check_alloc()?;
+        let id = self.heap.alloc(HeapObj::Array(Vec::new()));
+        self.load_path = Some(id);
+        Ok(id)
+    }
+
     /// The class that owns the current `@@cvar` context, if any.
     /// Resolution mirrors CRuby's "current cref" walk:
     ///   - frame.self_val is `Value::Class(c)` (class body or
@@ -642,6 +660,17 @@ impl Vm {
                             .map(|f| self.protos[f.proto_idx].filename.to_string())
                             .unwrap_or_else(|| "-".to_string());
                         Value::new_str(name)
+                    }
+                    // `$LOAD_PATH` / `$:` — the require-search-path
+                    // Array. Lazily materialised on first read so
+                    // scripts that don't touch it pay no startup
+                    // cost. The Array is mutable and persistent —
+                    // `$LOAD_PATH.unshift(dir)` adds an entry that
+                    // subsequent `require` calls consult (see
+                    // `Vm::ruby_source_candidates`).
+                    "$LOAD_PATH" | "$:" => {
+                        let id = self.ensure_load_path()?;
+                        Value::Array(id)
                     }
                     _ => self.globals.get(&name_id).cloned().unwrap_or(Value::Nil),
                 };
