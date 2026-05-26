@@ -59,3 +59,11 @@ begin
 rescue ArgumentError => e
   puts e.message                                # comparison of Symbol with 0 failed
 end
+
+# --- BigInt comparator result is treated as Integer ---
+# CRuby: `2**100 <=> 0` returns a BigInt Integer; sort should
+# accept any Integer (including BigInt) as the comparator
+# result. Without the BigInt arm, this would raise
+# ArgumentError on the very first comparison.
+big = 2 ** 100
+puts [3, 1, 2].sort { |a, b| (a * big) <=> (b * big) }.inspect

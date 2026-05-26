@@ -1388,10 +1388,27 @@ impl Vm {
                         // name in the message is the block-return
                         // type, not the operand types — those are
                         // both Integer in the common probe.
-                        let ord = match result {
-                            Value::Int(n) if n > 0 => std::cmp::Ordering::Greater,
-                            Value::Int(n) if n < 0 => std::cmp::Ordering::Less,
+                        //
+                        // BigInt path: with `bignum` enabled,
+                        // `2**100 <=> 0` legitimately returns a
+                        // BigInt for very large differences. Compare
+                        // its sign against 0 just like Int. Without
+                        // this, `arr.sort { |a, b| (a * 2**100) <=>
+                        // (b * 2**100) }` would ArgumentError.
+                        let ord = match &result {
+                            Value::Int(n) if *n > 0 => std::cmp::Ordering::Greater,
+                            Value::Int(n) if *n < 0 => std::cmp::Ordering::Less,
                             Value::Int(_) => std::cmp::Ordering::Equal,
+                            #[cfg(feature = "bignum")]
+                            Value::BigInt(id) => {
+                                use num_bigint::BigInt;
+                                let zero = BigInt::from(0);
+                                match g.vm.heap.bigint(*id).cmp(&zero) {
+                                    std::cmp::Ordering::Greater => std::cmp::Ordering::Greater,
+                                    std::cmp::Ordering::Less => std::cmp::Ordering::Less,
+                                    std::cmp::Ordering::Equal => std::cmp::Ordering::Equal,
+                                }
+                            }
                             _ => {
                                 let result_class = match g.vm.class_of(&result) {
                                     Value::Class(c) => c.name.clone(),
