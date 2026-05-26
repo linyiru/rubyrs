@@ -13,7 +13,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::Value;
 
-use super::Vm;
+use super::{PinGuard, Vm};
 
 impl Vm {
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
@@ -280,9 +280,26 @@ impl Vm {
                         Some(Ok(Value::Array(id)))
                     }
                     Value::Array(_) => Some(Ok(args[0].clone())),
-                    other => {
-                        self.maybe_gc();
-                        let id = self.heap.alloc(crate::heap::HeapObj::Array(vec![other.clone()]));
+                    _ => {
+                        // GC rooting: `args` was drained out of
+                        // `self.stack` in `do_call`, so `args[0]` is
+                        // a Rust local — NOT in the root set
+                        // (stack / pinned / frame locals / globals
+                        // / constants). Under STRESS_GC=1 every
+                        // alloc triggers mark+sweep, so the slot
+                        // referenced by `args[0]` would be reaped
+                        // between `maybe_gc` and `heap.alloc` and
+                        // the new one-element Array would point at
+                        // a recycled slot, surfacing as
+                        // `class_of called on non-Object slot`.
+                        // See issue #90, site #8. Mirrors the fix
+                        // applied at the 6 prior sites in commits
+                        // 86db73d / f2c3538 / 5946caa.
+                        let mut g = PinGuard::new(self);
+                        let elt = args[0].clone();
+                        g.pin(elt.clone());
+                        g.vm.maybe_gc();
+                        let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![elt]));
                         Some(Ok(Value::Array(id)))
                     }
                 }
