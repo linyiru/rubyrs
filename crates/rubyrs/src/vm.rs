@@ -1403,8 +1403,13 @@ impl Vm {
     /// - Non-Integer base → TypeError "no implicit conversion of
     ///   X into Integer".
     /// - Result-array estimate exceeds `max_value_bytes` → trap
-    ///   ResourceExhausted before allocation. Bound is
-    ///   `ceil(bit_length / log2(base)) * size_of::<Value>()`.
+    ///   ResourceExhausted before allocation. The bound uses an
+    ///   integer approximation: `est_count = floor((recv_bits - 1)
+    ///   / log2_lower) + 1`, where `log2_lower = max(1, base.bits()
+    ///   - 1)` is a lower bound on `log2(base)` (since `base >=
+    ///   2^(base.bits() - 1)`). Dividing by a smaller log gives a
+    ///   safe upper bound on the count without floating-point.
+    ///   Multiply by `size_of::<Value>()` for the byte estimate.
     #[cfg(feature = "bignum")]
     pub(crate) fn try_integer_digits(
         &mut self,
@@ -1476,23 +1481,34 @@ impl Vm {
             }
         };
         // Pre-estimate array length to avoid building a multi-GB
-        // Vec on hostile input. True count is
-        // `ceil(recv_bits / log2(base))`. Use the integer lower
-        // bound `log2(base) >= base.bits() - 1` (since
-        // `base >= 2^(base.bits() - 1)`); dividing by a smaller
-        // log gives a safe upper bound on the count without
-        // floating-point. Add 1 for the leading non-zero digit.
+        // Vec on hostile input. The exact digit count is
+        // `floor(log_base(recv)) + 1`; rewriting via base-2:
+        // `floor((recv_bits - 1) / log2(base)) + 1` (since
+        // `log2(recv) ≈ recv_bits - 1` for recv > 0). We use the
+        // integer lower bound `log2(base) >= base.bits() - 1`
+        // (since `base >= 2^(base.bits() - 1)`); dividing by a
+        // smaller log gives a safe upper bound on the count
+        // without floating-point.
         //
-        // Base = 2: `base.bits() - 1 == 1`, est ≈ recv_bits + 1.
-        // Base = 10: `base.bits() - 1 == 3`, est ≈ recv_bits/3 + 1.
-        // Base = 256: `base.bits() - 1 == 8`, est ≈ recv_bits/8 + 1.
+        // Base = 2:   log2_lower = 1, est = recv_bits (exact).
+        // Base = 10:  log2_lower = 3, est ≈ recv_bits/3 + 1.
+        // Base = 256: log2_lower = 8, est ≈ recv_bits/8 + 1.
         //
-        // Previous estimate (`recv_bits + 1` for ALL bases) was
-        // overly conservative for bases > 2 — could falsely trap
-        // under a tight cap even when the actual array fits.
+        // recv_bits == 0 case (`Sign::NoSign`) is handled below
+        // as a fixed single-element `[0]` array — skip the cap
+        // check entirely for that path.
         const VALUE_BYTES: u64 = std::mem::size_of::<Value>() as u64;
         let log2_lower: u64 = base.bits().saturating_sub(1).max(1);
-        let est_count: u64 = (recv_bits / log2_lower).saturating_add(1);
+        let est_count: u64 = if recv_bits == 0 {
+            1
+        } else {
+            // ceil-form: `(recv_bits - 1) / log2_lower + 1`.
+            // Previous form `recv_bits / log2_lower + 1`
+            // overcounted by 1 for base = 2 (recv_bits = N gave
+            // est = N+1 instead of N) and similarly off-by-one
+            // for any base where `recv_bits % log2_lower == 0`.
+            (recv_bits - 1) / log2_lower + 1
+        };
         let est_bytes: u64 = est_count.saturating_mul(VALUE_BYTES);
         let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
         if est_bytes > cap {
@@ -1504,8 +1520,9 @@ impl Vm {
             }));
         }
         // Build the digit array. Re-fetch the recv BigInt as the
-        // working value; clone is needed because we'll mutate via
-        // div_rem. For Int receivers, `BigInt::from(n)` is cheap.
+        // working value; clone is needed because we'll mutate `n`
+        // via repeated `n = &n / &base` in the loop below. For Int
+        // receivers, `BigInt::from(n)` is cheap.
         let mut n: BigInt = match recv {
             Value::Int(v) => BigInt::from(*v),
             Value::BigInt(id) => self.heap.bigint(*id).clone(),
