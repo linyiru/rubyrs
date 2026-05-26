@@ -73,3 +73,12 @@ begin
 rescue ArgumentError => e
   puts "last(-1): #{e.message}"   # last(-1): negative array size
 end
+
+# Block attached — CRuby silently discards. `first(n)` / `last(n)`
+# don't yield to a block, so the block is dead code. Before the
+# Apr 2026 iter.rs fix, the block-aware dispatch path had no
+# `first` / `last` arms and the call NoMethodError'd here.
+puts(a.first(2) { puts "should-never-run" }.inspect)  # [10, 20]
+puts(a.last(2)  { puts "should-never-run" }.inspect)  # [40, 50]
+puts(a.first    { puts "should-never-run" }.inspect)  # 10
+puts(a.last     { puts "should-never-run" }.inspect)  # 50

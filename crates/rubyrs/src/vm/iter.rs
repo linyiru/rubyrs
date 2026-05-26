@@ -370,6 +370,21 @@ impl Vm {
             return Ok(Some(early.unwrap_or_else(|| recv.clone())));
         }
         Ok(match (recv, name, args) {
+            // `arr.first` / `arr.first(n)` / `arr.last` / `arr.last(n)`
+            // with an attached block — CRuby silently discards the
+            // block (these methods don't yield). Without an arm
+            // here the call falls through to NoMethodError on
+            // `[1,2,3].first(2) { ... }`, surprising callers who
+            // expect Ruby's "block silently ignored when the
+            // method doesn't use one" convention. Delegate to the
+            // non-block dispatcher so both paths share one source
+            // of truth (and pick up future tweaks — e.g. Float /
+            // BigInt n coercion — in lockstep). The receiver
+            // doesn't need pinning here: `array_collection_call`
+            // pins anything it allocates.
+            (Value::Array(id), "first" | "last", _) => {
+                return self.array_collection_call(*id, name, args);
+            }
             (Value::Array(id), "each", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
