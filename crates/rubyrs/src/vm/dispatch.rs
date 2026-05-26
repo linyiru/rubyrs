@@ -3666,6 +3666,23 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // Block-form `def self.foo` dispatch. Mirrors `do_call`'s
+        // `Value::Class` arm at vm/dispatch.rs:1226 — without this,
+        // `Foo.bar(args) { … }` where `Foo` carries a user singleton
+        // method falls all the way through to `NoMethodError`.
+        // Common shape: `StringIO.open("x") do |io| … end`,
+        // `Module.send(:include, M) { … }`, any DSL helper a host
+        // exposes as a class method that takes a block. Same
+        // `lookup_class_singleton_method` helper walks the singleton
+        // chain through superclasses; on a hit, we re-enter via
+        // `invoke_method_with_block` to thread the block through.
+        if let Value::Class(cls) = &recv
+            && let Some(m) = self.lookup_class_singleton_method(cls, name_id)
+        {
+            let target_self = recv.clone();
+            return self.invoke_method_with_block(m, target_self, args, Some(block));
+        }
+
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {

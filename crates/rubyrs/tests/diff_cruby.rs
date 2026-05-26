@@ -274,6 +274,8 @@ fn run_diff(name: &str) {
 #[test] fn stdlib_pathname() { run_diff("stdlib_pathname"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_set() { run_diff("stdlib_set"); }
+#[cfg(feature = "stdlib")]
+#[test] fn stdlib_stringio() { run_diff("stdlib_stringio"); }
 #[test] fn uninitialized_constant() { run_diff("uninitialized_constant"); }
 #[test] fn singleton_class_prepend() { run_diff("singleton_class_prepend"); }
 #[test] fn tilt_load_capabilities() { run_diff("tilt_load_capabilities"); }
