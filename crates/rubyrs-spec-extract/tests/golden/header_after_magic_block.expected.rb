@@ -2,7 +2,7 @@
 # encoding: utf-8
 # frozen_string_literal: false
 
-# rubyrs-spec-extract v0.3: 1 pattern(s) left for hand polish.
+# rubyrs-spec-extract v0.4: 1 pattern(s) left for hand polish.
 # Each entry names the upstream line + reason. Address each
 # (comment out, inline, or wait for a later extractor version)
 # before the file is consumable by the micro-runner.

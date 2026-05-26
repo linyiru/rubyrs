@@ -6,7 +6,7 @@ micro-runner consumes (`crates/rubyrs/spec/`).
 
 This crate implements Layer 4 of the testing strategy
 ([`docs/TESTING.md`](https://github.com/linyiru/rubyrs/blob/master/docs/TESTING.md)).
-The current release is v0.2 — see the "What the extractor
+The current release is v0.4 — see the "What the extractor
 recognises" table below for the exact pattern set, and
 "Known limitations of v0.2" for the documented trade-offs.
 The hand-translated specs in
@@ -35,7 +35,7 @@ cargo run --release -p rubyrs-spec-extract \
 cargo test -p rubyrs --test ruby_spec
 ```
 
-## What the extractor recognises (current: v0.2)
+## What the extractor recognises (current: v0.4)
 
 The recogniser shipped incrementally. Patterns in italics
 are passthrough — extractor leaves them verbatim for a

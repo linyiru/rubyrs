@@ -84,6 +84,27 @@ fn main() -> ExitCode {
         }
     }
 
+    // Also check each shared file. A broken shared file would
+    // produce a silently-incomplete registry, and the consumer's
+    // `it_behaves_like` would fall through as "name not found"
+    // with no signal that a parse error caused it. Surfacing the
+    // errors keyed by path makes the actual failure mode visible.
+    let mut any_shared_errors = false;
+    for (i, src) in shared_sources.iter().enumerate() {
+        let sh_errors = rubyrs_spec_extract::parse_errors(src);
+        if !sh_errors.is_empty() {
+            any_shared_errors = true;
+            eprintln!(
+                "rubyrs-spec-extract: --shared {}: {} prism parse error(s); shared body may be incomplete:",
+                shared_paths[i],
+                sh_errors.len()
+            );
+            for e in &sh_errors {
+                eprintln!("  - {e}");
+            }
+        }
+    }
+
     let output = if shared_specs.is_empty() {
         rubyrs_spec_extract::extract(&source)
     } else {
@@ -91,7 +112,7 @@ fn main() -> ExitCode {
     };
     print!("{output}");
 
-    if errors.is_empty() {
+    if errors.is_empty() && !any_shared_errors {
         ExitCode::SUCCESS
     } else {
         // Non-zero so a script driving the extractor over a

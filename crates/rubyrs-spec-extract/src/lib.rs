@@ -2,11 +2,8 @@
 //! `assert_eq` / `assert_raises` shape that rubyrs's micro-runner
 //! understands (`crates/rubyrs/spec/`).
 //!
-//! v0.1 recognises exactly one pattern: `expr.should == val`.
-//! That pattern accounts for the bulk of the equality-style
-//! `it` blocks in upstream `core/string`, `core/method`, and
-//! similar simple files — the same shape PR #48/#52/#55 have
-//! been translating by hand.
+//! **Current version: v0.4.** See `README.md` for the full
+//! recogniser pattern table and version history.
 //!
 //! Approach: byte-range substitution. We parse the source with
 //! `ruby_prism`, walk only the `CallNode`s we care about, and
@@ -14,33 +11,33 @@
 //! walk we apply them in reverse byte order so earlier offsets
 //! stay valid. Everything we don't recognise passes through
 //! verbatim — including comments, whitespace, blank lines, and
-//! any matcher shapes (`should.raise`, `it_behaves_like`,
-//! predicate-style `should.X?`) we haven't taught the extractor
-//! about yet. Those land in the output as-is so a human can
-//! see what still needs to be hand-translated.
+//! any matcher shapes we haven't taught the extractor about yet.
+//! Those land in the output as-is so a human can see what still
+//! needs to be hand-translated (the v0.3 skip-log header
+//! enumerates the known unrewritten patterns at the top of the
+//! output).
 //!
-//! ## What v0.1 deliberately does NOT do
+//! ## v0.4 recogniser set (high-level)
 //!
-//! - `expr.should_not == val` — needs an `assert_neq` helper in
-//!   `spec_helper.rb`; pending.
-//! - `expr.should.foo?` (predicate matcher) — needs per-predicate
-//!   knowledge.
-//! - `-> { ... }.should.raise(X)` — could lower to
-//!   `assert_raises("X") { ... }` but requires parsing the lambda
-//!   and the matcher class name.
-//! - `it_behaves_like :shared, ...` — inlining shared examples is
-//!   a separate piece of work.
+//! - Matcher rewrites (v0.1–v0.2): `should ==` / `should_not ==`
+//!   / predicate matchers (`should.X?`) / lambda-raise.
+//! - `mock_int(literal_int)` standalone substitution (v0.3).
+//! - `before :each` body lift into sibling `it`s (v0.3, flat
+//!   case only).
+//! - Skip-log header listing unrewritten patterns (v0.3,
+//!   curated allow-list).
+//! - **`it_behaves_like :NAME, args...` cross-file inlining
+//!   (v0.4)** — see [`extract_with_shared`] / [`SharedSpec`].
 //!
-//! ## What v0.1 DOES do beyond the `should ==` rewrite
+//! ## Known limitations
 //!
-//! - **Strips `require_relative` lines** from the output. The
-//!   micro-runner has no loader, so a stray `require_relative
-//!   '../../spec_helper'` would raise NoMethodError at file scope
-//!   and the runner's `<file-level>` synthetic example would fail
-//!   the whole file. Stripping is a line-level filter
-//!   (`^\s*require_relative\b.*$`) applied after the AST rewrite
-//!   — independent of parse state so even partially-invalid
-//!   source still gets the cleanup.
+//! - Patterns nested inside the args of a matched outer call
+//!   aren't re-rewritten (cluster E in the v0.2 review history).
+//! - Consumer's `before :each` doesn't apply to inlined `it`s
+//!   from a `it_behaves_like` (v0.4) — documented in README.
+//! - `require_relative` lines are stripped via a line-level
+//!   filter (the micro-runner has no loader; an uncaught
+//!   file-scope `require_relative` would fail the file).
 
 use ruby_prism::{Node, Visit};
 
@@ -888,7 +885,7 @@ fn line_at(line_starts: &[usize], byte_offset: usize) -> usize {
 /// the extractor output.
 fn render_skip_header(patterns: &[UnhandledPattern]) -> String {
     let mut out = String::new();
-    out.push_str("# rubyrs-spec-extract v0.3: ");
+    out.push_str("# rubyrs-spec-extract v0.4: ");
     out.push_str(&format!("{} pattern(s) left for hand polish.\n", patterns.len()));
     out.push_str("# Each entry names the upstream line + reason. Address each\n");
     out.push_str("# (comment out, inline, or wait for a later extractor version)\n");
