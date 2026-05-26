@@ -398,6 +398,12 @@ pub(crate) struct Vm {
     /// ADR 0017 Rule 1 closure for the previous
     /// `std::process::id()` deviation.
     pub(crate) pid: Option<i64>,
+    /// Host-injected wall-clock source for `Time.now`. `None`
+    /// means `__time_now_raw` raises (deterministic Tier 1
+    /// default); CLI binary fills this from
+    /// `std::time::SystemTime::now()`. ADR 0017 Rule 1 closure
+    /// for the previous "no Time class at all" status.
+    pub(crate) time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) heap: Heap,
@@ -544,6 +550,7 @@ impl Vm {
             env_hash: None,
             env_override: None,
             pid: None,
+            time_now: None,
             stack: Vec::with_capacity(1024),
             frames: vec![],
             heap: Heap::new(),

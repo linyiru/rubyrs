@@ -2785,3 +2785,85 @@ fn secure_random_seed_setter_makes_output_deterministic() {
     rt.eval(script, "sr_seeded.rb").expect("eval");
     assert_eq!(buf.snapshot(), "true\ntrue\ntrue\nfalse\n");
 }
+
+#[test]
+fn time_now_default_raises_without_capability_injection() {
+    // ADR 0017 Rule 1: by default `Time.now` must NOT reach for
+    // the host wall clock. With no `Config::time_now` injection,
+    // the preamble's `Time.now` calls into `__time_now_raw` which
+    // raises RuntimeError with a message pointing at the
+    // capability slot.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("Time.now", "time_no_capability.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected Uncaught RuntimeError, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "RuntimeError");
+    assert!(
+        message.contains("Time.now requires `Config::time_now` injection"),
+        "unexpected message: {}",
+        message,
+    );
+}
+
+#[test]
+fn time_now_returns_injected_value_byte_identical() {
+    // With a fixed-clock injection the same `Time.now` call
+    // returns reproducible component values. Verifies the
+    // capability source flows through `__time_now_raw` →
+    // preamble `Time.now` → `Time#year` / `to_i` exactly as
+    // designed.
+    let buf = SharedBuf::new();
+    let cfg = rubyrs::Config {
+        time_now: Some(std::sync::Arc::new(|| (1_700_000_000, 123_456_789))),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    let script = r#"
+        t = Time.now
+        puts t.to_i
+        puts t.nsec
+        puts t.utc.year
+        puts t.utc.month
+        puts t.utc.day
+        puts t.utc.to_s
+    "#;
+    rt.eval(script, "time_injected.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "1700000000\n123456789\n2023\n11\n14\n2023-11-14 22:13:20 UTC\n"
+    );
+}
+
+#[test]
+fn time_now_observes_capability_state_changes_per_call() {
+    // The capability closure is called ONCE per `Time.now` — a
+    // mutating host can advance the simulated clock between
+    // calls and observe the script perceive the advance. Uses an
+    // `Arc<Mutex<i64>>` counter so the closure is Fn (the
+    // Config trait bound is `Fn`, not `FnMut`).
+    let buf = SharedBuf::new();
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0i64));
+    let counter_for_closure = counter.clone();
+    let cfg = rubyrs::Config {
+        time_now: Some(std::sync::Arc::new(move || {
+            let mut g = counter_for_closure.lock().unwrap();
+            *g += 1;
+            (*g, 0)
+        })),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    let script = r#"
+        puts Time.now.to_i
+        puts Time.now.to_i
+        puts Time.now.to_i
+    "#;
+    rt.eval(script, "time_advancing.rb").expect("eval");
+    assert_eq!(buf.snapshot(), "1\n2\n3\n");
+    // After the script ran, the closure should have been called
+    // exactly 3 times.
+    assert_eq!(*counter.lock().unwrap(), 3);
+}

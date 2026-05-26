@@ -138,7 +138,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" |
-                        "sprintf" | "format" |
+                        "sprintf" | "format" | "__time_now_raw" |
                         "Integer" | "Float" | "String" | "Array" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
                     );
@@ -403,6 +403,41 @@ impl Vm {
             // Kernel dispatch. `format` is the documented alias.
             // First arg is the format String; remaining args are
             // positional substitutions.
+            //
+            // `__time_now_raw` — Tier 1 wall-clock primitive used by
+            // the `preamble/time.rb` Time class. Returns
+            // `[epoch_seconds, nanoseconds]` (2-element Array) if the
+            // host injected `Config::time_now`; otherwise raises
+            // `RuntimeError`. Deterministic-by-default per ADR 0017
+            // Rule 1: the CLI binary opts in by injecting
+            // `SystemTime::now()`; library embedders that don't want
+            // the host clock exposed leave the field `None` and any
+            // `Time.now` call raises.
+            "__time_now_raw" => {
+                if !args.is_empty() {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0)",
+                            args.len(),
+                        ),
+                    })));
+                }
+                let Some(src) = self.time_now.clone() else {
+                    return Some(Err(self.trap(RubyError::RuntimeError {
+                        msg: "Time.now requires `Config::time_now` injection — \
+                              the embedding host hasn't enabled the wall-clock \
+                              capability (Tier 1 deterministic default)".into(),
+                    })));
+                };
+                let (sec, nsec) = src();
+                self.maybe_gc();
+                if let Err(e) = self.check_alloc() {
+                    return Some(Err(e));
+                }
+                let arr = vec![Value::Int(sec), Value::Int(nsec as i64)];
+                let id = self.heap.alloc(HeapObj::Array(arr));
+                Some(Ok(Value::Array(id)))
+            }
             "sprintf" | "format" => {
                 if args.is_empty() {
                     // CRuby's exact message — verified against MRI

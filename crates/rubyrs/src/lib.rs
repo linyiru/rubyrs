@@ -484,6 +484,33 @@ pub struct Config {
     /// so `rubyrs script.rb` behaves like CRuby; embed users that
     /// want the host PID exposed must opt in.
     pub pid: Option<std::num::NonZeroU32>,
+    /// Host-injected wall-clock source for `Time.now`. Closes the
+    /// ADR 0017 deviation that would otherwise let `Time.now`
+    /// reach for `std::time::SystemTime::now()` directly —
+    /// script-visible non-determinism + a host-clock capability
+    /// leak into untrusted scripts.
+    ///
+    /// `None` (default) means script-visible `Time.now` raises
+    /// `RuntimeError` (Tier 1 stays deterministic by default).
+    /// `Some(closure)` is called once per `Time.now` invocation;
+    /// the closure returns `(epoch_seconds, nanoseconds)` and the
+    /// preamble's `Time` class wraps that into a `Value::Object`
+    /// instance carrying `@sec` / `@nsec` ivars.
+    ///
+    /// The closure is `Arc<dyn Fn>` so a single Runtime can be
+    /// shared across calls without consuming the injected source.
+    /// `Send + Sync` keeps the Runtime usable from multi-threaded
+    /// host code that wraps it in an `Arc<Mutex<_>>`-style guard;
+    /// rubyrs itself is single-threaded (one Runtime = one Vm at
+    /// a time), but the bound matches what `register_fn` already
+    /// requires of host functions.
+    ///
+    /// The CLI binary `rubyrs` injects `std::time::SystemTime::now()`
+    /// so `rubyrs script.rb` behaves like CRuby; library / embed
+    /// users that want the host wall-clock exposed must opt in
+    /// explicitly. Deterministic-test hosts inject a fixed
+    /// `|| (1_700_000_000, 0)` closure for reproducible output.
+    pub time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
 }
 
 impl Default for Config {
@@ -512,6 +539,7 @@ impl Default for Config {
             deadline: None,
             env: None,
             pid: None,
+            time_now: None,
         }
     }
 }
@@ -744,6 +772,7 @@ impl Runtime {
         self.vm.max_value_bytes = cfg.max_value_bytes;
         self.vm.env_override = cfg.env;
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
+        self.vm.time_now = cfg.time_now;
         self.deadline = cfg.deadline;
     }
 
@@ -1125,6 +1154,17 @@ end
             "<rubyrs:preamble:securerandom>",
         )
             .expect("ICE: failed to load SecureRandom preamble");
+        // Tier 1 `Time` class — capability-injected via
+        // `Config::time_now` / the `__time_now_raw` Kernel
+        // primitive. Pure Ruby per the Path A decision documented
+        // in `perf/time_microbench_results.md`. Loaded
+        // unconditionally; default no-injection makes `Time.now`
+        // raise (ADR 0017 Rule 1 deterministic-default).
+        self.eval(
+            include_str!("preamble/time.rb"),
+            "<rubyrs:preamble:time>",
+        )
+            .expect("ICE: failed to load Time preamble");
     }
 
     /// Replace the runtime's stdout sink.

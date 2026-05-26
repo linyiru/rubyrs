@@ -180,6 +180,31 @@ fn main() {
         pid: std::num::NonZeroU32::new(process::id()),
         #[cfg(target_os = "wasi")]
         pid: None,
+        // Wall-clock injection for the Tier 1 `Time` class. CLI
+        // binary opts the host process clock in so `rubyrs
+        // script.rb` matches CRuby; library / embed users that
+        // construct a `Runtime` directly get the deterministic
+        // default (Time.now raises) until they wire their own
+        // `Config::time_now` (potentially a fixed-clock for
+        // reproducible tests).
+        time_now: Some(std::sync::Arc::new(|| {
+            // `UNIX_EPOCH` is the documented zero anchor; the
+            // SystemTime returned by `now()` may be before or
+            // after it. The pre-1970 case is rare in practice
+            // (only some embedded boards with no RTC) but
+            // handled — `duration_since(UNIX_EPOCH)` returns
+            // an Err carrying the magnitude.
+            use std::time::{SystemTime, UNIX_EPOCH};
+            match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+                Err(e) => {
+                    let d = e.duration();
+                    // Negate the seconds; nsec stays positive
+                    // because Duration is always non-negative.
+                    (-(d.as_secs() as i64), d.subsec_nanos())
+                }
+            }
+        })),
     };
 
     // wasi-wizer fast path: if the binary was put through
