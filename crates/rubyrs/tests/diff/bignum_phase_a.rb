@@ -75,3 +75,29 @@ puts fact(30).class
 puts fact(30).to_s
 puts fact(30).inspect
 puts fact(30).send(:to_s)
+
+# Operator method-call shape — `big.+(x)` / `big.send(:==, y)`
+# must match the Op::BinOp result exactly. Pre-cycle-2 these
+# fell through to ruby_eq's identity arm and returned the wrong
+# answer for canonical-value equality.
+big = 9_999_999_999_999_999_999
+puts big.+(1)
+puts big.send(:+, 1)
+puts big.send(:==, 9_999_999_999_999_999_999)
+
+# Collection equality — Array#include? and Hash key matching must
+# canonicalise BigInt by value (two independently-allocated 2^64
+# BigInts compare equal as members / keys). Before the ruby_eq
+# fix, both returned false / nil.
+a = [9_999_999_999_999_999_999, 1, 2]
+puts a.include?(9_999_999_999_999_999_999)
+h = {}
+h[9_999_999_999_999_999_999] = "yes"
+puts h[9_999_999_999_999_999_999]
+
+# Mixed Int / BigInt equality through ruby_eq — the Array#include?
+# path must canonicalise across types (BigInt that fits in i64
+# already demotes via bigint_to_value, but a value that genuinely
+# overflows must still compare equal to a literal of the same
+# value passed as an Int operand). 2^63 is the smallest such case.
+puts [9_223_372_036_854_775_808].include?(9_223_372_036_854_775_808)

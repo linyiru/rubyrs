@@ -533,13 +533,15 @@ impl Vm {
         // BigInt method dispatch — `primitive_call` and friends
         // are stateless and can't read the heap, so the BigInt
         // surface is hooked here where `&mut self` is available.
-        // Phase A: `to_s` and `inspect` (which produce a String
-        // from the BigInt's decimal). Arithmetic + comparison
-        // already get handled at the BinOp arm via the cold-path
-        // `try_bigint_binop`; this hook covers method-call shape
-        // (`big.to_s`, `big.inspect`, `big.send(:to_s)`).
+        // Covers `to_s` / `inspect` (heap read) AND the operator
+        // method-call shape (`big.+(1)`, `big.send(:==, x)`),
+        // routed through `try_bigint_binop` so method-call form
+        // matches the `Op::BinOp` semantics exactly. Without this
+        // route, `big.send(:==, other)` would fall through to
+        // `ruby_eq`'s Object-identity arm and miss canonical-value
+        // equality.
         #[cfg(feature = "bignum")]
-        if let Some(v) = self.bigint_primitive(&recv, &name, &args) {
+        if let Some(v) = self.bigint_primitive(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());
         }

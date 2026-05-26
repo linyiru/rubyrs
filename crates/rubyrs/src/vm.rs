@@ -794,17 +794,31 @@ impl Vm {
         recv: &Value,
         name: &str,
         args: &[Value],
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>, Trap> {
         let id = match recv {
             Value::BigInt(id) => *id,
-            _ => return None,
+            _ => return Ok(None),
         };
-        match (name, args.len()) {
-            ("to_s", 0) | ("inspect", 0) => {
-                Some(Value::new_str(self.heap.bigint(id).to_string()))
+        // Phase A heap-read operations.
+        if args.is_empty() {
+            match name {
+                "to_s" | "inspect" => {
+                    return Ok(Some(Value::new_str(self.heap.bigint(id).to_string())));
+                }
+                _ => {}
             }
-            _ => None,
         }
+        // Operator method-call shape — `big.+(1)`, `big.send(:==, x)`.
+        // Route through `try_bigint_binop` so the answer matches the
+        // `Op::BinOp` path exactly (same arithmetic / floor-div semantics,
+        // same comparison Bool, same overflow-promotion-then-demote rule).
+        if args.len() == 1
+            && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(name)
+            && let Some(v) = self.try_bigint_binop(kind, recv, &args[0])?
+        {
+            return Ok(Some(v));
+        }
+        Ok(None)
     }
 }
 

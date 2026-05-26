@@ -421,6 +421,14 @@ impl Heap {
                     worklist.push(*id);
                 }
             }
+            #[cfg(feature = "bignum")]
+            Value::BigInt(id) => {
+                let i = id.0 as usize;
+                if !marks[i] {
+                    marks[i] = true;
+                    worklist.push(*id);
+                }
+            }
             _ => {}
         }
     }
@@ -655,6 +663,25 @@ impl Value {
                     && x.end.ruby_eq(&y.end, heap)
             }
             (Value::Class(a), Value::Class(b)) => Rc::ptr_eq(a, b),
+            // BigInt × BigInt and BigInt ↔ Int — value equality so
+            // Array#include?, Hash key matching, and the Object#==
+            // fallback all see the same answer the BinOp == arm does
+            // (the BinOp path goes through try_bigint_binop which
+            // compares the underlying num_bigint::BigInt). Two
+            // separately-allocated `2**64` BigInts must hash-equal
+            // when treated as keys / collection members.
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(a), Value::BigInt(b)) => {
+                a == b || heap.bigint(*a) == heap.bigint(*b)
+            }
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(a), Value::Int(b)) => {
+                heap.bigint(*a) == &num_bigint::BigInt::from(*b)
+            }
+            #[cfg(feature = "bignum")]
+            (Value::Int(a), Value::BigInt(b)) => {
+                &num_bigint::BigInt::from(*a) == heap.bigint(*b)
+            }
             _ => false,
         }
     }
