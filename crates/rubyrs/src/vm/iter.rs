@@ -258,6 +258,32 @@ impl Vm {
                 out.push_str(&source[last_end..]);
                 return Ok(Some(Value::new_str(out)));
             }
+        // `s.each_byte { |b| ... }` — yield each byte (Int 0..255)
+        // to the block, then return the receiver String. CRuby
+        // returns an Enumerator when called without a block;
+        // Tier 1 doesn't model Enumerator (ADR 0017 row
+        // "Fiber / Enumerator" is Tier 2), so only the
+        // block-given shape is reachable here — `do_call`'s
+        // block-less path falls through to NoMethodError as
+        // before. The byte snapshot decouples iteration from
+        // any in-block mutation of the receiver (matches CRuby:
+        // `each_byte` yields the bytes that existed at call
+        // time, even if the block mutates the String).
+        if let Value::Str(s) = recv
+            && name == "each_byte" && args.is_empty()
+        {
+            let bytes: Vec<u8> = s.borrow().clone();
+            let mut g = PinGuard::new(self);
+            g.pin(recv.clone());
+            g.pin(Value::Block(block));
+            let pre_frames = g.vm.frames.len();
+            for b in bytes {
+                g.vm.invoke_block(block, vec![Value::Int(b as i64)])?;
+                g.vm.dispatch_until(pre_frames)?;
+                g.vm.stack.pop();
+            }
+            return Ok(Some(recv.clone()));
+        }
         // `s.scan(/pat/) { |m| ... }` / `s.scan(string) { |m| ... }`
         // — yield each match to the block (capture-group Array if
         // the regex has groups, the matched substring otherwise).
