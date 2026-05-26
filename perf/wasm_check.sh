@@ -68,16 +68,32 @@ fi
 
 # Build pipeline for the artifact the gate actually times:
 #
-#   raw .wasm  --[wasm-opt -Oz]-->  .opt.wasm  --[wasmtime compile]-->  .cwasm
-#                  (optional)                          (always)
+#   raw .wasm  --[wasm-opt -Oz]-->  .opt.wasm  --[wizer]-->  .wizer.wasm
+#                  (optional)                  (optional)
+#                                                  |
+#                              [wasm-opt -Oz again]
+#                                                  |
+#                                             .wizer.opt.wasm
+#                                                  |
+#                                       [wasmtime compile]
+#                                                  |
+#                                              .cwasm  ← gate measures this
 #
-# Layered for two reasons:
+# Layered for three reasons:
 #   1. wasm-opt -Oz shrinks the deliverable binary ~21% (1.48 MB →
-#      1.17 MB locally) and is what an embedder downstream would
-#      want to ship if they distribute the .wasm. Running it here
-#      keeps the upstream input to the AOT step matching what a
-#      consumer would actually deploy.
-#   2. `wasmtime compile` AOT-compiles to a `.cwasm` that wasmtime
+#      1.17 MB locally) — what a downstream embedder would ship
+#      if distributing the .wasm. Running it here keeps the AOT
+#      input matching what a consumer would actually deploy.
+#   2. wizer pre-initializes the Runtime (class registration +
+#      preamble bytecode load) by calling the `wizer.initialize`
+#      export and snapshotting linear memory. The post-wizer
+#      binary skips that work at every invocation. Local PoC:
+#      ~0.5 ms cold start saving — small in absolute ms, but at
+#      sub-10 ms scale it's ~5% relative. Wizer is OPTIONAL; the
+#      script falls back to the no-wizer path if it's missing.
+#      A second wasm-opt -Oz pass after wizer compacts the
+#      snapshotted memory layout for further size reduction.
+#   3. `wasmtime compile` AOT-compiles to a `.cwasm` that wasmtime
 #      can `run --allow-precompiled` against — bypasses JIT for
 #      every measured invocation, so the gate fences the "cold
 #      start with pre-compiled module" path (the headline cold-
@@ -86,10 +102,11 @@ fi
 #      it's wasmtime-version + host-arch specific machine code
 #      and must be regenerated per consumer environment.
 #
-# Local PoC: this combo drops the wasmtime startup_floor from
-# ~20 ms steady (raw .wasm) to ~10 ms (.cwasm) — and from a
-# 200 ms first-run cold to ~10 ms (no more per-run JIT). See
-# `perf/wasm_baselines.tsv` for the budget rationale.
+# Local PoC numbers (Apple M-series, M-series local):
+#   - raw .wasm + JIT-each-run:        ~20 ms
+#   - opt + AOT cwasm:                  ~7.6 ms
+#   - wizer + opt + AOT cwasm:          ~7.2 ms (this gate)
+# See `perf/wasm_baselines.tsv` for the budget rationale.
 #
 # Derived build artifacts live in a per-invocation tempdir
 # (cleaned via `trap` on EXIT), not next to the input `$WASM`.
@@ -144,13 +161,48 @@ else
   fi
 fi
 
+# wizer is OPTIONAL — when present, run the binary's
+# `wizer.initialize` export to pre-build Runtime state (classes +
+# preamble), then re-pass through wasm-opt -Oz to compact the
+# snapshotted memory. Yields ~0.5 ms cold-start improvement.
+# When absent, the script proceeds with the already-optimised
+# .wasm (gate still PASSes; just loses the wizer win).
+WIZER_WASM="$OPT_WASM"
+if command -v wizer >/dev/null 2>&1; then
+    WIZER_WASM_OUT="$PERF_TMPDIR/rubyrs.wizer.wasm"
+    echo "[wasm_check] wizer $OPT_WASM -> $WIZER_WASM_OUT"
+    # --allow-wasi lets the wizer pass over our .wasm even though
+    # it imports wasi syscalls; our wizer.initialize itself does
+    # NOT call any imports (per wizer's rule), but the import
+    # table includes wasi for `_start` use later.
+    if ! wizer --allow-wasi "$OPT_WASM" -o "$WIZER_WASM_OUT" >/dev/null 2>&1; then
+        echo "wasm_check: wizer pre-init failed on $OPT_WASM" >&2
+        exit 2
+    fi
+    # Second wasm-opt pass compacts the wizer-snapshotted data
+    # section. Optional — skip on wasm-opt absence (already
+    # warned above).
+    if command -v wasm-opt >/dev/null 2>&1; then
+        WIZER_OPT_WASM="$PERF_TMPDIR/rubyrs.wizer.opt.wasm"
+        if ! wasm-opt -Oz "$WIZER_WASM_OUT" -o "$WIZER_OPT_WASM" >/dev/null; then
+            echo "wasm_check: wasm-opt -Oz (post-wizer) failed" >&2
+            exit 2
+        fi
+        WIZER_WASM="$WIZER_OPT_WASM"
+    else
+        WIZER_WASM="$WIZER_WASM_OUT"
+    fi
+else
+    echo "wasm_check: wizer not on PATH — skipping pre-init pass (install \`wizer\` to enable; expect ~0.5 ms cold-start savings)"
+fi
+
 CWASM="$PERF_TMPDIR/rubyrs.cwasm"
-echo "[wasm_check] wasmtime compile $OPT_WASM -> $CWASM"
+echo "[wasm_check] wasmtime compile $WIZER_WASM -> $CWASM"
 # wasmtime compile failure (incompatible subcommand, malformed
 # wasm, etc.) is likewise a setup error — same 0/1/2 contract
 # reasoning as the wasm-opt arm above.
-if ! wasmtime compile "$OPT_WASM" -o "$CWASM" >/dev/null; then
-  echo "wasm_check: wasmtime compile failed on $OPT_WASM" >&2
+if ! wasmtime compile "$WIZER_WASM" -o "$CWASM" >/dev/null; then
+  echo "wasm_check: wasmtime compile failed on $WIZER_WASM" >&2
   exit 2
 fi
 

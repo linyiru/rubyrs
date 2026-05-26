@@ -7,6 +7,31 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ## [Unreleased]
 
 ### Changed
+- **Wasm cold start optimised via `wizer` pre-init.** Adds a wizer
+  layer to the perf-gate build pipeline (raw .wasm → wasm-opt -Oz
+  → wizer → wasm-opt -Oz → wasmtime compile → .cwasm) and an
+  exported `wizer.initialize` function that pre-builds a default
+  Runtime (class registrations + preamble bytecode load). At
+  invocation time `main()` consumes the snapshotted Runtime via
+  `rubyrs::take_wizer_runtime()` and applies the host Config on
+  top. Local M-series cold start drops ~0.5 ms (7.6 → 7.2 ms,
+  ~5% relative at sub-10 ms scale). The wizer layer is OPTIONAL
+  in `perf/wasm_check.sh` (falls back gracefully when wizer
+  isn't installed); CI installs the v11.0.3 release tarball
+  with sha256 verification.
+- **Wasi env-var bypass.** Switched `crates/rubyrs/src/main.rs` to
+  read `wasi_snapshot_preview1::environ_get` directly via FFI
+  instead of `std::env::vars()`. The Rust std path reads from
+  wasi-libc's `__environ` global, which wizer snapshots BEFORE
+  the C runtime populates it with the user-provided env — so
+  `env::vars()` returns empty on wizer'd builds even when
+  `wasmtime run --env=KEY=VAL` is used. The direct syscall
+  hits the wasi import fresh on each `_start`, making env
+  propagation work identically pre- and post-wizer. Defensive
+  even on non-wizer'd builds; same behaviour, different
+  read path.
+
+### Changed
 - **Wasm perf gate now measures AOT-precompiled `.cwasm`** instead
   of raw `.wasm` + per-run JIT. `perf/wasm_check.sh`'s build prelude
   runs `wasm-opt -Oz` (optional; install `binaryen` to enable the
