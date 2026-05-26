@@ -14,13 +14,14 @@
 # spikes AND OS-level noise (page-cache warm-up of the .cwasm,
 # wasmtime's own runtime cold start, process-spawn variance,
 # `/usr/bin/time` 10ms-granularity rounding). Because the gate
-# now measures against a pre-compiled `.cwasm` with
-# `--allow-precompiled`, JIT cost was already eliminated by
-# the build step above; there is no longer a per-run wasm-
-# cache warm-up cycle for min-of-3 to filter. This means each
-# of the 3 timed runs is essentially the same shape (load
-# .cwasm + run script), and the MIN reducer is mostly there
-# to absorb spawn/timer granularity jitter.
+# measures against the pre-compiled `.cwasm` produced by the
+# build prelude below (wasm-opt → wasmtime compile) with
+# `--allow-precompiled`, JIT cost has already been eliminated;
+# there is no longer a per-run wasm-cache warm-up cycle for
+# min-of-3 to filter. This means each of the 3 timed runs is
+# essentially the same shape (load .cwasm + run script), and
+# the MIN reducer is mostly there to absorb spawn/timer
+# granularity jitter.
 #
 # Why no RSS gate: peak-RSS under wasmtime conflates the host VM's
 # resident size with the guest's linear-memory working set, and
@@ -86,6 +87,20 @@ fi
 # 200 ms first-run cold to ~10 ms (no more per-run JIT). See
 # `perf/wasm_baselines.tsv` for the budget rationale.
 #
+# Derived build artifacts live in a per-invocation tempdir
+# (cleaned via `trap` on EXIT), not next to the input `$WASM`.
+# Reasons:
+#   1. `$WASM` may point at a read-only / shared path under some
+#      embedding setups; writing next to it would fail outright.
+#   2. Leaving `.opt.wasm` / `.cwasm` siblings next to the source
+#      surprises local runs and bloats incremental dev workflows.
+#   3. wasmtime compile is fast enough (~0.5s) that caching the
+#      output across runs isn't worth the surprise.
+# A dedicated subdir under `$TMPDIR` is plenty for the gate's
+# lifetime; `mktemp -d` picks a non-colliding path on macOS+Linux.
+PERF_TMPDIR="$(mktemp -d -t rubyrs-wasm-perf.XXXXXX)"
+trap 'rm -rf "$PERF_TMPDIR"' EXIT
+
 # wasm-opt is OPTIONAL — if `wasm-opt` isn't on PATH the script
 # proceeds with the raw .wasm. Skipping it costs ~10% of the
 # binary-size win but doesn't break the gate.
@@ -93,12 +108,12 @@ if ! command -v wasm-opt >/dev/null 2>&1; then
   echo "wasm_check: wasm-opt not on PATH — skipping the -Oz size pass (install \`binaryen\` to enable)"
   OPT_WASM="$WASM"
 else
-  OPT_WASM="${WASM%.wasm}.opt.wasm"
+  OPT_WASM="$PERF_TMPDIR/rubyrs.opt.wasm"
   echo "[wasm_check] wasm-opt -Oz $WASM -> $OPT_WASM"
   wasm-opt -Oz "$WASM" -o "$OPT_WASM" >/dev/null
 fi
 
-CWASM="${OPT_WASM%.wasm}.cwasm"
+CWASM="$PERF_TMPDIR/rubyrs.cwasm"
 echo "[wasm_check] wasmtime compile $OPT_WASM -> $CWASM"
 wasmtime compile "$OPT_WASM" -o "$CWASM" >/dev/null
 
