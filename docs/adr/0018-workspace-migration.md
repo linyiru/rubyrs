@@ -98,7 +98,7 @@ site `std` inventory):
   in `rubyrs-core` behind a default-on `bignum` Cargo feature,
   same shape as `regex`. `num_bigint` ships a `no_std` target
   (verified by reading its `Cargo.toml`), so this does not
-  break the Phase 1 ratchet.
+  break the Phase 2 `no_std` ratchet (described below).
 
 ### Phase 1 — `rubyrs-core` extraction (the painful one)
 
