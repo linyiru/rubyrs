@@ -8,14 +8,10 @@
 //! Stateless — no Vm access, just receiver + args + the
 //! resource cap.
 
-#[cfg(feature = "regex")]
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
-#[cfg(feature = "regex")]
-use crate::value::Instance;
 use crate::value::{RStr, Value};
 
 use super::{ruby_sprintf, Vm};
@@ -616,33 +612,7 @@ impl Vm {
                                     whole: whole.clone(),
                                     caps: last_caps,
                                 });
-                                self.maybe_gc();
-                                self.check_alloc()?;
-                                let caps_arr = self.heap.alloc(HeapObj::Array(group_vals));
-                                let cls_id = self.interner.intern("MatchData");
-                                let cls = match self.classes.get(&cls_id).cloned() {
-                                    Some(c) => c,
-                                    None => return Ok(Some(Value::Nil)),
-                                };
-                                // Second alloc — re-check the cap so
-                                // a tight `heap.max_live` budget that
-                                // admitted `caps_arr` but not the
-                                // Instance traps cleanly rather than
-                                // sneaking past the limit.
-                                self.check_alloc()?;
-                                let obj_id = self.heap.alloc(HeapObj::Instance(Instance {
-                                    class: cls,
-                                    ivars: HashMap::new(),
-                                    singleton_class: None,
-                                }));
-                                let whole_ivar = self.interner.intern("@whole");
-                                let caps_ivar = self.interner.intern("@caps");
-                                {
-                                    let inst = self.heap.instance_mut(obj_id);
-                                    inst.ivars.insert(whole_ivar, Value::new_str(whole));
-                                    inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
-                                }
-                                return Ok(Some(Value::Object(obj_id)));
+                                return Ok(Some(self.materialize_match_data(whole, group_vals)?));
                             }
                         }
                     }

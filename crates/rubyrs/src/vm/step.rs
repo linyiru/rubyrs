@@ -466,32 +466,7 @@ impl Vm {
                             })
                             .collect();
                         let whole_str = self.last_match.as_ref().unwrap().whole.clone();
-                        self.maybe_gc();
-                        self.check_alloc()?;
-                        let caps_arr = self.heap.alloc(crate::heap::HeapObj::Array(caps));
-                        let cls_id = self.interner.intern("MatchData");
-                        match self.classes.get(&cls_id).cloned() {
-                            None => Value::Nil,
-                            Some(cls) => {
-                                // Second alloc — re-check the cap so
-                                // a tight `heap.max_live` budget that
-                                // admitted `caps_arr` but not the
-                                // Instance traps cleanly rather than
-                                // sneaking past the limit.
-                                self.check_alloc()?;
-                                let obj_id = self.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
-                                    class: cls,
-                                    ivars: HashMap::new(),
-                                    singleton_class: None,
-                                }));
-                                let whole_ivar = self.interner.intern("@whole");
-                                let caps_ivar = self.interner.intern("@caps");
-                                let inst = self.heap.instance_mut(obj_id);
-                                inst.ivars.insert(whole_ivar, Value::new_str(whole_str));
-                                inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
-                                Value::Object(obj_id)
-                            }
-                        }
+                        self.materialize_match_data(whole_str, caps)?
                     } else {
                         Value::Nil
                     };
