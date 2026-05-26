@@ -25,8 +25,10 @@
 #   2. The preceding LOOKBACK lines contain a Value-bearing
 #      drain — `self.stack.pop()`, `self.stack.drain`,
 #      `self.stack.swap_remove`, `args.swap_remove`,
-#      `args.drain`, `args.pop`, or a direct `args[N]`
-#      reference.
+#      `args.drain`, `args.pop`, a direct `args[N]`
+#      reference, OR a `match args` / `match &args` arm-
+#      binding pattern (which exposes `args` Values to the
+#      arm body just like an explicit index does).
 #   3. There is no `PinGuard::new(self)` in the preceding
 #      LOOKBACK lines (PinGuard scope makes the path safe;
 #      such sites also typically use `g.vm.maybe_gc()` and
@@ -104,6 +106,12 @@ while IFS= read -r -d '' file; do
                     else if (p ~ /args\.drain/) drain = 1
                     else if (p ~ /args\.pop/) drain = 1
                     else if (p ~ /args\[[^]]+\]/) drain = 1
+                    # `match args { ... }` / `match &args { ... }`
+                    # — the arm body sees Values pattern-bound out
+                    # of the borrowed slice (`[]` / `[one]` /
+                    # `many` rest-bindings). The structurally
+                    # equivalent shape to `args[N]` for the lint.
+                    else if (p ~ /match[[:space:]]+(&)?args[[:space:]]*\{/) drain = 1
                 }
                 if (pinned) continue
                 if (!drain) continue

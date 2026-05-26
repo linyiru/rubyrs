@@ -167,16 +167,27 @@ impl Vm {
                     let s = a.to_inspect(&self.heap, &self.interner);
                     let _ = writeln!(self.stdout, "{}", s);
                 }
-                let result = match args {
-                    [] => Value::Nil,
-                    [one] => one.clone(),
+                match args {
+                    [] => Some(Ok(Value::Nil)),
+                    [one] => Some(Ok(one.clone())),
                     many => {
-                        self.maybe_gc();
-                        let id = self.heap.alloc(HeapObj::Array(many.to_vec()));
-                        Value::Array(id)
+                        // GC rooting: `args` is the `&[Value]` slice
+                        // backed by a Vec that `do_call` drained out
+                        // of `self.stack` — those Values are NOT in
+                        // the root set. Pin each element across
+                        // `maybe_gc` + `alloc` so the multi-arg `p` /
+                        // `pp` return Array can't reference a freed
+                        // slot under STRESS_GC=1. Same shape as the
+                        // seven sites from issue #90.
+                        let mut g = PinGuard::new(self);
+                        let elems: Vec<Value> = many.to_vec();
+                        for v in &elems { g.pin(v.clone()); }
+                        g.vm.maybe_gc();
+                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
+                        let id = g.vm.heap.alloc(HeapObj::Array(elems));
+                        Some(Ok(Value::Array(id)))
                     }
-                };
-                Some(Ok(result))
+                }
             }
             // `Integer(x)` / `Float(x)` / `String(x)` — strict
             // conversion functions. Unlike `to_i` / `to_f` (which

@@ -229,3 +229,4 @@ fn run_diff(name: &str) {
 #[test] fn string_high_byte_literal() { run_diff("string_high_byte_literal"); }
 #[test] fn singleton_class_attr() { run_diff("singleton_class_attr"); }
 #[test] fn kernel_array_coerce() { run_diff("kernel_array_coerce"); }
+#[test] fn kernel_p_multi_arg() { run_diff("kernel_p_multi_arg"); }
