@@ -1,4 +1,5 @@
-# Object#send / __send__ — dynamic dispatch by Symbol name.
+# Object#send / __send__ — dynamic dispatch by Symbol or String
+# (CRuby transparently `to_sym`s a String arg).
 # Differential fixture vs CRuby; landed as the highest-leverage
 # subset gap surfaced by PR #95 (the extractor v0.4 dogfood —
 # upstream shared specs call `obj.send(@method)` and the
@@ -124,4 +125,14 @@ begin
   "x".send([1, 2])
 rescue TypeError => e
   puts "type ok: #{e.message}"
+end
+
+# Block-form bypass must also be single-shot — `send(:map) { ... }`
+# (a block-form re-aim that goes through `do_call_block`) must not
+# leak the visibility flag into a subsequent direct call.
+[1, 2].send(:map) { |n| n }
+begin
+  v.secret
+rescue NoMethodError
+  puts "still blocked after block-form send"
 end

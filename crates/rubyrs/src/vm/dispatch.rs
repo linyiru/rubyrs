@@ -412,8 +412,13 @@ impl Vm {
         // **CRuby parity — visibility bypass**: `send` and
         // `__send__` may invoke private/protected methods. Set
         // `bypass_visibility_once` to suppress the visibility
-        // check during the re-entered call; the flag is consumed
-        // (single-shot) at the check site below.
+        // check during the re-entered call. The flag is consumed
+        // (single-shot) at the top of the next `do_call` /
+        // `do_call_block` into a local — *not* at the visibility
+        // check site — so a dispatch that bottoms out before the
+        // Object arm (e.g. `send(:nonexistent)` raising
+        // NoMethodError on a primitive) can't leak the bypass
+        // into the next unrelated call.
         let user_send_override = &*name == "send"
             && matches!(&recv, Value::Object(_))
             && {
@@ -2645,6 +2650,14 @@ impl Vm {
 
     pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
+        // Consume `bypass_visibility_once` at the dispatch boundary
+        // — same reasoning as `do_call`. `do_call_block` doesn't
+        // have a visibility-check site of its own today (block-form
+        // private/protected enforcement is a pre-existing gap), so
+        // the consumed value is unused locally; the important
+        // effect is that the flag can't leak past the block-form
+        // `send`/`__send__` re-aim into the next unrelated call.
+        let _bypass_visibility = std::mem::replace(&mut self.bypass_visibility_once, false);
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
