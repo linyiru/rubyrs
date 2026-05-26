@@ -612,6 +612,33 @@ fn pin_guard_balanced_when_block_raises_inside_iterator() {
 }
 
 #[test]
+fn syntax_error_message_is_human_readable() {
+    // Regression: `Runtime::eval` and the require_relative path
+    // used to stringify `ruby_prism::Diagnostic` via its derived
+    // Debug impl, which prints the internal `NonNull<...>` pointer
+    // fields and a `PhantomData<...>` marker. The user-facing
+    // SyntaxError leaked raw pointers like
+    //   "Diagnostic { diag: 0x153370, parser: 0x1358e0, marker: PhantomData<...> }"
+    // — useless to embedders and unstable across runs. The fix
+    // formats `.message()` + `line:col` from `.location()`. Lock
+    // both halves: the human-readable text shows up AND the
+    // pointer-shaped fields don't.
+    let mut rt = Runtime::new();
+    let err = rt.eval("def x(", "syntax_err.rb").unwrap_err();
+    let RubyError::SyntaxError { msg } = &err.err else {
+        panic!("expected SyntaxError, got {:?}", err.err);
+    };
+    assert!(!msg.contains("Diagnostic {"), "Debug-format leaked: {msg}");
+    assert!(!msg.contains("PhantomData"), "Debug-format leaked: {msg}");
+    assert!(!msg.contains("0x"), "raw pointer leaked: {msg}");
+    // Prism emits "expected a `)` to close the parameters" for
+    // this input; assert the actionable substring is present.
+    assert!(msg.contains("expected"), "missing diagnostic text: {msg}");
+    // Line/column prefix from format_prism_errors.
+    assert!(msg.starts_with("L1:"), "missing L<line>:<col> prefix: {msg}");
+}
+
+#[test]
 fn unsupported_ast_node_returns_syntax_error_trap_not_panic() {
     // P0-4: prior to this change, any Prism node the AST translator
     // didn't handle (case/when, regex literal, lambda, etc.) hit

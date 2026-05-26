@@ -32,6 +32,32 @@ pub(crate) fn line_col(source: &str, byte_offset: u32) -> (u32, u32) {
     (line, col)
 }
 
+/// Format Prism parse diagnostics into a SyntaxError message body.
+/// Each diagnostic becomes `"L<line>:<col>: <message>"`, joined with
+/// `"; "` when there are multiple.
+///
+/// `ruby_prism::Diagnostic` derives `Debug`, but its Debug impl
+/// stringifies the internal `NonNull<pm_diagnostic_t>` /
+/// `NonNull<pm_parser_t>` pointer fields as `0xADDR` plus a
+/// `PhantomData<...>` marker. Using that for the user-facing
+/// SyntaxError message leaked raw pointers into rubyrs output —
+/// e.g. `Diagnostic { diag: 0x153370, parser: 0x1358e0, marker:
+/// PhantomData<&...pm_diagnostic_t> }`. The published API
+/// (`message()` + `location().start_offset()`) is what should be
+/// formatted instead.
+pub(crate) fn format_prism_errors<'a>(
+    source: &str,
+    errors: impl Iterator<Item = ruby_prism::Diagnostic<'a>>,
+) -> String {
+    errors
+        .map(|e| {
+            let (line, col) = line_col(source, e.location().start_offset() as u32);
+            format!("L{line}:{col}: {}", e.message())
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// A Ruby-visible error. Today this is the closed set rubyrs can produce;
 /// we'll grow it to a class hierarchy with the rescue-by-class feature.
 #[derive(Debug)]

@@ -861,10 +861,9 @@ impl Vm {
         // Parse + AST translate. Errors surface as SyntaxError
         // through the standard Trap path.
         let parse_result = ruby_prism::parse(source.as_bytes());
-        let parse_errors: Vec<_> = parse_result.errors().collect();
-        if !parse_errors.is_empty() {
-            let msg = parse_errors.iter()
-                .map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("; ");
+        let mut parse_errors = parse_result.errors().peekable();
+        if parse_errors.peek().is_some() {
+            let msg = crate::error::format_prism_errors(&source, parse_errors);
             return Err(self.trap(RubyError::SyntaxError { msg }));
         }
         let (prog, ast_errors) = crate::ast::tr_with_errors_on_source(
