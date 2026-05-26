@@ -2195,6 +2195,32 @@ fn pow_method_works_under_no_bignum_profile() {
 }
 
 #[test]
+fn pow_arity_zero_or_too_many_args_raise_argument_error() {
+    // CRuby: `5.pow` and `5.pow(1, 2, 3)` raise ArgumentError
+    // ("wrong number of arguments (given N, expected 1..2)").
+    // Without the explicit arity guard those shapes fall through
+    // to NoMethodError despite `respond_to?(:pow)` being true.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [("5.pow", 0), ("5.pow(1, 2, 3)", 3), ("5.pow(1, 2, 3, 4, 5)", 5)] {
+        let err = rt.eval(script, "pow_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 1..2)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[test]
 fn pow_one_arg_accepts_float_exponent() {
     // `5.pow(1.5)` must mirror `5 ** 1.5` — both routes through
     // the same `**` arm. Previously the `pow` alias only fired

@@ -141,6 +141,22 @@ pub(crate) fn numeric_call(
             }
             return numeric_call(recv, "**", args, _max_value_bytes);
         }
+        // Arity guard for `pow` — CRuby raises ArgumentError with
+        // the exact "wrong number of arguments (given N, expected
+        // 1..2)" message for 0 or >2 args. Without this arm those
+        // shapes fall through to NoMethodError despite
+        // `respond_to?(:pow)` returning true. The 2-arg arms below
+        // catch the valid `[exp, mod]` shape; this guard catches
+        // 0, 3+ (1-arg is handled above). The pattern matches any
+        // `args` slice because the count check is in the guard.
+        (Value::Int(_), "pow", args_slice) if args_slice.len() != 2 => {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1..2)",
+                    args_slice.len(),
+                ),
+            });
+        }
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
