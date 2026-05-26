@@ -1966,8 +1966,10 @@ fn bigint_pow_caps_huge_result() {
 #[test]
 fn bigint_pow_honors_max_value_bytes() {
     // The DoS cap respects Config::max_value_bytes when set —
-    // a tight 64-byte cap rejects `2 ** 1000` (~125 bytes of
-    // decimal output, ~125 bytes of internal magnitude too).
+    // a tight 64-byte cap rejects `2 ** 1000`. The estimator
+    // bounds the binary magnitude (~126 bytes here; the decimal
+    // form would be 302 digits but the cap is on the storable
+    // value, not its rendered string).
     let cfg = rubyrs::Config { max_value_bytes: Some(64), ..Default::default() };
     let mut rt = rubyrs::Runtime::with_config(cfg);
     let err = rt.eval(
@@ -2023,12 +2025,13 @@ fn bigint_pow_bigint_receiver_negative_exponent_returns_float() {
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
-    // (2 ** 100) ** -2 → 1 / (2**200) which underflows f64 to 0.0.
+    // (2 ** 100) ** -2 → 2**-200 ≈ 6.22e-61: a tiny but non-zero
+    // Float (well above the smallest f64 subnormal at ~5e-324).
     rt.eval("puts ((2 ** 100) ** -2)", "bigint_pow_neg.rb")
         .expect("BigInt ** negative-Int must return a Float, not NoMethodError");
     let out = buf.snapshot();
     let v: f64 = out.trim().parse().expect("output must parse as Float");
-    assert!(v >= 0.0 && v < 1e-30, "expected near-zero Float, got {}", v);
+    assert!(v > 0.0 && v < 1e-50, "expected tiny positive Float ~6e-61, got {}", v);
 }
 
 #[cfg(feature = "bignum")]
@@ -2046,6 +2049,22 @@ fn bigint_pow_bigint_receiver_float_exponent_returns_float() {
     let expected = (2.0_f64).powi(50);
     let rel = ((v - expected) / expected).abs();
     assert!(rel < 1e-6, "expected ~{}, got {} (rel error {})", expected, v, rel);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_pow2_estimator_avoids_2x_overshoot() {
+    // The DoS estimator must use `(base_bits - 1) * exp + 1` for
+    // power-of-two bases, not `base_bits * exp` — otherwise a
+    // factor-of-2 overestimate falsely rejects allocations that
+    // fit. `2 ** 100_000` produces ~12.5 KB of magnitude; the
+    // tight bound estimates ~12.5 KB and fits under a 16 KB cap.
+    // The old `base_bits * exp` would have estimated ~25 KB and
+    // trapped, even though the real value fits comfortably.
+    let cfg = rubyrs::Config { max_value_bytes: Some(16 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.eval("2 ** 100_000", "pow2_tight_estimate.rb")
+        .expect("tight pow-of-2 estimate must allow values that fit the cap");
 }
 
 #[cfg(feature = "bignum")]

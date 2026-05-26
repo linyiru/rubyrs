@@ -899,12 +899,16 @@ impl Vm {
         // &mut self calls (`trap`, `bigint_to_value`) are free to
         // re-borrow. The full base is re-borrowed only at the
         // single `pow` site below.
-        let (base_sign, base_bits) = {
+        let (base_sign, base_bits, base_is_pow2) = {
             let base_cow = match self.as_bigint_ref(recv) {
                 Some(v) => v,
                 None => return Ok(None),
             };
-            (base_cow.sign(), base_cow.bits())
+            // count_ones == 1 ⇔ |base| is exactly a power of two.
+            // Used below for a tighter DoS estimator on the
+            // canonical `2 ** n` shape.
+            let is_pow2 = base_cow.magnitude().count_ones() == 1;
+            (base_cow.sign(), base_cow.bits(), is_pow2)
         };
         // Compute parity / sign / zero of the exponent up front so
         // every branch below dispatches on one vocabulary.
@@ -1020,10 +1024,25 @@ impl Vm {
             }
         };
         // Estimate result size and trap before allocating GBs.
+        // The true bit-length of `base ** exp` is
+        // `floor(exp * log2(|base|)) + 1`. For a power-of-two
+        // base, `log2(|base|) == base_bits - 1` exactly, so the
+        // tight bound is `(base_bits - 1) * exp + 1` — using
+        // `base_bits * exp` here would overshoot 2× on the
+        // canonical `2 ** n` shape (e.g. `2 ** 10_000_000`
+        // really is ~1.25MB but a `2 * 10_000_000 = 20M-bit`
+        // estimate would falsely trap a 2MB cap). For non-pow2
+        // bases we fall back to `base_bits * exp` as a safe
+        // upper bound (log2(base) < base_bits for any base).
         // Ceil-div in u64; compare against `cap as u64` so the
-        // check doesn't silently truncate on 32-bit targets
-        // (wasm32) via `as usize`.
-        let est_bits: u64 = base_bits.saturating_mul(exp_u32 as u64);
+        // check doesn't silently truncate on 32-bit targets.
+        let est_bits: u64 = if base_is_pow2 {
+            (base_bits.saturating_sub(1))
+                .saturating_mul(exp_u32 as u64)
+                .saturating_add(1)
+        } else {
+            base_bits.saturating_mul(exp_u32 as u64)
+        };
         let est_bytes: u64 = est_bits.saturating_add(7) / 8;
         let cap = self.max_value_bytes.unwrap_or(1 << 20);
         if est_bytes > cap as u64 {
