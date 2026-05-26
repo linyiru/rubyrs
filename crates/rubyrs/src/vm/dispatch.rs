@@ -419,6 +419,34 @@ impl Vm {
             // time. Bumps `method_gen` so any monomorphic inline
             // cache entry that thought the class lacked the
             // included/prepended methods invalidates.
+            // `private_constant :Foo, :Bar` / `public_constant ...` —
+            // visibility hints for module constants. CRuby uses them
+            // to prevent external `Tilt::EMPTY_HASH` access; rubyrs
+            // doesn't enforce constant visibility yet (separate gap),
+            // so the call is a no-op that returns the class. Returning
+            // self matches CRuby's chainable form. Required for tilt
+            // load (tilt.rb:11/14, tilt/mapping.rb:77/411 all use this).
+            //
+            // `autoload :Const, "path"` — CRuby's lazy-load hook: the
+            // constant materialises when first referenced. rubyrs
+            // doesn't model lazy loads (the embeddable host registers
+            // template engines eagerly), so this is a no-op returning
+            // nil (CRuby's actual return value for autoload). The
+            // constant simply won't exist until someone explicitly
+            // requires the target file. tilt's `register_lazy` calls
+            // autoload internally; the documented gap is that
+            // `Tilt['erb']` won't find the engine without a separate
+            // eager `require 'tilt/erb'`.
+            if &*name == "autoload"
+                && let Value::Class(_) = &self_val {
+                self.stack.push(Value::Nil);
+                return Ok(());
+            }
+            if matches!(&*name, "private_constant" | "public_constant")
+                && let Value::Class(_) = &self_val {
+                self.stack.push(self_val);
+                return Ok(());
+            }
             if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
                     let is_prepend = &*name == "prepend";
@@ -501,6 +529,27 @@ impl Vm {
                 // at the toplevel) parseable.
                 self.stack.push(Value::Nil);
                 return Ok(());
+            }
+            // `respond_to?(:foo)` / `respond_to?(:foo, true)` with no
+            // explicit receiver — implicit-self dispatch against the
+            // current frame's `self_val`. Mirrors the recv-bearing
+            // arm below (~line 2239); included here because the
+            // no-recv path runs FIRST and would NoMethodError before
+            // reaching that arm. Required by tilt.rb:143's
+            // `respond_to?(:deprecate_constant, true)` feature
+            // detection inside `class Tilt` body where self is a
+            // Class.
+            if &*name == "respond_to?" && (args.len() == 1 || args.len() == 2) {
+                let lookup_name: Option<SymId> = match &args[0] {
+                    Value::Sym(id) => Some(*id),
+                    Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
+                    _ => None,
+                };
+                if let Some(id) = lookup_name {
+                    let yes = self.responds_to(&self_val, id);
+                    self.stack.push(Value::Bool(yes));
+                    return Ok(());
+                }
             }
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
@@ -1565,6 +1614,22 @@ impl Vm {
                     /* cache_id = */ u16::MAX,
                 );
             }
+        // Explicit-receiver no-op stubs — `Foo.private_constant :X`,
+        // `Foo.public_constant :X`, `Foo.autoload :X, "path"`.
+        // Counterparts to the no-recv arm above. See that arm for the
+        // rationale (visibility / lazy-load hooks rubyrs doesn't model
+        // yet). Tilt's `Tilt.autoload class_name, file` inside
+        // `register_lazy` is the canonical caller.
+        if &*name == "autoload"
+            && let Value::Class(_) = &recv {
+            self.stack.push(Value::Nil);
+            return Ok(());
+        }
+        if matches!(&*name, "private_constant" | "public_constant")
+            && let Value::Class(_) = &recv {
+            self.stack.push(recv);
+            return Ok(());
+        }
         if let Value::Class(target) = &recv
             && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
                 // Explicit-receiver form: `MyClass.include(Mod)` /
@@ -2360,7 +2425,16 @@ impl Vm {
         // `respond_to?` (we don't support that yet, but conceptually)
         // would shadow this. Accepts either a `Symbol` or a `String`
         // argument; anything else falls through to NoMethodError.
-        if &*name == "respond_to?" && args.len() == 1 {
+        // `respond_to?(:foo)` or `respond_to?(:foo, include_private)`.
+        // CRuby's second arg toggles whether private methods count;
+        // we don't enforce method visibility precisely in the lookup
+        // path used here, so the bool is effectively ignored — the
+        // check passes through to `responds_to` which already walks
+        // the method table without filtering by visibility. Accepting
+        // the 2-arg form lets feature-detection patterns like
+        // `respond_to?(:deprecate_constant, true)` work without
+        // tripping NoMethodError.
+        if &*name == "respond_to?" && (args.len() == 1 || args.len() == 2) {
             let lookup_name: Option<SymId> = match &args[0] {
                 Value::Sym(id) => Some(*id),
                 Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),

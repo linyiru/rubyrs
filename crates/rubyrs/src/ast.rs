@@ -2366,8 +2366,37 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 out.push(sp(bn, Expr::SingletonChainPrepend(Box::new(src))));
                 continue;
             }
+            // `class << self` body: any remaining unsupported form
+            // compiles to a runtime `raise NotImplementedError`
+            // instead of a parse-time SyntaxError. The raise fires
+            // when the surrounding scope executes (method body →
+            // at invocation; class body → at load). Specific
+            // shapes already handled above (def / attr_* / alias /
+            // prepend-Mod) bypass this path. See the
+            // SingletonChainPrepend arm above for the prepend
+            // recogniser; everything else (e.g. `include Mod`
+            // inside `class << self`, generic method calls, etc.)
+            // lands here.
+            //
+            // `class << <non-self>` still hard-errors at parse
+            // time — that branch has no surrounding class_stack
+            // frame, so even silently emitting nil would do the
+            // wrong thing (the body's intended target receiver is
+            // lost).
+            if recv_is_self {
+                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, and `prepend Mod` (single Module arg, with `self` receiver) are supported in the spike subset";
+                out.push(sp(bn, Expr::Call {
+                    receiver: None,
+                    name: "raise".into(),
+                    args: vec![
+                        sp(bn, Expr::ConstRead("NotImplementedError".into())),
+                        sp(bn, Expr::StrLit(msg.into())),
+                    ],
+                }));
+                continue;
+            }
             AST_ERRORS.with(|cell| cell.borrow_mut().push(
-                "class << X body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, and `prepend Mod` (single Module arg, with `self` receiver) are supported in the spike subset".into()
+                "class << <non-self> body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` are supported in the spike subset".into()
             ));
             out.push(sp(bn, Expr::Nil));
         }

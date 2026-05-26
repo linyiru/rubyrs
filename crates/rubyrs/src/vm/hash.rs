@@ -21,6 +21,11 @@ impl Vm {
         Ok(
                 match (name, args) {
                     ("length", []) | ("size", []) => Some(Value::Int(self.heap.hash(id).len() as i64)),
+                    // `freeze` / `frozen?` — same pattern as Array.
+                    // No-ops; tilt's `EMPTY_HASH = {}.freeze` relies on
+                    // freeze being chainable (returning the receiver).
+                    ("freeze", []) => Some(Value::Hash(id)),
+                    ("frozen?", []) => Some(Value::Bool(false)),
                     ("[]", [k]) => {
                         let h = self.heap.hash(id);
                         for (key, val) in h {

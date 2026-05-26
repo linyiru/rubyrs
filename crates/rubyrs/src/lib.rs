@@ -632,6 +632,8 @@ class TypeError < StandardError
 end
 class NameError < StandardError
 end
+class NotImplementedError < StandardError
+end
 class IndexError < StandardError
 end
 class KeyError < IndexError
