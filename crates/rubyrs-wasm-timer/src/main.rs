@@ -3,9 +3,14 @@
 //! and `/usr/bin/time -p` inside `perf/wasm_breakdown.sh`, with two
 //! properties they don't have:
 //!
-//! 1. **ns-precision wall measurement.** `/usr/bin/time -p` rounds
-//!    to 10 ms on macOS (BSD `time(1)`'s `-p` shape); useless for
-//!    the sub-10 ms cwasm cold-starts this exists to characterize.
+//! 1. **Microsecond-precision wall measurement.** `/usr/bin/time -p`
+//!    rounds to 10 ms on macOS (BSD `time(1)`'s `-p` shape); useless
+//!    for the sub-10 ms cwasm cold-starts this exists to characterize.
+//!    `Instant::now()`'s underlying clock has ns resolution on every
+//!    target we care about, but we report `as_micros()` because (a) it
+//!    matches what `perf/wasm_breakdown.sh` consumes and (b) the
+//!    spawn-jitter floor is comfortably above 1 us, so ns digits would
+//!    just be noise.
 //!
 //! 2. **Negligible wrapper overhead.** A `python3 -c ...` invocation
 //!    adds ~1-2 ms of interpreter startup to every measurement —

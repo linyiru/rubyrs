@@ -39,10 +39,21 @@ wasmtime = { version = "45.0", default-features = false, features = [
 [dependencies]
 # Match the version `perf/wasm_check.sh` already validates in CI
 # (.github/workflows/ci.yml installs wasmtime v45.0.0 from the
-# release tarball with a pinned sha256). Using the same version
-# keeps cwasm produced by the CLI deserialize-able by this
-# embedder — wasmtime's serialized format is version-stamped and
-# `Module::deserialize` rejects mismatches.
+# release tarball with a pinned sha256). cwasm format
+# compatibility requires BOTH:
+#   - matching wasmtime version (cwasm is version-stamped;
+#     `Module::deserialize` rejects mismatches outright), AND
+#   - matching feature set (cwasm encodes the compiler-side
+#     feature config; runtime deserialize fails with messages like
+#     "module was compiled with GC however GC is disabled in the
+#     host" when the runtime feature set is smaller than the
+#     compile-time set).
+# Trimmed features below mean this embedder can NOT deserialize
+# cwasm produced by the full-feature `wasmtime compile` CLI even
+# when the version matches. `RUBYRS_CWASM=<path>` runtime override
+# still works, but only with cwasm built using the same trimmed
+# config (e.g. via `wasmtime::Engine::precompile_module` in this
+# crate's `build.rs`).
 #
 # Feature trimming: wasmtime's defaults include heavy options the
 # embedder doesn't use (cranelift compiler, cache layer, wat

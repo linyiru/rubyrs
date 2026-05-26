@@ -6,7 +6,9 @@
 //! `Engine::precompile_module` on a wizer-pre-initialized
 //! `rubyrs.wasm` and `include_bytes!`d into this binary, so the
 //! shipping artifact is a SINGLE executable — no external cwasm
-//! file required at runtime. ~14 MB on macOS arm64.
+//! file required at runtime. ~7 MB on macOS arm64 with the
+//! trimmed-feature `release-min` build (see [dependencies] in
+//! Cargo.toml).
 //!
 //! Two modes:
 //!

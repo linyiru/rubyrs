@@ -16,12 +16,14 @@
 #   - eval_done      : after `eval_file` returns
 #
 # Each checkpoint emits a `trace-startup\t<label>\t<micros>us` line on
-# stderr. This script runs the cwasm N times under `/usr/bin/time`,
-# takes the MIN per checkpoint (drops cache-warmup jitter), and
-# prints a table with deltas. The "wasmtime+wasi+load" row is
-# computed as `wall_total - last_checkpoint` — the time spent before
-# rubyrs's first instruction runs (wasmtime startup, wasi init, cwasm
-# mmap, _start dispatch).
+# stderr. This script runs the cwasm N times under the in-tree
+# `rubyrs-wasm-timer` (microsecond-precision wall-clock wrapper —
+# `/usr/bin/time -p` would round to 10 ms on macOS, useless at sub-
+# 10 ms scale), takes the MIN per checkpoint (drops cache-warmup
+# jitter), and prints a table with deltas. The "wasmtime+wasi+load"
+# row is computed as `wall_total - last_checkpoint` — the time spent
+# before rubyrs's first instruction runs (wasmtime startup, wasi
+# init, cwasm mmap, _start dispatch).
 #
 # Exit codes: 0 if the breakdown ran end-to-end; 2 on any setup
 # error (missing tools, build failure, no trace lines captured).
@@ -142,8 +144,9 @@ fi
 SCRIPT="$PERF_TMPDIR/breakdown.rb"
 printf '%s\n' "$SCRIPT_INLINE" > "$SCRIPT"
 
-# 4. Run N times. Capture stderr (trace lines + /usr/bin/time -p
-#    output) per run; drop stdout (script output, "3\n" here).
+# 4. Run N times. Capture stderr (trace-startup checkpoint lines
+#    from the guest + the rubyrs-wasm-timer sentinel) per run;
+#    drop stdout (script output, "3\n" here).
 echo ""
 echo "Running $RUNS iterations of cwasm + '$SCRIPT_INLINE'..." >&2
 for i in $(seq 1 "$RUNS"); do
@@ -195,7 +198,7 @@ fi
 
 WALL_US="$(extract_wall_us_min)"
 if [[ -z "$WALL_US" ]]; then
-  echo "wasm_breakdown: failed to parse /usr/bin/time output" >&2
+  echo "wasm_breakdown: no rubyrs-wasm-timer wall_us line found in run logs" >&2
   exit 2
 fi
 
