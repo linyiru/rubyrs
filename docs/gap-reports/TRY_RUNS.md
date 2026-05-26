@@ -40,6 +40,94 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
+## Results — 2026-05-26 (fifth pass), rubyrs at `cba21b6`
+
+Fifth pass after the session's PR wave landed:
+
+- **PR #102** — class-level `@ivars` + class variables (`@@foo`)
+- **PR #104** — Enumerable preamble stub + `require` leniency
+  (caller-dir / caller-parent search) + `$LOAD_PATH` as a real
+  Array + `__FILE__` / `__dir__` / `File.expand_path`
+- **PR #105** — `Module#prepend` (chain walked before class's own
+  methods)
+- **PR #107** — stdlib `require` lenient pass-through stub
+  (no-op for known names like `time`, `date`, `logger`,
+  `forwardable`; a separate `loaded_stdlib_stubs` set
+  tracks first-load so re-require returns `false`, matching
+  CRuby's idempotency without sharing the `loaded_features`
+  path-keyed set used for real Ruby-source loads) + Object
+  preamble stub + `String#hash`
+- **PR #109** — block-arg dispatch: `&nil` is no-block,
+  `&curried_proc` is accepted as block, `&` TypeError reports
+  CRuby class names, `send(:priv, &nil)` preserves visibility
+  bypass
+
+Same 12 standalone files, same pinned target commits.
+
+| File | Was (fourth) | Now | Change |
+|---|---|---|---|
+| liquid/extensions.rb | B | **A** | `require 'time'` / `require 'date'` now stub-out (PR #107 stdlib require stub); file body runs clean |
+| sinatra/middleware/logger.rb | B | **A** | `require 'logger'` / `require 'forwardable'` stubbed by the same PR #107 stub; class body executes — `Logger` itself isn't built in, but the file's class definition no longer touches it |
+| rake/linked_list.rb | F | **A** | by the fourth pass this had moved into F (project-helper / undefined module) after #30 and #34 closed the original D+E pieces; the remaining helper hole is now covered by PR #104's Enumerable preamble stub + `require` leniency |
+| tilt/string.rb | D | **A** | three-layer unblock: #105 (`Module#prepend`) closed `class << self; prepend(...)` in `tilt.rb`; #107 (Object stub + `String#hash` + stdlib require stub) closed `tilt/template.rb` load; #109 (block-arg `&nil` ICE) closed the remaining downstream `evaluate(..., &block)` call sites. The file's class body executes top-to-bottom |
+| (8 others) | — | — | unchanged — same A or same blocker as the fourth pass |
+
+Pass count: **5 → 9** (out of 12). Four files moved from blocked
+to clean in one pass — the largest jump across all five passes.
+
+### What this pass shows
+
+The fourth-pass analysis warned that "winning at the AST frontier
+now requires multi-step investment for the deeply-stacked files",
+and that the C-ext require wall (Cat B) and project-helper holes
+(Cat F) were load-bearing. This pass tested both predictions:
+
+- **Multi-step investment paid off**: tilt/string.rb sat behind
+  a *load-path* layer (require_relative — closed in PR #66, the
+  C→D move recorded in the fourth pass) and then *three more
+  AST/VM layers* after that — `class << self; prepend(...)`,
+  Object as an ancestor in the lookup chain, and the block-arg
+  ICE on the inner `evaluate(..., &block)` forwarding. This pass
+  closes the three post-require_relative layers (PR #105, #107,
+  #109) AND a fourth that only became visible after the first
+  two cleared. The pattern: each multi-step file surfaces
+  another layer per unblock, and pass-count movement arrives
+  only when the LAST one closes.
+- **Cat B partially fell to a stub strategy**: rather than
+  building real `Time` / `Logger` modules, PR #107's stdlib
+  require stub treats common stdlib `require` calls as no-ops
+  (with a separate `loaded_stdlib_stubs` set tracking first
+  load so re-require returns `false`, matching CRuby
+  idempotency). Files that only depend on the *load*
+  succeeding (not on the module being functional at runtime)
+  now pass.
+  liquid/extensions.rb and sinatra/middleware/logger.rb both
+  fit that shape; the remaining Cat B file
+  (dry/struct/extensions/pretty_print.rb) doesn't — it
+  actually exercises `PP.pp` and needs a real module.
+
+### Cumulative category histogram
+
+After 5 passes:
+
+| Category | First pass | Fourth pass | Now | Notes |
+|---|---:|---:|---:|---|
+| A (runs clean) | 3 | 5 | 9 | +4 this pass: liquid/extensions, sinatra/middleware/logger, rake/linked_list, tilt/string |
+| B (C-ext require) | 2 | 3 | 1 | dry/struct/extensions/pretty_print is the last survivor (needs real `PP`) |
+| C (require_relative / load path) | 1 | 0 | 0 | unchanged since #66 |
+| D (unsupported AST node at runtime) | 3 | 1 | 0 | tilt/string.rb closed; category empty |
+| E (literal-default-arg) | 2 | 0 | 0 | unchanged since #34 |
+| F (project helper / undefined module) | 2 | 3 | 2 | rake/linked_list moved to A; jekyll/theme_drop (`delegate_method_as`) and bundler/match_remote_metadata remain |
+| G (host DSL — Brewfile, excluded) | 1 | 1 | 1 | unchanged |
+
+Net direction: D and E are both empty; C is empty; the only
+remaining categories are A (most of the dataset), B (one C-ext
+case), and F (two project-internal helper cases). The next pass
+will not move purely by adding AST nodes or `require` stubs —
+it needs either (a) a real `PP` for the dry-struct case, or
+(b) a way to either implement or stub `delegate_method_as` /
+the bundler nil-module path for the two F cases.
+
 ## Results — 2026-05-25 (fourth pass), rubyrs at `d151c27`
 
 Fourth pass after PR #66 (`require_relative`) landed plus the
