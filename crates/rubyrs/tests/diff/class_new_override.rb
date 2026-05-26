@@ -60,3 +60,13 @@ class G
   def x; @x; end
 end
 puts G.new(99).x
+
+# Reopening a BUILT-IN class to override `self.new` also wins
+# over rubyrs's hardcoded class-specific intercepts (Hash.new
+# returning a real Hash, etc.). Without ordering the override
+# check ahead of the Hash special-case, `Hash.new` here would
+# silently return `{}` from the hardcoded path.
+class Hash
+  def self.new(*args); "Hash.new override: #{args.inspect}"; end
+end
+puts Hash.new("x")

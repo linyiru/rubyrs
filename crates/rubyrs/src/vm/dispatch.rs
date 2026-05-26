@@ -835,6 +835,35 @@ impl Vm {
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
+        // User-defined `def self.new` takes precedence over the
+        // built-in allocator AND over the Hash.new / String.new /
+        // other built-in class-level intercepts below. CRuby's
+        // `Class#new` is a normal Ruby method (allocate +
+        // initialize), and reopening any class — built-in or
+        // user — to override `self.new` should win. Without this
+        // check ahead of the Hash / String special-cases, e.g.
+        // `class Hash; def self.new; ...; end; end; Hash.new`
+        // silently bypassed the override and returned an empty
+        // `{}` from the hardcoded Hash path.
+        //
+        // The block-form path (`do_call_block`) already routes
+        // user `self.new` overrides through its general
+        // Value::Class singleton-method dispatch arm, so no
+        // mirrored check is needed there — this no-block path
+        // is the only one with hardcoded `.new` shortcuts that
+        // bypassed singleton resolution.
+        //
+        // Documented gap: `def self.new ... super ... end` still
+        // hits the allocator via super only if Class's builtin
+        // `new` is reachable through super_lookup — which it
+        // isn't today. Override-without-super covers the tilt
+        // entry-point (and the common DSL builder pattern); the
+        // super-into-allocator case is a separable follow-up.
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
+            return self.invoke_method(m, recv.clone(), args);
+        }
         // `String.new` / `String.new(s)` — Tier 1 primitive
         // constructor. Without this intercept the generic
         // `Class.new` allocator below would build a
@@ -917,33 +946,6 @@ impl Vm {
             }
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
-        }
-        // User-defined `def self.new` takes precedence over the
-        // built-in allocator. CRuby's `Class#new` is itself a
-        // normal Ruby method (delegating to `allocate` +
-        // `initialize`); any user override should win. Without
-        // this check, e.g. `module Tilt; def self.new(file, ...);
-        // @default_mapping.new(file, ...); end; end; Tilt.new("x")`
-        // never enters the override — the hardcoded allocator
-        // below returns a generic `#<Tilt>` Instance instead.
-        //
-        // The block-form path (`do_call_block`) already routes
-        // user `self.new` overrides through its general
-        // Value::Class singleton-method dispatch arm, so no
-        // mirrored check is needed there — this no-block path
-        // is the only one with a hardcoded `.new` shortcut that
-        // bypassed singleton resolution.
-        //
-        // Documented gap: `def self.new ... super ... end` still
-        // hits the allocator via super only if Class's builtin
-        // `new` is reachable through super_lookup — which it
-        // isn't today. Override-without-super covers the tilt
-        // entry-point (and the common DSL builder pattern); the
-        // super-into-allocator case is a separable follow-up.
-        if name_id == new_id
-            && let Value::Class(cls) = &recv
-            && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
-            return self.invoke_method(m, recv.clone(), args);
         }
         if name_id == new_id
             && let Value::Class(cls) = &recv {
