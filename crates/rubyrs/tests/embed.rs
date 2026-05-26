@@ -1767,3 +1767,36 @@ fn interpolated_regex_respects_max_symbols_cap() {
         err.err,
     );
 }
+
+#[test]
+fn object_send_string_arg_respects_max_symbols_cap() {
+    // PR #98 review coverage: `obj.send("dyn_#{i}")` interns the
+    // String arg as a method name. Without the same cap check
+    // `String#to_sym` uses, untrusted scripts could grow the
+    // interner unbounded by passing distinct dynamic strings to
+    // `send` in a loop. The fresh name has to be a String literal
+    // (Symbol args don't intern); we burn through the cap deliberately
+    // and then expect ResourceExhausted on the very next fresh name.
+    let cfg = rubyrs::Config { max_symbols: Some(64), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        r#"
+        i = 0
+        while i < 10_000
+          begin
+            "x".send("dyn_#{i}")
+          rescue NoMethodError
+            # most synthetic names don't resolve — that's fine,
+            # we just want the interner to keep growing.
+          end
+          i += 1
+        end
+        "#,
+        "send_symbol_storm.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted trap from send-name symbol storm, got {:?}",
+        err.err,
+    );
+}

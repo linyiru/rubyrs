@@ -197,7 +197,21 @@ impl Vm {
         }
         match &args[0] {
             Value::Sym(s) => Ok(*s),
-            Value::Str(s) => Ok(s.with_str_lossy(|n| self.interner.intern(n))),
+            Value::Str(s) => {
+                // Same `Config::max_symbols` cap as `String#to_sym`
+                // (vm/string.rs:971) — without this, untrusted code
+                // could grow the interner unbounded by calling
+                // `send("dyn_#{i}")` in a loop. Existing symbols
+                // always re-resolve; only fresh names count.
+                let name = s.to_string_lossy();
+                if let Some(max) = self.max_symbols
+                    && !self.interner.contains(&name) && self.interner.len() >= max {
+                        return Err(self.trap(RubyError::ResourceExhausted {
+                            msg: format!("interner exhausted: {} symbols", max),
+                        }));
+                    }
+                Ok(self.interner.intern(&name))
+            }
             other => {
                 let inspected = other.to_inspect(&self.heap, &self.interner);
                 Err(self.trap(RubyError::TypeError {
