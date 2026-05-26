@@ -2333,6 +2333,35 @@ fn digits_int_path_error_semantics_match_bignum_profile() {
     }
 }
 
+#[test]
+fn sprintf_radix_int_min_does_not_panic() {
+    // Regression guard: `format_radix_int` used to compute the
+    // magnitude of a negative i64 via `(-n) as u64`, which panics
+    // in debug builds for `n == i64::MIN` (-i64::MIN overflows
+    // i64). `'%x' % i64::MIN` is a legitimate Ruby call. Switch
+    // to `unsigned_abs()` so the path stays panic-free; pin all
+    // four base specifiers at the i64::MIN cell.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "imin = -9_223_372_036_854_775_808\n\
+         puts '%x' % imin\n\
+         puts '%X' % imin\n\
+         puts '%o' % imin\n\
+         puts '%b' % imin",
+        "sprintf_imin.rb",
+    ).expect("i64::MIN sprintf must not panic");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Documented divergence: we render `-<unsigned magnitude>`,
+    // CRuby renders the `..f`-prefixed two's-complement form.
+    assert_eq!(lines[0], "-8000000000000000");
+    assert_eq!(lines[1], "-8000000000000000");
+    assert_eq!(lines[2], "-1000000000000000000000");
+    assert_eq!(lines[3], "-1000000000000000000000000000000000000000000000000000000000000000");
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {

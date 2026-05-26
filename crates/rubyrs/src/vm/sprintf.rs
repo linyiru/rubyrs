@@ -291,10 +291,13 @@ fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {
         // We render just `-<unsigned digits>` which is close
         // enough for the common test cases and avoids dragging
         // in BigNum-style "..f" notation. Documented divergence.
+        // `unsigned_abs()` (vs `-n`) survives `i64::MIN`, whose
+        // negation would overflow i64 and panic in debug builds.
+        let abs_n = n.unsigned_abs();
         let mag = match radix {
-            16 => format!("{:x}", (-n) as u64),
-            8 => format!("{:o}", (-n) as u64),
-            2 => format!("{:b}", (-n) as u64),
+            16 => format!("{:x}", abs_n),
+            8 => format!("{:o}", abs_n),
+            2 => format!("{:b}", abs_n),
             _ => unreachable!(),
         };
         let mag = if upper { mag.to_uppercase() } else { mag };
