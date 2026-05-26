@@ -219,7 +219,15 @@ def split_blocks(src: str):
                 # `def receiver.method(); ... end` is unaffected
                 # because the leading `def` IS at statement
                 # position.
-                do_count = len(re.findall(r"\bdo\b(?:\s*\|.*\|)?\s*$", l))
+                # Detect statement openers before counting `do` so
+                # we can suppress the trailing-`do` count on
+                # constructs that USE the optional-`do` syntax
+                # (`while cond do`, `until cond do`, `for x in y do`).
+                # Without this, `while cond do … end` would
+                # increment depth twice (once for `while`, once for
+                # the trailing `do`) and only decrement once on
+                # `end`, leaking depth and ultimately swallowing
+                # the rest of the file. Reviewer feedback PR #133.
                 stmt_open_count = len(
                     re.findall(
                         r"^\s*(?:if|unless|while|until)\b",
@@ -232,6 +240,20 @@ def split_blocks(src: str):
                         l,
                     )
                 )
+                # `if cond` / `unless cond` don't take an optional
+                # `do` (they use `then` or newline), so only
+                # while/until/for can produce the double-count.
+                # Match those keywords at line start AND a
+                # trailing `do` on the same line.
+                trailing_do_after_stmt = bool(
+                    re.search(
+                        r"^\s*(?:while|until|for)\b.*\bdo\b(?:\s*\|.*\|)?\s*$",
+                        l,
+                    )
+                )
+                do_count = len(re.findall(r"\bdo\b(?:\s*\|.*\|)?\s*$", l))
+                if trailing_do_after_stmt:
+                    do_count = 0  # already counted via stmt_open
                 end_count = len(re.findall(r"\bend\b", l))
                 depth += do_count + stmt_open_count + kw_open_count - end_count
                 if depth == 0:
@@ -311,10 +333,12 @@ def rewrite_extractor_header(src: str, addressed: int) -> str:
     the header — but ONLY when every passthrough the extractor
     could have listed has been resolved by polish. If any
     leftover passthrough patterns remain in the post-polish
-    output (`it_behaves_like` without --shared, `context`,
-    `before :all`, `after`), the header is still accurate and we
-    leave it intact so readers know the file isn't yet
-    micro-runner-ready.
+    output (`it_behaves_like` without --shared,
+    `it_should_behave_like`, or a `context "..." do` block —
+    `before`/`after` hooks of any shape are handled separately
+    by `DROP_TOP_LEVEL_HEADS` and don't appear here), the
+    header is still accurate and we leave it intact so readers
+    know the file isn't yet micro-runner-ready.
 
     If polish addressed zero entries, leave the header verbatim
     (no work happened that could have invalidated it)."""
