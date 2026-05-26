@@ -554,20 +554,6 @@ end
 - Tests: `resource_exhausted_cannot_be_swallowed_by_bare_rescue`
   and `resource_exhausted_is_uncatchable_even_with_rescue_exception`.
 
-### Multi-class `rescue A, B => e`
-
-```ruby
-begin ...
-rescue A, B => e
-  ...
-end
-```
-
-- CRuby matches A or B.
-- rubyrs honours only the **first** class (`A`). The remaining
-  classes are silently ignored at compile time. Document the
-  gap as a P1-10 follow-up.
-
 ### `Foo::Bar` constant-path in `rescue`
 
 - We extract only the trailing segment (`Bar`) and look it up

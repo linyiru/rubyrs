@@ -1224,11 +1224,12 @@ pub(crate) fn compile_expr(
             // tried first; the VM's unwinder pops handlers LIFO, so
             // we push them in REVERSE source order. Each clause
             // declaring an explicit class (or none = bare = filter
-            // StandardError) gets its own PushRescue. A single
-            // clause with multiple classes (`rescue A, B`) currently
-            // honours only the first class — multi-class rescue
-            // expansion is a follow-up. ConstantPath
-            // (`Foo::Bar`) uses the trailing segment.
+            // StandardError) gets its own PushRescue. A clause
+            // listing multiple classes (`rescue A, B => e`) emits
+            // one PushRescue per class, all sharing the same
+            // handler body — the unwinder's per-handler filter
+            // match naturally routes any of A/B/… into the body.
+            // ConstantPath (`Foo::Bar`) uses the trailing segment.
             let pe = ensure.as_ref().map(|_| b.emit(Op::PushEnsure(0)));
 
             if rescue.is_empty() {
@@ -1238,42 +1239,57 @@ pub(crate) fn compile_expr(
                 // clause is tried first. The VM's unwinder pops the
                 // rescues stack LIFO, so we PUSH in REVERSE source
                 // order — the first source clause ends up on top.
+                // Within a single multi-class clause we also push
+                // in reverse class order so the unwinder pops the
+                // first listed class first (CRuby: `rescue A, B`
+                // tries A before B).
                 let stderr_sym = interner.intern("StandardError");
-                let mut placeholders: Vec<usize> = Vec::with_capacity(rescue.len());
+                // Per-clause groups of PushRescue placeholders.
+                // Same outer iteration order as `rescue.iter().rev()`
+                // (i.e. last clause first). All placeholders in a
+                // single inner Vec patch to the SAME handler body.
+                let mut groups: Vec<Vec<usize>> = Vec::with_capacity(rescue.len());
                 for rc in rescue.iter().rev() {
                     let (slot, bind) = match &rc.var {
                         Some(name) => (b.local_slot(name), 1u8),
                         None => (0u16, 0u8),
                     };
-                    // Single-class rescue today: we honour the first
-                    // class in the clause's list. Multi-class
-                    // (`rescue A, B => e`) is a follow-up — for now
-                    // the second-and-later classes are silently
-                    // ignored. Documented in ADR-pending.
-                    let filter_sym = match rc.classes.first() {
-                        Some(name) => interner.intern(name),
-                        None => stderr_sym,
+                    let filter_syms: Vec<crate::intern::SymId> = if rc.classes.is_empty() {
+                        vec![stderr_sym]
+                    } else {
+                        // reverse so the first listed class lands
+                        // on top of the rescue stack and is tried
+                        // first by the unwinder.
+                        rc.classes.iter().rev().map(|n| interner.intern(n)).collect()
                     };
-                    placeholders.push(b.emit(Op::PushRescue(0, slot, bind, filter_sym)));
+                    let mut group = Vec::with_capacity(filter_syms.len());
+                    for sym in filter_syms {
+                        group.push(b.emit(Op::PushRescue(0, slot, bind, sym)));
+                    }
+                    groups.push(group);
                 }
                 compile_body(b, body, protos, interner, cc);
-                for _ in &placeholders { b.emit(Op::PopRescue); }
+                // One PopRescue per emitted PushRescue.
+                let total: usize = groups.iter().map(|g| g.len()).sum();
+                for _ in 0..total { b.emit(Op::PopRescue); }
                 // Normal-path exit from body jumps past every
                 // handler body to the merge point. Each handler
                 // body also jumps to the same merge after running.
                 let mut jump_to_end: Vec<usize> = Vec::with_capacity(rescue.len() + 1);
                 jump_to_end.push(b.emit(Op::Jump(0)));
                 // Handler bodies emitted in the same order as the
-                // PushRescues we collected (reverse source order).
-                // Handler-body order in code doesn't affect runtime
-                // semantics — each PushRescue carries its own
-                // handler_ip — so we keep the iteration consistent.
+                // groups collected (reverse source order). All
+                // placeholders within a group are patched to the
+                // same handler_start — the multi-class semantics
+                // is "any of these classes runs THIS body".
                 for (i, rc) in rescue.iter().rev().enumerate() {
-                    let placeholder = placeholders[i];
+                    let group = &groups[i];
                     let handler_start = b.pos();
-                    let off = handler_start as i32 - placeholder as i32 - 1;
-                    if let Op::PushRescue(o, _, _, _) = &mut b.code[placeholder] {
-                        *o = off;
+                    for &placeholder in group {
+                        let off = handler_start as i32 - placeholder as i32 - 1;
+                        if let Op::PushRescue(o, _, _, _) = &mut b.code[placeholder] {
+                            *o = off;
+                        }
                     }
                     compile_body(b, &rc.body, protos, interner, cc);
                     jump_to_end.push(b.emit(Op::Jump(0)));

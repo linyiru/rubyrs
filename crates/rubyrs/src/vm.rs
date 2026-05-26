@@ -200,8 +200,10 @@ pub(crate) struct RescueHandler {
     /// class listed) populates this with `StandardError`, so any
     /// exception that intentionally lives outside the StandardError
     /// subtree (e.g. `ResourceExhausted`) cannot be silently swallowed
-    /// by `rescue => e`. Explicit `rescue ClassName => e` is a P1-10
-    /// follow-up; today every PushRescue uses StandardError.
+    /// by `rescue => e`. Explicit `rescue ClassName => e` carries the
+    /// resolved Class here. Multi-class clauses (`rescue A, B => e`)
+    /// emit one handler per class — same handler_ip, same bind_slot —
+    /// so each entry holds exactly one filter.
     pub(crate) filter_class: Option<Rc<Class>>,
 }
 

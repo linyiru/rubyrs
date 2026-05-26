@@ -260,3 +260,4 @@ fn run_diff(name: &str) {
 #[test] fn object_and_string_hash() { run_diff("object_and_string_hash"); }
 #[test] fn module_prepend() { run_diff("module_prepend"); }
 #[test] fn block_arg_nil() { run_diff("block_arg_nil"); }
+#[test] fn rescue_multi_class() { run_diff("rescue_multi_class"); }
