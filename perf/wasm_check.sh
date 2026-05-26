@@ -120,7 +120,8 @@ measure_wall_ms() {
   fi
 }
 
-declare -i overall_rc=0
+declare -i regression_seen=0
+declare -i setup_failure_seen=0
 declare -i seen=0
 
 # Read TSV. Skip comments + blank lines. `IFS=$'\t'` keeps
@@ -144,7 +145,13 @@ while IFS=$'\t' read -r script max_wall_ms note; do
   for ((i=1; i<=RUNS; i++)); do
     ms=$(measure_wall_ms "$script")
     if [[ "$ms" == "ERR" ]]; then
-      overall_rc=1
+      # Measurement failure (workload crashed mid-run, time
+      # output unparseable, etc.) is a SETUP issue — escalate
+      # to exit 2 per the documented 0/1/2 contract, not the
+      # exit-1-budget-exceeded path. Mixing these would surface
+      # an interpreter ICE under wasi as a "perf regression",
+      # which sends a future debugger to the wrong file.
+      setup_failure_seen=1
       best_ms=""
       break
     fi
@@ -154,7 +161,7 @@ while IFS=$'\t' read -r script max_wall_ms note; do
   if [[ -z "$best_ms" ]]; then continue; fi
   if [[ "$max_wall_ms" -ne 0 && "$best_ms" -gt "$max_wall_ms" ]]; then
     echo "  FAIL: best wall ${best_ms} ms > budget ${max_wall_ms} ms" >&2
-    overall_rc=1
+    regression_seen=1
   else
     echo "  ok: best wall ${best_ms} ms (≤ ${max_wall_ms} ms)"
   fi
@@ -164,4 +171,10 @@ if [[ "$seen" -eq 0 ]]; then
   echo "wasm_check: zero workloads parsed from $BASELINES" >&2
   exit 2
 fi
-exit "$overall_rc"
+# Exit-code priority: setup failure (2) outranks budget regression
+# (1). A measurement that never completed can't be a clean perf
+# signal anyway, so reporting it as the higher-severity setup
+# code is honest about what failed.
+if [[ "$setup_failure_seen" -ne 0 ]]; then exit 2; fi
+if [[ "$regression_seen" -ne 0 ]]; then exit 1; fi
+exit 0
