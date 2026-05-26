@@ -1,0 +1,17 @@
+{
+  "name": "rubyrs-cf-poc",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "./build.sh",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/workers-wasi": "^0.0.5"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+# PoC: rubyrs.wasm on Cloudflare Workers.
+#
+# Pin compatibility_date — Workers behaviour can shift on flag-
+# gated features (notably wasm-related ones); pinning makes the
+# `wrangler dev` ↔ `wrangler deploy` shape reproducible.
+name = "rubyrs-poc"
+main = "src/worker.js"
+compatibility_date = "2025-11-01"
+
+# No `[[rules]]` block needed: wrangler v3+ ships a default
+# CompiledWasm rule matching `**/*.wasm` (and `**/*.wasm?module`)
+# with `fallthrough = false`, so adding our own re-declaration
+# fails the build with "ignored because a previous rule with the
+# same type was not marked as `fallthrough = true`". Workers-wasi
+# also imports a `memfs.wasm` from inside its own package; the
+# default rule handles both that and our `wasm/rubyrs_worker.wasm`.
