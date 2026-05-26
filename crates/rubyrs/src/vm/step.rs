@@ -1027,6 +1027,39 @@ impl Vm {
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Nil);
             }
+            Op::SingletonChainPrepend => {
+                // Pop the module/class value and push it onto the
+                // surrounding class's `singleton_prepends` chain.
+                // Same scope guard as `AliasSingletonMethod`: only
+                // emitted by AST for `class << self; prepend Mod;
+                // end` inside a class body, so class_stack.last()
+                // is the install target. Idempotency uses identity
+                // (Rc::ptr_eq) for the same reason regular `prepend`
+                // does — repeated `prepend Mod` is a no-op.
+                let arg = self.stack.pop().expect("ICE: SingletonChainPrepend with empty stack");
+                let src = match arg {
+                    Value::Class(c) => c,
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Module)",
+                            other.type_name(),
+                        ),
+                    })),
+                };
+                if let Some(target) = self.class_stack.last().cloned() {
+                    let mut chain = target.singleton_prepends.borrow_mut();
+                    if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
+                        chain.insert(0, src);
+                    }
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                }
+                // `class << self; prepend Mod; end` at toplevel —
+                // no enclosing class. Silent no-op, matching the
+                // AliasSingletonMethod toplevel fallback (CRuby
+                // installs on main's eigenclass; we don't model
+                // that distinctly).
+                self.stack.push(Value::Nil);
+            }
             Op::DefMethodBlock(name_id) => {
                 // Pop the BlockHandle the preceding `CreateBlock`
                 // pushed, then wrap it as a closure-method. We
@@ -1150,6 +1183,7 @@ impl Vm {
                     superclass: RefCell::new(parent.clone()),
                     includes: RefCell::new(Vec::new()),
                     prepends: RefCell::new(Vec::new()),
+                    singleton_prepends: RefCell::new(Vec::new()),
                     class_vars: RefCell::new(HashMap::new()),
                     #[cfg(feature = "cext")]
                     cext_alloc_func: std::cell::Cell::new(None),

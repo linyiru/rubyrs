@@ -200,6 +200,16 @@ pub(crate) enum Op {
     /// installs on main's eigenclass — but observably equivalent
     /// for the toplevel call shapes that actually appear.)
     AliasSingletonMethod(SymId, SymId), // new, old
+    /// Pop a Module/Class value and push it onto
+    /// `class_stack.last()`'s `singleton_prepends` chain.
+    /// Mirrors the instance `prepend` recogniser in dispatch.rs
+    /// but targets the singleton chain. Emitted only by the
+    /// AST translation of `class << self; prepend Mod; end`.
+    /// CRuby semantics: the prepended module's instance methods
+    /// take precedence over the class's own singleton methods —
+    /// `Object#singleton_method_or_via_prepend` is the
+    /// lookup story, implemented in `lookup_class_singleton_method`.
+    SingletonChainPrepend,
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured
     /// locals into a Method, and installs it under `name` in the

@@ -1003,6 +1003,15 @@ pub(crate) fn compile_expr(
             // Like Op::AliasMethod, the handler pushes Nil itself;
             // no trailing LoadNil here.
         }
+        Expr::SingletonChainPrepend(src) => {
+            // Evaluate the module/class argument (`Module.new { ... }`,
+            // a constant lookup, anything that lands a Value::Class
+            // on the stack), then emit the op that pushes it onto
+            // the surrounding class's `singleton_prepends`. Handler
+            // pushes Nil for the expression result.
+            compile_expr(b, src, protos, interner, cc);
+            b.emit(Op::SingletonChainPrepend);
+        }
         Expr::ArrayLit(elems) => {
             for e in elems { compile_expr(b, e, protos, interner, cc); }
             b.emit(Op::NewArray(elems.len() as u16));

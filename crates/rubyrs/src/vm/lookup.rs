@@ -93,20 +93,60 @@ impl Vm {
         m
     }
 
-    /// Walk `cls`'s `singleton_methods` table, then the superclass
-    /// chain's, returning the first hit. CRuby's metaclass model
-    /// gives `Sub < Super` a singleton class whose parent is
-    /// `Super`'s singleton class — so `Sub.foo` finds Super's
-    /// `def self.foo`. We approximate that shape with a straight
-    /// superclass walk over the per-class `singleton_methods`
-    /// tables. Used by both the explicit-receiver `cls.foo` path
-    /// (in `do_call`) and the bare `foo` path when `self` is a
-    /// Value::Class (also in `do_call`) — keeping both in lockstep
-    /// avoids "self.bar finds it but bare bar doesn't" surprises.
+    /// Walk `cls`'s singleton_prepends → `singleton_methods` →
+    /// superclass chain (with the same chain at each level),
+    /// returning the first hit. CRuby's metaclass model gives
+    /// `Sub < Super` a singleton class whose parent is `Super`'s
+    /// singleton class — so `Sub.foo` finds Super's `def self.foo`.
+    /// We approximate that shape with a straight superclass walk
+    /// over the per-class `singleton_methods` tables, plus the
+    /// `singleton_prepends` chain that `class << X; prepend Mod; end`
+    /// populates. Used by both the explicit-receiver `cls.foo`
+    /// path (in `do_call`) and the bare `foo` path when `self`
+    /// is a Value::Class (also in `do_call`).
+    ///
+    /// Cycle defensiveness mirrors `lookup_method_uncached` — two
+    /// HashSets, one for the superclass chain and one fresh per
+    /// step for the singleton-prepends graph.
     #[inline]
     pub(crate) fn lookup_class_singleton_method(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+        // Walk a prepended module (and its own prepends/includes
+        // transitively) looking for an *instance* method named
+        // `name_id`. Methods on a prepended-to-singleton module
+        // are stored in `methods` (the module's normal table) —
+        // CRuby treats `class << X; prepend M; end` as putting
+        // M's instance methods in front of X's singleton methods.
+        fn walk_module(
+            m: &Rc<Class>,
+            name_id: SymId,
+            visited: &mut std::collections::HashSet<*const Class>,
+        ) -> Option<Rc<Method>> {
+            if !visited.insert(Rc::as_ptr(m)) { return None; }
+            for pre in m.prepends.borrow().iter() {
+                if let Some(found) = walk_module(pre, name_id, visited) {
+                    return Some(found);
+                }
+            }
+            if let Some(found) = m.methods.borrow().get(&name_id).cloned() {
+                return Some(found);
+            }
+            for inc in m.includes.borrow().iter() {
+                if let Some(found) = walk_module(inc, name_id, visited) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
         let mut current = cls.clone();
         loop {
+            if !sc_visited.insert(Rc::as_ptr(&current)) { return None; }
+            let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            for pre in current.singleton_prepends.borrow().iter() {
+                if let Some(found) = walk_module(pre, name_id, &mut inc_visited) {
+                    return Some(found);
+                }
+            }
             if let Some(m) = current.singleton_methods.borrow().get(&name_id).cloned() {
                 return Some(m);
             }
@@ -515,17 +555,39 @@ impl Vm {
         // it because the methods aren't in `methods` and a class's
         // own class is "Class", not its inheritance chain.
         if let Value::Class(cls) = &self_val {
-            let mut chain: Vec<Rc<Class>> = Vec::new();
-            let mut visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            // Build the class-method ancestor chain. Each node
+            // carries an `is_module` flag so the post-defining walk
+            // knows where to look: a singleton-prepended module
+            // stores its methods in `methods`, while a class itself
+            // stores singleton methods in `singleton_methods`.
+            // Cycle defensiveness mirrors `flatten_ancestors`.
+            let mut chain: Vec<(Rc<Class>, bool /* is_module */)> = Vec::new();
+            let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            // Flatten a singleton-prepended module into the chain,
+            // walking its own prepends/includes transitively (so a
+            // module's own `prepend`/`include` ancestry is honoured).
+            fn flatten_prepended_module(
+                m: &Rc<Class>,
+                out: &mut Vec<(Rc<Class>, bool)>,
+                visited: &mut std::collections::HashSet<*const Class>,
+            ) {
+                if !visited.insert(Rc::as_ptr(m)) { return; }
+                for pre in m.prepends.borrow().iter() {
+                    flatten_prepended_module(pre, out, visited);
+                }
+                out.push((m.clone(), true));
+                for inc in m.includes.borrow().iter() {
+                    flatten_prepended_module(inc, out, visited);
+                }
+            }
             let mut cur = cls.clone();
             loop {
-                // Same cycle defensiveness as `flatten_ancestors`
-                // / `walk_module` / `walks_through` — a cyclic
-                // superclass chain (cext or direct mutation; CRuby
-                // raises TypeError at class-definition time)
-                // would otherwise spin here.
-                if !visited.insert(Rc::as_ptr(&cur)) { break; }
-                chain.push(cur.clone());
+                if !sc_visited.insert(Rc::as_ptr(&cur)) { break; }
+                let mut inc_visited = std::collections::HashSet::new();
+                for pre in cur.singleton_prepends.borrow().iter() {
+                    flatten_prepended_module(pre, &mut chain, &mut inc_visited);
+                }
+                chain.push((cur.clone(), false));
                 let parent = cur.superclass.borrow().clone();
                 match parent {
                     Some(p) => cur = p,
@@ -533,11 +595,15 @@ impl Vm {
                 }
             }
             let m = chain.iter()
-                .position(|c| Rc::ptr_eq(c, &defining))
+                .position(|(c, _)| Rc::ptr_eq(c, &defining))
                 .map(|i| i + 1)
                 .and_then(|i| chain.get(i..))
-                .and_then(|tail| tail.iter().find_map(|c| {
-                    c.singleton_methods.borrow().get(&name_id).cloned()
+                .and_then(|tail| tail.iter().find_map(|(c, is_module)| {
+                    if *is_module {
+                        c.methods.borrow().get(&name_id).cloned()
+                    } else {
+                        c.singleton_methods.borrow().get(&name_id).cloned()
+                    }
                 }));
             return match m {
                 Some(m) => Ok((m, self_val)),
@@ -645,6 +711,7 @@ mod tests {
             singleton_methods: RefCell::new(HashMap::new()),
             includes: RefCell::new(Vec::new()),
             prepends: RefCell::new(Vec::new()),
+            singleton_prepends: RefCell::new(Vec::new()),
             superclass: RefCell::new(superclass),
             class_vars: RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]
