@@ -61,7 +61,27 @@ impl Vm {
                             g.pin(Value::Block(block_id));
                             g.vm.invoke_block(block_id, vec![Value::Hash(id), k.clone()])?;
                             g.vm.dispatch_until(pre_frames)?;
+                            // Non-local return from inside the block
+                            // (`def foo; h = Hash.new { return :early };
+                            // h[:x]; end` → foo returns :early). The
+                            // outer unwind machinery handles
+                            // method_return; we propagate by leaving
+                            // it set and returning Nil. The `[]` site
+                            // never observes our Nil because the
+                            // dispatch loop sees method_return first.
+                            if g.vm.method_return.is_some() {
+                                return Ok(Some(Value::Nil));
+                            }
                             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
+                            // `break value` from inside the block
+                            // exits the `[]` call with that value
+                            // — same shape as `break` from an
+                            // iterator block. Clear the flag so it
+                            // doesn't leak into the surrounding
+                            // method's loop/iterator state.
+                            if g.vm.break_signaled {
+                                g.vm.break_signaled = false;
+                            }
                             return Ok(Some(r));
                         }
                         Some(Value::Nil)
@@ -212,7 +232,11 @@ impl Vm {
                     ("merge", [Value::Hash(other)]) => {
                         // CRuby: keys in `other` overwrite keys in `self`,
                         // and `other`'s key-order is appended after self's
-                        // (existing keys retain their position).
+                        // (existing keys retain their position). The
+                        // result inherits the RECEIVER's default-block
+                        // (`h.default_proc`), so
+                        // `Hash.new { |h, k| h[k] = [] }.merge(x)[:y]`
+                        // still auto-vivifies on the merged hash.
                         let mut out: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
                         for (k, v) in extra {
@@ -223,8 +247,18 @@ impl Vm {
                                 out.push((k, v));
                             }
                         }
+                        // Snapshot the receiver's default-block BEFORE
+                        // alloc — the alloc could trigger GC, and the
+                        // block ObjId is a primitive we need stable
+                        // across the alloc. (The block itself is
+                        // already rooted via the receiver hash, which
+                        // hasn't gone away.)
+                        let default_block = self.heap.hash_default_block(id);
                         self.maybe_gc();
                         let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
+                        if default_block.is_some() {
+                            self.heap.hash_set_default_block(nid, default_block);
+                        }
                         Some(Value::Hash(nid))
                     }
                     ("delete", [k]) => {

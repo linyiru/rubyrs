@@ -3357,16 +3357,21 @@ impl Vm {
         // and access). `Hash#[]` consults this slot on missing
         // keys and invokes the block with `(self_hash, key)` —
         // tilt's `Hash.new { |h, k| h[k] = [] }` auto-vivifies.
-        // The `args.is_empty()` check matches CRuby's signature;
-        // `Hash.new(default) { block }` is a TypeError in CRuby
-        // (can't specify both) and falls through here to the
-        // generic path which currently raises NoMethodError —
-        // documented as a narrow gap, fixable later if needed.
+        //
+        // `Hash.new(default) { block }` is an ArgumentError in
+        // CRuby ("wrong number of arguments (given 1, expected 0)"
+        // from Hash#initialize when both default-arg and block are
+        // given). Mirror that explicitly so callers don't see the
+        // misleading generic Class.new fallback behaviour.
         if &*name == "new"
-            && args.is_empty()
             && let Some(Value::Class(cls)) = &recv
             && cls.name.as_str() == "Hash"
         {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                }));
+            }
             self.maybe_gc();
             self.check_alloc()?;
             let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));

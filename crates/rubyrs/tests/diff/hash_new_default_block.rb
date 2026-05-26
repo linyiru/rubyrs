@@ -43,6 +43,40 @@ puts hb.inspect                                 # {a: [:first], b: [:only]}
 # what [] yields. Subsequent accesses re-invoke the block
 # (no caching) so this returns a fresh value each time.
 counter = Hash.new { |_, k| "computed-#{k}" }
-puts counter[:x]                                # "computed-x"
-puts counter[:y]                                # "computed-y"
+puts counter[:x]                                # computed-x
+puts counter[:y]                                # computed-y
 puts counter.inspect                            # {} (block didn't mutate)
+
+# --- Hash.new arity check ---
+# `Hash.new(default) { block }` is ArgumentError in CRuby
+# ("wrong number of arguments"); rubyrs matches explicitly.
+begin
+  Hash.new(0) { |_, _| 0 }
+rescue ArgumentError => e
+  puts e.message
+end
+
+# --- merge preserves receiver's default-block ---
+# CRuby: derived hashes (merge/select/etc.) inherit the
+# receiver's default_proc. Without this, `Hash.new {...}.merge(x)[:y]`
+# loses auto-vivify. Pin the receiver's block survives the merge.
+base = Hash.new { |h, k| h[k] = "base-#{k}" }
+merged = base.merge({a: 1})
+puts merged.inspect                             # {a: 1}
+puts merged[:new_key]                           # base-new_key (block fired)
+puts merged.inspect                             # {a: 1, new_key: "base-new_key"}
+
+# --- non-local return from default-block ---
+# `return` from inside the default-block exits the enclosing
+# method with the return value, propagating through the `[]`
+# call site. CRuby semantics: default-block is a Proc, so
+# `return` works (non-local return through the enclosing method),
+# while `break` would raise LocalJumpError (untested here —
+# `break` from a Proc is not idiomatic and the diff_cruby
+# fixture pins what's actually used).
+def with_return_test
+  h = Hash.new { |_, _| return :early_return }
+  h[:any]
+  :unreachable
+end
+puts with_return_test                           # early_return

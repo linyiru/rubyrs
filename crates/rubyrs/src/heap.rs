@@ -264,15 +264,20 @@ impl Heap {
     /// semantics, narrowed to the common shape (no static default
     /// value yet, no `default=` assignment — both are deferred gaps).
     pub(crate) fn hash_default_block(&self, id: ObjId) -> Option<ObjId> {
-        if let HeapObj::Hash(h) = self.get(id) { h.default_block } else { None }
+        if let HeapObj::Hash(h) = self.get(id) { h.default_block }
+        else { panic!("ICE: heap slot is not a Hash (hash_default_block)") }
     }
     /// Install the default-value block; one-shot at allocation
     /// time from the `Hash.new { ... }` dispatch arm. The existing
     /// 11 in-VM hash allocations all pass through allocation
     /// directly with `default_block: None`, so this is only used
-    /// when the script explicitly opts in.
+    /// when the script explicitly opts in. Panics on type
+    /// mismatch (consistent with `hash()` / `hash_mut()`) so
+    /// internal ObjId-routing bugs surface loudly rather than
+    /// silently no-op.
     pub(crate) fn hash_set_default_block(&mut self, id: ObjId, block: Option<ObjId>) {
         if let HeapObj::Hash(h) = self.get_mut(id) { h.default_block = block; }
+        else { panic!("ICE: heap slot is not a Hash (hash_set_default_block)") }
     }
     pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
         if let HeapObj::Range(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Range") }
