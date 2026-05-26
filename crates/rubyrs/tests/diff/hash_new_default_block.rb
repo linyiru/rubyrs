@@ -65,6 +65,22 @@ rescue ArgumentError => e
   puts e.message
 end
 
+# --- Hash[...] class-method constructor ---
+# CRuby's `Hash.[]` builds a hash from one of three shapes.
+# Older gems (rake, minitest) prefer `Hash[pairs]` to
+# `pairs.to_h`; without an intercept, the call would
+# NoMethodError on Class.
+puts Hash[].inspect                             # {}
+puts Hash[:a, 1].inspect                        # {a: 1}
+puts Hash[:a, 1, :b, 2].inspect                 # {a: 1, b: 2}
+puts Hash[[[:x, 10], [:y, 20]]].inspect         # {x: 10, y: 20}
+# Odd flat arity → ArgumentError (matches CRuby's exact message).
+begin
+  Hash[:a]
+rescue ArgumentError => e
+  puts e.message
+end
+
 # --- merge with temporary RHS doesn't lose nested children ---
 # GC-rooting: merge clones `other`'s pairs shallowly (ObjId-level)
 # into a local Vec, then allocs the merged Hash. Without pinning

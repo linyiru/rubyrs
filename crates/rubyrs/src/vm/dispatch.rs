@@ -760,6 +760,71 @@ impl Vm {
         // motivating case) is the block form. Without default-
         // block support the whole tilt-load chain stalls on the
         // first `@lazy_map[ext]` access.
+        // `Hash[...]` class-method constructor. CRuby has three
+        // call shapes:
+        //   - `Hash[]`               → empty Hash
+        //   - `Hash[k1, v1, k2, v2]` → flat-pair form (even arity)
+        //   - `Hash[[[k, v], ...]]`  → 1 Array of 2-element pairs
+        //   - `Hash[{k => v, ...}]`  → 1 Hash (copy semantics)
+        // The flat-pair form is the most common; older gems prefer
+        // it over `pairs.to_h`. Without this intercept, `Hash[]`
+        // would NoMethodError on Class (no `[]` defined on
+        // Value::Class).
+        //
+        // Odd-arity (k without matching v) is ArgumentError in
+        // CRuby; mirror that.
+        if &*name == "[]"
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Hash"
+        {
+            self.maybe_gc();
+            self.check_alloc()?;
+            let pairs: Vec<(Value, Value)> = if args.len() == 1 {
+                match &args[0] {
+                    Value::Array(aid) => {
+                        // `Hash[[[k, v], ...]]`. Each element must be
+                        // a 2-element Array; anything else is
+                        // ArgumentError in CRuby (`invalid number of
+                        // elements (X for 2)`), but we follow the
+                        // common shape — non-pair elements are dropped
+                        // with TypeError. Stay strict only on the
+                        // outer Array shape.
+                        let outer = self.heap.array(*aid).clone();
+                        let mut out = Vec::with_capacity(outer.len());
+                        for elem in outer {
+                            if let Value::Array(pair_id) = elem {
+                                let pair = self.heap.array(pair_id);
+                                if pair.len() == 2 {
+                                    out.push((pair[0].clone(), pair[1].clone()));
+                                } else {
+                                    return Err(self.trap(RubyError::ArgumentError {
+                                        msg: format!("invalid number of elements ({} for 2)", pair.len()),
+                                    }));
+                                }
+                            } else {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: format!("wrong element type {} (expected array)", elem.type_name()),
+                                }));
+                            }
+                        }
+                        out
+                    }
+                    Value::Hash(hid) => self.heap.hash(*hid).clone(),
+                    _ => return Err(self.trap(RubyError::ArgumentError {
+                        msg: "odd number of arguments for Hash".into(),
+                    })),
+                }
+            } else if args.len() % 2 == 0 {
+                args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect()
+            } else {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "odd number of arguments for Hash".into(),
+                }));
+            };
+            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+            self.stack.push(Value::Hash(hid));
+            return Ok(());
+        }
         if name_id == new_id
             && let Value::Class(cls) = &recv
             && cls.name.as_str() == "Hash"
