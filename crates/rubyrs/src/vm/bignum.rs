@@ -1173,10 +1173,12 @@ pub(crate) fn bignum_log2_per_digit_scaled(radix: u32) -> u64 {
 /// Returns an upper bound on the number of characters
 /// `BigInt::to_str_radix(radix)` produces for a value with the
 /// given `bits()`. Clamps to ≥ 1 so that `BigInt(0)` (whose
-/// `bits()` is 0 but whose rendered form is `"0"`) passes a
-/// `max_value_bytes = 0` cap consistently with the pre-tightening
-/// behaviour. Uses `u128` intermediates to avoid overflow when
-/// `bits` approaches `u64::MAX / SCALE` (≈ 2^58 bits ≈ 32 PB).
+/// `bits()` is 0 but whose rendered form is `"0"`) costs at
+/// least one byte against `max_value_bytes` — callers compare
+/// `est > cap`, so `Some(0)` still traps even on the zero value
+/// (consistent with the pre-tightening behaviour). Uses `u128`
+/// intermediates to avoid overflow when `bits` approaches
+/// `u64::MAX / SCALE` (≈ 2^58 bits ≈ 32 PB).
 #[cfg(feature = "bignum")]
 pub(crate) fn bignum_digits_upper_bound(bits: u64, radix: u32) -> u64 {
     const SCALE: u128 = 64;
