@@ -11,8 +11,10 @@ rubyrs methods that aren't implemented yet (`Array#push`,
 masking the genuine PASSes around them.
 
 This script reads a spec file on stdin, walks `it "..." do … end`
-AND top-level `before "..." do … end` blocks, and drops any whose
-body matches a known "this won't run in the micro-runner" pattern
+AND top-level `before :each do … end` / `after :each do … end`
+blocks (ruby/spec uses symbol args on hooks, not strings — the
+extractor preserves that shape), and drops any whose body matches
+a known "this won't run in the micro-runner" pattern
 (see `DROP_PATTERNS` below). Each dropped block leaves a
 `# skipped (<category>): ...` trace at the dropped block's
 original indentation so the diff stays auditable.
@@ -154,9 +156,56 @@ def split_blocks(src: str):
             j = i + 1
             while j < n:
                 l = lines[j]
+                # Count every `end`-introducing keyword, not just
+                # `do`. Ruby has multiple block-ending forms (any
+                # `end`-terminated construct closes a depth):
+                #
+                #   * `do |args|` at end-of-line — explicit blocks
+                #   * `class Foo` / `module Foo` / `def foo`
+                #   * `if cond` / `unless cond` / `case expr`
+                #   * `begin` / `while cond` / `until cond` / `for x in y`
+                #
+                # The MODIFIER form of `if`/`unless`/`while`/`until`
+                # (`do_stuff if cond`) doesn't take an `end` and
+                # MUST NOT increment depth. Restrict those to
+                # statement position only: leading `\s*` then the
+                # keyword, followed by a word boundary. The other
+                # openers (`class`/`def`/`module`/`case`/`begin`/
+                # `for`) have no modifier form, so a word-boundary
+                # match anywhere on the line is safe — but in
+                # practice they too only appear at statement
+                # position in ruby/spec input.
+                #
+                # Reviewer feedback PR #133: the prior `\bdo\b`-only
+                # counter would mis-count `end` for an inner
+                # `class`/`def`/`if` body as the closing `end` of
+                # the outer `it` block, corrupting the output.
+                #
+                # `end_count` matches `\bend\b` ANYWHERE on the
+                # line (not just `^\s*end\b`) so a single-line
+                # `def foo; ... end` self-cancels: the `def`
+                # opener and inline `end` closer both count once
+                # and net to zero depth change. This matters in
+                # ruby/spec because `def receiver.method(...); ...
+                # end` shows up inside `it` blocks that synthesize
+                # methods on test fixtures (e.g.
+                # array_include_spec.rb's mock-based equality
+                # test).
                 do_count = len(re.findall(r"\bdo\b(?:\s*\|.*\|)?\s*$", l))
-                end_count = len(re.findall(r"^\s*end\s*$", l))
-                depth += do_count - end_count
+                stmt_open_count = len(
+                    re.findall(
+                        r"^\s*(?:if|unless|while|until)\b",
+                        l,
+                    )
+                )
+                kw_open_count = len(
+                    re.findall(
+                        r"\b(?:class|module|def|case|begin|for)\b",
+                        l,
+                    )
+                )
+                end_count = len(re.findall(r"\bend\b", l))
+                depth += do_count + stmt_open_count + kw_open_count - end_count
                 if depth == 0:
                     j += 1
                     break
@@ -182,7 +231,7 @@ EXTRACTOR_HEADER_OPENER = re.compile(
     r"^#\s*rubyrs-spec-extract v[\d.]+: \d+ pattern\(s\) left for hand polish\."
 )
 
-# Patterns that the EXTRACTOR currently passthrough's (lists in
+# Patterns the EXTRACTOR currently passes through (lists in
 # its skip-log header) but polish doesn't address. If any of
 # these appear in the post-polish output, the header is still
 # accurate — keep it. Reviewer feedback PR #133: stripping the

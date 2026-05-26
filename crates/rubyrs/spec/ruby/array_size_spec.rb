@@ -1,3 +1,12 @@
+# Adapted from ruby/spec core/array/size_spec.rb + shared/length.rb
+# at upstream commit 448cb340 (2026-05). Produced by
+# `rubyrs-spec-extract` v0.4 + `scripts/polish.py`.
+#
+# polish.py dropped `it` blocks containing fixture refs,
+# unimplemented Array methods, or `mock`/`should_receive`;
+# each drop leaves a `# skipped (<category>): ...` trace
+# inline. Regenerate by re-running the extractor + polish
+# pipeline documented in crates/rubyrs-spec-extract/README.md.
 
 describe "Array#size" do
   it "returns the number of elements" do
