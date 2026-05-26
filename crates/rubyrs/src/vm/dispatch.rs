@@ -373,24 +373,35 @@ impl Vm {
                 return self.do_call(name_id, argc, /*no_recv=*/false, cache_id);
             }
             // `__dir__` — returns the directory of the source
-            // file the call lexically appears in. CRuby
-            // canonicalizes to an absolute path; rubyrs uses
-            // the proto's stored filename verbatim (whatever
-            // the loader passed, typically already absolute
-            // when require resolves it; relative for inline
-            // eval). The filename comes from the currently-
-            // running proto, which is where the `__dir__`
-            // literal lives. Lets vendored Ruby helpers do
-            // `$LOAD_PATH.unshift __dir__` without needing
-            // any further plumbing.
+            // file the call lexically appears in. CRuby's
+            // contract is "canonicalized absolute path" — it
+            // calls `File.realpath(__FILE__)` first, so
+            // symlinks resolve and `..` segments collapse.
+            // We canonicalize the proto's stored filename via
+            // `fs::canonicalize` (follows symlinks, fails if
+            // the path doesn't exist) and then take its
+            // parent; on canonicalize failure (typically when
+            // `__dir__` runs from an `eval`'d inline string
+            // whose "filename" is a synthetic label like
+            // `<inline>`) we fall back to the lexical
+            // `Path::parent` of the raw filename. Lets
+            // vendored Ruby helpers do
+            // `$LOAD_PATH.unshift __dir__` and match what
+            // CRuby resolves through symlinked gem-vendor
+            // trees.
             if &*name == "__dir__" && args.is_empty() {
                 use std::path::Path;
                 let fname = self.frames.last()
                     .map(|f| self.protos[f.proto_idx].filename.to_string())
                     .unwrap_or_default();
-                let dir = Path::new(&fname).parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| ".".to_string());
+                let dir = match std::fs::canonicalize(&fname) {
+                    Ok(real) => real.parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| ".".to_string()),
+                    Err(_) => Path::new(&fname).parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| ".".to_string()),
+                };
                 self.stack.push(Value::new_str(dir));
                 return Ok(());
             }

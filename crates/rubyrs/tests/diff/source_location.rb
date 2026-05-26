@@ -17,14 +17,15 @@
 #     Location doesn't expose a pre-computed line number and
 #     the AST translator doesn't carry source bytes; tracked
 #     for a later promotion to real line numbers).
-#   - rubyrs's `__dir__` does NOT canonicalize via realpath;
-#     it returns the proto's stored filename's parent
-#     verbatim. CRuby's realpath-canonicalisation would
-#     resolve symlinks and `..` segments; we get them
-#     literally. Matches for most use cases (require
-#     resolves to canonical paths anyway) but diverges if
-#     a script reaches `__dir__` from a file loaded via a
-#     symlink. Not covered.
+#   - `__dir__` now canonicalizes via `fs::canonicalize`
+#     (matches CRuby's `File.realpath(__FILE__)` route),
+#     resolving symlinks and `..` segments. Falls back to
+#     the lexical `Path::parent` only when canonicalize
+#     fails (typically an `eval`'d inline source whose
+#     "filename" is a synthetic label like `<inline>`).
+#     Symlink-resolution agreement isn't probed in this
+#     fixture because the test infrastructure runs from
+#     non-symlinked paths — see the standalone bench.
 
 # --- File.expand_path: lexical resolution ---
 
