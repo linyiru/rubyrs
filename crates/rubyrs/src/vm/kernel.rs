@@ -368,6 +368,23 @@ impl Vm {
                         let rb_found = self.find_ruby_source_candidate(&path_str);
                         if rb_found {
                             Some(self.require_ruby(&path_str))
+                        } else if is_stdlib_stub_name(&path_str) {
+                            // Tier 1 lenient stub for known pure-
+                            // Ruby stdlib names. Returns `true` as
+                            // if the load succeeded; the actual
+                            // stdlib code isn't loaded. Scripts
+                            // that only `require 'uri'` for
+                            // feature detection without actually
+                            // calling `URI.parse` etc. proceed
+                            // past the require line. Use of the
+                            // stubbed-out stdlib fails later with
+                            // a more specific NameError /
+                            // NoMethodError, which is the right
+                            // surface for "feature absent" vs
+                            // "load failed". See ADR 0017 — stdlib
+                            // is Tier 3; this is the embeddable-
+                            // host lenient-mode bridge.
+                            Some(Ok(Value::Bool(true)))
                         } else {
                             #[cfg(feature = "cext")]
                             { Some(self.cext_require(&path_str)) }
@@ -841,4 +858,55 @@ impl Vm {
         Ok(Value::Bool(true))
     }
 
+}
+
+/// Known stdlib-shaped require names that rubyrs Tier 1 stubs to
+/// `true` rather than load. Whitelist is conservative: only the
+/// names script authors typically `require` for feature-detection
+/// or as no-op dependencies of larger files. Anything not in this
+/// set falls through to cext (or "cannot find" if cext is off).
+///
+/// Scripts that actually USE the stdlib's API (`URI.parse`,
+/// `Logger.new`, `JSON.parse`, ...) get a NameError /
+/// NoMethodError at the call site — which is the right surface
+/// for "feature absent in the embedded runtime" vs the
+/// alternative "the require itself blew up before any of your
+/// code ran." Aligns with the embeddable-DSL niche per
+/// ADR 0017 (stdlib is Tier 3; this stub is the Tier 1
+/// lenient-mode bridge that lets gem helpers load).
+///
+/// The list covers stdlib names referenced in the most
+/// commonly-vendored Ruby sources observed during the
+/// msgpack / Rack / Sinatra / Hanami load-coverage sweeps:
+///   - `uri` — Rack `utils.rb` percent-encoding plumbing
+///   - `set` — modern Ruby cross-cutting (Sinatra, dry-*)
+///   - `logger` — Sinatra `show_exceptions.rb`
+///   - `forwardable` — many gems
+///   - `singleton`, `delegate`, `ostruct` — small util gems
+///   - `pathname`, `tempfile`, `stringio`, `fileutils` —
+///     filesystem-shaped stdlib
+///   - `digest` / `digest/md5` / `digest/sha1` / `digest/sha2` —
+///     bcrypt and friends
+///   - `base64`, `securerandom` — auth / token gems
+///   - `json`, `yaml`, `date`, `time`, `csv`, `optparse`,
+///     `english` — high-frequency entries
+///   - `bigdecimal`, `monitor` — concurrency stubs that
+///     usually get treated as no-ops anyway in our
+///     single-threaded model
+///   - `erb` — template-engine probes (tilt et al.)
+fn is_stdlib_stub_name(name: &str) -> bool {
+    matches!(
+        name,
+        "uri" | "uri/generic" | "uri/common"
+        | "set" | "logger" | "forwardable"
+        | "singleton" | "delegate" | "ostruct"
+        | "pathname" | "tempfile" | "stringio" | "fileutils"
+        | "digest" | "digest/md5" | "digest/sha1" | "digest/sha2"
+        | "base64" | "securerandom"
+        | "json" | "yaml" | "date" | "time" | "csv"
+        | "optparse" | "english" | "English"
+        | "bigdecimal" | "monitor" | "erb"
+        | "open3" | "shellwords" | "weakref"
+        | "cgi" | "cgi/util"
+    )
 }
