@@ -220,3 +220,4 @@ fn run_diff(name: &str) {
 #[test] fn op_assign_extended() { run_diff("op_assign_extended"); }
 #[test] fn mutex_stub() { run_diff("mutex_stub"); }
 #[test] fn kernel_instance_method() { run_diff("kernel_instance_method"); }
+#[test] fn constant_scoping() { run_diff("constant_scoping"); }

@@ -58,6 +58,19 @@ pub(crate) struct ProtoBuilder {
     /// an empty stack so `next` in a block reaches the iteration
     /// driver, not an enclosing `while` in the parent proto.
     pub(crate) loop_next_jumps: Vec<Vec<usize>>,
+    /// Lexical class/module nesting at the point this proto is
+    /// being compiled. Empty at the toplevel, `["Foo"]` inside
+    /// `module Foo; ... end`, `["Foo", "Bar"]` inside
+    /// `module Foo; class Bar; ... end; end`, etc. Read by
+    /// `Expr::Class` and `Expr::ConstWrite` arms to emit a
+    /// second alias `StoreConst("Foo::Bar")` next to the bare
+    /// `StoreConst("Bar")`, so external code can later resolve
+    /// `Foo::Bar` via the existing flat-keyed constants table.
+    /// Reads from inside the scope still find the bare name —
+    /// dual-write keeps both lookup directions working without
+    /// modelling CRuby's full cref-walk constant lookup. See the
+    /// class_path emit sites and the docs/SUBSET.md note.
+    pub(crate) class_path: Vec<String>,
 }
 
 impl ProtoBuilder {
@@ -74,6 +87,7 @@ impl ProtoBuilder {
             is_method_body: false,
             loop_break_jumps: vec![],
             loop_next_jumps: vec![],
+            class_path: vec![],
         };
         for p in params { b.local_slot(p); }
         b
@@ -195,14 +209,28 @@ fn compile_stmt(
             let id = interner.intern(name);
             b.emit(Op::StoreIvar(id));
         }
-        Expr::ConstWrite(name, val) => {
+        Expr::ConstWrite(name, absolute, val) => {
             // Statement-position const write: skip the Dup the
             // expression form needs, matching the LVarWrite /
             // IVarWrite arms above. Saves `Dup + Pop` per top-level
             // `FOO = ...` line.
             compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
+            // Class-path alias: inside `module Foo; X = 1; end`,
+            // also store under `Foo::X` so `Foo::X` reads work
+            // from outside. Skipped for top-level (empty path),
+            // already-pathed names, AND absolute writes (`::X = 1`
+            // inside `module Foo` must NOT alias to `Foo::X` —
+            // leading `::` explicitly targets top-level only).
+            let prefixed_id = (!b.class_path.is_empty() && !*absolute && !name.contains("::"))
+                .then(|| interner.intern(&format!("{}::{}", b.class_path.join("::"), name)));
+            if prefixed_id.is_some() {
+                b.emit(Op::Dup);
+            }
             b.emit(Op::StoreConst(id));
+            if let Some(pid) = prefixed_id {
+                b.emit(Op::StoreConst(pid));
+            }
         }
         Expr::GVarWrite(name, val) => {
             // Statement-position global write: same `no Dup` fast
@@ -308,15 +336,31 @@ pub(crate) fn compile_expr(
             let id = interner.intern(name);
             b.emit(Op::LoadConst(id));
         }
-        Expr::ConstWrite(name, val) => {
+        Expr::ConstWrite(name, absolute, val) => {
             // CRuby: a constant assignment leaves the assigned value
             // on the stack as the expression's result. Same pattern
             // as IVarWrite above (Dup so the value survives the
-            // store).
+            // store). Absolute writes (`::X = 1`) skip the
+            // class_path alias — see the stmt-form arm for the
+            // rationale.
             compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
+            let prefixed_id = (!b.class_path.is_empty() && !*absolute && !name.contains("::"))
+                .then(|| interner.intern(&format!("{}::{}", b.class_path.join("::"), name)));
+            // Stack going in: [val]. We need to leave [val] on
+            // stack as the expression result. Each StoreConst pops
+            // one; with N stores we need N Dups.
+            //   no alias: Dup, StoreConst(bare)            → [val]
+            //   alias:    Dup, Dup, StoreConst(bare),
+            //                       StoreConst(prefixed)   → [val]
             b.emit(Op::Dup);
+            if prefixed_id.is_some() {
+                b.emit(Op::Dup);
+            }
             b.emit(Op::StoreConst(id));
+            if let Some(pid) = prefixed_id {
+                b.emit(Op::StoreConst(pid));
+            }
         }
         Expr::GVarRead(name) => {
             let id = interner.intern(name);
@@ -729,6 +773,10 @@ pub(crate) fn compile_expr(
             let proto_idx = compile_proto_kind(
                 name.clone(), effective_params, n_required_positional, defaults.clone(), body,
                 b.filename.clone(), protos, interner, cc, /*is_method=*/true,
+                // Methods inherit the lexical class_path so any
+                // nested `class Inner` defined inside the method
+                // body still aliases under the surrounding nesting.
+                b.class_path.clone(),
             );
             if let Some(rname) = rest {
                 protos[proto_idx].rest_param = Some(rname.clone());
@@ -796,7 +844,16 @@ pub(crate) fn compile_expr(
             b.emit(Op::Super(name_id, argc));
         }
         Expr::Class { name, superclass, body } => {
-            let proto_idx = compile_proto(format!("<class:{}>", name), vec![], body, b.filename.clone(), protos, interner, cc);
+            // Child path = parent's class_path + [this name]. Threaded
+            // into the body proto so a further-nested `class Inner`
+            // sees the full chain and aliases under
+            // `Foo::Bar::Inner`.
+            let mut child_path = b.class_path.clone();
+            child_path.push(name.clone());
+            let proto_idx = compile_proto_at(
+                format!("<class:{}>", name), vec![], body,
+                b.filename.clone(), protos, interner, cc, child_path,
+            );
             // Push the superclass (or Nil for "default to Object") for DefClass to pop.
             if let Some(parent) = superclass {
                 let parent_id = interner.intern(parent);
@@ -806,6 +863,18 @@ pub(crate) fn compile_expr(
             }
             let name_id = interner.intern(name);
             b.emit(Op::DefClass(name_id, proto_idx as u32));
+            // Alias under the prefixed path so `Foo::Bar.new` from
+            // outside resolves. Skipped when class_path is empty
+            // (top-level — no prefix needed) or when name already
+            // looks like a path (defensive — Expr::Class names are
+            // bare in our AST today, but stay safe). Idempotent on
+            // re-open: same Class value stored.
+            if !b.class_path.is_empty() && !name.contains("::") {
+                b.emit(Op::LoadConst(name_id));
+                let prefixed = format!("{}::{}", b.class_path.join("::"), name);
+                let pid = interner.intern(&prefixed);
+                b.emit(Op::StoreConst(pid));
+            }
         }
         Expr::ArrayLit(elems) => {
             for e in elems { compile_expr(b, e, protos, interner, cc); }
@@ -1131,8 +1200,23 @@ pub(crate) fn compile_proto(
     name: String, params: Vec<String>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) -> usize {
+    compile_proto_at(name, params, body, filename, protos, interner, cc, vec![])
+}
+
+/// Same as `compile_proto` but seeds the new proto's `class_path`
+/// with the parent's lexical nesting. Used by the `Expr::Class`
+/// arm to thread `module Foo; class Bar; ...; end; end`'s path
+/// into the inner body so further nested writes alias correctly.
+/// Top-level callers (Runtime::eval, require) keep using the
+/// no-arg `compile_proto` shim above.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_proto_at(
+    name: String, params: Vec<String>, body: &[SExpr],
+    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    class_path: Vec<String>,
+) -> usize {
     let n_req = params.len() as u16;
-    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false)
+    compile_proto_kind(name, params, n_req, vec![], body, filename, protos, interner, cc, /*is_method=*/false, class_path)
 }
 
 /// Same as `compile_proto` but tags the resulting builder as a
@@ -1151,9 +1235,10 @@ pub(crate) fn compile_proto_kind(
     name: String, params: Vec<String>, n_required_positional: u16,
     default_exprs: Vec<Option<SExpr>>, body: &[SExpr],
     filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
-    is_method: bool,
+    is_method: bool, class_path: Vec<String>,
 ) -> usize {
     let mut b = ProtoBuilder::new(&params, filename);
+    b.class_path = class_path;
     if is_method {
         b.method_name = Some(name.clone());
         b.method_param_count = params.len() as u16;
@@ -1237,6 +1322,12 @@ pub(crate) fn compile_block(
         // driver (`Op::Return` from the block frame), not an
         // enclosing `while` in the parent.
         loop_next_jumps: vec![],
+        // Blocks inherit the enclosing proto's class_path so a
+        // bare `class Bar` inside a block running in a class body
+        // still aliases under the right `Foo::Bar` key. Real
+        // codebases rarely do this; blocks are inherited for
+        // consistency, not because we expect it to fire often.
+        class_path: parent.class_path.clone(),
     };
     let param_start = b.n_locals;
     // Slot layout in two phases:
