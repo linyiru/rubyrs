@@ -227,6 +227,32 @@ pub(crate) fn string_call(
                 None => Value::Nil,
             })))
         }
+        // `String#index(needle, offset)` — start scanning at `offset`.
+        // CRuby accepts negative offsets (counted from the end) and
+        // returns nil when offset > length. Returns nil when needle
+        // isn't found at or after `offset`. The returned index is
+        // ABSOLUTE in the receiver (not relative to `offset`),
+        // matching CRuby's contract; this is what makes
+        // `String#index` chainable for streaming readers like
+        // StringIO#gets.
+        (Value::Str(a), "index", [Value::Str(b), Value::Int(off)]) => {
+            Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| {
+                let len = sa.len() as i64;
+                let start = if *off < 0 { len + *off } else { *off };
+                // CRuby: out-of-range offsets (either side) return
+                // nil rather than clamping. `len + offset < 0` is
+                // the "negative offset past the start" case;
+                // `offset > len` is the "offset past the end" case.
+                if !(0..=len).contains(&start) {
+                    return Value::Nil;
+                }
+                let start = start as usize;
+                match sa[start..].find(sb) {
+                    Some(i) => Value::Int((start + i) as i64),
+                    None => Value::Nil,
+                }
+            })))
+        }
         (Value::Str(a), "rindex", [Value::Str(b)]) => {
             Some(a.with_str_lossy(|sa| b.with_str_lossy(|sb| match sa.rfind(sb) {
                 Some(i) => Value::Int(i as i64),
