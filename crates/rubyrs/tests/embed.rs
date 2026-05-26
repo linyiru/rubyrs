@@ -1631,15 +1631,38 @@ fn gemfile_dsl_real_hosting_end_to_end() {
 // `Config::env` / `Config::pid` / `Runtime::set_stdout`. The CLI
 // binary `rubyrs` overrides all three; library users do not
 // inherit those overrides.
+// Two complementary tests for the default-stdout policy. Together
+// they verify the indirection works end-to-end:
+//
+//   - `adr_0017_default_stdout_does_not_panic` — `Runtime::new`
+//     without a `set_stdout` call accepts `puts` without erroring.
+//     Cannot directly assert "no bytes left the process" without
+//     intercepting fd 1 (would require a new dev-dep like `gag`
+//     or fork-and-pipe scaffolding); the source-level guarantee
+//     is `vm.rs::Vm::new`'s `stdout: Box::new(std::io::sink())`,
+//     and the smoke test below catches the most likely regression
+//     (someone swaps in `stdout()` and `puts` start panicking on
+//     a non-tty test runner).
+//
+//   - `adr_0017_set_stdout_routes_writes_to_host_sink` — after
+//     `set_stdout(buf)`, `puts X` lands in `buf`. Catches the
+//     other regression class — set_stdout silently no-oping — and
+//     proves the host-controlled-sink path the spec depends on
+//     is actually wired.
 #[test]
-fn adr_0017_default_stdout_is_silent() {
-    // No set_stdout — default is std::io::sink(). `puts` succeeds
-    // (no error), the bytes just go nowhere.
+fn adr_0017_default_stdout_does_not_panic() {
     let mut rt = rubyrs::Runtime::new();
     rt.eval(r#"puts "should be silent""#, "embed-test").expect("puts should not error");
-    // No way to assert "nothing was written" without intercepting
-    // the sink; the assertion is the eval doesn't error and we
-    // didn't see output in the test runner.
+}
+
+#[test]
+fn adr_0017_set_stdout_routes_writes_to_host_sink() {
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"puts "captured""#, "embed-test").expect("puts should not error");
+    assert_eq!(buf.snapshot(), "captured\n",
+        "set_stdout(buf) must route puts into the host-provided sink");
 }
 
 #[test]

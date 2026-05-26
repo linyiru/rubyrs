@@ -365,13 +365,22 @@ impl Vm {
                         // insertion order); otherwise `ENV.each` /
                         // `ENV.to_a` / `ENV.inspect` would vary across
                         // runs even for identical host injection.
-                        let pairs: Vec<(Value, Value)> = match &self.env_override {
+                        //
+                        // `take()` consumes the override on first
+                        // build: once the Ruby Hash is allocated it
+                        // is the canonical ENV, so keeping a second
+                        // copy on `Vm` would just retain duplicate
+                        // memory for the rest of the runtime's
+                        // lifetime and force per-entry String clones
+                        // every time. Moving the Strings into
+                        // `Value::new_str` avoids both.
+                        let pairs: Vec<(Value, Value)> = match self.env_override.take() {
                             Some(map) => {
-                                let mut entries: Vec<(&String, &String)> = map.iter().collect();
-                                entries.sort_by(|a, b| a.0.cmp(b.0));
+                                let mut entries: Vec<(String, String)> = map.into_iter().collect();
+                                entries.sort_by(|a, b| a.0.cmp(&b.0));
                                 entries
                                     .into_iter()
-                                    .map(|(k, v)| (Value::new_str(k.clone()), Value::new_str(v.clone())))
+                                    .map(|(k, v)| (Value::new_str(k), Value::new_str(v)))
                                     .collect()
                             }
                             None => Vec::new(),
