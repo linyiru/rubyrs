@@ -2088,6 +2088,81 @@ fn bigint_pow_bigint_receiver_float_exponent_returns_float() {
     assert!(rel < 1e-6, "expected ~{}, got {} (rel error {})", expected, v, rel);
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn int_min_abs_promotes_to_bigint() {
+    // `i64::MIN.abs` overflows i64 by exactly one (magnitude is
+    // 2^63, one past i64::MAX). numeric.rs's `abs` arm now
+    // declines under `bignum`, bigint_primitive's unary path
+    // materialises the BigInt 2^63 and keeps it as BigInt (since
+    // it doesn't fit i64). Same expectation for `-i64::MIN`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts((-9_223_372_036_854_775_808).abs)\n\
+         puts(-(-9_223_372_036_854_775_808))",
+        "int_min_unary.rb",
+    ).expect("i64::MIN unary must promote, not wrap");
+    assert_eq!(buf.snapshot().trim(), "9223372036854775808\n9223372036854775808");
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn int_min_abs_wraps_without_bignum() {
+    // Without the bignum feature, `i64::MIN.abs` stays as
+    // `i64::MIN` (wrapping_abs) — there's no BigInt fallback. Pin
+    // the historical behaviour so a future no-bignum build can't
+    // silently flip semantics.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts((-9_223_372_036_854_775_808).abs)",
+        "int_min_unary_no_bignum.rb",
+    ).expect("eval must succeed (wraps to i64::MIN)");
+    assert_eq!(buf.snapshot().trim(), "-9223372036854775808");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_unary_plus_returns_same_value_id() {
+    // `+@` on BigInt is a no-op clone — the resulting Value is
+    // a `Value::BigInt(id)` pointing at the same heap entry as
+    // the receiver, since try_bigint_unary returns `recv.clone()`.
+    // Verified indirectly: the output must equal the receiver's
+    // string form exactly.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "big = 2 ** 100\nputs(big == (+big))",
+        "bigint_unary_plus.rb",
+    ).expect("+@ on BigInt must equal the receiver");
+    assert_eq!(buf.snapshot().trim(), "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_unary_neg_demotes_when_result_fits_int() {
+    // `-big` where `big` is a BigInt that, after negation, fits
+    // i64 must demote to `Value::Int`. Construct a BigInt that
+    // is exactly i64::MAX + 1 via `(i64::MAX + 1)` — wait, that
+    // overflows literally. Use `2 ** 63` which is exactly
+    // i64::MAX + 1 (= 9223372036854775808). Negate it: result is
+    // i64::MIN exactly, which DOES fit in i64. Demote-on-fit
+    // should give `Value::Int(i64::MIN)`. Verify with `is_a?`
+    // semantics via comparison and `.to_s`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "big = 2 ** 63\nputs(-big)\nputs((-big) == -9_223_372_036_854_775_808)",
+        "bigint_unary_neg_demote.rb",
+    ).expect("demote-on-fit must produce Int from -BigInt that fits");
+    assert_eq!(buf.snapshot().trim(), "-9223372036854775808\ntrue");
+}
+
 #[test]
 fn pow_zero_to_negative_exponent_raises_zero_division() {
     // CRuby: `0 ** -1` raises `ZeroDivisionError: divided by 0`

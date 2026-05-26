@@ -1192,6 +1192,65 @@ impl Vm {
             None => f64::NAN,
         }
     }
+
+    /// Unary `-@` / `+@` / `abs` for BigInt receivers, plus the
+    /// Int(i64::MIN) auto-promotion case (where the i64 cannot
+    /// represent its own negation or absolute value, so numeric.rs
+    /// declines and we materialise the BigInt 2^63 here). For Int
+    /// receivers other than i64::MIN we return `None` so dispatch
+    /// stays on numeric.rs's existing wrapping arms. `+@` on
+    /// BigInt is a no-op clone; on Int it shouldn't even reach
+    /// here (numeric.rs handles it) — included for completeness.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_unary(
+        &mut self,
+        recv: &Value,
+        name: &str,
+    ) -> Result<Option<Value>, Trap> {
+        use num_bigint::{BigInt, Sign};
+        match recv {
+            Value::BigInt(id) => {
+                // Compute the owned result in a borrow scope, then
+                // drop the borrow before calling bigint_to_value
+                // (&mut self). `+@` just hands back the receiver
+                // unchanged — no demote needed.
+                if name == "+@" {
+                    return Ok(Some(recv.clone()));
+                }
+                let result = {
+                    let b = self.heap.bigint(*id);
+                    match name {
+                        "-@" => -b,
+                        "abs" => match b.sign() {
+                            Sign::Minus => -b,
+                            // Plus/NoSign: already non-negative.
+                            // Clone (cheap allocation, but unavoidable
+                            // since we need an owned BigInt to feed
+                            // bigint_to_value's demote-on-fit path).
+                            _ => b.clone(),
+                        },
+                        _ => return Ok(None),
+                    }
+                };
+                Ok(Some(self.bigint_to_value(result)?))
+            }
+            Value::Int(n) if *n == i64::MIN => {
+                // i64::MIN.abs() and -i64::MIN both overflow i64 by
+                // exactly one (the magnitude is 2^63, one past
+                // i64::MAX). Promote via BigInt — bigint_to_value
+                // will keep it as BigInt since it doesn't fit.
+                match name {
+                    "abs" | "-@" => {
+                        let promoted = -BigInt::from(i64::MIN);
+                        Ok(Some(self.bigint_to_value(promoted)?))
+                    }
+                    "+@" => Ok(Some(Value::Int(i64::MIN))),
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 /// BigInt method dispatch — covers the calls `primitive_call`
@@ -1244,6 +1303,16 @@ impl Vm {
             && let Some(v) = self.try_bigint_pow(recv, &args[0])?
         {
             return Ok(Some(v));
+        }
+        // 4. Unary `-@` / `+@` / `abs` — fires for BigInt recv OR
+        //    for Int(i64::MIN) recv (numeric_call declined in that
+        //    case so we can promote to the BigInt 2^63). Sits ahead
+        //    of the general guard so the Int(i64::MIN) shape isn't
+        //    filtered out.
+        if args.is_empty() && matches!(name, "-@" | "+@" | "abs") {
+            if let Some(v) = self.try_bigint_unary(recv, name)? {
+                return Ok(Some(v));
+            }
         }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
