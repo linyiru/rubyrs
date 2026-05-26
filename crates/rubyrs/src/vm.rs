@@ -1405,14 +1405,18 @@ impl Vm {
     /// - Base < 2 → ArgumentError "invalid radix N".
     /// - Non-Integer base → TypeError "no implicit conversion of
     ///   X into Integer".
-    /// - Result-array estimate exceeds `max_value_bytes` → trap
-    ///   ResourceExhausted before allocation. The bound uses an
-    ///   integer approximation: `est_count = floor((recv_bits - 1)
-    ///   / log2_lower) + 1`, where `log2_lower = max(1, base.bits()
-    ///   - 1)` is a lower bound on `log2(base)` (since `base >=
-    ///   2^(base.bits() - 1)`). Dividing by a smaller log gives a
-    ///   safe upper bound on the count without floating-point.
-    ///   Multiply by `size_of::<Value>()` for the byte estimate.
+    /// - Result-array estimate exceeds the active cap → trap
+    ///   ResourceExhausted before allocation. The cap is
+    ///   `Config::max_value_bytes` when set, otherwise a 1 MB
+    ///   safety ceiling (same fallback as `try_bigint_pow`'s
+    ///   estimator — so hostless / default-config users still get
+    ///   a bound on this allocation path). The bound itself uses
+    ///   an integer approximation: `est_count = floor((recv_bits
+    ///   - 1) / log2_lower) + 1`, where `log2_lower = max(1,
+    ///   base.bits() - 1)` is a lower bound on `log2(base)` (since
+    ///   `base >= 2^(base.bits() - 1)`). Dividing by a smaller log
+    ///   gives a safe upper bound on the count without floating-
+    ///   point. Multiply by `size_of::<Value>()` for bytes.
     #[cfg(feature = "bignum")]
     pub(crate) fn try_integer_digits(
         &mut self,

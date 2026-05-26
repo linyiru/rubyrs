@@ -2403,17 +2403,24 @@ impl Vm {
         // Error semantics match `Vm::try_integer_digits` (the
         // BigInt-receiver path under `feature = "bignum"`) so
         // both profiles agree on the surface user code sees:
+        //   - Arity > 1 → ArgumentError "wrong number of arguments
+        //     (given N, expected 0..1)" matching CRuby. Under
+        //     bignum the equivalent guard in `bigint_primitive`
+        //     fires first; this arm catches the no-bignum profile.
         //   - Non-Integer base → TypeError matching CRuby text.
         //   - Negative base → ArgumentError "negative radix".
         //   - 0/1 base → ArgumentError "invalid radix N".
         //   - Negative receiver → ArgumentError "out of domain"
         //     (CRuby uses Math::DomainError; substituted per
         //     dispatch.rs:2402-2403 — comment was the origin).
-        //   - Arity > 1: under bignum the arity guard in
-        //     `bigint_primitive` traps before reaching here;
-        //     without bignum this `args.len() <= 1` gate makes
-        //     the arm decline so the call surfaces NoMethodError.
-        //     TODO: arity guard for no-bignum profile.
+        if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            }));
+        }
         if let Value::Int(n) = &recv && &*name == "digits" && args.len() <= 1 {
             let base: i64 = match args.first() {
                 None => 10,

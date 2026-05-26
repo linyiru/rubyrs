@@ -2196,6 +2196,38 @@ fn pow_method_works_under_no_bignum_profile() {
 
 #[cfg(not(feature = "bignum"))]
 #[test]
+fn digits_no_bignum_arity_guard_raises_argument_error() {
+    // Under no-bignum, `bigint_primitive`'s arity guard doesn't
+    // exist — the dispatch.rs Int fast path needs its own guard
+    // so `5.digits(10, 2)` raises ArgumentError matching CRuby
+    // instead of falling through to NoMethodError despite
+    // `respond_to?(:digits)` being true.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [
+        ("5.digits(10, 2)", 2),
+        ("5.digits(10, 2, 3)", 3),
+        ("5.digits(10, 2, 3, 4)", 4),
+    ] {
+        let err = rt.eval(script, "no_bignum_digits_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 0..1)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
 fn digits_int_path_error_semantics_match_bignum_profile() {
     // Cross-profile parity: the no-bignum Int#digits path
     // (dispatch.rs) must surface the same error class +
