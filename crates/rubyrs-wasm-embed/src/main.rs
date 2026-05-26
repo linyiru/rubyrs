@@ -66,7 +66,16 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let extra_args: Vec<String> = argv.filter_map(|a| a.into_string().ok()).collect();
+    // Convert extra args through `to_string_lossy()` instead of
+    // `into_string().ok()` so non-UTF-8 bytes survive (as U+FFFD
+    // replacements) rather than being silently dropped. Matches
+    // what `script_filename` already does below — and the rubyrs
+    // CLI's `env::args()` would have panicked on the same input,
+    // so a lossy-but-visible conversion is no worse than the
+    // baseline and meaningfully better than silent loss.
+    let extra_args: Vec<String> = argv
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
 
     let engine = Engine::default();
 
