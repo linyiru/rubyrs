@@ -238,3 +238,4 @@ fn run_diff(name: &str) {
 #[test] fn cext_msgpack_timestamp() { run_diff("cext_msgpack_timestamp"); }
 #[test] fn class_method_defined() { run_diff("class_method_defined"); }
 #[test] fn rational_literal() { run_diff("rational_literal"); }
+#[test] fn cext_msgpack_pure_ruby_load() { run_diff("cext_msgpack_pure_ruby_load"); }

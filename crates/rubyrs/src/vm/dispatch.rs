@@ -278,7 +278,7 @@ impl Vm {
             // whitelist matches lookup.rs's `Value::Class(_)`
             // primitive-method set — keep both in lockstep.
             if matches!(&self_val, Value::Class(_))
-                && matches!(&*name, "new" | "name" | "method_defined?" | "instance_method") {
+                && matches!(&*name, "new" | "name" | "method_defined?" | "instance_method" | "undef_method") {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 for a in args { self.stack.push(a); }
@@ -1416,6 +1416,31 @@ impl Vm {
                     let sid = self.interner.intern(&s.to_string_lossy());
                     let answer = class_method_defined(self, cls, sid);
                     self.stack.push(Value::Bool(answer));
+                    return Ok(());
+                }
+                // `Class#undef_method(:name)` — CRuby removes
+                // the method from the class so subsequent calls
+                // raise NoMethodError. The Tier 1 subset doesn't
+                // model "undefined-by-name-but-not-by-table-
+                // delete", and the typical use case is purely
+                // defensive (`undef_method :dup` on cext-owned
+                // classes to discourage scripts from cloning a
+                // pointer-backed object). No-op for now — matches
+                // the same conservative shape `Class#private` /
+                // `#public` take when called with arguments
+                // (visibility flag isn't propagated). Documented
+                // divergence; lets msgpack-ruby `lib/msgpack/
+                // packer.rb` / `buffer.rb` / `unpacker.rb` load
+                // cleanly (each calls `undef_method :dup` /
+                // `:clone` at class-body top level). Accepts
+                // Symbol/String args; variadic per CRuby.
+                ("undef_method", _) => {
+                    // Return the class itself (CRuby returns the
+                    // Module the call was made on) so chain-style
+                    // uses (`MyClass.undef_method(:foo).new`)
+                    // remain syntactically valid; not a primary
+                    // use case but cheap to preserve.
+                    self.stack.push(Value::Class(cls.clone()));
                     return Ok(());
                 }
                 ("instance_method", [Value::Sym(sid)]) => {

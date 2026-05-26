@@ -22,3 +22,15 @@ Currently vendored:
   fix (so `from_msgpack_ext`'s `new(sec, 0)` factories work
   without rewriting). Exercised by
   `tests/diff/cext_msgpack_timestamp.rb`.
+- `msgpack/buffer.rb`, `msgpack/packer.rb`, `msgpack/unpacker.rb`,
+  `msgpack/factory.rb` — the Ruby halves of msgpack-ruby's
+  cext-backed `Buffer` / `Packer` / `Unpacker` / `Factory`
+  classes. Each opens `module MessagePack; class X; end; end`
+  and adds pure-Ruby helpers (`register_type`,
+  `registered_types`, `type_registered?`, `Factory#load` /
+  `#dump` / `#pool` etc.) on top of the implementations the
+  C extension fills in at `require 'msgpack/msgpack'` time.
+  Loaded together by `tests/diff/cext_msgpack_pure_ruby_load.rb`
+  — proves the pure-Ruby halves parse + define their classes
+  + carry the expected method tables. Functional pack /
+  unpack round-trips still need the cext (separate scope).

@@ -242,7 +242,7 @@ impl Vm {
                 "group_by" | "sort_by" | "sort"
             ),
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect"),
-            Value::Class(_) => matches!(name, "new" | "name" | "method_defined?" | "instance_method"),
+            Value::Class(_) => matches!(name, "new" | "name" | "method_defined?" | "instance_method" | "undef_method"),
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
