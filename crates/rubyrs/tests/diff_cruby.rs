@@ -259,3 +259,4 @@ fn run_diff(name: &str) {
 #[test] fn enumerable_stub() { run_diff("enumerable_stub"); }
 #[test] fn object_and_string_hash() { run_diff("object_and_string_hash"); }
 #[test] fn module_prepend() { run_diff("module_prepend"); }
+#[test] fn block_arg_nil() { run_diff("block_arg_nil"); }

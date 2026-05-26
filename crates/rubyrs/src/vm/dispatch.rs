@@ -2947,7 +2947,27 @@ impl Vm {
             // hold the BoundMethod; when invoked, it does
             // `m.call(*args)`. See `coerce_bound_method_to_block`.
             Value::BoundMethod(bm_id) => self.coerce_bound_method_to_block(bm_id)?,
-            _ => panic!("ICE: CallBlock without Block value on stack"),
+            // `foo(&nil)` in CRuby is equivalent to `foo` without
+            // a block. Common shape: `def render(&block);
+            // evaluate(&block); end` invoked without a block ⇒
+            // `block` is Nil, the `&block` forwarding becomes
+            // `evaluate(&nil)`. Restore args to the stack and
+            // delegate to the no-block dispatch path.
+            Value::Nil => {
+                for a in args { self.stack.push(a); }
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            // Anything else (Int / Str / ...) is a real type error
+            // — CRuby raises `TypeError: wrong argument type X
+            // (expected Proc)`. Mirror that instead of ICE-panicking.
+            other => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "wrong argument type {} (expected Proc)",
+                        other.type_name(),
+                    ),
+                }));
+            }
         };
         let recv = if no_recv {
             None
