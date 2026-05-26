@@ -258,6 +258,21 @@ jobs:
         # and the calibration sources.
         run: bash perf/wasm_check.sh
 
+      - name: Compile-check trace-startup feature
+        # `trace-startup` is opt-in (used only by the manually-
+        # dispatched `.github/workflows/wasm-breakdown.yml`).
+        # Without this check, a cfg-typo, a Rust edition migration
+        # that misses the gated `Trace` struct, or a wasi-libc
+        # bump that changes `eprintln!`'s linkage would compile
+        # fine on master and only surface weeks later when
+        # someone runs the breakdown harness. Cheap insurance: a
+        # `cargo check` against the same wasm32-wasip1 target the
+        # build above already warmed the cache for. Surfaced as a
+        # check rather than a build to keep the step under a few
+        # seconds — the breakdown workflow exercises the full
+        # `cargo build --features trace-startup` path properly.
+        run: cargo check --release --target wasm32-wasip1 --no-default-features --features trace-startup -p rubyrs
+
   panic-budget:
     name: Panic budget (per-file ratchet)
     runs-on: ubuntu-latest
