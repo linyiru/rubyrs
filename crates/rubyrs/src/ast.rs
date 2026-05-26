@@ -302,10 +302,6 @@ pub(crate) fn cid_to_string(id: ruby_prism::ConstantId<'_>) -> String {
     String::from_utf8_lossy(id.as_slice()).into_owned()
 }
 
-/// Flatten a Prism `ConstantPathNode` into a single `"A::B::C"`
-/// string. Returns `None` if any segment is dynamic (e.g. a
-/// method-call result in const position) — callers should fall
-/// back to last-segment-only behaviour in that case.
 /// True iff a `ConstantPathNode` chain is rooted at top-level
 /// (leading `::`). `Foo::Bar` is relative, `::Bar` and
 /// `::Foo::Bar` are absolute. Used by `ConstantPathWriteNode`
@@ -326,6 +322,10 @@ fn is_constant_path_absolute(node: &Node<'_>) -> bool {
     }
 }
 
+/// Flatten a Prism `ConstantPathNode` into a single `"A::B::C"`
+/// string. Returns `None` if any segment is dynamic (e.g. a
+/// method-call result in const position) — callers should fall
+/// back to last-segment-only behaviour in that case.
 fn flatten_constant_path(node: &Node<'_>) -> Option<String> {
     let cp = node.as_constant_path_node()?;
     let name = cid_to_string(cp.name()?);
