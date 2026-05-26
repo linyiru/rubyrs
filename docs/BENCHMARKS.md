@@ -88,6 +88,75 @@ or native MRI wins on throughput (see "Throughput" below where
 rubyrs still trails CRuby's interpreter ~1.76× on a 1M-iteration
 loop). The two niches don't overlap.
 
+## Edge runtimes: cross-host portability
+
+Validates the "one wasm artifact, many edge runtimes" thesis. Same
+`src/rubyrs_worker.wasm` (1.68 MB after Wizer pre-init, no
+wasm-opt — see [PoC details](#wasm-opt-vs-wizer-notes) below)
+runs unchanged under three different V8-based runtimes and one
+non-V8 baseline. Spike branch:
+[`spike/cf-worker-poc`](../poc/cf-worker/).
+
+`puts 1+1` workload, n=5 each, Apple M-series:
+
+| Runtime | Engine | Self-host? | Cold-start | Warm tiny | Warm smoke.rb | 1M `each` |
+|---------|:------:|:---------:|:----------:|:---------:|:-------------:|:---------:|
+| **Deno** 2.8 + browser_wasi_shim | V8 14.9 | ✅ | 25 ms | **1.5 ms** | **1.7 ms** | 124 ms |
+| **workerd** 2026-05-26 + workers-wasi | V8 | ✅ | **18 ms** | 2.5 ms | 4.0 ms | 135 ms |
+| **CF Workers edge** (managed) | V8 (= workerd) | ❌ | ~149 ms wall | 7 ms cpu | 7 ms cpu | 173 ms cpu |
+| wasmtime 45 (CLI, no HTTP) | wasmtime | ✅ | 12.7 ms (raw) / ~7 ms (AOT) | — | — | — |
+
+Notes:
+
+- **CF edge numbers are CPU time from `wrangler tail`** bucketed
+  by per-isolate invocation count (a header `x-rubyrs-invocation`
+  emitted by [worker.js](../poc/cf-worker/src/worker.js)). Cold
+  isolate (invocation == 1) wall is 149 ms / cpu ~80 ms; warm
+  (invocation > 1) settles to 7 ms cpu p50, p90 12 ms, max 13 ms.
+  The earlier-reading "wizer regresses edge perf" turned out to
+  be deploy-then-immediately-measure pool-warming noise, not a
+  real regression — [Pyodide-on-Workers' published 1027 ms
+  mean](https://blog.cloudflare.com/python-workers-advancements/)
+  is similarly a pool-hit + pool-miss blend.
+- **Deno beats workerd on warm by ~40 %** (1.5 vs 2.5 ms tiny)
+  despite trailing on cold (25 vs 18 ms). Plausible reasons: (1)
+  `browser_wasi_shim`'s stdin/stdout is a pure-JS callback on a
+  single `Uint8Array`, vs `workers-wasi`'s extra `memfs.wasm`
+  proxy step; (2) `Deno.serve` is hyper-based Rust HTTP cutting
+  out workerd's JS-shim ↔ kj layer. Heavy compute converges to
+  within ~10 % because V8's wasm engine dominates that regime.
+- **wasmtime cold-start (7-13 ms)** beats every V8 host on
+  cold but provides no HTTP layer of its own — listed for
+  baseline only; HTTP-serving wasmtime would require either
+  wasi-http (component model, not Preview 1) or a custom Rust
+  HTTP loop. Not part of the V8-host comparison.
+
+#### wasm-opt vs Wizer notes
+
+Counter-intuitive PoC finding: **`wasm-opt` is consistently
+net-negative on V8 cold-start at every optimisation level**, even
+when its size reductions are large. Smaller wasm doesn't translate
+into faster instantiate; the V8 wasm parser appears to bottleneck
+on IR construction / module setup rather than byte count. Wizer
+pre-init is the win, n=5 each on workerd local:
+
+| Build pipeline | Wasm size | Cold-start (median) |
+|----------------|----------:|--------------------:|
+| baseline (raw cargo output) | 1.54 MB | 57 ms |
+| wasm-opt -Oz only | 1.22 MB (−21 %) | 53 ms (−7 %) |
+| wasm-opt -Oz + Wizer | 1.37 MB | 27 ms (−53 %) |
+| wasm-opt -O2 + Wizer | 1.42 MB | 23 ms (−60 %) |
+| **Wizer only** (no wasm-opt) | **1.68 MB** | **18 ms (−69 %)** |
+
+The Wizer win matches what
+[`workerd/src/pyodide/make_snapshots.py`](https://github.com/cloudflare/workerd/tree/main/src/pyodide)
+does for Python Workers — snapshot the post-init linear memory
+so cold-start skips re-running the interpreter's bootstrap. We
+cannot match CF's *baseline-preloaded-in-isolate-pool* trick
+(that requires the runtime to be linked into workerd itself),
+but the per-Worker snapshot equivalent is exactly what the PoC's
+`build.sh` produces.
+
 ## Throughput
 
 1M iteration loop computing fizzbuzz string lengths.
