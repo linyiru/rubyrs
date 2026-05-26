@@ -1250,6 +1250,34 @@ won't be fixed until we have a clear use case demanding parity.
   root list. `STRESS_GC=1 cargo test` exercises this in CI.
 
 ### Internal
+- **GC rooting lint gate ([issue #90](https://github.com/linyiru/rubyrs/issues/90)).**
+  After seven structurally-identical GC-rooting incidents in
+  three discovery rounds (`86db73d` / `f2c3538` / `5946caa` /
+  the site-#8 fix in this cycle), a static gate now prevents
+  the eighth from being written. `scripts/lint-gc-rooting.sh`
+  scans every `vm/*.rs` file for the dangerous shape — a
+  `self.maybe_gc()` + `self.heap.alloc(` pair preceded by a
+  Value drain (`self.stack.pop` / `self.stack.drain` /
+  `self.stack.swap_remove` / `args.swap_remove` / `args.drain` /
+  `args.pop` / `args[N]`) in the same logical block, without an
+  intervening `PinGuard::new(self)`. Sites using the PinGuard
+  form (`g.vm.maybe_gc()` / `g.vm.heap.alloc()`) are deliberately
+  bypassed — that pattern is the structural fix and the lint
+  treats it as the canonical recipe. Genuine false-positives
+  carry an inline `// allow: gc-rooting — <reason>` justification.
+  Two such annotations sit on the current tree at `dispatch.rs:223`
+  (`method(:foo)` implicit-self — `recv` cloned from rooted
+  `frames.last().self_val`) and `kernel.rs:278` (`Array(nil)` —
+  empty Array, no Value held). New CI step in
+  `.github/workflows/ci.yml` runs the gate ahead of clippy.
+  Also includes the site-#8 fix in `vm/kernel.rs` (
+  `Kernel#Array(other_heap_value)` — `args[0]` was unrooted
+  across `maybe_gc`, surfaced under `STRESS_GC=1` as
+  `ICE: class_of called on non-Object slot`) and the
+  `kernel_array_coerce.rb` diff fixture that reproduces it.
+  Heuristic limitations documented in the script header; if a
+  future hole slips past, escalate to Option 2 of the issue
+  (`Vm::alloc_pinned` helper).
 - **[ADR 0017](docs/adr/0017-tier1-boundary.md) — Tier-1 boundary
   specification.** Concrete contract for what is / isn't in
   Tier 1, populating the abstract shape ADR 0015 sketched.
