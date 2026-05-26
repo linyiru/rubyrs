@@ -667,13 +667,27 @@ impl Runtime {
         rt
     }
 
-    /// Apply a Config to an already-constructed Runtime. Idempotent;
-    /// later calls overwrite earlier ones. Used by the wizer-init
-    /// path so the snapshotted Runtime (built with default Config)
-    /// can pick up host-driven settings (env vars, PID, fuel caps)
-    /// at runtime AFTER wizer rehydrates it.
+    /// Apply a Config to an already-constructed Runtime. Used by the
+    /// wizer-init path so the snapshotted Runtime (built with default
+    /// Config) can pick up host-driven settings (env vars, PID, fuel
+    /// caps) at runtime AFTER wizer rehydrates it.
+    ///
+    /// Contract: call this once, BEFORE any `eval()` or `ENV` access.
+    /// Later calls fully overwrite resource caps, PID, deadline, and
+    /// `stress_gc`. However, `cfg.env` is consumed lazily on the
+    /// first `ENV` materialization inside the Vm (via
+    /// `env_override.take()`); once `ENV` has been touched by Ruby
+    /// code, a subsequent `apply_config` cannot retroactively change
+    /// the script-visible env. The CLI binary always calls this
+    /// exactly once at startup, so the caveat only matters for
+    /// embedders.
     pub fn apply_config(&mut self, cfg: Config) {
-        if cfg.stress_gc { self.vm.stress_gc = true; }
+        // Fully overwrite (not OR-merge) so a later call with
+        // `stress_gc: false` actually clears a previously-set true.
+        // Previously this was `if cfg.stress_gc { ... = true; }`,
+        // which made the flag monotonic and broke the documented
+        // overwrite semantics.
+        self.vm.stress_gc = cfg.stress_gc;
         self.vm.fuel = cfg.fuel;
         self.vm.max_frames = cfg.max_frames;
         self.vm.heap.max_live = cfg.max_heap_objects;
