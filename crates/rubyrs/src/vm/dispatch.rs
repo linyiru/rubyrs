@@ -1617,7 +1617,27 @@ impl Vm {
                 }
                 #[cfg(feature = "regex")]
                 Value::Regex(re) => match arg {
-                    Value::Str(s) => s.with_str_lossy(|s| re.is_match(s)),
+                    // CRuby: `Regexp#===` (used by `case/when`) sets
+                    // `$~`/`$1`.. on hit and clears them on miss,
+                    // just like `=~`/`String#match`. Switch from
+                    // `is_match` to `captures` so the side-channel
+                    // sees the same view through every entry point.
+                    Value::Str(s) => s.with_str_lossy(|s| match re.captures(s) {
+                        Some(caps) => {
+                            let m0 = caps.get(0).unwrap();
+                            self.last_match = Some(crate::vm::LastMatch {
+                                whole: m0.as_str().to_string(),
+                                caps: (1..caps.len())
+                                    .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                                    .collect(),
+                            });
+                            true
+                        }
+                        None => {
+                            self.last_match = None;
+                            false
+                        }
+                    }),
                     _ => false,
                 },
                 _ => recv.ruby_eq(arg, &self.heap),
