@@ -941,6 +941,24 @@ impl Vm {
                         let id = self.heap.alloc(HeapObj::Array(result));
                         Some(Value::Array(id))
                     }
+                    // `String#unpack1(fmt)` — same engine as `#unpack`
+                    // but returns just the first directive's result
+                    // (or `nil` if the result is empty). Idiomatic
+                    // when a binary-protocol parser knows the format
+                    // produces one value (msgpack-ruby's per-frame
+                    // header reads, `bcrypt`'s salt extraction, etc.)
+                    // and wants to skip the `.first` boilerplate.
+                    //
+                    // Offset kwarg (`unpack1(fmt, offset: N)`, Ruby
+                    // 3.1+) is not implemented; the 1-arg form is
+                    // what real-world Ruby code uses overwhelmingly.
+                    ("unpack1", [Value::Str(fmt)]) => {
+                        let bytes = s.borrow().clone();
+                        let fmt_str = fmt.to_string_lossy();
+                        let mut result = unpack_bytes(&bytes, &fmt_str)
+                            .map_err(|m| self.trap(RubyError::ArgumentError { msg: m }))?;
+                        Some(if result.is_empty() { Value::Nil } else { result.swap_remove(0) })
+                    }
                     ("to_sym", []) => {
                         // P2-14b: cap the interner before a hot loop
                         // (`arr.map { |x| x.to_s.to_sym }` and similar)
