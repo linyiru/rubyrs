@@ -1061,25 +1061,27 @@ impl Vm {
                         ),
                     })),
                 };
-                let target = match self.class_stack.last().cloned() {
+                // Install target resolution: prefer the lexical
+                // class body on `class_stack` (the common case —
+                // `class C; class << self; prepend M; end; end`).
+                // Fall back to the current frame's `self` when
+                // `self` is itself a Class — that covers the
+                // method-body case (`class C; def self.install!;
+                // class << self; prepend M; end; end; end`), where
+                // CRuby installs on C's eigenclass because `self`
+                // inside `install!` is C. Only raise when neither
+                // path yields a class — toplevel / instance-method
+                // contexts where rubyrs doesn't model the
+                // eigenclass distinctly.
+                let target = self.class_stack.last().cloned().or_else(|| {
+                    self.frames.last().and_then(|f| match &f.self_val {
+                        Value::Class(c) => Some(c.clone()),
+                        _ => None,
+                    })
+                });
+                let target = match target {
                     Some(c) => c,
                     None => {
-                        // No class on `class_stack` — covers
-                        // toplevel (`class << self; prepend Mod;
-                        // end` at the script top) and other
-                        // contexts where `self` isn't a class
-                        // (e.g. inside a method body where
-                        // class_stack hasn't been pushed). CRuby
-                        // would install on the surrounding self's
-                        // eigenclass; rubyrs doesn't model main's
-                        // eigenclass or non-Object eigenclasses
-                        // distinctly. Raising here is the honest
-                        // signal — silently swallowing would
-                        // diverge from CRuby observably. No
-                        // real-world target in our subset uses
-                        // this shape; tilt's `class << self;
-                        // prepend ...` always sits inside a class
-                        // body.
                         return Err(self.trap(RubyError::SyntaxError {
                             msg: "`class << self; prepend Mod; end` is not supported outside a class/module body (no singleton-class install target — main's / instance eigenclasses not modelled in rubyrs)".into(),
                         }));

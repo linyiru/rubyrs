@@ -128,3 +128,22 @@ puts TIdem.tag                   # "outer-inner" (Outer wraps, super hits Inner 
 # in either direction without a much deeper refactor — out of
 # scope for this PR. The local-class dedup above already locks
 # the dogfood case (tilt's `class << self; prepend(Module.new)`).
+
+# Method-body install — `class << self; prepend Mod; end` reached
+# from inside a class method. CRuby installs Mod on the enclosing
+# class's eigenclass because `self` inside `install!` IS the
+# class. The install target falls back to frame self when
+# `class_stack` is empty (the method-body case).
+module Installer
+  def hi; "installer-" + super; end
+end
+class Deferred
+  def self.hi; "default"; end
+  def self.install!
+    class << self
+      prepend Installer
+    end
+  end
+end
+Deferred.install!
+puts Deferred.hi                 # "installer-default"
