@@ -978,6 +978,97 @@ end
 ## flag on Kernel-derived BoundMethods to fix.
 class Kernel
 end
+## Encoding — minimal stub for codebases that use the encoding
+## API (ERB's compiler does at lib/erb/compiler.rb:317 / :461
+## to detect the source encoding from a magic comment). rubyrs
+## stores raw bytes with no per-string encoding tag, so every
+## String reports as UTF-8 and every encoding is treated as
+## ASCII-compatible / non-dummy. `Encoding.find(name)` returns
+## the predefined constant for the standard names (singleton
+## identity stable across calls) and raises ArgumentError for
+## unknown names. Identity guarantee: `s.encoding ==
+## Encoding.find("UTF-8")` works because the find returns the
+## same `Encoding::UTF_8` instance the dispatch.rs intercept
+## reads.
+##
+## Predefined constants cover the names ERB / cgi/util / similar
+## stdlib-shaped consumers reach for; add more as real targets
+## need them. `Encoding::BINARY` is the canonical CRuby alias
+## for `ASCII_8BIT`.
+class Encoding
+  ## `Encoding.find(name)` returns the singleton instance for each
+  ## of the four predefined encoding names. Identity is stable for
+  ## the standard names — `Encoding.find("UTF-8").equal?(Encoding::UTF_8)`
+  ## — because we return the same constant on every call. There is
+  ## NO Hash cache; a case-over-name dispatch hits the four named
+  ## constants directly.
+  ##
+  ## Why no Hash cache: `Runtime::with_config` applies `Config`
+  ## (including `max_value_bytes`) BEFORE `load_preamble` runs, so
+  ## any Hash mutation inside the preamble would count against tiny
+  ## caps used in resource-limit tests and fail preamble load
+  ## entirely.
+  ##
+  ## Unknown names raise `ArgumentError`, matching CRuby's
+  ## `Encoding.find("missing")` shape (and avoiding the equality-
+  ## breaking trap of returning two different `.new` instances for
+  ## the same name).
+  def self.find(name)
+    # Case-insensitive only — match CRuby's actual behaviour.
+    # ERB and similar consumers feed values from magic-comment
+    # regex captures ("utf-8", "UTF-8", ...); without
+    # normalization, lowercase magic comments would surprise
+    # users with ArgumentError. CRuby does NOT fold '_' → '-'
+    # (it rejects "UTF_8") and does NOT accept "UTF8" (the
+    # un-hyphenated form), but does fold "ASCII" → US-ASCII
+    # and "BINARY" → ASCII-8BIT — verified empirically vs
+    # CRuby 3.4.
+    case name.to_s.upcase
+    when "UTF-8" then UTF_8
+    when "US-ASCII", "ASCII" then US_ASCII
+    when "ASCII-8BIT", "BINARY" then ASCII_8BIT
+    else raise ArgumentError, "unknown encoding name - " + name.to_s
+    end
+  end
+
+  def initialize(name)
+    @name = name
+  end
+
+  def name
+    @name
+  end
+
+  def to_s
+    @name
+  end
+
+  def inspect
+    # Built with concat — using the quote-then-hash sequence
+    # inline would close the outer raw-string delimiter at
+    # Rust parse time.
+    '#<Encoding:' + @name + '>'
+  end
+
+  ## Always false in our subset — we don't model dummy encodings
+  ## (the ones CRuby uses for, e.g., UTF-16 where you must know
+  ## the byte order). Real codebases gate ASCII-safety checks on
+  ## this; returning false keeps the happy path.
+  def dummy?
+    false
+  end
+
+  ## Always true — UTF-8, US-ASCII, and ASCII-8BIT (the only
+  ## names we serve up) are all ASCII-compatible.
+  def ascii_compatible?
+    true
+  end
+end
+Encoding::UTF_8 = Encoding.new("UTF-8")
+Encoding::US_ASCII = Encoding.new("US-ASCII")
+Encoding::ASCII_8BIT = Encoding.new("ASCII-8BIT")
+Encoding::BINARY = Encoding::ASCII_8BIT
+
 ## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
 ## (tilt does at template.rb:239) to pick between bind_call and
 ## bind.call paths. We claim a recent CRuby version to opt into

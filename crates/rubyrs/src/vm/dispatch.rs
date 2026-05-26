@@ -32,6 +32,38 @@ use super::{
 use crate::HostCtx;
 
 impl Vm {
+    /// `String#encoding` intercept — pushes the preamble's
+    /// `Encoding::UTF_8` instance and returns true if the call
+    /// matches the shape; returns false otherwise so the caller
+    /// falls through to its usual primitive dispatch.
+    ///
+    /// Used by BOTH `do_call` and `do_call_block`. The Encoding
+    /// object lives in the joined-name constants table seeded by
+    /// the preamble; materialising it requires `&mut self`, which
+    /// the stateless `primitive::string_call` free function can't
+    /// supply.
+    ///
+    /// ICE if the constant is missing — only reachable when the
+    /// preamble didn't load (e.g. a misconfigured test harness),
+    /// and silently returning Nil leaves downstream callers
+    /// (`enc.dummy?` etc.) with a NoMethodError far from the root
+    /// cause. Panic surfaces the actual bootstrap failure.
+    pub(crate) fn try_push_string_encoding(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> bool {
+        if !matches!(recv, Value::Str(_)) || name != "encoding" || !args.is_empty() {
+            return false;
+        }
+        let key = self.interner.intern("Encoding::UTF_8");
+        let v = self.constants.get(&key).cloned()
+            .expect("ICE: Encoding::UTF_8 not in constants table — preamble didn't load");
+        self.stack.push(v);
+        true
+    }
+
     /// Re-entrant dispatch entry for C extensions calling back into
     /// Ruby via `rb_funcall*`. Invokes `recv.method(args)` through
     /// the normal `do_call` path, leaving the result on the stack
@@ -720,6 +752,9 @@ impl Vm {
             return Ok(());
         }
 
+        if self.try_push_string_encoding(&recv, &name, &args) {
+            return Ok(());
+        }
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
             .map_err(|e| self.trap(e))? {
             self.stack.push(v);
@@ -3881,6 +3916,9 @@ impl Vm {
             return Ok(());
         }
 
+        if self.try_push_string_encoding(&recv, &name, &args) {
+            return Ok(());
+        }
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
         // Mirror do_call's bigint_primitive hook. Without this,

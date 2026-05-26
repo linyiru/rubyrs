@@ -178,17 +178,22 @@ pub(crate) fn string_call(
         // `Encoding::InvalidByteSequenceError`; with `true` the
         // raise never fires and template loading proceeds.
         (Value::Str(_), "valid_encoding?", []) => Some(Value::Bool(true)),
-        // `String#encoding` — CRuby returns an `Encoding` object;
-        // we return the name as a String since there's no per-
-        // string encoding tag and no Encoding class in scope.
-        // Real codebases commonly use `str.encoding.to_s` for
-        // formatting; that works in both. Direct
-        // `str.encoding == Encoding::UTF_8` comparisons are NOT
-        // supported — even if `Encoding::UTF_8` were added later,
-        // the comparison would compare String vs Encoding-object
-        // and diverge from CRuby. Sticking to `.to_s` or
-        // `.to_s == "UTF-8"` is the portable form.
-        (Value::Str(_), "encoding", []) => Some(Value::new_str("UTF-8")),
+        // `String#encoding` is intercepted in dispatch.rs before
+        // this function, so it can hand back the
+        // `Encoding::UTF_8` instance from the preamble (needs Vm
+        // access for the constants table). The string_call
+        // free-function context can't reach Vm state.
+        //
+        // `String#b` — CRuby: a NEW String (a copy of the
+        // receiver's bytes) with ASCII-8BIT encoding. Returning
+        // `recv.clone()` would share the underlying RStr Rc and
+        // make `.b` an alias — mutations to the result would leak
+        // back to the original, and a frozen receiver would yield
+        // a frozen result. Copy the bytes into a fresh RStr so
+        // the result is independent and unfrozen. We don't tag
+        // encodings per-string, so the ASCII-8BIT distinction is
+        // a no-op for our subset.
+        (Value::Str(a), "b", []) => Some(Value::new_str_bytes(a.content.borrow().clone())),
         (Value::Str(a), "strip", []) => Some(Value::new_str(a.to_string_lossy().trim().to_string())),
         (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_start().to_string())),
         (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_end().to_string())),
