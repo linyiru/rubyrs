@@ -2411,8 +2411,10 @@ impl Vm {
         //   - Negative base → ArgumentError "negative radix".
         //   - 0/1 base → ArgumentError "invalid radix N".
         //   - Negative receiver → ArgumentError "out of domain"
-        //     (CRuby uses Math::DomainError; substituted per
-        //     dispatch.rs:2402-2403 — comment was the origin).
+        //     (CRuby uses Math::DomainError; substituted because
+        //     Math::DomainError isn't modelled in this subset —
+        //     same convention as other numeric-out-of-domain
+        //     arms elsewhere in `Vm::do_call`).
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(

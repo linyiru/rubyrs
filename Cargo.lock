@@ -519,6 +519,7 @@ dependencies = [
  "cc",
  "libloading",
  "num-bigint",
+ "num-integer",
  "regex",
  "ruby-prism",
  "rubyrs-cext",

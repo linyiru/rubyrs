@@ -1399,8 +1399,10 @@ impl Vm {
     /// fall through to NoMethodError). Traps:
     /// - Negative receiver → ArgumentError "out of domain"
     ///   (CRuby raises Math::DomainError; the established subset
-    ///   pattern at dispatch.rs:2402-2403 uses ArgumentError as
-    ///   the substitute since Math::DomainError isn't modelled).
+    ///   pattern uses ArgumentError as the substitute since
+    ///   Math::DomainError isn't modelled — same convention as
+    ///   the Range #cover? / numeric-out-of-domain arms in
+    ///   `Vm::do_call`).
     /// - Base < 0 → ArgumentError "negative radix".
     /// - Base < 2 → ArgumentError "invalid radix N".
     /// - Non-Integer base → TypeError "no implicit conversion of
@@ -1546,21 +1548,26 @@ impl Vm {
         // final GC walk, which now sees both the pinned digits
         // and the freshly-allocated Array as reachable).
         let mut guard = PinGuard::new(self);
-        let mut digits: Vec<Value> = Vec::new();
+        // Pre-reserve up to `est_count` (already capped against
+        // `max_value_bytes` above, so safe to truncate to usize).
+        // Avoids the geometric reallocation pattern Vec would
+        // otherwise use during the loop on large digit arrays.
+        let cap_count = est_count.min(usize::MAX as u64) as usize;
+        let mut digits: Vec<Value> = Vec::with_capacity(cap_count);
         if recv_sign == Sign::NoSign {
             digits.push(Value::Int(0));
         } else {
+            use num_integer::Integer;
             while n.sign() != Sign::NoSign {
-                // num_bigint's `/` and `%` on BigInt do truncated
-                // div (matches num_integer::Integer::div_rem for
-                // non-negative operands, which is our case here —
-                // `n` starts non-negative and `base` is checked
-                // non-negative above). rem fits i64 when base
-                // fits i64; for BigInt base we go through
-                // bigint_to_value so the demote-on-fit funnel
-                // handles either path.
-                let rem = &n % &base;
-                n = &n / &base;
+                // `div_rem` returns (quotient, remainder) in a
+                // single division step — half the per-iteration
+                // BigInt work vs separate `&n / &base` + `&n %
+                // &base`. `Integer` is impl'd for `BigInt` by
+                // num-bigint. rem fits i64 when base fits i64;
+                // for BigInt base we go through bigint_to_value
+                // so the demote-on-fit funnel handles either.
+                let (quot, rem) = n.div_rem(&base);
+                n = quot;
                 let digit_val = guard.vm.bigint_to_value(rem)?;
                 if matches!(digit_val, Value::BigInt(_)) {
                     guard.pin(digit_val.clone());
