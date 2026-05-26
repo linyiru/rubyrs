@@ -1341,10 +1341,10 @@ impl Vm {
             return Ok(Some(v));
         }
         // Cond 2 — see entry-conditions doc above.
-        if args.is_empty() && matches!(name, "-@" | "+@" | "abs") {
-            if let Some(v) = self.try_bigint_unary(recv, name)? {
-                return Ok(Some(v));
-            }
+        if args.is_empty() && matches!(name, "-@" | "+@" | "abs")
+            && let Some(v) = self.try_bigint_unary(recv, name)?
+        {
+            return Ok(Some(v));
         }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
