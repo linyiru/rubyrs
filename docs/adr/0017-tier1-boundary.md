@@ -64,9 +64,10 @@ all four is in. Anything that fails any one is outside.
    *what* to write, never *where*; the where is the host's
    capability decision.
 
-   See "Current deviations" below — Tier 1 is the target state
-   and a small number of code paths (notably `ENV` reading the
-   host process via `std::env::vars()`) still need gating.
+   See "Closed deviations" below for the history of the small
+   number of code paths that previously violated this rule (now
+   all gated; the CLI binary is the worked example of an
+   explicit "host process is the sink" choice).
 
 3. **No regex.**
    `/pattern/` literals and the Regexp class move to Tier 2 (a
@@ -176,17 +177,17 @@ would import the rule violation along with the feature.
   tomorrow: Rails-capable bet" framing has architectural backing:
   Tier 1 is the today-shippable surface, the outer tiers stay
   honest about their bet-vs-promise status.
-- **Sandbox story is consistent (after the deviations land,
-  and after Tier-2/3 features exist to opt out of).** Hosts
-  running untrusted scripts get the documented guarantee: build
-  with `--no-default-features` (which today only opts out of
-  `cext`; future tier features will be additive options that
-  enable the larger surfaces), and every OS-touching capability
-  is in their hands. See the "Current deviations" table —
-  until those PRs ship, Tier 1 builds still default-leak
-  `stdout`, `ENV`, and `$$` to the host process. The spec is
-  the contract the deviations PRs (and the later Tier-2/3
-  feature PRs) are closing toward.
+- **Sandbox story is consistent at the library/embed layer.**
+  Library hosts running untrusted scripts construct a `Runtime`
+  with `Config::default()` — sink stdout, empty `ENV`, `$$ = 0`
+  — and explicitly inject any capability they want exposed via
+  `Config::env` / `Config::pid` / `Runtime::set_stdout`. The
+  CLI binary `rubyrs` is the worked example of an explicit
+  "host process is the sink" choice. Cargo-feature opt-outs
+  (today `cext` and `regex`; future tier features will be
+  additive) drop deeper surfaces. See the "Closed deviations"
+  table for the four leaks the previous Tier-1 implementation
+  had and how each one was closed.
 - **Reviewer + contributor checklist.** "Is this PR adding a
   syscall to Tier 1?" becomes a literal text-search check on the
   cfg gates.

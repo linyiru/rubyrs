@@ -357,6 +357,18 @@ impl Vm {
                     let id = if let Some(id) = self.env_hash {
                         id
                     } else {
+                        // Order matters: do the fallible
+                        // `maybe_gc` + `check_alloc()?` step BEFORE
+                        // consuming `env_override`. Calling `take()`
+                        // first and then trapping on the heap cap
+                        // would permanently drop the host-injected
+                        // ENV map (the `?` early-return preserves no
+                        // override state), and any subsequent `ENV`
+                        // access would rebuild as empty — a silent
+                        // capability loss the host has no way to
+                        // recover from.
+                        self.maybe_gc();
+                        self.check_alloc()?;
                         // ADR 0017 Rule 1 requires deterministic
                         // iteration. `Config::env: HashMap` has
                         // randomised hash order, so collect the
@@ -367,13 +379,13 @@ impl Vm {
                         // runs even for identical host injection.
                         //
                         // `take()` consumes the override on first
-                        // build: once the Ruby Hash is allocated it
-                        // is the canonical ENV, so keeping a second
-                        // copy on `Vm` would just retain duplicate
-                        // memory for the rest of the runtime's
-                        // lifetime and force per-entry String clones
-                        // every time. Moving the Strings into
-                        // `Value::new_str` avoids both.
+                        // build (now that we know alloc will succeed):
+                        // once the Ruby Hash is allocated it is the
+                        // canonical ENV, so keeping a second copy on
+                        // `Vm` would just retain duplicate memory and
+                        // force per-entry String clones every time.
+                        // Moving the Strings into `Value::new_str`
+                        // avoids both.
                         let pairs: Vec<(Value, Value)> = match self.env_override.take() {
                             Some(map) => {
                                 let mut entries: Vec<(String, String)> = map.into_iter().collect();
@@ -385,14 +397,6 @@ impl Vm {
                             }
                             None => Vec::new(),
                         };
-                        self.maybe_gc();
-                        // Apply `Config::max_heap_objects` to this
-                        // path too — every other heap alloc site
-                        // calls `check_alloc()?` after `maybe_gc()`,
-                        // and skipping it here let scripts exceed
-                        // the live-object cap by triggering the lazy
-                        // ENV build while already at the limit.
-                        self.check_alloc()?;
                         let id = self.heap.alloc(HeapObj::Hash(pairs));
                         self.env_hash = Some(id);
                         id

@@ -382,7 +382,17 @@ include!(concat!(env!("OUT_DIR"), "/prism_node_sets.rs"));
 
 /// Configuration for a [`Runtime`]. Defaults are unlimited; tighten for
 /// untrusted scripts.
+///
+/// **Construction**: use `Config::default()` and field-update syntax
+/// rather than a struct literal, e.g.
+/// ```ignore
+/// rubyrs::Config { fuel: Some(1_000_000), ..Default::default() }
+/// ```
+/// The struct is `#[non_exhaustive]` — adding new capability fields
+/// (each one a future ADR 0017 host-capability gate) is now an
+/// additive change rather than a source-breaking one.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct Config {
     /// When true, every potential GC point triggers a full collection.
     /// Useful for catching root-set bugs in host code; rough on
@@ -821,9 +831,16 @@ end
             .expect("ICE: failed to load built-in exception preamble");
     }
 
-    /// Replace the runtime's stdout sink. Lets a host capture `puts` /
-    /// `print` output (e.g. into a `Vec<u8>` buffer) instead of having
-    /// it go to the process stdout.
+    /// Replace the runtime's stdout sink.
+    ///
+    /// **Per ADR 0017 the default sink is `std::io::sink()`**, not
+    /// process stdout — `Runtime::new()` is silent until the host
+    /// calls this method to wire up where script output should go.
+    /// The CLI binary `rubyrs` (in `crates/rubyrs/src/main.rs`) wires
+    /// it to `std::io::stdout()`, which is why `rubyrs script.rb`
+    /// behaves like CRuby; library embedders choose their own sink
+    /// (`Vec<u8>` buffer, `tempfile::NamedTempFile`, a process pipe,
+    /// `std::io::sink()` itself when output should be discarded).
     pub fn set_stdout(&mut self, w: Box<dyn Write>) {
         self.vm.stdout = w;
     }
