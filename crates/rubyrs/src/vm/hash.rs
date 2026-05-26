@@ -247,17 +247,26 @@ impl Vm {
                                 out.push((k, v));
                             }
                         }
-                        // Snapshot the receiver's default-block BEFORE
-                        // alloc — the alloc could trigger GC, and the
-                        // block ObjId is a primitive we need stable
-                        // across the alloc. (The block itself is
-                        // already rooted via the receiver hash, which
-                        // hasn't gone away.)
+                        // GC rooting: snapshot the receiver's default-
+                        // block BEFORE alloc. The receiver `id` arrived
+                        // as a Rust-local ObjId from `do_call`'s recv-
+                        // pop; it isn't on the stack / in a frame /
+                        // pinned, so `maybe_gc` could sweep it AND
+                        // anything reachable only through it (the
+                        // default-block itself). That would leave us
+                        // copying a freed-slot ObjId onto the new
+                        // Hash. Pin both the receiver hash and (when
+                        // present) the default-block across the alloc.
                         let default_block = self.heap.hash_default_block(id);
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        if let Some(bid) = default_block {
+                            g.pin(Value::Block(bid));
+                        }
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
                         if default_block.is_some() {
-                            self.heap.hash_set_default_block(nid, default_block);
+                            g.vm.heap.hash_set_default_block(nid, default_block);
                         }
                         Some(Value::Hash(nid))
                     }

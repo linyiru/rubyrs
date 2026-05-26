@@ -3383,11 +3383,21 @@ impl Vm {
                     msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
                 }));
             }
-            self.maybe_gc();
-            self.check_alloc()?;
-            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
-            self.heap.hash_set_default_block(hid, Some(block));
-            self.stack.push(Value::Hash(hid));
+            // GC rooting: `block` was popped from the stack into a
+            // Rust-local ObjId above. Until `hash_set_default_block`
+            // installs it into the new Hash (which IS a GC root via
+            // `self.stack.push` below), the block is unreachable
+            // from the standard roots (stack / frames / pinned).
+            // `maybe_gc` could sweep it between the alloc and the
+            // store, leaving `hash_set_default_block` pointing at a
+            // freed slot. Pin across both maybe_gc + alloc.
+            let mut g = PinGuard::new(self);
+            g.pin(Value::Block(block));
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+            g.vm.heap.hash_set_default_block(hid, Some(block));
+            g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
         // `instance_eval` / `class_eval` / `module_eval` — swap
