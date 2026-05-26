@@ -64,15 +64,29 @@ fn emit_prism_node_sets() {
     // Cross-check 2: every `as_*_node` accessor in ast.rs must be
     // present in SUPPORTED, and vice versa. This is the no-drift
     // guarantee — the const advertised in lib.rs cannot lie.
+    //
+    // Typed-accessor exemption: a few Prism nodes are reached via a
+    // typed parent-method accessor that returns the concrete node
+    // type directly, rather than via the generic `as_*_node()` cast.
+    // The most prominent is `ParametersNode::block()` which returns
+    // `Option<BlockParameterNode>` — there is no `as_block_parameter_node`
+    // call site to sniff, yet the node IS supported by the runtime
+    // (see ast.rs's `def` arm: `p.block()` reads `.name()` directly).
+    // List such nodes here so the cross-check passes AND the node
+    // shows up as Supported in SUPPORTED_PRISM_NODES (which gapscan
+    // reads to classify scan hits).
+    let typed_accessor_exempt: BTreeSet<String> =
+        ["BlockParameterNode".to_string()].into_iter().collect();
     let ast_src = std::fs::read_to_string(manifest.join("src/ast.rs"))
         .expect("rubyrs build.rs: cannot read src/ast.rs");
-    let accessor_names = extract_as_node_accessors(&ast_src);
+    let mut accessor_names = extract_as_node_accessors(&ast_src);
+    accessor_names.extend(typed_accessor_exempt.iter().cloned());
     let only_in_data: Vec<_> = supported.difference(&accessor_names).collect();
     let only_in_ast: Vec<_> = accessor_names.difference(&supported).collect();
     assert!(
         only_in_data.is_empty() && only_in_ast.is_empty(),
         "rubyrs build.rs: data/supported_prism_nodes.txt is out of sync with src/ast.rs.\n  \
-         Listed in data file but no as_*_node accessor in ast.rs: {only_in_data:?}\n  \
+         Listed in data file but no as_*_node accessor in ast.rs (and not in the typed-accessor exempt list): {only_in_data:?}\n  \
          Used in ast.rs but missing from data file: {only_in_ast:?}"
     );
 

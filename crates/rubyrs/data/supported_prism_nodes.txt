@@ -1,7 +1,16 @@
-# Prism node classes that ast.rs translates directly via an
-# `as_*_node` accessor. Source of truth — build.rs validates this
-# stays exactly in sync with the `as_*_node` calls in src/ast.rs
-# and re-exports it as `rubyrs::SUPPORTED_PRISM_NODES`.
+# Prism node classes that ast.rs translates and the runtime supports.
+# Source of truth — build.rs validates this stays exactly in sync with
+# the `as_*_node` accessor calls in src/ast.rs and re-exports it as
+# `rubyrs::SUPPORTED_PRISM_NODES`.
+#
+# Most entries correspond to an `as_*_node()` call in ast.rs. A small
+# number of nodes are reached via a typed parent-method accessor that
+# returns the concrete node type directly (no `as_*_node` cast) — e.g.
+# `ParametersNode::block()` returns `Option<BlockParameterNode>`, read
+# in the `def` arm of ast.rs. Those nodes are listed here AND enrolled
+# in the `typed_accessor_exempt` set in build.rs; the cross-check then
+# passes for both directions. When adding such an entry, update both
+# this file and the exempt set together.
 #
 # Format: one CamelCase name per line, sorted, `#` comments OK.
 
@@ -12,6 +21,7 @@ AssocNode
 BeginNode
 BlockArgumentNode
 BlockNode
+BlockParameterNode
 BlockParametersNode
 BreakNode
 CallNode
