@@ -354,6 +354,17 @@ if command -v wasm3 >/dev/null 2>&1; then
   wasm3_wasm_base="$(basename "$WIZER_OPT")"
   # $WIZER_OPT already lives in $PERF_TMPDIR (pipeline step above),
   # so the cwd-based wasm3 invocation can address it by basename.
+  #
+  # Probe-run wasm3 once to make sure it actually works on this
+  # host before timing it. Some prebuilt wasm3 binaries (the v0.5.0
+  # linux-x64 release in particular) crash with SIGILL on GHA
+  # runners that don't have the CPU features wasm3 was built for.
+  # The `if !` guard would handle a SIGILL inside the timing loop
+  # but the rest of the loop would still spend N runs on a doomed
+  # call; skip the whole row when the probe fails.
+  if ! (cd "$PERF_TMPDIR" && wasm3 "$wasm3_wasm_base" "$wasm3_script_base") >/dev/null 2>&1; then
+    echo "[skip] wasm3 probe failed (likely SIGILL on prebuilt binary; CPU feature mismatch?)" >&2
+  else
   for _ in $(seq 1 "$RUNS"); do
     wasm3_us=$("$TIMER_BIN" --cwd "$PERF_TMPDIR" wasm3 "$wasm3_wasm_base" "$wasm3_script_base" 2>&1 1>/dev/null \
           | awk -F'\t' '$1=="wasm-timer" && $2=="wall_us" { print $3 }')
@@ -364,6 +375,7 @@ if command -v wasm3 >/dev/null 2>&1; then
   if [[ -n "$wasm3_best" ]]; then
     printf "  %-32s %10s us\n" "wasm3 (interpreter):" "$wasm3_best"
   fi
+  fi  # close the probe-success branch
 fi
 
 echo ""
