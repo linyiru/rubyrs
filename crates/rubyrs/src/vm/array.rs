@@ -197,7 +197,14 @@ impl Vm {
                     // receiver's length). `n == 0` is `[]`; `n < 0` is
                     // ArgumentError "negative array size". Symmetric
                     // with `take` / `drop` already implemented below,
-                    // and mirrors `Range#first(n)` at vm/range.rs:83.
+                    // modulo the negative-`n` policy: those silently
+                    // clamp to 0 instead of trapping. `Range#first(n)`
+                    // at vm/range.rs:83 also clamps; this arm
+                    // deliberately diverges to match CRuby's
+                    // Array-specific ArgumentError. Aligning the
+                    // Range / take / drop paths is a separate
+                    // cleanup, since both are pre-existing CRuby
+                    // divergences not introduced by this change.
                     ("first", [Value::Int(n)]) => {
                         if *n < 0 {
                             return Err(self.trap(RubyError::ArgumentError {

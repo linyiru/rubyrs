@@ -49,8 +49,8 @@ puts a.last.inspect               # 50
 puts [].first.inspect             # nil
 puts [].last.inspect              # nil
 
-# Single-element array — first(n) and last(n) are not symmetric
-# for n > 1 with one element; both return the whole thing.
+# Single-element array — both `first(n)` and `last(n)` return the
+# whole one-element array when n > len, no surprise.
 puts [42].first(3).inspect        # [42]
 puts [42].last(3).inspect         # [42]
 
