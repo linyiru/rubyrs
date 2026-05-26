@@ -287,6 +287,7 @@ impl Vm {
                 match &args[0] {
                     Value::Nil => {
                         self.maybe_gc(); // allow: gc-rooting — allocates an empty Array (`Vec::new()`); no Value held across the alloc window.
+                        if let Err(t) = self.check_alloc() { return Some(Err(t)); }
                         let id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::new()));
                         Some(Ok(Value::Array(id)))
                     }
@@ -310,6 +311,7 @@ impl Vm {
                         let elt = args[0].clone();
                         g.pin(elt.clone());
                         g.vm.maybe_gc();
+                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
                         let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![elt]));
                         Some(Ok(Value::Array(id)))
                     }
