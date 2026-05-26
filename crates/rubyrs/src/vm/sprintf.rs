@@ -77,15 +77,40 @@ pub(crate) fn ruby_sprintf(
         idx += 1;
         let mut body = match spec {
             'd' | 'i' => {
-                let n = coerce_int(arg)?;
-                let mut body = if n < 0 {
-                    format!("-{}", n.unsigned_abs())
-                } else if flag_plus {
-                    format!("+{n}")
-                } else if flag_space {
-                    format!(" {n}")
+                // BigInt fast path: render the decimal directly via
+                // num_bigint's Display so `'%d' % (2**100)` works.
+                // Other base specifiers (%x/X/o/b/B) remain Int-only
+                // for Phase A; arbitrary-precision base conversion is
+                // a Phase B follow-up.
+                #[cfg(feature = "bignum")]
+                let big_decimal: Option<String> = match arg {
+                    Value::BigInt(id) => Some(heap.bigint(*id).to_string()),
+                    _ => None,
+                };
+                #[cfg(not(feature = "bignum"))]
+                let big_decimal: Option<String> = None;
+                let mut body = if let Some(s) = big_decimal {
+                    let abs_digits = s.strip_prefix('-').unwrap_or(&s);
+                    if s.starts_with('-') {
+                        format!("-{abs_digits}")
+                    } else if flag_plus {
+                        format!("+{abs_digits}")
+                    } else if flag_space {
+                        format!(" {abs_digits}")
+                    } else {
+                        abs_digits.to_string()
+                    }
                 } else {
-                    n.to_string()
+                    let n = coerce_int(arg)?;
+                    if n < 0 {
+                        format!("-{}", n.unsigned_abs())
+                    } else if flag_plus {
+                        format!("+{n}")
+                    } else if flag_space {
+                        format!(" {n}")
+                    } else {
+                        n.to_string()
+                    }
                 };
                 if let Some(p) = precision {
                     // Precision on an integer pads with zeros to
