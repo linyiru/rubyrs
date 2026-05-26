@@ -1541,6 +1541,111 @@ impl Vm {
                     self.stack.push(Value::Bool(included));
                     return Ok(());
                 }
+                // `Module#superclass` — direct parent class, or
+                // nil at the top of the chain. CRuby returns
+                // Object's superclass as BasicObject and
+                // BasicObject's as nil; rubyrs doesn't model
+                // BasicObject so the chain bottoms out earlier.
+                ("superclass", []) => {
+                    let v = match cls.superclass.borrow().clone() {
+                        Some(p) => Value::Class(p),
+                        None => Value::Nil,
+                    };
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                // `Module#instance_methods` — Symbol Array of
+                // instance method names. With no arg or `true`,
+                // walks the full ancestor chain (own + includes +
+                // superclass chain, recursing into each module's
+                // own includes). With `false`, returns only this
+                // class's own methods table.
+                // `public_instance_methods` / `private_instance_methods` /
+                // `protected_instance_methods` route through the
+                // same arm — rubyrs doesn't model visibility-
+                // aware filtering on the user-Method table
+                // (every method is effectively public for
+                // introspection), so all three return the same
+                // list. Documented divergence; matches the same
+                // shape `Class#method_defined?`'s 2-arg form
+                // takes.
+                ("instance_methods", args)
+                | ("public_instance_methods", args)
+                | ("private_instance_methods", args)
+                | ("protected_instance_methods", args)
+                    if args.is_empty()
+                        || matches!(args, [Value::Bool(_)]) => {
+                    let inherited = !matches!(args, [Value::Bool(false)]);
+                    let mut sids: Vec<crate::intern::SymId> = Vec::new();
+                    if inherited {
+                        let mut visited: Vec<*const crate::value::Class> = Vec::new();
+                        fn walk(
+                            c: &std::rc::Rc<crate::value::Class>,
+                            out: &mut Vec<crate::intern::SymId>,
+                            visited: &mut Vec<*const crate::value::Class>,
+                        ) {
+                            let ptr = std::rc::Rc::as_ptr(c);
+                            if visited.contains(&ptr) { return; }
+                            visited.push(ptr);
+                            for k in c.methods.borrow().keys() {
+                                if !out.contains(k) { out.push(*k); }
+                            }
+                            for inc in c.includes.borrow().iter() {
+                                walk(inc, out, visited);
+                            }
+                            if let Some(sup) = c.superclass.borrow().clone() {
+                                walk(&sup, out, visited);
+                            }
+                        }
+                        walk(cls, &mut sids, &mut visited);
+                    } else {
+                        for k in cls.methods.borrow().keys() {
+                            sids.push(*k);
+                        }
+                    }
+                    // Lexicographic sort for stable cross-run
+                    // output; matches `methods`' shape.
+                    sids.sort_by(|a, b| {
+                        self.interner.resolve(*a).cmp(self.interner.resolve(*b))
+                    });
+                    let elems: Vec<Value> = sids.into_iter().map(Value::Sym).collect();
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::Array(elems));
+                    self.stack.push(Value::Array(id));
+                    return Ok(());
+                }
+                // `Module#constants` — Symbol Array of constant
+                // names directly on this module. Tier 1 stores
+                // constants in `Vm.constants` keyed by their
+                // (potentially prefixed) name; we filter by
+                // prefix match against the class's own
+                // qualified name. Documented divergence: CRuby
+                // also walks included modules; rubyrs returns
+                // only directly-defined names for simplicity.
+                // The 1-arg `false` form (only-own) is the
+                // default here; the `true` form is the same.
+                ("constants", args) if args.is_empty()
+                    || matches!(args, [Value::Bool(_)]) => {
+                    let prefix = format!("{}::", cls.name);
+                    let mut names: Vec<String> = Vec::new();
+                    for k in self.constants.keys() {
+                        let s = self.interner.resolve(*k).to_string();
+                        if let Some(short) = s.strip_prefix(&prefix)
+                            && !short.contains("::") {
+                            names.push(short.to_string());
+                        }
+                    }
+                    names.sort();
+                    let elems: Vec<Value> = names.into_iter()
+                        .map(|n| Value::Sym(self.interner.intern(&n)))
+                        .collect();
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::Array(elems));
+                    self.stack.push(Value::Array(id));
+                    return Ok(());
+                }
                 // `Class#instance_method(:sym)` — direct UnboundMethod
                 // construction. Walks the ancestor chain via
                 // `lookup_method_uncached`; NameError if the method

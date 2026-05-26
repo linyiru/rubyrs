@@ -250,7 +250,14 @@ impl Vm {
                 "group_by" | "sort_by" | "sort"
             ),
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect"),
-            Value::Class(_) => matches!(name, "new" | "name" | "to_s" | "inspect" | "method_defined?" | "instance_method" | "undef_method"),
+            Value::Class(_) => matches!(name,
+                "new" | "name" | "to_s" | "inspect"
+                | "method_defined?" | "instance_method" | "undef_method"
+                | "superclass" | "ancestors" | "include?"
+                | "instance_methods" | "public_instance_methods"
+                | "private_instance_methods" | "protected_instance_methods"
+                | "constants"
+            ),
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
