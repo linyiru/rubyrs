@@ -76,6 +76,43 @@ pub(crate) fn numeric_call(
             };
             Some(Value::Int(result))
         }
+        // `Integer#to_s(radix)` — base-`radix` rendering, lowercase
+        // for digits >= 10. Radix must be 2..=36 (CRuby's accepted
+        // range); anything outside raises ArgumentError. Negative
+        // receivers get a leading `-` followed by the magnitude in
+        // the requested radix. `unsigned_abs` avoids overflow on
+        // `i64::MIN`. Lives BEFORE the broad `(Int, op, [Int])`
+        // coercion arm because that arm's inner-op match would
+        // otherwise shadow this (None-fallthrough inside the
+        // inner match doesn't surface to the outer pattern walk
+        // — same lesson as the `Float#round(n)` shadow note and
+        // the `Integer#[]` placement above).
+        (Value::Int(a), "to_s", [Value::Int(radix)]) => {
+            let r = *radix;
+            if !(2..=36).contains(&r) {
+                return Err(RubyError::ArgumentError {
+                    msg: format!("invalid radix {}", r),
+                });
+            }
+            let r = r as u32;
+            let mut n: u64 = a.unsigned_abs();
+            let neg = *a < 0;
+            if n == 0 {
+                return Ok(Some(Value::new_str("0")));
+            }
+            let mut buf = Vec::<u8>::new();
+            while n > 0 {
+                let d = (n % r as u64) as u32;
+                let ch = std::char::from_digit(d, r).expect("digit < radix");
+                buf.push(ch as u8);
+                n /= r as u64;
+            }
+            if neg { buf.push(b'-'); }
+            buf.reverse();
+            Some(Value::new_str(
+                String::from_utf8(buf).expect("ASCII digits + sign"),
+            ))
+        }
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),

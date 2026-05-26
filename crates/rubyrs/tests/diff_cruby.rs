@@ -106,6 +106,7 @@ fn run_diff(name: &str) {
 #[test] fn integer_chr() { run_diff("integer_chr"); }
 #[test] fn string_new() { run_diff("string_new"); }
 #[test] fn string_each_byte() { run_diff("string_each_byte"); }
+#[test] fn integer_to_s_radix() { run_diff("integer_to_s_radix"); }
 #[test] fn enumerable_by() { run_diff("enumerable_by"); }
 #[test] fn super_call() { run_diff("super_call"); }
 #[test] fn return_nonlocal() { run_diff("return_nonlocal"); }
