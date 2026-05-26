@@ -900,6 +900,18 @@ pub(crate) fn compile_expr(
             let name_id = interner.intern(&mname);
             b.emit(Op::Super(name_id, argc));
         }
+        Expr::SuperApply(args_expr) => {
+            // `super(*args)` — assemble the args Array and let
+            // `Op::ApplySuper` pop + drain it. Mirror of the
+            // `Expr::Apply` shape used by regular splat-call
+            // dispatch. Method-name resolution is the same as
+            // direct-form `Expr::Super`.
+            let mname = b.method_name.clone()
+                .unwrap_or_else(|| "<super-outside-method>".to_string());
+            let name_id = interner.intern(&mname);
+            compile_expr(b, args_expr, protos, interner, cc);
+            b.emit(Op::ApplySuper(name_id));
+        }
         Expr::Class { name, superclass, body } => {
             // Child path = parent's class_path + [this name]. Threaded
             // into the body proto so a further-nested `class Inner`

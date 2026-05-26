@@ -636,6 +636,53 @@ impl Vm {
             Op::CallNoRecvBlock(name_id, argc, cache_id) => {
                 self.do_call_block(name_id, argc as usize, true, cache_id)?;
             }
+            Op::ApplySuper(name_id) => {
+                // Pop assembled args Array and drain elements
+                // into a Vec<Value>. From here the super-
+                // lookup path is identical to Op::Super; the
+                // only difference is how the args Vec was
+                // produced (splat-assembled at the call site
+                // vs. pushed individually by Op::Super).
+                let args_val = self.stack.pop().expect("ICE: ApplySuper without args slot");
+                let args: Vec<Value> = match args_val {
+                    Value::Array(aid) => self.heap.array(aid).clone(),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("ApplySuper expected Array args, got {}", other.type_name()),
+                    })),
+                };
+                let frame = self.frames.last().expect("ICE: ApplySuper no frame");
+                let self_val = frame.self_val.clone();
+                let defining = match frame.defining_class.clone() {
+                    Some(c) => c,
+                    None => {
+                        return Err(self.trap(RubyError::NoMethodError {
+                            method: "super called outside of method".to_string(),
+                            recv_type: self_val.type_name(),
+                        }));
+                    }
+                };
+                let parent = match defining.superclass.borrow().clone() {
+                    Some(p) => p,
+                    None => {
+                        return Err(self.trap(RubyError::NoMethodError {
+                            method: format!("super: no superclass method `{}'",
+                                self.interner.resolve(name_id)),
+                            recv_type: self_val.type_name(),
+                        }));
+                    }
+                };
+                let m = match self.lookup_method_uncached(&parent, name_id) {
+                    Some(m) => m,
+                    None => {
+                        return Err(self.trap(RubyError::NoMethodError {
+                            method: format!("super: no superclass method `{}'",
+                                self.interner.resolve(name_id)),
+                            recv_type: self_val.type_name(),
+                        }));
+                    }
+                };
+                self.invoke_method(m, self_val, args)?;
+            }
             Op::Super(name_id, argc) => {
                 let split = self.stack.len() - argc as usize;
                 let args: Vec<Value> = self.stack.drain(split..).collect();

@@ -117,6 +117,13 @@ pub(crate) enum Op {
     /// IC slot isn't used (super resolves via class chain, not
     /// the per-site cache).
     Super(SymId, u8),
+    /// `super(*args)` — apply-style super dispatch. Pops one
+    /// Array off the stack and uses its elements as the
+    /// positional args. Mirrors `Op::ApplyCall`'s shape but
+    /// the receiver is implicit (self) and lookup starts at
+    /// the defining-class's superclass per CRuby's "module
+    /// of definition" rule. Same name_id resolves the method.
+    ApplySuper(SymId),
     DefMethod(SymId, u32),         // name, proto_idx
     /// `def self.foo` inside a class body — installs `foo` on
     /// the surrounding class's `singleton_methods` table (not

@@ -265,6 +265,15 @@ pub(crate) enum Expr {
     /// empty parens passes no args and is `Some(vec![])`;
     /// bare `super` is `None`.
     Super(Option<Vec<SExpr>>),
+    /// `super(*args)` / `super(a, *rest, b)` — splat in the
+    /// super argument list. The inner SExpr evaluates to an
+    /// Array containing the fully-assembled call args (the
+    /// same shape `Expr::Apply` uses for regular splat-call
+    /// dispatch). Compiles to `Op::ApplySuper(name_id)`.
+    /// Rack `lib/rack/headers.rb`'s `super(*a.map!{...})`
+    /// shape surfaces this; previously raised
+    /// `unsupported node: SplatNode` at AST translation.
+    SuperApply(Box<SExpr>),
     /// `a || b` — short-circuit: returns `a` if truthy, else `b`.
     Or(Box<SExpr>, Box<SExpr>),
     /// `a && b` — short-circuit: returns `b` if `a` truthy, else `a`.
@@ -1367,9 +1376,47 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return sp(node, Expr::Super(None));
     }
     if let Some(n) = node.as_super_node() {
-        let args: Vec<SExpr> = n.arguments()
-            .map(|args| args.arguments().iter().map(|c| tr(&c)).collect())
+        let arg_nodes: Vec<ruby_prism::Node<'_>> = n.arguments()
+            .map(|args| args.arguments().iter().collect())
             .unwrap_or_default();
+        // Detect splat anywhere in the arg list. When present,
+        // assemble the args into a single Array via the same
+        // chunking strategy regular Call-with-splat uses
+        // (concat the non-splat groups via `+`), and emit
+        // `Expr::SuperApply` so the compiler routes through
+        // `Op::ApplySuper` (which pops one Array and treats
+        // its elements as positional args). Without this path,
+        // `super(*a)` and `super(a, *rest, b)` shapes from
+        // Rack / Sinatra inheritance chains tripped the
+        // `unsupported node: SplatNode` trap.
+        let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
+        if has_splat {
+            let mut chunks: Vec<SExpr> = Vec::new();
+            let mut buf: Vec<SExpr> = Vec::new();
+            for c in &arg_nodes {
+                if let Some(sn) = c.as_splat_node()
+                    && let Some(inner) = sn.expression() {
+                    if !buf.is_empty() {
+                        chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
+                    }
+                    chunks.push(tr(&inner));
+                } else {
+                    buf.push(tr(c));
+                }
+            }
+            if !buf.is_empty() {
+                chunks.push(sp(node, Expr::ArrayLit(buf)));
+            }
+            let mut it = chunks.into_iter();
+            let first = it.next().unwrap_or_else(|| sp(node, Expr::ArrayLit(vec![])));
+            let acc = it.fold(first, |lhs, rhs| sp(node, Expr::Call {
+                receiver: Some(Box::new(lhs)),
+                name: "+".into(),
+                args: vec![rhs],
+            }));
+            return sp(node, Expr::SuperApply(Box::new(acc)));
+        }
+        let args: Vec<SExpr> = arg_nodes.iter().map(tr).collect();
         return sp(node, Expr::Super(Some(args)));
     }
     if let Some(n) = node.as_or_node() {

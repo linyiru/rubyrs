@@ -242,3 +242,4 @@ fn run_diff(name: &str) {
 #[test] fn alias_singleton_keyword() { run_diff("alias_singleton_keyword"); }
 #[test] fn class_qualified_name() { run_diff("class_qualified_name"); }
 #[test] fn alias_method_primitive() { run_diff("alias_method_primitive"); }
+#[test] fn super_splat() { run_diff("super_splat"); }
