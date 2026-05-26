@@ -28,20 +28,36 @@ use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm}
 /// no catastrophic backtracking.
 ///
 /// Currently handled:
-/// - `\G` (match-at-last-position anchor) → stripped. CRuby uses
-///   it for stateful scanning where the engine remembers the end
-///   of the previous match; the rubyrs subset mostly slices the
-///   input from the current cursor before matching, so the
-///   surrounding structural anchors carry the intent. Motivating
-///   case: MRI's `lib/erb/compiler.rb:460`
-///   (`/\G<%#(.*)%>/`) — without translation the LoadRegex op
-///   raises SyntaxError on the `\G`.
+/// - `\G` (match-at-last-position anchor) — context-aware:
+///   * Outside a character class: dropped entirely. CRuby uses
+///     it for stateful scanning where the engine remembers the
+///     end of the previous match; the rubyrs subset mostly
+///     slices the input from the current cursor before matching,
+///     so the surrounding structural anchors carry the intent.
+///   * Inside a character class (`/[\G]/`): translated to bare
+///     `G` so the literal-G semantic survives — CRuby treats
+///     `\G` in a class as literal G, but the Rust regex crate
+///     rejects the escape verbatim.
+///
+/// Motivating case: MRI's `lib/erb/compiler.rb:460`
+/// (`/\G<%#(.*)%>/`) — without translation the LoadRegex op
+/// raises SyntaxError on the `\G`.
+///
+/// Returns a `Cow<'_, str>`: borrowed (zero-alloc fast path) when
+/// the pattern doesn't contain `\G` at all (the overwhelmingly
+/// common case), owned String when translation happened.
 ///
 /// Other Onigmo features (`\K`, `(?<=...)`, named-group backrefs
 /// like `\k<name>`, etc.) still surface as the regex crate's
 /// SyntaxError. Adding translations is per-feature on demand.
 #[cfg(feature = "regex")]
-fn preprocess_regex_pattern(src: &str) -> String {
+fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
+    // Fast path: most regexes don't use `\G`. Skip the whole
+    // scan + allocation when the source can't possibly contain
+    // the anchor.
+    if !src.contains("\\G") {
+        return std::borrow::Cow::Borrowed(src);
+    }
     // Tracks character-class depth so `\G` is only stripped when
     // it's the Onigmo anchor (outside any `[...]`). Inside a
     // character class — `/[\G]/` — `\G` is a literal `G` in
@@ -135,7 +151,9 @@ fn preprocess_regex_pattern(src: &str) -> String {
     // SAFETY: input was a &str (valid UTF-8) and every byte
     // operation above either copies an input run verbatim or
     // pushes ASCII (`G`). No way to produce invalid UTF-8.
-    String::from_utf8(out).expect("ICE: preprocess_regex_pattern produced invalid UTF-8")
+    std::borrow::Cow::Owned(
+        String::from_utf8(out).expect("ICE: preprocess_regex_pattern produced invalid UTF-8")
+    )
 }
 
 impl Vm {
