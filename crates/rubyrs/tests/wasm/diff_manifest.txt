@@ -1,0 +1,53 @@
+# Curated subset of `crates/rubyrs/tests/diff/` fixtures that get re-run under
+# the wasm32-wasip1 build to prove the wasi-portable code path
+# stays behaviorally equivalent to the native runtime — not just
+# compile-clean (which is what the earlier wasm CI lane checked)
+# and not just one inline script (which is what `smoke.rb`
+# covers). The diff_cruby host lane already asserts that native
+# rubyrs and CRuby agree byte-for-byte on every fixture; this
+# matrix adds the third leg: wasm rubyrs vs CRuby (transitively
+# vs native rubyrs) on a curated spread.
+#
+# Selection rules:
+#   - one fixture per major subset feature axis (integers,
+#     strings, arrays, hashes, blocks, classes, modules,
+#     exceptions, ranges, etc.) — broad coverage matters
+#     more than depth.
+#   - skip wasi-hostile fixtures: `env_hash` (ENV semantics differ),
+#     `file_io` (sandbox + --dir gymnastics), anything spawning a
+#     subshell.
+#   - keep total runtime under ~5s on wasmtime so the lane stays
+#     fast — most fixtures run in tens of milliseconds each.
+#
+# Lines starting with `#` and blank lines are ignored by
+# `diff_matrix.sh`. One fixture name per line, with no `.rb`
+# suffix (the script appends it).
+
+integer_basics
+string_basics
+array_basics
+hash_basics
+block_basics
+class_basics
+symbol_basics
+interpolation
+rescue_basics
+fizzbuzz_15
+inheritance
+custom_exception
+ensure_basics
+control_flow
+range_basics
+enumerable_filter
+enumerable_aggregate
+spaceship
+attr_accessor
+ternary
+case_when
+modules
+inline_rescue
+# regex_* fixtures intentionally excluded — the wasm CI build
+# uses --no-default-features, which disables the `regex` Cargo
+# feature (ADR 0017 Tier 2). On that shape `/pattern/` literals
+# emit a SyntaxError trap by design. If a future wasi build
+# turns the regex feature on, add `regex_minimal` here.

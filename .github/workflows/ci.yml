@@ -199,6 +199,20 @@ jobs:
         #    break / class def in one tight fixture.
         run: bash crates/rubyrs/tests/wasm/smoke.sh
 
+      - name: Diff matrix (wasm32-wasip1 vs CRuby)
+        # Third leg of the wasm correctness ladder (compile → smoke
+        # → matrix). Runs a curated subset of
+        # `crates/rubyrs/tests/diff/*.rb` fixtures under BOTH `ruby`
+        # and `rubyrs.wasm`, asserts byte-identical stdout. Catches
+        # native-vs-wasi behaviour drift the smoke fixture's one
+        # script can't surface. Manifest at
+        # `crates/rubyrs/tests/wasm/diff_manifest.txt`; ruby is
+        # preinstalled on ubuntu-latest so no extra setup step here.
+        # `diff_matrix.sh` invokes `cargo build` again — cargo's
+        # incremental rebuild is a no-op after the previous smoke
+        # step, so the duplicate invocation is cheap.
+        run: bash crates/rubyrs/tests/wasm/diff_matrix.sh
+
   panic-budget:
     name: Panic budget (per-file ratchet)
     runs-on: ubuntu-latest
