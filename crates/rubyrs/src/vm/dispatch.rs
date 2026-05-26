@@ -835,6 +835,37 @@ impl Vm {
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
+        // User-defined `def self.new` takes precedence over the
+        // built-in allocator AND over the Hash.new / String.new /
+        // other built-in class-level intercepts below. CRuby's
+        // `Class#new` is a normal Ruby method (allocate +
+        // initialize), and reopening any class — built-in or
+        // user — to override `self.new` should win. Without this
+        // check ahead of the Hash / String special-cases, e.g.
+        // `class Hash; def self.new; ...; end; end; Hash.new`
+        // silently bypassed the override and returned an empty
+        // `{}` from the hardcoded Hash path.
+        //
+        // The block-form path (`do_call_block`) generally routes
+        // user `self.new` overrides through its general
+        // Value::Class singleton-method dispatch arm, so most
+        // classes don't need a mirrored check there. The one
+        // exception is `do_call_block`'s `Hash.new { block }`
+        // intercept, which fires before that generic arm — it
+        // carries the same singleton pre-check pattern as this
+        // one for parity.
+        //
+        // Documented gap: `def self.new ... super ... end` still
+        // hits the allocator via super only if Class's builtin
+        // `new` is reachable through super_lookup — which it
+        // isn't today. Override-without-super covers the tilt
+        // entry-point (and the common DSL builder pattern); the
+        // super-into-allocator case is a separable follow-up.
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
+            return self.invoke_method(m, recv.clone(), args);
+        }
         // `String.new` / `String.new(s)` — Tier 1 primitive
         // constructor. Without this intercept the generic
         // `Class.new` allocator below would build a
@@ -3511,6 +3542,26 @@ impl Vm {
             && let Some(Value::Class(cls)) = &recv
             && cls.name.as_str() == "Hash"
         {
+            // Same precedence rule as `do_call`'s Hash.new no-
+            // block path: a user `def self.new` on Hash (reopened
+            // class) wins over the built-in default-block
+            // intercept. CRuby treats `Class#new` as a regular
+            // method; a reopen-and-override is just normal
+            // method-resolution and should be honoured in block-
+            // form too. Without this check, `class Hash; def
+            // self.new(&b); ...; end; end; Hash.new { ... }`
+            // silently returned `{}` from the hardcoded intercept
+            // below.
+            //
+            // `do_call_block`'s generic Value::Class singleton-
+            // method dispatch arm further down would catch this
+            // for non-Hash classes, but it fires AFTER this Hash
+            // intercept, so Hash specifically needs the explicit
+            // pre-check.
+            if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                let target_self = Value::Class(cls.clone());
+                return self.invoke_method_with_block(m, target_self, args, Some(block));
+            }
             if !args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),

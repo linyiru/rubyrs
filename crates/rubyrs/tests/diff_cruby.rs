@@ -291,3 +291,4 @@ fn run_diff(name: &str) {
 #[test] fn tilt_load_capabilities() { run_diff("tilt_load_capabilities"); }
 #[test] fn hash_new_default_block() { run_diff("hash_new_default_block"); }
 #[test] fn array_sort_block() { run_diff("array_sort_block"); }
+#[test] fn class_new_override() { run_diff("class_new_override"); }
