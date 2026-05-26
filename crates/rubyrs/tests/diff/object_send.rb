@@ -136,3 +136,12 @@ begin
 rescue NoMethodError
   puts "still blocked after block-form send"
 end
+
+# respond_to? must agree with dispatch — every value responds to
+# both `send` and `__send__`, regardless of primitive vs Object.
+puts "one".respond_to?(:send)
+puts "one".respond_to?(:__send__)
+puts 1.respond_to?(:send)
+puts [].respond_to?(:__send__)
+puts Greeter.new.respond_to?(:send)
+puts nil.respond_to?(:send)

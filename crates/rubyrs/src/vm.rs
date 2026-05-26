@@ -431,11 +431,15 @@ pub(crate) struct Vm {
     /// > until_depth, while rescue unwind drops below.
     pub(crate) suppress_call_result_push: bool,
     /// Single-shot flag set by the `send` / `__send__` recogniser
-    /// (`vm/dispatch.rs`) right before re-entering dispatch. The
-    /// next visibility check in `do_call`'s Object arm consumes
-    /// the flag (`mem::replace(..., false)`) and skips both the
-    /// Private and Protected gates. CRuby parity: `send` may
-    /// invoke methods of any visibility, but the bypass doesn't
+    /// (`vm/dispatch.rs`) right before re-entering dispatch.
+    /// Consumed (`mem::replace(..., false)`) at the **dispatch
+    /// boundary** — the very top of `do_call` / `do_call_block` —
+    /// into a local that the Object-arm visibility check reads.
+    /// Consumption is *not* at the check site itself: that would
+    /// leak the flag whenever dispatch bottoms out before the
+    /// Object arm (e.g. `send(:nonexistent)` on a primitive
+    /// raising NoMethodError). CRuby parity: `send` may invoke
+    /// methods of any visibility, but the bypass doesn't
     /// transitively apply — anything that method itself calls
     /// runs through the normal check.
     pub(crate) bypass_visibility_once: bool,
