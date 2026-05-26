@@ -355,10 +355,9 @@ def rewrite_extractor_header(src: str, addressed: int) -> str:
     if start >= len(lines) or not EXTRACTOR_HEADER_OPENER.match(lines[start]):
         return src
     # Header runs from `start` until the first non-`#` line
-    # (or blank line acting as separator before code). Strip
-    # everything up to and including the trailing blank line —
-    # and also strip the leading blanks that preceded the
-    # header so we don't leave them dangling.
+    # (or blank line acting as separator before code). The
+    # range `start..end` covers the header block plus any
+    # trailing blank line that separates it from the code.
     end = start
     for idx in range(start, len(lines)):
         line = lines[idx]
@@ -366,7 +365,14 @@ def rewrite_extractor_header(src: str, addressed: int) -> str:
             end = idx + 1
             continue
         break
-    return "".join(lines[end:])
+    # Preserve the preamble lines (shebang / magic comments)
+    # that precede the header — `lines[:start]` covers them
+    # plus any blanks between them and the header. Dropping
+    # the preamble alongside the header (the v1 behavior) was a
+    # real bug per PR #133 review: a `# encoding: utf-8` or
+    # `# frozen_string_literal: true` line affects Ruby's
+    # parser semantics, not just documentation.
+    return "".join(lines[:start] + lines[end:])
 
 
 def main():
