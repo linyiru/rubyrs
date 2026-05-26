@@ -3125,6 +3125,11 @@ fn method_recv_hash(v: &Value) -> i64 {
         Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id)
         | Value::Block(id) | Value::BoundMethod(id) | Value::UnboundMethod(id)
         | Value::CurriedProc(id) => id.0 as i64,
+        // Two BigInts that hash-equal must collide via ObjId since
+        // the heap-side bigint value identity is the ObjId (we
+        // never share an ObjId across different BigInt values).
+        #[cfg(feature = "bignum")]
+        Value::BigInt(id) => id.0 as i64,
         Value::Class(c) => Rc::as_ptr(c) as i64,
         Value::Str(s) => Rc::as_ptr(s) as i64,
         Value::Int(n) => *n,

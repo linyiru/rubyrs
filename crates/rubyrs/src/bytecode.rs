@@ -40,6 +40,15 @@ pub(crate) enum Op {
     /// and `Expr::RegexLit` never reaches the compiler arm.
     #[cfg(feature = "regex")]
     LoadRegex(SymId),
+    /// Load an integer literal that overflows i64. The SymId is
+    /// the interned decimal representation of the value; the
+    /// runtime parses to `BigInt` on first load and caches in
+    /// `Vm.bigint_lit_cache` keyed by SymId. Same shape as
+    /// `LoadRegex`. Cfg-gated on `bignum`; without the feature
+    /// the variant disappears and the AST translator emits a
+    /// saturated `IntLit` instead.
+    #[cfg(feature = "bignum")]
+    LoadBigInt(SymId),
     /// Pop a Value::Str, compile it as a Regex pattern, push
     /// Value::Regex. Emitted by `Expr::InterpolatedRegex` after
     /// the same `to_s + +` build sequence used by InterpolatedStr.
@@ -347,11 +356,30 @@ impl BinOpKind {
             _ => return None,
         })
     }
-    pub(crate) fn apply_int(self, a: i64, b: i64) -> Value {
-        match self {
-            BinOpKind::Add => Value::Int(a.wrapping_add(b)),
-            BinOpKind::Sub => Value::Int(a.wrapping_sub(b)),
-            BinOpKind::Mul => Value::Int(a.wrapping_mul(b)),
+    /// Applies the op against two i64 operands. Returns `Some(v)`
+    /// for the in-range result; returns `None` only when the
+    /// `bignum` feature is on AND an Add/Sub/Mul would overflow
+    /// i64 — the caller promotes to BigInt in that case. With
+    /// `bignum` off the arms fall back to `wrapping_*` so callers
+    /// can keep an unconditional `.unwrap()` on the return.
+    /// Div/Mod still use `wrapping_*` either way because the only
+    /// overflow case (`i64::MIN / -1`) is documented divergence
+    /// from CRuby either way; comparison arms cannot overflow.
+    pub(crate) fn apply_int(self, a: i64, b: i64) -> Option<Value> {
+        #[cfg(feature = "bignum")]
+        let arith = |a: i64, b: i64, op: fn(i64, i64) -> Option<i64>| op(a, b);
+        #[cfg(not(feature = "bignum"))]
+        let arith = |a: i64, b: i64, op: fn(i64, i64) -> i64| Some(op(a, b));
+        #[cfg(feature = "bignum")]
+        let (add, sub, mul): (fn(i64, i64) -> Option<i64>, _, _) =
+            (i64::checked_add, i64::checked_sub, i64::checked_mul);
+        #[cfg(not(feature = "bignum"))]
+        let (add, sub, mul): (fn(i64, i64) -> i64, _, _) =
+            (i64::wrapping_add, i64::wrapping_sub, i64::wrapping_mul);
+        Some(match self {
+            BinOpKind::Add => Value::Int(arith(a, b, add)?),
+            BinOpKind::Sub => Value::Int(arith(a, b, sub)?),
+            BinOpKind::Mul => Value::Int(arith(a, b, mul)?),
             BinOpKind::Div => Value::Int(a.wrapping_div(b)),
             BinOpKind::Mod => Value::Int(a.wrapping_rem(b)),
             BinOpKind::Lt => Value::Bool(a < b),
@@ -360,7 +388,7 @@ impl BinOpKind {
             BinOpKind::Ge => Value::Bool(a >= b),
             BinOpKind::Eq => Value::Bool(a == b),
             BinOpKind::Ne => Value::Bool(a != b),
-        }
+        })
     }
 }
 

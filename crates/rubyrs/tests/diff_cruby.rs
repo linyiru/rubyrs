@@ -149,6 +149,7 @@ fn run_diff(name: &str) {
 #[test] fn last_match_globals() { run_diff("last_match_globals"); }
 #[test] fn case_when_regex_globals() { run_diff("case_when_regex_globals"); }
 #[test] fn interpolated_regex() { run_diff("interpolated_regex"); }
+#[test] fn bignum_phase_a() { run_diff("bignum_phase_a"); }
 #[test] fn file_io() { run_diff("file_io"); }
 #[test] fn range_extras() { run_diff("range_extras"); }
 #[test] fn tap_then() { run_diff("tap_then"); }

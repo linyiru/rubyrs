@@ -222,6 +222,25 @@ impl Vm {
                 };
                 self.stack.push(Value::new_str_bytes(bytes));
             }
+            #[cfg(feature = "bignum")]
+            Op::LoadBigInt(id) => {
+                use std::str::FromStr;
+                let big = if let Some(b) = self.bigint_lit_cache.get(&id) {
+                    (**b).clone()
+                } else {
+                    let src = self.interner.resolve(id).clone();
+                    let parsed = num_bigint::BigInt::from_str(&src).map_err(|e| {
+                        self.trap(RubyError::SyntaxError {
+                            msg: format!("invalid bigint literal {:?}: {}", src, e),
+                        })
+                    })?;
+                    let rc = Rc::new(parsed);
+                    self.bigint_lit_cache.insert(id, rc.clone());
+                    (*rc).clone()
+                };
+                let v = self.bigint_to_value(big)?;
+                self.stack.push(v);
+            }
             #[cfg(feature = "regex")]
             Op::LoadRegex(id) => {
                 let regex_rc = if let Some(r) = self.regex_cache.get(&id) {
@@ -1304,12 +1323,26 @@ impl Vm {
                             msg: "divided by 0".to_string(),
                         }));
                     }
-                    self.stack.push(kind.apply_int(x, rhs));
+                    let v = match kind.apply_int(x, rhs) {
+                        Some(v) => v,
+                        // Overflow on Add/Sub/Mul — promote to BigInt.
+                        // With bignum off, `apply_int` never returns
+                        // None (the arms fall back to wrapping_*).
+                        #[cfg(feature = "bignum")]
+                        None => self.bigint_arith(kind, &Value::Int(x), &Value::Int(rhs))
+                            .expect("ICE: bigint_arith None for Int operands")?,
+                        #[cfg(not(feature = "bignum"))]
+                        None => unreachable!("apply_int returns None only when bignum is on"),
+                    };
+                    self.stack.push(v);
                 } else {
                     // Cold path: behave as if a generic `<op>` was dispatched
                     // with rhs boxed as an Int.
                     let b_val = Value::Int(rhs);
-                    if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b_val), self.max_value_bytes).map_err(|e| self.trap(e))? {
+                    if let Some(v) = self.try_bigint_binop(kind, &a, &b_val)? {
+                        // BigInt LHS + Int RHS — promoted arithmetic.
+                        self.stack.push(v);
+                    } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b_val), self.max_value_bytes).map_err(|e| self.trap(e))? {
                         self.stack.push(v);
                     } else if let Some(v) = self.sym_primitive(&a, kind.name(), std::slice::from_ref(&b_val)) {
                         self.stack.push(v);
@@ -1334,7 +1367,19 @@ impl Vm {
                             msg: "divided by 0".to_string(),
                         }));
                     }
-                    self.stack.push(kind.apply_int(*x, *y));
+                    let v = match kind.apply_int(*x, *y) {
+                        Some(v) => v,
+                        #[cfg(feature = "bignum")]
+                        None => self.bigint_arith(kind, &a, &b)
+                            .expect("ICE: bigint_arith None for Int operands")?,
+                        #[cfg(not(feature = "bignum"))]
+                        None => unreachable!("apply_int returns None only when bignum is on"),
+                    };
+                    self.stack.push(v);
+                } else if let Some(v) = self.try_bigint_binop(kind, &a, &b)? {
+                    // BigInt × {Int,BigInt} or Int × BigInt — promoted
+                    // arithmetic in arbitrary precision.
+                    self.stack.push(v);
                 } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b), self.max_value_bytes).map_err(|e| self.trap(e))? {
                     self.stack.push(v);
                 } else {

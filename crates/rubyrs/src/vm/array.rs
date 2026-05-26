@@ -448,7 +448,7 @@ impl Vm {
                                             msg: "divided by 0".to_string(),
                                         }));
                                     }
-                                    acc = kind.apply_int(*x, *y);
+                                    acc = self.apply_int_promote(kind, *x, *y)?;
                                 }
                                 _ => return Ok(None),
                             }

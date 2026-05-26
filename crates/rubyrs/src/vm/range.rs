@@ -237,7 +237,7 @@ impl Vm {
                                             msg: "divided by 0".to_string(),
                                         }));
                                     }
-                                    acc = kind.apply_int(*x, i);
+                                    acc = self.apply_int_promote(kind, *x, i)?;
                                 }
                                 _ => return Ok(None),
                             }

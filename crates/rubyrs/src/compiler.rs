@@ -283,6 +283,8 @@ pub(crate) fn compile_expr(
         }
         #[cfg(feature = "regex")]
         Expr::RegexLit(src) => { let id = interner.intern(src); b.emit(Op::LoadRegex(id)); }
+        #[cfg(feature = "bignum")]
+        Expr::BigIntLit(decimal) => { let id = interner.intern(decimal); b.emit(Op::LoadBigInt(id)); }
         Expr::SymbolLit(s) => { let id = interner.intern(s); b.emit(Op::LoadSymbol(id)); }
         Expr::InterpolatedStr(parts) => {
             if parts.is_empty() {

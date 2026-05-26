@@ -82,6 +82,21 @@ pub struct ObjId(pub(crate) u32);
 #[derive(Clone, Debug)]
 pub enum Value {
     Int(i64),
+    /// Arbitrary-precision integer. CRuby unified Fixnum + Bignum
+    /// into Integer at 2.4; we model it as an i64 fast path plus
+    /// a heap-allocated `num_bigint::BigInt` slow path. Promotion
+    /// is implicit: any arithmetic op that would overflow i64
+    /// promotes to BigInt; any BigInt result that fits back in
+    /// i64 demotes on creation (so `Fixnum == Bignum` equality
+    /// stays the natural `Int(5) == Int(5)` case for the common
+    /// post-overflow shrink).
+    ///
+    /// Cfg-gated on the `bignum` feature (ADR 0018's BigInt
+    /// placement decision — Tier-1 semantics, Tier-1 implementation
+    /// dep). With `--no-default-features`, the variant disappears
+    /// and arithmetic falls back to i64-saturating `wrapping_*`.
+    #[cfg(feature = "bignum")]
+    BigInt(ObjId),
     /// 64-bit float. Mixed arithmetic with Int promotes the Int
     /// (CRuby's "Float wins on mix" rule). Equality across the
     /// numeric types coerces too — `5 == 5.0` is `true`.

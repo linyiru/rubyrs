@@ -10,6 +10,12 @@ pub(crate) enum HeapObj {
     Array(Vec<Value>),
     Hash(Vec<(Value, Value)>),
     Range(RangeObj),
+    /// Arbitrary-precision integer (the heap-side of `Value::BigInt`).
+    /// Contains no nested `Value` — GC walk is a no-op for this
+    /// variant. Cfg-gated on the `bignum` feature alongside
+    /// `Value::BigInt`. ADR 0018 BigInt placement.
+    #[cfg(feature = "bignum")]
+    BigInt(num_bigint::BigInt),
     /// A `proc { ... }` value. Lives in the heap (P2-13) so blocks
     /// participate in mark-sweep — earlier `Rc<BlockHandle>` form
     /// cycled whenever a block's `captured` held the block itself.
@@ -226,6 +232,10 @@ impl Heap {
     }
     pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
         if let HeapObj::Range(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Range") }
+    }
+    #[cfg(feature = "bignum")]
+    pub(crate) fn bigint(&self, id: ObjId) -> &num_bigint::BigInt {
+        if let HeapObj::BigInt(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a BigInt") }
     }
     pub(crate) fn block(&self, id: ObjId) -> &BlockHandle {
         if let HeapObj::Block(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a Block") }
@@ -475,6 +485,8 @@ impl Value {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "Integer",
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => "Integer", // unified with Fixnum since CRuby 2.4
             Value::Float(_) => "Float",
             Value::Str(_) => "String",
             Value::Sym(_) => "Symbol",
@@ -496,6 +508,8 @@ impl Value {
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
             Value::Int(i) => i.to_string(),
+            #[cfg(feature = "bignum")]
+            Value::BigInt(id) => heap.bigint(*id).to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.to_string_lossy(),
             Value::Sym(id) => interner.resolve(*id).to_string(),
