@@ -94,6 +94,14 @@ begin; respond_to?(:a, true, :extra); rescue ArgumentError => e; puts e.message;
 begin; Object.new.respond_to?; rescue ArgumentError => e; puts e.message; end
 begin; "x".respond_to?(:a, true, :extra); rescue ArgumentError => e; puts e.message; end
 
+# --- respond_to? type-check ---
+# CRuby raises TypeError on non-Symbol / non-String arg[0],
+# before reaching method_missing. Previously rubyrs silently
+# fell through to NoMethodError with a misleading
+# "undefined method 'respond_to?' for NilClass" message.
+begin; Object.new.respond_to?(123); rescue TypeError => e; puts e.message; end
+begin; respond_to?([:not_a_sym]); rescue TypeError => e; puts e.message; end
+
 # --- NotImplementedError class hierarchy (CRuby parity) ---
 # Subclass of ScriptError (NOT StandardError) so a bare `rescue`
 # does NOT catch it — that's CRuby's behaviour and we now match.

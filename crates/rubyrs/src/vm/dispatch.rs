@@ -564,16 +564,25 @@ impl Vm {
                         msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                     }));
                 }
-                let lookup_name: Option<SymId> = match &args[0] {
-                    Value::Sym(id) => Some(*id),
-                    Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
-                    _ => None,
+                // Type: CRuby raises `TypeError: X is not a symbol nor
+                // a string` when arg[0] isn't a Symbol or String.
+                // Without this guard the call would silently fall
+                // through to method_missing / NoMethodError, which
+                // misreports the failure as "method missing" instead
+                // of "wrong arg type" and confuses debugging.
+                let lookup_name: SymId = match &args[0] {
+                    Value::Sym(id) => *id,
+                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "{} is not a symbol nor a string",
+                            other.to_inspect(&self.heap, &self.interner),
+                        ),
+                    })),
                 };
-                if let Some(id) = lookup_name {
-                    let yes = self.responds_to(&self_val, id);
-                    self.stack.push(Value::Bool(yes));
-                    return Ok(());
-                }
+                let yes = self.responds_to(&self_val, lookup_name);
+                self.stack.push(Value::Bool(yes));
+                return Ok(());
             }
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
@@ -2473,16 +2482,22 @@ impl Vm {
                     msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                 }));
             }
-            let lookup_name: Option<SymId> = match &args[0] {
-                Value::Sym(id) => Some(*id),
-                Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
-                _ => None,
+            // Type check matches the no-recv arm — CRuby raises
+            // `TypeError: X is not a symbol nor a string` for any
+            // other arg[0] type, before reaching method_missing.
+            let lookup_name: SymId = match &args[0] {
+                Value::Sym(id) => *id,
+                Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "{} is not a symbol nor a string",
+                        other.to_inspect(&self.heap, &self.interner),
+                    ),
+                })),
             };
-            if let Some(id) = lookup_name {
-                let yes = self.responds_to(&recv, id);
-                self.stack.push(Value::Bool(yes));
-                return Ok(());
-            }
+            let yes = self.responds_to(&recv, lookup_name);
+            self.stack.push(Value::Bool(yes));
+            return Ok(());
         }
         if self.try_method_missing(&recv, name_id, args, None)? {
             return Ok(());
