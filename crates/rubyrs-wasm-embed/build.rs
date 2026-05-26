@@ -48,14 +48,23 @@ fn main() {
         return;
     }
 
+    // If we got this far the user EXPLICITLY pointed us at a
+    // file that exists — a read failure (EACCES, IO error,
+    // mid-build deletion) is almost certainly a mistake they
+    // want to know about loudly, not silently demoted to "no
+    // cwasm available" via a cargo:warning that's easy to miss
+    // in piped release-mode build output. Asymmetric vs the
+    // "env var unset" / "file doesn't exist" branches above,
+    // which legitimately mean "no opinion expressed yet" and
+    // route to the stub. Reviewer feedback PR #125: the previous
+    // shape made debuggability inconsistent — stub-write
+    // failures panic, stub-read failures stubbed silently,
+    // both representing the same class of "I tried but
+    // couldn't" fault.
     let wasm_bytes = match fs::read(&wasm_path) {
         Ok(b) => b,
         Err(e) => {
-            stub(
-                &cwasm_out,
-                &format!("failed to read {}: {e}", wasm_path.display()),
-            );
-            return;
+            panic!("failed to read RUBYRS_WIZER_WASM={}: {e}", wasm_path.display());
         }
     };
 
