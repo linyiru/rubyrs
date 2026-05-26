@@ -150,7 +150,19 @@ export WASI_SDK_PATH=/opt/wasi-sdk-24.0-arm64-macos   # adjust path
 bash crates/rubyrs/tests/wasm/smoke.sh
 ```
 
-The same script runs in the `wasm` CI lane after the build step.
+Diff matrix (runs a curated subset of `tests/diff/*.rb` fixtures
+under both `ruby` and `rubyrs.wasm`, asserts byte-identical stdout —
+catches native-vs-wasi behaviour drift the smoke fixture can't
+surface alone). Needs CRuby on PATH:
+
+```bash
+bash crates/rubyrs/tests/wasm/diff_matrix.sh
+```
+
+Manifest at `crates/rubyrs/tests/wasm/diff_manifest.txt` —
+add a fixture name (without `.rb`) to expand coverage; the file
+header documents selection rules. Both scripts run in the `wasm`
+CI lane after the build step.
 
 Notes:
 - The `build.rs` ships a tiny `__wasi_init_tp` no-op stub so Rust std's
