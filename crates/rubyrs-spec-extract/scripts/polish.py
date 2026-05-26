@@ -176,16 +176,70 @@ EXTRACTOR_HEADER_OPENER = re.compile(
     r"^#\s*rubyrs-spec-extract v[\d.]+: \d+ pattern\(s\) left for hand polish\."
 )
 
+# Patterns that the EXTRACTOR currently passthrough's (lists in
+# its skip-log header) but polish doesn't address. If any of
+# these appear in the post-polish output, the header is still
+# accurate — keep it. Reviewer feedback PR #133: stripping the
+# header when only SOME entries got addressed hides the
+# remaining work and makes the file look micro-runner-ready when
+# it isn't. Pattern list mirrors the extractor's documented
+# "passthrough" allow-list (see crates/rubyrs-spec-extract/README.md
+# "What the extractor recognises" table).
+EXTRACTOR_LEFTOVER_PATTERNS = [
+    # `it_behaves_like` without a matching --shared inlined by
+    # the extractor stays as a literal call in the output. Polish
+    # has no shared-registry to resolve it from.
+    r"\bit_behaves_like\b",
+    r"\bit_should_behave_like\b",
+    # `context "..." do ... end` — micro-runner doesn't define
+    # `context`. Polish doesn't touch these because they CAN be
+    # nested inside an `it`-bearing `describe`, dropping the
+    # whole block would lose passing examples.
+    r"^\s*context\s+[\"']",
+    # `before :all` and `after :each`/`:all` — distinct from the
+    # top-level `before :each` blocks polish.py handles via
+    # DROP_TOP_LEVEL_HEADS (those are caught and traced with
+    # `# skipped (before-not-lifted)`). The :all variants need
+    # different handling (run-once-per-describe instead of
+    # per-`it`) and currently fall through unaddressed.
+    r"^\s*before\s+:all\b",
+    r"^\s*after\b",
+]
+
+
+def has_unaddressed_passthroughs(src: str) -> bool:
+    """Scan `src` for any leftover passthrough patterns polish
+    doesn't handle. Used by `rewrite_extractor_header` to decide
+    whether the extractor's header is still accurate."""
+    for pat in EXTRACTOR_LEFTOVER_PATTERNS:
+        # `re.MULTILINE` so `^` matches per-line, not just
+        # at the start of the whole string.
+        if re.search(pat, src, re.MULTILINE):
+            return True
+    return False
+
 
 def rewrite_extractor_header(src: str, addressed: int) -> str:
     """If the file opens with an extractor 'patterns left for hand
     polish' header and polish addressed at least one entry, strip
-    the header. Leaving it would mislead readers into thinking the
-    file isn't micro-runner-ready when it now is.
+    the header — but ONLY when every passthrough the extractor
+    could have listed has been resolved by polish. If any
+    leftover passthrough patterns remain in the post-polish
+    output (`it_behaves_like` without --shared, `context`,
+    `before :all`, `after`), the header is still accurate and we
+    leave it intact so readers know the file isn't yet
+    micro-runner-ready.
 
-    If polish addressed zero entries (extractor's header still
-    accurate), leave it verbatim."""
+    If polish addressed zero entries, leave the header verbatim
+    (no work happened that could have invalidated it)."""
     if addressed == 0:
+        return src
+    if has_unaddressed_passthroughs(src):
+        # Header still accurate — polish addressed some entries
+        # but at least one passthrough pattern remains. Leaving
+        # the header is the conservative choice. (Reviewer can
+        # tell post-polish vs pre-polish state from the in-body
+        # `# skipped (<category>)` traces.)
         return src
     lines = src.splitlines(keepends=True)
     # The extractor's header often starts on line 1, but if a
