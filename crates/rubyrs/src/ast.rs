@@ -1710,13 +1710,20 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // wrapping `class << X` doesn't introduce a NEW class with its
     // own name; the defs already address the existing
     // singleton_methods table on X's class chain.
-    // `alias new old` keyword form — desugar into a synthetic
-    // `alias_method :new, :old` Call so the existing compiler
-    // intercept (compiler.rs, `Op::AliasMethod`) handles it.
-    // Only the all-Symbol form is supported (the keyword's
-    // syntactic shape — `alias prefer register` parses as
-    // SymbolNode + SymbolNode in Prism). `alias $new $old`
-    // (GlobalVariableNode operands) falls through unsupported.
+    // `alias new old` keyword form (method-name aliasing) —
+    // desugar into a synthetic `alias_method :new, :old` Call so
+    // the existing compiler intercept (compiler.rs,
+    // `Op::AliasMethod`) handles it. Both operands are parsed as
+    // `SymbolNode` by Prism; non-Symbol shapes here are exotic
+    // (dynamic dispatch via `alias` is uncommon) and fall
+    // through to the AST_ERRORS trail.
+    //
+    // NOT THIS ARM: `alias $new $old` (global-variable aliasing)
+    // is `AliasGlobalVariableNode` — a distinct Prism node, not
+    // an `AliasMethodNode` with GlobalVariableNode operands. The
+    // arm below only matches AliasMethodNode, so global-alias
+    // forms naturally fall through to the unsupported-node trail
+    // unchanged.
     //
     // OUT OF SCOPE: `alias` inside `class << X` body. The
     // existing intercept emits Op::AliasMethod targeting
@@ -1726,10 +1733,6 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // Wrapped at the singleton-class body translation site below
     // — those cases still surface as the existing "only def and
     // attr_*" SyntaxError.
-    // Non-Symbol operand forms (alias $g1 $g2, etc.) — the
-    // chain's `let (Some(...), Some(...)) = ...` fails for them
-    // and the whole arm falls through to the unsupported-node
-    // trail below, surfacing as AST_ERRORS.
     if let Some(n) = node.as_alias_method_node()
         && let (Some(new_sym), Some(old_sym)) = (
             n.new_name().as_symbol_node(),
