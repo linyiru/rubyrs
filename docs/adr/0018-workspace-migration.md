@@ -154,11 +154,16 @@ artefact a user could `cargo install` once the tiers are split):
 
 Plus a fourth, specific to this migration:
 
-- **`no_std` ratchet**: the actual enforcement is the
-  `#![no_std]` attribute on the `rubyrs-core` crate root — once
-  it's there, the compiler rejects any `use std::*` import. To
-  catch drift early (before someone tries to embed in a truly
-  `std`-less environment), CI also runs the bare-WASM target
+- **`no_std` ratchet**: enforcement is layered. The
+  `#![no_std]` attribute on the `rubyrs-core` crate root
+  removes `std` from the prelude, so accidental `use std::*`
+  imports stop compiling on any target — that's the
+  in-source contract, and it catches casual drift. It is
+  *not* an absolute ban (someone determined could still write
+  `extern crate std;` explicitly on a target where `std` is
+  available). The hard guarantee comes from CI: PRs that
+  touch `rubyrs-core` also have to compile on the bare-WASM
+  target
   (`wasm32-unknown-unknown` — which genuinely has no `std`;
   `wasm32-wasip1` ships `std` and would silently let drift in)
   in **two passes** on every PR that touches `rubyrs-core`:
@@ -167,14 +172,16 @@ Plus a fourth, specific to this migration:
     `std` imports in core code
   - `cargo check -p rubyrs-core --target wasm32-unknown-unknown`
     (default features on) — catches `std` leaking in through a
-    default-on dependency like `bignum` (`num-bigint`'s `std`
+    default-on dependency like `bignum` (`num_bigint`'s `std`
     feature is opt-out, so a future bump that flips it on by
     accident would otherwise sneak past the first pass)
 
-  The two together — `#![no_std]` attribute as the in-source
-  contract, plus both feature-shape variants on the bare-WASM
-  target as build-time canaries — make the guarantee mechanical
-  for both direct usage and transitive feature-enabled usage.
+  Layered together — `#![no_std]` rejects casual drift at the
+  source, and the bare-WASM target rejects determined drift at
+  build time (since `std` is absent on that target, even an
+  explicit `extern crate std;` won't link). The two-pass
+  feature variant catches transitive drift via default-on
+  dependencies.
 
 CI scripts live in `.github/workflows/`. Phase 2 is one PR.
 
