@@ -620,13 +620,13 @@ impl Vm {
                     }
                 }
                 // Missing key — CRuby's `Hash#dig` walks via `[]`
-                // per step, which fires the default-block on a
-                // hash built with `Hash.new { |h, k| ... }`.
-                // Without this, nested auto-vivify hashes diverge:
-                // `Hash.new { |h, k| h[k] = {} }.dig(:x, :y)` would
-                // return nil instead of triggering :x's block.
-                // Mirrors the `Hash#[]` missing-key arm (pin
-                // receiver + key + block across the dispatch).
+                // per step, which consults default_value first, then
+                // default-block. Mirrors the `Hash#[]` missing-key
+                // arm: scalar default returned as-is, block fired
+                // with `(self_hash, key)` if no scalar default.
+                if let Some(v) = self.heap.hash_default_value(id) {
+                    return Ok(v);
+                }
                 if let Some(block_id) = self.heap.hash_default_block(id) {
                     let pre_frames = self.frames.len();
                     let mut g = PinGuard::new(self);

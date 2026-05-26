@@ -50,6 +50,17 @@ impl Vm {
                         // `Hash.new { |h, k| h[k] = [] }` — block
                         // mutates the Hash AND returns the value the
                         // caller sees.
+                        // Scalar default (set by `Hash.new(value)`)
+                        // is checked BEFORE the block — but only one
+                        // of the two can be set at allocation time
+                        // (CRuby refuses both, and the Hash.new
+                        // intercept enforces that). Returned as-is,
+                        // NOT cached: `h[:missing]` returns the
+                        // default but doesn't add `:missing` to the
+                        // pairs.
+                        if let Some(v) = self.heap.hash_default_value(id) {
+                            return Ok(Some(v));
+                        }
                         if let Some(block_id) = self.heap.hash_default_block(id) {
                             let pre_frames = self.frames.len();
                             let mut g = PinGuard::new(self);

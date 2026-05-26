@@ -829,25 +829,36 @@ impl Vm {
             && let Value::Class(cls) = &recv
             && cls.name.as_str() == "Hash"
         {
-            // `Hash.new` without a block — empty Hash, no default.
+            // `Hash.new` without a block. CRuby shapes:
+            //   - 0 args: empty Hash, no default
+            //   - 1 arg:  empty Hash with scalar default; missing-
+            //             key lookup returns this value as-is (not
+            //             cached into the Hash).
+            //   - 2+ args: ArgumentError
             // The block-form (`Hash.new { |h, k| ... }`) routes
-            // through `do_call_block` and has its own parallel
-            // intercept there; this arm never sees a block.
-            //
-            // Arity: CRuby `Hash.new` takes 0 or 1 args (the 1-arg
-            // scalar default is silently ignored as a documented
-            // gap — see SUBSET.md). 2+ args is ArgumentError;
-            // raise explicitly so wrong-arity calls don't silently
-            // produce an empty Hash and confuse the caller.
+            // through `do_call_block` and has its own intercept
+            // (which raises ArgumentError when a scalar default is
+            // also given — CRuby refuses both at once).
             if args.len() > 1 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
                 }));
             }
-            self.maybe_gc();
-            self.check_alloc()?;
-            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
-            self.stack.push(Value::Hash(hid));
+            let default = args.first().cloned();
+            // Pin the default across maybe_gc — if it's a heap
+            // value (Array / Hash / String), it could be a
+            // temporary on its way to becoming the default and
+            // would otherwise be unrooted between args.first() and
+            // hash_set_default_value below.
+            let mut g = PinGuard::new(self);
+            if let Some(v) = &default { g.pin(v.clone()); }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+            if default.is_some() {
+                g.vm.heap.hash_set_default_value(hid, default);
+            }
+            g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
         if name_id == new_id

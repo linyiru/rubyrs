@@ -1,15 +1,15 @@
-# `Hash.new` semantics — three forms in CRuby, two of them
-# handled by rubyrs:
+# `Hash.new` semantics — three forms in CRuby, all handled:
 #
 #   1. `Hash.new`                    → empty Hash, no default
-#   2. `Hash.new(default_value)`     → scalar default — NOT MODELLED
-#      (silently ignored; documented divergence)
+#   2. `Hash.new(default_value)`     → scalar default returned
+#      as-is on missing-key access (NOT cached into the Hash)
 #   3. `Hash.new { |h, k| block }`   → block called on missing-key
 #      access with `(self_hash, key)`; auto-vivification idiom
 #
 # Tilt's `@lazy_map = Hash.new { |h, k| h[k] = [] }` (in
-# `tilt/mapping.rb:131`) was the motivating case — without
-# form (3), tilt-load stalled at the first `@lazy_map[ext]`.
+# `tilt/mapping.rb:131`) was the motivating case for form (3);
+# `counts = Hash.new(0); counts[w] += 1` is the canonical
+# form-(2) idiom.
 
 # --- (1) Bare Hash.new ---
 # Returns a real Hash (Value::Hash on the rubyrs side, not a
@@ -20,6 +20,24 @@ puts h.inspect                                  # {}
 puts h[:missing].inspect                        # nil (no default)
 h[:k] = 1
 puts h.inspect                                  # {k: 1}
+
+# --- (2) Hash.new with scalar default ---
+# `Hash.new(default)` returns the scalar on every missing-key
+# access. NOT cached — the Hash stays empty until something
+# explicitly assigns. Canonical idiom: `Hash.new(0)` for
+# frequency / count maps where `counts[w] += 1` desugars to
+# `counts[w] = counts[w] + 1` (and `counts[w]` returns 0 first
+# time around).
+counts = Hash.new(0)
+counts[:apple] += 1
+counts[:apple] += 1
+counts[:banana] += 1
+puts counts.inspect                             # {apple: 2, banana: 1}
+
+# Scalar default is returned as-is — not cached into the hash.
+plain = Hash.new("missing")
+puts plain[:never].inspect                      # "missing"
+puts plain.inspect                              # {} (no key added)
 
 # --- (3) Hash.new with default-block ---
 # Block invoked on missing-key access. Return value of the

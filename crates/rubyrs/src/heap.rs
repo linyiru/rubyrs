@@ -101,12 +101,14 @@ pub(crate) struct RangeObj {
     pub(crate) exclusive: bool,
 }
 
-/// Heap representation of a Hash. Carries the key/value pairs and
+/// Heap representation of a Hash. Carries the key/value pairs,
 /// an optional default-block ObjId for `Hash.new { |h, k| ... }`-
-/// style auto-vivification. The block is a `Value::Block`'s id;
+/// style auto-vivification, and an optional scalar default value
+/// for `Hash.new(default)` (the simpler form — returned as-is on
+/// missing keys, not mutated). The block is a `Value::Block`'s id;
 /// `Hash#[]` invokes it with `(self_hash, key)` when the key is
-/// missing. GC walks the pairs and the default-block (if present)
-/// so neither dangles.
+/// missing. GC walks the pairs, the default-block (if present),
+/// and the scalar default (if present) so nothing dangles.
 ///
 /// Constructor `HashObj::with_pairs(pairs)` keeps all 11 internal
 /// `HeapObj::Hash` allocations short. The `default_block` slot
@@ -120,11 +122,20 @@ pub(crate) struct RangeObj {
 pub(crate) struct HashObj {
     pub(crate) pairs: Vec<(Value, Value)>,
     pub(crate) default_block: Option<ObjId>,
+    /// Scalar default — set by `Hash.new(default_value)`. Returned
+    /// as-is from `Hash#[]` on missing keys; NOT cached into the
+    /// Hash (i.e. `h[:missing]` returns the default but doesn't
+    /// add `:missing` to the pairs). Mutually exclusive with
+    /// `default_block` in CRuby semantics (block takes precedence
+    /// if both are set — but rubyrs's `Hash.new` already raises
+    /// ArgumentError on the both-given form, so the slots are
+    /// effectively exclusive at allocation time).
+    pub(crate) default_value: Option<Value>,
 }
 
 impl HashObj {
     pub(crate) fn with_pairs(pairs: Vec<(Value, Value)>) -> Self {
-        Self { pairs, default_block: None }
+        Self { pairs, default_block: None, default_value: None }
     }
 }
 
@@ -284,6 +295,18 @@ impl Heap {
         if let HeapObj::Hash(h) = self.get_mut(id) { h.default_block = block; }
         else { panic!("ICE: heap slot is not a Hash (hash_set_default_block)") }
     }
+    /// Scalar default — set by `Hash.new(default)`. Returned as-is
+    /// on missing-key lookup. Cloned on read to avoid sharing a
+    /// `&Value` into a method that's about to mutate the heap.
+    /// Panics on type mismatch, consistent with `hash()`.
+    pub(crate) fn hash_default_value(&self, id: ObjId) -> Option<Value> {
+        if let HeapObj::Hash(h) = self.get(id) { h.default_value.clone() }
+        else { panic!("ICE: heap slot is not a Hash (hash_default_value)") }
+    }
+    pub(crate) fn hash_set_default_value(&mut self, id: ObjId, value: Option<Value>) {
+        if let HeapObj::Hash(h) = self.get_mut(id) { h.default_value = value; }
+        else { panic!("ICE: heap slot is not a Hash (hash_set_default_value)") }
+    }
     pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
         if let HeapObj::Range(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Range") }
     }
@@ -418,6 +441,13 @@ impl Heap {
                     {
                         self.marks[blk_id.0 as usize] = true;
                         worklist.push(blk_id);
+                    }
+                    // Scalar default — set by `Hash.new(default)`.
+                    // May itself reference the heap (e.g. a default
+                    // String or Array); walk via the usual Value
+                    // visitor.
+                    if let Some(v) = &h.default_value {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                 }
                 Slot::Live(HeapObj::Range(r)) => {
