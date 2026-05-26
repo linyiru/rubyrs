@@ -62,7 +62,7 @@ spec/
     │
     │ # core/array batch: extractor v0.4 + scripts/polish.py
     │ # drops `it` blocks matching DROP_PATTERNS (fixture /
-    │ # mock / frozen-state / method-not-implemented) and
+    │ # mock / method-not-implemented) and
     │ # top-level `before`/`after` hooks the lifter didn't
     │ # pick up (before-not-lifted / after-not-supported).
     │ # Each drop leaves `# skipped (<category>): it "..." do`

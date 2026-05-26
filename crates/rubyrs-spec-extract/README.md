@@ -58,7 +58,7 @@ landing. The companion `scripts/polish.py` removes:
 
 Each drop leaves a `# skipped (<category>): ...` trace at the
 original block's indentation. Categories: `fixture` /
-`mock` / `frozen-state` / `method-not-implemented` for `it`
+`mock` / `method-not-implemented` for `it`
 blocks; `before-not-lifted` / `after-not-supported` for hook
 blocks. `git grep "# skipped (method-not-implemented)"` finds
 every block that would unlock when one feature PR lands.
