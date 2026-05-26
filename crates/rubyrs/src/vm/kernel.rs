@@ -394,6 +394,22 @@ impl Vm {
                                 return Some(Ok(Value::Bool(false)));
                             }
                             self.loaded_stdlib_stubs.insert(path_str.to_string());
+                            // Under `--features stdlib`, run the
+                            // embedded pure-Ruby implementation (if
+                            // any) on the current Vm. The default
+                            // build's lenient stub path stops at the
+                            // constant-shell loop below, preserving
+                            // ADR 0017's "feature-absent surface"
+                            // for stdlib names in Tier 1 core.
+                            #[cfg(feature = "stdlib")]
+                            if let Some(src) = crate::stdlib_vendor::stdlib_vendor_source(&path_str) {
+                                let vfs_path = std::path::PathBuf::from(
+                                    format!("<vendor>/{}.rb", &*path_str)
+                                );
+                                if let Err(t) = self.compile_and_run_source(vfs_path, src.to_string()) {
+                                    return Some(Err(t));
+                                }
+                            }
                             //
                             // Materialise the constant shell(s)
                             // each stdlib name conventionally
@@ -712,6 +728,21 @@ impl Vm {
                 msg: format!("require: read {} failed: {}", canon.display(), e),
             })),
         };
+        self.compile_and_run_source(canon, source)
+    }
+
+    /// Body shared by `load_ruby_source_from_canon` (disk source)
+    /// and the `stdlib` feature's vendor require path (embedded
+    /// `include_str!` source). Takes a pre-read source string plus
+    /// a path used as the loaded_features key, filename tracking
+    /// key, and backtrace label. Caller owns the "did we already
+    /// load this?" guard; this helper unconditionally runs the body.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn compile_and_run_source(
+        &mut self,
+        canon: std::path::PathBuf,
+        source: String,
+    ) -> Result<Value, Trap> {
         // Parse + AST translate. Errors surface as SyntaxError
         // through the standard Trap path.
         let parse_result = ruby_prism::parse(source.as_bytes());

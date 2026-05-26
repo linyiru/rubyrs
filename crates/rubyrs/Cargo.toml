@@ -57,6 +57,19 @@ cext = ["dep:rubyrs-cext", "dep:libloading"]
 # The default keeps it on so today's CLI / embedder behaviour
 # stays identical to pre-PoC.
 regex = ["dep:regex"]
+# Tier 3 stdlib vendor bridge (per ADR 0017 row 125). With this
+# feature off, the lenient stdlib stub path (`is_stdlib_stub_name`)
+# stays a pure "feature-absent surface": `require 'pathname'`
+# materialises the constant shell so `defined?(Pathname)` returns
+# "constant", but any call (`Pathname.new(...)`) raises
+# NoMethodError. With this feature on, the same require path
+# additionally loads an embedded pure-Ruby implementation
+# (`crates/rubyrs/src/stdlib_vendor/<name>.rb`) on the running
+# Vm, so the module's CRuby-compatible behaviour becomes
+# available to scripts. The full-features build is the only
+# place Tier 1 core grows a Tier 3 surface; the default build
+# stays minimal per ADR 0017.
+stdlib = []
 
 [dependencies]
 ruby-prism.workspace = true

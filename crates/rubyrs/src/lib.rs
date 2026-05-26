@@ -28,6 +28,8 @@ mod compiler;
 mod error;
 mod heap;
 mod intern;
+#[cfg(feature = "stdlib")]
+mod stdlib_vendor;
 mod value;
 mod vm;
 
