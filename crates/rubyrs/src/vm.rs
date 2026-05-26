@@ -430,6 +430,15 @@ pub(crate) struct Vm {
     /// Distinct from `method_return` because that path keeps frames
     /// > until_depth, while rescue unwind drops below.
     pub(crate) suppress_call_result_push: bool,
+    /// Single-shot flag set by the `send` / `__send__` recogniser
+    /// (`vm/dispatch.rs`) right before re-entering dispatch. The
+    /// next visibility check in `do_call`'s Object arm consumes
+    /// the flag (`mem::replace(..., false)`) and skips both the
+    /// Private and Protected gates. CRuby parity: `send` may
+    /// invoke methods of any visibility, but the bypass doesn't
+    /// transitively apply — anything that method itself calls
+    /// runs through the normal check.
+    pub(crate) bypass_visibility_once: bool,
     /// Cached index into `protos` of the BoundMethod→Block
     /// forwarder. Lazily built on first `&method_object`
     /// coercion in `do_call_block`. The forwarder is a tiny
@@ -505,6 +514,7 @@ impl Vm {
             method_return: None,
             pending_loop_transfer: None,
             suppress_call_result_push: false,
+            bypass_visibility_once: false,
         }
     }
 

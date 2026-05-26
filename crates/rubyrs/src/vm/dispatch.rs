@@ -182,6 +182,15 @@ impl Vm {
 
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
+        // Consume `bypass_visibility_once` at the dispatch
+        // boundary, before any arm runs. A naive consume-at-the-
+        // vis-check would leak the flag whenever the dispatch
+        // bottoms out without entering the Value::Object arm
+        // (e.g. `send(:nonexistent)` on a primitive receiver
+        // raises NoMethodError before the Object arm is reached
+        // — the flag would survive and silently bypass the next
+        // call's vis check).
+        let bypass_visibility = std::mem::replace(&mut self.bypass_visibility_once, false);
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let recv = if no_recv {
@@ -382,8 +391,10 @@ impl Vm {
         // fns, method_missing, etc.) — `send` is just a name
         // re-aim, not a separate dispatch table.
         //
-        // Symbol arg only; CRuby also accepts String but we keep
-        // the subset narrow (same precedent as `Object#method`).
+        // The method-name arg accepts both Symbol and String
+        // (CRuby's transparent `to_sym`). Same precedent as
+        // `Object#method` but broader because shared specs and
+        // tilt-style libraries commonly pass `send("foo")`.
         // Block-form (`send(:name) { ... }`) lives in
         // `do_call_block`; this arm covers the block-less call.
         //
@@ -391,7 +402,29 @@ impl Vm {
         // resolves a runtime-dynamic name — caching it at the
         // original `send` call site's slot would poison whatever
         // method the bytecode actually compiled for that slot.
-        if matches!(&*name, "send" | "__send__") {
+        //
+        // **CRuby parity — user-defined `def send`**: only
+        // `__send__` is reserved. A user `def send` on the
+        // receiver's class wins over the built-in re-aim when the
+        // call is named `send`. We check that first and fall
+        // through to the regular `Value::Object` arm if found.
+        //
+        // **CRuby parity — visibility bypass**: `send` and
+        // `__send__` may invoke private/protected methods. Set
+        // `bypass_visibility_once` to suppress the visibility
+        // check during the re-entered call; the flag is consumed
+        // (single-shot) at the check site below.
+        let user_send_override = &*name == "send"
+            && matches!(&recv, Value::Object(_))
+            && {
+                if let Value::Object(id) = &recv {
+                    let cls = self.heap.class_of(*id);
+                    self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                } else {
+                    false
+                }
+            };
+        if matches!(&*name, "send" | "__send__") && !user_send_override {
             if args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: "wrong number of arguments (given 0, expected 1+)".into(),
@@ -399,33 +432,24 @@ impl Vm {
             }
             let target_sym = match &args[0] {
                 Value::Sym(s) => Some(*s),
-                // CRuby accepts a String as the method-name arg
-                // too (transparent String#to_sym). Intern it
-                // here so both forms route through the same
-                // SymId-based lookup path.
-                Value::Str(s) => Some(s.with_str_lossy(|name| self.interner.intern(name))),
+                Value::Str(s) => Some(s.with_str_lossy(|n| self.interner.intern(n))),
                 _ => None,
             };
             if let Some(target_sym) = target_sym {
                 let new_argc = args.len() - 1;
+                self.bypass_visibility_once = true;
                 self.stack.push(recv);
                 for a in args.into_iter().skip(1) {
                     self.stack.push(a);
                 }
                 return self.do_call(target_sym, new_argc, false, u16::MAX);
             }
-            // CRuby phrasing: `<inspect(arg)> is not a symbol nor
-            // a string`. Construct a tiny inspect-equivalent for
-            // the primitive cases (the only realistic mis-types
-            // hitting this path) and fall back to type_name() for
-            // anything that would need a real `inspect` dispatch.
-            let inspected = match &args[0] {
-                Value::Int(n) => n.to_string(),
-                Value::Float(f) => f.to_string(),
-                Value::Bool(b) => b.to_string(),
-                Value::Nil => "nil".to_string(),
-                other => other.type_name().to_string(),
-            };
+            // CRuby: `<inspect(arg)> is not a symbol nor a string`.
+            // `Value::to_inspect` is the heap-aware Ruby-inspect
+            // equivalent (no dispatch re-entry), so the message
+            // renders arrays/hashes/instances close to CRuby's
+            // shape instead of falling back to a bare type_name.
+            let inspected = args[0].to_inspect(&self.heap, &self.interner);
             return Err(self.trap(RubyError::TypeError {
                 msg: format!("{} is not a symbol nor a string", inspected),
             }));
@@ -649,13 +673,18 @@ impl Vm {
                 // the receiver class via the existing
                 // `class_is_a` helper.
                 let vis = m.visibility.get();
-                if vis == Visibility::Private {
+                // `send` / `__send__` bypass the visibility check
+                // exactly once. The flag was consumed at the top
+                // of `do_call` into a local so it applies even when
+                // the bypassed method itself dispatches other
+                // calls (those see a freshly-cleared flag).
+                if vis == Visibility::Private && !bypass_visibility {
                     return Err(self.trap(RubyError::NoMethodError {
                         method: format!("private method '{name}' called"),
                         recv_type: recv.type_name(),
                     }));
                 }
-                if vis == Visibility::Protected {
+                if vis == Visibility::Protected && !bypass_visibility {
                     // Check against the method's *defining* class
                     // (where `def name` literally lives) rather
                     // than the receiver's class — that's CRuby's
@@ -2739,8 +2768,20 @@ impl Vm {
         // so the stack shape it expects from a caller is
         // `[..., recv, block, *args]`. Put them back in that order
         // and re-enter. cache_id = u16::MAX for the same reason as
-        // the block-less arm.
-        if matches!(&*name, "send" | "__send__") {
+        // the block-less arm. User-`def send` override + visibility
+        // bypass parity — same rules as the block-less arm; see
+        // there for the rationale.
+        let user_send_override = &*name == "send"
+            && matches!(&recv, Value::Object(_))
+            && {
+                if let Value::Object(id) = &recv {
+                    let cls = self.heap.class_of(*id);
+                    self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                } else {
+                    false
+                }
+            };
+        if matches!(&*name, "send" | "__send__") && !user_send_override {
             if args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: "wrong number of arguments (given 0, expected 1+)".into(),
@@ -2748,11 +2789,12 @@ impl Vm {
             }
             let target_sym = match &args[0] {
                 Value::Sym(s) => Some(*s),
-                Value::Str(s) => Some(s.with_str_lossy(|name| self.interner.intern(name))),
+                Value::Str(s) => Some(s.with_str_lossy(|n| self.interner.intern(n))),
                 _ => None,
             };
             if let Some(target_sym) = target_sym {
                 let new_argc = args.len() - 1;
+                self.bypass_visibility_once = true;
                 self.stack.push(recv);
                 self.stack.push(Value::Block(block));
                 for a in args.into_iter().skip(1) {
@@ -2760,13 +2802,7 @@ impl Vm {
                 }
                 return self.do_call_block(target_sym, new_argc, false, u16::MAX);
             }
-            let inspected = match &args[0] {
-                Value::Int(n) => n.to_string(),
-                Value::Float(f) => f.to_string(),
-                Value::Bool(b) => b.to_string(),
-                Value::Nil => "nil".to_string(),
-                other => other.type_name().to_string(),
-            };
+            let inspected = args[0].to_inspect(&self.heap, &self.interner);
             return Err(self.trap(RubyError::TypeError {
                 msg: format!("{} is not a symbol nor a string", inspected),
             }));

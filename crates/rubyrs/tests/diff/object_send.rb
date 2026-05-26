@@ -69,3 +69,59 @@ begin
 rescue NoMethodError => e
   puts "missing ok"
 end
+
+# Visibility bypass — CRuby allows `send` / `__send__` to invoke
+# private and protected methods even with an explicit receiver.
+class Vault
+  def reveal
+    secret
+  end
+
+  private
+
+  def secret
+    "🤐"
+  end
+end
+v = Vault.new
+begin
+  v.secret
+rescue NoMethodError
+  puts "direct private blocked"
+end
+puts v.send(:secret)
+puts v.__send__(:secret)
+# The bypass is single-shot — `reveal` calls `secret` internally
+# and that internal call must still be a normal private dispatch
+# (allowed because the call is implicit-self), but if we leaked
+# the flag a subsequent direct call to `v.secret` would succeed.
+puts v.reveal
+begin
+  v.secret
+rescue NoMethodError
+  puts "still blocked"
+end
+
+# User-defined `def send` — CRuby's reserved-name rule: `send`
+# is overridable, `__send__` is not.
+class HasOwnSend
+  def send(*args)
+    "intercepted #{args.inspect}"
+  end
+
+  def hidden
+    "real_hidden"
+  end
+end
+h = HasOwnSend.new
+puts h.send(:hidden)           # → user's send wins
+puts h.__send__(:hidden)        # → built-in re-aim wins
+
+# TypeError inspect — non-primitive target's message uses
+# Value::to_inspect so an array renders as `[1, 2]` rather
+# than the bare type name.
+begin
+  "x".send([1, 2])
+rescue TypeError => e
+  puts "type ok: #{e.message}"
+end
