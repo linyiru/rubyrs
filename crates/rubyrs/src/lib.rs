@@ -781,77 +781,18 @@ impl Runtime {
     /// runtime's own machinery so the resulting classes look identical
     /// to user-defined ones (no special-cased C structs).
     fn load_preamble(&mut self) {
+        // Exception hierarchy first — other preamble fragments below
+        // (and any user code that raises during their load) need
+        // `RuntimeError`/`StandardError`/etc. to be resolvable.
+        // Lives in its own file per the random.rb / time.rb pattern:
+        // larger, structurally distinct from the class-stub block
+        // below, and meaty enough that editor support pays off.
+        self.eval(
+            include_str!("preamble/exceptions.rb"),
+            "<rubyrs:preamble:exceptions>",
+        )
+            .expect("ICE: failed to load exception preamble");
         const PREAMBLE: &str = r#"
-class Exception
-  def initialize(msg)
-    @message = msg
-  end
-  def message
-    @message
-  end
-  def to_s
-    @message
-  end
-end
-class StandardError < Exception
-end
-class RuntimeError < StandardError
-end
-class NoMethodError < StandardError
-end
-class ArgumentError < StandardError
-end
-class TypeError < StandardError
-end
-class NameError < StandardError
-end
-## ScriptError — CRuby's ancestor for compile/load-time errors
-## (NotImplementedError, LoadError, SyntaxError). Subclasses
-## inherit from ScriptError → Exception in CRuby, NOT from
-## StandardError, so a bare `rescue` (which catches StandardError)
-## does NOT catch them. Important: stubbing this as a child of
-## StandardError would silently change rescue semantics for
-## existing CRuby code that relies on NotImplementedError NOT
-## being caught by `rescue` clauses.
-class ScriptError < Exception
-end
-class NotImplementedError < ScriptError
-end
-class IndexError < StandardError
-end
-class KeyError < IndexError
-end
-class ZeroDivisionError < StandardError
-end
-## CRuby's RangeError — value out of an expected range. Raised
-## by `Integer#chr` on bytes outside `0..255`,
-## `Integer#pow(exp, mod)` for negative exponents (the modular
-## inverse may not exist; we don't compute it), `Numeric#step` on
-## negative step with no end, and user-level `raise RangeError`.
-## Sits under StandardError so a bare `rescue` catches it.
-class RangeError < StandardError
-end
-## LocalJumpError — raised when a control-flow keyword
-## (`break` / `next` / `return`) escapes the wrong scope. The
-## canonical case is `break` from inside a stored Proc (e.g. a
-## Hash default-block or any saved block): the block isn't
-## currently being yielded-to from an iterator, so there's no
-## loop body to break out of. CRuby raises LocalJumpError;
-## rubyrs raises it from the `Hash#[]` / `Hash#dig` default-
-## block paths.
-class LocalJumpError < StandardError
-end
-class FrozenError < RuntimeError
-end
-## Intentionally `< Exception`, NOT `< StandardError`. A bare
-## `rescue => e` clause filters on `StandardError` by default,
-## so attaching `ResourceExhausted` outside that subtree means
-## user scripts cannot accidentally — or deliberately — swallow
-## their own fuel / heap / frame trap and keep burning quota.
-## CRuby uses the same pattern for `SystemExit` and `Interrupt`.
-## See docs/adr/0008-resource-caps-for-untrusted-scripts.md.
-class ResourceExhausted < Exception
-end
 ## Stub classes for built-in types. Without these, `5.class` and
 ## friends have nothing to return; the bodies stay empty because
 ## built-in method dispatch goes through `primitive_call` /
