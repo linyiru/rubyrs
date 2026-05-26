@@ -166,8 +166,9 @@ In rough order of ROI for the embedding / DSL use case:
    surface
 3. **BigInt Phase B** — `**`, bit ops, unary `-@`/`+@`, `abs`,
    tighter Float interop
-4. **P2-B Spec ingestion v0.1** — `tools/spec_extract` from ruby/spec,
-   first SPEC_STATUS.md report
+4. **P2-B Spec ingestion** — `crates/rubyrs-spec-extract` v0.4 +
+   `polish.py` shipped; live coverage in
+   [`SPEC_STATUS.md`](SPEC_STATUS.md)
 5. **Bytecode peephole sweep** — DefClass-then-Dup-then-StoreConst is
    one obvious fusion; IC-stats counters (cargo feature `ic-stats`)
    to validate the 4-way IC's hit rate on real workloads

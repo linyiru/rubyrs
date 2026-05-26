@@ -86,8 +86,10 @@ The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **146 examples across 35
-files**, all passing.
+"Future work" below). Live counts (files, examples per class,
+skipped-trace categories) are in
+[`docs/SPEC_STATUS.md`](../../../docs/SPEC_STATUS.md), regenerated
+by `cargo test -p rubyrs --test spec_status` and gated in CI.
 
 ## DSL the helper provides
 
