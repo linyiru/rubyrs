@@ -459,7 +459,7 @@ impl Vm {
                 };
                 let fmt_args = &args[1..];
                 let out = match crate::vm::ruby_sprintf(
-                    &fmt, fmt_args, &self.heap, &self.interner,
+                    &fmt, fmt_args, &self.heap, &self.interner, self.max_value_bytes,
                 ) {
                     Ok(s) => s,
                     Err(e) => return Some(Err(self.trap(e))),

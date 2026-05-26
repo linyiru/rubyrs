@@ -21,6 +21,7 @@ pub(crate) fn ruby_sprintf(
     args: &[Value],
     heap: &Heap,
     interner: &Interner,
+    max_value_bytes: Option<usize>,
 ) -> Result<String, RubyError> {
     let mut out = String::new();
     let mut idx: usize = 0;
@@ -142,11 +143,11 @@ pub(crate) fn ruby_sprintf(
             // documented divergence (see `format_radix_int`
             // comment). For BigInt, the divergence applies the
             // same way.
-            'x' => format_radix_any(arg, heap, 16, false, flag_hash)?,
-            'X' => format_radix_any(arg, heap, 16, true, flag_hash)?,
-            'o' => format_radix_any(arg, heap, 8, false, flag_hash)?,
-            'b' => format_radix_any(arg, heap, 2, false, flag_hash)?,
-            'B' => format_radix_any(arg, heap, 2, true, flag_hash)?,
+            'x' => format_radix_any(arg, heap, 16, false, flag_hash, max_value_bytes)?,
+            'X' => format_radix_any(arg, heap, 16, true, flag_hash, max_value_bytes)?,
+            'o' => format_radix_any(arg, heap, 8, false, flag_hash, max_value_bytes)?,
+            'b' => format_radix_any(arg, heap, 2, false, flag_hash, max_value_bytes)?,
+            'B' => format_radix_any(arg, heap, 2, true, flag_hash, max_value_bytes)?,
             'f' => {
                 let f = coerce_float(arg)?;
                 let prec = precision.unwrap_or(6);
@@ -273,10 +274,46 @@ fn coerce_float(v: &Value) -> Result<f64, RubyError> {
 /// `..f`-prefixed two's-complement form for BOTH Int and BigInt —
 /// documented divergence shared with `format_radix_int`.
 #[cfg(feature = "bignum")]
-fn format_radix_any(arg: &Value, heap: &Heap, radix: u32, upper: bool, alt: bool) -> Result<String, RubyError> {
+fn format_radix_any(
+    arg: &Value,
+    heap: &Heap,
+    radix: u32,
+    upper: bool,
+    alt: bool,
+    max_value_bytes: Option<usize>,
+) -> Result<String, RubyError> {
     use num_bigint::Sign;
     if let Value::BigInt(id) = arg {
         let b = heap.bigint(*id);
+        // Pre-allocation cap check: `to_str_radix(2)` on a 10M-bit
+        // BigInt allocates a ~10 MB string in one go. Estimate
+        // the rendered length from the BigInt's bit count and
+        // trap BEFORE the alloc — `String#%` / `Kernel#sprintf`'s
+        // post-format cap check only sees the already-allocated
+        // result string and can't unwind a host OOM.
+        //
+        // Bound: `ceil(bits / log2_per_digit) + sign_byte + prefix`
+        // where `log2_per_digit = max(1, floor(log2(radix)))` is
+        // a lower bound on `log2(base)` (dividing by a smaller
+        // log gives a safe upper bound on the count without
+        // floating-point), `sign_byte` is 1 iff negative,
+        // `prefix` is 0 / 1 (octal `#`) / 2 (`0x`/`0b` `#`).
+        let bits = b.bits();
+        let log2_per_digit: u64 = (u32::BITS - radix.leading_zeros())
+            .saturating_sub(1) as u64;
+        let log2_per_digit = log2_per_digit.max(1);
+        let digits_est: u64 = bits.saturating_add(log2_per_digit - 1) / log2_per_digit;
+        let sign_byte: u64 = if b.sign() == Sign::Minus { 1 } else { 0 };
+        let prefix_len: u64 = if !alt { 0 } else {
+            match radix { 16 | 2 => 2, 8 => 1, _ => 0 }
+        };
+        let est = digits_est.saturating_add(sign_byte).saturating_add(prefix_len);
+        let cap = max_value_bytes.unwrap_or(1 << 20) as u64;
+        if est > cap {
+            return Err(RubyError::ResourceExhausted {
+                msg: format!("sprintf value size ~{} bytes > cap {}", est, cap),
+            });
+        }
         let prefix: &str = if !alt { "" } else {
             match radix {
                 16 => if upper { "0X" } else { "0x" },
@@ -297,7 +334,14 @@ fn format_radix_any(arg: &Value, heap: &Heap, radix: u32, upper: bool, alt: bool
 }
 
 #[cfg(not(feature = "bignum"))]
-fn format_radix_any(arg: &Value, _heap: &Heap, radix: u32, upper: bool, alt: bool) -> Result<String, RubyError> {
+fn format_radix_any(
+    arg: &Value,
+    _heap: &Heap,
+    radix: u32,
+    upper: bool,
+    alt: bool,
+    _max_value_bytes: Option<usize>,
+) -> Result<String, RubyError> {
     Ok(format_radix_int(coerce_int(arg)?, radix, upper, alt))
 }
 

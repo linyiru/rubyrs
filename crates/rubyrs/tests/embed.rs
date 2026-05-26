@@ -2333,6 +2333,31 @@ fn digits_int_path_error_semantics_match_bignum_profile() {
     }
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_radix_bigint_traps_via_pre_alloc_cap() {
+    // `'%b' % (2 ** N)` allocates ~N bytes during
+    // `to_str_radix`. The post-format cap check in `Kernel#sprintf`
+    // / `String#%` only sees the already-allocated result string
+    // and can't unwind a host OOM. Pre-alloc cap in
+    // `format_radix_any` must trap based on `bits()` BEFORE the
+    // alloc runs.
+    //
+    // Set a 64 KB cap large enough for `2 ** 100_000` to exist
+    // as a BigInt (~12.5 KB magnitude) but small enough that
+    // its base-2 sprintf form (~100 KB) trips. Pin the trap.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "'%b' % (2 ** 100_000)",
+        "sprintf_pre_alloc_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
 #[test]
 fn sprintf_alt_form_with_zero_pad_keeps_prefix_before_zeros() {
     // Regression guard: pre-fix `'%#08x' % 255` produced

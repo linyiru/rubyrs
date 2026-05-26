@@ -970,11 +970,15 @@ impl Vm {
         // BigInt allocates ~1 MB before we get a chance to inspect
         // its length. Estimate the rendered length first via
         // `bits()` and trap before the alloc. Bound:
-        // `ceil(bits / log2_lower) + 1` where `log2_lower =
-        // max(1, ceil(log2(radix)))` is the per-digit bit yield —
-        // i.e. how many output chars one bit produces — divided
-        // out. Mirror with the 0-arg arm so both paths share the
-        // protection. +1 for the sign byte (negative receivers).
+        // `ceil(bits / log2_per_digit) + sign_byte` where
+        // `log2_per_digit = max(1, floor(log2(radix)))` is a
+        // lower bound on `log2(base)` (dividing by a smaller log
+        // gives a safe upper bound on the count without
+        // floating-point). `sign_byte = 1` iff the BigInt is
+        // negative, else 0 (avoids systematic over-estimate that
+        // would false-trap non-negative values landing exactly
+        // on the cap). Mirrored by the 0-arg arm so both paths
+        // share the protection.
         if name == "to_s" && args.len() == 1
             && let Value::BigInt(id) = recv
         {
@@ -1116,25 +1120,33 @@ impl Vm {
     /// OOM (or hit the allocator's panic-on-fail path) before we
     /// get a chance to inspect `s.len()`. Estimate the rendered
     /// length from the BigInt's bit count + per-digit bit yield:
-    ///   `ceil(bits / log2_per_digit) + 1` (sign byte)
-    /// where `log2_per_digit = max(1, base.bits() - 1)` is a
+    ///   `ceil(bits / log2_per_digit) + sign_byte`
+    /// where `log2_per_digit = max(1, floor(log2(radix)))` is a
     /// lower bound on `log2(base)`, matching the
-    /// `Vm::try_integer_digits` estimator. Dividing by a smaller
-    /// log gives a safe upper bound on the char count.
-    /// `max_value_bytes` falls back to the same 1 MB safety
-    /// ceiling that `try_bigint_pow` uses when no host cap is
-    /// configured.
+    /// `Vm::try_integer_digits` estimator (dividing by a smaller
+    /// log gives a safe upper bound on the char count without
+    /// floating-point). `sign_byte = 1` iff the BigInt is
+    /// negative, else 0 — avoids systematic over-estimate that
+    /// would false-trap non-negative values landing exactly on
+    /// the cap. `max_value_bytes` falls back to the same 1 MB
+    /// safety ceiling that `try_bigint_pow` uses when no host
+    /// cap is configured.
     #[cfg(feature = "bignum")]
     pub(crate) fn check_bigint_to_s_cap(&mut self, id: crate::value::ObjId, radix: u32) -> Result<(), crate::error::Trap> {
-        let bits = self.heap.bigint(id).bits();
-        // log2_per_digit lower bound: u32::BITS - leading_zeros - 1,
-        // floor of log2(radix). For radix == 2 this is 1 (exact);
-        // for radix == 10 this is 3; for radix == 36 this is 5.
+        use num_bigint::Sign;
+        let b = self.heap.bigint(id);
+        let bits = b.bits();
+        let sign_byte: u64 = if b.sign() == Sign::Minus { 1 } else { 0 };
+        // log2_per_digit lower bound: floor(log2(radix)) computed
+        // as `(u32::BITS - radix.leading_zeros()) - 1`. For radix
+        // == 2 this is 1 (exact); for radix == 10 this is 3; for
+        // radix == 36 this is 5.
         let log2_per_digit: u64 = (u32::BITS - radix.leading_zeros())
             .saturating_sub(1) as u64;
         let log2_per_digit = log2_per_digit.max(1);
-        // ceil-div bits / log2_per_digit, + 1 for sign byte.
-        let est: u64 = bits.saturating_add(log2_per_digit - 1) / log2_per_digit + 1;
+        // ceil-div bits / log2_per_digit, then add sign byte if negative.
+        let digits_est: u64 = bits.saturating_add(log2_per_digit - 1) / log2_per_digit;
+        let est: u64 = digits_est.saturating_add(sign_byte);
         let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
         if est > cap {
             return Err(self.trap(RubyError::ResourceExhausted {
