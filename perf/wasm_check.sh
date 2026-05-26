@@ -8,8 +8,16 @@
 #
 # For each row in `perf/wasm_baselines.tsv`: run the workload
 # through `wasmtime` three times, take the MIN wall time across
-# the runs (the stable floor — drops occasional CI jitter spikes),
-# and fail if it exceeds the row's `max_wall_ms`.
+# the runs, and fail if it exceeds the row's `max_wall_ms`.
+#
+# MIN-of-3 is the steady-state floor — drops both CI jitter
+# spikes AND wasmtime's first-run wasm-cache cold population
+# (subsequent runs hit `~/.cache/wasmtime`, so the warm-cache
+# wall is what `cmp` picks). This measures rubyrs interpreter
+# cost under wasi, not wasmtime's own cache-warmup time. If a
+# future row needs literal cold-cache measurement, add it as
+# its own row that clears the cache or passes `--disable-cache`
+# between runs — see `perf/wasm_baselines.tsv` for the rationale.
 #
 # Why no RSS gate: peak-RSS under wasmtime conflates the host VM's
 # resident size with the guest's linear-memory working set, and

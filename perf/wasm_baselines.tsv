@@ -17,11 +17,28 @@
 # above the row explaining what grew and whether it was intentional;
 # never "bumped to make CI green" silently.
 #
+# What the gate actually measures
+# -------------------------------
+# `perf/wasm_check.sh` takes the MIN wall across 3 runs — that's the
+# stable steady-state floor (the same min-of-N pattern host
+# `baselines.tsv` uses for the same reason). On wasmtime the first
+# run typically populates `~/.cache/wasmtime` and subsequent runs hit
+# warm-cache, so MIN is essentially "warm-cache steady startup,"
+# not literal cold-cache startup. We use steady-state because:
+#   1. CI runners cache between jobs differently, making cold-cache
+#      numbers unreproducible.
+#   2. The regression signal we want is "did the rubyrs interpreter
+#      get slower under wasi", and steady-state isolates that from
+#      wasmtime's own cache-warmup variance.
+# If literal cold-cache measurement is ever needed, that's a separate
+# workload (run wasmtime with --disable-cache or clear the cache
+# between runs) and a separate row.
+#
 # Initial calibration (Apple M-series, wasmtime 45.0.0,
-# rubyrs.wasm release build):
-#   cold_start.rb      ~10 ms (steady, first run ~180 ms with
-#                              wasmtime's wasm-cache cold).
-#   fizzbuzz_1m.rb     ~510 ms (M-series local).
+# rubyrs.wasm release build, MIN of 3 runs each):
+#   startup_floor.rb   ~10 ms steady (first run can be ~180 ms with
+#                                     wasmtime's wasm-cache cold).
+#   fizzbuzz_1m.rb     ~510 ms.
 #
 # CI is on ubuntu-latest x86_64, where wasmtime + wasi-portable
 # code typically run 1.5-2× slower than Apple Silicon native. Budgets
@@ -33,5 +50,5 @@
 # Expect a re-cal commit if/when the wasmtime version pinned in
 # CI bumps or the wasi-sdk shape changes.
 
-crates/rubyrs/tests/wasm/cold_start.rb	300	wasmtime cold start + rubyrs init
+crates/rubyrs/tests/wasm/startup_floor.rb	300	wasmtime startup floor + rubyrs init (warm-cache steady)
 crates/rubyrs/benches/fizzbuzz_1m.rb	2500	1M fizzbuzz under wasi
