@@ -37,3 +37,9 @@ puts t.encoding.to_s
 # String so the comparison is true). Real codebases typically
 # write `.encoding.to_s == "UTF-8"`, which works in both:
 puts("hello".encoding.to_s == "UTF-8")
+
+# Feature detection — `respond_to?` must agree with what
+# `string_call` actually dispatches. Regression guard against
+# the lookup.rs allowlist drifting out of sync.
+puts "x".respond_to?(:valid_encoding?)
+puts "x".respond_to?(:encoding)
