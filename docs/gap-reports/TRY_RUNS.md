@@ -80,8 +80,11 @@ Observable in this pass's try-runs:
 | bundler/plugin/installer/git.rb | A | **A** | unchanged |
 | bundler/match_remote_metadata.rb | F | **F** | unchanged |
 
-Pass count (host-installable subset, 8 files): **6/8 → 6/8** at the file-roster
-level — `sinatra/base.rb` *would* be a fresh Cat B file if we add it,
+Pass count (host-installable subset, 7 files — original 12 minus
+the 5 gems not on host minus Brewfile): **6/7 → 5/7** at the
+file-roster level — `rake/scope.rb` downgraded A → F this pass
+(detailed in the table above; cause is load-order, not language
+regression). `sinatra/base.rb` *would* be a fresh Cat B file if we add it,
 but the original 12-set kept Sinatra represented by
 `middleware/logger.rb` (already Cat A) so the roster's pass count
 doesn't move. The five other files from the original 12-set
@@ -138,12 +141,12 @@ read; it confirms it. Specifically:
 
 ### Cumulative category histogram
 
-Counted against the host-installable subset (8 files of the original
-12 + 4 new sinatra files = 12 unique files):
+Counted against the host-installable subset (7 files of the original
+12 + 4 new sinatra files = 11 unique files):
 
-| Category | Pass 5 (8-file subset) | Now (12 with sinatra additions) | Notes |
+| Category | Pass 5 (7-file subset) | Now (11 with sinatra additions) | Notes |
 |---|---:|---:|---|
-| A (runs clean) | 6 | 6 | unchanged: logger, rake/linked_list, tilt/string, bundler/version, bundler/plugin/installer/git, plus middleware/logger duplicated above |
+| A (runs clean) | 6 | 5 | down by one — `rake/scope.rb` moved A → F this pass (Rake::LinkedList load-order). The 5 remaining: middleware/logger, rake/linked_list, tilt/string, bundler/version, bundler/plugin/installer/git |
 | B (C-ext require) | 0 | 2 | sinatra/base, sinatra/show_exceptions |
 | D (unsupported AST node at runtime) | 0 | 0 | unchanged at empty |
 | F (project-helper / undefined constant) | 1 | 4 | match_remote_metadata, rake/scope (new this pass — Rake::LinkedList load-order), sinatra/main (ARGV), sinatra/indifferent_hash (Gem::Version) |
