@@ -13,7 +13,7 @@
 # MIN-of-3 is the steady-state floor — drops both CI jitter
 # spikes AND wasmtime's first-run wasm-cache cold population
 # (subsequent runs hit `~/.cache/wasmtime`, so the warm-cache
-# wall is what `cmp` picks). This measures rubyrs interpreter
+# wall is what `min` picks). This measures rubyrs interpreter
 # cost under wasi, not wasmtime's own cache-warmup time. If a
 # future row needs literal cold-cache measurement, add it as
 # its own row that clears the cache or passes `--disable-cache`
@@ -106,17 +106,31 @@ measure_wall_ms() {
       echo "ERR"; return
     fi
     # `m:ss.ss` or `h:mm:ss.ss`
-    awk -v t="$wall" 'BEGIN {
+    # On an unexpected `wall` shape the awk branch must emit
+    # the same `ERR` sentinel the upstream parse errors use —
+    # an empty string would slip past the caller's
+    # `"$ms" == "ERR"` check and fail later inside the integer
+    # `if [[ ... -lt ... ]]` comparison with a confusing shell
+    # error rather than the documented setup-failure exit code.
+    local parsed
+    parsed=$(awk -v t="$wall" 'BEGIN {
       n = split(t, parts, ":");
       if (n == 2) {
         ms_f = (parts[1] * 60 + parts[2]) * 1000;
       } else if (n == 3) {
         ms_f = (parts[1] * 3600 + parts[2] * 60 + parts[3]) * 1000;
-      } else { exit 1 }
+      } else {
+        print "ERR"; exit 0;
+      }
       ms = int(ms_f);
       if (ms_f > ms) ms = ms + 1;
       printf "%d\n", ms;
-    }'
+    }')
+    if [[ "$parsed" == "ERR" ]]; then
+      echo "wasm_check: GNU time wall \`$wall\` had unexpected shape for $script" >&2
+      echo "ERR"; return
+    fi
+    printf "%s\n" "$parsed"
   fi
 }
 
@@ -159,7 +173,13 @@ while IFS=$'\t' read -r script max_wall_ms note; do
     if [[ -z "$best_ms" || "$ms" -lt "$best_ms" ]]; then best_ms="$ms"; fi
   done
   if [[ -z "$best_ms" ]]; then continue; fi
-  if [[ "$max_wall_ms" -ne 0 && "$best_ms" -gt "$max_wall_ms" ]]; then
+  if [[ "$max_wall_ms" -eq 0 ]]; then
+    # `0` is the documented sentinel for "wall check disabled" —
+    # see baselines.tsv. Print that explicitly so CI logs don't
+    # imply a 0 ms budget was met (which would read as
+    # surprisingly tight to anyone scanning the log).
+    echo "  ok: best wall ${best_ms} ms (wall check disabled)"
+  elif [[ "$best_ms" -gt "$max_wall_ms" ]]; then
     echo "  FAIL: best wall ${best_ms} ms > budget ${max_wall_ms} ms" >&2
     regression_seen=1
   else
