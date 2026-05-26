@@ -45,8 +45,8 @@ for tool in wasmtime cargo; do
   fi
 done
 
-# We need ns-precision wall timing — macOS `/usr/bin/time -p` rounds
-# to 10 ms, useless at sub-10 ms scale. Use the in-tree
+# We need microsecond-precision wall timing — macOS `/usr/bin/time -p`
+# rounds to 10 ms, useless at sub-10 ms scale. Use the in-tree
 # `rubyrs-wasm-timer` binary: ~50-200 us own overhead vs python's
 # 1-2 ms interpreter init, so the wasmtime+wasi measurement is
 # closer to a "naked" host-spawn reading.
@@ -82,8 +82,11 @@ if [[ ! -f "$RAW_WASM" ]]; then
   exit 2
 fi
 
-# 2. Pipeline matches `perf/wasm_check.sh`:
-#    raw → wasm-opt -Oz → wizer → wasm-opt -Oz → wasmtime compile
+# 2. Pipeline mirrors `perf/build_embedder.sh`'s wizer-FIRST shape
+#    (see the "wizer-before-wasm-opt" block below for the rationale —
+#    Linux apt's binaryen v116 strips the `wizer.initialize` export
+#    on the pre-wizer -Oz pass):
+#    raw → wizer → wasm-opt -Oz → wasmtime compile
 #    wasm-opt and wizer are OPTIONAL (graceful skip with a note);
 #    `wasmtime compile` is required because the headline AOT shape
 #    is what the breakdown is here to characterize.

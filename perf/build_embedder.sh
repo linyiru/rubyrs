@@ -2,13 +2,15 @@
 # perf/build_embedder.sh — produce the single-binary `rubyrs-wasm-embed`
 # shipping artifact.
 #
-# Pipeline:
+# Pipeline (wizer BEFORE wasm-opt — see the "Pipeline reorder"
+# rationale block below for the Linux binaryen DCE-strips-export
+# bug that motivated this ordering):
 #   1. cargo build --release --target wasm32-wasip1 --no-default-features
-#   2. wasm-opt -Oz                           ←  ~21% size cut (1.5 MB → 1.2 MB)
-#   3. wizer (snapshot preamble + classes)    ←  ~0.5 ms cold-start cut
-#   4. wasm-opt -Oz again                     ←  compacts post-wizer memory
-#   5. cargo build --profile release-min -p rubyrs-wasm-embed \
-#         RUBYRS_WIZER_WASM=<step-4-output>   ←  build.rs precompiles to cwasm
+#   2. wizer (snapshot preamble + classes)    ←  ~0.5 ms cold-start cut
+#   3. wasm-opt -Oz                           ←  ~21% size cut + compacts
+#                                                 post-wizer memory layout
+#   4. cargo build --profile release-min -p rubyrs-wasm-embed \
+#         RUBYRS_WIZER_WASM=<step-3-output>   ←  build.rs precompiles to cwasm
 #                                                 and bakes via include_bytes!
 #
 # Output: target/release-min/rubyrs-wasm-embed (~7 MB single binary

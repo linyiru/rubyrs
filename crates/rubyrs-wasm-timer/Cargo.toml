@@ -1,6 +1,6 @@
 [package]
 name = "rubyrs-wasm-timer"
-description = "Sub-millisecond wall-clock timer for perf/wasm_breakdown.sh — execs a child and prints ns-precision elapsed time. Lives in-tree because /usr/bin/time -p rounds to 10 ms on macOS and `python3 -c ...` adds 1-2 ms of interpreter startup."
+description = "Sub-millisecond wall-clock timer for perf/wasm_breakdown.sh — execs a child and prints microsecond-precision elapsed time. Lives in-tree because /usr/bin/time -p rounds to 10 ms on macOS and `python3 -c ...` adds 1-2 ms of interpreter startup."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
