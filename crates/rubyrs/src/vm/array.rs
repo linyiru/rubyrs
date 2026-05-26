@@ -356,15 +356,32 @@ impl Vm {
                     }
                     ("sum", []) | ("sum", [Value::Int(_)]) => {
                         let init = match args { [Value::Int(n)] => *n, _ => 0 };
-                        let a = self.heap.array(id);
-                        let mut s: i64 = init;
-                        for v in a {
-                            match v {
-                                Value::Int(n) => s = s.wrapping_add(*n),
+                        let a = self.heap.array(id).clone();
+                        // Same overflow-promotion shape as inject:
+                        // start in i64 fast path, promote to BigInt
+                        // on overflow, continue summing in arbitrary
+                        // precision. Without this, `[2**62, 2**62,
+                        // 2**62].sum` would wrap silently even with
+                        // bignum on — divergence from Op::BinOp +.
+                        let kind = crate::bytecode::BinOpKind::Add;
+                        let mut acc: Value = Value::Int(init);
+                        for v in &a {
+                            match (&acc, v) {
+                                (Value::Int(x), Value::Int(y)) => {
+                                    acc = self.apply_int_promote(kind, *x, *y)?;
+                                }
+                                (_, Value::Int(_)) => {
+                                    #[cfg(feature = "bignum")]
+                                    if let Some(next) = self.try_bigint_binop(kind, &acc, v)? {
+                                        acc = next;
+                                        continue;
+                                    }
+                                    return Ok(None);
+                                }
                                 _ => return Ok(None),
                             }
                         }
-                        Some(Value::Int(s))
+                        Some(acc)
                     }
                     ("min", []) => {
                         let a = self.heap.array(id);

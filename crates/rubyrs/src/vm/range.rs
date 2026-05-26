@@ -218,9 +218,34 @@ impl Vm {
                         let init = match args { [Value::Int(n)] => *n, _ => 0 };
                         let end_inc = if excl { ei - 1 } else { ei };
                         if bi > end_inc { return Ok(Some(Value::Int(init))); }
+                        // n * (bi + end_inc) / 2 closed form. n and
+                        // bi+end_inc each fit i64, but their product
+                        // can overflow for large ranges (e.g.
+                        // `(1..10_000_000_000).sum`). Try the i64
+                        // fast path; promote to BigInt on overflow
+                        // when the feature is on, otherwise wrap (the
+                        // pre-PR behaviour for both no-bignum and the
+                        // accidental wrap with bignum on).
                         let n = end_inc - bi + 1;
-                        let s = n.wrapping_mul(bi.wrapping_add(end_inc)) / 2;
-                        Some(Value::Int(init.wrapping_add(s)))
+                        if let Some(prod) = n.checked_mul(bi.checked_add(end_inc).unwrap_or(i64::MAX))
+                            && let Some(half) = Some(prod / 2)
+                            && let Some(total) = init.checked_add(half)
+                        {
+                            return Ok(Some(Value::Int(total)));
+                        }
+                        #[cfg(feature = "bignum")]
+                        {
+                            use num_bigint::BigInt;
+                            let big_n = BigInt::from(n);
+                            let big_sum = BigInt::from(bi) + BigInt::from(end_inc);
+                            let big_total = BigInt::from(init) + (big_n * big_sum) / 2;
+                            return Ok(Some(self.bigint_to_value(big_total)?));
+                        }
+                        #[cfg(not(feature = "bignum"))]
+                        {
+                            let s = n.wrapping_mul(bi.wrapping_add(end_inc)) / 2;
+                            Some(Value::Int(init.wrapping_add(s)))
+                        }
                     }
                     ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
                         let end_inc = if excl { ei - 1 } else { ei };

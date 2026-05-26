@@ -114,3 +114,12 @@ puts 1.send(:+, 9_223_372_036_854_775_808)
 # wildcard arm and bailed the whole primitive.
 puts (1..30).inject(:*)
 puts [10_000_000_000, 10_000_000_000, 10_000_000_000].inject(:+)
+
+# Array#sum / Range#sum overflow promotion — pre-cycle-5 these
+# used wrapping_add and silently lost precision the moment the
+# running total crossed i64. Range#sum uses the n*(a+b)/2 closed
+# form which can overflow at the multiplication step alone.
+big = 4_611_686_018_427_387_904  # 2^62
+puts [big, big, big].sum
+puts (1..10_000_000_000).sum
+puts [1, 2, 3, big].sum
