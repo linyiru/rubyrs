@@ -5,9 +5,9 @@ describe "Array#reverse" do
     assert_eq([1, 3, 5, 2].reverse, [2, 5, 3, 1])
   end
 
-  # skipped (fixture-dependent): it "properly handles recursive arrays" do
+  # skipped (fixture): it "properly handles recursive arrays" do
 
-  # skipped (fixture-dependent): it "does not return subclass instance on Array subclasses" do
+  # skipped (fixture): it "does not return subclass instance on Array subclasses" do
 end
 
 describe "Array#reverse!" do
@@ -18,7 +18,7 @@ describe "Array#reverse!" do
     assert_eq([].reverse!, [])
   end
 
-  # skipped (fixture-dependent): it "properly handles recursive arrays" do
+  # skipped (fixture): it "properly handles recursive arrays" do
 
-  # skipped (fixture-dependent): it "raises a FrozenError on a frozen array" do
+  # skipped (fixture): it "raises a FrozenError on a frozen array" do
 end

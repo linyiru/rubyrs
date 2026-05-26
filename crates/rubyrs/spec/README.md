@@ -62,9 +62,11 @@ spec/
     │
     │ # core/array batch: extractor v0.4 + scripts/polish.py
     │ # (drops fixture-dependent + unimplemented-method `it`
-    │ # blocks, leaving auditable `# skipped` traces). Adds 9
+    │ # blocks, leaving auditable `# skipped (<category>): ...`
+    │ # traces at the dropped block's indentation). Adds 9
     │ # files covering the head/tail/length surface; the polish
-    │ # step is documented in spec-extract/README.md.
+    │ # step is documented in
+    │ # ../../rubyrs-spec-extract/README.md.
     ├── array_empty_spec.rb
     ├── array_first_spec.rb
     ├── array_include_spec.rb
@@ -187,7 +189,19 @@ Don't smuggle a divergence into the spec — write the spec to
 match upstream behaviour. If rubyrs differs intentionally,
 document the divergence in
 [`docs/SUBSET.md`](../../../docs/SUBSET.md) and skip the spec
-case with a `#` comment naming the upstream source line.
+case with a `#` comment.
+
+For HAND-written specs (pre-extractor flow) the convention is
+to name the upstream source line in that comment so reviewers
+can cross-check against the original. For specs produced by
+the extractor + `scripts/polish.py` pipeline, the polish step's
+`# skipped (<category>): it "..." do` traces preserve the
+original `it` block's first line verbatim — that line is a
+high-fidelity locator inside the upstream spec file, easier
+to grep than a numeric line ref that goes stale when upstream
+moves. Either form is acceptable; the polish-traced form is
+preferred for batches >5 files because regenerating doesn't
+require re-walking upstream source.
 
 ## Extractor workflow (extractor-assisted translation)
 

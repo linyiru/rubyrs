@@ -5,5 +5,5 @@ describe "Array#size" do
     assert_eq([1, 2, 3].send(:size), 3)
   end
 
-  # skipped (fixture-dependent): it "properly handles recursive arrays" do
+  # skipped (fixture): it "properly handles recursive arrays" do
 end
