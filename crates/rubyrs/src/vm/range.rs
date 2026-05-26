@@ -227,10 +227,20 @@ impl Vm {
                         // pre-PR behaviour for both no-bignum and the
                         // accidental wrap with bignum on).
                         let n = end_inc - bi + 1;
-                        if let Some(prod) = n.checked_mul(bi.checked_add(end_inc).unwrap_or(i64::MAX))
-                            && let Some(half) = Some(prod / 2)
-                            && let Some(total) = init.checked_add(half)
-                        {
+                        // Fast path: each checked_* must succeed. If
+                        // ANY step overflows i64 we fall through to
+                        // the BigInt branch (or the wrapping legacy
+                        // arm with bignum off). Earlier draft used
+                        // `unwrap_or(i64::MAX)` here, which silently
+                        // substituted a bogus value when bi+end_inc
+                        // overflowed and could return an incorrect
+                        // in-range result instead of falling back —
+                        // fixed to short-circuit cleanly with `?`.
+                        if let Some(total) = (|| -> Option<i64> {
+                            let sum = bi.checked_add(end_inc)?;
+                            let prod = n.checked_mul(sum)?;
+                            init.checked_add(prod / 2)
+                        })() {
                             return Ok(Some(Value::Int(total)));
                         }
                         #[cfg(feature = "bignum")]

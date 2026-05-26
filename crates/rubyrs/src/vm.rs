@@ -752,25 +752,31 @@ impl Vm {
             }
             // Both operands must be integers (Int or BigInt); if
             // not, decline and let primitive_call try (e.g. for
-            // String * BigInt later).
-            let ax = match self.as_bigint(a) {
+            // String * BigInt later). Use `as_bigint_ref` to
+            // borrow heap-side BigInts rather than cloning — only
+            // Int→BigInt coercions allocate, and comparison ops
+            // run entirely from refs.
+            let ax_cow = match self.as_bigint_ref(a) {
                 Some(v) => v,
                 None => return Ok(None),
             };
-            let bx = match self.as_bigint(b) {
+            let bx_cow = match self.as_bigint_ref(b) {
                 Some(v) => v,
                 None => return Ok(None),
             };
-            // Comparison ops return Bool directly.
+            // Comparison ops return Bool directly (run against the
+            // borrowed BigInts via Cow's Deref impl — no clones).
             match kind {
-                BinOpKind::Lt => return Ok(Some(Value::Bool(ax < bx))),
-                BinOpKind::Le => return Ok(Some(Value::Bool(ax <= bx))),
-                BinOpKind::Gt => return Ok(Some(Value::Bool(ax > bx))),
-                BinOpKind::Ge => return Ok(Some(Value::Bool(ax >= bx))),
-                BinOpKind::Eq => return Ok(Some(Value::Bool(ax == bx))),
-                BinOpKind::Ne => return Ok(Some(Value::Bool(ax != bx))),
+                BinOpKind::Lt => return Ok(Some(Value::Bool(&*ax_cow < &*bx_cow))),
+                BinOpKind::Le => return Ok(Some(Value::Bool(&*ax_cow <= &*bx_cow))),
+                BinOpKind::Gt => return Ok(Some(Value::Bool(&*ax_cow > &*bx_cow))),
+                BinOpKind::Ge => return Ok(Some(Value::Bool(&*ax_cow >= &*bx_cow))),
+                BinOpKind::Eq => return Ok(Some(Value::Bool(&*ax_cow == &*bx_cow))),
+                BinOpKind::Ne => return Ok(Some(Value::Bool(&*ax_cow != &*bx_cow))),
                 _ => {}
             }
+            drop(ax_cow);
+            drop(bx_cow);
             // Arithmetic: delegate to bigint_arith which handles
             // zero-division traps and CRuby-style floor div / mod.
             match self.bigint_arith(kind, a, b) {
@@ -866,11 +872,32 @@ impl Vm {
     /// Resolves an Int / BigInt operand to its `num_bigint::BigInt`
     /// form. Non-integer Values return `None` so the caller can
     /// fall through to the regular dispatch path (e.g. method-missing
-    /// for `String + BigInt`).
+    /// for `String + BigInt`). Owned form — clones the heap-side
+    /// BigInt because the caller will consume it (arithmetic moves).
+    /// For comparisons / read-only paths prefer `as_bigint_ref`.
     pub(crate) fn as_bigint(&self, v: &Value) -> Option<num_bigint::BigInt> {
         match v {
             Value::Int(n) => Some(num_bigint::BigInt::from(*n)),
             Value::BigInt(id) => Some(self.heap.bigint(*id).clone()),
+            _ => None,
+        }
+    }
+
+    /// Borrowed form of `as_bigint`. BigInt operands flow as
+    /// `Cow::Borrowed(&BigInt)` (no clone); Int operands wrap
+    /// in `Cow::Owned(BigInt::from(n))` because we have to
+    /// materialise the conversion somewhere. The borrowed result
+    /// is tied to `&self.heap`, so the caller must drop it before
+    /// any `&mut self` calls. Used by `try_bigint_binop` for
+    /// comparison ops where both sides run from refs.
+    pub(crate) fn as_bigint_ref<'a>(
+        &'a self,
+        v: &'a Value,
+    ) -> Option<std::borrow::Cow<'a, num_bigint::BigInt>> {
+        use std::borrow::Cow;
+        match v {
+            Value::Int(n) => Some(Cow::Owned(num_bigint::BigInt::from(*n))),
+            Value::BigInt(id) => Some(Cow::Borrowed(self.heap.bigint(*id))),
             _ => None,
         }
     }
