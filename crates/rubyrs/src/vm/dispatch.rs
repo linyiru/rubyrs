@@ -1692,14 +1692,39 @@ impl Vm {
                 // default here; the `true` form is the same.
                 ("constants", args) if args.is_empty()
                     || matches!(args, [Value::Bool(_)]) => {
-                    let prefix = format!("{}::", cls.name);
+                    // CRuby: `Module#constants` walks the
+                    // receiver's own constants table AND
+                    // every included module's constants. The
+                    // boolean arg (`false` to exclude
+                    // inherited from included modules) is
+                    // accepted but rubyrs's chain is shallow
+                    // enough that the distinction rarely
+                    // matters; we always walk the includes for
+                    // simplicity. Documented behaviour.
+                    //
+                    // Constants are stored under their dual-
+                    // write prefixed key (`Foo::BAR`) per
+                    // PR #89, so the filter scans the global
+                    // table for entries matching `{cls.name}::`
+                    // — directly-defined names — and repeats
+                    // the scan for each `include`'d module's
+                    // own prefix. Dedup via the running set.
                     let mut names: Vec<String> = Vec::new();
-                    for k in self.constants.keys() {
-                        let s = self.interner.resolve(*k).to_string();
-                        if let Some(short) = s.strip_prefix(&prefix)
-                            && !short.contains("::") {
-                            names.push(short.to_string());
+                    let collect = |prefix: &str, names: &mut Vec<String>| {
+                        for k in self.constants.keys() {
+                            let s = self.interner.resolve(*k).to_string();
+                            if let Some(short) = s.strip_prefix(prefix)
+                                && !short.contains("::")
+                                && !names.contains(&short.to_string()) {
+                                names.push(short.to_string());
+                            }
                         }
+                    };
+                    let own_prefix = format!("{}::", cls.name);
+                    collect(&own_prefix, &mut names);
+                    for inc in cls.includes.borrow().iter() {
+                        let inc_prefix = format!("{}::", inc.name);
+                        collect(&inc_prefix, &mut names);
                     }
                     names.sort();
                     let elems: Vec<Value> = names.into_iter()

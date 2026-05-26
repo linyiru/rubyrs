@@ -254,6 +254,7 @@ fn run_diff(name: &str) {
 #[test] fn module_introspection() { run_diff("module_introspection"); }
 #[test] fn instance_methods_visibility() { run_diff("instance_methods_visibility"); }
 #[test] fn module_include_typecheck() { run_diff("module_include_typecheck"); }
+#[test] fn module_constants_included() { run_diff("module_constants_included"); }
 #[test] fn class_level_ivars() { run_diff("class_level_ivars"); }
 #[test] fn enumerable_stub() { run_diff("enumerable_stub"); }
 #[test] fn object_and_string_hash() { run_diff("object_and_string_hash"); }
