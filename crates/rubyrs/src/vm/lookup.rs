@@ -335,9 +335,11 @@ impl Vm {
     }
 }
 
-/// `child` is-a `ancestor` if `ancestor` appears anywhere in `child`'s
-/// superclass chain (or `child == ancestor`). Wired into rescue-by-
-/// class filter matching and the `is_a?` / `include?` dispatch arms.
+/// `child` is-a `ancestor` if `ancestor` appears anywhere in
+/// `child`'s ancestor chain — that is, the superclass walk *plus*
+/// each class's transitive `prepends` and `includes`. Returns true
+/// for `child == ancestor`. Wired into rescue-by-class filter
+/// matching and the `is_a?` / `include?` dispatch arms.
 pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     fn walks_through(
         node: &Rc<Class>,
