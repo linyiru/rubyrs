@@ -157,6 +157,38 @@ cannot match CF's *baseline-preloaded-in-isolate-pool* trick
 but the per-Worker snapshot equivalent is exactly what the PoC's
 `build.sh` produces.
 
+#### Cold-start floor — two negative experiments
+
+Above ~18 ms (workerd local) the marginal cost of further wasm
+shrinkage is zero. Two independent attempts confirmed:
+
+1. **Lazy-loading the Tier 1 stdlib preambles** (Random + SecureRandom,
+   `src/lib.rs::load_preamble` calls these unconditionally today).
+   Cuts ~40 KB from the Wizer'd wasm. Cold-start n=5: 17.7, 19.5,
+   22.1, 22.6, 19.3 ms — **median 19.5 ms, marginally SLOWER than
+   the 18.2 ms baseline**, well within variance.
+
+2. **`opt-level = "z"` + LTO=fat + codegen-units=1**. Repo's own
+   `[profile.release-min]` history note records this combination as
+   **3–19 % SLOWER at cold start despite producing a 56 %-smaller
+   binary**, measured on three hosts (macOS arm64, Linux arm64,
+   Linux x86_64). The reason is the same one wasm-opt -Oz hits:
+   aggressive size shrinkage suppresses inlining and substitutes
+   shorter call sequences, which V8's wasm tier-up engine takes
+   longer to fix up than it would have to compile the original.
+
+Two independent angles, same negative result — the 18 ms floor
+is V8's wasm parser + module-instantiate fixed cost, NOT a
+function of our byte count. To reduce further the project would
+have to either (a) reduce the function count (1798 today) so V8
+has fewer IRs to build, requiring rubyrs-internal refactoring; (b)
+move to component model + AOT (wasmtime serve), bypassing V8's
+parse path entirely; or (c) get CF to expose a generic
+`--save-wasm-snapshot` user-wasm equivalent of their privileged
+Python preload (currently not on offer). The 18 ms cold-start
+is best treated as the public-API floor for this build shape and
+the PoC is now operating at that floor.
+
 ## Throughput
 
 1M iteration loop computing fizzbuzz string lengths.
