@@ -437,11 +437,25 @@ impl Vm {
             // autoload internally; the documented gap is that
             // `Tilt['erb']` won't find the engine without a separate
             // eager `require 'tilt/erb'`.
+            //
+            // Arity matches CRuby: exactly 2 args. Wrong arity still
+            // raises ArgumentError so caller bugs don't get hidden by
+            // the stub fast-path.
             if &*name == "autoload"
                 && let Value::Class(_) = &self_val {
+                if args.len() != 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                    }));
+                }
                 self.stack.push(Value::Nil);
                 return Ok(());
             }
+            // `private_constant` / `public_constant` accept any number
+            // of symbol args (CRuby; including zero, which is a no-op).
+            // We don't enforce that args are Symbols since the stub
+            // ignores them anyway; the documented gap is that wrong
+            // arg types silently no-op here instead of TypeError.
             if matches!(&*name, "private_constant" | "public_constant")
                 && let Value::Class(_) = &self_val {
                 self.stack.push(self_val);
@@ -1622,6 +1636,11 @@ impl Vm {
         // `register_lazy` is the canonical caller.
         if &*name == "autoload"
             && let Value::Class(_) = &recv {
+            if args.len() != 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                }));
+            }
             self.stack.push(Value::Nil);
             return Ok(());
         }

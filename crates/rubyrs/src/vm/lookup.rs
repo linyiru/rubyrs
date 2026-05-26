@@ -317,6 +317,7 @@ impl Vm {
             ),
             Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name"),
             Value::Array(_) => matches!(name,
+                "freeze" | "frozen?" |
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "unshift" | "prepend" |
                 "shift" | "pop" | "reverse_each" |
@@ -341,6 +342,7 @@ impl Vm {
                 "inspect"
             ),
             Value::Hash(_) => matches!(name,
+                "freeze" | "frozen?" |
                 "length" | "size" | "[]" | "[]=" | "empty?" |
                 "include?" | "has_key?" | "key?" | "member?" |
                 "keys" | "values" | "to_h" | "to_a" |
@@ -377,6 +379,11 @@ impl Vm {
                 // would be false for any `def self.foo` or
                 // singleton-prepended method, even though `C.foo`
                 // dispatches successfully — diverges from CRuby.
+                //
+                // `autoload` / `private_constant` / `public_constant`
+                // are stub no-ops (see dispatch.rs); they're in the
+                // whitelist so feature-detection (`C.respond_to?(
+                // :autoload)`) agrees with what dispatch will accept.
                 if matches!(name,
                     "new" | "name" | "to_s" | "inspect"
                     | "method_defined?" | "instance_method" | "undef_method"
@@ -384,6 +391,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
+                    | "autoload" | "private_constant" | "public_constant"
                 ) {
                     return true;
                 }

@@ -51,3 +51,53 @@ r = RC.new
 puts r.respond_to?(:public_one)                 # true
 puts r.respond_to?(:public_one, true)           # true
 puts r.respond_to?(:nonexistent, false)         # false
+
+# --- respond_to? agrees with dispatch ---
+# The whitelist in lookup.rs must stay in sync with the new
+# dispatch stubs — otherwise `Array#freeze` works but
+# `[].respond_to?(:freeze)` lies. Pin both directions.
+puts [].respond_to?(:freeze)                    # true
+puts [].respond_to?(:frozen?)                   # true
+puts({}.respond_to?(:freeze))                   # true
+puts({}.respond_to?(:frozen?))                  # true
+module RtTest
+end
+puts RtTest.respond_to?(:autoload)              # true
+puts RtTest.respond_to?(:private_constant)      # true
+puts RtTest.respond_to?(:public_constant)       # true
+
+# --- autoload arity ---
+# Stubbed but still validates argc (2 required). Wrong arity
+# raises ArgumentError, matching CRuby — the no-op stub doesn't
+# swallow caller bugs.
+begin
+  RtTest.autoload(:OnlyOne)
+rescue ArgumentError => e
+  puts e.message
+end
+
+# --- NotImplementedError class hierarchy (CRuby parity) ---
+# Subclass of ScriptError (NOT StandardError) so a bare `rescue`
+# does NOT catch it — that's CRuby's behaviour and we now match.
+# Important divergence to pin because the bare-rescue default
+# is what most code relies on. Construct a probe that catches
+# the bare-rescue miss with an explicit NotImplementedError
+# rescue at an outer layer, then reports which one fired.
+caught_at = begin
+  begin
+    raise NotImplementedError, "probe"
+  rescue
+    "bare"
+  end
+rescue NotImplementedError
+  "explicit"
+end
+puts caught_at                                  # "explicit" in CRuby AND rubyrs
+
+# Direct explicit rescue still catches it (sanity).
+caught_explicit = begin
+  raise NotImplementedError, "oops"
+rescue NotImplementedError
+  true
+end
+puts caught_explicit                            # true
