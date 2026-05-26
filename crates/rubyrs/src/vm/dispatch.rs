@@ -2483,6 +2483,103 @@ impl Vm {
             self.stack.push(Value::Array(id));
             return Ok(());
         }
+        // `obj.instance_variable_get(name)` — pure ivar read by name.
+        // Accepts a Symbol (`:@foo`) or String (`"@foo"`). Returns the
+        // ivar value if set, `nil` if not. Only `Value::Object` carries
+        // ivars in rubyrs's heap model (primitives like Int/Str are
+        // unboxed), so non-Object receivers always return nil after
+        // the same name validation runs — this matches CRuby's
+        // surface that all values respond to the method, even if the
+        // result is uninteresting.
+        //
+        // Surfaced as a blocker for sinatra/indifferent_hash.rb's
+        // `Gem::Version#<=>` shape (TRY_RUNS pass 7 layer #2) and is
+        // load-bearing for any introspection-heavy gem.
+        if &*name == "instance_variable_get" && args.len() == 1 {
+            let ivar_id = match &args[0] {
+                Value::Sym(id) => {
+                    let resolved = self.interner.resolve(*id);
+                    if !resolved.starts_with('@') {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("`{}' is not allowed as an instance variable name", resolved),
+                        }));
+                    }
+                    *id
+                }
+                Value::Str(s) => {
+                    let raw = s.to_string_lossy();
+                    if !raw.starts_with('@') {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("`{}' is not allowed as an instance variable name", raw),
+                        }));
+                    }
+                    self.interner.intern(&raw)
+                }
+                other => {
+                    let inspected = other.to_inspect(&self.heap, &self.interner);
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} is not a symbol nor a string", inspected),
+                    }));
+                }
+            };
+            let v = if let Value::Object(oid) = &recv {
+                if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*oid) {
+                    inst.ivars.get(&ivar_id).cloned().unwrap_or(Value::Nil)
+                } else {
+                    Value::Nil
+                }
+            } else {
+                Value::Nil
+            };
+            self.stack.push(v);
+            return Ok(());
+        }
+        // `obj.instance_variable_set(name, value)` — pure ivar write
+        // by name. Same name validation as the get path. On Object
+        // receivers, mutates the instance's ivar table and returns
+        // the value. Non-Object receivers raise FrozenError because
+        // primitives are immutable in rubyrs — the closest match to
+        // CRuby's "can't modify frozen Integer / can't define
+        // singleton" surface.
+        if &*name == "instance_variable_set" && args.len() == 2 {
+            let ivar_id = match &args[0] {
+                Value::Sym(id) => {
+                    let resolved = self.interner.resolve(*id);
+                    if !resolved.starts_with('@') {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("`{}' is not allowed as an instance variable name", resolved),
+                        }));
+                    }
+                    *id
+                }
+                Value::Str(s) => {
+                    let raw = s.to_string_lossy();
+                    if !raw.starts_with('@') {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("`{}' is not allowed as an instance variable name", raw),
+                        }));
+                    }
+                    self.interner.intern(&raw)
+                }
+                other => {
+                    let inspected = other.to_inspect(&self.heap, &self.interner);
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} is not a symbol nor a string", inspected),
+                    }));
+                }
+            };
+            let value = args[1].clone();
+            if let Value::Object(oid) = &recv {
+                self.heap.instance_mut(*oid).ivars.insert(ivar_id, value.clone());
+                self.stack.push(value);
+                return Ok(());
+            } else {
+                let inspected = recv.to_inspect(&self.heap, &self.interner);
+                return Err(self.trap(RubyError::FrozenError {
+                    msg: format!("can't modify frozen {}", inspected),
+                }));
+            }
+        }
         // `Integer#digits([base])` for Int receivers — LSB-first
         // digit Array, i64 fast path (no BigInt arithmetic for
         // small inputs). Default base 10; base must be >= 2.
