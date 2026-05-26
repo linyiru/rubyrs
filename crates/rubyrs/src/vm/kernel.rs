@@ -370,20 +370,27 @@ impl Vm {
                             Some(self.require_ruby(&path_str))
                         } else if is_stdlib_stub_name(&path_str) {
                             // Tier 1 lenient stub for known pure-
-                            // Ruby stdlib names. Returns `true` as
-                            // if the load succeeded; the actual
-                            // stdlib code isn't loaded. Scripts
-                            // that only `require 'uri'` for
-                            // feature detection without actually
-                            // calling `URI.parse` etc. proceed
-                            // past the require line. Use of the
-                            // stubbed-out stdlib fails later with
-                            // a more specific NameError /
-                            // NoMethodError, which is the right
-                            // surface for "feature absent" vs
-                            // "load failed". See ADR 0017 — stdlib
-                            // is Tier 3; this is the embeddable-
-                            // host lenient-mode bridge.
+                            // Ruby stdlib names. Returns `true` on
+                            // first load and `false` on every
+                            // subsequent require (CRuby's
+                            // loaded-features dedup semantics).
+                            // The actual stdlib code isn't
+                            // loaded; scripts that only
+                            // `require 'uri'` for feature
+                            // detection proceed past the require
+                            // line. Use of the stubbed-out
+                            // stdlib fails later with a more
+                            // specific NameError / NoMethodError,
+                            // which is the right surface for
+                            // "feature absent" vs "load failed".
+                            // See ADR 0017 — stdlib is Tier 3;
+                            // this is the embeddable-host
+                            // lenient-mode bridge.
+                            let already_loaded = self.loaded_stdlib_stubs.contains(&*path_str);
+                            if already_loaded {
+                                return Some(Ok(Value::Bool(false)));
+                            }
+                            self.loaded_stdlib_stubs.insert(path_str.to_string());
                             //
                             // Materialise the constant shell(s)
                             // each stdlib name conventionally

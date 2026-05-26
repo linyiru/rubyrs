@@ -272,6 +272,18 @@ pub(crate) struct Vm {
     /// build shape).
     #[cfg(not(target_os = "wasi"))]
     pub(crate) loaded_features: std::collections::HashSet<std::path::PathBuf>,
+    /// Set of stdlib stub names (`uri`, `logger`, `json`, ...)
+    /// that have been "loaded" via the lenient require stub.
+    /// CRuby's `require` returns `true` on first load and
+    /// `false` on every subsequent call for the same feature;
+    /// rubyrs was returning `true` every time because the
+    /// stub didn't track per-name state. Tracked separately
+    /// from `loaded_features` (which keys on canonical
+    /// `PathBuf`) because stubs have no path. Same wasi-gate
+    /// for the same reason — `require` is a trap on wasm32-
+    /// wasi so the field would be dead code.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) loaded_stdlib_stubs: std::collections::HashSet<String>,
     /// Per-call-site inline-cache counter. Each compiled `Op::Call`
     /// gets a unique u16 slot id; the Vm side allocates
     /// `call_caches[id]` lazily. Lives on the Vm so kernel
@@ -491,6 +503,8 @@ impl Vm {
             constants: HashMap::new(),
             #[cfg(not(target_os = "wasi"))]
             loaded_features: std::collections::HashSet::new(),
+            #[cfg(not(target_os = "wasi"))]
+            loaded_stdlib_stubs: std::collections::HashSet::new(),
             cache_counter: 0,
             globals: HashMap::new(),
             toplevel_methods: HashMap::new(),

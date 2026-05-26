@@ -14,15 +14,11 @@
 # vendor pure-Ruby stdlib alongside.
 #
 # Documented divergences NOT exercised here:
-#   - rubyrs returns `true` on EVERY require call to a
-#     stubbed name (we don't track loaded-features for
-#     stubs). CRuby returns `false` on the second and
-#     later require of the same name. Mainstream use
-#     never depends on this distinction — `require` is
-#     idempotent either way.
-#   - The stubbed module/class isn't actually loaded.
-#     `defined?(URI)` returns nil in rubyrs vs "constant"
-#     in CRuby. Fixture stays off that path.
+#   - The stubbed module's API isn't actually loaded.
+#     `URI.parse "..."` raises NoMethodError in rubyrs
+#     vs returning a URI::HTTPS instance in CRuby — the
+#     deliberate Tier 1 "feature absent" surface. Fixture
+#     stays off that path.
 
 # Each one returns `true` (matching CRuby on first load).
 puts require('uri')
@@ -38,9 +34,10 @@ puts require('digest/sha1')
 puts require('securerandom')
 puts require('yaml')
 # `date` is transitively loaded by `yaml` in CRuby, so its
-# require would return `false` (already-loaded). rubyrs's
-# stub doesn't track loaded-features so returns `true` —
-# documented divergence. Fixture skips `date` to keep
+# explicit `require 'date'` returns `false` (already-
+# loaded). rubyrs tracks per-name stub state too, but
+# doesn't model the transitive-load chain — date would
+# return `true` here. Fixture skips `date` to keep
 # byte-identical comparison.
 puts require('time')
 puts require('English')
@@ -48,6 +45,19 @@ puts require('erb')
 
 # `require` returning truthy lets the next statement run.
 puts "post-require: ok"
+
+# Loaded-features dedup: second require of an already-
+# stubbed name returns `false` (matches CRuby).
+puts require('uri')         # false — already loaded
+puts require('logger')      # false
+puts require('json')        # false
+# Fresh stub still returns true the first time, false
+# every time after. `weakref` is a small stdlib name
+# that nothing earlier in the fixture transitively
+# loads, so the first-load returns true and the
+# second false on both implementations.
+puts require('weakref')     # true — first load
+puts require('weakref')     # false — re-require
 
 # Stub now materialises the conventional top-level
 # constant for each stdlib name, so feature-detection
