@@ -1246,7 +1246,19 @@ impl Vm {
                 // of `do_call` into a local so it applies even when
                 // the bypassed method itself dispatches other
                 // calls (those see a freshly-cleared flag).
-                if vis == Visibility::Private && !bypass_visibility {
+                //
+                // CRuby 2.7+ also allows `self.foo` (and
+                // `self.foo = v`) to dispatch private methods —
+                // the explicit-self receiver is recognised as the
+                // same as a bare call. Earlier versions only
+                // allowed the setter form; we follow the modern
+                // (3.x) rule. Identity comparison via ObjId on the
+                // current frame's self_val.
+                let self_recv = matches!(
+                    (&recv, self.frames.last().map(|f| &f.self_val)),
+                    (Value::Object(rid), Some(Value::Object(sid))) if rid == sid
+                );
+                if vis == Visibility::Private && !bypass_visibility && !self_recv {
                     return Err(self.trap(RubyError::NoMethodError {
                         method: format!("private method '{name}' called"),
                         recv_type: recv.type_name(),
