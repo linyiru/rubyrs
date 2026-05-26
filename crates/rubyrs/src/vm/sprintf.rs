@@ -328,9 +328,14 @@ fn format_radix_any(
         };
         // `to_str_radix` on the magnitude (positive BigUint) gives
         // lowercase digits 10..35 as 'a'..'z'. Uppercase variant
-        // post-processes the same way the i64 path does.
-        let mag = b.magnitude().to_str_radix(radix);
-        let mag = if upper { mag.to_uppercase() } else { mag };
+        // uppercases in-place via `make_ascii_uppercase` rather
+        // than `to_uppercase()` — the latter allocates a second
+        // full-size String, doubling peak memory for large
+        // BigInt formats (a `%X` of a near-cap value would push
+        // us past the cap during formatting). All `to_str_radix`
+        // output is ASCII, so byte-level uppercase is safe.
+        let mut mag = b.magnitude().to_str_radix(radix);
+        if upper { mag.make_ascii_uppercase(); }
         let sign = if b.sign() == Sign::Minus { "-" } else { "" };
         return Ok(format!("{sign}{prefix}{mag}"));
     }
@@ -363,22 +368,22 @@ fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {
         // `unsigned_abs()` (vs `-n`) survives `i64::MIN`, whose
         // negation would overflow i64 and panic in debug builds.
         let abs_n = n.unsigned_abs();
-        let mag = match radix {
+        let mut mag = match radix {
             16 => format!("{:x}", abs_n),
             8 => format!("{:o}", abs_n),
             2 => format!("{:b}", abs_n),
             _ => unreachable!(),
         };
-        let mag = if upper { mag.to_uppercase() } else { mag };
+        if upper { mag.make_ascii_uppercase(); }
         format!("-{prefix}{mag}")
     } else {
-        let mag = match radix {
+        let mut mag = match radix {
             16 => format!("{:x}", n as u64),
             8 => format!("{:o}", n as u64),
             2 => format!("{:b}", n as u64),
             _ => unreachable!(),
         };
-        let mag = if upper { mag.to_uppercase() } else { mag };
+        if upper { mag.make_ascii_uppercase(); }
         format!("{prefix}{mag}")
     }
 }
