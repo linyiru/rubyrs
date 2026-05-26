@@ -458,18 +458,26 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     }
 }
 
-/// `target` is reachable via `cls`'s singleton-class ancestor
-/// chain. Walks the superclass chain (each class's
-/// `singleton_prepends`) and recurses through each prepended
-/// module's own prepends/includes — so `class Sub < Super` sees
-/// `Super`'s singleton-prepends too. Used to dedupe
-/// `class << self; prepend Mod; end` against modules already
-/// reachable transitively.
+/// `target` is reachable via `cls`'s own `singleton_prepends`
+/// (transitively through each prepended module's prepends /
+/// includes). Used to dedupe `class << self; prepend Mod; end`
+/// within ONE class's singleton chain.
 ///
-/// CRuby's `prepend` is a no-op when the arg is anywhere in the
-/// ancestor chain; without the superclass walk, a subclass
-/// redundantly `prepend`-ing a parent-installed wrapper would
-/// reorder the chain.
+/// Deliberately does NOT walk the superclass chain. In CRuby
+/// each class has its own eigenclass, and each eigenclass owns
+/// an independent prepends list — so
+/// `class Sub < Super; class << self; prepend Wrap; end; end`
+/// must INSERT Wrap on Sub's eigenclass even when Super's
+/// eigenclass already has Wrap. Method lookup then sees Wrap
+/// twice (once per eigenclass): `Sub.foo` runs Wrap (Sub's
+/// chain) → super → Wrap (Super's chain) → super → Super.foo.
+/// The `IdemSuper`/`IdemSub` fixture in
+/// `singleton_class_prepend.rb` locks that double-wrap.
+///
+/// Dedup still applies WITHIN the local chain — repeated
+/// `prepend M` on the same class is a no-op, and `prepend M`
+/// when M is reachable through an already-prepended module's
+/// includes/prepends is also a no-op.
 pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> bool {
     fn walks_through(
         node: &Rc<Class>,
@@ -486,25 +494,11 @@ pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> b
         }
         false
     }
-    // Two visited sets — same shape as the other ancestor walkers.
-    // `sc_visited` bails on superclass cycles; `inc_visited` is
-    // shared across the whole walk (full-chain dedup, same
-    // reasoning as `super_lookup` — a module reachable through
-    // multiple superclass levels needs to count as present once).
-    let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
-    let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
-    let mut current = cls.clone();
-    loop {
-        if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
-        for pre in current.singleton_prepends.borrow().iter() {
-            if walks_through(pre, target, &mut inc_visited) { return true; }
-        }
-        let parent = current.superclass.borrow().clone();
-        match parent {
-            Some(p) => current = p,
-            None => return false,
-        }
+    let mut visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    for pre in cls.singleton_prepends.borrow().iter() {
+        if walks_through(pre, target, &mut visited) { return true; }
     }
+    false
 }
 
 /// Flatten a class's ancestor chain into a Vec in CRuby

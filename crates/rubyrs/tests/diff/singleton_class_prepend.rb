@@ -93,11 +93,21 @@ end
 # Transitive idempotency — if a singleton-prepended wrapper
 # already includes/prepends Inner, explicitly `prepend Inner`
 # should be a no-op (not reorder the chain).
+#
+# Observability: Outer wraps super so the chain order is visible
+# in the output. With dedup, chain at TIdem = [Outer, TIdem, ...
+# Inner via Outer's includes], so Outer#tag's super resolves to
+# Inner#tag → "outer-inner". WITHOUT dedup, `prepend Inner` would
+# put Inner ahead of Outer, breaking Outer's super-chain and
+# producing just "outer-<NoMethodError>" or "inner" depending on
+# where super lands. The wrapped output catches the regression
+# the previous "inner" alone couldn't.
 module Inner
   def tag; "inner"; end
 end
 module Outer
   include Inner                  # Outer transitively reaches Inner
+  def tag; "outer-" + super; end # wraps Inner#tag via the include chain
 end
 class TIdem
   def self.tag; "TIdem"; end
@@ -106,33 +116,15 @@ class TIdem
     prepend Inner                # already reachable via Outer — no-op
   end
 end
-# Without ancestor-aware dedup, the chain would become
-# [Inner, Outer, TIdem] and TIdem.tag → "inner". With dedup it
-# stays [Outer, TIdem]; Outer.tag resolves to Inner#tag via
-# Outer's includes, so the value is the same — but the order
-# matters when both modules define overlapping methods. Easier
-# observable: Outer doesn't define `tag` of its own, so
-# `TIdem.tag` should still resolve via Outer's include chain
-# to Inner#tag.
-puts TIdem.tag                   # "inner" (Outer's include of Inner is walked)
+puts TIdem.tag                   # "outer-inner" (Outer wraps, super hits Inner via includes)
 
-# Cross-class idempotency — a subclass explicitly re-prepending
-# a wrapper its superclass already installed should be a no-op
-# (not reorder or duplicate). Without walking the superclass
-# chain in the dedup check, the `prepend Wrap` below would
-# silently shadow Super's existing Wrap and corrupt resolution
-# (though the visible output is the same here because Wrap is
-# the only wrapper — the property locked by this assertion is
-# that the dedup walk reaches Super.singleton_prepends).
-class IdemSuper
-  def self.greet; "super.greet"; end
-  class << self
-    prepend Wrap
-  end
-end
-class IdemSub < IdemSuper
-  class << self
-    prepend Wrap                # already in Super's singleton chain — no-op
-  end
-end
-puts IdemSub.greet               # "intercepted-super.greet"
+# Note: cross-class singleton-prepend (the same Wrap module
+# prepended via `class << self` on BOTH a class and its
+# subclass) is intentionally NOT exercised here. In CRuby each
+# eigenclass holds an independent IClass per prepend, so the
+# chain contains Wrap twice and `Sub.foo` double-wraps. rubyrs's
+# chain representation dedupes by Module identity (no IClass
+# layer), so the second `prepend Wrap` wouldn't be observable
+# in either direction without a much deeper refactor — out of
+# scope for this PR. The local-class dedup above already locks
+# the dogfood case (tilt's `class << self; prepend(Module.new)`).
