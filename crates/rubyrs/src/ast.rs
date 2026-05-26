@@ -96,7 +96,12 @@ pub(crate) enum Expr {
     /// yet — the path form's segment-validation divergences from
     /// CRuby are noted at the ConstantPathWriteNode translation
     /// site below).
-    ConstWrite(String, Box<SExpr>),
+    /// Fields: name, absolute, value. `absolute` is true only for
+    /// writes through a leading-`::` constant path (`::X = 1`,
+    /// `::Foo::Bar = 2`); the compiler skips its lexical
+    /// class_path alias for those so they stay at top-level only.
+    /// Bare-name writes and relative-path writes pass false.
+    ConstWrite(String, bool, Box<SExpr>),
     Call {
         receiver: Option<Box<SExpr>>,
         name: String,
@@ -301,6 +306,26 @@ pub(crate) fn cid_to_string(id: ruby_prism::ConstantId<'_>) -> String {
 /// string. Returns `None` if any segment is dynamic (e.g. a
 /// method-call result in const position) — callers should fall
 /// back to last-segment-only behaviour in that case.
+/// True iff a `ConstantPathNode` chain is rooted at top-level
+/// (leading `::`). `Foo::Bar` is relative, `::Bar` and
+/// `::Foo::Bar` are absolute. Used by `ConstantPathWriteNode`
+/// arms to suppress the lexical-class-path alias the compiler
+/// emits for relative writes — `::X = 1` inside `module Foo`
+/// must store ONLY at top-level `X`, not also at `Foo::X`.
+fn is_constant_path_absolute(node: &Node<'_>) -> bool {
+    let Some(cp) = node.as_constant_path_node() else { return false; };
+    match cp.parent() {
+        None => true,                       // `::Bar` or root of `::Foo::Bar`
+        Some(parent) => {
+            if parent.as_constant_path_node().is_some() {
+                is_constant_path_absolute(&parent)
+            } else {
+                false                       // hit `Foo` in `Foo::Bar` — relative
+            }
+        }
+    }
+}
+
 fn flatten_constant_path(node: &Node<'_>) -> Option<String> {
     let cp = node.as_constant_path_node()?;
     let name = cid_to_string(cp.name()?);
@@ -490,7 +515,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // divergence from CRuby (CRuby warns "already initialized" and
     // reassigns); see `Vm::constants` for the precedence rationale.
     if let Some(n) = node.as_constant_write_node() {
-        return sp(node, Expr::ConstWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+        return sp(node, Expr::ConstWrite(cid_to_string(n.name()), false, Box::new(tr(&n.value()))));
     }
     // `Foo::Bar = expr` — ConstantPathWriteNode. Same spike-scope
     // model as ConstantPathNode read: flatten the LHS path into a
@@ -512,15 +537,16 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // scope (the AST translation alone can't see runtime types).
     if let Some(n) = node.as_constant_path_write_node() {
         let target = n.target();
+        let absolute = is_constant_path_absolute(&target.as_node());
         // target is a ConstantPathNode; flatten via the same helper
         // the read path uses.
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
-            return sp(node, Expr::ConstWrite(joined, Box::new(tr(&n.value()))));
+            return sp(node, Expr::ConstWrite(joined, absolute, Box::new(tr(&n.value()))));
         }
         // Dynamic-path fallback (rare): use the trailing name only,
         // matching the ConstantPathNode read fallback at line ~415.
         if let Some(name_id) = target.name() {
-            return sp(node, Expr::ConstWrite(cid_to_string(name_id), Box::new(tr(&n.value()))));
+            return sp(node, Expr::ConstWrite(cid_to_string(name_id), absolute, Box::new(tr(&n.value()))));
         }
     }
     // Op-assign desugaring: `a += b` is translated to
@@ -700,18 +726,18 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             name: op,
             args: vec![tr(&n.value())],
         });
-        return sp(node, Expr::ConstWrite(name, Box::new(rhs)));
+        return sp(node, Expr::ConstWrite(name, false, Box::new(rhs)));
     }
     if let Some(n) = node.as_constant_or_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::ConstRead(name.clone()));
-        let write = sp(node, Expr::ConstWrite(name, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::ConstWrite(name, false, Box::new(tr(&n.value()))));
         return sp(node, Expr::Or(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_constant_and_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::ConstRead(name.clone()));
-        let write = sp(node, Expr::ConstWrite(name, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::ConstWrite(name, false, Box::new(tr(&n.value()))));
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
     // ConstantPath op-writes — `Foo::Bar += 1`. Target is a
@@ -724,6 +750,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // an unsupported-node error while `obj.foo::BAR = 1` works.
     if let Some(n) = node.as_constant_path_operator_write_node() {
         let target = n.target();
+        let absolute = is_constant_path_absolute(&target.as_node());
         let op = cid_to_string(n.binary_operator());
         let make = |name: String| {
             let read = sp(node, Expr::ConstRead(name.clone()));
@@ -732,7 +759,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 name: op.clone(),
                 args: vec![tr(&n.value())],
             });
-            sp(node, Expr::ConstWrite(name, Box::new(rhs)))
+            sp(node, Expr::ConstWrite(name, absolute, Box::new(rhs)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
             return make(joined);
@@ -743,9 +770,10 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_constant_path_or_write_node() {
         let target = n.target();
+        let absolute = is_constant_path_absolute(&target.as_node());
         let make = |name: String| {
             let read = sp(node, Expr::ConstRead(name.clone()));
-            let write = sp(node, Expr::ConstWrite(name, Box::new(tr(&n.value()))));
+            let write = sp(node, Expr::ConstWrite(name, absolute, Box::new(tr(&n.value()))));
             sp(node, Expr::Or(Box::new(read), Box::new(write)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
@@ -757,9 +785,10 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_constant_path_and_write_node() {
         let target = n.target();
+        let absolute = is_constant_path_absolute(&target.as_node());
         let make = |name: String| {
             let read = sp(node, Expr::ConstRead(name.clone()));
-            let write = sp(node, Expr::ConstWrite(name, Box::new(tr(&n.value()))));
+            let write = sp(node, Expr::ConstWrite(name, absolute, Box::new(tr(&n.value()))));
             sp(node, Expr::And(Box::new(read), Box::new(write)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {

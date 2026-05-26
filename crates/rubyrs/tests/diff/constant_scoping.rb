@@ -58,6 +58,24 @@ module Cfg
 end
 puts Cfg::Defaults[:name]
 
+# --- Absolute paths (`::X = ...`) skip the lexical alias ---
+# Inside `module Wrapper`, `::TOP_ABS = ...` should store ONLY
+# at top-level — `Wrapper::TOP_ABS` must NOT be created. We
+# verify by checking the top-level value round-trips.
+module Wrapper
+  ::TOP_ABS = "from absolute write"
+end
+puts TOP_ABS
+
+# Same for the `::Foo::Bar = ...` form inside a nested scope —
+# leading `::` keeps the write top-level-rooted.
+module Outer2
+  class Inner2
+    ::FromInner = "deep absolute"
+  end
+end
+puts FromInner
+
 # --- Reopening preserves the alias (DefClass is idempotent) ---
 module Reopen
   class Box

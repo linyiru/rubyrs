@@ -209,7 +209,7 @@ fn compile_stmt(
             let id = interner.intern(name);
             b.emit(Op::StoreIvar(id));
         }
-        Expr::ConstWrite(name, val) => {
+        Expr::ConstWrite(name, absolute, val) => {
             // Statement-position const write: skip the Dup the
             // expression form needs, matching the LVarWrite /
             // IVarWrite arms above. Saves `Dup + Pop` per top-level
@@ -218,11 +218,11 @@ fn compile_stmt(
             let id = interner.intern(name);
             // Class-path alias: inside `module Foo; X = 1; end`,
             // also store under `Foo::X` so `Foo::X` reads work
-            // from outside. Skipped for top-level / already-pathed
-            // names. Dup keeps a copy on stack for the second
-            // store; statement-form was Dup-free before this, so
-            // the net effect is one extra Dup per nested write.
-            let prefixed_id = (!b.class_path.is_empty() && !name.contains("::"))
+            // from outside. Skipped for top-level (empty path),
+            // already-pathed names, AND absolute writes (`::X = 1`
+            // inside `module Foo` must NOT alias to `Foo::X` —
+            // leading `::` explicitly targets top-level only).
+            let prefixed_id = (!b.class_path.is_empty() && !*absolute && !name.contains("::"))
                 .then(|| interner.intern(&format!("{}::{}", b.class_path.join("::"), name)));
             if prefixed_id.is_some() {
                 b.emit(Op::Dup);
@@ -335,14 +335,16 @@ pub(crate) fn compile_expr(
             let id = interner.intern(name);
             b.emit(Op::LoadConst(id));
         }
-        Expr::ConstWrite(name, val) => {
+        Expr::ConstWrite(name, absolute, val) => {
             // CRuby: a constant assignment leaves the assigned value
             // on the stack as the expression's result. Same pattern
             // as IVarWrite above (Dup so the value survives the
-            // store).
+            // store). Absolute writes (`::X = 1`) skip the
+            // class_path alias — see the stmt-form arm for the
+            // rationale.
             compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
-            let prefixed_id = (!b.class_path.is_empty() && !name.contains("::"))
+            let prefixed_id = (!b.class_path.is_empty() && !*absolute && !name.contains("::"))
                 .then(|| interner.intern(&format!("{}::{}", b.class_path.join("::"), name)));
             // Stack going in: [val]. We need to leave [val] on
             // stack as the expression result. Each StoreConst pops
