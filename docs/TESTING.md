@@ -127,13 +127,13 @@ useful first-pass acceptance criterion.
 | Area | Files | Examples | Pass rate |
 |---|---|---|---|
 | Metaprog (ADR 0010 PoC) | 6 | 30 | 100% |
-| `core/string` subset (sub, gsub, reverse, include, empty) | 5 | 35 | 100% |
+| `core/string` subset (sub, gsub, reverse, include, empty, length, size) — length/size are the first v0.4 dogfood (`it_behaves_like :string_length` inlined from `shared/length.rb`) | 7 | 37 | 100% |
 | `core/method` subset (call, compose, curry, ==, to_proc, owner, receiver) | 7 | 37 | 100% |
 | `core/unboundmethod` subset (==) | 1 | 6 | 100% |
 | `core/integer` subset (digits) — re-extracted with v0.2 (was first extractor-assisted in PR #61) | 1 | 7 | 100% |
 | `core/array` subset (count, take, compact) — count via v0.2; take + compact via v0.3 | 3 | 13 | 100% |
 | `core/hash` subset (keys) — extractor v0.3 output | 1 | 2 | 100% |
-| **Total** | **24** | **130** | **100%** |
+| **Total** | **26** | **132** | **100%** |
 
 Every example must pass — there is no "tagged divergent" lane
 yet. Skipped upstream `it` blocks are noted in the spec file's
