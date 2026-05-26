@@ -604,6 +604,33 @@ impl Vm {
 
 
 
+    /// Consume the in-flight non-local-return value, clearing any
+    /// pending break/next transfer along with it.
+    ///
+    /// Invariant captured here: a `Op::ReturnMethod` that fires
+    /// while a `begin/break` (or `next`) is mid-ensure walk
+    /// supersedes that structured transfer (CRuby semantics —
+    /// `return` wins, the break value is dropped). The
+    /// `pending_loop_transfer` slot has to be cleared at the same
+    /// instant `method_return` is consumed, otherwise an EndEnsure
+    /// in a surviving frame could later resume into the now-stale
+    /// target IP.
+    ///
+    /// All consume sites (currently `vm/step.rs::dispatch`'s unwind
+    /// arm and `vm/kernel.rs::require_in_filescope`'s mimic of that
+    /// unwind) must go through this helper rather than
+    /// `self.method_return.take()` directly so the invariant cannot
+    /// drift apart in one of them. Read-only `is_some()` checks
+    /// keep using the field directly — they don't consume, so the
+    /// invariant doesn't apply.
+    pub(crate) fn take_method_return(&mut self) -> Option<Value> {
+        let v = self.method_return.take();
+        if v.is_some() {
+            self.pending_loop_transfer = None;
+        }
+        v
+    }
+
     pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         Ok(match recv {
             Value::Array(id) => return self.array_collection_call(*id, name, args),

@@ -204,21 +204,19 @@ impl Vm {
             // then popping the method frame and pushing the value
             // as its return. Exit the whole dispatch if we
             // unwound off the bottom of the frame stack.
-            if let Some(val) = self.method_return.take() {
-                // A non-local `return` from inside an ensure body
-                // that was running due to a pending break/next
-                // supersedes the structured transfer (CRuby
-                // semantics: `return` wins, the break value is
-                // dropped). Clear the slot so no EndEnsure in a
-                // surviving frame can resume into the now-stale
-                // target IP. EndEnsure is reachable on TWO paths
-                // (exception unwind via `unwind_with_exception`,
-                // AND the loop-transfer walk via
-                // `continue_loop_transfer`), but neither runs
-                // automatically as we pop frames here — so a
-                // stale pending could in principle be consumed
-                // later. This clear closes that window.
-                self.pending_loop_transfer = None;
+            if let Some(val) = self.take_method_return() {
+                // `take_method_return` (vm.rs) already cleared
+                // `pending_loop_transfer` for us — the invariant
+                // (non-local `return` supersedes a mid-ensure
+                // break/next) is captured at the consume site
+                // rather than duplicated here. See that helper's
+                // doc comment for why the clear is required:
+                // EndEnsure is reachable on TWO paths (exception
+                // unwind via `unwind_with_exception`, AND the
+                // loop-transfer walk via `continue_loop_transfer`),
+                // and neither runs automatically as we pop frames
+                // below, so a stale pending could in principle be
+                // consumed later. The helper closes that window.
                 while let Some(f) = self.frames.last() {
                     if !f.is_block { break; }
                     let f = self.frames.pop().unwrap();

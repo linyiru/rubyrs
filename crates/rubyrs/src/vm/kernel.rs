@@ -1169,7 +1169,20 @@ impl Vm {
             // after unwind), continue dispatching. If the unwind
             // would pop OUR <main> frame or beyond, the return
             // escapes — bail with suppress flag.
-            let val = self.method_return.take().unwrap();
+            // Use `take_method_return` (vm.rs) so the
+            // `pending_loop_transfer` invariant — a non-local
+            // return supersedes a mid-ensure break/next — is
+            // applied at the same instant we consume the value,
+            // mirroring `step.rs::dispatch`'s unwind arm. The
+            // restore-on-escape branch below (line ~1198) puts
+            // `method_return` back without restoring
+            // `pending_loop_transfer`; that's correct — the
+            // structured transfer was already invalidated by the
+            // non-local return crossing this take site, and the
+            // outer dispatch loop will re-take and re-apply the
+            // invariant via the same helper if the unwind keeps
+            // climbing.
+            let val = self.take_method_return().unwrap();
             // Pop block frames (handling class_eval block + class
             // body bookkeeping).
             while let Some(f) = self.frames.last() {
