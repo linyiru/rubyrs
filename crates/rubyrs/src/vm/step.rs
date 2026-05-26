@@ -48,43 +48,77 @@ fn preprocess_regex_pattern(src: &str) -> String {
     // every regex dialect, and dropping the `\\G` would change
     // it to an empty character class (regex compile error) or
     // collapse it with neighbours.
+    //
+    // POSIX classes (`[:digit:]`, `[:alpha:]`, etc.) need their
+    // own pass: the inner `]` that closes `:digit:]` would
+    // otherwise prematurely flip `in_class` to false on a
+    // pattern like `/[[:digit:]\G]/`. We detect `[:`,
+    // `[=`, `[.` after entering a class and skip past the
+    // matching `:]`/`=]`/`.]` as a unit.
+    let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars().peekable();
+    let mut i = 0;
     let mut in_class = false;
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                // `\G` outside a char class → drop entirely
-                // (Onigmo's match-at-last-position anchor; the
-                // Rust regex crate has no equivalent).
-                // `\G` inside a char class → CRuby/Onigmo treat
-                // it as a literal `G`, but the Rust regex crate
-                // rejects the escape sequence verbatim. Translate
-                // to bare `G` so `/[\G]/` becomes `/[G]/` —
-                // semantically identical to CRuby's reading.
-                if next == 'G' {
-                    chars.next();
-                    if in_class {
-                        out.push('G');
-                    }
-                    continue;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' && i + 1 < bytes.len() {
+            let next = bytes[i + 1];
+            // `\G` outside a char class → drop entirely (Onigmo
+            // anchor with no Rust regex equivalent).
+            // `\G` inside a char class → CRuby treats as literal
+            // `G`. The Rust regex crate rejects the `\G` escape
+            // even inside a class, so we translate to bare `G`
+            // (`/[\G]/` → `/[G]/`).
+            if next == b'G' {
+                if in_class {
+                    out.push('G');
                 }
-                out.push(c);
-                out.push(next);
-                chars.next();
+                i += 2;
+                continue;
+            }
+            // Other escapes pass through unchanged in both
+            // contexts.
+            out.push(c as char);
+            out.push(next as char);
+            i += 2;
+            continue;
+        }
+        // POSIX / collating-class skip — only inside a class,
+        // and only when the `[` is followed by `:`, `=`, or `.`.
+        // Find the matching closer (`:]`, `=]`, `.]`) and copy
+        // the whole token verbatim so neither `in_class` nor
+        // `\G` handling re-fires inside it.
+        if in_class
+            && c == b'['
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b':' | b'=' | b'.')
+        {
+            let opener = bytes[i + 1];
+            let close = [opener, b']'];
+            // Search forward for the closer.
+            let mut j = i + 2;
+            while j + 1 < bytes.len() && &bytes[j..j + 2] != close {
+                j += 1;
+            }
+            // Copy `[` through the closing `]` if found, else
+            // bail out and just copy the `[` to let the regex
+            // crate report its own error.
+            if j + 1 < bytes.len() && &bytes[j..j + 2] == close {
+                out.push_str(&src[i..j + 2]);
+                i = j + 2;
                 continue;
             }
         }
-        // Character-class bracket tracking. Only the outermost
-        // `[` opens; nested `[` (inside POSIX classes like
-        // `[[:alpha:]]`) doesn't re-toggle. A `]` closes only
-        // when in_class is true.
-        if c == '[' && !in_class {
+        // Outer character-class bracket tracking. POSIX inner
+        // classes are skipped above so their `]` doesn't reach
+        // this branch.
+        if c == b'[' && !in_class {
             in_class = true;
-        } else if c == ']' && in_class {
+        } else if c == b']' && in_class {
             in_class = false;
         }
-        out.push(c);
+        out.push(c as char);
+        i += 1;
     }
     out
 }

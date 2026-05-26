@@ -65,6 +65,13 @@ puts $2                                          # v
 puts "XYZ" =~ /[\G]/                            # nil  (no G in XYZ)
 puts ("GHI" =~ /[\G]/)                          # 0    (G at offset 0)
 puts ("ABCG" =~ /[\G]/)                         # 3    (G at offset 3)
+# POSIX class + `\G` inside the same outer class. The naive
+# bracket tracker would flip in_class to false at the `]` that
+# closes `[:digit:]`, then strip `\G` instead of translating to
+# literal G. The POSIX-skip pass keeps the outer class intact.
+puts ("G123" =~ /[[:digit:]\G]/)                # 0    (G at offset 0; class is "digit or G")
+puts ("xyz" =~ /[[:digit:]\G]/)                 # nil  (no digit, no G)
+puts ("9" =~ /[[:digit:]\G]/)                   # 0    (digit at offset 0)
 
 # --- `\G` inside an alternation / grouping ---
 # Mirror lib/erb/compiler.rb:460's other shape:
