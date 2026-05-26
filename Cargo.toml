@@ -13,21 +13,24 @@ lto = "thin"
 # `release` stays the same for everyday throughput-optimized
 # builds (rubyrs CLI, tests, perf gates).
 #
-# Knobs and what each one buys:
-#   - opt-level = "z": optimize for binary size (vs default "3"
-#     which favours speed). Trades ~5-10% throughput for
-#     measurable binary shrink in the wasmtime crate dependency
-#     tree.
-#   - lto = "fat": cross-crate LTO instead of thin. Catches the
-#     dead code that thin LTO misses across the wasmtime crate
-#     surface (it's a big crate; thin's per-CGU view leaves
-#     stuff behind that whole-program analysis prunes).
-#   - codegen-units = 1: single CGU lets the optimizer see the
-#     full crate at once. Slower builds, smaller output.
+# History: an earlier revision also set `opt-level = "z"`,
+# `lto = "fat"`, `codegen-units = 1`. Measured against the
+# baseline `release` profile on three hosts (macOS arm64, Linux
+# arm64, Linux x86_64), the z-mode build was 3-19% SLOWER at
+# cold start despite being 56% smaller. The size reduction
+# comes from suppressing inlining and using shorter call
+# sequences — exactly the costs that hurt the wasmtime crate's
+# initialization path on every spawn. `opt-level = "z"` is the
+# wrong knob when the bottleneck is launch-time code execution
+# rather than dyld page load.
+#
+# Knobs that stayed — all "free" wins (no runtime perf cost):
 #   - panic = "abort": removes unwinding metadata + landing
 #     pads, ~5-15% smaller binaries. The embedder doesn't catch
 #     panics anyway — guest traps surface through wasmtime's
-#     Result, not Rust panics.
+#     Result, not Rust panics. `inherits = "release"` keeps the
+#     LTO + opt-level=3 + codegen-units settings from the parent
+#     profile intact.
 #   - strip = "symbols": removes debug + symbol table after
 #     linking. ~15-20% smaller artifact, no runtime impact.
 #   - debug = false: no debug info emitted in the first place
@@ -35,9 +38,6 @@ lto = "thin"
 #     bigger object file; both together cover macOS dSYM too).
 [profile.release-min]
 inherits = "release"
-opt-level = "z"
-lto = "fat"
-codegen-units = 1
 panic = "abort"
 strip = "symbols"
 debug = false
