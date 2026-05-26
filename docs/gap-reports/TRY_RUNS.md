@@ -40,6 +40,74 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
+## Results — 2026-05-26 (fifth pass), rubyrs at `cba21b6`
+
+Fifth pass after the session's PR wave landed: stdlib-require
+stub-out (PR #98), `Class.new { ... }` block dispatch lifecycle
+(#102), inline-rescue / class @ivar / hash equality / Object
+ancestor stub (#107), module `prepend` (#105), `&nil` and
+`&curried_proc` block-arg dispatch (#109), plus the rake
+constant-assignment / linked-list defaults pair (#102, #104).
+Same 12 standalone files, same pinned target commits.
+
+| File | Was (fourth) | Now | Change |
+|---|---|---|---|
+| liquid/extensions.rb | B | **A** | `require 'time'` / `require 'date'` now stub-out (PR #98 stdlib_require_stub); file body runs clean |
+| sinatra/middleware/logger.rb | B | **A** | `require 'logger'` / `require 'forwardable'` stubbed; class body executes — `Logger` itself isn't built in, but the file's class definition no longer touches it |
+| rake/linked_list.rb | D+E | **A** | non-literal default args (#34), `EMPTY = self.new` style constant assigns (#30 → #102 follow-up), and the lazy `EMPTY_HASH` / Enumerable mix-in pieces all line up |
+| tilt/string.rb | D | **A** | three-layer unblock: PR #105 (`module_prepend`) closed `class << self; prepend(...)` in `tilt.rb`; #107 (Object stub + class @ivar) closed `tilt/template.rb` load; #109 (block-arg ICE) closed the remaining downstream call sites. The file's class body executes top-to-bottom |
+| (8 others) | — | — | unchanged — same A or same blocker as the fourth pass |
+
+Pass count: **5 → 9** (out of 12). Four files moved from blocked
+to clean in one pass — the largest jump across all five passes.
+
+### What this pass shows
+
+The fourth-pass analysis warned that "winning at the AST frontier
+now requires multi-step investment for the deeply-stacked files",
+and that the C-ext require wall (Cat B) and project-helper holes
+(Cat F) were load-bearing. This pass tested both predictions:
+
+- **Multi-step investment paid off**: tilt/string.rb sat behind
+  *three* blockers (Object ancestor stub, module `prepend`,
+  block-arg ICE). The previous pass moved it from C to D by
+  closing the first layer; this pass closes the remaining two
+  layers AND a downstream layer that only became visible after
+  the first two cleared. The pattern: each multi-step file
+  surfaces another layer per unblock, and pass-count movement
+  arrives only when the LAST one closes.
+- **Cat B partially fell to a stub strategy**: rather than
+  building real `Time` / `Logger` modules, PR #98's stub-out
+  treats common stdlib `require` calls as no-ops. Files that
+  only depend on the *load* succeeding (not on the module
+  being functional at runtime) now pass. liquid/extensions.rb
+  and sinatra/middleware/logger.rb both fit that shape; the
+  remaining Cat B file (dry/struct/extensions/pretty_print.rb)
+  doesn't — it actually exercises `PP.pp` and needs a real
+  module.
+
+### Cumulative category histogram
+
+After 5 passes:
+
+| Category | First pass | Fourth pass | Now | Notes |
+|---|---:|---:|---:|---|
+| A (runs clean) | 3 | 5 | 9 | +4 this pass: liquid/extensions, sinatra/middleware/logger, rake/linked_list, tilt/string |
+| B (C-ext require) | 2 | 3 | 1 | dry/struct/extensions/pretty_print is the last survivor (needs real `PP`) |
+| C (require_relative / load path) | 1 | 0 | 0 | unchanged since #66 |
+| D (unsupported AST node at runtime) | 3 | 1 | 0 | tilt/string.rb closed; category empty |
+| E (literal-default-arg) | 2 | 0 | 0 | unchanged since #34 |
+| F (project helper / undefined module) | 2 | 3 | 2 | rake/linked_list moved to A; jekyll/theme_drop (`delegate_method_as`) and bundler/match_remote_metadata remain |
+| G (host DSL — Brewfile, excluded) | 1 | 1 | 1 | unchanged |
+
+Net direction: D and E are both empty; C is empty; the only
+remaining categories are A (most of the dataset), B (one C-ext
+case), and F (two project-internal helper cases). The next pass
+will not move purely by adding AST nodes or `require` stubs —
+it needs either (a) a real `PP` for the dry-struct case, or
+(b) a way to either implement or stub `delegate_method_as` /
+the bundler nil-module path for the two F cases.
+
 ## Results — 2026-05-25 (fourth pass), rubyrs at `d151c27`
 
 Fourth pass after PR #66 (`require_relative`) landed plus the
