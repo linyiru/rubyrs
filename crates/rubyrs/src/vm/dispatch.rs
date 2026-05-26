@@ -2181,6 +2181,12 @@ impl Vm {
                 ],
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<synthetic>".into(),
+                // Synthetic forwarder protos have no body-
+                // introduced locals; every slot they touch is
+                // either filled at invoke time (block params /
+                // rest) or written by the proto's own emitted
+                // ops. `u16::MAX` skips the per-invocation reset.
+                block_body_local_start: u16::MAX,
                 byte_literals: Vec::new(),
             };
             let idx = self.protos.len();
@@ -2259,6 +2265,12 @@ impl Vm {
                 ],
                 op_spans: vec![Span::ZERO; 6],
                 filename: "<synthetic>".into(),
+                // Synthetic forwarder protos have no body-
+                // introduced locals; every slot they touch is
+                // either filled at invoke time (block params /
+                // rest) or written by the proto's own emitted
+                // ops. `u16::MAX` skips the per-invocation reset.
+                block_body_local_start: u16::MAX,
                 byte_literals: Vec::new(),
             };
             let idx = self.protos.len();
@@ -2351,10 +2363,34 @@ impl Vm {
         };
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
+        let body_local_start = proto.block_body_local_start;
         {
             let mut locals = captured.borrow_mut();
             if locals.len() < needed {
                 while locals.len() < needed { locals.push(Value::Nil); }
+            }
+            // Reset body-introduced block-local slots before
+            // rebinding params. CRuby's "block-locals are fresh
+            // each invocation" semantics: a variable
+            // first-assigned inside the block body (e.g.
+            // `y = 100 if cond`, `n ||= 0`, plain `tmp = expr`)
+            // sees `nil` at the top of every call, even when an
+            // earlier invocation assigned it. Outer-scope
+            // variables (slot index < parent.n_locals at compile
+            // time) and the block's own params keep their
+            // values across invocations because their slot
+            // indices sit below `body_local_start`.
+            //
+            // `block_body_local_start == u16::MAX` is the
+            // sentinel for "not a block-shaped proto" — set by
+            // `ProtoBuilder::build` and by the cext synthetic
+            // forwarders. The branch is also a no-op when the
+            // block body assigned no new locals (start equals
+            // n_locals).
+            if (body_local_start as usize) < needed {
+                for slot in body_local_start as usize..needed {
+                    locals[slot] = Value::Nil;
+                }
             }
             // Place args into the block's required param slots.
             // CRuby's arity-mismatch semantics: too few args →

@@ -230,3 +230,4 @@ fn run_diff(name: &str) {
 #[test] fn singleton_class_attr() { run_diff("singleton_class_attr"); }
 #[test] fn kernel_array_coerce() { run_diff("kernel_array_coerce"); }
 #[test] fn kernel_p_multi_arg() { run_diff("kernel_p_multi_arg"); }
+#[test] fn block_local_freshness() { run_diff("block_local_freshness"); }

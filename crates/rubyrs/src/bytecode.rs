@@ -354,6 +354,19 @@ pub(crate) struct Proto {
     pub(crate) op_spans: Vec<Span>,
     /// Source filename — used by Trap backtrace formatting.
     pub(crate) filename: Rc<str>,
+    /// Start index of body-introduced local slots for block
+    /// protos — `invoke_block` resets slots
+    /// `[block_body_local_start, n_locals)` to `Value::Nil` on
+    /// every invocation so a variable first-assigned inside the
+    /// block doesn't leak its value across iterations / calls.
+    /// CRuby semantics: each `do ... end` / `proc.call` /
+    /// `lambda.call` invocation gets fresh block-locals; outer
+    /// scope variables stay shared (their slot index is below
+    /// this threshold because compile_block snapshots
+    /// `parent.n_locals` first). `u16::MAX` is the "no reset"
+    /// sentinel — set for every non-block proto (methods, class
+    /// bodies, toplevel `<main>`).
+    pub(crate) block_body_local_start: u16,
     /// Per-proto pool of binary string literals — bytes from
     /// `\xNN` escapes that aren't valid UTF-8. Indexed by
     /// `Op::LoadConstStrBytes(u32)`. The global interner (which

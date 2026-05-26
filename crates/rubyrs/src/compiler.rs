@@ -145,6 +145,10 @@ impl ProtoBuilder {
             code: self.code,
             op_spans: self.op_spans,
             filename: self.filename,
+            // Non-block protos (methods, class bodies, toplevel)
+            // never need slot resetting; only `compile_block` flips
+            // this via the dedicated setter on the resulting Proto.
+            block_body_local_start: u16::MAX,
             byte_literals: self.byte_literals,
         }
     }
@@ -1491,6 +1495,16 @@ pub(crate) fn compile_block(
         }
     }
 
+    // Snapshot of `n_locals` JUST before the body compiles. Every
+    // local allocated past this point is body-introduced (the
+    // block's `x = ...` first-assignment shape) and gets reset to
+    // `Nil` per invocation by invoke_block, matching CRuby's
+    // "block-locals are fresh each call" semantics. Outer-scope
+    // variables (slot index < parent.n_locals at compile time)
+    // and the block's own params / destructure-inner slots
+    // (allocated in the param-binding phase above) keep their
+    // values across invocations.
+    let body_local_start = b.n_locals;
     compile_body(&mut b, body, protos, interner, cc);
     b.emit(Op::Return);
     // Proto's `params` vec carries the source-visible names. For
@@ -1518,6 +1532,15 @@ pub(crate) fn compile_block(
     // happens to bind into the same index later.
     let block_n_locals = b.n_locals;
     protos.push(b.build("<block>".into(), proto_params, proto_param_count as u16));
+    // Stamp the body-local-reset range on the just-built block
+    // Proto. `build()` defaults this to `u16::MAX` (no reset)
+    // because that's correct for every non-block builder; the
+    // block path overrides it here. Only meaningful when there
+    // *are* body-introduced slots; if the body assigned no new
+    // locals (`body_local_start == block_n_locals`) the reset
+    // range is empty and the runtime loop is a noop, so we don't
+    // need to special-case it.
+    protos.last_mut().expect("ICE: just pushed").block_body_local_start = body_local_start;
     if parent.n_locals < block_n_locals {
         parent.n_locals = block_n_locals;
     }
