@@ -1156,7 +1156,7 @@ impl Vm {
         // so a BigInt-receiver path computes pow against a
         // borrowed magnitude rather than a clone.
         let result = match self.as_bigint_ref(recv) {
-            Some(c) => (&*c).pow(exp_u32),
+            Some(c) => c.pow(exp_u32),
             None => unreachable!("recv shape validated earlier"),
         };
         Ok(Some(self.bigint_to_value(result)?))
@@ -1230,20 +1230,20 @@ impl Vm {
         //    arithmetic entirely (the expression form `1 + big`
         //    works because Op::BinOp already routes via
         //    try_bigint_binop on either-operand-is-BigInt).
-        if args.len() == 1 && name == "**" {
-            if let Some(v) = self.try_bigint_pow(recv, &args[0])? {
-                return Ok(Some(v));
-            }
-            // Fall through to the rest of bigint_primitive only if
-            // try_bigint_pow declined. Decline cases now narrow to
-            // Int recv × Int (positive) exp where numeric_call
-            // already produced a value, or operand shapes that
-            // aren't integer at all (the latter never reaches
-            // bigint_primitive in practice — primitive_call's Int
-            // arm would have matched first). Float and negative-Int
-            // exponents are handled inside try_bigint_pow itself
-            // for BigInt-flavoured operands; Int×Int Float/neg-exp
-            // is owned by numeric_call before we get here.
+        // Fall through to the rest of bigint_primitive when
+        // `try_bigint_pow` declines. Decline cases narrow to
+        // Int recv × Int (positive) exp where `numeric_call`
+        // already produced a value, or operand shapes that aren't
+        // integer at all (the latter never reaches bigint_primitive
+        // in practice — `primitive_call`'s Int arm would have
+        // matched first). Float and negative-Int exponents are
+        // handled inside `try_bigint_pow` itself for BigInt-
+        // flavoured operands; Int×Int Float/neg-exp is owned by
+        // `numeric_call` before we get here.
+        if args.len() == 1 && name == "**"
+            && let Some(v) = self.try_bigint_pow(recv, &args[0])?
+        {
+            return Ok(Some(v));
         }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));

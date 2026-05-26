@@ -113,11 +113,13 @@ pub(crate) struct RangeObj {
 /// Constructor `HashObj::with_pairs(pairs)` keeps all 11 internal
 /// `HeapObj::Hash` allocations short. The `default_block` slot
 /// gets populated by:
+///
 ///   - `Hash.new { |h, k| ... }` in `vm/dispatch.rs` (the
 ///     primary entry point)
 ///   - `Hash#merge` (and other derivers in the future) — when the
 ///     receiver has a default-block, the new Hash inherits it so
 ///     `Hash.new { ... }.merge(x)[:y]` still auto-vivifies.
+///
 /// Both paths use `Heap::hash_set_default_block` after the alloc.
 pub(crate) struct HashObj {
     pub(crate) pairs: Vec<(Value, Value)>,

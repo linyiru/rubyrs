@@ -814,7 +814,7 @@ impl Vm {
                         msg: "odd number of arguments for Hash".into(),
                     })),
                 }
-            } else if args.len() % 2 == 0 {
+            } else if args.len().is_multiple_of(2) {
                 args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect()
             } else {
                 return Err(self.trap(RubyError::ArgumentError {
