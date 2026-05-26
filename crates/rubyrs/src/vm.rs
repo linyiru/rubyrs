@@ -1417,24 +1417,23 @@ impl Vm {
         args: &[Value],
     ) -> Result<Option<Value>, Trap> {
         use num_bigint::{BigInt, Sign};
-        // recv must be Integer.
-        let recv_bits: u64;
-        let recv_sign: Sign;
-        match recv {
-            Value::Int(n) => {
-                recv_sign = if *n > 0 { Sign::Plus }
-                            else if *n < 0 { Sign::Minus }
-                            else { Sign::NoSign };
-                recv_bits = if *n == 0 { 0 }
-                            else { 64 - (n.unsigned_abs()).leading_zeros() as u64 };
-            }
+        // BigInt receivers only — Int receivers route through
+        // `dispatch.rs`'s existing i64 fast path (no BigInt
+        // arithmetic for small Int×Int). Non-Integer recv: decline
+        // so dispatch can fall through to NoMethodError.
+        // Returning `Ok(None)` for Int recv lets `bigint_primitive`
+        // continue through the arity guard (which still fires for
+        // `args.len() > 1` regardless of recv type) and then
+        // through to `dispatch.rs`'s Int#digits handler. The Int
+        // fast path now shares error message text with this BigInt
+        // path (see the matching dispatch.rs edits).
+        let (recv_bits, recv_sign) = match recv {
             Value::BigInt(id) => {
                 let b = self.heap.bigint(*id);
-                recv_sign = b.sign();
-                recv_bits = b.bits();
+                (b.bits(), b.sign())
             }
             _ => return Ok(None),
-        }
+        };
         // Negative receiver: out of domain.
         if recv_sign == Sign::Minus {
             return Err(self.trap(RubyError::ArgumentError {
@@ -1520,14 +1519,12 @@ impl Vm {
                 ),
             }));
         }
-        // Build the digit array. Re-fetch the recv BigInt as the
-        // working value; clone is needed because we'll mutate `n`
-        // via repeated `n = &n / &base` in the loop below. For Int
-        // receivers, `BigInt::from(n)` is cheap.
+        // Build the digit array. Clone the heap BigInt as the
+        // working value; we mutate `n` via repeated `n = &n / &base`
+        // in the loop below, so an owned BigInt is required.
         let mut n: BigInt = match recv {
-            Value::Int(v) => BigInt::from(*v),
             Value::BigInt(id) => self.heap.bigint(*id).clone(),
-            _ => unreachable!(),
+            _ => unreachable!("recv shape narrowed to BigInt at fn entry"),
         };
         // GC rooting: every `bigint_to_value` call below invokes
         // `maybe_gc()`. For Int radix (the common case) rem is

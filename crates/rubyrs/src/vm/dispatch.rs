@@ -2397,10 +2397,23 @@ impl Vm {
             self.stack.push(Value::Array(id));
             return Ok(());
         }
-        // `Integer#digits([base])` — LSB-first digit Array. Default
-        // base 10; custom base must be >= 2. Negative receivers
-        // raise (CRuby raises Math::DomainError; subset uses
-        // ArgumentError since Math::DomainError isn't modelled).
+        // `Integer#digits([base])` for Int receivers — LSB-first
+        // digit Array, i64 fast path (no BigInt arithmetic for
+        // small inputs). Default base 10; base must be >= 2.
+        // Error semantics match `Vm::try_integer_digits` (the
+        // BigInt-receiver path under `feature = "bignum"`) so
+        // both profiles agree on the surface user code sees:
+        //   - Non-Integer base → TypeError matching CRuby text.
+        //   - Negative base → ArgumentError "negative radix".
+        //   - 0/1 base → ArgumentError "invalid radix N".
+        //   - Negative receiver → ArgumentError "out of domain"
+        //     (CRuby uses Math::DomainError; substituted per
+        //     dispatch.rs:2402-2403 — comment was the origin).
+        //   - Arity > 1: under bignum the arity guard in
+        //     `bigint_primitive` traps before reaching here;
+        //     without bignum this `args.len() <= 1` gate makes
+        //     the arm decline so the call surfaces NoMethodError.
+        //     TODO: arity guard for no-bignum profile.
         if let Value::Int(n) = &recv && &*name == "digits" && args.len() <= 1 {
             let base: i64 = match args.first() {
                 None => 10,
@@ -2409,6 +2422,11 @@ impl Vm {
                     msg: format!("no implicit conversion of {} into Integer", other.type_name()),
                 })),
             };
+            if base < 0 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "negative radix".to_string(),
+                }));
+            }
             if base < 2 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("invalid radix {}", base),
@@ -2416,7 +2434,7 @@ impl Vm {
             }
             if *n < 0 {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: "numerical argument is out of domain - \"digits\"".into(),
+                    msg: "out of domain".to_string(),
                 }));
             }
             let mut elems: Vec<Value> = Vec::new();

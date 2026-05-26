@@ -2194,6 +2194,36 @@ fn pow_method_works_under_no_bignum_profile() {
     assert_eq!(buf.snapshot().trim(), "125\n6\n1\n1\n-1");
 }
 
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn digits_int_path_error_semantics_match_bignum_profile() {
+    // Cross-profile parity: the no-bignum Int#digits path
+    // (dispatch.rs) must surface the same error class +
+    // message text as the bignum BigInt path
+    // (Vm::try_integer_digits). Pin the dispatch.rs error arms
+    // so a future refactor that flips one side doesn't silently
+    // diverge.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected_msg) in [
+        ("(-5).digits",     "out of domain"),
+        ("5.digits(-2)",    "negative radix"),
+        ("5.digits(1)",     "invalid radix 1"),
+        ("5.digits(0)",     "invalid radix 0"),
+    ] {
+        let err = rt.eval(script, "no_bignum_digits.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(msg, expected_msg, "wrong message for {:?}", script);
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn digits_negative_recv_raises_argument_error_substitute() {
