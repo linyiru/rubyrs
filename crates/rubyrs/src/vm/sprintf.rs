@@ -302,7 +302,11 @@ fn format_radix_any(
         let log2_per_digit: u64 = (u32::BITS - radix.leading_zeros())
             .saturating_sub(1) as u64;
         let log2_per_digit = log2_per_digit.max(1);
-        let digits_est: u64 = bits.saturating_add(log2_per_digit - 1) / log2_per_digit;
+        // ceil-div bits / log2_per_digit, clamped to ≥ 1: `BigInt(0)`
+        // has `bits() == 0` but `to_str_radix(_)` returns "0" (one
+        // char). Without the clamp, a tight `max_value_bytes`
+        // would under-estimate by 1 and let "0" through unbounded.
+        let digits_est: u64 = (bits.saturating_add(log2_per_digit - 1) / log2_per_digit).max(1);
         let sign_byte: u64 = if b.sign() == Sign::Minus { 1 } else { 0 };
         let prefix_len: u64 = if !alt { 0 } else {
             match radix { 16 | 2 => 2, 8 => 1, _ => 0 }

@@ -1028,14 +1028,11 @@ impl Vm {
                         // could OOM on a 1 MB string before we get a
                         // chance to check `s.len()`. Shared helper
                         // with the 1-arg `to_s(radix)` arm above.
-                        // End the heap borrow before calling
-                        // `check_bigint_to_s_cap` (which needs
-                        // `&mut self`). `let _ = b` discards the
-                        // borrow without the `drop()` lint nag.
-                        let big_id = *id;
-                        let _ = b;
-                        self.check_bigint_to_s_cap(big_id, 10)?;
-                        let s = self.heap.bigint(big_id).to_string();
+                        // `check_bigint_to_s_cap` takes `&self`, so
+                        // the heap borrow on `b` can stay live across
+                        // the call without an explicit drop dance.
+                        self.check_bigint_to_s_cap(*id, 10)?;
+                        let s = b.to_string();
                         return Ok(Some(Value::new_str(s)));
                     }
                     // Pure read-only predicates — fit cleanly in
@@ -1132,7 +1129,7 @@ impl Vm {
     /// safety ceiling that `try_bigint_pow` uses when no host
     /// cap is configured.
     #[cfg(feature = "bignum")]
-    pub(crate) fn check_bigint_to_s_cap(&mut self, id: crate::value::ObjId, radix: u32) -> Result<(), crate::error::Trap> {
+    pub(crate) fn check_bigint_to_s_cap(&self, id: crate::value::ObjId, radix: u32) -> Result<(), crate::error::Trap> {
         use num_bigint::Sign;
         let b = self.heap.bigint(id);
         let bits = b.bits();
@@ -1144,8 +1141,13 @@ impl Vm {
         let log2_per_digit: u64 = (u32::BITS - radix.leading_zeros())
             .saturating_sub(1) as u64;
         let log2_per_digit = log2_per_digit.max(1);
-        // ceil-div bits / log2_per_digit, then add sign byte if negative.
+        // ceil-div bits / log2_per_digit, then add sign byte if
+        // negative. Clamp to at least 1 digit for the zero case:
+        // `BigInt(0).to_str_radix(_)` returns "0" (one char) even
+        // though `bits()` is 0; without the clamp a strict
+        // `max_value_bytes = 0` cap would let "0" through.
         let digits_est: u64 = bits.saturating_add(log2_per_digit - 1) / log2_per_digit;
+        let digits_est = digits_est.max(1);
         let est: u64 = digits_est.saturating_add(sign_byte);
         let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
         if est > cap {
