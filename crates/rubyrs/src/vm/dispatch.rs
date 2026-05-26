@@ -1894,10 +1894,11 @@ impl Vm {
                 );
             }
         // Explicit-receiver no-op stubs — `Foo.private_constant :X`,
-        // `Foo.public_constant :X`, `Foo.autoload :X, "path"`.
-        // Counterparts to the no-recv arm above. See that arm for the
-        // rationale (visibility / lazy-load hooks rubyrs doesn't model
-        // yet). Tilt's `Tilt.autoload class_name, file` inside
+        // `Foo.public_constant :X`, `Foo.deprecate_constant :X`,
+        // `Foo.autoload :X, "path"`. Counterparts to the no-recv
+        // arm above. See that arm for the rationale (visibility /
+        // lazy-load / deprecation hooks rubyrs doesn't model yet).
+        // Tilt's `Tilt.autoload class_name, file` inside
         // `register_lazy` is the canonical caller.
         if &*name == "autoload"
             && let Value::Class(_) = &recv {
