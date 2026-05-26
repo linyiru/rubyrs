@@ -143,11 +143,31 @@ impl Vm {
                     }
                 }
                 let (bi, ei) = (begin_int.unwrap(), end_int.unwrap());
-                let count = if excl { (ei - bi).max(0) } else { (ei - bi + 1).max(0) };
+                // count uses checked arithmetic — `ei - bi` overflows
+                // for ranges like `(i64::MIN..i64::MAX)`; treat any
+                // overflow as a size of 0 (matches the "empty" semantic
+                // that the rest of this match already returns for
+                // bi > end_inc). Pre-cycle-14 used `ei - bi + 1`
+                // unchecked, panicking in debug builds.
+                let count = if excl {
+                    ei.checked_sub(bi).map(|d| d.max(0)).unwrap_or(0)
+                } else {
+                    ei.checked_sub(bi).and_then(|d| d.checked_add(1)).map(|d| d.max(0)).unwrap_or(0)
+                };
                 match (name, args) {
                     ("begin", []) | ("first", []) | ("min", []) => Some(b.clone()),
                     ("end", []) | ("last", []) => Some(e.clone()),
-                    ("max", []) => Some(if excl { Value::Int(ei - 1) } else { e.clone() }),
+                    ("max", []) => Some(if excl {
+                        // ei - 1 overflows when ei == i64::MIN
+                        // (e.g. `(-2**63...-2**63).max`); treat as
+                        // empty range → nil, matching the
+                        // empty-range semantic that Range#sum/inject
+                        // already use for the same i64-edge case.
+                        match ei.checked_sub(1) {
+                            Some(v) => Value::Int(v),
+                            None => Value::Nil,
+                        }
+                    } else { e.clone() }),
                     ("size", []) | ("length", []) | ("count", []) => Some(Value::Int(count)),
                     ("exclude_end?", []) => Some(Value::Bool(excl)),
                     ("include?", [Value::Int(v)]) => {
