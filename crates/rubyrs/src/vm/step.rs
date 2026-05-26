@@ -751,78 +751,13 @@ impl Vm {
                         msg: format!("ApplySuper expected Array args, got {}", other.type_name()),
                     })),
                 };
-                let frame = self.frames.last().expect("ICE: ApplySuper no frame");
-                let self_val = frame.self_val.clone();
-                let defining = match frame.defining_class.clone() {
-                    Some(c) => c,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: "super called outside of method".to_string(),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
-                let parent = match defining.superclass.borrow().clone() {
-                    Some(p) => p,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: format!("super: no superclass method `{}'",
-                                self.interner.resolve(name_id)),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
-                let m = match self.lookup_method_uncached(&parent, name_id) {
-                    Some(m) => m,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: format!("super: no superclass method `{}'",
-                                self.interner.resolve(name_id)),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
+                let (m, self_val) = self.super_lookup(name_id)?;
                 self.invoke_method(m, self_val, args)?;
             }
             Op::Super(name_id, argc) => {
                 let split = self.stack.len() - argc as usize;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
-                let frame = self.frames.last().expect("ICE: Super no frame");
-                let self_val = frame.self_val.clone();
-                // Start the lookup at the *defining class's*
-                // superclass, not `self.class.superclass`. The
-                // latter would re-find the current method when
-                // `self` is a subclass instance and recurse
-                // forever. CRuby's "module of definition" rule.
-                let defining = match frame.defining_class.clone() {
-                    Some(c) => c,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: "super called outside of method".to_string(),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
-                let parent = match defining.superclass.borrow().clone() {
-                    Some(p) => p,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: format!("super: no superclass method `{}'",
-                                self.interner.resolve(name_id)),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
-                let m = match self.lookup_method_uncached(&parent, name_id) {
-                    Some(m) => m,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: format!("super: no superclass method `{}'",
-                                self.interner.resolve(name_id)),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
+                let (m, self_val) = self.super_lookup(name_id)?;
                 self.invoke_method(m, self_val, args)?;
             }
             Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw) => {
@@ -1185,6 +1120,7 @@ impl Vm {
                     singleton_methods: RefCell::new(HashMap::new()),
                     superclass: RefCell::new(parent.clone()),
                     includes: RefCell::new(Vec::new()),
+                    prepends: RefCell::new(Vec::new()),
                     class_vars: RefCell::new(HashMap::new()),
                     #[cfg(feature = "cext")]
                     cext_alloc_func: std::cell::Cell::new(None),

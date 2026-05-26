@@ -66,15 +66,6 @@ impl Vm {
         m
     }
 
-    /// Plain method lookup walking the class chain, with no cache touch.
-    /// Used for paths that don't benefit from caching (e.g. `initialize`
-    /// resolution during `Class.new`).
-    ///
-    /// Lookup order at each class in the chain: own methods → included
-    /// modules (recursively, depth-first; a module's own includes are
-    /// part of the walk) → superclass. Mirrors CRuby's ancestor walk
-    /// where `Person.ancestors == [Person, IncludedB, IncludedA, Object,
-    /// Kernel, BasicObject]` and `include` chains compose transitively
     /// Walk `cls`'s `singleton_methods` table, then the superclass
     /// chain's, returning the first hit. CRuby's metaclass model
     /// gives `Sub < Super` a singleton class whose parent is
@@ -100,26 +91,66 @@ impl Vm {
         }
     }
 
-    /// (`module M; include N; end; class C; include M; end` ⇒ C
-    /// resolves N's methods).
+    /// Plain method lookup walking the class chain, with no cache
+    /// touch. Used for paths that don't benefit from caching (e.g.
+    /// `initialize` resolution during `Class.new`).
+    ///
+    /// Lookup order at each class in the chain (CRuby ancestor walk):
+    /// **prepends (transitive) → own methods → included modules
+    /// (transitive) → superclass**. Prepended and included modules
+    /// also walk their own prepends/includes recursively, so
+    /// `module M; include N; end; class C; include M; end` resolves
+    /// `N`'s methods on a `C` instance.
     #[inline]
     pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
-        // Recursive helper that walks one node's own methods + its
-        // includes (transitively). Returns `Some` on the first hit.
-        fn walk_module(m: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+        // Recursive helper that walks one node's prepends, own
+        // methods, then includes (transitively, in dispatch order).
+        // Returns `Some` on the first hit. `visited` carries an
+        // Rc-pointer set across the recursion to keep diamond
+        // includes O(unique-modules) and to bail on cyclic graphs
+        // (cext or direct manipulation can construct
+        // `A.includes B; B.includes A` even though CRuby raises
+        // `ArgumentError: cyclic include detected` at insertion —
+        // rubyrs doesn't enforce that today, so the walker stays
+        // defensive).
+        fn walk_module(
+            m: &Rc<Class>,
+            name_id: SymId,
+            visited: &mut std::collections::HashSet<*const Class>,
+        ) -> Option<Rc<Method>> {
+            if !visited.insert(Rc::as_ptr(m)) {
+                return None;
+            }
+            for pre in m.prepends.borrow().iter() {
+                if let Some(found) = walk_module(pre, name_id, visited) {
+                    return Some(found);
+                }
+            }
             if let Some(found) = m.methods.borrow().get(&name_id).cloned() {
                 return Some(found);
             }
             for inc in m.includes.borrow().iter() {
-                if let Some(found) = walk_module(inc, name_id) {
+                if let Some(found) = walk_module(inc, name_id, visited) {
                     return Some(found);
                 }
             }
             None
         }
+        // Two separate visited sets:
+        // - `sc_visited` protects against superclass-chain cycles.
+        // - The inner set (fresh per superclass step) protects
+        //   against include/prepend graph cycles + diamonds at
+        //   ONE level. We can't share one set: a module
+        //   transitively included at multiple superclass levels
+        //   (rare but legal) needs to be walked at each level.
+        let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
         let mut current = cls.clone();
         loop {
-            if let Some(m) = walk_module(&current, name_id) {
+            if !sc_visited.insert(Rc::as_ptr(&current)) {
+                return None;
+            }
+            let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            if let Some(m) = walk_module(&current, name_id, &mut inc_visited) {
                 return Some(m);
             }
             let parent = current.superclass.borrow().clone();
@@ -311,28 +342,213 @@ impl Vm {
     }
 }
 
-/// `child` is-a `ancestor` if `ancestor` appears anywhere in `child`'s
-/// superclass chain (or `child == ancestor`).
-#[allow(dead_code)] // wired up in the next commit (rescue ClassName filter)
+/// `child` is-a `ancestor` if `ancestor` appears anywhere in
+/// `child`'s ancestor chain — that is, the superclass walk *plus*
+/// each class's transitive `prepends` and `includes`. Returns true
+/// for `child == ancestor`. Wired into rescue-by-class filter
+/// matching and the `is_a?` / `include?` dispatch arms.
 pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
-    fn walks_through(node: &Rc<Class>, target: &Rc<Class>) -> bool {
+    fn walks_through(
+        node: &Rc<Class>,
+        target: &Rc<Class>,
+        visited: &mut std::collections::HashSet<*const Class>,
+    ) -> bool {
         if Rc::ptr_eq(node, target) { return true; }
+        if !visited.insert(Rc::as_ptr(node)) {
+            // Cycle — same defensiveness as `walk_module` /
+            // `flatten_ancestors`. Without it, a cyclic
+            // include/prepend graph stack-overflows `is_a?`.
+            return false;
+        }
+        // Recurse through both prepends and includes — CRuby
+        // `is_a?(M)` is true for any module reachable via either
+        // chain transitively. Without the prepend recursion,
+        // `module M; prepend N; end; class C; include M; end`
+        // would report `c.is_a?(N) == false` even though
+        // dispatch finds N's methods.
+        for pre in node.prepends.borrow().iter() {
+            if walks_through(pre, target, visited) { return true; }
+        }
         for inc in node.includes.borrow().iter() {
-            if walks_through(inc, target) { return true; }
+            if walks_through(inc, target, visited) { return true; }
         }
         false
     }
+    // Two separate visited sets — same rationale as
+    // `lookup_method_uncached`: superclass-chain cycles vs.
+    // include/prepend-graph cycles need independent protection.
+    let mut sc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
     let mut current = child.clone();
     loop {
-        // Recursively walk included modules so transitive includes
-        // (`include M; M includes N` ⇒ `class_is_a(C, N) == true`)
-        // resolve. Matches CRuby's rescue-filter behaviour and the
-        // `is_a?` / `kind_of?` predicates.
-        if walks_through(&current, ancestor) { return true; }
+        if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
+        let mut inc_visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+        if walks_through(&current, ancestor, &mut inc_visited) { return true; }
         let parent = current.superclass.borrow().clone();
         match parent {
             Some(p) => current = p,
             None => return false,
+        }
+    }
+}
+
+/// Flatten a class's ancestor chain into a Vec in CRuby
+/// dispatch order: at each level — prepends (transitive) → the
+/// class/module itself → includes (transitive) → superclass.
+/// Transitive means a prepended/included module's own
+/// prepends/includes are walked too.
+///
+/// Deduplicates by Rc pointer using a `HashSet`: a diamond-
+/// shaped include/prepend graph (`M includes A; M includes B;
+/// A includes C; B includes C`) yields `[..., C]` once,
+/// matching CRuby's linearization. The same visited set
+/// guards against cyclic graphs (`A includes B; B includes A`)
+/// which would otherwise recurse unboundedly.
+///
+/// Used by `super` (Op::Super / Op::ApplySuper) to find the
+/// next ancestor after `defining_class`. Walking the chain
+/// every super call is fine — super isn't a hot path in any
+/// rubyrs spec we run today.
+pub(crate) fn flatten_ancestors(cls: &Rc<Class>) -> Vec<Rc<Class>> {
+    fn flatten_module(
+        m: &Rc<Class>,
+        out: &mut Vec<Rc<Class>>,
+        visited: &mut std::collections::HashSet<*const Class>,
+    ) {
+        if !visited.insert(Rc::as_ptr(m)) {
+            return;
+        }
+        for pre in m.prepends.borrow().iter() {
+            flatten_module(pre, out, visited);
+        }
+        out.push(m.clone());
+        for inc in m.includes.borrow().iter() {
+            flatten_module(inc, out, visited);
+        }
+    }
+    let mut out: Vec<Rc<Class>> = Vec::new();
+    let mut visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+    let mut current = cls.clone();
+    loop {
+        if !visited.insert(Rc::as_ptr(&current)) {
+            // Cycle through the superclass chain — CRuby blocks
+            // it at class-definition time, but bail rather than
+            // spin if user code somehow constructs one.
+            return out;
+        }
+        for pre in current.prepends.borrow().iter() {
+            flatten_module(pre, &mut out, &mut visited);
+        }
+        out.push(current.clone());
+        for inc in current.includes.borrow().iter() {
+            flatten_module(inc, &mut out, &mut visited);
+        }
+        let parent = current.superclass.borrow().clone();
+        match parent {
+            Some(p) => current = p,
+            None => return out,
+        }
+    }
+}
+
+impl Vm {
+    /// Shared `super` lookup for both `Op::Super` (positional args)
+    /// and `Op::ApplySuper` (splat-assembled args). Walks the
+    /// receiver's class ancestor chain (prepends + own + includes
+    /// transitively, per `flatten_ancestors`), finds where the
+    /// frame's `defining_class` sits, and resumes lookup from the
+    /// next ancestor.
+    ///
+    /// Receiver-class lookup uses `Heap::class_of` (returns the
+    /// singleton class if present) so a `def obj.foo` singleton
+    /// method's `super` still threads through the singleton →
+    /// real-class chain — `singleton_method_spec.rb` covers that.
+    /// At each ancestor we scan only `methods.borrow()` because the
+    /// ancestor list is already fully flattened (`include`d /
+    /// `prepend`ed modules appear as their own entries).
+    pub(crate) fn super_lookup(&mut self, name_id: SymId)
+        -> Result<(Rc<crate::value::Method>, Value), crate::error::Trap>
+    {
+        let frame = self.frames.last().expect("ICE: super with empty frames");
+        let self_val = frame.self_val.clone();
+        let defining = match frame.defining_class.clone() {
+            Some(c) => c,
+            None => {
+                return Err(self.trap(crate::error::RubyError::NoMethodError {
+                    method: "super called outside of method".to_string(),
+                    recv_type: self_val.type_name(),
+                }));
+            }
+        };
+        // Class-method super — `def self.foo; super; end`. The
+        // receiver IS the class, defining_class is the class
+        // itself, and the inherited method lives in the
+        // superclass's `singleton_methods` table (mirror of how
+        // `lookup_class_singleton_method` walks the superclass
+        // chain). The instance-method ancestor walk wouldn't find
+        // it because the methods aren't in `methods` and a class's
+        // own class is "Class", not its inheritance chain.
+        if let Value::Class(cls) = &self_val {
+            let mut chain: Vec<Rc<Class>> = Vec::new();
+            let mut visited: std::collections::HashSet<*const Class> = std::collections::HashSet::new();
+            let mut cur = cls.clone();
+            loop {
+                // Same cycle defensiveness as `flatten_ancestors`
+                // / `walk_module` / `walks_through` — a cyclic
+                // superclass chain (cext or direct mutation; CRuby
+                // raises TypeError at class-definition time)
+                // would otherwise spin here.
+                if !visited.insert(Rc::as_ptr(&cur)) { break; }
+                chain.push(cur.clone());
+                let parent = cur.superclass.borrow().clone();
+                match parent {
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+            let m = chain.iter()
+                .position(|c| Rc::ptr_eq(c, &defining))
+                .map(|i| i + 1)
+                .and_then(|i| chain.get(i..))
+                .and_then(|tail| tail.iter().find_map(|c| {
+                    c.singleton_methods.borrow().get(&name_id).cloned()
+                }));
+            return match m {
+                Some(m) => Ok((m, self_val)),
+                None => Err(self.trap(crate::error::RubyError::NoMethodError {
+                    method: format!("super: no superclass method `{}'",
+                        self.interner.resolve(name_id)),
+                    recv_type: self_val.type_name(),
+                })),
+            };
+        }
+        let recv_cls = match &self_val {
+            Value::Object(id) => self.heap.class_of(*id),
+            other => match self.class_of(other) {
+                Value::Class(c) => c,
+                _ => {
+                    return Err(self.trap(crate::error::RubyError::NoMethodError {
+                        method: format!("super: no superclass method `{}'",
+                            self.interner.resolve(name_id)),
+                        recv_type: other.type_name(),
+                    }));
+                }
+            },
+        };
+        let ancs = flatten_ancestors(&recv_cls);
+        let m = ancs.iter()
+            .position(|a| Rc::ptr_eq(a, &defining))
+            .map(|i| i + 1)
+            .and_then(|i| ancs.get(i..))
+            .and_then(|tail| tail.iter().find_map(|a| {
+                a.methods.borrow().get(&name_id).cloned()
+            }));
+        match m {
+            Some(m) => Ok((m, self_val)),
+            None => Err(self.trap(crate::error::RubyError::NoMethodError {
+                method: format!("super: no superclass method `{}'",
+                    self.interner.resolve(name_id)),
+                recv_type: self_val.type_name(),
+            })),
         }
     }
 }
@@ -401,6 +617,7 @@ mod tests {
             methods: RefCell::new(HashMap::new()),
             singleton_methods: RefCell::new(HashMap::new()),
             includes: RefCell::new(Vec::new()),
+            prepends: RefCell::new(Vec::new()),
             superclass: RefCell::new(superclass),
             class_vars: RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]

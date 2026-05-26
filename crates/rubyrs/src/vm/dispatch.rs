@@ -398,15 +398,19 @@ impl Vm {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());
             }
-            // `include Mod` inside a class body — `self` is the
-            // class, name resolves with no receiver. Pushes the
-            // source onto the target's `includes` chain (instead
-            // of copying methods); `lookup_method_uncached` then
-            // walks the chain at dispatch time. Bumps method_gen
-            // so any monomorphic inline cache entry that thought
-            // the class lacked the included methods invalidates.
-            if (&*name == "include" || &*name == "extend") && !args.is_empty()
+            // `include Mod` / `extend Mod` / `prepend Mod` inside
+            // a class body — `self` is the class, name resolves
+            // with no receiver. Pushes the source module onto the
+            // target's `includes` or `prepends` chain (split by
+            // method name; see the dispatch order comment on
+            // `lookup_method_uncached`). Methods aren't copied —
+            // `lookup_method_uncached` walks the chain at dispatch
+            // time. Bumps `method_gen` so any monomorphic inline
+            // cache entry that thought the class lacked the
+            // included/prepended methods invalidates.
+            if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
                 && let Value::Class(target) = &self_val {
+                    let is_prepend = &*name == "prepend";
                     for a in &args {
                         let src = match a {
                             Value::Class(c) => c.clone(),
@@ -417,11 +421,28 @@ impl Vm {
                                 ),
                             })),
                         };
-                        // CRuby last-included-wins: push to the
-                        // front so it's checked first by the lookup
-                        // walk (which goes head-to-tail).
-                        let mut chain = target.includes.borrow_mut();
-                        if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
+                        // CRuby last-{included,prepended}-wins:
+                        // push to the front so it's checked first
+                        // by the lookup walk (which goes head-to-
+                        // tail). `prepend` and `include` route into
+                        // separate chains — `lookup_method_uncached`
+                        // walks prepends BEFORE the class's own
+                        // methods, and includes AFTER.
+                        //
+                        // Idempotency check is full ancestor-chain,
+                        // not just the direct vec — CRuby treats
+                        // `include M` / `prepend M` as a no-op if
+                        // `M` is anywhere in ancestors (transitive
+                        // includes/prepends too). Without
+                        // `class_is_a`, `include ContainsM` then
+                        // `include M` would move `M` ahead of
+                        // `ContainsM` and reorder lookup.
+                        if !super::class_is_a(target, &src) {
+                            let mut chain = if is_prepend {
+                                target.prepends.borrow_mut()
+                            } else {
+                                target.includes.borrow_mut()
+                            };
                             chain.insert(0, src);
                         }
                     }
@@ -1466,10 +1487,12 @@ impl Vm {
                 );
             }
         if let Value::Class(target) = &recv
-            && (&*name == "include" || &*name == "extend") && !args.is_empty() {
-                // Explicit-receiver form: `MyClass.include(Mod)`.
-                // Same chain-push semantics as the no-receiver
-                // form above — see that comment for the rationale.
+            && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
+                // Explicit-receiver form: `MyClass.include(Mod)` /
+                // `.prepend(Mod)`. Same chain-push semantics as the
+                // no-receiver form above — see that comment for the
+                // rationale and the prepend-vs-include split.
+                let is_prepend = &*name == "prepend";
                 for a in &args {
                     let src = match a {
                         Value::Class(c) => c.clone(),
@@ -1480,8 +1503,15 @@ impl Vm {
                             ),
                         })),
                     };
-                    let mut chain = target.includes.borrow_mut();
-                    if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
+                    // Full ancestor-chain idempotency, same as the
+                    // no-receiver arm — see that comment for the
+                    // reorder hazard a shallow vec-check creates.
+                    if !super::class_is_a(target, &src) {
+                        let mut chain = if is_prepend {
+                            target.prepends.borrow_mut()
+                        } else {
+                            target.includes.borrow_mut()
+                        };
                         chain.insert(0, src);
                     }
                 }
@@ -1517,19 +1547,18 @@ impl Vm {
         if let Value::Class(cls) = &recv {
             match (&*name, args.as_slice()) {
                 ("ancestors", []) => {
-                    let mut chain: Vec<Value> = Vec::new();
-                    let mut current = cls.clone();
-                    loop {
-                        chain.push(Value::Class(current.clone()));
-                        for inc in current.includes.borrow().iter() {
-                            chain.push(Value::Class(inc.clone()));
-                        }
-                        let parent = current.superclass.borrow().clone();
-                        match parent {
-                            Some(p) => current = p,
-                            None => break,
-                        }
-                    }
+                    // Go through `flatten_ancestors` so the result
+                    // matches the dispatch order
+                    // `lookup_method_uncached` actually walks —
+                    // transitive expansion of includes/prepends +
+                    // diamond dedup. Without this, the user-visible
+                    // ancestors list could diverge from CRuby's
+                    // linearization (and from what method resolution
+                    // actually does).
+                    let chain: Vec<Value> = super::flatten_ancestors(cls)
+                        .into_iter()
+                        .map(Value::Class)
+                        .collect();
                     self.maybe_gc();
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::Array(chain));
