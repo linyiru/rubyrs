@@ -82,11 +82,32 @@ impl Vm {
                         ("end", []) | ("last", []) | ("max", []) => return Ok(Some(e.clone())),
                         ("first", [Value::Int(n)]) => {
                             // Endless (1..) supports first(n);
-                            // beginless (..n) doesn't (no anchor
-                            // for "first").
+                            // beginless (..n) doesn't — CRuby raises
+                            // `RangeError: cannot get the first
+                            // element of beginless range`.
+                            //
+                            // Negative `n` is an ArgumentError in
+                            // CRuby, not a silent clamp to 0. Mirrors
+                            // the policy `Array#first(n)` adopted in
+                            // #140.
+                            if *n < 0 {
+                                return Err(self.trap(RubyError::ArgumentError {
+                                    msg: "negative array size (or size too big)".into(),
+                                }));
+                            }
                             if let Some(bi) = begin_int {
-                                let n = (*n).max(0);
-                                let mut out: Vec<Value> = Vec::with_capacity(n as usize);
+                                // `usize::try_from(*n).unwrap_or(MAX)`
+                                // is the wasm32-safe shape from #140:
+                                // i64 → usize would truncate large
+                                // positives on a 32-bit usize host.
+                                // Capacity is bounded by `n` so very
+                                // large requests still try to alloc
+                                // the full vec — that's a memory
+                                // cost the caller asked for, matching
+                                // the existing endless `step`/`to_a`
+                                // patterns.
+                                let n = usize::try_from(*n).unwrap_or(usize::MAX);
+                                let mut out: Vec<Value> = Vec::with_capacity(n);
                                 let mut v = bi;
                                 for _ in 0..n {
                                     out.push(Value::Int(v));
@@ -96,7 +117,9 @@ impl Vm {
                                 let nid = self.heap.alloc(HeapObj::Array(out));
                                 return Ok(Some(Value::Array(nid)));
                             }
-                            return Ok(None);
+                            return Err(self.trap(RubyError::RangeError {
+                                msg: "cannot get the first element of beginless range".into(),
+                            }));
                         }
                         ("cover?", [Value::Int(v)]) => {
                             let lo_ok = match begin_int { Some(lo) => *v >= lo, None => true };
@@ -157,6 +180,76 @@ impl Vm {
                 match (name, args) {
                     ("begin", []) | ("first", []) | ("min", []) => Some(b.clone()),
                     ("end", []) | ("last", []) => Some(e.clone()),
+                    // `(b..e).first(n)` / `(b..e).last(n)` — materialise
+                    // the slice as a fresh Array. Both refuse negative
+                    // `n` with ArgumentError, matching CRuby's
+                    // `Array#first/last(n)` policy that #140 mirrored.
+                    // For first/last on the empty range (b > e) the
+                    // `count == 0` short-circuit returns []. CRuby
+                    // uses slightly different wording for the two
+                    // sides ("negative array size (or size too big)"
+                    // for first vs "negative array size" for last);
+                    // matching that exactly so a diff_cruby fixture
+                    // can lock both error paths.
+                    //
+                    // Tracked in #143 alongside the endless-range
+                    // negative-n fix above.
+                    ("first", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size (or size too big)".into(),
+                            }));
+                        }
+                        // Cap `n` at `count` so a request bigger than
+                        // the range size doesn't try to alloc Vec for
+                        // billions of elements. `count` is already
+                        // computed safely (saturating) above.
+                        let n_taken = (*n).min(count);
+                        let n_safe = usize::try_from(n_taken).unwrap_or(usize::MAX);
+                        let mut elems: Vec<Value> = Vec::with_capacity(n_safe);
+                        let mut v = bi;
+                        for _ in 0..n_safe {
+                            elems.push(Value::Int(v));
+                            v = v.saturating_add(1);
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(nid))
+                    }
+                    ("last", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        // Same `count`-capping rationale as `first(n)`
+                        // above. The slice ends at `end_inc` (one
+                        // before `ei` when exclusive) and starts at
+                        // `end_inc - n_taken + 1`. Both arithmetics
+                        // use `saturating_sub` / `saturating_add` so
+                        // an i64-edge range can't panic in debug
+                        // builds.
+                        let n_taken = (*n).min(count);
+                        let n_safe = usize::try_from(n_taken).unwrap_or(usize::MAX);
+                        let mut elems: Vec<Value> = Vec::with_capacity(n_safe);
+                        // `count == 0` (empty range, b > e) short-
+                        // circuits below — `end_inc` would underflow
+                        // on `ei - 1` for excl-empty otherwise.
+                        if count == 0 {
+                            let nid = self.heap.alloc(HeapObj::Array(elems));
+                            return Ok(Some(Value::Array(nid)));
+                        }
+                        let end_inc = if excl { ei.saturating_sub(1) } else { ei };
+                        let start = end_inc.saturating_sub(n_taken).saturating_add(1);
+                        let mut v = start;
+                        for _ in 0..n_safe {
+                            elems.push(Value::Int(v));
+                            v = v.saturating_add(1);
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(nid))
+                    }
                     ("max", []) => Some(if excl {
                         // ei - 1 overflows when ei == i64::MIN
                         // (e.g. `(-2**63...-2**63).max`); treat as
