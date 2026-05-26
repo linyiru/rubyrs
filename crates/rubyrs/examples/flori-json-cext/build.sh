@@ -49,6 +49,44 @@ esac
 PARSER_OUT="$SCRIPT_DIR/parser.$EXT"
 GENERATOR_OUT="$SCRIPT_DIR/generator.$EXT"
 
+# Cross-process safety against parallel cargo test binaries.
+# Mirrors msgpack-cext/build.sh's rationale: `cargo test` runs
+# integration-test binaries in parallel processes; each calls
+# this script. An in-process OnceLock in Rust dedupes within ONE
+# binary but not across them, so two concurrent `cc ... -o $OUT`
+# invocations would race on the same output file and a parallel
+# `dlopen` could see a half-written Mach-O / ELF ("file too short"
+# / invalid object) — flaky CI failure.
+#
+# Two layers with non-overlapping jobs:
+#   1. Always-on: link each cc invocation to a `$TMP` then `mv -f`
+#      atomically into `$OUT`. POSIX rename(2) is atomic on the
+#      same filesystem, so a parallel `dlopen` sees either the
+#      OLD bundle or the COMPLETE new one — never a truncated
+#      file. This alone guarantees correctness regardless of
+#      how many concurrent builders fire.
+#   2. Optional flock-based MUTUAL EXCLUSION across BOTH
+#      `cc` invocations: if `flock(1)` is installed (default
+#      on Linux util-linux, absent on macOS unless brewed),
+#      serialise concurrent runs of THIS script so only one
+#      compile pair is in flight at a time. Both callers
+#      still ultimately compile (serialisation, not
+#      deduplication), but cumulative CPU stays linear
+#      instead of N callers × full compile in parallel.
+#      Pure performance — has no effect on output
+#      correctness, which layer 1 already guarantees.
+#
+# Why one shared lock file vs. two: parser.c and generator.c
+# don't share output paths, so a per-output lock would let two
+# callers compile parser+generator concurrently with each other.
+# That's fine for correctness but wastes CPU duplicating work.
+# Holding one lock across both compiles keeps the serialisation
+# tight.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$SCRIPT_DIR/.build.lock"
+    flock 9
+fi
+
 # Common compile flags. -DJSON_GENERATOR gates the right forward-
 # decl block in fbuffer.h for generator only; parser is built
 # without it so it gets the non-generator path.
@@ -66,14 +104,20 @@ COMMON_CFLAGS=(
     -I "$SCRIPT_DIR/vendor/fbuffer"
 )
 
+PARSER_TMP="$PARSER_OUT.tmp.$$"
+GENERATOR_TMP="$GENERATOR_OUT.tmp.$$"
+trap 'rm -f "$PARSER_TMP" "$GENERATOR_TMP"' EXIT
+
 cc "${LDFLAGS[@]}" "${COMMON_CFLAGS[@]}" \
    "$SCRIPT_DIR/vendor/parser/parser.c" \
-   -o "$PARSER_OUT"
+   -o "$PARSER_TMP"
+mv -f "$PARSER_TMP" "$PARSER_OUT"
 
 cc "${LDFLAGS[@]}" "${COMMON_CFLAGS[@]}" \
    -DJSON_GENERATOR \
    "$SCRIPT_DIR/vendor/generator/generator.c" \
-   -o "$GENERATOR_OUT"
+   -o "$GENERATOR_TMP"
+mv -f "$GENERATOR_TMP" "$GENERATOR_OUT"
 
 echo "built $PARSER_OUT"
 echo "built $GENERATOR_OUT"
