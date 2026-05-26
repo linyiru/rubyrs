@@ -192,6 +192,32 @@ impl Vm {
                         Some(v.clone())
                     }
                     ("first", []) => Some(self.heap.array(id).first().cloned().unwrap_or(Value::Nil)),
+                    // `arr.first(n)` / `arr.last(n)` — CRuby returns a
+                    // new Array of up to `n` elements (capped at the
+                    // receiver's length). `n == 0` is `[]`; `n < 0` is
+                    // ArgumentError "negative array size". Symmetric
+                    // with `take` / `drop` already implemented below,
+                    // and mirrors `Range#first(n)` at vm/range.rs:83.
+                    ("first", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        let n = *n as usize;
+                        // Pin the receiver across maybe_gc: same rationale
+                        // as `take`/`drop` — the receiver Array has been
+                        // popped from the operand stack before this match
+                        // arm runs, and STRESS_GC would otherwise sweep
+                        // it (and its children) between iter().take()
+                        // and the alloc.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let out: Vec<Value> = g.vm.heap.array(id).iter().take(n).cloned().collect();
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
                     ("dig", keys) if !keys.is_empty() => {
                         let mut cur = Value::Array(id);
                         for key in keys {
@@ -201,6 +227,25 @@ impl Vm {
                         Some(cur)
                     }
                     ("last", []) => Some(self.heap.array(id).last().cloned().unwrap_or(Value::Nil)),
+                    ("last", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        let n = *n as usize;
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let arr = g.vm.heap.array(id);
+                        // `saturating_sub` handles `n >= len` cleanly —
+                        // CRuby's `[1,2,3].last(5)` returns the full
+                        // array, no error.
+                        let start = arr.len().saturating_sub(n);
+                        let out: Vec<Value> = arr[start..].to_vec();
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
                     ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
                     ("include?", [needle]) => {
                         let a = self.heap.array(id);
