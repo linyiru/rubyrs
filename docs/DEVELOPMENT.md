@@ -176,17 +176,28 @@ The script builds an optimised AOT artifact before timing:
   raw `.wasm`  →  `wasm-opt -Oz`  →  `wizer`  →  `wasm-opt -Oz`  →  `wasmtime compile`  →  `.cwasm`
 
 and runs every workload via `wasmtime run --allow-precompiled`.
-Local M-series numbers (each layer is optional and the gate
-falls back gracefully when a tool is missing):
 
-  - raw `.wasm` + JIT-each-run: ~20 ms cold start
-  - + `wasm-opt -Oz`:           ~7.6 ms (binary 1.48 → 1.17 MB)
-  - + `wizer`:                  ~7.2 ms (~5% relative at this
-                                          scale; binary 1.17 →
-                                          1.28 MB +9% from the
-                                          baked-in preamble heap)
-  - + `wasmtime compile`:        same wall, eliminates per-run
-                                  JIT cost
+`wasmtime compile` is the REQUIRED baseline of the gate — the
+script always runs it because the gate measures the AOT-cwasm
+path. `wasm-opt -Oz` and `wizer` are OPTIONAL layers stacked
+on top of that baseline; each one's contribution is independent
+and the gate falls back gracefully when either tool is missing.
+
+Local M-series numbers, with the AOT-cwasm path as the
+baseline (so every row already includes `wasmtime compile`):
+
+  - raw `.wasm` + JIT-each-run (no AOT):  ~20 ms cold start
+  - AOT cwasm baseline:                    ~8.6 ms
+  - + `wasm-opt -Oz`:                      ~7.6 ms (binary
+                                            1.48 → 1.17 MB
+                                            for the .wasm
+                                            input)
+  - + `wizer` (on top of -Oz):             ~7.2 ms (~5%
+                                            relative at this
+                                            scale; cwasm
+                                            4.4 → 4.6 MB +5%
+                                            from the baked-in
+                                            preamble heap)
 
 `startup_floor.rb` total ~7-10 ms; `fizzbuzz_1m.rb` ~510 ms
 (unchanged across pipeline variants — compute-bound, not
@@ -194,18 +205,19 @@ startup-bound).
 
 Install dependencies:
 
+  - `wasmtime` — REQUIRED (the gate measures the cwasm path).
   - `binaryen` (`brew install binaryen` / `apt install binaryen`)
-    — enables `wasm-opt -Oz`.
+    — OPTIONAL, enables `wasm-opt -Oz`.
   - `wizer` (`cargo install wizer --features 'env_logger structopt'`
-    or the GitHub release tarball; CI uses the latter) — enables
-    Runtime pre-initialization. The binary exports
+    or the GitHub release tarball; CI uses the latter) — OPTIONAL,
+    enables Runtime pre-initialization. The binary exports
     `wizer.initialize`, which wizer calls and snapshots; main()
     then picks up the pre-built Runtime via
     `rubyrs::take_wizer_runtime()` and applies the host Config
     on top.
 
-Skipping either tool keeps the gate green; you just lose that
-layer's contribution. The CI lane installs both.
+Skipping either optional tool keeps the gate green; you just lose
+that layer's contribution. The CI lane installs both.
 
 ### wasi env-var quirk
 

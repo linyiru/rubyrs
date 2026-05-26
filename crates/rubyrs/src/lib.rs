@@ -604,12 +604,16 @@ pub extern "C" fn wizer_initialize() {
     // SAFETY: wasm32-wasip1 is single-threaded; this static is
     // only mutated here (during the one wizer-init pass) and
     // consumed once by `take_wizer_runtime()` from main(). Use
-    // `addr_of_mut!` + pointer write to avoid the Rust 2024
-    // `static_mut_refs` lint (taking `&mut` on a static is
-    // deprecated in 2024 edition).
+    // `addr_of_mut!` + `(*p).replace(...)` to avoid the Rust
+    // 2024 `static_mut_refs` lint AND ensure any prior occupant
+    // is dropped (a bare `p.write(...)` would leak the previous
+    // Runtime if `wizer.initialize` were somehow invoked more
+    // than once during a debugging / embedding cycle).
     unsafe {
         let p = std::ptr::addr_of_mut!(WIZER_RUNTIME);
-        p.write(Some(Runtime::new_default_impl()));
+        let _prev = (*p).replace(Runtime::new_default_impl());
+        // `_prev` (Option<Runtime>) drops here, freeing the
+        // earlier Runtime's heap + Vm slots if one existed.
     }
 }
 

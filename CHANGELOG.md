@@ -30,8 +30,6 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   propagation work identically pre- and post-wizer. Defensive
   even on non-wizer'd builds; same behaviour, different
   read path.
-
-### Changed
 - **Wasm perf gate now measures AOT-precompiled `.cwasm`** instead
   of raw `.wasm` + per-run JIT. `perf/wasm_check.sh`'s build prelude
   runs `wasm-opt -Oz` (optional; install `binaryen` to enable the
