@@ -81,10 +81,15 @@ DROP_PATTERNS = [
     (r"\.shift\(\s*[^)\s]", "method-not-implemented"),
     # `Array#push` MULTI-ARG form is not yet in rubyrs — single-arg
     # `.push(x)` works, but `.push(a, b, c)` raises NoMethodError.
-    # Match only the multi-arg shape: open paren + non-`)` content
-    # + `,` (the comma is what makes it multi-arg). Single-arg
-    # `[1].push(2)` does NOT match — `.push(\d+)` has no comma.
-    (r"\.push\(\s*[^)]+,", "method-not-implemented"),
+    # Match only the multi-arg shape at the TOP level of the arg
+    # list: `\.push\(` + zero-or-more chars that aren't a nesting
+    # delimiter or comma + `,`. Excluding `()`, `{}`, `[]`, and
+    # `,` from the repeated class means the regex stops at any
+    # nested delimiter, so single-arg calls with nested-call,
+    # hash-literal, or array-literal args are correctly LEFT
+    # alone — the v1 regex `\.push\(\s*[^)]+,` over-dropped all
+    # three shapes (caught by /code-review).
+    (r"\.push\(\s*[^(){}\[\],]*,", "method-not-implemented"),
     # Note (was wrong): `\.unshift\b` and `\.inject\s*\(` rules were
     # removed after PR #133 review confirmed both methods are
     # implemented (unshift: single AND multi-arg; inject: block AND
