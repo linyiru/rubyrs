@@ -631,6 +631,28 @@ impl Vm {
         v
     }
 
+    /// Consume the visibility-bypass flag set by `send` /
+    /// `__send__` (and the `&nil` block-forward case). Returns
+    /// whatever value the flag held and clears it to `false` in
+    /// one step.
+    ///
+    /// The two existing consume sites (`vm/dispatch.rs::do_call`
+    /// and `do_call_block` at the dispatch boundary) previously
+    /// inlined `mem::replace(&mut self.bypass_visibility_once,
+    /// false)`. The `take_*` named helper exists so a future
+    /// dispatch-entry path can be added by grepping for `take_*`
+    /// rather than knowing to spell out the `mem::replace` idiom
+    /// from scratch — same discoverability win as
+    /// `take_method_return`. The placement constraint the field's
+    /// doc comment warns about (consume at dispatch boundary, NOT
+    /// at the visibility-check site, otherwise the flag leaks
+    /// when dispatch bottoms out before the Object arm) still
+    /// applies regardless of which spelling you use; the helper
+    /// doesn't enforce it.
+    pub(crate) fn take_bypass_visibility(&mut self) -> bool {
+        std::mem::replace(&mut self.bypass_visibility_once, false)
+    }
+
     pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         Ok(match recv {
             Value::Array(id) => return self.array_collection_call(*id, name, args),

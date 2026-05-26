@@ -263,7 +263,7 @@ impl Vm {
         // raises NoMethodError before the Object arm is reached
         // — the flag would survive and silently bypass the next
         // call's vis check).
-        let bypass_visibility = std::mem::replace(&mut self.bypass_visibility_once, false);
+        let bypass_visibility = self.take_bypass_visibility();
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let recv = if no_recv {
@@ -3632,7 +3632,7 @@ impl Vm {
         // next unrelated call. The `&nil` arm below re-installs
         // it before delegating to `do_call`, which DOES enforce
         // visibility — so `send(:priv, &nil)` still bypasses.
-        let bypass_visibility = std::mem::replace(&mut self.bypass_visibility_once, false);
+        let bypass_visibility = self.take_bypass_visibility();
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let block_val = self.stack.pop().expect("ICE: stack underflow before block");
