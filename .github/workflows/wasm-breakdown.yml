@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - 'spike/wasm-breakdown'
+      - 'master'
       - 'spike/wasm-**'
     paths:
       - 'perf/wasm_breakdown.sh'
@@ -21,6 +21,17 @@ on:
       - 'crates/rubyrs-wasm-timer/**'
       - 'crates/rubyrs/src/main.rs'
       - '.github/workflows/wasm-breakdown.yml'
+  # Weekly cron keeps the harness validated on master even when
+  # nothing in the path filter changed — catches regressions
+  # caused by GHA runner image updates (new binaryen / wasmtime
+  # default behavior, kernel changes affecting spawn cost),
+  # upstream tool releases the harness downloads (wasmer install
+  # script changes), and Rust toolchain drift on the pinned 1.95
+  # channel. Sunday 12:00 UTC keeps the run off Monday-morning
+  # CI peak; the workflow is non-gating so a failure on weekend
+  # just sends a notification rather than blocking work.
+  schedule:
+    - cron: '0 12 * * 0'
 
 jobs:
   measure:
