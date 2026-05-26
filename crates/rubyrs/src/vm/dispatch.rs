@@ -926,7 +926,13 @@ impl Vm {
         // @default_mapping.new(file, ...); end; end; Tilt.new("x")`
         // never enters the override — the hardcoded allocator
         // below returns a generic `#<Tilt>` Instance instead.
-        // Mirrored in `do_call_block` for the block-form path.
+        //
+        // The block-form path (`do_call_block`) already routes
+        // user `self.new` overrides through its general
+        // Value::Class singleton-method dispatch arm, so no
+        // mirrored check is needed there — this no-block path
+        // is the only one with a hardcoded `.new` shortcut that
+        // bypassed singleton resolution.
         //
         // Documented gap: `def self.new ... super ... end` still
         // hits the allocator via super only if Class's builtin
