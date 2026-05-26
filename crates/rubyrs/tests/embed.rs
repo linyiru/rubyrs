@@ -2359,6 +2359,68 @@ fn sprintf_radix_bigint_traps_via_pre_alloc_cap() {
 }
 
 #[test]
+fn sprintf_alt_form_suppresses_prefix_for_zero_value() {
+    // CRuby suppresses the alt-form prefix when the value is
+    // zero: `'%#x' % 0` → `"0"`, not `"0x0"`. Same for
+    // `'%#o' % 0` (`"0"`, not `"00"`), `'%#b' % 0` (`"0"`,
+    // not `"0b0"`). Pin both Int(0) and BigInt(0) paths plus
+    // the standard non-zero alt rendering as the negative
+    // half of the contract.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%#o' % 0\n\
+         puts '%#x' % 0\n\
+         puts '%#X' % 0\n\
+         puts '%#b' % 0\n\
+         puts '%#B' % 0\n\
+         puts '%#o' % 7\n\
+         puts '%#x' % 255",
+        "sprintf_alt_zero.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Zero values: no prefix.
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "0");
+    assert_eq!(lines[2], "0");
+    assert_eq!(lines[3], "0");
+    assert_eq!(lines[4], "0");
+    // Non-zero: prefix present.
+    assert_eq!(lines[5], "07");
+    assert_eq!(lines[6], "0xff");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_alt_form_suppresses_prefix_for_bigint_zero() {
+    // Same suppression rule applies to the BigInt(0) path —
+    // exercised only when bignum is on and BigInt(0) actually
+    // exists as a Value (normally demote-on-fit would convert
+    // it to Int(0) in user code, but the helper code-path
+    // still needs the check for hand-built BigInt zero values
+    // from FFI / preamble paths).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    // `2 ** 100 - 2 ** 100` materialises a BigInt subtraction
+    // that demotes to Int(0); use `(2 ** 100) % (2 ** 100)`
+    // for the same effect. Both paths route through the Int(0)
+    // arm in practice, so the meaningful coverage is shared
+    // with the sibling test above. This test just pins that
+    // the bignum profile produces the same output.
+    rt.eval(
+        "puts '%#x' % ((2 ** 100) % (2 ** 100))\n\
+         puts '%#o' % ((2 ** 100) % (2 ** 100))\n\
+         puts '%#b' % ((2 ** 100) % (2 ** 100))",
+        "sprintf_alt_bigint_zero.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    assert_eq!(out.trim(), "0\n0\n0");
+}
+
+#[test]
 fn sprintf_alt_form_with_zero_pad_keeps_prefix_before_zeros() {
     // Regression guard: pre-fix `'%#08x' % 255` produced
     // `00000xff` (zero-pad inserted before the `0x` prefix);

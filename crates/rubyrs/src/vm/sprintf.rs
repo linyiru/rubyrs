@@ -285,6 +285,12 @@ fn format_radix_any(
     use num_bigint::Sign;
     if let Value::BigInt(id) = arg {
         let b = heap.bigint(*id);
+        // CRuby suppresses the alt-form prefix for zero values:
+        // `'%#x' % 0`, `'%#o' % 0`, `'%#b' % 0` all render as
+        // just `"0"`, not `"0x0"` / `"00"` / `"0b0"`. Match that
+        // for both BigInt(0) and (downstream via the i64 path)
+        // Int(0).
+        let alt = alt && b.sign() != Sign::NoSign;
         // Pre-allocation cap check: `to_str_radix(2)` on a 10M-bit
         // BigInt allocates a ~10 MB string in one go. Estimate
         // the rendered length from the BigInt's bit count and
@@ -355,6 +361,11 @@ fn format_radix_any(
 }
 
 fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {
+    // CRuby suppresses the alt-form prefix for `n == 0` (`'%#x' % 0`
+    // → `"0"`, not `"0x0"`). Apply once before the prefix lookup
+    // so both the negative and non-negative arms below see the
+    // adjusted flag.
+    let alt = alt && n != 0;
     let prefix: &str = if !alt { "" } else {
         match radix { 16 => if upper { "0X" } else { "0x" }, 8 => "0", 2 => if upper { "0B" } else { "0b" }, _ => "" }
     };
