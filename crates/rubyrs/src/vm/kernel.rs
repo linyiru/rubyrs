@@ -405,6 +405,7 @@ impl Vm {
                                         singleton_methods: std::cell::RefCell::new(std::collections::HashMap::new()),
                                         superclass: std::cell::RefCell::new(None),
                                         includes: std::cell::RefCell::new(Vec::new()),
+                                        prepends: std::cell::RefCell::new(Vec::new()),
                                         class_vars: std::cell::RefCell::new(std::collections::HashMap::new()),
                                         ivars: std::cell::RefCell::new(std::collections::HashMap::new()),
                                         #[cfg(feature = "cext")]
