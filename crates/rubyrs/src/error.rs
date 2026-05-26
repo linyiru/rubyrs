@@ -1,8 +1,7 @@
-// Error and span types. The Span flow is wired all the way through (Spanned<Expr>
-// in `ast`, `op_spans` on Proto), but the panic→Trap migration happens in P0-B-2.
-// These items are referenced by `bytecode` and `compiler` indirectly via Span;
-// the rest will become live once panics are rewritten to throw a Trap.
-#![allow(dead_code)]
+// Error and span types. The Span flow is wired all the way through
+// (Spanned<Expr> in `ast`, `op_spans` on Proto); the panic→Trap
+// migration that introduced the original `#![allow(dead_code)]`
+// completed in P0-B-2 and the items are all live now.
 
 use std::rc::Rc;
 

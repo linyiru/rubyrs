@@ -128,13 +128,13 @@ fn preprocess_regex_pattern(src: &str) -> std::borrow::Cow<'_, str> {
             let close = [opener, b']'];
             // Search forward for the closer.
             let mut j = i + 2;
-            while j + 1 < bytes.len() && &bytes[j..j + 2] != close {
+            while j + 1 < bytes.len() && bytes[j..j + 2] != close {
                 j += 1;
             }
             // Copy `[` through the closing `]` if found, else
             // bail out and just copy the `[` to let the regex
             // crate report its own error.
-            if j + 1 < bytes.len() && &bytes[j..j + 2] == close {
+            if j + 1 < bytes.len() && bytes[j..j + 2] == close {
                 out.extend_from_slice(&bytes[i..j + 2]);
                 i = j + 2;
                 continue;
