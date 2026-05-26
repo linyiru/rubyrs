@@ -110,12 +110,26 @@ if ! command -v wasm-opt >/dev/null 2>&1; then
 else
   OPT_WASM="$PERF_TMPDIR/rubyrs.opt.wasm"
   echo "[wasm_check] wasm-opt -Oz $WASM -> $OPT_WASM"
-  wasm-opt -Oz "$WASM" -o "$OPT_WASM" >/dev/null
+  # wasm-opt failure is a SETUP error (broken build tool, bad
+  # input wasm, etc.), not a perf regression. Catch and exit 2
+  # per the documented 0/1/2 contract instead of letting
+  # `set -e` propagate wasm-opt's exit code (typically 1, which
+  # would be misclassified as "budget exceeded").
+  if ! wasm-opt -Oz "$WASM" -o "$OPT_WASM" >/dev/null; then
+    echo "wasm_check: wasm-opt -Oz failed on $WASM" >&2
+    exit 2
+  fi
 fi
 
 CWASM="$PERF_TMPDIR/rubyrs.cwasm"
 echo "[wasm_check] wasmtime compile $OPT_WASM -> $CWASM"
-wasmtime compile "$OPT_WASM" -o "$CWASM" >/dev/null
+# wasmtime compile failure (incompatible subcommand, malformed
+# wasm, etc.) is likewise a setup error — same 0/1/2 contract
+# reasoning as the wasm-opt arm above.
+if ! wasmtime compile "$OPT_WASM" -o "$CWASM" >/dev/null; then
+  echo "wasm_check: wasmtime compile failed on $OPT_WASM" >&2
+  exit 2
+fi
 
 # `/usr/bin/time` parsing differs by platform (same shape as the
 # host check.sh). Only wall is consumed here; RSS lines are ignored.
