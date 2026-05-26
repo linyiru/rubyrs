@@ -164,6 +164,17 @@ jobs:
           fi
           echo "WASI_SDK_PATH=/opt/wasi-sdk-24.0-x86_64-linux" >> $GITHUB_ENV
 
+      - name: Install binaryen (wasm-opt)
+        # `perf/wasm_check.sh` runs `wasm-opt -Oz` on the built
+        # rubyrs.wasm before the AOT-compile step. Without binaryen
+        # the script falls back to skipping the -Oz pass (PASS still
+        # works), but having it installed makes the CI cwasm match
+        # the shipping shape and cuts ~13% off the cwasm size.
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y binaryen
+
       - name: Install wasmtime
         # End-to-end smoke (next step) needs a wasi runtime. Pin a
         # specific release + verify a sha256 over the downloaded
@@ -215,12 +226,15 @@ jobs:
 
       - name: Perf gate (wasm32-wasip1 wall time)
         # Fourth leg of the wasm ladder (compile → smoke → matrix →
-        # perf). Runs each workload in `perf/wasm_baselines.tsv`
-        # three times under wasmtime, takes the min wall across
-        # the runs, and fails if it exceeds the row's budget. Same
-        # absolute-baseline policy as `perf/check.sh` (the native
-        # gate); see `perf/wasm_baselines.tsv` for the bumping
-        # etiquette and calibration sources.
+        # perf). The script runs wasm-opt -Oz on the built .wasm
+        # (size pass), wasmtime-compiles to .cwasm (AOT — no JIT
+        # cost per invocation), then times each workload in
+        # `perf/wasm_baselines.tsv` three times under
+        # `wasmtime run --allow-precompiled`, takes min wall, and
+        # fails if it exceeds the row's budget. Same absolute-
+        # baseline policy as `perf/check.sh` (the native gate);
+        # `perf/wasm_baselines.tsv` documents bumping etiquette
+        # and the calibration sources.
         run: bash perf/wasm_check.sh
 
   panic-budget:

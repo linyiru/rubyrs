@@ -62,14 +62,53 @@ if [[ ! -x /usr/bin/time ]]; then
   exit 2
 fi
 
+# Build pipeline for the artifact the gate actually times:
+#
+#   raw .wasm  --[wasm-opt -Oz]-->  .opt.wasm  --[wasmtime compile]-->  .cwasm
+#                  (optional)                          (always)
+#
+# Layered for two reasons:
+#   1. wasm-opt -Oz shrinks the deliverable binary ~21% (1.48 MB →
+#      1.17 MB locally) and is what an embedder downstream would
+#      want to ship; running it here keeps the cwasm we measure
+#      against the realistic shipping shape.
+#   2. `wasmtime compile` AOT-compiles to a `.cwasm` that wasmtime
+#      can `run --allow-precompiled` against — bypasses JIT for
+#      every measured invocation, so the gate fences the "cold
+#      start with pre-compiled module" path (the headline cold-
+#      start story) rather than the every-invocation JIT cost.
+#
+# Local PoC: this combo drops the wasmtime startup_floor from
+# ~20 ms steady (raw .wasm) to ~10 ms (.cwasm) — and from a
+# 200 ms first-run cold to ~10 ms (no more per-run JIT). See
+# `perf/wasm_baselines.tsv` for the budget rationale.
+#
+# wasm-opt is OPTIONAL — if `wasm-opt` isn't on PATH the script
+# proceeds with the raw .wasm. Skipping it costs ~10% of the
+# binary-size win but doesn't break the gate.
+if ! command -v wasm-opt >/dev/null 2>&1; then
+  echo "wasm_check: wasm-opt not on PATH — skipping the -Oz size pass (install \`binaryen\` to enable)"
+  OPT_WASM="$WASM"
+else
+  OPT_WASM="${WASM%.wasm}.opt.wasm"
+  echo "[wasm_check] wasm-opt -Oz $WASM -> $OPT_WASM"
+  wasm-opt -Oz "$WASM" -o "$OPT_WASM" >/dev/null
+fi
+
+CWASM="${OPT_WASM%.wasm}.cwasm"
+echo "[wasm_check] wasmtime compile $OPT_WASM -> $CWASM"
+wasmtime compile "$OPT_WASM" -o "$CWASM" >/dev/null
+
 # `/usr/bin/time` parsing differs by platform (same shape as the
 # host check.sh). Only wall is consumed here; RSS lines are ignored.
+# All wasmtime invocations below use `--allow-precompiled` so the
+# AOT `.cwasm` path is exercised end-to-end.
 PLATFORM="$(uname -s)"
 measure_wall_ms() {
   local script="$1"
   local out rc=0
   if [[ "$PLATFORM" == "Darwin" ]]; then
-    out=$(LC_ALL=C /usr/bin/time wasmtime run --dir=. "$WASM" "$script" 2>&1 >/dev/null) || rc=$?
+    out=$(LC_ALL=C /usr/bin/time wasmtime run --allow-precompiled --dir=. "$CWASM" "$script" 2>&1 >/dev/null) || rc=$?
     if (( rc != 0 )); then
       echo "wasm_check: workload \`$script\` exited with status $rc under wasmtime" >&2
       [[ -n "$out" ]] && echo "$out" | sed 's/^/  | /' >&2
@@ -91,7 +130,7 @@ measure_wall_ms() {
       printf "%d\n", ms;
     }'
   else
-    out=$(LC_ALL=C /usr/bin/time -v wasmtime run --dir=. "$WASM" "$script" 2>&1 >/dev/null) || rc=$?
+    out=$(LC_ALL=C /usr/bin/time -v wasmtime run --allow-precompiled --dir=. "$CWASM" "$script" 2>&1 >/dev/null) || rc=$?
     if (( rc != 0 )); then
       echo "wasm_check: workload \`$script\` exited with status $rc under wasmtime" >&2
       [[ -n "$out" ]] && echo "$out" | sed 's/^/  | /' >&2

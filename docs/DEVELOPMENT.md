@@ -171,6 +171,22 @@ native `perf/check.sh`):
 bash perf/wasm_check.sh
 ```
 
+The script builds an optimised AOT artifact before timing:
+
+  raw `.wasm`  →  `wasm-opt -Oz`  →  `wasmtime compile`  →  `.cwasm`
+
+and runs every workload via `wasmtime run --allow-precompiled`.
+Local M-series numbers with that pipeline:
+
+  - `startup_floor.rb` — ~7-10 ms (no JIT step; raw `.wasm` was
+    ~20 ms steady / ~200 ms first-run cold)
+  - `fizzbuzz_1m.rb` — ~510 ms (no measurable change vs raw)
+
+Install `binaryen` (`brew install binaryen` / `apt install binaryen`)
+to enable the `-Oz` size pass; the script falls back to the raw
+`.wasm` when `wasm-opt` isn't on PATH (gate still PASSes, just
+without the binary-size benefit).
+
 Budgets in `perf/wasm_baselines.tsv`. Same absolute-baseline
 policy as the host gate: bump a budget with a comment explaining
 *what grew*; never silently to make CI green.
@@ -178,10 +194,18 @@ policy as the host gate: bump a budget with a comment explaining
 Notes:
 - The `build.rs` ships a tiny `__wasi_init_tp` no-op stub so Rust std's
   threading init resolves at link time.
-- The resulting `.wasm` is ~1.4 MB on Rust 1.95 / wasi-sdk 24 (stripped
-  release). Cold start under wasmtime stays under ~20 ms on Apple
-  Silicon. The size has grown vs. earlier PoC numbers as more of the
-  Ruby subset landed; the Bignum / require-relative / Symbol features
+- Binary shapes (Rust 1.95 / wasi-sdk 24 / wasmtime 45, Apple
+  M-series local):
+    - raw `.wasm` (stripped release): ~1.48 MB; wasmtime cold
+      start ~200 ms first-run / ~20 ms steady
+    - `wasm-opt -Oz` `.wasm`: ~1.17 MB (-21% — the shipping shape
+      if you're distributing the .wasm)
+    - `wasmtime compile` `.cwasm` (AOT, from optimised .wasm):
+      ~4.4 MB on disk (machine code, not bytecode); cold start
+      ~7-10 ms with `--allow-precompiled` (no JIT cost per
+      invocation — this is what the perf gate measures)
+  The size has grown vs. earlier PoC numbers as more of the Ruby
+  subset landed; the Bignum / require-relative / Symbol features
   each pulled in additional code paths.
 - `std::process::id()` panics on wasm32-wasip1 (wasi has no PID
   concept). `crates/rubyrs/src/main.rs` cfg-gates the call so the
