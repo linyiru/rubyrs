@@ -6,9 +6,10 @@
 #      (matches CRuby; was silent-nil before).
 #   2. Qualified reads (`Foo::Bar`) on a defined module but
 #      undefined inner constant raise NameError.
-#   3. The op-write `||=` / `&&=` lazy-init idiom still works
-#      — the read position uses a silent-nil variant so
+#   3. The op-write `||=` lazy-init idiom still works — the
+#      read position uses a silent-nil variant so
 #      `UNSET ||= default` initialises rather than raising.
+#      `&&=` and `+=` stay strict (CRuby parity).
 #
 # Without these contracts pinned, regressions show up as
 # `nil.new` / `nil.keys` confusion at the call site rather
@@ -60,6 +61,25 @@ puts LIVE_CONST                                 # "updated"
 # CRuby raises NameError before the `+` ever runs. We match.
 begin
   COUNTER += 1
+rescue NameError => e
+  puts e.message
+end
+
+# --- (3c) ConstantPath op-writes (`Foo::Bar ||= ...` etc) ---
+# Same per-op rules as bare constants: only `||=` is silent,
+# `&&=` and `+=` raise. Pin the path form independently because
+# it's a separate AST node and has its own translation arm.
+module Ns
+end
+Ns::LAZY ||= "path-init"
+puts Ns::LAZY                                   # "path-init"
+begin
+  Ns::MISSING_AND &&= "never"
+rescue NameError => e
+  puts e.message
+end
+begin
+  Ns::MISSING_PLUS += 1
 rescue NameError => e
   puts e.message
 end

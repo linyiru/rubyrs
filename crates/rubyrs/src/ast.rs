@@ -179,16 +179,14 @@ pub(crate) enum Expr {
     },
     SelfExpr,
     ConstRead(String),
-    /// Silent-nil variant of `ConstRead` — used only by the AST
-    /// translator for op-write read positions (`FOO ||= ...`,
-    /// `FOO &&= ...`, `FOO += ...`). CRuby's op-write semantics
-    /// either (a) special-case the read to not raise (for
-    /// `||=` / `&&=`), or (b) raise NameError on the read which
-    /// then never reaches the assignment (for `+=` and friends).
-    /// Our compiled form treats both alike — silent nil here so
-    /// the lazy-init idiom (`UNSET_CONST ||= default`) works;
-    /// the `+=` strict-read divergence is documented in SUBSET.md.
-    /// Emits `Op::LoadConstOrNil`.
+    /// Silent-nil variant of `ConstRead` — emitted ONLY for the
+    /// `||=` read position (`FOO ||= default` / `Foo::Bar ||=
+    /// default`). CRuby special-cases `||=` so the read returns
+    /// nil rather than raising NameError on an undefined LHS,
+    /// which is what makes the lazy-init idiom work. Every other
+    /// op-write (`&&=`, `+=`, ...) uses strict `ConstRead` and
+    /// raises NameError before the operator runs. Emits
+    /// `Op::LoadConstOrNil`.
     ConstReadOrNil(String),
     /// Constant write — covers both the bare `FOO = expr`
     /// (ConstantWriteNode) and the path form `Foo::Bar = expr`
@@ -1134,8 +1132,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // collapsed bare-name write doesn't get class_path-aliased
         // (the dynamic `obj::X += 1` was never meant to land in
         // the lexical scope).
+        //
+        // Strict read — matches the bare `FOO += 1` arm above:
+        // CRuby raises NameError before the operator runs on an
+        // undefined constant.
         let make = |name: String, abs: bool| {
-            let read = sp(node, Expr::ConstReadOrNil(name.clone()));
+            let read = sp(node, Expr::ConstRead(name.clone()));
             let rhs = sp(node, Expr::Call {
                 receiver: Some(Box::new(read)),
                 name: op.clone(),
@@ -1170,8 +1172,11 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_constant_path_and_write_node() {
         let target = n.target();
         let absolute = is_constant_path_absolute(&target.as_node());
+        // Strict read — matches the bare `FOO &&= ...` arm above:
+        // CRuby has no lazy-init shortcut for `&&=`; undefined
+        // constants raise NameError on the read.
         let make = |name: String, abs: bool| {
-            let read = sp(node, Expr::ConstReadOrNil(name.clone()));
+            let read = sp(node, Expr::ConstRead(name.clone()));
             let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(&n.value()))));
             sp(node, Expr::And(Box::new(read), Box::new(write)))
         };

@@ -590,10 +590,11 @@ impl Vm {
             }
             Op::LoadConstOrNil(name_id) => {
                 // Silent-nil variant of `LoadConst`. See the op's
-                // doc comment in bytecode.rs — only AST op-write
-                // read positions emit this. Same ENV intercept
-                // because op-writes against ENV are syntactically
-                // legal (rare but possible).
+                // doc comment in bytecode.rs — only the AST `||=`
+                // read position emits this. No ENV intercept:
+                // `ENV ||= ...` is not idiomatic, and any sane
+                // ENV access goes through `LoadConst` where the
+                // intercept lives.
                 let v = if let Some(c) = self.classes.get(&name_id).cloned() {
                     Value::Class(c)
                 } else if let Some(v) = self.constants.get(&name_id).cloned() {
