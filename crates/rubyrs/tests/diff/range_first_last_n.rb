@@ -34,6 +34,19 @@ puts (5..1).last(2).inspect       # []
 puts (5...5).first(2).inspect     # []   exclusive, begin == end → empty
 puts (5...5).last(2).inspect      # []
 
+# i64::MIN boundary — exposes an off-by-one in the previous
+# `start = end_inc.saturating_sub(n_taken).saturating_add(1)`
+# shape, where `i64::MIN.saturating_sub(1)` clamps and the
+# subsequent `+1` produced `[i64::MIN + 1]` instead of
+# `[i64::MIN]`. `bi + (count - n_taken)` avoids the saturation
+# artifact. Constructed at runtime because Ruby literals don't
+# carry a clean `i64::MIN` token (would lex as `0 - 2**63` →
+# BigInt promotion). The subtraction here stays inside i64.
+neg_min = (-9223372036854775807) - 1
+puts neg_min                      # -9223372036854775808
+puts (neg_min..neg_min).last(1).inspect  # [-9223372036854775808]
+puts (neg_min..neg_min).first(1).inspect # [-9223372036854775808]
+
 # Endless range — first(n) generates n consecutive ints.
 puts (1..).first(0).inspect       # []
 puts (1..).first(3).inspect       # [1, 2, 3]

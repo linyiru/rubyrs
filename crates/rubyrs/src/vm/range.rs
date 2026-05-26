@@ -223,24 +223,32 @@ impl Vm {
                             }));
                         }
                         // Same `count`-capping rationale as `first(n)`
-                        // above. The slice ends at `end_inc` (one
-                        // before `ei` when exclusive) and starts at
-                        // `end_inc - n_taken + 1`. Both arithmetics
-                        // use `saturating_sub` / `saturating_add` so
-                        // an i64-edge range can't panic in debug
-                        // builds.
+                        // above. The slice starts at
+                        // `bi + (count - n_taken)` and walks `n_taken`
+                        // ints upward.
+                        //
+                        // Earlier shape computed `start` as
+                        // `end_inc.saturating_sub(n_taken).saturating_add(1)`,
+                        // which had an off-by-one at the i64::MIN
+                        // boundary: with `bi == ei == i64::MIN` and
+                        // `n_taken == 1`, `i64::MIN - 1` saturates to
+                        // `i64::MIN`, the `+ 1` then gives `i64::MIN + 1`,
+                        // and the result was `[i64::MIN + 1]` instead
+                        // of `[i64::MIN]`. The `bi + (count - n_taken)`
+                        // form is safe: `count - n_taken ≥ 0` by the
+                        // `n_taken = n.min(count)` cap, and
+                        // `bi + (count - n_taken) ≤ bi + count = ei + (1 or 0)`,
+                        // which fits in i64 as long as `ei` itself
+                        // does. `saturating_add` is paranoia in case
+                        // a future change pushes the bound.
                         let n_taken = (*n).min(count);
                         let n_safe = usize::try_from(n_taken).unwrap_or(usize::MAX);
                         let mut elems: Vec<Value> = Vec::with_capacity(n_safe);
-                        // `count == 0` (empty range, b > e) short-
-                        // circuits below — `end_inc` would underflow
-                        // on `ei - 1` for excl-empty otherwise.
                         if count == 0 {
                             let nid = self.heap.alloc(HeapObj::Array(elems));
                             return Ok(Some(Value::Array(nid)));
                         }
-                        let end_inc = if excl { ei.saturating_sub(1) } else { ei };
-                        let start = end_inc.saturating_sub(n_taken).saturating_add(1);
+                        let start = bi.saturating_add(count.saturating_sub(n_taken));
                         let mut v = start;
                         for _ in 0..n_safe {
                             elems.push(Value::Int(v));
