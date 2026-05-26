@@ -91,3 +91,61 @@ class G
   end
 end
 puts G.new.greet                 # "G: from-inc"
+
+# Transitive include: `module M; include N; end; class H; include M; end`
+# — H#foo should find N#foo and `is_a?(N)` should be true.
+module N
+  def trans; "N"; end
+end
+module ContainsN
+  include N
+end
+class H
+  include ContainsN
+end
+puts H.new.trans                 # "N"
+puts H.new.is_a?(N)              # true
+
+# Transitive super: `module M; include N; def foo; super; end; end`
+# — super from M#foo walks past M to N.
+module BaseSuper
+  def step; "base"; end
+end
+module MidSuper
+  include BaseSuper
+  def step; "mid:" + super; end
+end
+class TopSuper
+  include MidSuper
+end
+puts TopSuper.new.step           # "mid:base"
+
+# `super(*args)` (ApplySuper opcode) goes through the same shared
+# ancestor walk as plain `super` — was an independent bug before.
+module SplatBase
+  def greet(*args); "base:#{args.inspect}"; end
+end
+class SplatChild
+  include SplatBase
+  def greet(*args)
+    "child:#{args.inspect} → " + super(*args)
+  end
+end
+puts SplatChild.new.greet(1, 2, 3)
+
+# Prepend-on-prepend: `module Outer; prepend Inner; end; class T; prepend Outer; end`
+# Transitive prepends should resolve via the prepend chain too.
+module Inner
+  def call; "Inner"; end
+end
+module Outer
+  prepend Inner
+  def call; "Outer"; end
+end
+class T
+  prepend Outer
+  def call; "T"; end
+end
+# Chain at T: [Inner, Outer, T, ...]. Inner is the first match.
+puts T.new.call                  # "Inner"
+puts T.new.is_a?(Inner)          # true (prepend-of-prepend reachability)

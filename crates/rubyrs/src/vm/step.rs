@@ -751,122 +751,13 @@ impl Vm {
                         msg: format!("ApplySuper expected Array args, got {}", other.type_name()),
                     })),
                 };
-                let frame = self.frames.last().expect("ICE: ApplySuper no frame");
-                let self_val = frame.self_val.clone();
-                let defining = match frame.defining_class.clone() {
-                    Some(c) => c,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: "super called outside of method".to_string(),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
-                let parent = match defining.superclass.borrow().clone() {
-                    Some(p) => p,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: format!("super: no superclass method `{}'",
-                                self.interner.resolve(name_id)),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
-                let m = match self.lookup_method_uncached(&parent, name_id) {
-                    Some(m) => m,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: format!("super: no superclass method `{}'",
-                                self.interner.resolve(name_id)),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
+                let (m, self_val) = self.super_lookup(name_id)?;
                 self.invoke_method(m, self_val, args)?;
             }
             Op::Super(name_id, argc) => {
                 let split = self.stack.len() - argc as usize;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
-                let frame = self.frames.last().expect("ICE: Super no frame");
-                let self_val = frame.self_val.clone();
-                let defining = match frame.defining_class.clone() {
-                    Some(c) => c,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: "super called outside of method".to_string(),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
-                // CRuby super semantics: walk the receiver's class
-                // ancestor chain, find where the *defining class*
-                // sits, then resume lookup from the next ancestor.
-                // The old shape (defining.superclass + recursive
-                // lookup) handled plain inheritance but not the
-                // included/prepended-module cases — a module has no
-                // real superclass, so `super` from inside an
-                // included or prepended `def` would raise even
-                // though CRuby finds the next-in-chain method.
-                //
-                // Cost: builds a Vec of Rc<Class> per super call.
-                // `super` isn't a hot path in any rubyrs spec we
-                // run today; if profiling later disagrees, cache
-                // the chain on the Class or the frame.
-                // Use `Heap::class_of` (returns singleton class if
-                // present), NOT `Vm::class_of` which reports the
-                // real user-visible class. Without this, super from
-                // inside a `def obj.foo` singleton method can't
-                // find `defining` (the singleton class) in the
-                // ancestor walk and fails to find the original
-                // class chain. `singleton_method_spec.rb` covers
-                // this case.
-                let recv_cls = match &self_val {
-                    Value::Object(id) => self.heap.class_of(*id),
-                    other => match self.class_of(other) {
-                        Value::Class(c) => c,
-                        _ => {
-                            return Err(self.trap(RubyError::NoMethodError {
-                                method: format!("super: no superclass method `{}'",
-                                    self.interner.resolve(name_id)),
-                                recv_type: other.type_name(),
-                            }));
-                        }
-                    },
-                };
-                let mut ancs: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
-                let mut cur = recv_cls;
-                loop {
-                    for pre in cur.prepends.borrow().iter() {
-                        ancs.push(pre.clone());
-                    }
-                    ancs.push(cur.clone());
-                    for inc in cur.includes.borrow().iter() {
-                        ancs.push(inc.clone());
-                    }
-                    let parent = cur.superclass.borrow().clone();
-                    match parent {
-                        Some(p) => cur = p,
-                        None => break,
-                    }
-                }
-                let start_idx = ancs.iter()
-                    .position(|a| std::rc::Rc::ptr_eq(a, &defining))
-                    .map(|i| i + 1);
-                let m = start_idx
-                    .and_then(|i| ancs.get(i..))
-                    .and_then(|tail| tail.iter().find_map(|a| {
-                        a.methods.borrow().get(&name_id).cloned()
-                    }));
-                let m = match m {
-                    Some(m) => m,
-                    None => {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: format!("super: no superclass method `{}'",
-                                self.interner.resolve(name_id)),
-                            recv_type: self_val.type_name(),
-                        }));
-                    }
-                };
+                let (m, self_val) = self.super_lookup(name_id)?;
                 self.invoke_method(m, self_val, args)?;
             }
             Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw) => {

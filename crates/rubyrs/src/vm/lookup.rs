@@ -110,9 +110,15 @@ impl Vm {
     /// `module M; include N; end` still resolves `N`'s methods).
     #[inline]
     pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
-        // Recursive helper that walks one node's own methods + its
-        // includes (transitively). Returns `Some` on the first hit.
+        // Recursive helper that walks one node's prepends, own
+        // methods, then includes (transitively, in dispatch order).
+        // Returns `Some` on the first hit.
         fn walk_module(m: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+            for pre in m.prepends.borrow().iter() {
+                if let Some(found) = walk_module(pre, name_id) {
+                    return Some(found);
+                }
+            }
             if let Some(found) = m.methods.borrow().get(&name_id).cloned() {
                 return Some(found);
             }
@@ -125,11 +131,8 @@ impl Vm {
         }
         let mut current = cls.clone();
         loop {
-            for pre in current.prepends.borrow().iter() {
-                if let Some(found) = walk_module(pre, name_id) {
-                    return Some(found);
-                }
-            }
+            // `walk_module` already walks prepends → own → includes
+            // at each level, so no duplicate prepends scan here.
             if let Some(m) = walk_module(&current, name_id) {
                 return Some(m);
             }
@@ -321,6 +324,15 @@ impl Vm {
 pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     fn walks_through(node: &Rc<Class>, target: &Rc<Class>) -> bool {
         if Rc::ptr_eq(node, target) { return true; }
+        // Recurse through both prepends and includes — CRuby
+        // `is_a?(M)` is true for any module reachable via either
+        // chain transitively. Without the prepend recursion,
+        // `module M; prepend N; end; class C; include M; end`
+        // would report `c.is_a?(N) == false` even though
+        // dispatch finds N's methods.
+        for pre in node.prepends.borrow().iter() {
+            if walks_through(pre, target) { return true; }
+        }
         for inc in node.includes.borrow().iter() {
             if walks_through(inc, target) { return true; }
         }
@@ -328,19 +340,110 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     }
     let mut current = child.clone();
     loop {
-        // Recursively walk included AND prepended modules so
-        // transitive ancestors resolve. Matches CRuby's rescue-
-        // filter behaviour and the `is_a?` / `kind_of?` predicates;
-        // `obj.is_a?(M)` is true for both included and prepended
-        // `M` (and their own transitive includes).
-        for pre in current.prepends.borrow().iter() {
-            if walks_through(pre, ancestor) { return true; }
-        }
         if walks_through(&current, ancestor) { return true; }
         let parent = current.superclass.borrow().clone();
         match parent {
             Some(p) => current = p,
             None => return false,
+        }
+    }
+}
+
+/// Flatten a class's ancestor chain into a Vec in CRuby
+/// dispatch order: at each level — prepends (transitive) → the
+/// class/module itself → includes (transitive) → superclass.
+/// Transitive means a prepended/included module's own
+/// prepends/includes are walked too.
+///
+/// Used by `super` (Op::Super / Op::ApplySuper) to find the
+/// next ancestor after `defining_class`. Walking the chain
+/// every super call is fine — super isn't a hot path in any
+/// rubyrs spec we run today.
+pub(crate) fn flatten_ancestors(cls: &Rc<Class>) -> Vec<Rc<Class>> {
+    fn flatten_module(m: &Rc<Class>, out: &mut Vec<Rc<Class>>) {
+        for pre in m.prepends.borrow().iter() {
+            flatten_module(pre, out);
+        }
+        out.push(m.clone());
+        for inc in m.includes.borrow().iter() {
+            flatten_module(inc, out);
+        }
+    }
+    let mut out: Vec<Rc<Class>> = Vec::new();
+    let mut current = cls.clone();
+    loop {
+        for pre in current.prepends.borrow().iter() {
+            flatten_module(pre, &mut out);
+        }
+        out.push(current.clone());
+        for inc in current.includes.borrow().iter() {
+            flatten_module(inc, &mut out);
+        }
+        let parent = current.superclass.borrow().clone();
+        match parent {
+            Some(p) => current = p,
+            None => return out,
+        }
+    }
+}
+
+impl Vm {
+    /// Shared `super` lookup for both `Op::Super` (positional args)
+    /// and `Op::ApplySuper` (splat-assembled args). Walks the
+    /// receiver's class ancestor chain (prepends + own + includes
+    /// transitively, per `flatten_ancestors`), finds where the
+    /// frame's `defining_class` sits, and resumes lookup from the
+    /// next ancestor.
+    ///
+    /// Receiver-class lookup uses `Heap::class_of` (returns the
+    /// singleton class if present) so a `def obj.foo` singleton
+    /// method's `super` still threads through the singleton →
+    /// real-class chain — `singleton_method_spec.rb` covers that.
+    /// At each ancestor we scan only `methods.borrow()` because the
+    /// ancestor list is already fully flattened (`include`d /
+    /// `prepend`ed modules appear as their own entries).
+    pub(crate) fn super_lookup(&mut self, name_id: SymId)
+        -> Result<(Rc<crate::value::Method>, Value), crate::error::Trap>
+    {
+        let frame = self.frames.last().expect("ICE: super with empty frames");
+        let self_val = frame.self_val.clone();
+        let defining = match frame.defining_class.clone() {
+            Some(c) => c,
+            None => {
+                return Err(self.trap(crate::error::RubyError::NoMethodError {
+                    method: "super called outside of method".to_string(),
+                    recv_type: self_val.type_name(),
+                }));
+            }
+        };
+        let recv_cls = match &self_val {
+            Value::Object(id) => self.heap.class_of(*id),
+            other => match self.class_of(other) {
+                Value::Class(c) => c,
+                _ => {
+                    return Err(self.trap(crate::error::RubyError::NoMethodError {
+                        method: format!("super: no superclass method `{}'",
+                            self.interner.resolve(name_id)),
+                        recv_type: other.type_name(),
+                    }));
+                }
+            },
+        };
+        let ancs = flatten_ancestors(&recv_cls);
+        let m = ancs.iter()
+            .position(|a| Rc::ptr_eq(a, &defining))
+            .map(|i| i + 1)
+            .and_then(|i| ancs.get(i..))
+            .and_then(|tail| tail.iter().find_map(|a| {
+                a.methods.borrow().get(&name_id).cloned()
+            }));
+        match m {
+            Some(m) => Ok((m, self_val)),
+            None => Err(self.trap(crate::error::RubyError::NoMethodError {
+                method: format!("super: no superclass method `{}'",
+                    self.interner.resolve(name_id)),
+                recv_type: self_val.type_name(),
+            })),
         }
     }
 }
