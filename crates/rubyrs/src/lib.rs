@@ -6,6 +6,12 @@
 //! use rubyrs::{Runtime, Value};
 //!
 //! let mut rt = Runtime::new();
+//! // Per ADR 0017, `Runtime::new()` defaults its stdout sink to
+//! // `std::io::sink()`. Wire it up to wherever the host wants
+//! // script output to land before evaluating anything — the CLI
+//! // binary uses process stdout; library embedders typically
+//! // capture into a buffer.
+//! rt.set_stdout(Box::new(std::io::stdout()));
 //! rt.eval(r#"puts "hello, world""#, "inline").unwrap();
 //!
 //! // Register a host function callable from Ruby:
