@@ -1018,6 +1018,61 @@ won't be fixed until we have a clear use case demanding parity.
   `"ICE: ..."` to make the distinction explicit when one fires.
 
 ### Fixed
+- **GC rooting holes around `maybe_gc` — 6 latent sites flushed
+  out by the first all-green STRESS_GC=1 CI run.** Master CI's
+  STRESS_GC=1 step had been blocked by the prior-stage panic-
+  budget and clippy red until the CI unbreak below cleared the
+  gate; once it could run, three rounds of investigation found
+  six sites all sharing one structural bug: a heap-bearing
+  `Value` popped from the operand stack lives only in a Rust
+  local across an intervening `self.maybe_gc()`, and is not in
+  any GC root set (`self.stack`, `self.pinned`, frames'
+  `locals`, etc.). Under STRESS_GC=1 the slot gets swept and
+  the subsequent `heap.alloc` reuses it, leaving the new heap
+  object referencing a dangling ObjId — surfaces as
+  `heap.rs ICE: class_of called on non-Object slot` or stack-
+  overflow in `to_inspect` (self-referential slot loop). The
+  pattern, all known sites, three mitigation options, and the
+  recommended next step are written up as a self-contained
+  brief in [#90](https://github.com/linyiru/rubyrs/issues/90)
+  for systematic follow-up.
+  - **`Object#method(:name)` + `invoke_block` rest-slot path**
+    (`86db73d`). The first arm holds the recv as a Rust local
+    across `maybe_gc` before alloc'ing the BoundMethod; the
+    second pops `block_id` off the operand stack before
+    pushing the new frame whose locals would have rooted the
+    captured Vec. Wrapped both with `PinGuard`. Repro fixture:
+    `proc_curry_compose.rb` under `STRESS_GC=1` — fails at
+    `(succ >> m).(4)` where `m = Squared.new.method(:call)`.
+  - **`Array#combination` / `Array#permutation` / `String#scan`
+    capture-group accumulator Vecs** (`f2c3538`). Each builds
+    a result via a Rust-local `Vec<Value>` where every
+    iteration `heap.alloc`'s a fresh sub-Array and pushes its
+    ObjId in; the wrapping result Array isn't allocated until
+    the loop finishes, so under STRESS_GC=1 every prior sub-
+    Array gets swept on the next iteration. Slot reuse on
+    subsequent allocations made the final result self-
+    referential, overflowing the stack at `to_inspect`. Fix:
+    pin each sub-Array as it's pushed into the accumulator;
+    `PinGuard` Drop pops them all on return. Repro fixtures:
+    `array_combinatorics.rb` (combination + permutation paths)
+    and `string_scan.rb` (capture-group path; no-capture
+    branch builds Rc-Strings and was already safe).
+  - **`UnboundMethod#bind(receiver)`** (`5946caa`). Same
+    pattern as `Object#method`: target value from `args` is a
+    Rust local across `maybe_gc`. PR #85's
+    `kernel_instance_method.rb` is the first fixture to
+    stress this arm under STRESS_GC=1 — went undetected in
+    the previous round because the earlier sweep's grep
+    filter was too aggressive and dropped the failure line.
+    Same `PinGuard`-around-alloc fix.
+  - **Companion**: same commit `5946caa` also gates the
+    `use super::PinGuard;` import in `vm/string.rs` behind
+    `cfg(feature = "regex")`. The PinGuard reference there
+    sits entirely inside the `("scan", [Value::Regex(...)])`
+    arm; without the gate `--no-default-features` (the
+    wasm32-wasip1 build shape) trips `-D warnings` on the
+    unused import.
 - **CI unbreak — clippy, panic budget, wasm dead_code.**
   Master CI was red on four independent gates after the
   `break/next/ensure`, global-variable, op-write, `require .rb`,
