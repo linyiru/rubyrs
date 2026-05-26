@@ -31,10 +31,16 @@ cd "$WORKSPACE_ROOT"
 
 # Sanity-check toolchain presence so failures land on a useful
 # message rather than a confusing rustc / cargo error mid-run.
-if ! command -v wasmtime >/dev/null 2>&1; then
-    echo "smoke.sh: wasmtime not on PATH — install from https://wasmtime.dev/" >&2
-    exit 1
-fi
+# Each tool check has to come BEFORE the tool's invocation: with
+# `set -e`, a bare `rustup target list ...` on a host without
+# rustup installed would error out as "command not found" — not
+# the actionable message we want.
+for cmd in wasmtime rustup cargo; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "smoke.sh: $cmd not on PATH — see docs/DEVELOPMENT.md for setup" >&2
+        exit 1
+    fi
+done
 if ! rustup target list --installed | grep -qx wasm32-wasip1; then
     echo "smoke.sh: wasm32-wasip1 target not installed — \`rustup target add wasm32-wasip1\`" >&2
     exit 1
@@ -58,13 +64,17 @@ echo "[smoke.sh] $WASM built ($(wc -c < "$WASM") bytes)"
 
 # Capture under the same working dir wasmtime needs --dir for.
 # Using --dir=. is sufficient since the fixture is read by path
-# relative to the workspace root.
+# relative to the workspace root. Write stdout to a tempfile +
+# `cmp` so the comparison is byte-for-byte (command substitution
+# would strip trailing newlines and could mask a real divergence).
+ACTUAL_FILE="$(mktemp -t rubyrs-wasm-smoke.XXXXXX)"
+trap 'rm -f "$ACTUAL_FILE"' EXIT
 echo "[smoke.sh] wasmtime run $SMOKE_RB_REL"
-ACTUAL="$(wasmtime run --dir=. "$WASM" "$SMOKE_RB_REL")"
+wasmtime run --dir=. "$WASM" "$SMOKE_RB_REL" > "$ACTUAL_FILE"
 
-if [ "$ACTUAL" != "$(cat "$EXPECTED")" ]; then
+if ! cmp -s "$ACTUAL_FILE" "$EXPECTED"; then
     echo "[smoke.sh] FAIL — stdout diverged from expected:" >&2
-    diff <(echo "$ACTUAL") "$EXPECTED" >&2 || true
+    diff -u "$EXPECTED" "$ACTUAL_FILE" >&2 || true
     exit 1
 fi
 
