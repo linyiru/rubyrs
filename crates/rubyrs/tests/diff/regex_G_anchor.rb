@@ -57,6 +57,15 @@ puts matches.inspect                             # [[" coding: utf-8 "], [" othe
 puts $1                                          # k
 puts $2                                          # v
 
+# --- `\G` inside a character class — literal G, NOT stripped ---
+# `/[\G]/` is "character class containing G" in every regex
+# dialect. The preprocessor must NOT strip `\G` inside `[...]`
+# or the class would silently change behaviour (empty class,
+# regex compile error, or collapse with neighbours).
+puts "XYZ" =~ /[\G]/                            # nil  (no G in XYZ)
+puts ("GHI" =~ /[\G]/)                          # 0    (G at offset 0)
+puts ("ABCG" =~ /[\G]/)                         # 3    (G at offset 3)
+
 # --- `\G` inside an alternation / grouping ---
 # Mirror lib/erb/compiler.rb:460's other shape:
 #   /\G(?:<%#(.*)%>|%#(.*)\n)/

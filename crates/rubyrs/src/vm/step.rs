@@ -42,15 +42,31 @@ use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm}
 /// SyntaxError. Adding translations is per-feature on demand.
 #[cfg(feature = "regex")]
 fn preprocess_regex_pattern(src: &str) -> String {
+    // Tracks character-class depth so `\G` is only stripped when
+    // it's the Onigmo anchor (outside any `[...]`). Inside a
+    // character class — `/[\G]/` — `\G` is a literal `G` in
+    // every regex dialect, and dropping the `\\G` would change
+    // it to an empty character class (regex compile error) or
+    // collapse it with neighbours.
     let mut out = String::with_capacity(src.len());
     let mut chars = src.chars().peekable();
+    let mut in_class = false;
     while let Some(c) = chars.next() {
         if c == '\\' {
             if let Some(&next) = chars.peek() {
-                // `\G` → drop. Other escapes (`\d`, `\s`, `\\`,
-                // `\.`, ...) pass through verbatim.
+                // `\G` outside a char class → drop entirely
+                // (Onigmo's match-at-last-position anchor; the
+                // Rust regex crate has no equivalent).
+                // `\G` inside a char class → CRuby/Onigmo treat
+                // it as a literal `G`, but the Rust regex crate
+                // rejects the escape sequence verbatim. Translate
+                // to bare `G` so `/[\G]/` becomes `/[G]/` —
+                // semantically identical to CRuby's reading.
                 if next == 'G' {
                     chars.next();
+                    if in_class {
+                        out.push('G');
+                    }
                     continue;
                 }
                 out.push(c);
@@ -58,6 +74,15 @@ fn preprocess_regex_pattern(src: &str) -> String {
                 chars.next();
                 continue;
             }
+        }
+        // Character-class bracket tracking. Only the outermost
+        // `[` opens; nested `[` (inside POSIX classes like
+        // `[[:alpha:]]`) doesn't re-toggle. A `]` closes only
+        // when in_class is true.
+        if c == '[' && !in_class {
+            in_class = true;
+        } else if c == ']' && in_class {
+            in_class = false;
         }
         out.push(c);
     }
