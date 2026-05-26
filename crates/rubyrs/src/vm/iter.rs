@@ -1399,14 +1399,26 @@ impl Vm {
                             Value::Int(n) if *n > 0 => std::cmp::Ordering::Greater,
                             Value::Int(n) if *n < 0 => std::cmp::Ordering::Less,
                             Value::Int(_) => std::cmp::Ordering::Equal,
+                            // Float comparator results — CRuby's
+                            // `rb_cmpint` accepts any numeric that
+                            // compares against 0 (common shape:
+                            // `arr.sort { |a, b| a - b }` on floats).
+                            // Sort by sign; NaN treated as Equal
+                            // (CRuby is also undefined-ish there).
+                            Value::Float(f) if *f > 0.0 => std::cmp::Ordering::Greater,
+                            Value::Float(f) if *f < 0.0 => std::cmp::Ordering::Less,
+                            Value::Float(_) => std::cmp::Ordering::Equal,
                             #[cfg(feature = "bignum")]
                             Value::BigInt(id) => {
-                                use num_bigint::BigInt;
-                                let zero = BigInt::from(0);
-                                match g.vm.heap.bigint(*id).cmp(&zero) {
-                                    std::cmp::Ordering::Greater => std::cmp::Ordering::Greater,
-                                    std::cmp::Ordering::Less => std::cmp::Ordering::Less,
-                                    std::cmp::Ordering::Equal => std::cmp::Ordering::Equal,
+                                // O(n²) sort — avoid allocating
+                                // BigInt::from(0) per comparison. The
+                                // heap-stored bigint exposes
+                                // `.sign()` directly (num_bigint API).
+                                use num_bigint::Sign;
+                                match g.vm.heap.bigint(*id).sign() {
+                                    Sign::Plus => std::cmp::Ordering::Greater,
+                                    Sign::Minus => std::cmp::Ordering::Less,
+                                    Sign::NoSign => std::cmp::Ordering::Equal,
                                 }
                             }
                             _ => {

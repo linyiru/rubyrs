@@ -67,3 +67,9 @@ end
 # ArgumentError on the very first comparison.
 big = 2 ** 100
 puts [3, 1, 2].sort { |a, b| (a * big) <=> (b * big) }.inspect
+
+# --- Float comparator result ---
+# CRuby's rb_cmpint accepts any numeric that compares against
+# integer 0. `a - b` for Float arrays is a very common idiom.
+floats = [3.2, 1.1, 4.5, 1.9]
+puts floats.sort { |a, b| a - b }.inspect
