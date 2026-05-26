@@ -1537,9 +1537,35 @@ impl Vm {
                     return Ok(());
                 }
                 ("include?", [Value::Class(m)]) => {
+                    // CRuby parity: `Module#include?` requires
+                    // the argument to be a Module, not a Class.
+                    // `Sub.include?(Foo)` where `Foo` is a Class
+                    // raises TypeError. rubyrs stores both with
+                    // the same struct + an `is_module` flag, so
+                    // the check is one field-read.
+                    if !m.is_module {
+                        // CRuby's message uses the receiver's
+                        // *type* name ("Class"), not the
+                        // class's identity name. Matches CRuby
+                        // verbatim.
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: "wrong argument type Class (expected Module)".to_string(),
+                        }));
+                    }
                     let included = super::class_is_a(cls, m);
                     self.stack.push(Value::Bool(included));
                     return Ok(());
+                }
+                // Non-Class / non-Module arg — also TypeError in
+                // CRuby. Catch-all so the diagnostic surface
+                // matches.
+                ("include?", [other]) => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Module)",
+                            other.type_name(),
+                        ),
+                    }));
                 }
                 // `Module#superclass` — direct parent class, or
                 // nil at the top of the chain. CRuby returns
