@@ -356,19 +356,17 @@ impl Vm {
                     {
                         let path_str = path.to_string_lossy();
                         // Probe for a `.rb` sibling first, regardless
-                        // of cfg!("cext"). The Ruby-source path is
-                        // always available.
-                        let p = std::path::Path::new(&*path_str);
-                        let rb_candidate = if p.extension().and_then(|e| e.to_str()) == Some("rb") {
-                            p.to_path_buf()
-                        } else if p.extension().is_none() {
-                            p.with_extension("rb")
-                        } else {
-                            // Has a non-.rb extension (.so / .dylib /
-                            // …) — go straight to cext.
-                            std::path::PathBuf::new()
-                        };
-                        if !rb_candidate.as_os_str().is_empty() && rb_candidate.exists() {
+                        // of cfg!("cext"). Walks the same candidate
+                        // list `require_ruby` consults — cwd-relative,
+                        // caller-source-dir, caller-source-parent
+                        // (the cross-package "lib"-style hop). Lets
+                        // `require 'rack/show_exceptions'` from
+                        // `<root>/sinatra/show_exceptions.rb`
+                        // resolve to `<root>/rack/show_exceptions.rb`
+                        // without forcing the script to spell out
+                        // `require_relative` paths.
+                        let rb_found = self.find_ruby_source_candidate(&path_str);
+                        if rb_found {
                             Some(self.require_ruby(&path_str))
                         } else {
                             #[cfg(feature = "cext")]
@@ -532,29 +530,93 @@ impl Vm {
     /// hand-roll the wrapper.
     #[cfg(not(target_os = "wasi"))]
     pub(crate) fn require_ruby(&mut self, path_str: &str) -> Result<Value, Trap> {
+        let candidates = self.ruby_source_candidates(path_str);
+        let canon_opt = candidates.iter().find_map(|c| std::fs::canonicalize(c).ok());
+        let canon = match canon_opt {
+            Some(c) => c,
+            None => {
+                let tried = candidates.iter()
+                    .map(|c| c.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(self.trap(RubyError::RuntimeError {
+                    msg: format!("require: cannot find {} (tried: {})", path_str, tried),
+                }));
+            }
+        };
+        self.load_ruby_source_from_canon(canon)
+    }
+
+    /// Search-path candidates for `require <path_str>`. First
+    /// existing one wins. CRuby's canonical model walks
+    /// `$LOAD_PATH` (gem install paths + stdlib + the running
+    /// script's dir); rubyrs approximates the "co-located source
+    /// tree" subset of that for the embeddable / single-tree
+    /// DSL host case. Absolute paths shortcut the search.
+    ///
+    /// Order:
+    ///   1. as-given (handles absolute paths + cwd-relative).
+    ///   2. caller source file's directory + name.rb
+    ///      (sibling: `require 'helpers'` from `lib/x.rb`
+    ///      finds `lib/helpers.rb`).
+    ///   3. caller source file's PARENT directory + name.rb
+    ///      (cross-package "lib" hop: `require
+    ///      'rack/show_exceptions'` from
+    ///      `<root>/sinatra/show_exceptions.rb` finds
+    ///      `<root>/rack/show_exceptions.rb`).
+    ///   4. raw input as last-resort defensive fallback when
+    ///      auto-`.rb` extension was applied but didn't match.
+    ///
+    /// Shared by `require_ruby` (for the actual load) and the
+    /// `require` dispatch arm (for the .rb-vs-cext routing
+    /// decision) so the two stay structurally guaranteed to
+    /// agree on which candidates to consider.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn ruby_source_candidates(&self, path_str: &str) -> Vec<std::path::PathBuf> {
         use std::path::{Path, PathBuf};
         let p = Path::new(path_str);
-        // Auto-`.rb` if the input has no extension.
-        let mut target: PathBuf = if p.extension().is_none() {
+        let rb_form: PathBuf = if p.extension().is_none() {
             p.with_extension("rb")
         } else {
             p.to_path_buf()
         };
-        if !target.exists() {
-            // Mirror CRuby behaviour for `require "foo"` when foo
-            // exists in cwd but the auto-extension path doesn't:
-            // fall back to the raw input. (Mostly defensive — the
-            // common cases are absolute paths or extensionless
-            // names that the `.rb` append catches.)
-            target = p.to_path_buf();
+        let mut candidates: Vec<PathBuf> = Vec::with_capacity(4);
+        candidates.push(rb_form.clone());
+        if !rb_form.is_absolute() {
+            let caller_dir: Option<PathBuf> = self.frames.last().and_then(|f| {
+                let fname = self.protos[f.proto_idx].filename.to_string();
+                Path::new(&fname).parent().map(Path::to_path_buf)
+            });
+            if let Some(dir) = caller_dir {
+                candidates.push(dir.join(&rb_form));
+                if let Some(parent) = dir.parent() {
+                    candidates.push(parent.join(&rb_form));
+                }
+            }
         }
-        let canon = match std::fs::canonicalize(&target) {
-            Ok(p) => p,
-            Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                msg: format!("require: cannot find {} ({})", target.display(), e),
-            })),
-        };
-        self.load_ruby_source_from_canon(canon)
+        if rb_form != p {
+            candidates.push(p.to_path_buf());
+        }
+        candidates
+    }
+
+    /// Quick existence probe — true iff `path_str` resolves to a
+    /// real Ruby source file under the search-path rules above.
+    /// Used by the require routing to pick the `.rb` path over
+    /// the cext path when both could in principle apply.
+    #[cfg(not(target_os = "wasi"))]
+    pub(crate) fn find_ruby_source_candidate(&self, path_str: &str) -> bool {
+        // Has-non-rb extension (.so/.dylib/…) — go straight to
+        // cext, don't even consider .rb candidates. Matches the
+        // pre-refactor behaviour.
+        let p = std::path::Path::new(path_str);
+        if let Some(ext) = p.extension().and_then(|e| e.to_str())
+            && ext != "rb" {
+            return false;
+        }
+        self.ruby_source_candidates(path_str)
+            .iter()
+            .any(|c| c.exists())
     }
 
     /// Shared load body for `require` / `require_relative` once
