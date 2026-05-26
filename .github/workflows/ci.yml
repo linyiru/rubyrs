@@ -175,6 +175,27 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y binaryen
 
+      - name: Install wizer
+        # `perf/wasm_check.sh` runs wizer between wasm-opt and
+        # `wasmtime compile` to pre-initialize the Runtime
+        # (classes + preamble bytecode) and snapshot linear
+        # memory. Without wizer the script skips the pass and
+        # still PASSes; with it, cold start drops ~0.5 ms
+        # (~5% relative at sub-10 ms scale). Bump version +
+        # checksum together when the toolchain pin moves.
+        run: |
+          set -euo pipefail
+          WIZER_VERSION=v11.0.3
+          WIZER_SHA256=36016e7f846f38ad09f22eb4bafb99068f038c431eb9613ddf59e31ad8a21414
+          TARBALL="wizer-${WIZER_VERSION}-x86_64-linux.tar.xz"
+          URL="https://github.com/bytecodealliance/wizer/releases/download/${WIZER_VERSION}/${TARBALL}"
+          curl -sSLo "$TARBALL" "$URL"
+          echo "${WIZER_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar xf "$TARBALL"
+          mkdir -p "$HOME/.local/bin"
+          install -m 755 "wizer-${WIZER_VERSION}-x86_64-linux/wizer" "$HOME/.local/bin/wizer"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Install wasmtime
         # End-to-end smoke (next step) needs a wasi runtime. Pin a
         # specific release + verify a sha256 over the downloaded

@@ -61,14 +61,15 @@ unmodified Rails-style Gemfile (`*splat`, `**kwargs`, multi-symbol
 real-world shapes a Bundler Gemfile uses, running in ~0.4 ms
 end-to-end).
 
-| Cold start | rubyrs (native) | rubyrs.wasm (raw, JIT) | rubyrs.cwasm (AOT) | CRuby 3.4 |
-|------------|----------------|------------------------|--------------------|-----------|
+| Cold start | rubyrs (native) | rubyrs.wasm (raw, JIT) | rubyrs.cwasm (AOT + wizer) | CRuby 3.4 |
+|------------|----------------|------------------------|----------------------------|-----------|
 | `puts 1+2` | **1.5 ms** | 12.7 ms | **~7 ms** | 78 ms |
 
 The wasm column is the raw `.wasm` shipping shape under
 `wasmtime run`; `cwasm` adds a one-time `wasmtime compile`
-step (and is what `perf/wasm_check.sh` measures — see
-`docs/DEVELOPMENT.md` for the build pipeline).
+step plus `wizer` pre-initialization (preamble snapshot)
+— and is what `perf/wasm_check.sh` measures end-to-end. See
+`docs/DEVELOPMENT.md` for the build pipeline.
 
 | 1M fizzbuzz | rubyrs | CRuby | CRuby + YJIT |
 |-------------|--------|-------|--------------|

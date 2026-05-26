@@ -1861,3 +1861,84 @@ fn range_size_with_i64_max_width_returns_zero() {
     ).expect("should succeed without panic");
     assert_eq!(buf.snapshot().trim(), "0");
 }
+
+#[test]
+fn config_default_picks_up_stress_gc_env() {
+    // Regression guard for PR #116 review: removing the
+    // `env::var("STRESS_GC")` read from `Vm::new` (to satisfy
+    // wizer's no-imports rule on wasm32-wasip1) silently broke
+    // ci.yml's "Run tests (STRESS_GC=1)" job — that step re-runs
+    // `cargo test` with the env var set, expecting every
+    // `Runtime::new()` in the suite to flip into stress mode for
+    // broader GC-rooting coverage. The compensating read lives in
+    // `Config::default()` instead; this test pins it so a future
+    // cleanup of `Config::default` doesn't re-introduce the silent
+    // CI coverage gap.
+    //
+    // SAFETY: `std::env::set_var` / `remove_var` are unsafe in 2024
+    // edition because they aren't thread-safe. No other test in the
+    // suite currently reads `STRESS_GC` at runtime (the
+    // `*_survives_stress_gc` tests hard-code the flag in Config and
+    // don't consult env), so the race window is empty today. If a
+    // future test starts reading the env, gate this behind a
+    // serial-test crate.
+    let prev = std::env::var("STRESS_GC").ok();
+    unsafe { std::env::remove_var("STRESS_GC") };
+    assert!(
+        !rubyrs::Config::default().stress_gc,
+        "Config::default().stress_gc must be false when STRESS_GC unset",
+    );
+
+    unsafe { std::env::set_var("STRESS_GC", "1") };
+    assert!(
+        rubyrs::Config::default().stress_gc,
+        "Config::default().stress_gc must be true when STRESS_GC=1 — the CI stress-mode gate relies on this",
+    );
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var("STRESS_GC", v) },
+        None => unsafe { std::env::remove_var("STRESS_GC") },
+    }
+}
+
+#[test]
+fn preamble_fits_under_tight_resource_caps() {
+    // Regression guard for PR #116 cycle 7 refactor: moving
+    // `apply_config` BEFORE `load_preamble` in `Runtime::with_config`
+    // means the built-in preamble (Exception hierarchy + ancillary
+    // classes) now runs UNDER user-supplied caps. The 67 existing
+    // embed tests currently pass with caps like `max_heap_objects:
+    // Some(50)`, `max_symbols: Some(64)`, `fuel: Some(10_000)`,
+    // `deadline: Some(50ms)` — but nothing asserts the preamble
+    // actually fits. A future contributor adding even a handful of
+    // built-in classes (e.g. Comparable, Numeric, Range methods)
+    // could silently push the preamble past one of these budgets,
+    // panicking deep inside `load_preamble().expect("ICE: …")`
+    // during Runtime construction — manifesting as an inscrutable
+    // ICE in tests that on the surface look like they're testing
+    // user-script caps.
+    //
+    // Pin a budget tighter than ANY cap used elsewhere in this
+    // file (sweep above shows `max_heap_objects: Some(50)` and
+    // `max_symbols: Some(64)` as the floors). If preamble growth
+    // breaks this canary first, the failure points at the right
+    // root cause; without it, the failure surfaces as a panic in
+    // an unrelated cap-trap test.
+    let cfg = rubyrs::Config {
+        max_heap_objects: Some(50),
+        max_symbols: Some(64),
+        fuel: Some(10_000),
+        max_frames: Some(64),
+        max_value_bytes: Some(1024),
+        deadline: Some(std::time::Duration::from_millis(50)),
+        ..Default::default()
+    };
+    // Construction itself is the assertion: if any cap trips during
+    // preamble eval, `load_preamble().expect(...)` panics here.
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    // Sanity: the resulting Runtime should still be able to eval a
+    // trivial expression — i.e. the preamble didn't quietly consume
+    // every last unit of fuel/heap. The caps are intentionally
+    // tight, so this only succeeds if there's headroom left.
+    rt.eval("1 + 1", "preamble_canary.rb").expect("trivial eval must succeed after preamble under tight caps");
+}

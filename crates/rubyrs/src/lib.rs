@@ -403,7 +403,6 @@ include!(concat!(env!("OUT_DIR"), "/prism_node_sets.rs"));
 /// expressions cross-crate entirely and would have a much larger
 /// migration footprint here. Tracked as follow-up; see PR #88
 /// thread for the analysis.
-#[derive(Default)]
 pub struct Config {
     /// When true, every potential GC point triggers a full collection.
     /// Useful for catching root-set bugs in host code; rough on
@@ -485,6 +484,36 @@ pub struct Config {
     /// so `rubyrs script.rb` behaves like CRuby; embed users that
     /// want the host PID exposed must opt in.
     pub pid: Option<std::num::NonZeroU32>,
+}
+
+impl Default for Config {
+    /// Default Config. `stress_gc` auto-enables from the `STRESS_GC`
+    /// env var on non-wasi hosts so `STRESS_GC=1 cargo test` flips
+    /// every `Runtime::new()`-using test into stress mode — the
+    /// previous behavior, lost when `Vm::new` stopped reading the
+    /// env var to satisfy wizer's no-imports rule. The wizer path
+    /// does NOT go through `Config::default()` (it calls
+    /// `Runtime::new_default_impl` directly), so this env read can't
+    /// pollute the snapshot. The CLI binary explicitly reads
+    /// `STRESS_GC` again from main.rs for the same flag — both reads
+    /// agree, harmless.
+    fn default() -> Self {
+        #[cfg(not(target_os = "wasi"))]
+        let stress_gc = std::env::var("STRESS_GC").is_ok();
+        #[cfg(target_os = "wasi")]
+        let stress_gc = false;
+        Self {
+            stress_gc,
+            fuel: None,
+            max_heap_objects: None,
+            max_frames: None,
+            max_symbols: None,
+            max_value_bytes: None,
+            deadline: None,
+            env: None,
+            pid: None,
+        }
+    }
 }
 
 /// Read-only handle into the runtime's heap, passed to closures
@@ -569,12 +598,94 @@ pub struct Runtime {
     deadline: Option<std::time::Duration>,
 }
 
+/// Per-process slot used by the wizer pre-initialize path. On
+/// wasm32-wasip1, the binary exports `wizer.initialize` (below)
+/// which constructs a default Runtime and stashes it here; Wizer
+/// then snapshots linear memory so a later `wasmtime run` picks
+/// up the prebuilt classes + preamble bytecode without redoing
+/// that work. The CLI binary's `main()` calls `take_wizer_runtime()`
+/// to consume the slot.
+///
+/// Single-threaded by design: wasm32-wasip1 has no threads, and
+/// the CLI binary owns the process. Embedded hosts that link
+/// rubyrs as a library don't touch this slot — they construct
+/// their own Runtime via `Runtime::new()` / `Runtime::with_config()`.
+#[cfg(target_os = "wasi")]
+static mut WIZER_RUNTIME: Option<Runtime> = None;
+
+/// Wizer entry point. Builds a default-Config Runtime (registers
+/// builtin classes, runs the Ruby preamble) and stashes it in
+/// `WIZER_RUNTIME` for the eventual `main()` to consume.
+///
+/// Wizer's rules forbid imported function calls during init, so
+/// we deliberately split out `new_default_impl()` (no env reads,
+/// no PID lookup, no stdout binding) as the wizer-able subset.
+/// Config-driven settings — fuel caps, env override, deadline —
+/// are applied later by `main()` via `apply_config()`, AFTER the
+/// snapshot.
+///
+/// If Wizer is never invoked, the function is dead code; the
+/// `#[export_name]` attribute keeps it linked anyway so the
+/// build artifact is wizer-ready as-shipped.
+#[cfg(target_os = "wasi")]
+#[unsafe(export_name = "wizer.initialize")]
+pub extern "C" fn wizer_initialize() {
+    // SAFETY: wasm32-wasip1 is single-threaded; this static is
+    // only mutated here (during the one wizer-init pass) and
+    // consumed once by `take_wizer_runtime()` from main(). Use
+    // `addr_of_mut!` + `(*p).replace(...)` to avoid the Rust
+    // 2024 `static_mut_refs` lint AND ensure any prior occupant
+    // is dropped (a bare `p.write(...)` would leak the previous
+    // Runtime if `wizer.initialize` were somehow invoked more
+    // than once during a debugging / embedding cycle).
+    unsafe {
+        let p = std::ptr::addr_of_mut!(WIZER_RUNTIME);
+        let _prev = (*p).replace(Runtime::new_default_impl());
+        // `_prev` (Option<Runtime>) drops here, freeing the
+        // earlier Runtime's heap + Vm slots if one existed.
+    }
+}
+
+/// Consume the wizer-built Runtime if one is present, returning
+/// `None` when the binary wasn't put through wizer. The CLI
+/// binary's `main()` calls this, then applies its own Config
+/// (env vars, PID, fuel) on top of the rehydrated state.
+#[cfg(target_os = "wasi")]
+pub fn take_wizer_runtime() -> Option<Runtime> {
+    // SAFETY: same single-threaded justification as above; this
+    // is the unique consumer site. `addr_of_mut!` for the same
+    // 2024-edition reason as `wizer_initialize`.
+    unsafe {
+        let p = std::ptr::addr_of_mut!(WIZER_RUNTIME);
+        (*p).take()
+    }
+}
+
 impl Runtime {
     pub fn new() -> Self {
         Self::with_config(Config::default())
     }
 
     pub fn with_config(cfg: Config) -> Self {
+        // Apply Config BEFORE loading the preamble so user-supplied
+        // resource caps (fuel, max_frames, max_heap_objects, etc.)
+        // are in effect during preamble eval — and `apply_config`'s
+        // contract ("call before any eval()") is honored. The wizer
+        // path can't do this: it has no host Config at snapshot time,
+        // so its preamble runs under defaults — that's by design and
+        // documented on `new_default_impl`.
+        let mut rt = Self::build_skeleton();
+        rt.apply_config(cfg);
+        rt.load_preamble();
+        rt
+    }
+
+    /// Construct a Runtime skeleton (fresh Vm, no preamble) shared
+    /// by `with_config` and the wizer pre-initialize path. Doing it
+    /// this way lets the non-wizer constructor apply Config before
+    /// the preamble runs, while the wizer path runs the preamble
+    /// under defaults so the snapshot is host-Config-independent.
+    fn build_skeleton() -> Self {
         // PR #60 review #14: clear any leftover per-thread cext
         // STATE before constructing a fresh Vm. The persistent
         // CExtState (L3-H) lives in a thread_local; without this
@@ -586,21 +697,54 @@ impl Runtime {
         rubyrs_cext::reset_state();
 
         let interner = intern::Interner::new();
-        let mut vm = vm::Vm::new(vec![], interner);
-        if cfg.stress_gc { vm.stress_gc = true; }
-        vm.fuel = cfg.fuel;
-        vm.max_frames = cfg.max_frames;
-        vm.heap.max_live = cfg.max_heap_objects;
-        vm.max_symbols = cfg.max_symbols;
-        vm.max_value_bytes = cfg.max_value_bytes;
-        vm.env_override = cfg.env;
-        vm.pid = cfg.pid.map(|n| n.get() as i64);
-        let mut rt = Runtime {
-            vm,
-            deadline: cfg.deadline,
-        };
+        let vm = vm::Vm::new(vec![], interner);
+        Runtime { vm, deadline: None }
+    }
+
+    /// Wizer-able default Runtime: skeleton + preamble, no host
+    /// Config applied. The wizer path stashes this in
+    /// `WIZER_RUNTIME`; `main()` later calls `apply_config()` on the
+    /// rehydrated instance to layer host-driven settings (env, PID,
+    /// fuel caps) on top. The preamble runs under default caps here
+    /// — fuel/stress_gc/etc. do NOT apply to preamble execution in
+    /// the wizer path (they can't: wizer's no-imports rule forbids
+    /// reading host env at snapshot time).
+    #[cfg(target_os = "wasi")]
+    fn new_default_impl() -> Self {
+        let mut rt = Self::build_skeleton();
         rt.load_preamble();
         rt
+    }
+
+    /// Apply a Config to an already-constructed Runtime. Used by the
+    /// wizer-init path so the snapshotted Runtime (built with default
+    /// Config) can pick up host-driven settings (env vars, PID, fuel
+    /// caps) at runtime AFTER wizer rehydrates it.
+    ///
+    /// Contract: call this once, BEFORE any `eval()` or `ENV` access.
+    /// Later calls fully overwrite resource caps, PID, deadline, and
+    /// `stress_gc`. However, `cfg.env` is consumed lazily on the
+    /// first `ENV` materialization inside the Vm (via
+    /// `env_override.take()`); once `ENV` has been touched by Ruby
+    /// code, a subsequent `apply_config` cannot retroactively change
+    /// the script-visible env. The CLI binary always calls this
+    /// exactly once at startup, so the caveat only matters for
+    /// embedders.
+    pub fn apply_config(&mut self, cfg: Config) {
+        // Fully overwrite (not OR-merge) so a later call with
+        // `stress_gc: false` actually clears a previously-set true.
+        // Previously this was `if cfg.stress_gc { ... = true; }`,
+        // which made the flag monotonic and broke the documented
+        // overwrite semantics.
+        self.vm.stress_gc = cfg.stress_gc;
+        self.vm.fuel = cfg.fuel;
+        self.vm.max_frames = cfg.max_frames;
+        self.vm.heap.max_live = cfg.max_heap_objects;
+        self.vm.max_symbols = cfg.max_symbols;
+        self.vm.max_value_bytes = cfg.max_value_bytes;
+        self.vm.env_override = cfg.env;
+        self.vm.pid = cfg.pid.map(|n| n.get() as i64);
+        self.deadline = cfg.deadline;
     }
 
     /// Bootstrap the built-in Ruby class hierarchy (currently just

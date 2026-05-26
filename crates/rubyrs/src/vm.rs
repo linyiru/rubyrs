@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::env;
 use std::rc::Rc;
 
 use crate::bytecode::Proto;
@@ -546,7 +545,18 @@ impl Vm {
             // The CLI binary `rubyrs` wires it to process stdout in
             // `main.rs` so `rubyrs script.rb` behaves like CRuby.
             stdout: Box::new(std::io::sink()),
-            stress_gc: env::var("STRESS_GC").is_ok(),
+            // Default to false; Config-driven `stress_gc` flows in
+            // via `Runtime::apply_config`. The previous `env::var`
+            // read here meant `Vm::new` indirectly hit a wasi
+            // import on wasm32-wasip1, which would violate wizer's
+            // "no imports during init" rule (see PR #116 review)
+            // and bake the wizer-time env into the snapshot rather
+            // than respecting the user's runtime `STRESS_GC` setting.
+            // Now the env read happens exactly once at the CLI
+            // boundary (`main.rs::env_lookup("STRESS_GC")`), feeds
+            // into `Config.stress_gc`, and reaches the Vm via
+            // `apply_config`.
+            stress_gc: false,
             fuel: None,
             max_frames: None,
             deadline_at: None,
