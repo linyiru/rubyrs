@@ -54,3 +54,11 @@ module Ret
   Y = private_constant(:X)
 end
 puts Ret::Y == Ret                    # true
+
+# 0-arg form is a no-op returning the receiver in CRuby — locks
+# that the stub doesn't trip its arg-shape guard on the empty
+# call.
+class Empty
+  Z = public_constant
+end
+puts Empty::Z == Empty                # true

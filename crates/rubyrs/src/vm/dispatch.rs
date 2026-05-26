@@ -1909,10 +1909,15 @@ impl Vm {
                 // plus the constant-lookup gate without breaking
                 // this call-site contract.
                 ("private_constant", args) | ("public_constant", args)
-                    if !args.is_empty() && args.iter().all(|a|
+                    if args.iter().all(|a|
                         matches!(a, Value::Sym(_) | Value::Str(_))
                     ) =>
                 {
+                    // 0-arg form is a no-op returning the receiver
+                    // in CRuby — `Foo.private_constant.inspect`
+                    // prints "Foo". Accept it here so the stub
+                    // matches what `respond_to?` already
+                    // advertises.
                     self.stack.push(Value::Class(cls.clone()));
                     return Ok(());
                 }
