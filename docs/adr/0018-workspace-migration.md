@@ -78,8 +78,11 @@ parallel.
 
 ### Phase 0 — preflight (this ADR + audit) — **before any code moves**
 
-This ADR is itself Phase 0's first deliverable. Phase 0 also
-produces:
+This ADR is Phase 0's first deliverable, landing on its own.
+Phase 0's remaining deliverables land in **separate follow-up
+PRs** so each can be reviewed against its own subject matter
+(an ADR change shouldn't be reviewed in the same diff as a 54-
+site `std` inventory):
 
 - A **`std`-usage audit** in a new `docs/STD_AUDIT.md` (separate
   from `docs/MUTABLE_LAYERS.md`, which is specifically about
@@ -151,15 +154,22 @@ Plus a fourth, specific to this migration:
   `#![no_std]` attribute on the `rubyrs-core` crate root — once
   it's there, the compiler rejects any `use std::*` import. To
   catch drift early (before someone tries to embed in a truly
-  `std`-less environment), CI also runs `cargo check -p
-  rubyrs-core --no-default-features --target
-  wasm32-unknown-unknown` on every PR that touches
-  `rubyrs-core`. That target genuinely has no `std`
-  (`wasm32-wasip1` does ship `std`, so it would not catch the
-  drift this ratchet exists to prevent). The two together —
-  `#![no_std]` attribute as the in-source contract, plus the
-  bare-WASM target as the build-time canary — make the
-  guarantee mechanical.
+  `std`-less environment), CI also runs the bare-WASM target
+  (`wasm32-unknown-unknown` — which genuinely has no `std`;
+  `wasm32-wasip1` ships `std` and would silently let drift in)
+  in **two passes** on every PR that touches `rubyrs-core`:
+  - `cargo check -p rubyrs-core --no-default-features` — the
+    pure minimum; catches direct `std` imports in core code
+  - `cargo check -p rubyrs-core` (default features on) —
+    catches `std` leaking in through a default-on dependency
+    like `bignum` (`num-bigint`'s `std` feature is opt-out, so
+    a future bump that flips it on by accident would
+    otherwise sneak past the first pass)
+
+  The two together — `#![no_std]` attribute as the in-source
+  contract, plus both feature-shape variants on the bare-WASM
+  target as build-time canaries — make the guarantee mechanical
+  for both direct usage and transitive feature-enabled usage.
 
 CI scripts live in `.github/workflows/`. Phase 2 is one PR.
 
@@ -226,8 +236,8 @@ plan in the BigInt thread can proceed in **parallel with Phase
 
 ### What gets easier
 
-- **Embed users get a small core by default**. Anyone running
-  `cargo add rubyrs-core` today gets just the language — no
+- **Embed users get a small core by default**. Post-Phase-1,
+  `cargo add rubyrs-core` will pull in just the language — no
   cext, no regex, no host IO. This matches mruby's "tiny by
   default" niche.
 - **WASM/embedded targets stay viable forever**. The `no_std`
