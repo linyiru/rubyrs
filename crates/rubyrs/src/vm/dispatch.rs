@@ -373,6 +373,64 @@ impl Vm {
 
         let recv = recv.expect("ICE: receiver missing");
 
+        // `Object#send(:name, args...)` / `__send__(:name, args...)`
+        // — dynamic dispatch. Resolve the first arg as the target
+        // method name and re-enter `do_call` with `recv` pushed
+        // back, the remaining args on the stack, and the resolved
+        // SymId in name_id. The whole normal lookup path then
+        // handles the rest (primitives, singleton methods, host
+        // fns, method_missing, etc.) — `send` is just a name
+        // re-aim, not a separate dispatch table.
+        //
+        // Symbol arg only; CRuby also accepts String but we keep
+        // the subset narrow (same precedent as `Object#method`).
+        // Block-form (`send(:name) { ... }`) lives in
+        // `do_call_block`; this arm covers the block-less call.
+        //
+        // cache_id passed as `u16::MAX` because the re-entered call
+        // resolves a runtime-dynamic name — caching it at the
+        // original `send` call site's slot would poison whatever
+        // method the bytecode actually compiled for that slot.
+        if matches!(&*name, "send" | "__send__") {
+            if args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1+)".into(),
+                }));
+            }
+            let target_sym = match &args[0] {
+                Value::Sym(s) => Some(*s),
+                // CRuby accepts a String as the method-name arg
+                // too (transparent String#to_sym). Intern it
+                // here so both forms route through the same
+                // SymId-based lookup path.
+                Value::Str(s) => Some(s.with_str_lossy(|name| self.interner.intern(name))),
+                _ => None,
+            };
+            if let Some(target_sym) = target_sym {
+                let new_argc = args.len() - 1;
+                self.stack.push(recv);
+                for a in args.into_iter().skip(1) {
+                    self.stack.push(a);
+                }
+                return self.do_call(target_sym, new_argc, false, u16::MAX);
+            }
+            // CRuby phrasing: `<inspect(arg)> is not a symbol nor
+            // a string`. Construct a tiny inspect-equivalent for
+            // the primitive cases (the only realistic mis-types
+            // hitting this path) and fall back to type_name() for
+            // anything that would need a real `inspect` dispatch.
+            let inspected = match &args[0] {
+                Value::Int(n) => n.to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Bool(b) => b.to_string(),
+                Value::Nil => "nil".to_string(),
+                other => other.type_name().to_string(),
+            };
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!("{} is not a symbol nor a string", inspected),
+            }));
+        }
+
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
             .map_err(|e| self.trap(e))? {
             self.stack.push(v);
@@ -2674,6 +2732,46 @@ impl Vm {
             }));
         }
         let recv = recv.expect("ICE: receiver missing for block call");
+
+        // `obj.send(:name, args...) { ... }` — same dynamic-name
+        // re-aim as the block-less arm in `do_call`. `do_call_block`
+        // pops args then block then recv (in that drain/pop order),
+        // so the stack shape it expects from a caller is
+        // `[..., recv, block, *args]`. Put them back in that order
+        // and re-enter. cache_id = u16::MAX for the same reason as
+        // the block-less arm.
+        if matches!(&*name, "send" | "__send__") {
+            if args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1+)".into(),
+                }));
+            }
+            let target_sym = match &args[0] {
+                Value::Sym(s) => Some(*s),
+                Value::Str(s) => Some(s.with_str_lossy(|name| self.interner.intern(name))),
+                _ => None,
+            };
+            if let Some(target_sym) = target_sym {
+                let new_argc = args.len() - 1;
+                self.stack.push(recv);
+                self.stack.push(Value::Block(block));
+                for a in args.into_iter().skip(1) {
+                    self.stack.push(a);
+                }
+                return self.do_call_block(target_sym, new_argc, false, u16::MAX);
+            }
+            let inspected = match &args[0] {
+                Value::Int(n) => n.to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Bool(b) => b.to_string(),
+                Value::Nil => "nil".to_string(),
+                other => other.type_name().to_string(),
+            };
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!("{} is not a symbol nor a string", inspected),
+            }));
+        }
+
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
         if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
         let new_id = self.interner.intern("new");
