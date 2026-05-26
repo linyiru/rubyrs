@@ -314,6 +314,79 @@ end
 }
 
 #[test]
+fn require_rejects_empty_snake_segments() {
+    // Pins the symmetric extension of the leading-underscore
+    // guard (see `require_rejects_leading_underscore_path`).
+    // `snake_to_camel_case` drops empty parts from its `_`-split,
+    // so `rack_` collapses to `Rack` (`["rack", ""]` → capitalize
+    // each → `["Rack", ""]` → concat → `"Rack"`); same for
+    // `rack__foo` → `"RackFoo"` and `rack_foo_` → `"RackFoo"`.
+    // Without this guard a developer who mistypes `require
+    // "rack_"` against an embedder-registered `module Rack`
+    // would silently no-op, hiding the typo until a later
+    // `Rack_::Something` NameError far from the source. The
+    // guard rejects any `first_seg` that yields an empty
+    // segment when split on `_`, so the three shapes below
+    // fall through to cext_require with the standard
+    // "cannot find" diagnostic — and the well-formed control
+    // case `require "rack"` keeps working.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let driver_path = tmp.join("require_rb_empty_snake_seg_driver.rb");
+    fs::write(&driver_path,
+        // Use `r##"..."##` (two-hash delimiter) so the Ruby
+        // template can contain `"#{...}"` interpolations
+        // starting immediately after a `"` — otherwise Rust's
+        // raw-string parser sees `"#` and terminates the
+        // literal early.
+        r##"
+module Rack; end
+module RackFoo; end
+
+# Each malformed shape must reject; the well-formed `rack` must
+# still succeed via the normal snake-to-camel path.
+[
+  ["rack_",      :reject],   # trailing underscore
+  ["rack__foo",  :reject],   # double interior underscore
+  ["rack_foo_",  :reject],   # trailing on multi-segment
+  ["rack",       :accept],   # control — must still succeed
+].each do |(p, expected)|
+  begin
+    r = require p
+    actual = (r == true || r == false) ? :accept : :other
+  rescue RuntimeError
+    actual = :reject
+  end
+  puts "name=#{p} expected=#{expected} actual=#{actual}"
+end
+"##
+    ).unwrap();
+
+    let rubyrs = env!("CARGO_BIN_EXE_rubyrs");
+    let out = Command::new(rubyrs)
+        .arg(&driver_path)
+        .output()
+        .expect("failed to spawn rubyrs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "rubyrs exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    let expected = "\
+name=rack_ expected=reject actual=reject
+name=rack__foo expected=reject actual=reject
+name=rack_foo_ expected=reject actual=reject
+name=rack expected=accept actual=accept
+";
+    assert_eq!(
+        stdout, expected,
+        "empty-snake-segment guard mismatch.\nfull stdout:\n{}\nstderr:\n{}",
+        stdout, stderr,
+    );
+}
+
+#[test]
 fn require_rejects_path_traversal_in_subsegments() {
     // Pins the per-segment validation added per Copilot review
     // on PR #135. Without it, `require "rack/../missing"` would

@@ -793,6 +793,24 @@ impl Vm {
         if !first_seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
             return false;
         }
+        // Empty-snake-segment guard. The alphabetic check above
+        // only inspects the first char, so it rejects `_rack`
+        // (leading underscore) but lets `rack_`, `rack__foo`,
+        // and `rack_foo_` through — all of which collapse to
+        // valid Ruby constant names because `snake_to_camel_case`
+        // drops empty parts from its `_`-split (`["rack", ""]`
+        // → capitalize each → `["Rack", ""]` → concat →
+        // `"Rack"`). Without this guard a developer who mistypes
+        // `require "rack_"` against an embedder-registered
+        // `module Rack` would silently match, hiding the typo
+        // until a later `Rack_::Something` NameError far from
+        // the source of the mistake. Reject any `first_seg`
+        // that yields an empty segment when split on `_` so
+        // these shapes fall through to cext_require with the
+        // standard diagnostic.
+        if first_seg.split('_').any(|s| s.is_empty()) {
+            return false;
+        }
         // Core-class blocklist. `self.classes` is populated by
         // the preamble (`crates/rubyrs/src/lib.rs` ~750-1100) with
         // every built-in class/module name — `Object`, `String`,
