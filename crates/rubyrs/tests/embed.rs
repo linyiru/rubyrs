@@ -2170,6 +2170,45 @@ fn bigint_unary_neg_demotes_when_result_fits_int() {
     );
 }
 
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_method_works_under_no_bignum_profile() {
+    // Both 1-arg and 2-arg `Integer#pow` must work on the no-bignum
+    // profile too — `respond_to?(:pow)` is whitelisted
+    // unconditionally, so dispatch needs to match. 1-arg delegates
+    // to `**` (numeric.rs alias). 2-arg uses an i128 square-and-
+    // multiply since BigInt isn't available.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 5.pow(3)\n\
+         puts 5.pow(3, 7)\n\
+         puts 7.pow(8, 5)\n\
+         puts (-5).pow(3, 7)\n\
+         puts 5.pow(3, -7)",
+        "pow_no_bignum.rb",
+    ).expect("pow must work without bignum");
+    // 5³=125; 125 mod 7 = 6; 7⁸ mod 5 = 1; (-5)³=-125, -125 floor-mod 7 = 1
+    // (since -125 = 7*-18 + 1); 125 floor-mod -7 = -1.
+    assert_eq!(buf.snapshot().trim(), "125\n6\n1\n1\n-1");
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_no_bignum_error_shapes_match_cruby() {
+    let mut rt = rubyrs::Runtime::new();
+    assert!(
+        rt.eval("5.pow(-1, 7)", "no_bignum_neg_exp.rb").unwrap_err().err.is("RangeError"),
+    );
+    assert!(
+        rt.eval("5.pow(3, 0)", "no_bignum_zero_mod.rb").unwrap_err().err.is("ZeroDivisionError"),
+    );
+    assert!(
+        rt.eval("5.pow(1.5, 7)", "no_bignum_float_exp.rb").unwrap_err().err.is("TypeError"),
+    );
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn pow_mod_huge_exponent_skips_dos_cap() {

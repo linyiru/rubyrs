@@ -234,8 +234,58 @@ pub(crate) fn numeric_call(
                 if *b >= 0 { a.wrapping_shr((*b as u32).min(63)) }
                 else { a.wrapping_shl(((-b) as u32).min(63)) }
             )),
+            // `Integer#pow(exp)` — 1-arg form is an alias for `**`.
+            // Keeps `respond_to?(:pow)` honest in BOTH profiles
+            // (whitelisted unconditionally in lookup.rs). Reuses
+            // the `**` arm logic verbatim by recursing into the same
+            // inner-match dispatch — keeps `0**-n` → ZeroDivisionError,
+            // identity short-circuits, and demote-on-fit centralised.
+            "pow" => return numeric_call(recv, "**", args, _max_value_bytes),
             _ => None,
         },
+        // 2-arg form `pow(exp, mod)` — under `bignum`, declined here
+        // so bigint_primitive's modpow path handles it (full
+        // Integer×Integer×Integer coverage including BigInt).
+        // Without `bignum`, implement square-and-multiply with i128
+        // intermediates so `respond_to?(:pow)` stays consistent with
+        // dispatch on the no-bignum profile. CRuby semantics:
+        // ZeroDivisionError on mod==0, RangeError on neg exp,
+        // floor-mod (same sign as modulus) on the result.
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(a), "pow", [Value::Int(exp), Value::Int(modulus)]) => {
+            if *modulus == 0 {
+                return Err(RubyError::ZeroDivisionError { msg: "divided by 0".to_string() });
+            }
+            if *exp < 0 {
+                return Err(RubyError::RangeError {
+                    msg: "Integer#pow() 1st argument cannot be negative when 2nd argument specified".to_string(),
+                });
+            }
+            // i128 arithmetic: b ∈ [0, |m|) and b² fits since
+            // |m| ≤ 2^63 ⇒ b² ≤ 2^126 < i128::MAX.
+            let m_abs: i128 = (*modulus as i128).unsigned_abs() as i128;
+            let mut result: i128 = if m_abs == 1 { 0 } else { 1 };
+            let mut base: i128 = (*a as i128).rem_euclid(m_abs);
+            let mut e: i64 = *exp;
+            while e > 0 {
+                if e & 1 == 1 {
+                    result = (result * base).rem_euclid(m_abs);
+                }
+                e >>= 1;
+                if e > 0 {
+                    base = (base * base).rem_euclid(m_abs);
+                }
+            }
+            // Adjust for floor-mod: result has same sign as modulus.
+            let adjusted = if *modulus < 0 && result != 0 { result - m_abs } else { result };
+            Some(Value::Int(adjusted as i64))
+        }
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "pow", [_, _]) => {
+            return Err(RubyError::TypeError {
+                msg: "Integer#pow() 2nd argument not allowed unless all arguments are integers".to_string(),
+            });
+        }
         (Value::Int(a), "to_s", []) | (Value::Int(a), "inspect", []) => {
             Some(Value::new_str(a.to_string()))
         }
