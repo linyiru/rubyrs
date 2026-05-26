@@ -208,19 +208,35 @@ impl Vm {
                         let n_take = *n;
                         let snapshot: Vec<Value> = self.heap.array(id).clone();
                         let len = snapshot.len();
+                        // GC rooting: `out` is a Rust-local Vec, NOT a
+                        // GC root. Each iteration alloc's a sub-array
+                        // and pushes its ObjId into `out`; under
+                        // STRESS_GC=1 the next iteration's `maybe_gc`
+                        // sweeps the prior sub-arrays (nothing roots
+                        // them yet — the wrapping result Array isn't
+                        // alloc'd until the loop ends). The reused
+                        // slots then form a self-referential mess
+                        // that overflows the stack at inspect time.
+                        // Pin each sub-array via PinGuard; Drop pops
+                        // them all once the function returns.
+                        let mut g = PinGuard::new(self);
                         let mut out: Vec<Value> = Vec::new();
                         if n_take == 0 {
-                            self.maybe_gc();
-                            let empty_id = self.heap.alloc(HeapObj::Array(Vec::new()));
-                            out.push(Value::Array(empty_id));
+                            g.vm.maybe_gc();
+                            let empty_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                            let v = Value::Array(empty_id);
+                            g.pin(v.clone());
+                            out.push(v);
                         } else if n_take > 0 && (n_take as usize) <= len {
                             let k = n_take as usize;
                             let mut idx: Vec<usize> = (0..k).collect();
                             loop {
                                 let pick: Vec<Value> = idx.iter().map(|&i| snapshot[i].clone()).collect();
-                                self.maybe_gc();
-                                let pid = self.heap.alloc(HeapObj::Array(pick));
-                                out.push(Value::Array(pid));
+                                g.vm.maybe_gc();
+                                let pid = g.vm.heap.alloc(HeapObj::Array(pick));
+                                let v = Value::Array(pid);
+                                g.pin(v.clone());
+                                out.push(v);
                                 // Advance idx like CRuby (rightmost
                                 // that can still advance bumps; tail
                                 // resets to consecutive).
@@ -237,8 +253,8 @@ impl Vm {
                                 if i == k { break; }
                             }
                         }
-                        self.maybe_gc();
-                        let result_id = self.heap.alloc(HeapObj::Array(out));
+                        g.vm.maybe_gc();
+                        let result_id = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(result_id))
                     }
                     // `arr.permutation` / `arr.permutation(n)` — every
@@ -252,11 +268,18 @@ impl Vm {
                             [Value::Int(n)] => *n,
                             _ => len as i64,
                         };
+                        // Same GC-rooting shape as `combination` above —
+                        // pin each sub-Array as it's pushed into `out`
+                        // so STRESS_GC=1 doesn't sweep it before the
+                        // wrapping result Array is alloc'd.
+                        let mut g = PinGuard::new(self);
                         let mut out: Vec<Value> = Vec::new();
                         if n_take == 0 {
-                            self.maybe_gc();
-                            let empty_id = self.heap.alloc(HeapObj::Array(Vec::new()));
-                            out.push(Value::Array(empty_id));
+                            g.vm.maybe_gc();
+                            let empty_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                            let v = Value::Array(empty_id);
+                            g.pin(v.clone());
+                            out.push(v);
                         } else if n_take > 0 && (n_take as usize) <= len {
                             let k = n_take as usize;
                             // Recursive lexicographic enumeration —
@@ -292,13 +315,15 @@ impl Vm {
                             rec(&indices, &mut used, &mut current, k, &snapshot, &mut perms);
                             for p in perms {
                                 let pick: Vec<Value> = p.into_iter().map(|i| snapshot[i].clone()).collect();
-                                self.maybe_gc();
-                                let pid = self.heap.alloc(HeapObj::Array(pick));
-                                out.push(Value::Array(pid));
+                                g.vm.maybe_gc();
+                                let pid = g.vm.heap.alloc(HeapObj::Array(pick));
+                                let v = Value::Array(pid);
+                                g.pin(v.clone());
+                                out.push(v);
                             }
                         }
-                        self.maybe_gc();
-                        let result_id = self.heap.alloc(HeapObj::Array(out));
+                        g.vm.maybe_gc();
+                        let result_id = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(result_id))
                     }
                     // `arr.tally` — count occurrences into a Hash
