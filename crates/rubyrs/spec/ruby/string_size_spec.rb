@@ -24,8 +24,13 @@ describe "String#size" do
   end
 
   # Skipped — upstream shared/length.rb:13–18 needs
-  # `Encoding::UTF_32BE` / `Encoding::SHIFT_JIS` constants
-  # and `String#encode(enc)`. rubyrs is byte-flat UTF-8 only.
+  # `Encoding::UTF_32BE` / `Encoding::SHIFT_JIS` constants and
+  # actual transcoding semantics. rubyrs has `String#encode` /
+  # `String#force_encoding` as no-op stubs (see `vm/string.rs`),
+  # but no `Encoding` constants and no real codepoint
+  # re-encoding — strings stay UTF-8 bytes either way, so the
+  # `.size == 400` assertion after `.encode(...)` would silently
+  # pass on the no-op when in fact the round-trip isn't happening.
   #
   # it "returns the length of a string in different encodings" do
   #   utf8_str = 'こにちわ' * 100
