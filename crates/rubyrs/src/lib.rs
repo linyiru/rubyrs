@@ -949,6 +949,77 @@ end
 ## flag on Kernel-derived BoundMethods to fix.
 class Kernel
 end
+## Encoding — minimal stub for codebases that use the encoding
+## API (ERB's compiler does at lib/erb/compiler.rb:317 / :461
+## to detect the source encoding from a magic comment). rubyrs
+## stores raw bytes with no per-string encoding tag, so every
+## String reports as UTF-8 and every encoding is treated as
+## ASCII-compatible / non-dummy. `Encoding.find(name)` builds an
+## instance keyed by name string — repeated calls with the same
+## name return the same instance via a class-variable cache, so
+## `s.encoding == Encoding.find("UTF-8")` works.
+##
+## Predefined constants cover the names ERB / cgi/util / similar
+## stdlib-shaped consumers reach for; add more as real targets
+## need them. `Encoding::BINARY` is the canonical CRuby alias
+## for `ASCII_8BIT`.
+class Encoding
+  ## Avoid a `@@cache` Hash for the find lookup — preamble eval
+  ## happens BEFORE the host applies per-Runtime `max_value_bytes`
+  ## caps, but the Hash mutation would still count against any
+  ## tiny caps used in resource-limit tests. A case-over-name with
+  ## the four predefined constants gives stable identity for the
+  ## standard names (so `Encoding.find("UTF-8").equal?(Encoding::UTF_8)`)
+  ## without any allocator pressure during preamble load. Unknown
+  ## names fall through to `.new` — uncached, but acceptable for
+  ## the subset (real codebases only `find` the standard names).
+  def self.find(name)
+    case name.to_s
+    when "UTF-8" then UTF_8
+    when "US-ASCII" then US_ASCII
+    when "ASCII-8BIT", "BINARY" then ASCII_8BIT
+    else new(name.to_s)
+    end
+  end
+
+  def initialize(name)
+    @name = name
+  end
+
+  def name
+    @name
+  end
+
+  def to_s
+    @name
+  end
+
+  def inspect
+    # Built with concat — using the quote-then-hash sequence
+    # inline would close the outer raw-string delimiter at
+    # Rust parse time.
+    '#<Encoding:' + @name + '>'
+  end
+
+  ## Always false in our subset — we don't model dummy encodings
+  ## (the ones CRuby uses for, e.g., UTF-16 where you must know
+  ## the byte order). Real codebases gate ASCII-safety checks on
+  ## this; returning false keeps the happy path.
+  def dummy?
+    false
+  end
+
+  ## Always true — UTF-8, US-ASCII, and ASCII-8BIT (the only
+  ## names we serve up) are all ASCII-compatible.
+  def ascii_compatible?
+    true
+  end
+end
+Encoding::UTF_8 = Encoding.new("UTF-8")
+Encoding::US_ASCII = Encoding.new("US-ASCII")
+Encoding::ASCII_8BIT = Encoding.new("ASCII-8BIT")
+Encoding::BINARY = Encoding::ASCII_8BIT
+
 ## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
 ## (tilt does at template.rb:239) to pick between bind_call and
 ## bind.call paths. We claim a recent CRuby version to opt into

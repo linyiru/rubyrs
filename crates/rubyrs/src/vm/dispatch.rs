@@ -720,6 +720,21 @@ impl Vm {
             return Ok(());
         }
 
+        // `String#encoding` — returns the preamble's
+        // `Encoding::UTF_8` instance. Intercepted here (rather than
+        // in `primitive::string_call`) because materialising the
+        // Encoding object needs Vm access for the joined-name
+        // constants table; `string_call` is a free function.
+        // Falls through to Nil if the preamble hasn't loaded
+        // (e.g. minimal test harness) — a louder failure than
+        // silently returning a String surprises downstream
+        // callers (ERB's `enc.dummy?` etc.).
+        if matches!(&recv, Value::Str(_)) && &*name == "encoding" && args.is_empty() {
+            let key = self.interner.intern("Encoding::UTF_8");
+            let v = self.constants.get(&key).cloned().unwrap_or(Value::Nil);
+            self.stack.push(v);
+            return Ok(());
+        }
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes)
             .map_err(|e| self.trap(e))? {
             self.stack.push(v);

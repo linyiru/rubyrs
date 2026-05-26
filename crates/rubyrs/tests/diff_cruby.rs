@@ -300,5 +300,6 @@ fn run_diff(name: &str) {
 #[test] fn class_new_override() { run_diff("class_new_override"); }
 #[test] fn backreference_globals() { run_diff("backreference_globals"); }
 #[test] fn class_path_nested() { run_diff("class_path_nested"); }
+#[test] fn encoding_stub() { run_diff("encoding_stub"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_strscan() { run_diff("stdlib_strscan"); }
