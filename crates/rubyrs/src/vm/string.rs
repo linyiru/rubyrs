@@ -593,6 +593,36 @@ impl Vm {
                     let copy = s.content.borrow().clone();
                     return Ok(Some(Value::new_str_bytes(copy)));
                 }
+                // `+@` — unfreeze idiom. CRuby 3.x ALWAYS returns
+                // a fresh non-frozen String (the older docs said
+                // it returns the receiver when not frozen — the
+                // actual behaviour, verified empirically against
+                // CRuby 3.4, is to always dup). Drives the `+''`
+                // literal-then-mutate pattern (used by ERB's
+                // `lib/erb/compiler.rb:282` and countless other
+                // gems that build content strings from frozen-
+                // string-literal mode).
+                if name == "+@" && args.is_empty() {
+                    let copy = s.content.borrow().clone();
+                    return Ok(Some(Value::new_str_bytes(copy)));
+                }
+                // `-@` — freeze idiom. CRuby: returns the receiver
+                // when already frozen, otherwise a frozen dup. The
+                // hash-table-dedupe optimisation CRuby applies is
+                // out of scope for our subset (no frozen-string
+                // table), but the observable contract — same value,
+                // frozen state guaranteed — matches.
+                if name == "-@" && args.is_empty() {
+                    if s.frozen.get() {
+                        return Ok(Some(Value::Str(s)));
+                    }
+                    let copy = s.content.borrow().clone();
+                    let frozen = Value::new_str_bytes(copy);
+                    if let Value::Str(ref ns) = frozen {
+                        ns.frozen.set(true);
+                    }
+                    return Ok(Some(frozen));
+                }
                 // Helper closure: bail out of any mutating method
                 // if `s` was frozen. Used by `<<`, `concat`,
                 // `prepend`, `replace`, `[]=`.
