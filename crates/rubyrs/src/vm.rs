@@ -1217,18 +1217,23 @@ impl Vm {
                 if name == "+@" {
                     return Ok(Some(recv.clone()));
                 }
+                // `abs` on an already-non-negative BigInt is the
+                // identity: skip both the BigInt clone and the
+                // bigint_to_value allocation by handing back
+                // `recv` unchanged (same shape as `+@`). Only the
+                // Minus branch needs a fresh BigInt + demote-on-fit
+                // funnel.
+                if name == "abs" {
+                    let sign = self.heap.bigint(*id).sign();
+                    if sign != Sign::Minus {
+                        return Ok(Some(recv.clone()));
+                    }
+                }
                 let result = {
                     let b = self.heap.bigint(*id);
                     match name {
                         "-@" => -b,
-                        "abs" => match b.sign() {
-                            Sign::Minus => -b,
-                            // Plus/NoSign: already non-negative.
-                            // Clone (cheap allocation, but unavoidable
-                            // since we need an owned BigInt to feed
-                            // bigint_to_value's demote-on-fit path).
-                            _ => b.clone(),
-                        },
+                        "abs" => -b, // sign == Minus from check above
                         _ => return Ok(None),
                     }
                 };

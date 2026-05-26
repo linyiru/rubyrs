@@ -2128,39 +2128,46 @@ fn int_min_abs_wraps_without_bignum() {
 #[test]
 fn bigint_unary_plus_returns_same_value_id() {
     // `+@` on BigInt is a no-op clone — the resulting Value is
-    // a `Value::BigInt(id)` pointing at the same heap entry as
-    // the receiver, since try_bigint_unary returns `recv.clone()`.
-    // Verified indirectly: the output must equal the receiver's
-    // string form exactly.
-    let buf = SharedBuf::new();
+    // a `Value::BigInt(id)` pointing at the SAME heap entry as
+    // the receiver. Numeric `==` would also pass if `+@` silently
+    // re-allocated, so capture both values into a 2-element
+    // Array and assert on the `Value::BigInt` ids directly.
     let mut rt = rubyrs::Runtime::new();
-    rt.set_stdout(Box::new(buf.clone()));
-    rt.eval(
-        "big = 2 ** 100\nputs(big == (+big))",
+    let v = rt.eval(
+        "big = 2 ** 100\n[big, +big]",
         "bigint_unary_plus.rb",
-    ).expect("+@ on BigInt must equal the receiver");
-    assert_eq!(buf.snapshot().trim(), "true");
+    ).expect("+@ on BigInt must produce a Value");
+    let elems = rt.resolve_array(&v).expect("expected Value::Array");
+    assert_eq!(elems.len(), 2);
+    match (&elems[0], &elems[1]) {
+        (Value::BigInt(a), Value::BigInt(b)) => assert_eq!(
+            a, b,
+            "+@ must return a Value::BigInt pointing at the same heap id",
+        ),
+        other => panic!("expected (Value::BigInt, Value::BigInt), got {:?}", other),
+    }
 }
 
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_unary_neg_demotes_when_result_fits_int() {
-    // `-big` where `big` is a BigInt that, after negation, fits
-    // i64 must demote to `Value::Int`. Construct a BigInt that
-    // is exactly i64::MAX + 1 via `(i64::MAX + 1)` — wait, that
-    // overflows literally. Use `2 ** 63` which is exactly
-    // i64::MAX + 1 (= 9223372036854775808). Negate it: result is
-    // i64::MIN exactly, which DOES fit in i64. Demote-on-fit
-    // should give `Value::Int(i64::MIN)`. Verify with `is_a?`
-    // semantics via comparison and `.to_s`.
-    let buf = SharedBuf::new();
+    // `-big` where `big` after negation fits i64 must demote to
+    // `Value::Int`. `2 ** 63` is exactly i64::MAX + 1
+    // (9223372036854775808); negating gives i64::MIN exactly,
+    // which fits. Demote-on-fit should produce
+    // `Value::Int(i64::MIN)`. Numeric `==` would silently pass
+    // even if the result stayed `Value::BigInt`, so assert
+    // directly on the Value variant.
     let mut rt = rubyrs::Runtime::new();
-    rt.set_stdout(Box::new(buf.clone()));
-    rt.eval(
-        "big = 2 ** 63\nputs(-big)\nputs((-big) == -9_223_372_036_854_775_808)",
+    let v = rt.eval(
+        "big = 2 ** 63\n-big",
         "bigint_unary_neg_demote.rb",
-    ).expect("demote-on-fit must produce Int from -BigInt that fits");
-    assert_eq!(buf.snapshot().trim(), "-9223372036854775808\ntrue");
+    ).expect("eval must succeed");
+    assert!(
+        matches!(v, Value::Int(i64::MIN)),
+        "expected Value::Int(i64::MIN), got {:?}",
+        v,
+    );
 }
 
 #[test]
