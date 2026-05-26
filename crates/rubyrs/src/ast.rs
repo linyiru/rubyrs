@@ -2044,9 +2044,27 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         }));
     }
     if let Some(n) = node.as_class_node() {
-        let name = if let Some(cr) = n.constant_path().as_constant_read_node() {
+        // Class name shape:
+        //   1. `class Foo`      — ConstantReadNode → "Foo"
+        //   2. `class Foo::Bar` — ConstantPathNode → "Foo::Bar"
+        //      (flatten via the same helper used by ConstRead's
+        //      path arm, so reads of `Foo::Bar` from elsewhere hit
+        //      the same joined-string key in `Vm.classes`).
+        //   3. dynamic path or unrecognised — "?" fallback (keeps
+        //      compilation alive; the resulting class is unusable
+        //      but does not ICE).
+        // Motivating use: MRI `lib/erb/compiler.rb:79`
+        // (`class ERB::Compiler`) — without case (2), the body
+        // executes against a class named "?" and `ERB::Compiler`
+        // resolves to nil.
+        let cp = n.constant_path();
+        let name = if let Some(cr) = cp.as_constant_read_node() {
             cid_to_string(cr.name())
-        } else { "?".to_string() };
+        } else if let Some(joined) = flatten_constant_path(&cp) {
+            joined
+        } else {
+            "?".to_string()
+        };
         let superclass = n.superclass().and_then(|s| {
             s.as_constant_read_node().map(|cr| cid_to_string(cr.name()))
         });
@@ -2069,9 +2087,17 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // introspection, and the strict "can't `.new` a module"
     // check. Acceptable for the subset.
     if let Some(n) = node.as_module_node() {
-        let name = if let Some(cr) = n.constant_path().as_constant_read_node() {
+        // Same constant-path handling as `class Foo::Bar` above —
+        // `module Foo::Bar` is the second-most-common shape in
+        // real gems (e.g. `module Tilt::ERBTemplate::Helpers`).
+        let cp = n.constant_path();
+        let name = if let Some(cr) = cp.as_constant_read_node() {
             cid_to_string(cr.name())
-        } else { "?".to_string() };
+        } else if let Some(joined) = flatten_constant_path(&cp) {
+            joined
+        } else {
+            "?".to_string()
+        };
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
