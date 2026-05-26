@@ -262,6 +262,7 @@ fn run_diff(name: &str) {
 #[test] fn block_arg_nil() { run_diff("block_arg_nil"); }
 #[test] fn rescue_multi_class() { run_diff("rescue_multi_class"); }
 #[test] fn rescue_constant_path() { run_diff("rescue_constant_path"); }
+#[test] fn class_qualified_separates() { run_diff("class_qualified_separates"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_pathname() { run_diff("stdlib_pathname"); }
 #[test] fn uninitialized_constant() { run_diff("uninitialized_constant"); }

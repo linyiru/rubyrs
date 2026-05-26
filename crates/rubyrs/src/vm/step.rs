@@ -1127,21 +1127,24 @@ impl Vm {
                     Value::Class(c) => Some(c),
                     _ => None, // Nil -> default; treat as no explicit parent for now
                 };
-                // Use the qualified name for `Class.name` when the
-                // class is being defined inside a module/class body
-                // (`module Foo; class Bar; ...; end; end` →
-                // qual_id = SymId for "Foo::Bar"). Top-level
-                // classes leave the third arg as the u32::MAX
-                // sentinel and fall back to the bare name. Only
-                // takes effect on first creation — class re-open
-                // (`or_insert_with` short-circuits) keeps whatever
-                // name the original define stamped.
-                let name_str = if qual_id.0 == u32::MAX {
-                    self.interner.resolve(name_id).to_string()
-                } else {
-                    self.interner.resolve(qual_id).to_string()
-                };
-                let cls = self.classes.entry(name_id).or_insert_with(|| Rc::new(Class {
+                // Key the class table by the QUALIFIED SymId when
+                // one is supplied (`module Foo; class Bar; end; end`
+                // → `qual_id = sym("Foo::Bar")`). Top-level
+                // definitions leave the third arg as the
+                // `u32::MAX` sentinel and key by the bare name.
+                //
+                // This separates `class Bar` at top level from a
+                // `module Foo; class Bar; end; end` nested define:
+                // they hash to different slots, so each gets its
+                // own `Class` object with independent method /
+                // ivar / superclass tables — matching CRuby's
+                // "scope determines identity" model. Re-opening
+                // within the same scope still hits the same slot
+                // (the qualified SymId is identical) so methods
+                // added in a reopen land on the same class.
+                let table_key = if qual_id.0 == u32::MAX { name_id } else { qual_id };
+                let name_str = self.interner.resolve(table_key).to_string();
+                let cls = self.classes.entry(table_key).or_insert_with(|| Rc::new(Class {
                     name: std::cell::RefCell::new(name_str),
                     is_module,
                     ivars: RefCell::new(HashMap::new()),

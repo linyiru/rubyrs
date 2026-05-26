@@ -982,12 +982,19 @@ pub(crate) fn compile_expr(
             }
             // Alias under the prefixed path so `Foo::Bar.new` from
             // outside resolves. Skipped when class_path is empty
-            // (top-level — no prefix needed) or when name already
-            // looks like a path (defensive — Expr::Class names are
-            // bare in our AST today, but stay safe). Idempotent on
-            // re-open: same Class value stored.
+            // (top-level — no prefix needed). Idempotent on re-
+            // open: same Class value stored.
+            //
+            // DefClass's Return arm pushes the freshly-created /
+            // re-opened class onto the operand stack. Dup leaves
+            // it for whoever consumes the class-expression value
+            // while StoreConst consumes the dup'd copy. A direct
+            // LoadConst(name_id) here would miss after the
+            // key-by-qualified-name refactor — the class table is
+            // now keyed by `qual_id` for nested definitions, so a
+            // bare-name LoadConst couldn't find it.
             if qual_id.0 != u32::MAX {
-                b.emit(Op::LoadConst(name_id));
+                b.emit(Op::Dup);
                 b.emit(Op::StoreConst(qual_id));
             }
         }
