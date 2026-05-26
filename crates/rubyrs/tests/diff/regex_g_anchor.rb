@@ -11,9 +11,11 @@
 # For real-world consumers — primarily MRI lib/erb/compiler.rb:460
 # (`/\G<%#(.*)%>/` and similar) — the surrounding structural
 # anchors (`<%#`, `%>`) constrain the match to the same locations
-# in practice. This fixture pins the cases where the over-match
-# is observable AS WELL AS the cases where rubyrs and CRuby
-# coincide.
+# in practice. This fixture only pins shapes where rubyrs and
+# CRuby agree byte-for-byte; the divergent shapes (e.g. `\G`
+# against a non-zero-offset receiver) are called out inline as
+# comments but NOT asserted — diff_cruby would fail. The impl-
+# site doc in vm/step.rs records the divergence formally.
 
 # --- Pure-`\G` patterns: same behaviour as without `\G` ---
 # When `\G` sits at the start AND the surrounding text doesn't
