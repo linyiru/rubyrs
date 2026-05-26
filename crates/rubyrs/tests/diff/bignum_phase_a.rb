@@ -123,3 +123,14 @@ big = 4_611_686_018_427_387_904  # 2^62
 puts [big, big, big].sum
 puts (1..10_000_000_000).sum
 puts [1, 2, 3, big].sum
+
+# `<=>` across Int / BigInt — pre-cycle-8 the Int catch-all in
+# primitive.rs (`(Value::Int, "<=>", [_]) => Nil`) shadowed
+# bigint_primitive's downstream handling and returned nil for
+# `1 <=> big`. respond_to?(:<=>) reports true universally, so
+# the catch-all returning nil silently violated the contract
+# Comparable relies on.
+huge = 9_999_999_999_999_999_999
+puts huge <=> 1
+puts 1 <=> huge
+puts huge <=> huge

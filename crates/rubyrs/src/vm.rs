@@ -843,6 +843,26 @@ impl Vm {
         {
             return Ok(Some(v));
         }
+        // `<=>` — universal three-way comparison. Not in BinOpKind
+        // (it returns Int not Bool, so the BinOp machinery doesn't
+        // model it), so we handle it here for Int/BigInt operands.
+        // CRuby's Integer#<=> returns nil for incomparable rhs
+        // (e.g. `1 <=> "foo"`); we do the same by deferring to the
+        // numeric_call path via None.
+        if args.len() == 1 && name == "<=>" {
+            if let (Some(ax), Some(bx)) = (
+                self.as_bigint_ref(recv),
+                self.as_bigint_ref(&args[0]),
+            ) {
+                let ord = (&*ax).cmp(&*bx);
+                let n = match ord {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                };
+                return Ok(Some(Value::Int(n)));
+            }
+        }
         Ok(None)
     }
 }
