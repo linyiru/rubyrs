@@ -21,7 +21,7 @@
 #
 # RULE: flag any `self.maybe_gc()` line where ALL of the
 # following hold:
-#   1. The next BWIN lines contain a `self.heap.alloc(`.
+#   1. The next FWIN lines contain a `self.heap.alloc(`.
 #   2. The preceding LOOKBACK lines contain a Value-bearing
 #      drain — `self.stack.pop()`, `self.stack.drain`,
 #      `self.stack.swap_remove`, `args.swap_remove`,
@@ -50,7 +50,13 @@ LOOKBACK=15    # lines backward to find a Value drain (in the
                # which terminates the enclosing scope and prevents
                # false-positives from drains in unrelated earlier
                # match arms or Op handlers)
-TMP="$(mktemp)"
+# Portable mktemp invocation: GNU mktemp accepts no-template form,
+# BSD/macOS mktemp requires either a template path or `-t prefix`
+# with a 6+ X-block. `-t` is supported by both flavours, but BSD
+# uses TMPDIR + prefix and GNU uses prefix.XXXXXX in TMPDIR — so
+# we hand BSD's stricter form (a template suffix) which GNU also
+# honours. Required for the macos-latest CI runner.
+TMP="$(mktemp -t gc-rooting-lint.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
 
 # Walk every vm/*.rs file. awk is the natural fit: per-line
