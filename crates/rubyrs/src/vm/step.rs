@@ -21,6 +21,49 @@ use crate::value::{BlockHandle, Class, Method, Value, Visibility};
 
 use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm};
 
+/// Translate Onigmo-specific regex constructs into something the
+/// Rust `regex` crate accepts. The crate is by design less
+/// expressive than Onigmo (no backreferences, no `\G`, no
+/// look-behind, ...) — the trade-off is linear-time matching and
+/// no catastrophic backtracking.
+///
+/// Currently handled:
+/// - `\G` (match-at-last-position anchor) → stripped. CRuby uses
+///   it for stateful scanning where the engine remembers the end
+///   of the previous match; the rubyrs subset mostly slices the
+///   input from the current cursor before matching, so the
+///   surrounding structural anchors carry the intent. Motivating
+///   case: MRI's `lib/erb/compiler.rb:460`
+///   (`/\G<%#(.*)%>/`) — without translation the LoadRegex op
+///   raises SyntaxError on the `\G`.
+///
+/// Other Onigmo features (`\K`, `(?<=...)`, named-group backrefs
+/// like `\k<name>`, etc.) still surface as the regex crate's
+/// SyntaxError. Adding translations is per-feature on demand.
+#[cfg(feature = "regex")]
+fn preprocess_regex_pattern(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                // `\G` → drop. Other escapes (`\d`, `\s`, `\\`,
+                // `\.`, ...) pass through verbatim.
+                if next == 'G' {
+                    chars.next();
+                    continue;
+                }
+                out.push(c);
+                out.push(next);
+                chars.next();
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 impl Vm {
     /// Lazily allocate the `$LOAD_PATH` Array on first access.
     /// Idempotent — subsequent calls return the same ObjId so
@@ -265,7 +308,8 @@ impl Vm {
                     r.clone()
                 } else {
                     let src = self.interner.resolve(id).clone();
-                    let compiled = regex::Regex::new(&src).map_err(|e| {
+                    let translated = preprocess_regex_pattern(&src);
+                    let compiled = regex::Regex::new(&translated).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", src, e),
                         })
@@ -330,7 +374,8 @@ impl Vm {
                     if let Some(r) = self.regex_cache.get(&id) {
                         return Ok(r.clone());
                     }
-                    let compiled = regex::Regex::new(pat).map_err(|e| {
+                    let translated = preprocess_regex_pattern(pat);
+                    let compiled = regex::Regex::new(&translated).map_err(|e| {
                         self.trap(RubyError::SyntaxError {
                             msg: format!("invalid regex /{}/: {}", pat, e),
                         })

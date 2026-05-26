@@ -161,6 +161,7 @@ fn run_diff(name: &str) {
 #[test] fn last_match_globals() { run_diff("last_match_globals"); }
 #[test] fn case_when_regex_globals() { run_diff("case_when_regex_globals"); }
 #[test] fn interpolated_regex() { run_diff("interpolated_regex"); }
+#[test] fn regex_g_anchor() { run_diff("regex_G_anchor"); }
 #[cfg(feature = "bignum")]
 #[test] fn bignum_phase_a() { run_diff("bignum_phase_a"); }
 #[cfg(feature = "bignum")]
