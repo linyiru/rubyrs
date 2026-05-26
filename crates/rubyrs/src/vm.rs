@@ -1494,9 +1494,10 @@ impl Vm {
         // Base = 10:  log2_lower = 3, est ≈ recv_bits/3 + 1.
         // Base = 256: log2_lower = 8, est ≈ recv_bits/8 + 1.
         //
-        // recv_bits == 0 case (`Sign::NoSign`) is handled below
-        // as a fixed single-element `[0]` array — skip the cap
-        // check entirely for that path.
+        // recv_bits == 0 case (`Sign::NoSign`) sets est_count = 1
+        // explicitly below — the cap check still runs but is
+        // trivially satisfied for any non-pathological cap (a
+        // single-Value array is `size_of::<Value>()` bytes).
         const VALUE_BYTES: u64 = std::mem::size_of::<Value>() as u64;
         let log2_lower: u64 = base.bits().saturating_sub(1).max(1);
         let est_count: u64 = if recv_bits == 0 {
