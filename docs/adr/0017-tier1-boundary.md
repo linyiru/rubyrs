@@ -146,8 +146,10 @@ table is kept as a record of what was fixed and where.
 | `ENV` reading populated from `std::env::vars()` of the host process | (was) `crates/rubyrs/src/vm/step.rs:342` (the `LoadConst("ENV")` arm) | Rules 1 + 2 | **Closed (this branch)**: `Config::env: Option<HashMap<String, String>>` injects an explicit map. `None` (default) → script sees empty ENV; `Some(m)` → script sees `m` only. CLI binary fills from `std::env::vars()`. |
 | `$$` global read the host process's PID via `std::process::id()` | (was) `crates/rubyrs/src/vm/step.rs:365` (the `LoadGlobal("$$")` arm) | Rule 1 | **Closed (this branch)**: `Config::pid: Option<i64>` injects an explicit PID. `None` (default) → `$$` returns `0` sentinel; `Some(n)` → returns `n`. CLI binary fills from `std::process::id()`. |
 
-Each deviation is its own small PR — none block this ADR from
-landing, but they are the work this spec lines up.
+The remediations landed in PR #86 (regex) and PR #88 (the three
+host-capability rows); both are linked in the Status column of
+the table above. New deviations get added here as they are
+discovered.
 
 ### Future risks (when implemented)
 

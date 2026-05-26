@@ -357,14 +357,33 @@ impl Vm {
                     let id = if let Some(id) = self.env_hash {
                         id
                     } else {
+                        // ADR 0017 Rule 1 requires deterministic
+                        // iteration. `Config::env: HashMap` has
+                        // randomised hash order, so collect the
+                        // entries into a key-sorted Vec before
+                        // materialising the Ruby Hash (which preserves
+                        // insertion order); otherwise `ENV.each` /
+                        // `ENV.to_a` / `ENV.inspect` would vary across
+                        // runs even for identical host injection.
                         let pairs: Vec<(Value, Value)> = match &self.env_override {
-                            Some(map) => map
-                                .iter()
-                                .map(|(k, v)| (Value::new_str(k.clone()), Value::new_str(v.clone())))
-                                .collect(),
+                            Some(map) => {
+                                let mut entries: Vec<(&String, &String)> = map.iter().collect();
+                                entries.sort_by(|a, b| a.0.cmp(b.0));
+                                entries
+                                    .into_iter()
+                                    .map(|(k, v)| (Value::new_str(k.clone()), Value::new_str(v.clone())))
+                                    .collect()
+                            }
                             None => Vec::new(),
                         };
                         self.maybe_gc();
+                        // Apply `Config::max_heap_objects` to this
+                        // path too — every other heap alloc site
+                        // calls `check_alloc()?` after `maybe_gc()`,
+                        // and skipping it here let scripts exceed
+                        // the live-object cap by triggering the lazy
+                        // ENV build while already at the limit.
+                        self.check_alloc()?;
                         let id = self.heap.alloc(HeapObj::Hash(pairs));
                         self.env_hash = Some(id);
                         id
