@@ -824,6 +824,30 @@ impl Vm {
                 let m = match existing {
                     Some(m) => m,
                     None => {
+                        // Source name not in the user-Method table.
+                        // Before raising NameError, check whether the
+                        // surrounding class's primitive whitelist
+                        // responds to it (`Symbol#name`, `Integer#+`,
+                        // ...). If so, synthesise a forwarder Method
+                        // whose body is `LoadSelf; LoadLocal(0);
+                        // ApplyCall(old_id, ...); Return` — i.e.
+                        // call the primitive on `self` with any
+                        // forwarded args. This is what lets the
+                        // msgpack-ruby `lib/msgpack/symbol.rb`
+                        // `alias_method :to_msgpack_ext, :name`
+                        // shape work without rewriting upstream.
+                        // Variadic forwarding via a rest param so
+                        // arities other than 0 also forward
+                        // correctly.
+                        let cls_ref = self.class_stack.last().cloned();
+                        if let Some(cls) = &cls_ref
+                            && self.primitive_class_responds_to(&cls.name, old_id) {
+                            let synth = self.synth_primitive_forwarder(cls, old_id);
+                            cls.methods.borrow_mut().insert(new_id, synth);
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                            self.stack.push(Value::Nil);
+                            return Ok(true);
+                        }
                         // CRuby raises NameError ("undefined method ...")
                         // when `alias_method`'s source name isn't found
                         // on the receiver's ancestor chain — not

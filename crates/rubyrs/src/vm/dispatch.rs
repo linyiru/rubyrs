@@ -555,6 +555,22 @@ impl Vm {
                 return Ok(());
             }
 
+        // Primitive-receiver fallback to the user-Class method
+        // table. CRuby's dispatch walks every value's class chain
+        // uniformly; rubyrs's primitive arms above handle the
+        // built-in methods, but `class Symbol; alias_method
+        // :to_msgpack_ext, :name; end` installs a forwarder in
+        // `self.classes[Symbol].methods` that's only reachable
+        // through the user-Class table. Look up the primitive's
+        // class name via `class_of` and try `lookup_method_cached`
+        // on it. Skip Object (its own arm below handles that) and
+        // Class (Class.new etc. handled by the earlier arm).
+        if !matches!(&recv, Value::Object(_) | Value::Class(_))
+            && let Value::Class(cls) = self.class_of(&recv)
+            && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+            self.invoke_method(m, recv.clone(), args)?;
+            return Ok(());
+        }
         if let Value::Object(id) = &recv {
             let cls = self.heap.class_of(*id);
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
@@ -2760,6 +2776,81 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
         // permissive answer so the gem helper path doesn't trip
         // on Kernel-shared method probes.
         None => is_primitive_class_name(&cls.name),
+    }
+}
+
+impl Vm {
+    /// Does an instance of the primitive class `class_name`
+    /// respond to method `sid`? Builds a sentinel `Value` of
+    /// the matching shape and consults the per-primitive
+    /// `responds_to` whitelist. Aggregate primitives
+    /// (Array/Hash/Range/Regexp/...) fall back to permissive
+    /// `true`, matching `class_method_defined`'s shape. Used
+    /// by `Op::AliasMethod` to decide whether to synthesise a
+    /// primitive-forwarder Method when the source name isn't
+    /// in the user-Method table.
+    pub(crate) fn primitive_class_responds_to(&self, class_name: &str, sid: SymId) -> bool {
+        let sentinel: Option<Value> = match class_name {
+            "Integer" => Some(Value::Int(0)),
+            "Float" => Some(Value::Float(0.0)),
+            "String" => Some(Value::new_str("")),
+            "Symbol" => Some(Value::Sym(SymId(0))),
+            "TrueClass" => Some(Value::Bool(true)),
+            "FalseClass" => Some(Value::Bool(false)),
+            "NilClass" => Some(Value::Nil),
+            _ => None,
+        };
+        match sentinel {
+            Some(s) => self.responds_to(&s, sid),
+            None => is_primitive_class_name(class_name),
+        }
+    }
+
+    /// Build a Method that forwards to a primitive method on
+    /// `self`. Emitted as the body of an `alias_method`'d
+    /// primitive — when the alias is invoked, the body runs
+    /// `LoadSelf; LoadLocal(0); ApplyCall(orig_id, ...); Return`
+    /// so any args the caller passed flow through to the
+    /// primitive call via the rest-Array slot. The forwarder
+    /// Proto is appended to `self.protos` and the index is
+    /// stamped into the returned Method.
+    pub(crate) fn synth_primitive_forwarder(&mut self, cls: &Rc<Class>, orig_id: SymId) -> Rc<crate::value::Method> {
+        use crate::bytecode::{Op, Proto};
+        use crate::error::Span;
+        let proto = Proto {
+            name: format!("<primitive-alias-forwarder:{}>", self.interner.resolve(orig_id)),
+            // `args` is the rest-arg name; proto.params lists it so
+            // `invoke_method`'s arg-binding loop treats slot 0 as
+            // the rest collector. n_required_positional = 0 keeps
+            // the alias arity-permissive (matches primitive
+            // dispatch, which is variadic).
+            params: vec!["args".to_string()],
+            n_required_positional: 0,
+            rest_param: Some("args".to_string()),
+            kw_param_defaults: vec![],
+            kw_rest_param: None,
+            block_param: None,
+            n_locals: 1,
+            code: vec![
+                Op::LoadSelf,
+                Op::LoadLocal(0),
+                Op::ApplyCall(orig_id, u16::MAX),
+                Op::Return,
+            ],
+            op_spans: vec![Span::ZERO; 4],
+            filename: "<primitive-alias>".into(),
+            block_body_local_start: u16::MAX,
+            byte_literals: vec![],
+        };
+        let idx = self.protos.len();
+        self.protos.push(proto);
+        Rc::new(crate::value::Method {
+            params: vec!["args".to_string()],
+            proto_idx: idx,
+            defining_class: Some(Rc::downgrade(cls)),
+            visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+            closure: None,
+        })
     }
 }
 
