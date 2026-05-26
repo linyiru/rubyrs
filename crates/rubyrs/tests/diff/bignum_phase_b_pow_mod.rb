@@ -29,7 +29,7 @@ puts 2.pow(10_000, 1_000_000_007)
 puts 2.pow(1_000_000, 1_000_000_007)
 
 # Negative base. CRuby uses floor-mod (result has same sign as mod).
-puts (-5).pow(3, 7)         # -125 mod 7 = 6
+puts (-5).pow(3, 7)         # -125 floor-mod 7 = 1 (-125 = 7*-18 + 1)
 puts (-2).pow(10, 7)        # 1024 mod 7 = 2 (even exponent → positive)
 puts (-2).pow(11, 7)        # -2048 mod 7 = 1 (-2048 = 7*-293 + 1)
 

@@ -2194,6 +2194,61 @@ fn pow_method_works_under_no_bignum_profile() {
     assert_eq!(buf.snapshot().trim(), "125\n6\n1\n1\n-1");
 }
 
+#[test]
+fn pow_one_arg_accepts_float_exponent() {
+    // `5.pow(1.5)` must mirror `5 ** 1.5` — both routes through
+    // the same `**` arm. Previously the `pow` alias only fired
+    // for `[Int]` exponents, so Float exp NoMethodErrored despite
+    // being supported by `**`. Pin across both profiles.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 5.pow(1.5)\nputs 9.pow(0.5)",
+        "pow_float_exp.rb",
+    ).expect("Int#pow(Float) must work");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    let a: f64 = lines[0].parse().expect("Float output");
+    let b: f64 = lines[1].parse().expect("Float output");
+    // 5^1.5 ≈ 11.180339887; 9^0.5 = 3.0.
+    assert!((a - 11.180_339_887).abs() < 1e-6);
+    assert!((b - 3.0).abs() < 1e-12);
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_no_bignum_two_arg_distinguishes_exp_vs_mod_type_errors() {
+    // CRuby uses two distinct TypeError messages depending on
+    // which arg is non-Integer: "...1st argument is integer" when
+    // the exp is non-Int, "...all arguments are integers" when the
+    // mod is non-Int. The no-bignum 2-arg path must match exactly
+    // (the bignum path already does).
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(1.5, 7)", "exp_float.rb").unwrap_err();
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        other => panic!("expected TypeError, got {:?}", other),
+    };
+    assert!(
+        msg.contains("a 1st argument is integer"),
+        "wrong message for non-Int exp: {}",
+        msg,
+    );
+    let err = rt.eval("5.pow(3, 1.5)", "mod_float.rb").unwrap_err();
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        other => panic!("expected TypeError, got {:?}", other),
+    };
+    assert!(
+        msg.contains("all arguments are integers"),
+        "wrong message for non-Int mod: {}",
+        msg,
+    );
+}
+
 #[cfg(not(feature = "bignum"))]
 #[test]
 fn pow_no_bignum_error_shapes_match_cruby() {

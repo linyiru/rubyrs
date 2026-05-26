@@ -113,6 +113,34 @@ pub(crate) fn numeric_call(
                 String::from_utf8(buf).expect("ASCII digits + sign"),
             ))
         }
+        // `Integer#pow(exp)` — 1-arg form is an alias for `**` for
+        // numeric exponents (Int / Float / BigInt under bignum).
+        // Sits BEFORE the broader `(Int, op, [Int])` arm because
+        // that arm's inner-match `_ => None` fallthrough would
+        // otherwise consume the (Int, "pow", [Int]) shape and
+        // prevent the top-level alias from firing. Delegating to
+        // `**` keeps ZeroDivisionError / identity short-circuits /
+        // demote-on-fit centralised. Non-numeric exponents (String,
+        // Symbol, nil, …) raise TypeError matching CRuby — the
+        // `**` operator's own dispatch would otherwise surface
+        // NoMethodError, which is the wrong error class.
+        (Value::Int(_), "pow", [arg]) => {
+            let acceptable = match arg {
+                Value::Int(_) | Value::Float(_) => true,
+                #[cfg(feature = "bignum")]
+                Value::BigInt(_) => true,
+                _ => false,
+            };
+            if !acceptable {
+                return Err(RubyError::TypeError {
+                    msg: format!(
+                        "{} can't be coerced into Integer",
+                        type_name_for_coerce(arg),
+                    ),
+                });
+            }
+            return numeric_call(recv, "**", args, _max_value_bytes);
+        }
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
@@ -234,13 +262,6 @@ pub(crate) fn numeric_call(
                 if *b >= 0 { a.wrapping_shr((*b as u32).min(63)) }
                 else { a.wrapping_shl(((-b) as u32).min(63)) }
             )),
-            // `Integer#pow(exp)` — 1-arg form is an alias for `**`.
-            // Keeps `respond_to?(:pow)` honest in BOTH profiles
-            // (whitelisted unconditionally in lookup.rs). Reuses
-            // the `**` arm logic verbatim by recursing into the same
-            // inner-match dispatch — keeps `0**-n` → ZeroDivisionError,
-            // identity short-circuits, and demote-on-fit centralised.
-            "pow" => return numeric_call(recv, "**", args, _max_value_bytes),
             _ => None,
         },
         // 2-arg form `pow(exp, mod)` — under `bignum`, declined here
@@ -280,6 +301,19 @@ pub(crate) fn numeric_call(
             let adjusted = if *modulus < 0 && result != 0 { result - m_abs } else { result };
             Some(Value::Int(adjusted as i64))
         }
+        // Non-Integer exponent (with mod given) — match CRuby's
+        // distinct "1st argument is integer" message. Kept ahead
+        // of the "all arguments are integers" arm so the more
+        // specific message wins.
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "pow", [exp, _]) if !matches!(exp, Value::Int(_)) => {
+            return Err(RubyError::TypeError {
+                msg: "Integer#pow() 2nd argument not allowed unless a 1st argument is integer".to_string(),
+            });
+        }
+        // Non-Integer modulus (exp is Int) — CRuby's "all arguments
+        // are integers" message. This fires when the exponent passed
+        // the integer check above but the modulus did not.
         #[cfg(not(feature = "bignum"))]
         (Value::Int(_), "pow", [_, _]) => {
             return Err(RubyError::TypeError {
