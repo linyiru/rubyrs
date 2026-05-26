@@ -40,7 +40,7 @@ pub(crate) use cext::with_vm_ptr_set;
 pub(crate) use lookup::{class_is_a, CallCache};
 pub(crate) use primitive::primitive_call;
 pub(crate) use sprintf::ruby_sprintf;
-pub(crate) use util::{value_cmp_v, vec_nil, visibility_from_name};
+pub(crate) use util::{value_cmp_v, value_cmp_v_heap, vec_nil, visibility_from_name};
 
 // ---------- VM ----------
 
@@ -603,7 +603,11 @@ impl Vm {
     }
 
     pub(crate) fn user_cmp(&mut self, a: &Value, b: &Value) -> Result<Option<std::cmp::Ordering>, Trap> {
-        if let Some(ord) = value_cmp_v(a, b, &self.interner) {
+        // Heap-aware fast path so Array#sort works on BigInt
+        // arrays — value_cmp_v alone would return None for any
+        // BigInt operand and force fall-through to the user `<=>`
+        // method dispatch, which doesn't exist for primitives.
+        if let Some(ord) = value_cmp_v_heap(a, b, &self.interner, &self.heap) {
             return Ok(Some(ord));
         }
         // Try the receiver's `<=>` method (user-defined). Only
@@ -830,6 +834,8 @@ impl Vm {
         // receiver (Int#to_s already handled by numeric_call).
         if recv_is_bigint && args.is_empty() {
             if let Value::BigInt(id) = recv {
+                use num_bigint::Sign;
+                let b = self.heap.bigint(*id);
                 match name {
                     "to_s" | "inspect" => {
                         // BigInt decimal can grow arbitrarily (consider
@@ -839,7 +845,7 @@ impl Vm {
                         // primitive_call arms enforce. Without this
                         // check a script could DoS the host by
                         // converting a huge BigInt to string.
-                        let s = self.heap.bigint(*id).to_string();
+                        let s = b.to_string();
                         if let Some(max) = self.max_value_bytes
                             && s.len() > max
                         {
@@ -849,6 +855,23 @@ impl Vm {
                         }
                         return Ok(Some(Value::new_str(s)));
                     }
+                    // Pure read-only predicates — fit cleanly in
+                    // Phase A because they don't need heap mutation.
+                    // (CRuby Integer uniformity: any predicate the
+                    // i64 Int receiver supports should work on the
+                    // unified Integer class regardless of magnitude.)
+                    "to_i" => return Ok(Some(recv.clone())),
+                    "to_f" => {
+                        // Lossy at extreme magnitudes; matches CRuby.
+                        return Ok(Some(Value::Float(
+                            b.to_string().parse::<f64>().unwrap_or(f64::INFINITY)
+                        )));
+                    }
+                    "zero?" => return Ok(Some(Value::Bool(b.sign() == Sign::NoSign))),
+                    "positive?" => return Ok(Some(Value::Bool(b.sign() == Sign::Plus))),
+                    "negative?" => return Ok(Some(Value::Bool(b.sign() == Sign::Minus))),
+                    "even?" => return Ok(Some(Value::Bool((b & num_bigint::BigInt::from(1)) == num_bigint::BigInt::from(0)))),
+                    "odd?" => return Ok(Some(Value::Bool((b & num_bigint::BigInt::from(1)) != num_bigint::BigInt::from(0)))),
                     _ => {}
                 }
             }

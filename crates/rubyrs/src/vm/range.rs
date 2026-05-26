@@ -158,6 +158,18 @@ impl Vm {
                         let in_r = if excl { *v >= bi && *v < ei } else { *v >= bi && *v <= ei };
                         Some(Value::Bool(in_r))
                     }
+                    // BigInt arg with Int bounds: BigInt is always
+                    // outside the Int-bounded range UNLESS the
+                    // BigInt happens to fit i64 (in which case
+                    // bigint_to_value would have demoted it). So
+                    // any reachable Value::BigInt arg here is
+                    // outside the range — return false. (The
+                    // BigInt-bound branch below handles the
+                    // BigInt-bound case.)
+                    #[cfg(feature = "bignum")]
+                    ("include?", [Value::BigInt(_)]) | ("cover?", [Value::BigInt(_)]) => {
+                        Some(Value::Bool(false))
+                    }
                     // `r.cover?(other_range)` — true iff the
                     // other range is fully within self. For Int
                     // bounds both sides; mismatched-type endpoints

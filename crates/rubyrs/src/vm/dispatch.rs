@@ -27,7 +27,7 @@ use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 #[cfg(all(feature = "cext", not(target_os = "wasi")))]
 use super::with_vm_ptr_set;
 use super::{
-    primitive_call, value_cmp_v, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
+    primitive_call, value_cmp_v_heap, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
 };
 use crate::HostCtx;
 
@@ -1890,13 +1890,32 @@ impl Vm {
                     // all work. Strings / Symbols compare
                     // lexicographically — handled below.
                     let r = self.heap.range(*rid);
-                    fn to_f64(v: &Value) -> Option<f64> {
+                    #[cfg(feature = "bignum")]
+                    let to_f64 = |v: &Value| -> Option<f64> {
+                        match v {
+                            Value::Int(n) => Some(*n as f64),
+                            Value::Float(f) => Some(*f),
+                            // BigInt-to-f64 via the decimal-string
+                            // round-trip — adequate for the
+                            // include?/cover? containment check
+                            // (Float comparison is already lossy),
+                            // and avoids importing a `ToPrimitive`
+                            // trait for one use. Without this arm a
+                            // BigInt-bounded range fails the to_f64
+                            // pass and falls into the lex fallback,
+                            // which also lacked BigInt support.
+                            Value::BigInt(id) => self.heap.bigint(*id).to_string().parse::<f64>().ok(),
+                            _ => None,
+                        }
+                    };
+                    #[cfg(not(feature = "bignum"))]
+                    let to_f64 = |v: &Value| -> Option<f64> {
                         match v {
                             Value::Int(n) => Some(*n as f64),
                             Value::Float(f) => Some(*f),
                             _ => None,
                         }
-                    }
+                    };
                     let excl = r.exclusive;
                     
                     match (to_f64(&r.begin), to_f64(&r.end), to_f64(arg)) {
@@ -1909,10 +1928,10 @@ impl Vm {
                             // compare using value_cmp_v if both bounds
                             // and the arg are the same comparable type.
                             let b = &r.begin; let e = &r.end;
-                            let ge_lo = value_cmp_v(arg, b, &self.interner)
+                            let ge_lo = value_cmp_v_heap(arg, b, &self.interner, &self.heap)
                                 .map(|o| o != std::cmp::Ordering::Less)
                                 .unwrap_or(false);
-                            let cmp_hi = value_cmp_v(arg, e, &self.interner);
+                            let cmp_hi = value_cmp_v_heap(arg, e, &self.interner, &self.heap);
                             let le_hi = match cmp_hi {
                                 Some(o) => if excl { o == std::cmp::Ordering::Less }
                                            else { o != std::cmp::Ordering::Greater },

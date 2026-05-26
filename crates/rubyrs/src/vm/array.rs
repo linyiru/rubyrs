@@ -13,7 +13,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{ObjId, Value};
 
-use super::{value_cmp_v, PinGuard, Vm};
+use super::{value_cmp_v_heap, PinGuard, Vm};
 
 impl Vm {
     /// Array#X methods that don't take a block. Returns
@@ -396,7 +396,7 @@ impl Vm {
                         if a.is_empty() { return Ok(Some(Value::Nil)); }
                         let mut best = a[0].clone();
                         for v in &a[1..] {
-                            match value_cmp_v(v, &best, &self.interner) {
+                            match value_cmp_v_heap(v, &best, &self.interner, &self.heap) {
                                 Some(std::cmp::Ordering::Less) => best = v.clone(),
                                 Some(_) => {}
                                 None => return Ok(None),
@@ -409,7 +409,7 @@ impl Vm {
                         if a.is_empty() { return Ok(Some(Value::Nil)); }
                         let mut best = a[0].clone();
                         for v in &a[1..] {
-                            match value_cmp_v(v, &best, &self.interner) {
+                            match value_cmp_v_heap(v, &best, &self.interner, &self.heap) {
                                 Some(std::cmp::Ordering::Greater) => best = v.clone(),
                                 Some(_) => {}
                                 None => return Ok(None),
