@@ -1117,37 +1117,25 @@ impl Vm {
     /// OOM (or hit the allocator's panic-on-fail path) before we
     /// get a chance to inspect `s.len()`. Estimate the rendered
     /// length from the BigInt's bit count + per-digit bit yield:
-    ///   `ceil(bits / log2_per_digit) + sign_byte`
-    /// where `log2_per_digit = max(1, floor(log2(radix)))` is a
-    /// lower bound on `log2(base)`, matching the
-    /// `Vm::try_integer_digits` estimator (dividing by a smaller
-    /// log gives a safe upper bound on the char count without
-    /// floating-point). `sign_byte = 1` iff the BigInt is
-    /// negative, else 0 — avoids systematic over-estimate that
-    /// would false-trap non-negative values landing exactly on
-    /// the cap. `max_value_bytes` falls back to the same 1 MB
-    /// safety ceiling that `try_bigint_pow` uses when no host
-    /// cap is configured.
+    ///   `ceil(bits * SCALE / log2_per_digit_scaled) + sign_byte`
+    /// where `log2_per_digit_scaled = floor(log2(radix) * SCALE)`
+    /// is a tight integer lower bound on `log2(base)` (see
+    /// [`bignum_log2_per_digit_scaled`]). Earlier revisions used
+    /// the integer `floor(log2(radix))` which over-estimated the
+    /// digit count by ~10% for radix 10 and ~38% for radix 3 —
+    /// enough to false-trap rendered values that would actually
+    /// fit under a tightly-configured `max_value_bytes`.
+    /// `sign_byte = 1` iff the BigInt is negative, else 0.
+    /// `max_value_bytes` falls back to the same 1 MB safety
+    /// ceiling that `try_bigint_pow` uses when no host cap is
+    /// configured.
     #[cfg(feature = "bignum")]
     pub(crate) fn check_bigint_to_s_cap(&self, id: crate::value::ObjId, radix: u32) -> Result<(), crate::error::Trap> {
         use num_bigint::Sign;
         let b = self.heap.bigint(id);
         let bits = b.bits();
         let sign_byte: u64 = if b.sign() == Sign::Minus { 1 } else { 0 };
-        // log2_per_digit lower bound: floor(log2(radix)) computed
-        // as `(u32::BITS - radix.leading_zeros()) - 1`. For radix
-        // == 2 this is 1 (exact); for radix == 10 this is 3; for
-        // radix == 36 this is 5.
-        let log2_per_digit: u64 = (u32::BITS - radix.leading_zeros())
-            .saturating_sub(1) as u64;
-        let log2_per_digit = log2_per_digit.max(1);
-        // ceil-div bits / log2_per_digit, then add sign byte if
-        // negative. Clamp to at least 1 digit for the zero case:
-        // `BigInt(0).to_str_radix(_)` returns "0" (one char) even
-        // though `bits()` is 0; without the clamp a strict
-        // `max_value_bytes = 0` cap would let "0" through.
-        let digits_est: u64 = bits.saturating_add(log2_per_digit - 1) / log2_per_digit;
-        let digits_est = digits_est.max(1);
+        let digits_est = bignum_digits_upper_bound(bits, radix);
         let est: u64 = digits_est.saturating_add(sign_byte);
         let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
         if est > cap {
@@ -1157,6 +1145,50 @@ impl Vm {
         }
         Ok(())
     }
+}
+
+/// Returns `floor(log2(radix) * SCALE)` as an integer lower
+/// bound on `log2(radix)`. Shared by the `to_s(radix)` cap in
+/// [`Vm::check_bigint_to_s_cap`] and the `'%b/%o/%x' % bignum`
+/// pre-allocation cap in [`super::sprintf::format_radix_any`].
+///
+/// `SCALE = 64` keeps the table-free f64 computation within
+/// f64's ~15.95 decimal-digit precision for the 2..=36 radix
+/// domain we care about (the largest value here is
+/// `floor(log2(36) * 64) = 330` which rounds exactly) while
+/// giving enough resolution that the resulting digit estimate
+/// is within +1 of the true value across the supported radix
+/// range. Power-of-two radices short-circuit to an exact
+/// integer multiply to sidestep f64 rounding entirely.
+#[cfg(feature = "bignum")]
+pub(crate) fn bignum_log2_per_digit_scaled(radix: u32) -> u64 {
+    const SCALE: u64 = 64;
+    if radix >= 2 && radix.is_power_of_two() {
+        return (radix.trailing_zeros() as u64) * SCALE;
+    }
+    let v = (radix as f64).log2() * SCALE as f64;
+    (v.floor() as u64).max(1)
+}
+
+/// Returns an upper bound on the number of characters
+/// `BigInt::to_str_radix(radix)` produces for a value with the
+/// given `bits()`. Clamps to ≥ 1 so that `BigInt(0)` (whose
+/// `bits()` is 0 but whose rendered form is `"0"`) passes a
+/// `max_value_bytes = 0` cap consistently with the pre-tightening
+/// behaviour. Uses `u128` intermediates to avoid overflow when
+/// `bits` approaches `u64::MAX / SCALE` (≈ 2^58 bits ≈ 32 PB).
+#[cfg(feature = "bignum")]
+pub(crate) fn bignum_digits_upper_bound(bits: u64, radix: u32) -> u64 {
+    const SCALE: u128 = 64;
+    let log2_scaled = bignum_log2_per_digit_scaled(radix) as u128;
+    let scaled_bits = (bits as u128).saturating_mul(SCALE);
+    let digits_est = (scaled_bits + log2_scaled - 1) / log2_scaled;
+    let digits_est_u64 = if digits_est > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        digits_est as u64
+    };
+    digits_est_u64.max(1)
 }
 
 /// BigInt arithmetic surface — shared by the i64-overflow promotion

@@ -2358,6 +2358,29 @@ fn sprintf_radix_bigint_traps_via_pre_alloc_cap() {
     );
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_cap_does_not_false_trap_decimal_at_exact_length() {
+    // Regression for cycle 10: earlier the cap estimator used
+    // integer `floor(log2(radix))` as the per-digit bit yield,
+    // which over-estimated digit count by ~10% for radix 10.
+    // `(10 ** 100).to_s` is exactly 101 chars ("1" + 100 "0"s);
+    // pre-fix estimate was ceil(333 bits / 3) = 111, so a cap
+    // of 105 would have false-trapped despite the rendered
+    // value fitting. Post-fix estimate is 101, matching reality.
+    let cfg = rubyrs::Config { max_value_bytes: Some(105), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (10 ** 100).to_s",
+        "to_s_cap_tight.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let expected = format!("1{}", "0".repeat(100));
+    assert_eq!(out.trim(), expected);
+}
+
 #[test]
 fn sprintf_alt_form_suppresses_prefix_for_zero_value() {
     // CRuby suppresses the alt-form prefix when the value is

@@ -298,21 +298,16 @@ fn format_radix_any(
         // post-format cap check only sees the already-allocated
         // result string and can't unwind a host OOM.
         //
-        // Bound: `ceil(bits / log2_per_digit) + sign_byte + prefix`
-        // where `log2_per_digit = max(1, floor(log2(radix)))` is
-        // a lower bound on `log2(base)` (dividing by a smaller
-        // log gives a safe upper bound on the count without
-        // floating-point), `sign_byte` is 1 iff negative,
-        // `prefix` is 0 / 1 (octal `#`) / 2 (`0x`/`0b` `#`).
-        let bits = b.bits();
-        let log2_per_digit: u64 = (u32::BITS - radix.leading_zeros())
-            .saturating_sub(1) as u64;
-        let log2_per_digit = log2_per_digit.max(1);
-        // ceil-div bits / log2_per_digit, clamped to ≥ 1: `BigInt(0)`
-        // has `bits() == 0` but `to_str_radix(_)` returns "0" (one
-        // char). Without the clamp, a tight `max_value_bytes`
-        // would under-estimate by 1 and let "0" through unbounded.
-        let digits_est: u64 = (bits.saturating_add(log2_per_digit - 1) / log2_per_digit).max(1);
+        // Bound: `digits_upper_bound(bits, radix) + sign_byte + prefix`
+        // via the shared [`super::bignum::bignum_digits_upper_bound`]
+        // helper (scaled-integer `log2(radix)` table, ~tight to ±1
+        // char). Earlier revisions used the integer
+        // `floor(log2(radix))` which over-estimated by ~10% for
+        // radix 10 — enough to false-trap rendered values that
+        // would actually fit under a tight cap.
+        // `sign_byte` is 1 iff negative, `prefix` is 0 / 1 (octal
+        // `#`) / 2 (`0x`/`0b` `#`).
+        let digits_est = super::bignum::bignum_digits_upper_bound(b.bits(), radix);
         let sign_byte: u64 = if b.sign() == Sign::Minus { 1 } else { 0 };
         let prefix_len: u64 = if !alt { 0 } else {
             match radix { 16 | 2 => 2, 8 => 1, _ => 0 }
