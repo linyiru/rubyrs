@@ -30,6 +30,10 @@ spec/
     ├── string_reverse_spec.rb     # ruby/spec snapshot ~2026-05;
     ├── string_include_spec.rb     # see TESTING.md for the
     ├── string_empty_spec.rb       # ingestion-pipeline roadmap)
+    ├── string_length_spec.rb      # core/string — first v0.4
+    ├── string_size_spec.rb        # dogfood (`it_behaves_like
+    │                              # :string_length` inlined
+    │                              # from shared/length.rb)
     │
     │ # core/method subset — each file mirrors the same-named
     │ # upstream spec; surfaces covered are `Method#call` / `#()`,
@@ -62,7 +66,7 @@ The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **130 examples across 24
+"Future work" below). Current total: **132 examples across 26
 files**, all passing.
 
 ## DSL the helper provides
