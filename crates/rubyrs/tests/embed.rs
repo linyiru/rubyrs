@@ -1802,3 +1802,29 @@ fn object_send_string_arg_respects_max_symbols_cap() {
         err.err,
     );
 }
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_respects_max_value_bytes_cap() {
+    // Regression cover for PR #103 cycle 13. BigInt#to_s/#inspect
+    // produce a decimal-digit string that grows arbitrarily with
+    // the magnitude (`(2 ** 1_000_000).to_s` is ~300 KB), so the
+    // bigint_primitive path must enforce Config::max_value_bytes
+    // the same way primitive_call arms do — otherwise a script
+    // could DoS the host by stringifying a huge integer.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        r#"
+        n = 1
+        100.times { n = n * 1_000_000 }   # n has ~600 decimal digits
+        n.to_s
+        "#,
+        "bigint_to_s_size_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted trap from BigInt#to_s exceeding max_value_bytes, got {:?}",
+        err.err,
+    );
+}

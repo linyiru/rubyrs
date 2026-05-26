@@ -832,7 +832,22 @@ impl Vm {
             if let Value::BigInt(id) = recv {
                 match name {
                     "to_s" | "inspect" => {
-                        return Ok(Some(Value::new_str(self.heap.bigint(*id).to_string())));
+                        // BigInt decimal can grow arbitrarily (consider
+                        // `n = 2 ** 1_000_000; n.to_s`), so the
+                        // String materialised here must obey the same
+                        // `Config::max_value_bytes` cap that other
+                        // primitive_call arms enforce. Without this
+                        // check a script could DoS the host by
+                        // converting a huge BigInt to string.
+                        let s = self.heap.bigint(*id).to_string();
+                        if let Some(max) = self.max_value_bytes
+                            && s.len() > max
+                        {
+                            return Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("value size {} bytes > cap {}", s.len(), max),
+                            }));
+                        }
+                        return Ok(Some(Value::new_str(s)));
                     }
                     _ => {}
                 }
