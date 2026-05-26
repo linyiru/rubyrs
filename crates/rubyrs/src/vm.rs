@@ -695,10 +695,16 @@ impl Vm {
     }
 }
 
-/// Dispatch helpers shared by every Int×Int arithmetic site —
-/// the main `Op::BinOp` path plus the reduce-style accumulators
-/// in `Array#sum`/`Range#sum`. Promotes to BigInt on overflow
-/// when the feature is on; falls back to wrapping when it's off.
+/// Dispatch helpers used by the reduce-style accumulators in
+/// `Array#sum`/`Range#sum`/`Array#inject`/`Range#inject`. Promotes
+/// to BigInt on overflow when the feature is on; falls back to
+/// wrapping when it's off. (The main `Op::BinOp` path doesn't go
+/// through this helper — it inlines the same logic in step.rs
+/// with the BinOpInt/BinOp fast paths because each instruction
+/// already has the operands unwrapped in locals; routing through
+/// a helper would add an avoidable match on the i64 fast path.
+/// If those two paths ever drift apart, refactor both onto this
+/// helper.)
 impl Vm {
     /// Apply an Int×Int op, promoting to BigInt on Add/Sub/Mul
     /// overflow when `bignum` is on. Use this instead of calling

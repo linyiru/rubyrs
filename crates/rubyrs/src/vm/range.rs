@@ -216,7 +216,16 @@ impl Vm {
                     }
                     ("sum", []) | ("sum", [Value::Int(_)]) => {
                         let init = match args { [Value::Int(n)] => *n, _ => 0 };
-                        let end_inc = if excl { ei - 1 } else { ei };
+                        // ei - 1 can overflow when ei == i64::MIN
+                        // (e.g. `(-2**63...-2**63)` — exclusive end
+                        // at the minimum). Treat that as an empty
+                        // range, same as `bi > end_inc`.
+                        let end_inc = if excl {
+                            match ei.checked_sub(1) {
+                                Some(v) => v,
+                                None => return Ok(Some(Value::Int(init))),
+                            }
+                        } else { ei };
                         if bi > end_inc { return Ok(Some(Value::Int(init))); }
                         // n * (bi + end_inc) / 2 closed form. The
                         // i64 fast path computes EVERY step with
@@ -259,19 +268,37 @@ impl Vm {
                         }
                     }
                     ("inject", [Value::Sym(op_sym)]) | ("reduce", [Value::Sym(op_sym)]) => {
-                        let end_inc = if excl { ei - 1 } else { ei };
+                        // ei - 1 can overflow when ei == i64::MIN
+                        // (exclusive end at the minimum); empty range.
+                        let end_inc = if excl {
+                            match ei.checked_sub(1) {
+                                Some(v) => v,
+                                None => return Ok(Some(Value::Nil)),
+                            }
+                        } else { ei };
                         if bi > end_inc { return Ok(Some(Value::Nil)); }
                         let op_name = self.interner.resolve(*op_sym).clone();
                         let kind = match crate::bytecode::BinOpKind::from_op_name(&op_name) { Some(k) => k, None => return Ok(None) };
                         let mut acc = Value::Int(bi);
-                        let mut i = bi + 1;
-                        while i <= end_inc {
-                            // Same overflow-promotion shape as
-                            // Array#inject: once `acc` becomes BigInt
-                            // (e.g. `(1..30).inject(:*)`), fall through
-                            // to `try_bigint_binop` so the fold
-                            // continues in arbitrary precision instead
-                            // of bailing the whole primitive.
+                        // bi + 1 can overflow when bi == i64::MAX
+                        // (e.g. `(i64::MAX..i64::MAX).inject(:+)`).
+                        // After the empty-range early returns above
+                        // we know bi <= end_inc, but bi == i64::MAX
+                        // still hits this. Treat that as a singleton:
+                        // acc already holds the only element.
+                        let mut i = match bi.checked_add(1) {
+                            Some(v) => v,
+                            None => return Ok(Some(acc)),
+                        };
+                        // Single shared increment site. The BigInt
+                        // arm previously had its own `i += 1; continue;`
+                        // which double-incremented; now both arms
+                        // share the bottom-of-loop step. The
+                        // increment uses checked_add so a fold over
+                        // a range ending at i64::MAX terminates
+                        // cleanly instead of wrapping into an
+                        // infinite loop.
+                        loop {
                             match &acc {
                                 Value::Int(x) => {
                                     if matches!(kind, crate::bytecode::BinOpKind::Div | crate::bytecode::BinOpKind::Mod) && i == 0 {
@@ -285,13 +312,18 @@ impl Vm {
                                     #[cfg(feature = "bignum")]
                                     if let Some(next) = self.try_bigint_binop(kind, &acc, &Value::Int(i))? {
                                         acc = next;
-                                        i += 1;
-                                        continue;
+                                    } else {
+                                        return Ok(None);
                                     }
+                                    #[cfg(not(feature = "bignum"))]
                                     return Ok(None);
                                 }
                             }
-                            i += 1;
+                            if i == end_inc { break; }
+                            i = match i.checked_add(1) {
+                                Some(v) => v,
+                                None => break, // overflow at end of range
+                            };
                         }
                         Some(acc)
                     }
