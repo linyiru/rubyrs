@@ -29,7 +29,7 @@
 #     with ruby preinstalled.
 #
 # Why CRuby-at-runtime instead of checked-in `.expected_wasm`
-# files: the `tests/diff/` corpus is ~180 fixtures and the
+# files: the `crates/rubyrs/tests/diff/` corpus is ~180 fixtures and the
 # diff_cruby suite already runs CRuby as oracle in CI; pinning
 # generated snapshots would just duplicate that work and create a
 # coupling where every fixture edit triggers two file updates

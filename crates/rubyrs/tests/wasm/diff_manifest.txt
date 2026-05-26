@@ -11,7 +11,7 @@
 # Selection rules:
 #   - one fixture per major subset feature axis (integers,
 #     strings, arrays, hashes, blocks, classes, modules,
-#     exceptions, ranges, regex, etc.) — broad coverage matters
+#     exceptions, ranges, etc.) — broad coverage matters
 #     more than depth.
 #   - skip wasi-hostile fixtures: `env_hash` (ENV semantics differ),
 #     `file_io` (sandbox + --dir gymnastics), anything spawning a
