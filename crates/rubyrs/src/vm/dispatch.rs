@@ -1555,52 +1555,62 @@ impl Vm {
                     return Ok(());
                 }
                 // `Module#instance_methods` — Symbol Array of
-                // instance method names. With no arg or `true`,
-                // walks the full ancestor chain (own + includes +
-                // superclass chain, recursing into each module's
-                // own includes). With `false`, returns only this
-                // class's own methods table.
-                // `public_instance_methods` / `private_instance_methods` /
-                // `protected_instance_methods` route through the
-                // same arm — rubyrs doesn't model visibility-
-                // aware filtering on the user-Method table
-                // (every method is effectively public for
-                // introspection), so all three return the same
-                // list. Documented divergence; matches the same
-                // shape `Class#method_defined?`'s 2-arg form
-                // takes.
+                // instance method names. CRuby's filter rules:
+                //   - `instance_methods` returns public +
+                //     protected (excludes private)
+                //   - `public_instance_methods` only public
+                //   - `private_instance_methods` only private
+                //   - `protected_instance_methods` only protected
+                // No-arg / `true` walks the full ancestor chain
+                // (own + includes + superclass, recursing into
+                // each module's own includes). `false` returns
+                // only this class's own methods table.
                 ("instance_methods", args)
                 | ("public_instance_methods", args)
                 | ("private_instance_methods", args)
                 | ("protected_instance_methods", args)
                     if args.is_empty()
                         || matches!(args, [Value::Bool(_)]) => {
+                    use crate::value::Visibility;
                     let inherited = !matches!(args, [Value::Bool(false)]);
+                    // Visibility filter per CRuby semantics.
+                    let allow: fn(Visibility) -> bool = match &*name {
+                        "instance_methods" => |v| matches!(v, Visibility::Public | Visibility::Protected),
+                        "public_instance_methods" => |v| v == Visibility::Public,
+                        "private_instance_methods" => |v| v == Visibility::Private,
+                        "protected_instance_methods" => |v| v == Visibility::Protected,
+                        _ => unreachable!(),
+                    };
                     let mut sids: Vec<crate::intern::SymId> = Vec::new();
                     if inherited {
                         let mut visited: Vec<*const crate::value::Class> = Vec::new();
                         fn walk(
                             c: &std::rc::Rc<crate::value::Class>,
+                            allow: fn(Visibility) -> bool,
                             out: &mut Vec<crate::intern::SymId>,
                             visited: &mut Vec<*const crate::value::Class>,
                         ) {
                             let ptr = std::rc::Rc::as_ptr(c);
                             if visited.contains(&ptr) { return; }
                             visited.push(ptr);
-                            for k in c.methods.borrow().keys() {
-                                if !out.contains(k) { out.push(*k); }
+                            for (k, m) in c.methods.borrow().iter() {
+                                if allow(m.visibility.get()) && !out.contains(k) {
+                                    out.push(*k);
+                                }
                             }
                             for inc in c.includes.borrow().iter() {
-                                walk(inc, out, visited);
+                                walk(inc, allow, out, visited);
                             }
                             if let Some(sup) = c.superclass.borrow().clone() {
-                                walk(&sup, out, visited);
+                                walk(&sup, allow, out, visited);
                             }
                         }
-                        walk(cls, &mut sids, &mut visited);
+                        walk(cls, allow, &mut sids, &mut visited);
                     } else {
-                        for k in cls.methods.borrow().keys() {
-                            sids.push(*k);
+                        for (k, m) in cls.methods.borrow().iter() {
+                            if allow(m.visibility.get()) {
+                                sids.push(*k);
+                            }
                         }
                     }
                     // Lexicographic sort for stable cross-run
