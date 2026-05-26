@@ -40,6 +40,121 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
+## Results — 2026-05-26 evening (sixth pass), rubyrs at `ad0a6ba`
+
+Sixth pass after the post-#107/#109 wave (PR #124 BackReferenceRead,
+PR #127 StringScanner vendor, PR #128 Module.deprecate_constant stub,
+plus the BigInt / Module.new / Kernel#sprintf / Integer(str,radix)
+landings that arrived alongside them). Host is the same Mac;
+re-probed against the sinatra/rake/tilt/bundler files installed on
+host gem path (jekyll/liquid/dry-struct not installed — those 5
+files of the original 12 are SKIPPED below, not regressed).
+
+### What this pass shows
+
+**The Sinatra `lib/` AST frontier is gone.** Re-running
+`rubyrs-gapscan scan sinatra/lib` against the same Sinatra commit
+(`5236d34`) returns **0 Missing node classes** — down from 17 the
+day before (`BlockParameterNode` ×58, `RestParameterNode` ×44,
+`RegularExpressionNode` ×39, `AliasMethodNode` ×16,
+`KeywordHashNode` ×12, `ConstantWriteNode` ×10, `AssocSplatNode` ×6,
+`DefinedNode` ×5, `GlobalVariableReadNode` ×5,
+`KeywordRestParameterNode` ×5, `NumberedReferenceReadNode` ×5,
+`ClassVariableReadNode` ×4, `SingletonClassNode` ×3,
+`ClassVariableWriteNode` ×2, `InterpolatedRegularExpressionNode` ×2,
+`BackReferenceReadNode` ×1, `LambdaNode` ×1; full list in
+[sinatra.md](sinatra.md)). All 5 non-trivial files in sinatra/lib are
+now **100% AST-translatable**, including `sinatra/base.rb` (7113
+nodes, previously 97.48%).
+
+Observable in this pass's try-runs:
+
+| File | Pass 5 | Now | Change |
+|---|---|---|---|
+| sinatra/middleware/logger.rb | A | **A** | unchanged |
+| sinatra/base.rb | (out of 12-set; would have been D — parse blocked on `BackReferenceReadNode`) | **B** | parse now completes; first runtime statement is `require 'rack'` → C-ext require wall (Cat B) |
+| rake/scope.rb | A | **F** | `Rake::LinkedList` undefined — rake/scope.rb references the helper without requiring it; the helper file itself is still Cat A |
+| rake/linked_list.rb | A | **A** | unchanged |
+| tilt/string.rb | A | **A** | unchanged |
+| bundler/version.rb | A | **A** | unchanged |
+| bundler/plugin/installer/git.rb | A | **A** | unchanged |
+| bundler/match_remote_metadata.rb | F | **F** | unchanged |
+
+Pass count (host-installable subset, 8 files): **6/8 → 6/8** at the file-roster
+level — `sinatra/base.rb` *would* be a fresh Cat B file if we add it,
+but the original 12-set kept Sinatra represented by
+`middleware/logger.rb` (already Cat A) so the roster's pass count
+doesn't move. The five other files from the original 12-set
+(jekyll/utils/thread_event, jekyll/drops/theme_drop,
+liquid/extensions, liquid/resource_limits, dry/struct/extensions/pretty_print)
+are skipped this pass because their gems aren't installed on the
+current host. Treat their pass-5 category (3×A, 1×F, 1×B) as
+carried forward; future passes that re-fetch those gems should
+re-confirm.
+
+### Additional sinatra/lib files probed this pass (not in original 12)
+
+Since the gapscan flip surfaced four more sinatra files at 100%
+translatable, ran each standalone to see what category they fall
+into at runtime:
+
+| File | Nodes | Category | Trigger |
+|---|---:|---|---|
+| `sinatra/main.rb` | 216 | F | `uninitialized constant Sinatra::ARGV` — Ruby's top-level `ARGV` global isn't exposed inside class/module bodies |
+| `sinatra/indifferent_hash.rb` | 483 | F | `uninitialized constant Gem::Version` — uses Rubygems' `Gem::Version` for a version check |
+| `sinatra/show_exceptions.rb` | 175 | B | `require 'rack/show_exceptions'` C-ext wall |
+| `sinatra/base.rb` | 7113 | B | `require 'rack'` C-ext wall |
+
+Notably, **none of the four falls into Cat D** — every AST node
+they reach for at runtime is implemented. They split between
+"first executable statement is `require <C-ext>`" (Cat B) and
+"references a constant not in scope" (Cat F).
+
+### What the gapscan flip means for what to do next
+
+Pre-pass-6, the standing read was "AST frontier saturated; further
+movement needs non-AST work (require chain, Enumerable, Logger
+built-in, etc.)" — that was empirically true *for the original 12
+files*. The flip to zero-Missing on sinatra/lib doesn't change that
+read; it confirms it. Specifically:
+
+- **The dataset to look at next is sinatra-shaped, not AST-shaped.**
+  Every blocker in the four new sinatra files above is either Cat B
+  (C-ext require chain — Rack) or Cat F (project-helper / Rubygems /
+  toplevel-ARGV). None are about Prism nodes anymore.
+- **`require 'rack'` is the highest-leverage Cat B in the wild.**
+  Solving it (even via a "register a host-provided Rack module and
+  let `require` no-op when the constant is already defined" stub)
+  unblocks sinatra/base.rb's body. That body in turn is gated by
+  many of the same hidden gaps that the AST view classifies
+  Supported (e.g. `route`, `halt`, `set` as bareword DSL calls).
+  Expect each unblock to surface the next.
+- **Cat F now divides into two flavours.** Project-internal helpers
+  (jekyll's `delegate_method_as`, bundler's `MatchMetadata`,
+  rake/scope's missing `LinkedList`) are one shape; well-known
+  built-ins absent from rubyrs (`Gem::Version`, top-level `ARGV`)
+  are another. The latter are individually small wins and worth
+  considering as "low-hanging Cat F → Cat A" moves.
+
+### Cumulative category histogram
+
+Counted against the host-installable subset (8 files of the original
+12 + 4 new sinatra files = 12 unique files):
+
+| Category | Pass 5 (8-file subset) | Now (12 with sinatra additions) | Notes |
+|---|---:|---:|---|
+| A (runs clean) | 6 | 6 | unchanged: logger, rake/linked_list, tilt/string, bundler/version, bundler/plugin/installer/git, plus middleware/logger duplicated above |
+| B (C-ext require) | 0 | 2 | sinatra/base, sinatra/show_exceptions |
+| D (unsupported AST node at runtime) | 0 | 0 | unchanged at empty |
+| F (project-helper / undefined constant) | 1 | 4 | match_remote_metadata, rake/scope (new this pass — Rake::LinkedList load-order), sinatra/main (ARGV), sinatra/indifferent_hash (Gem::Version) |
+
+Net direction: Cat B grew (the Rack require is now a real,
+sinatra-side blocker, not just an abstract C-ext wall), and Cat F
+became the live-fire surface — the *specific* gaps in Cat F now
+include things rubyrs could plausibly stub (`Gem::Version`,
+top-level `ARGV` exposure), which is a more actionable shape than
+pass 5's "Cat F = unfixable per-project quirks".
+
 ## Results — 2026-05-26 (fifth pass), rubyrs at `cba21b6`
 
 Fifth pass after the session's PR wave landed:
