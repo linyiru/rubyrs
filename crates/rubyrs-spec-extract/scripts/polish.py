@@ -80,10 +80,16 @@ DROP_PATTERNS = [
     (r"\.min\s*(\{|\s+do\b)", "method-not-implemented"),
     (r"\.max\s*(\{|\s+do\b)", "method-not-implemented"),
     (r"\.inject\s*\(", "method-not-implemented"),
-    # Subclass/instance-of-Array checks: requires `Array.[]` class
-    # method or `instance_of?` against a subclass — not in the
-    # micro-runner's surface.
-    (r"\.instance_of\?\(\s*Array\)", "method-not-implemented"),
+    # NOTE: a v0.1 entry here dropped any block containing
+    # `.instance_of?(Array)`, on the theory that subclass-vs-Array
+    # checks weren't in the micro-runner surface. rubyrs DOES
+    # implement `Object#instance_of?`, and the actual unsupported
+    # case (calling it on a fixture-built subclass like
+    # `ArraySpecs::MyArray`) is already caught by the `MyArray` /
+    # `ArraySpecs` fixture patterns above. Removed the rule —
+    # plain `Array.instance_of?(Array)` checks are runnable and
+    # valuable, so dropping them by accident is exactly the
+    # over-fitting reviewer feedback PR #133 caught.
 ]
 
 # Standalone (top-level, not inside an `it`) blocks that the
