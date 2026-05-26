@@ -213,6 +213,16 @@ jobs:
         # step, so the duplicate invocation is cheap.
         run: bash crates/rubyrs/tests/wasm/diff_matrix.sh
 
+      - name: Perf gate (wasm32-wasip1 wall time)
+        # Fourth leg of the wasm ladder (compile → smoke → matrix →
+        # perf). Runs each workload in `perf/wasm_baselines.tsv`
+        # three times under wasmtime, takes the min wall across
+        # the runs, and fails if it exceeds the row's budget. Same
+        # absolute-baseline policy as `perf/check.sh` (the native
+        # gate); see `perf/wasm_baselines.tsv` for the bumping
+        # etiquette and calibration sources.
+        run: bash perf/wasm_check.sh
+
   panic-budget:
     name: Panic budget (per-file ratchet)
     runs-on: ubuntu-latest
