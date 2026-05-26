@@ -604,6 +604,61 @@ impl Vm {
                 };
                 self.stack.push(v);
             }
+            Op::LoadConstChain(chain_idx) => {
+                // Cref-walking constant read. The compiler builds the
+                // chain at emit time from the lexical class_path
+                // (innermost scope first); the runtime walks it in
+                // order, taking the first hit in `classes` or
+                // `constants`. Used for bare-name reads inside a
+                // non-empty class/module scope so `Bar` inside
+                // `module Foo` resolves to `Foo::Bar` before falling
+                // through to the top-level `Bar`.
+                let proto_idx = self.frames.last().expect("ICE: LoadConstChain no frame").proto_idx;
+                let chain = self.protos[proto_idx].const_chains[chain_idx as usize].clone();
+                let mut found: Option<Value> = None;
+                for sym in &chain {
+                    if let Some(c) = self.classes.get(sym).cloned() {
+                        found = Some(Value::Class(c));
+                        break;
+                    }
+                    if let Some(v) = self.constants.get(sym).cloned() {
+                        found = Some(v);
+                        break;
+                    }
+                }
+                let v = match found {
+                    Some(v) => v,
+                    None => {
+                        // Report the INNERMOST-scope qualified form
+                        // in the NameError so the user sees the path
+                        // CRuby would have searched first — e.g.
+                        // `uninitialized constant Foo::Bar::UnresolvedX`
+                        // rather than the bare `UnresolvedX`.
+                        // chain[0] is the innermost candidate.
+                        let name = self.interner.resolve(chain[0]).clone();
+                        return Err(self.trap(crate::error::RubyError::NameError {
+                            msg: format!("uninitialized constant {}", name),
+                        }));
+                    }
+                };
+                self.stack.push(v);
+            }
+            Op::LoadConstChainOrNil(chain_idx) => {
+                let proto_idx = self.frames.last().expect("ICE: LoadConstChainOrNil no frame").proto_idx;
+                let chain = self.protos[proto_idx].const_chains[chain_idx as usize].clone();
+                let mut found: Option<Value> = None;
+                for sym in &chain {
+                    if let Some(c) = self.classes.get(sym).cloned() {
+                        found = Some(Value::Class(c));
+                        break;
+                    }
+                    if let Some(v) = self.constants.get(sym).cloned() {
+                        found = Some(v);
+                        break;
+                    }
+                }
+                self.stack.push(found.unwrap_or(Value::Nil));
+            }
             Op::LoadGlobal(name_id) => {
                 // Special-globals intercept. `$$` is the canonical
                 // case from tilt/template.rb (`"...-#{$$}"`); add

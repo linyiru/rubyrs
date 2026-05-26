@@ -2708,6 +2708,7 @@ impl Vm {
                 // ops. `u16::MAX` skips the per-invocation reset.
                 block_body_local_start: u16::MAX,
                 byte_literals: Vec::new(),
+                const_chains: Vec::new(),
             };
             let idx = self.protos.len();
             self.protos.push(proto);
@@ -2791,6 +2792,7 @@ impl Vm {
                 // ops. `u16::MAX` skips the per-invocation reset.
                 block_body_local_start: u16::MAX,
                 byte_literals: Vec::new(),
+                const_chains: Vec::new(),
             };
             let idx = self.protos.len();
             self.protos.push(proto);
@@ -3334,6 +3336,7 @@ impl Vm {
             filename: "<primitive-alias>".into(),
             block_body_local_start: u16::MAX,
             byte_literals: vec![],
+            const_chains: vec![],
         };
         let idx = self.protos.len();
         self.protos.push(proto);

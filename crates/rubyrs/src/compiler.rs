@@ -63,6 +63,9 @@ pub(crate) struct ProtoBuilder {
     /// Flushed into `Proto.byte_literals` on emit. See
     /// `Op::LoadConstStrBytes` for the runtime side.
     pub(crate) byte_literals: Vec<std::rc::Rc<[u8]>>,
+    /// Per-call-site cref chains, flushed into `Proto.const_chains`
+    /// on emit. See `Op::LoadConstChain` in bytecode.rs.
+    pub(crate) const_chains: Vec<Vec<crate::intern::SymId>>,
     /// Lexical class/module nesting at the point this proto is
     /// being compiled. Empty at the toplevel, `["Foo"]` inside
     /// `module Foo; ... end`, `["Foo", "Bar"]` inside
@@ -94,6 +97,7 @@ impl ProtoBuilder {
             loop_next_jumps: vec![],
             class_path: vec![],
             byte_literals: vec![],
+            const_chains: vec![],
         };
         for p in params { b.local_slot(p); }
         b
@@ -150,8 +154,38 @@ impl ProtoBuilder {
             // this via the dedicated setter on the resulting Proto.
             block_body_local_start: u16::MAX,
             byte_literals: self.byte_literals,
+            const_chains: self.const_chains,
         }
     }
+}
+
+/// Build the cref chain a bare-name constant read should walk at
+/// runtime, given the lexical `class_path` at emit time. Returns
+/// `None` when the chain is just `[bare_sym]` (no inner scopes) —
+/// the caller should fall back to a plain `LoadConst(bare_sym)`
+/// in that case (saves one indirection through `Proto.const_chains`).
+///
+/// Chain order is innermost-scope first, matching CRuby's "cref
+/// walks from the inside out and falls through to the top level":
+/// for class_path `["Foo", "Bar"]` and bare `"X"` it produces
+/// `[sym("Foo::Bar::X"), sym("Foo::X"), sym("X")]`. First hit in
+/// `Vm.classes` or `Vm.constants` wins.
+fn build_const_chain(
+    class_path: &[String],
+    bare: &str,
+    interner: &mut crate::intern::Interner,
+) -> Option<Vec<crate::intern::SymId>> {
+    if class_path.is_empty() || bare.contains("::") {
+        return None;
+    }
+    let mut chain: Vec<crate::intern::SymId> =
+        Vec::with_capacity(class_path.len() + 1);
+    for i in (0..class_path.len()).rev() {
+        let prefix = class_path[..=i].join("::");
+        chain.push(interner.intern(&format!("{}::{}", prefix, bare)));
+    }
+    chain.push(interner.intern(bare));
+    Some(chain)
 }
 
 pub(crate) fn compile_body(
@@ -409,12 +443,29 @@ pub(crate) fn compile_expr(
             b.emit(Op::StoreCvar(id));
         }
         Expr::ConstRead(name) => {
-            let id = interner.intern(name);
-            b.emit(Op::LoadConst(id));
+            // Inside a non-empty class/module scope, emit a cref-
+            // walking lookup so `Bar` inside `module Foo; ... end`
+            // resolves to `Foo::Bar` first and falls back through
+            // outer scopes to the bare top-level name. Top-level
+            // reads stay on the plain `LoadConst` path.
+            if let Some(chain) = build_const_chain(&b.class_path, name, interner) {
+                let idx = b.const_chains.len() as u32;
+                b.const_chains.push(chain);
+                b.emit(Op::LoadConstChain(idx));
+            } else {
+                let id = interner.intern(name);
+                b.emit(Op::LoadConst(id));
+            }
         }
         Expr::ConstReadOrNil(name) => {
-            let id = interner.intern(name);
-            b.emit(Op::LoadConstOrNil(id));
+            if let Some(chain) = build_const_chain(&b.class_path, name, interner) {
+                let idx = b.const_chains.len() as u32;
+                b.const_chains.push(chain);
+                b.emit(Op::LoadConstChainOrNil(idx));
+            } else {
+                let id = interner.intern(name);
+                b.emit(Op::LoadConstOrNil(id));
+            }
         }
         Expr::ConstWrite(name, absolute, val) => {
             // CRuby: a constant assignment leaves the assigned value
@@ -953,10 +1004,25 @@ pub(crate) fn compile_expr(
                 format!("<class:{}>", name), vec![], body,
                 b.filename.clone(), protos, interner, cc, child_path,
             );
-            // Push the superclass (or Nil for "default to Object") for DefClass to pop.
+            // Push the superclass (or Nil for "default to Object")
+            // for DefClass to pop. The parent reference is a const
+            // read at the SURROUNDING lexical scope (not the child
+            // class's scope) — `module Foo; class Bar < Plant; end;
+            // end` looks up `Plant` with cref walk
+            // `[Foo::Plant, Plant]`. AST stores `superclass` as a
+            // bare name today, so qualified parents
+            // (`class C < Foo::Bar`) aren't representable here yet;
+            // when they are, this branch will need to dispatch on
+            // ConstantPath vs ConstantRead like the rescue arm does.
             if let Some(parent) = superclass {
-                let parent_id = interner.intern(parent);
-                b.emit(Op::LoadConst(parent_id));
+                if let Some(chain) = build_const_chain(&b.class_path, parent, interner) {
+                    let idx = b.const_chains.len() as u32;
+                    b.const_chains.push(chain);
+                    b.emit(Op::LoadConstChain(idx));
+                } else {
+                    let parent_id = interner.intern(parent);
+                    b.emit(Op::LoadConst(parent_id));
+                }
             } else {
                 b.emit(Op::LoadNil);
             }
@@ -1483,6 +1549,10 @@ pub(crate) fn compile_block(
         // emitted bytecode embeds indices that the runtime
         // resolves through the block's own Proto.
         byte_literals: vec![],
+        // Blocks get a fresh per-Proto const-chain pool too. The
+        // ChainOrNil / Chain ops carry indices that resolve
+        // through this Proto's table, not the parent's.
+        const_chains: vec![],
     };
     let param_start = b.n_locals;
     // Slot layout in two phases:

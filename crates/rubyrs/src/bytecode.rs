@@ -96,6 +96,24 @@ pub(crate) enum Op {
     /// practice (ENV always resolves via `LoadConst` on every
     /// other read site).
     LoadConstOrNil(SymId),
+    /// CRuby-style cref-walk constant resolution for a bare-name
+    /// read INSIDE a non-empty class / module scope. The `u32`
+    /// is an index into the current Proto's `const_chains`; each
+    /// chain entry is the ordered list of qualified SymIds the
+    /// runtime should try in turn (innermost-scope first, falling
+    /// back outward to the top-level bare name). First hit in
+    /// `Vm.classes` then `Vm.constants` wins; running off the end
+    /// raises `NameError`. ENV intercept doesn't apply — chains
+    /// are only emitted for bare reads from inside scopes that
+    /// would never reach the ENV name anyway. Top-level reads
+    /// (empty class_path at compile time) keep using
+    /// `LoadConst(SymId)` directly.
+    LoadConstChain(u32),
+    /// Silent-nil variant of `LoadConstChain` for the `||=` read
+    /// position; running off the chain returns `Value::Nil`
+    /// instead of raising `NameError`. Mirrors `LoadConstOrNil`'s
+    /// role for plain `LoadConst`.
+    LoadConstChainOrNil(u32),
     /// Pop top of stack, store as the value of constant `SymId`.
     /// Caller is responsible for emitting `Dup` first when the
     /// expression's value should also remain on the stack (CRuby's
@@ -457,4 +475,15 @@ pub(crate) struct Proto {
     /// are usually small and rare). Valid-UTF-8 literals still
     /// go through the interner via `Op::LoadConstStr(SymId)`.
     pub(crate) byte_literals: Vec<std::rc::Rc<[u8]>>,
+    /// Per-call-site cref chains for `Op::LoadConstChain` /
+    /// `Op::LoadConstChainOrNil`. Each entry is the ordered list
+    /// of qualified SymIds the runtime should try in turn when
+    /// resolving a bare constant read inside a non-empty class /
+    /// module scope. For scope `[Foo, Bar]` and bare `X` the chain
+    /// is `[sym("Foo::Bar::X"), sym("Foo::X"), sym("X")]`. First
+    /// hit in `Vm.classes` / `Vm.constants` wins; running off the
+    /// chain raises NameError (or returns Nil for the OrNil variant).
+    /// Top-level reads (empty class_path at emit time) keep using
+    /// `Op::LoadConst(SymId)` directly — no chain needed.
+    pub(crate) const_chains: Vec<Vec<crate::intern::SymId>>,
 }
