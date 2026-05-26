@@ -1669,18 +1669,29 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::Class { name, superclass: None, body });
     }
-    // `class << X; body; end` — singleton class body. Spike scope:
-    // each top-level Expr in the body must be a Def; the Def gets
-    // rewritten with `receiver: Some(<translated X>)` so the existing
-    // `def X.foo` machinery (`Op::DefSingletonMethod` when X = self
-    // inside a `class Foo` body; `Op::DefObjectSingletonMethod`
-    // otherwise) lands each method on the right singleton table.
+    // `class << X; body; end` — singleton class body. Supported
+    // body entries in the spike subset:
     //
-    // Non-Def entries in the body (constant assignments, helper
-    // calls like `attr_accessor`, embedded `begin/end`) surface as
-    // SyntaxError — they'd need either a real
-    // singleton-class-as-class-stack-entry opcode or a `class_eval`
-    // detour, and no current try-run target uses them.
+    //   1. `def name(...) ... end` — rewritten with
+    //      `receiver: Some(<translated X>)` so the existing
+    //      `def X.foo` machinery (`Op::DefSingletonMethod` when
+    //      X = self inside a `class Foo` body;
+    //      `Op::DefObjectSingletonMethod` otherwise) lands each
+    //      method on the right singleton table.
+    //   2. `attr_reader` / `attr_writer` / `attr_accessor` with
+    //      Symbol-literal args — expanded into one or two
+    //      synthetic def-rewrites per symbol (see the helper
+    //      `attr_reader_writer_flags` and the per-symbol loop
+    //      below). Zero-arg form is a silent no-op matching
+    //      CRuby 3.4.
+    //
+    // Other body entries (constant assignments, alias keyword,
+    // `prepend`/`include` calls, embedded begin/end, etc.) still
+    // surface as SyntaxError — they'd need either a real
+    // singleton-class-as-class-stack-entry opcode or a
+    // `class_eval` detour. Add support here as real targets
+    // hit them; the error message at the fallthrough below
+    // lists what's currently accepted.
     //
     // We don't translate to an `Expr::Class { ... }` because the
     // wrapping `class << X` doesn't introduce a NEW class with its
