@@ -65,7 +65,7 @@ Same 12 standalone files, same pinned target commits.
 |---|---|---|---|
 | liquid/extensions.rb | B | **A** | `require 'time'` / `require 'date'` now stub-out (PR #107 stdlib require stub); file body runs clean |
 | sinatra/middleware/logger.rb | B | **A** | `require 'logger'` / `require 'forwardable'` stubbed by the same PR #107 stub; class body executes — `Logger` itself isn't built in, but the file's class definition no longer touches it |
-| rake/linked_list.rb | D+E | **A** | non-literal default args (#34) + `EMPTY = self.new`-style constant assigns (#30) + Enumerable preamble stub and `require` leniency (#104) line up |
+| rake/linked_list.rb | F | **A** | by the fourth pass this had moved into F (project-helper / undefined module) after #30 and #34 closed the original D+E pieces; the remaining helper hole is now covered by PR #104's Enumerable preamble stub + `require` leniency |
 | tilt/string.rb | D | **A** | three-layer unblock: #105 (`Module#prepend`) closed `class << self; prepend(...)` in `tilt.rb`; #107 (Object stub + `String#hash` + stdlib require stub) closed `tilt/template.rb` load; #109 (block-arg `&nil` ICE) closed the remaining downstream `evaluate(..., &block)` call sites. The file's class body executes top-to-bottom |
 | (8 others) | — | — | unchanged — same A or same blocker as the fourth pass |
 
