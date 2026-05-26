@@ -59,6 +59,26 @@ spec/
     │
     ├── array_take_spec.rb         # core/array — extractor v0.3
     ├── array_compact_spec.rb      # core/array — extractor v0.3
+    │
+    │ # core/array batch: extractor v0.4 + scripts/polish.py
+    │ # drops `it` blocks matching DROP_PATTERNS (fixture /
+    │ # mock / method-not-implemented) and
+    │ # top-level `before`/`after` hooks the lifter didn't
+    │ # pick up (before-not-lifted / after-not-supported).
+    │ # Each drop leaves `# skipped (<category>): it "..." do`
+    │ # at the original indentation. Adds 9 files covering the
+    │ # head/tail/length surface; the polish step is documented
+    │ # in ../../rubyrs-spec-extract/README.md.
+    ├── array_empty_spec.rb
+    ├── array_first_spec.rb
+    ├── array_include_spec.rb
+    ├── array_last_spec.rb
+    ├── array_length_spec.rb
+    ├── array_pop_spec.rb
+    ├── array_reverse_spec.rb
+    ├── array_shift_spec.rb
+    ├── array_size_spec.rb
+    │
     └── hash_keys_spec.rb          # core/hash  — extractor v0.3
 ```
 
@@ -66,7 +86,7 @@ The runner is at
 [`crates/rubyrs/tests/ruby_spec.rs`](../tests/ruby_spec.rs) and
 runs as part of `cargo test -p rubyrs`. Every example must pass
 — there's no "tag this as known-divergent" mechanism yet (see
-"Future work" below). Current total: **132 examples across 26
+"Future work" below). Current total: **146 examples across 35
 files**, all passing.
 
 ## DSL the helper provides
@@ -171,7 +191,19 @@ Don't smuggle a divergence into the spec — write the spec to
 match upstream behaviour. If rubyrs differs intentionally,
 document the divergence in
 [`docs/SUBSET.md`](../../../docs/SUBSET.md) and skip the spec
-case with a `#` comment naming the upstream source line.
+case with a `#` comment.
+
+For HAND-written specs (pre-extractor flow) the convention is
+to name the upstream source line in that comment so reviewers
+can cross-check against the original. For specs produced by
+the extractor + `scripts/polish.py` pipeline, the polish step's
+`# skipped (<category>): it "..." do` traces preserve the
+original `it` block's first line verbatim — that line is a
+high-fidelity locator inside the upstream spec file, easier
+to grep than a numeric line ref that goes stale when upstream
+moves. Either form is acceptable; the polish-traced form is
+preferred for batches >5 files because regenerating doesn't
+require re-walking upstream source.
 
 ## Extractor workflow (extractor-assisted translation)
 

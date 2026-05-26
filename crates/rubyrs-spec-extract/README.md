@@ -35,6 +35,49 @@ cargo run --release -p rubyrs-spec-extract \
 cargo test -p rubyrs --test ruby_spec
 ```
 
+For batches that touch core classes (Array, String, Integer)
+the extractor output is usually one polish step away from
+landing. The companion `scripts/polish.py` removes:
+
+  - **`it` blocks** whose body matches a `DROP_PATTERNS` entry —
+    fixtures (`ArraySpecs.recursive_array`, `MyArray[...]`),
+    unimplemented method FORMS (`Array#min { ... }` block-
+    comparator, count-form `Array#first(n)`, multi-arg
+    `Array#push(a, b, c)` — single-arg `.push(x)` is fine), and
+    `mock`/`should_receive`. (Frozen-state behavior is
+    type-specific: rubyrs implements `FrozenError` raising for
+    `String` but not `Array`/`Hash`. Array-frozen specs always
+    use the `ArraySpecs.frozen_array` fixture and get caught by
+    the fixture rule, so polish doesn't need a separate
+    FrozenError pattern that would over-drop String specs.)
+  - **Top-level `before`/`after` hook blocks** the extractor's
+    v0.3 `before :each` lifter didn't pick up (multi-arg,
+    non-flat context, `before :all`, `after :each`) — these
+    would otherwise file-level-trap with `undefined method
+    \`before\` for NilClass`.
+
+Each drop leaves a `# skipped (<category>): ...` trace at the
+original block's indentation. Categories: `fixture` /
+`mock` / `method-not-implemented` for `it`
+blocks; `before-not-lifted` / `after-not-supported` for hook
+blocks. `git grep "# skipped (method-not-implemented)"` finds
+every block that would unlock when one feature PR lands.
+
+Pipeline shape:
+
+```bash
+cargo run --release -p rubyrs-spec-extract \
+  -- /path/to/ruby-spec/core/array/length_spec.rb \
+  --shared /path/to/ruby-spec/core/array/shared/length.rb \
+  | crates/rubyrs-spec-extract/scripts/polish.py \
+  > crates/rubyrs/spec/ruby/array_length_spec.rb
+```
+
+Adding a new pattern to drop is one regex line in `polish.py`'s
+`DROP_PATTERNS`; the `# skipped` comments make future revisits
+(e.g., when multi-arg `Array#push` lands as a feature) easy to
+find and re-evaluate.
+
 ## What the extractor recognises (current: v0.4)
 
 The recogniser shipped incrementally. Patterns in italics
