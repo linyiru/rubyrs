@@ -191,7 +191,7 @@ impl Vm {
                 "<<" | "concat" | "prepend" | "replace" |
                 "freeze" | "frozen?" | "dup"
             ),
-            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect"),
+            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name"),
             Value::Array(_) => matches!(name,
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "shift" | "pop" | "reverse_each" |
@@ -242,7 +242,7 @@ impl Vm {
                 "group_by" | "sort_by" | "sort"
             ),
             Value::Bool(_) | Value::Nil => matches!(name, "to_s" | "inspect"),
-            Value::Class(_) => matches!(name, "new" | "name"),
+            Value::Class(_) => matches!(name, "new" | "name" | "method_defined?" | "instance_method"),
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
@@ -328,6 +328,15 @@ impl Vm {
     pub(crate) fn sym_primitive(&self, recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
         match (recv, name, args) {
             (Value::Sym(id), "to_s", []) => Some(Value::new_str(self.interner.resolve(*id).to_string())),
+            // Symbol#name (Ruby 3.0+) returns the same content as
+            // #to_s. CRuby distinguishes by returning a frozen
+            // String for #name vs. a mutable copy for #to_s;
+            // rubyrs doesn't model the frozen distinction at
+            // Value level, so the two are operationally the same
+            // here. Lets msgpack-ruby `lib/msgpack/symbol.rb`'s
+            // `if method_defined?(:name)` Ruby-version probe land
+            // on the modern branch.
+            (Value::Sym(id), "name", []) => Some(Value::new_str(self.interner.resolve(*id).to_string())),
             // Symbol#inspect — `:name` form (prefix with colon).
             (Value::Sym(id), "inspect", []) => {
                 Some(Value::new_str(format!(":{}", self.interner.resolve(*id))))

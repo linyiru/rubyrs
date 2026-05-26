@@ -257,23 +257,28 @@ impl Vm {
                 self.invoke_method(m, self_val.clone(), args)?;
                 return Ok(());
             }
-            // Bare `new(...)` inside a class singleton method
-            // (`def self.from_msgpack_ext(data); ...; new(sec, 0);
-            // end`) resolves to `self.new(...)`, where `self` is
-            // the class being defined. CRuby reaches `Class#new`
-            // through the class-of-class method chain; rubyrs
-            // models class-instance allocation as a hard-coded
-            // arm on the receiver-form `do_call` path (the
-            // `name_id == new_id` block further down), which the
-            // bare-call branch never reaches without an explicit
-            // bridge. Vendored msgpack-ruby `lib/msgpack/
-            // timestamp.rb`'s `from_msgpack_ext` factories
-            // surfaced this — they instantiate via bare `new` in
-            // every type-tag branch. Push self_val + the original
-            // args back onto the stack and re-enter `do_call`
-            // with `no_recv=false` so the receiver-form arms
-            // (including allocator hooks via cext) take over.
-            if matches!(&self_val, Value::Class(_)) && &*name == "new" {
+            // Bare calls on Class instances inside `class Foo
+            // ... end` bodies and `def self.X` singleton methods.
+            // Each whitelisted name has a receiver-form arm
+            // further down `do_call` (Class.new allocator,
+            // Class#name, Class#method_defined?, Class#
+            // instance_method, ...). Without this bridge the
+            // bare-call branch would fall through to
+            // `toplevel_methods` and raise NoMethodError, even
+            // though `self.foo` works fine. Vendored msgpack-
+            // ruby surfaced two of these:
+            //   - `def self.from_msgpack_ext(...); new(...); end`
+            //     in timestamp.rb (bare `new`)
+            //   - `class Symbol; if method_defined?(:name); ...`
+            //     in symbol.rb (bare `method_defined?` inside an
+            //     `if`/`else` at class-body top level)
+            // Push self_val + the original args back onto the
+            // stack and re-enter `do_call` with `no_recv=false`
+            // so the receiver-form dispatch takes over. The
+            // whitelist matches lookup.rs's `Value::Class(_)`
+            // primitive-method set — keep both in lockstep.
+            if matches!(&self_val, Value::Class(_))
+                && matches!(&*name, "new" | "name" | "method_defined?" | "instance_method") {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 for a in args { self.stack.push(a); }
@@ -1379,6 +1384,40 @@ impl Vm {
                 // still raise NameError for unknown methods —
                 // matching CRuby behaviour for the case that
                 // matters most (typo detection in user code).
+                // `Class#method_defined?(:sym)` — presence check
+                // for an instance method anywhere on the class's
+                // own table or its ancestor chain (own +
+                // `include`-d modules + superclass). CRuby's
+                // 2-arg form (`method_defined?(:foo, false)`)
+                // excludes the private-method tail; we don't
+                // model visibility-aware skipping, so we
+                // implement the canonical 1-arg shape and a
+                // permissive 2-arg form whose second arg is
+                // accepted-and-ignored. Primitive classes —
+                // those whose instances are non-Object `Value`
+                // variants (Integer / Float / String / Symbol /
+                // Array / Hash / Range / Regexp / Proc / Method
+                // / UnboundMethod / TrueClass / FalseClass /
+                // NilClass) — return `true` for any name so
+                // pure-Ruby helpers that probe these classes
+                // (msgpack-ruby's `lib/msgpack/symbol.rb`'s
+                // `if method_defined?(:name)` Ruby-2.7+ version
+                // detect) don't trip on a hard-false where
+                // CRuby would say yes. Matches the same shape as
+                // the `instance_method` arm above.
+                ("method_defined?", [Value::Sym(sid)])
+                | ("method_defined?", [Value::Sym(sid), _]) => {
+                    let answer = class_method_defined(self, cls, *sid);
+                    self.stack.push(Value::Bool(answer));
+                    return Ok(());
+                }
+                ("method_defined?", [Value::Str(s)])
+                | ("method_defined?", [Value::Str(s), _]) => {
+                    let sid = self.interner.intern(&s.to_string_lossy());
+                    let answer = class_method_defined(self, cls, sid);
+                    self.stack.push(Value::Bool(answer));
+                    return Ok(());
+                }
                 ("instance_method", [Value::Sym(sid)]) => {
                     let found = self.lookup_method_uncached(cls, *sid).is_some();
                     if !found && !is_primitive_class_name(&cls.name) {
@@ -2660,6 +2699,45 @@ impl Vm {
 /// The two lists are NOT meant to be kept identical; future
 /// editors should add new entries to whichever side actually
 /// needs them.
+/// `Class#method_defined?(name)` resolver. Walks the user-Method
+/// table + ancestor chain first; if that misses and `cls` is a
+/// primitive class (Integer / String / ...), builds a sentinel
+/// receiver of the matching `Value` shape and consults the per-
+/// primitive `responds_to` whitelist. This way
+/// `String.method_defined?(:nope)` correctly returns `false` while
+/// `Symbol.method_defined?(:name)` returns `true` (the
+/// `msgpack-ruby/lib/msgpack/symbol.rb` Ruby-2.7+ version-detect
+/// path). Excluded primitives that need a non-trivial sentinel
+/// (Array/Hash/Range/Regexp/Proc/Method/UnboundMethod) fall back
+/// to a permissive `true` — matches CRuby for the broadly-shared
+/// Kernel methods and stays out of false-negative territory while
+/// the synthesis cost isn't justified.
+fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
+    if vm.lookup_method_uncached(cls, sid).is_some() {
+        return true;
+    }
+    let sentinel: Option<Value> = match cls.name.as_str() {
+        "Integer" => Some(Value::Int(0)),
+        "Float" => Some(Value::Float(0.0)),
+        "String" => Some(Value::new_str("")),
+        // Sym(SymId(0)) is the first interned token — the
+        // interner always has at least one entry by the time
+        // class objects exist, so this is safe to construct.
+        "Symbol" => Some(Value::Sym(SymId(0))),
+        "TrueClass" => Some(Value::Bool(true)),
+        "FalseClass" => Some(Value::Bool(false)),
+        "NilClass" => Some(Value::Nil),
+        _ => None,
+    };
+    match sentinel {
+        Some(s) => vm.responds_to(&s, sid),
+        // Aggregate / opaque primitives: keep the previously-
+        // permissive answer so the gem helper path doesn't trip
+        // on Kernel-shared method probes.
+        None => is_primitive_class_name(&cls.name),
+    }
+}
+
 fn is_primitive_class_name(name: &str) -> bool {
     matches!(
         name,
