@@ -2309,3 +2309,37 @@ fn random_new_no_arg_raises_in_tier1_deterministic_mode() {
         message,
     );
 }
+
+#[test]
+fn secure_random_seed_setter_makes_output_deterministic() {
+    // rubyrs-specific Tier 1 affordance: `SecureRandom.seed = N`
+    // reseeds the hidden default `Random` so subsequent calls
+    // produce a reproducible sequence. CRuby's SecureRandom has
+    // no `seed=` surface (entropy-only), so this behaviour is
+    // pinned at the embed layer rather than in the diff_cruby
+    // harness. ADR 0017 row 131 documents the determinism trade.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let script = r#"
+        SecureRandom.seed = 42
+        a_hex = SecureRandom.hex(16)
+        a_uuid = SecureRandom.uuid
+        a_alpha = SecureRandom.alphanumeric(32)
+
+        SecureRandom.seed = 42
+        b_hex = SecureRandom.hex(16)
+        b_uuid = SecureRandom.uuid
+        b_alpha = SecureRandom.alphanumeric(32)
+
+        puts a_hex == b_hex
+        puts a_uuid == b_uuid
+        puts a_alpha == b_alpha
+
+        SecureRandom.seed = 99
+        c_hex = SecureRandom.hex(16)
+        puts c_hex == a_hex
+    "#;
+    rt.eval(script, "sr_seeded.rb").expect("eval");
+    assert_eq!(buf.snapshot(), "true\ntrue\ntrue\nfalse\n");
+}

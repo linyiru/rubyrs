@@ -1106,6 +1106,17 @@ end
             "<rubyrs:preamble:random>",
         )
             .expect("ICE: failed to load Random preamble");
+        // Tier 1 SecureRandom shim — wraps the Random class
+        // above. Same Tier 1 placement rationale as Random;
+        // the cryptographic guarantee is traded for determinism
+        // (ADR 0017 row 131). Loaded after Random so the
+        // module's `Random.new(0)` default initialisation can
+        // resolve the constant.
+        self.eval(
+            include_str!("preamble/securerandom.rb"),
+            "<rubyrs:preamble:securerandom>",
+        )
+            .expect("ICE: failed to load SecureRandom preamble");
     }
 
     /// Replace the runtime's stdout sink.
