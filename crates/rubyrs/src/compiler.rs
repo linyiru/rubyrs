@@ -619,12 +619,19 @@ pub(crate) fn compile_expr(
             // Symbol literal — dynamic forms (`attr_accessor(*xs)`)
             // pass through as a regular Call and will fail at
             // dispatch.
+            // attr_* compile-time intercept inside a normal class
+            // body. Paired with the `class << X` AST-level expansion
+            // in ast.rs (see `attr_reader_writer_flags`): if the
+            // semantics of either intercept change, update both.
+            //
+            // Zero-arg form is intentionally accepted as a silent
+            // no-op — CRuby 3.4 does the same (verified: no
+            // ArgumentError, no methods defined). The for-loop
+            // below handles empty args naturally (vacuous iter()).
             if receiver.is_none()
-                && (name == "attr_accessor" || name == "attr_reader" || name == "attr_writer")
+                && let Some((do_reader, do_writer)) = crate::ast::attr_reader_writer_flags(name)
                 && args.iter().all(|a| matches!(a.node, Expr::SymbolLit(_)))
             {
-                let do_reader = name != "attr_writer";
-                let do_writer = name != "attr_reader";
                 let prev = b.current_span;
                 for a in args {
                     let sym_name = if let Expr::SymbolLit(s) = &a.node { s.clone() } else { unreachable!() };

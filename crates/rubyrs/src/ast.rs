@@ -314,6 +314,26 @@ pub(crate) fn cid_to_string(id: ruby_prism::ConstantId<'_>) -> String {
     String::from_utf8_lossy(id.as_slice()).into_owned()
 }
 
+/// Decode an `attr_*` method name into `(do_reader, do_writer)`
+/// flags. Returns `None` for any other name. Shared by the
+/// compiler's class-body intercept (compiler.rs, normal `class
+/// Foo; attr_*; end`) and the AST-level `class << X; attr_*; end`
+/// expansion below, so both sites agree on which methods get
+/// synthesised. The actual reader/writer body shape
+/// (`def name; @name; end` / `def name=(v); @name = v; end`) is
+/// still spelled out at each call site — bytecode emission and
+/// SExpr construction don't share a representation. If the
+/// desugar EVER changes (e.g. to add type checks), update both
+/// sites in lockstep.
+pub(crate) fn attr_reader_writer_flags(name: &str) -> Option<(bool, bool)> {
+    match name {
+        "attr_reader"   => Some((true,  false)),
+        "attr_writer"   => Some((false, true)),
+        "attr_accessor" => Some((true,  true)),
+        _ => None,
+    }
+}
+
 /// True iff a `ConstantPathNode` chain is rooted at top-level
 /// (leading `::`). `Foo::Bar` is relative, `::Bar` and
 /// `::Foo::Bar` are absolute. Used by `ConstantPathWriteNode`
@@ -1649,18 +1669,29 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::Class { name, superclass: None, body });
     }
-    // `class << X; body; end` — singleton class body. Spike scope:
-    // each top-level Expr in the body must be a Def; the Def gets
-    // rewritten with `receiver: Some(<translated X>)` so the existing
-    // `def X.foo` machinery (`Op::DefSingletonMethod` when X = self
-    // inside a `class Foo` body; `Op::DefObjectSingletonMethod`
-    // otherwise) lands each method on the right singleton table.
+    // `class << X; body; end` — singleton class body. Supported
+    // body entries in the spike subset:
     //
-    // Non-Def entries in the body (constant assignments, helper
-    // calls like `attr_accessor`, embedded `begin/end`) surface as
-    // SyntaxError — they'd need either a real
-    // singleton-class-as-class-stack-entry opcode or a `class_eval`
-    // detour, and no current try-run target uses them.
+    //   1. `def name(...) ... end` — rewritten with
+    //      `receiver: Some(<translated X>)` so the existing
+    //      `def X.foo` machinery (`Op::DefSingletonMethod` when
+    //      X = self inside a `class Foo` body;
+    //      `Op::DefObjectSingletonMethod` otherwise) lands each
+    //      method on the right singleton table.
+    //   2. `attr_reader` / `attr_writer` / `attr_accessor` with
+    //      Symbol-literal args — expanded into one or two
+    //      synthetic def-rewrites per symbol (see the helper
+    //      `attr_reader_writer_flags` and the per-symbol loop
+    //      below). Zero-arg form is a silent no-op matching
+    //      CRuby 3.4.
+    //
+    // Other body entries (constant assignments, alias keyword,
+    // `prepend`/`include` calls, embedded begin/end, etc.) still
+    // surface as SyntaxError — they'd need either a real
+    // singleton-class-as-class-stack-entry opcode or a
+    // `class_eval` detour. Add support here as real targets
+    // hit them; the error message at the fallthrough below
+    // lists what's currently accepted.
     //
     // We don't translate to an `Expr::Class { ... }` because the
     // wrapping `class << X` doesn't introduce a NEW class with its
@@ -1714,37 +1745,134 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         if needs_local {
             out.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
         }
+        // Closure helper: make a `def recv.name(params) body` SExpr
+        // rewriting the receiver-less Def into a singleton-method
+        // form. Reused for both real DefNodes in the body and for
+        // synthetic Defs we generate when expanding `attr_*` calls.
+        let mk_singleton_def = |bn: &Node<'_>, def_translated: Expr| -> Option<SExpr> {
+            if let Expr::Def {
+                name, params, defaults, rest, kw_params, kw_rest,
+                block_param, receiver: _, body,
+            } = def_translated {
+                let receiver = if needs_local {
+                    sp(bn, Expr::LVarRead(synth_local.clone()))
+                } else {
+                    recv_expr.clone()
+                };
+                Some(sp(bn, Expr::Def {
+                    name, params, defaults, rest, kw_params, kw_rest,
+                    block_param,
+                    receiver: Some(Box::new(receiver)),
+                    body,
+                }))
+            } else {
+                None
+            }
+        };
         for bn in &body_nodes {
             if bn.as_def_node().is_some() {
                 let translated = tr(bn);
-                if let Expr::Def {
-                    name, params, defaults, rest, kw_params, kw_rest,
-                    block_param, receiver: _, body,
-                } = translated.node {
-                    let receiver = if needs_local {
-                        sp(bn, Expr::LVarRead(synth_local.clone()))
-                    } else {
-                        recv_expr.clone()
-                    };
-                    out.push(sp(bn, Expr::Def {
-                        name, params, defaults, rest, kw_params, kw_rest,
-                        block_param,
-                        receiver: Some(Box::new(receiver)),
-                        body,
-                    }));
+                if let Some(s) = mk_singleton_def(bn, translated.node) {
+                    out.push(s);
                 } else {
                     AST_ERRORS.with(|cell| cell.borrow_mut().push(
                         "class << X: internal — def translated unexpectedly".into()
                     ));
                     out.push(sp(bn, Expr::Nil));
                 }
-            } else {
-                AST_ERRORS.with(|cell| cell.borrow_mut().push(
-                    "class << X body: only `def` statements are supported in the spike subset".into()
-                ));
-                out.push(sp(bn, Expr::Nil));
+                continue;
             }
+            // `attr_reader :foo` / `attr_writer :foo` / `attr_accessor :foo`
+            // inside `class << X` body. CRuby installs reader/writer
+            // methods on X's singleton class. We desugar each symbol
+            // arg into one or two synthetic `def X.foo; @foo; end` /
+            // `def X.foo=(val); @foo = val; end` Defs and route them
+            // through the existing singleton-rewrite path above.
+            //
+            // Caveat: ivar persistence on Class receivers diverges
+            // from CRuby (class-level @foo on a Class value doesn't
+            // currently round-trip across method calls — separate gap).
+            // The reader returns nil instead of CRuby's last-written
+            // value. Tilt's template.rb:503 only checks
+            // `extract_fixed_locals.nil?`, so nil-vs-false is moot.
+            if let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+            {
+                let name = cid_to_string(call.name());
+                // Decode via the shared helper (paired with
+                // compiler.rs's normal-class-body attr_* arm).
+                // NOTE: zero-arg `attr_accessor` (etc.) is a SILENT
+                // NO-OP in CRuby 3.4 (verified: no ArgumentError,
+                // no methods defined). Our loop below handles that
+                // case naturally — empty sym_names → no iterations
+                // → nothing emitted. Don't add a guard rejecting
+                // zero-arg; that would diverge from CRuby.
+                if let Some((do_reader, do_writer)) = attr_reader_writer_flags(&name) {
+                    let mut all_sym_args = true;
+                    let sym_names: Vec<String> = call.arguments()
+                        .map(|args| args.arguments().iter().filter_map(|a| {
+                            a.as_symbol_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())
+                        }).collect())
+                        .unwrap_or_default();
+                    let expected = call.arguments().map(|a| a.arguments().iter().count()).unwrap_or(0);
+                    if sym_names.len() != expected { all_sym_args = false; }
+                    if !all_sym_args {
+                        AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                            "class << X body: attr_* with non-symbol args is not supported".into()
+                        ));
+                        out.push(sp(bn, Expr::Nil));
+                        continue;
+                    }
+                    for sym_name in sym_names {
+                        let ivar_name = format!("@{}", sym_name);
+                        if do_reader {
+                            let body = vec![sp(bn, Expr::IVarRead(ivar_name.clone()))];
+                            let def = Expr::Def {
+                                name: sym_name.clone(),
+                                params: vec![], defaults: vec![], rest: None,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                        if do_writer {
+                            let setter_name = format!("{sym_name}=");
+                            let body = vec![sp(bn, Expr::IVarWrite(
+                                ivar_name.clone(),
+                                Box::new(sp(bn, Expr::LVarRead("val".into()))),
+                            ))];
+                            let def = Expr::Def {
+                                name: setter_name,
+                                params: vec!["val".into()], defaults: vec![], rest: None,
+                                kw_params: vec![], kw_rest: None, block_param: None,
+                                receiver: None,
+                                body,
+                            };
+                            if let Some(s) = mk_singleton_def(bn, def) { out.push(s); }
+                        }
+                    }
+                    continue;
+                }
+            }
+            AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                "class << X body: only `def` and `attr_reader`/`attr_writer`/`attr_accessor` are supported in the spike subset".into()
+            ));
+            out.push(sp(bn, Expr::Nil));
         }
+        // Pin the trailing value to nil so the synthetic receiver
+        // LVarWrite (when `needs_local`) doesn't leak as the body's
+        // result. Empty bodies (`class << X; end`) and zero-arg
+        // attr_* (`class << X; attr_accessor; end`) would otherwise
+        // return the receiver value — CRuby returns nil for the
+        // empty case. We don't try to match CRuby's attr_*
+        // return-Array shape (`[]` for zero-arg); nil is the
+        // user-friendly common case and the spec for `class << X`
+        // generally is "evaluates to the last expression in body";
+        // every supported entry's last op is already nil-pushing
+        // (Def → LoadNil, expanded attr_* → LoadNil), so this only
+        // changes the rare zero-arg/empty edge.
+        out.push(sp(node, Expr::Nil));
         return sp(node, Expr::Begin {
             body: out,
             rescue: vec![],
