@@ -3122,3 +3122,62 @@ fn time_now_observes_capability_state_changes_per_call() {
     // exactly 3 times.
     assert_eq!(*counter.lock().unwrap(), 3);
 }
+
+#[test]
+fn array_first_last_non_int_n_raises_no_method_error_today() {
+    // Pin the current rubyrs divergence from CRuby on
+    // `Array#first(n)` / `Array#last(n)` when `n` isn't an
+    // `Int`.
+    //
+    // CRuby behaviour (2026-05):
+    //   - `[1,2,3].first(2.0)` returns `[1, 2]` — Float's
+    //     `to_int` coerces to 2.
+    //   - `[1,2,3].last(:x)`   raises `TypeError: no implicit
+    //     conversion of Symbol into Integer`.
+    //
+    // rubyrs behaviour: both raise `NoMethodError: undefined
+    // method 'first'/'last' for Array` because the match arms
+    // in `vm/array.rs` only bind `Value::Int(n)`, so Float /
+    // Sym / BigInt / etc. fall past the `(n)` arms to the
+    // generic NoMethodError catch-all.
+    //
+    // This test is NOT a diff_cruby fixture because the
+    // divergence would make the harness fail. The point is to
+    // make the divergence VISIBLE in tree: a future contributor
+    // who fixes Float coercion (or wires `to_int` more
+    // generally) will see this test fail, get directed to
+    // re-classify Array#first(n) / Array#last(n), and either
+    // remove or update this test. Without it, the divergence
+    // is invisible — there's no failing breadcrumb when
+    // someone partially implements coercion in a way that
+    // changes the behaviour here.
+    //
+    // The `take` / `drop` arms in the same file have the same
+    // shape; widening to_int coercion across all Int-taking
+    // Array methods would be a separable change.
+    // RubyError + Runtime are already in scope from the file-level
+    // `use rubyrs::{Config, HostCtx, Runtime, RubyError, Trap, Value};`
+    // at the top — no extra import needed.
+
+    fn assert_no_method(src: &str) {
+        let mut rt = Runtime::new();
+        let err = rt.eval(src, "non_int_n.rb")
+            .expect_err("expected error");
+        // `RubyError::is()` handles both the direct
+        // NoMethodError variant and the Uncaught wrapper that
+        // some dispatch paths route through (they both surface
+        // as `NoMethodError` to the script).
+        assert!(
+            err.err.is("NoMethodError"),
+            "expected NoMethodError for `{src}`, got {:?}",
+            err.err,
+        );
+    }
+
+    assert_no_method("[1,2,3].first(2.0)");
+    assert_no_method("[1,2,3].last(2.0)");
+    assert_no_method("[1,2,3].first(:x)");
+    assert_no_method("[1,2,3].last(:x)");
+    assert_no_method("[1,2,3].first('2')");
+    assert_no_method("[1,2,3].last('2')");
+}

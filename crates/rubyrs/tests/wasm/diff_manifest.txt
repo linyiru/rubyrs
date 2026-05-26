@@ -51,3 +51,4 @@ inline_rescue
 # feature (ADR 0017 Tier 2). On that shape `/pattern/` literals
 # emit a SyntaxError trap by design. If a future wasi build
 # turns the regex feature on, add `regex_minimal` here.
+array_first_last_n

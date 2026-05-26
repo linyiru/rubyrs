@@ -192,6 +192,62 @@ impl Vm {
                         Some(v.clone())
                     }
                     ("first", []) => Some(self.heap.array(id).first().cloned().unwrap_or(Value::Nil)),
+                    // `arr.first(n)` / `arr.last(n)` — CRuby returns a
+                    // new Array of up to `n` elements (capped at the
+                    // receiver's length). `n == 0` is `[]`; `n < 0` is
+                    // ArgumentError "negative array size".
+                    //
+                    // CRuby-divergences NOT introduced here but worth
+                    // naming so a reader doesn't think the inconsistency
+                    // came from this PR:
+                    //
+                    //   - Array#take / Array#drop (vm/array.rs ~770)
+                    //     silently clamp negative `n` to 0 rather than
+                    //     trapping. Array#first / #last now trap, on
+                    //     purpose — matches CRuby's actual semantics for
+                    //     the *Array* methods.
+                    //   - Range#first(n) is missing entirely on closed
+                    //     ranges (e.g. `(1..5).first(2)` → NoMethodError);
+                    //     the only arm that exists is the *endless* one
+                    //     at vm/range.rs:83, and that arm silently clamps
+                    //     negative n via `(*n).max(0)` instead of
+                    //     trapping. Both gaps are pre-existing. Tracked
+                    //     in issue #143.
+                    //
+                    // The Range gap is tracked separately rather than
+                    // bundled in this PR — fixing it touches a different
+                    // file, a different (endless / closed) shape split,
+                    // and a different semantic question (does Range
+                    // materialise into an Array, or stream lazily).
+                    ("first", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        // `*n as usize` would silently truncate on
+                        // wasm32-wasip1 (usize is u32 there), turning
+                        // an `arr.first(2**32)` request into
+                        // `arr.first(0)`. `try_from` + `unwrap_or(MAX)`
+                        // keeps the contract "n bigger than usize means
+                        // n bigger than len means take the whole
+                        // thing", which is what CRuby does. Native
+                        // hosts (usize == u64) are unaffected because
+                        // we already trapped negatives above.
+                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
+                        // Pin the receiver across maybe_gc: same rationale
+                        // as `take`/`drop` — the receiver Array has been
+                        // popped from the operand stack before this match
+                        // arm runs, and STRESS_GC would otherwise sweep
+                        // it (and its children) between iter().take()
+                        // and the alloc.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let out: Vec<Value> = g.vm.heap.array(id).iter().take(n).cloned().collect();
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
                     ("dig", keys) if !keys.is_empty() => {
                         let mut cur = Value::Array(id);
                         for key in keys {
@@ -201,6 +257,30 @@ impl Vm {
                         Some(cur)
                     }
                     ("last", []) => Some(self.heap.array(id).last().cloned().unwrap_or(Value::Nil)),
+                    ("last", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        // Same wasm32 truncation guard as `first(n)`
+                        // above; combined with the `saturating_sub`
+                        // below, `n` beyond `usize::MAX` collapses to
+                        // start == 0, i.e. return the whole array —
+                        // matching CRuby's "n > len" semantics.
+                        let n = usize::try_from(*n).unwrap_or(usize::MAX);
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        let arr = g.vm.heap.array(id);
+                        // `saturating_sub` handles `n >= len` cleanly —
+                        // CRuby's `[1,2,3].last(5)` returns the full
+                        // array, no error.
+                        let start = arr.len().saturating_sub(n);
+                        let out: Vec<Value> = arr[start..].to_vec();
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out));
+                        Some(Value::Array(nid))
+                    }
                     ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
                     ("include?", [needle]) => {
                         let a = self.heap.array(id);
