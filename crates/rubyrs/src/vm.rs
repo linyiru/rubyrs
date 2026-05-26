@@ -751,8 +751,8 @@ impl Vm {
         // None can only happen under `feature = "bignum"`.
         #[cfg(feature = "bignum")]
         {
-            return self.bigint_arith(kind, &Value::Int(x), &Value::Int(y))
-                .expect("ICE: bigint_arith None for Int operands");
+            self.bigint_arith(kind, &Value::Int(x), &Value::Int(y))
+                .expect("ICE: bigint_arith None for Int operands")
         }
         #[cfg(not(feature = "bignum"))]
         unreachable!("apply_int returns None only when bignum is on");
@@ -836,12 +836,12 @@ impl Vm {
             // Comparison ops return Bool directly (run against the
             // borrowed BigInts via Cow's Deref impl — no clones).
             match kind {
-                BinOpKind::Lt => return Ok(Some(Value::Bool(&*ax_cow < &*bx_cow))),
-                BinOpKind::Le => return Ok(Some(Value::Bool(&*ax_cow <= &*bx_cow))),
-                BinOpKind::Gt => return Ok(Some(Value::Bool(&*ax_cow > &*bx_cow))),
-                BinOpKind::Ge => return Ok(Some(Value::Bool(&*ax_cow >= &*bx_cow))),
-                BinOpKind::Eq => return Ok(Some(Value::Bool(&*ax_cow == &*bx_cow))),
-                BinOpKind::Ne => return Ok(Some(Value::Bool(&*ax_cow != &*bx_cow))),
+                BinOpKind::Lt => return Ok(Some(Value::Bool(*ax_cow < *bx_cow))),
+                BinOpKind::Le => return Ok(Some(Value::Bool(*ax_cow <= *bx_cow))),
+                BinOpKind::Gt => return Ok(Some(Value::Bool(*ax_cow > *bx_cow))),
+                BinOpKind::Ge => return Ok(Some(Value::Bool(*ax_cow >= *bx_cow))),
+                BinOpKind::Eq => return Ok(Some(Value::Bool(*ax_cow == *bx_cow))),
+                BinOpKind::Ne => return Ok(Some(Value::Bool(*ax_cow != *bx_cow))),
                 _ => {}
             }
             drop(ax_cow);
@@ -893,11 +893,12 @@ impl Vm {
         }
         // Phase A heap-read operations — only meaningful on a BigInt
         // receiver (Int#to_s already handled by numeric_call).
-        if recv_is_bigint && args.is_empty() {
-            if let Value::BigInt(id) = recv {
-                use num_bigint::Sign;
-                let b = self.heap.bigint(*id);
-                match name {
+        if recv_is_bigint && args.is_empty()
+            && let Value::BigInt(id) = recv
+        {
+            use num_bigint::Sign;
+            let b = self.heap.bigint(*id);
+            match name {
                     "to_s" | "inspect" => {
                         // BigInt decimal can grow arbitrarily (consider
                         // `n = 2 ** 1_000_000; n.to_s`), so the
@@ -934,7 +935,6 @@ impl Vm {
                     "even?" => return Ok(Some(Value::Bool((b & num_bigint::BigInt::from(1)) == num_bigint::BigInt::from(0)))),
                     "odd?" => return Ok(Some(Value::Bool((b & num_bigint::BigInt::from(1)) != num_bigint::BigInt::from(0)))),
                     _ => {}
-                }
             }
         }
         // Operator method-call shape — `big.+(1)`, `1.+(big)`,
@@ -954,19 +954,19 @@ impl Vm {
         // CRuby's Integer#<=> returns nil for incomparable rhs
         // (e.g. `1 <=> "foo"`); we do the same by deferring to the
         // numeric_call path via None.
-        if args.len() == 1 && name == "<=>" {
-            if let (Some(ax), Some(bx)) = (
+        if args.len() == 1 && name == "<=>"
+            && let (Some(ax), Some(bx)) = (
                 self.as_bigint_ref(recv),
                 self.as_bigint_ref(&args[0]),
-            ) {
-                let ord = (&*ax).cmp(&*bx);
-                let n = match ord {
-                    std::cmp::Ordering::Less => -1,
-                    std::cmp::Ordering::Equal => 0,
-                    std::cmp::Ordering::Greater => 1,
-                };
-                return Ok(Some(Value::Int(n)));
-            }
+            )
+        {
+            let ord = ax.cmp(&bx);
+            let n = match ord {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            return Ok(Some(Value::Int(n)));
         }
         Ok(None)
     }
