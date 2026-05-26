@@ -89,14 +89,27 @@ while IFS= read -r line; do
     [ "$skip" = "0" ] && FIXTURES+=("$line")
 done < "$MANIFEST"
 
+# Fail fast on an empty manifest — otherwise this script would
+# exit 0 with "PASSED: 0 / 0", which CI would silently treat as
+# a green wasm-correctness signal.
+if [ "${#FIXTURES[@]}" -eq 0 ]; then
+    echo "diff_matrix.sh: manifest has zero fixtures (after stripping comments / blanks) — refusing to proceed" >&2
+    exit 1
+fi
+
 echo "[diff_matrix.sh] running ${#FIXTURES[@]} fixtures under wasmtime + CRuby"
 
 PASSED=()
 FAILED=()
 ACTUAL_FILE="$(mktemp -t rubyrs-wasm-diff.XXXXXX)"
 EXPECTED_FILE="$(mktemp -t rubyrs-wasm-diff-exp.XXXXXX)"
-trap 'rm -f "$ACTUAL_FILE" "$EXPECTED_FILE"' EXIT
+RUBY_STDERR="$(mktemp -t rubyrs-wasm-diff-ruby-err.XXXXXX)"
+WASM_STDERR="$(mktemp -t rubyrs-wasm-diff-wasm-err.XXXXXX)"
+trap 'rm -f "$ACTUAL_FILE" "$EXPECTED_FILE" "$RUBY_STDERR" "$WASM_STDERR"' EXIT
 
+# Capture stderr to a tempfile per fixture and surface it on
+# failure — CI logs need enough information to localise the
+# regression without re-running locally.
 for name in "${FIXTURES[@]}"; do
     rb="crates/rubyrs/tests/diff/${name}.rb"
     if [ ! -f "$rb" ]; then
@@ -104,20 +117,29 @@ for name in "${FIXTURES[@]}"; do
         continue
     fi
     # CRuby reference output (host oracle).
-    if ! ruby --disable=gems "$rb" > "$EXPECTED_FILE" 2>/dev/null; then
+    if ! ruby --disable=gems "$rb" > "$EXPECTED_FILE" 2> "$RUBY_STDERR"; then
         FAILED+=("$name (CRuby itself failed — fixture bug?)")
+        echo "    ruby stderr:" >&2
+        sed 's/^/      /' "$RUBY_STDERR" >&2
         continue
     fi
     # wasm32-wasip1 output. Captured with `>` (not command-sub)
     # so trailing newlines are preserved byte-for-byte.
-    if ! wasmtime run --dir=. "$WASM" "$rb" > "$ACTUAL_FILE" 2>/dev/null; then
+    if ! wasmtime run --dir=. "$WASM" "$rb" > "$ACTUAL_FILE" 2> "$WASM_STDERR"; then
         FAILED+=("$name (wasmtime exited non-zero)")
+        echo "    wasmtime stderr:" >&2
+        sed 's/^/      /' "$WASM_STDERR" >&2
         continue
     fi
     if cmp -s "$ACTUAL_FILE" "$EXPECTED_FILE"; then
         PASSED+=("$name")
     else
         FAILED+=("$name (stdout diverged)")
+        # Show a unified diff so CI logs make the regression
+        # immediately diagnosable. Limit to first 40 lines so a
+        # large divergence doesn't spam the log.
+        echo "    diff -u (ruby vs wasm) head -40:" >&2
+        diff -u "$EXPECTED_FILE" "$ACTUAL_FILE" 2>/dev/null | head -40 | sed 's/^/      /' >&2 || true
     fi
 done
 
