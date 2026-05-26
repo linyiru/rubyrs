@@ -62,6 +62,22 @@ pub(crate) fn string_call(
         (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => {
             Some(Value::Int(a.with_str_lossy(|s| s.chars().count()) as i64))
         }
+        // `String#hash` — Integer hash derived from the byte
+        // contents. CRuby guarantees: equal strings hash equal
+        // (we satisfy this — same byte slice hashes identically
+        // via DefaultHasher). The reverse is not promised by
+        // either implementation. tilt/string.rb:17 uses this for
+        // a heredoc tag (`"TILT#{@data.hash.abs}"`); generally
+        // any code performing explicit `obj.hash` lookups on a
+        // String. (Hash key dispatch internally uses a separate
+        // mechanism — this primitive is only the script-visible
+        // `#hash` method.)
+        (Value::Str(a), "hash", []) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            a.borrow().hash(&mut h);
+            Some(Value::Int(h.finish() as i64))
+        }
         (Value::Str(a), "bytesize", []) => Some(Value::Int(a.borrow().len() as i64)),
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
         (Value::Str(a), "upcase", []) => Some(Value::new_str(a.to_string_lossy().to_uppercase())),

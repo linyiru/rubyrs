@@ -654,6 +654,18 @@ end
 ## these from user code does work (`class Integer; def foo; end`)
 ## but adding methods that way won't shadow the primitive arms —
 ## see docs/SUBSET.md.
+## Object — CRuby's universal ancestor. Real CRuby has every
+## value inheriting from Object → BasicObject. We don't model
+## the full chain (primitives have no parent class in our
+## model; user classes default to no superclass). But user code
+## reaches for `Object` as a sentinel: `Object.new` for an
+## anonymous receiver (tilt's default render scope), `class Foo
+## < Object` for explicit-root inheritance, `is_a?(Object)` for
+## the universal predicate. An empty stub class makes those
+## bare references resolve without redirecting every primitive's
+## class chain through it.
+class Object
+end
 class Integer
 end
 class Float
