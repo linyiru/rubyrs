@@ -195,7 +195,8 @@ impl Vm {
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
-                "freeze" | "frozen?" | "dup"
+                "freeze" | "frozen?" | "dup" |
+                "hash"
             ),
             Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name"),
             Value::Array(_) => matches!(name,

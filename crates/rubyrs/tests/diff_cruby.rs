@@ -252,3 +252,4 @@ fn run_diff(name: &str) {
 #[test] fn stdlib_require_stub() { run_diff("stdlib_require_stub"); }
 #[test] fn class_level_ivars() { run_diff("class_level_ivars"); }
 #[test] fn enumerable_stub() { run_diff("enumerable_stub"); }
+#[test] fn object_and_string_hash() { run_diff("object_and_string_hash"); }
