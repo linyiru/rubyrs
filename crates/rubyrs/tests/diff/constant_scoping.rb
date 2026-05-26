@@ -60,21 +60,38 @@ puts Cfg::Defaults[:name]
 
 # --- Absolute paths (`::X = ...`) skip the lexical alias ---
 # Inside `module Wrapper`, `::TOP_ABS = ...` should store ONLY
-# at top-level — `Wrapper::TOP_ABS` must NOT be created. We
-# verify by checking the top-level value round-trips.
+# at top-level — `Wrapper::TOP_ABS` must NOT be created or
+# overwritten. The pre-populated `Wrapper::TOP_ABS` sentinel
+# below would be clobbered if the absolute write incorrectly
+# aliased into the lexical scope; printing it after the absolute
+# write proves the alias was skipped.
+# Pre-populate Wrapper::TOP_ABS with a sentinel value so the
+# absolute write below would clobber it if it incorrectly
+# aliased into the lexical scope. Wrapper is a Module (not a
+# Class) so `module Wrapper` on the next line reopens it
+# cleanly under both CRuby and rubyrs.
+module Wrapper
+end
+Wrapper::TOP_ABS = "sentinel: prefixed not touched"
 module Wrapper
   ::TOP_ABS = "from absolute write"
 end
-puts TOP_ABS
+puts TOP_ABS            # "from absolute write" — top-level updated
+puts Wrapper::TOP_ABS   # "sentinel: ..." — alias was correctly skipped
 
-# Same for the `::Foo::Bar = ...` form inside a nested scope —
-# leading `::` keeps the write top-level-rooted.
+# Same for the `::Foo::Bar = ...` form inside a nested scope.
+module Outer2
+  class Inner2
+  end
+end
+Outer2::Inner2::FromInner = "sentinel: deep prefixed not touched"
 module Outer2
   class Inner2
     ::FromInner = "deep absolute"
   end
 end
-puts FromInner
+puts FromInner                       # "deep absolute" — top-level
+puts Outer2::Inner2::FromInner       # "sentinel: ..." — alias skipped
 
 # --- Reopening preserves the alias (DefClass is idempotent) ---
 module Reopen
