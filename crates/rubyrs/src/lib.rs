@@ -638,18 +638,25 @@ impl Runtime {
     }
 
     pub fn with_config(cfg: Config) -> Self {
-        let mut rt = Self::new_default_impl();
+        // Apply Config BEFORE loading the preamble so user-supplied
+        // resource caps (fuel, max_frames, max_heap_objects, etc.)
+        // are in effect during preamble eval — and `apply_config`'s
+        // contract ("call before any eval()") is honored. The wizer
+        // path can't do this: it has no host Config at snapshot time,
+        // so its preamble runs under defaults — that's by design and
+        // documented on `new_default_impl`.
+        let mut rt = Self::build_skeleton();
         rt.apply_config(cfg);
+        rt.load_preamble();
         rt
     }
 
-    /// Construct a Runtime with the default Config — used by both
-    /// `Runtime::new()` and the wizer pre-initialize path. Split out
-    /// so the wizer-able portion (class registration + preamble
-    /// load) is callable from the `wizer.initialize` export
-    /// without the Config-application step that needs host inputs
-    /// (env, pid) wizer's no-imports rule disallows.
-    fn new_default_impl() -> Self {
+    /// Construct a Runtime skeleton (fresh Vm, no preamble) shared
+    /// by `with_config` and the wizer pre-initialize path. Doing it
+    /// this way lets the non-wizer constructor apply Config before
+    /// the preamble runs, while the wizer path runs the preamble
+    /// under defaults so the snapshot is host-Config-independent.
+    fn build_skeleton() -> Self {
         // PR #60 review #14: clear any leftover per-thread cext
         // STATE before constructing a fresh Vm. The persistent
         // CExtState (L3-H) lives in a thread_local; without this
@@ -662,7 +669,20 @@ impl Runtime {
 
         let interner = intern::Interner::new();
         let vm = vm::Vm::new(vec![], interner);
-        let mut rt = Runtime { vm, deadline: None };
+        Runtime { vm, deadline: None }
+    }
+
+    /// Wizer-able default Runtime: skeleton + preamble, no host
+    /// Config applied. The wizer path stashes this in
+    /// `WIZER_RUNTIME`; `main()` later calls `apply_config()` on the
+    /// rehydrated instance to layer host-driven settings (env, PID,
+    /// fuel caps) on top. The preamble runs under default caps here
+    /// — fuel/stress_gc/etc. do NOT apply to preamble execution in
+    /// the wizer path (they can't: wizer's no-imports rule forbids
+    /// reading host env at snapshot time).
+    #[cfg(target_os = "wasi")]
+    fn new_default_impl() -> Self {
+        let mut rt = Self::build_skeleton();
         rt.load_preamble();
         rt
     }
