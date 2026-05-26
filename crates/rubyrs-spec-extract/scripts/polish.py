@@ -56,10 +56,17 @@ DROP_PATTERNS = [
     # micro-runner has no mocking surface.
     (r"\bmock\(", "mock"),
     (r"\bshould_receive\b", "mock"),
-    # FrozenError raising / freeze-detection — rubyrs doesn't
-    # currently model frozen state for Arrays.
-    (r"\bFrozenError\b", "frozen-state"),
-    (r"\.freeze\b", "frozen-state"),
+    # Note: a v0.1 entry here dropped any block mentioning
+    # `FrozenError` or `.freeze`. Removed after PR #133 review
+    # confirmed rubyrs DOES implement frozen semantics for
+    # `String` — `"foo".freeze; "foo".frozen?` returns true and
+    # mutation raises a real FrozenError. Only `Array`/`Hash`
+    # freeze are currently no-ops, and Array specs that test
+    # frozen behavior always go through `ArraySpecs.frozen_array`
+    # (caught by the `\bArraySpecs\b` fixture pattern above).
+    # Keeping a blanket FrozenError rule here would silently drop
+    # runnable String specs in future batches — exactly the
+    # over-fit hazard reviewer feedback flagged.
     # Count-form variants of head/tail accessors. rubyrs ships
     # only the zero-arg form for `Array#first`/`#last`/`#min`/
     # `#max`/`#pop`/`#shift`. `\(\s*[^)\s]` matches any non-empty

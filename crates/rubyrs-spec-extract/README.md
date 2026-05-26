@@ -43,8 +43,13 @@ landing. The companion `scripts/polish.py` removes:
     fixtures (`ArraySpecs.recursive_array`, `MyArray[...]`),
     unimplemented method FORMS (`Array#min { ... }` block-
     comparator, count-form `Array#first(n)`, multi-arg
-    `Array#push(a, b, c)` — single-arg `.push(x)` is fine),
-    `mock`/`should_receive`, and `FrozenError`/`.freeze` checks.
+    `Array#push(a, b, c)` — single-arg `.push(x)` is fine), and
+    `mock`/`should_receive`. (Frozen-state behavior is
+    type-specific: rubyrs implements `FrozenError` raising for
+    `String` but not `Array`/`Hash`. Array-frozen specs always
+    use the `ArraySpecs.frozen_array` fixture and get caught by
+    the fixture rule, so polish doesn't need a separate
+    FrozenError pattern that would over-drop String specs.)
   - **Top-level `before`/`after` hook blocks** the extractor's
     v0.3 `before :each` lifter didn't pick up (multi-arg,
     non-flat context, `before :all`, `after :each`) — these
