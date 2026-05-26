@@ -157,7 +157,18 @@ impl Vm {
             }
             "__defined_const?" => {
                 if let Some(Value::Sym(sid)) = args.first() {
-                    let hit = self.classes.contains_key(sid);
+                    // Same fallback chain `Op::LoadConst` uses:
+                    // `self.classes` (bare top-level keys + the
+                    // qualified keys that key-by-qualified-name
+                    // stamps for nested classes), then
+                    // `self.constants` (user-assigned constants
+                    // including `FOO = 1` and `Foo::Bar = 42`).
+                    // Without the constants check, qualified
+                    // constant assignment reported "expression"
+                    // for `defined?(Foo::Bar)` even though the
+                    // value resolved through `Op::LoadConst`.
+                    let hit = self.classes.contains_key(sid)
+                        || self.constants.contains_key(sid);
                     return Some(Ok(if hit { Value::new_str("constant") } else { Value::Nil }));
                 }
                 Some(Ok(Value::Nil))

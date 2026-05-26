@@ -266,6 +266,7 @@ fn run_diff(name: &str) {
 #[test] fn class_qualified_separates() { run_diff("class_qualified_separates"); }
 #[test] fn class_cref_walk() { run_diff("class_cref_walk"); }
 #[test] fn module_nesting() { run_diff("module_nesting"); }
+#[test] fn defined_constant_path() { run_diff("defined_constant_path"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_pathname() { run_diff("stdlib_pathname"); }
 #[test] fn uninitialized_constant() { run_diff("uninitialized_constant"); }

@@ -1530,6 +1530,22 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 args: vec![sp(node, Expr::SymbolLit(name))],
             });
         }
+        if inner.as_constant_path_node().is_some()
+            && let Some(joined) = flatten_constant_path(&inner)
+        {
+            // `defined?(Foo::Bar)` — flatten the path to the same
+            // qualified key the dual-write / class table uses, then
+            // let `__defined_const?` report `"constant"` if either
+            // `self.classes` or `self.constants` holds the entry.
+            // Falls back to `"expression"` only if the path can't
+            // be flattened (dynamic ConstantPath, rare; matches
+            // CRuby's behaviour for `defined?(some_method::Foo)`).
+            return Spanned::new(span, Expr::Call {
+                receiver: None,
+                name: "__defined_const?".into(),
+                args: vec![sp(node, Expr::SymbolLit(joined))],
+            });
+        }
         if let Some(cn) = inner.as_call_node() {
             // No-receiver, no-args call → runtime method check on
             // self / toplevel / builtin. With a receiver, CRuby
