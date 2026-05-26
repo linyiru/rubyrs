@@ -65,6 +65,20 @@ rescue ArgumentError => e
   puts e.message
 end
 
+# --- merge with temporary RHS doesn't lose nested children ---
+# GC-rooting: merge clones `other`'s pairs shallowly (ObjId-level)
+# into a local Vec, then allocs the merged Hash. Without pinning
+# `*other` across the alloc, maybe_gc could sweep `*other` plus
+# its nested heap children (Arrays / Strings / Hashes) — the
+# new Hash would hold dangling ObjIds. The literal-temporary
+# shape `h.merge({a: [...]})` is the easy repro because the
+# RHS is unreachable from the stack after the call.
+1000.times do |i|
+  m = {}.merge({a: [i, i+1]})
+  raise "GC corruption iter #{i}: #{m[:a].inspect}" unless m[:a] == [i, i+1]
+end
+puts "merge-temporary-rhs ok"
+
 # --- merge preserves receiver's default-block ---
 # CRuby: derived hashes (merge/select/etc.) inherit the
 # receiver's default_proc. Without this, `Hash.new {...}.merge(x)[:y]`

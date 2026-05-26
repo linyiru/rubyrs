@@ -260,6 +260,17 @@ impl Vm {
                         let default_block = self.heap.hash_default_block(id);
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
+                        // Pin `*other` too — `extra` was a shallow clone
+                        // of its pairs (ObjIds, not deep copies), so any
+                        // nested heap children (Arrays / Strings /
+                        // Hashes / etc.) inside `extra` are reachable
+                        // ONLY through `*other`. Without this pin,
+                        // maybe_gc could sweep `*other` plus its
+                        // children, leaving the new merged Hash with
+                        // dangling ObjIds. Caught under STRESS_GC by
+                        // a probe like
+                        // `h.merge({a: [1,2,3,4,5]})` in a tight loop.
+                        g.pin(Value::Hash(*other));
                         if let Some(bid) = default_block {
                             g.pin(Value::Block(bid));
                         }
