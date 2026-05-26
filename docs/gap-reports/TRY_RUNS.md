@@ -52,8 +52,11 @@ Fifth pass after the session's PR wave landed:
   methods)
 - **PR #107** — stdlib `require` lenient pass-through stub
   (no-op for known names like `time`, `date`, `logger`,
-  `forwardable`; `loaded_features` tracked so re-require returns
-  false) + Object preamble stub + `String#hash`
+  `forwardable`; a separate `loaded_stdlib_stubs` set
+  tracks first-load so re-require returns `false`, matching
+  CRuby's idempotency without sharing the `loaded_features`
+  path-keyed set used for real Ruby-source loads) + Object
+  preamble stub + `String#hash`
 - **PR #109** — block-arg dispatch: `&nil` is no-block,
   `&curried_proc` is accepted as block, `&` TypeError reports
   CRuby class names, `send(:priv, &nil)` preserves visibility
@@ -93,9 +96,11 @@ and that the C-ext require wall (Cat B) and project-helper holes
 - **Cat B partially fell to a stub strategy**: rather than
   building real `Time` / `Logger` modules, PR #107's stdlib
   require stub treats common stdlib `require` calls as no-ops
-  (with `loaded_features` tracked so re-require returns false).
-  Files that only depend on the *load* succeeding (not on the
-  module being functional at runtime) now pass.
+  (with a separate `loaded_stdlib_stubs` set tracking first
+  load so re-require returns `false`, matching CRuby
+  idempotency). Files that only depend on the *load*
+  succeeding (not on the module being functional at runtime)
+  now pass.
   liquid/extensions.rb and sinatra/middleware/logger.rb both
   fit that shape; the remaining Cat B file
   (dry/struct/extensions/pretty_print.rb) doesn't — it
