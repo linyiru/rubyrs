@@ -1344,6 +1344,16 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let mut copy: Vec<Value> = g.vm.heap.array(*id).clone();
+                // Pin every element. If the comparator block mutates
+                // the receiver (e.g. `arr.clear` mid-sort) and triggers
+                // maybe_gc, elements referenced only from this Rust-
+                // local `copy` Vec would otherwise be unrooted and
+                // could be swept — leading to dangling ObjIds when the
+                // next comparison reads them. CRuby disallows
+                // concurrent mutation entirely; we instead keep the
+                // elements alive defensively so the sort completes
+                // without ICE'ing.
+                for v in &copy { g.pin(v.clone()); }
                 let pre_frames = g.vm.frames.len();
                 let n = copy.len();
                 let mut early: Option<Value> = None;
