@@ -38,3 +38,24 @@ puts already.inspect                            # [1, 2, 3, 4]
 # --- empty / single-element edge cases ---
 puts [].sort! { |a, b| a <=> b }.inspect        # []
 puts [42].sort! { |a, b| a <=> b }.inspect      # [42]
+
+# --- non-local `return` from comparator block ---
+# CRuby semantics: `return` propagates out of the enclosing
+# method, the sort's intermediate state is discarded. Tests
+# our `method_return` propagation path.
+def with_return_sort
+  [3, 1, 2].sort! { |_, _| return :early }
+  :unreached
+end
+puts with_return_sort                           # early
+
+# --- non-Integer comparator result raises ArgumentError ---
+# CRuby's exact format: `comparison of {class} with 0 failed`
+# (ArgumentError from Comparable#> after coercing the result to
+# the cmp axis). Caught common bug: comparator returns a Symbol
+# or other non-Integer.
+begin
+  [1, 2, 3].sort { |_, _| :sym }
+rescue ArgumentError => e
+  puts e.message                                # comparison of Symbol with 0 failed
+end

@@ -1358,24 +1358,52 @@ impl Vm {
                         let b = copy[j].clone();
                         g.vm.invoke_block(block, vec![a, b])?;
                         g.vm.dispatch_until(pre_frames)?;
-                        if g.vm.method_return.is_some() { break 'outer; }
+                        // Non-local `return` from inside the
+                        // comparator block: push Nil and let the
+                        // outer dispatch loop's method_return check
+                        // unwind. `Ok(None)` would route through
+                        // do_call_block's fallthrough and eventually
+                        // hit NoMethodError (because `sort!` only
+                        // exists in the no-block path; there's no
+                        // primitive fallback for the block-form).
+                        // Empirically verified vs CRuby:
+                        // `def foo; [3,1,2].sort!{return :x};
+                        // :unreached; end; foo` → `:x`.
+                        if g.vm.method_return.is_some() {
+                            return Ok(Some(Value::Nil));
+                        }
                         let result = g.vm.stack.pop().unwrap_or(Value::Nil);
                         if g.vm.break_signaled {
                             g.vm.break_signaled = false;
                             early = Some(result);
                             break 'outer;
                         }
+                        // Non-Integer block result mirrors CRuby's
+                        // `comparison of X with 0 failed`
+                        // (ArgumentError, NOT TypeError — CRuby
+                        // routes the result through `<=>`-style
+                        // comparison against the integer 0 to
+                        // determine ordering, and the failure
+                        // surfaces from Comparable#>). The class
+                        // name in the message is the block-return
+                        // type, not the operand types — those are
+                        // both Integer in the common probe.
                         let ord = match result {
                             Value::Int(n) if n > 0 => std::cmp::Ordering::Greater,
                             Value::Int(n) if n < 0 => std::cmp::Ordering::Less,
                             Value::Int(_) => std::cmp::Ordering::Equal,
-                            _ => return Err(g.vm.trap(crate::error::RubyError::TypeError {
-                                msg: format!(
-                                    "comparison of {} with {} failed",
-                                    result.type_name(),
-                                    result.type_name(),
-                                ),
-                            })),
+                            _ => {
+                                let result_class = match g.vm.class_of(&result) {
+                                    Value::Class(c) => c.name.clone(),
+                                    _ => result.type_name().to_string(),
+                                };
+                                return Err(g.vm.trap(crate::error::RubyError::ArgumentError {
+                                    msg: format!(
+                                        "comparison of {} with 0 failed",
+                                        result_class,
+                                    ),
+                                }));
+                            }
                         };
                         match ord {
                             std::cmp::Ordering::Greater => {
