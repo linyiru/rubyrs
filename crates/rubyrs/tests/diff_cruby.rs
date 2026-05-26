@@ -248,5 +248,6 @@ fn run_diff(name: &str) {
 #[test] fn load_path() { run_diff("load_path"); }
 #[test] fn source_location() { run_diff("source_location"); }
 #[test] fn source_line() { run_diff("source_line"); }
+#[test] fn require_xpkg() { run_diff("require_xpkg"); }
 #[test] fn class_level_ivars() { run_diff("class_level_ivars"); }
 #[test] fn enumerable_stub() { run_diff("enumerable_stub"); }
