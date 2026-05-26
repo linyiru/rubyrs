@@ -2006,7 +2006,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             // `class << self; alias prefer register; end` is the
             // motivating case — `register` is a class method of
             // Tilt, `prefer` should also be a class method.
-            if let Some(alias_node) = bn.as_alias_method_node()
+            // IMPORTANT scope guard: `Op::AliasSingletonMethod`
+            // installs on `class_stack.last().singleton_methods`,
+            // which is only the correct target when the surrounding
+            // shape is `class << self` inside a class body — the
+            // existing class_stack entry IS X. For
+            // `class << SomeConst` / `class << obj`, the body runs
+            // in the same frame without any class_stack push, so
+            // the op would silently alias on the wrong receiver
+            // (or on toplevel). Those receivers still fall through
+            // to the existing unsupported-node SyntaxError.
+            let recv_is_self = matches!(&recv_expr.node, Expr::SelfExpr);
+            if recv_is_self
+                && let Some(alias_node) = bn.as_alias_method_node()
                 && let (Some(new_sym), Some(old_sym)) = (
                     alias_node.new_name().as_symbol_node(),
                     alias_node.old_name().as_symbol_node(),
@@ -2017,8 +2029,18 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 out.push(sp(bn, Expr::AliasSingletonMethod(new_name, old_name)));
                 continue;
             }
+            // Tighter error if we declined to handle alias due to
+            // the non-self receiver guard above — separate from
+            // the general "only def / attr_* / alias" message.
+            if bn.as_alias_method_node().is_some() && !recv_is_self {
+                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                    "class << <non-self>: `alias` is only supported when the receiver is `self` (inside a class body)".into()
+                ));
+                out.push(sp(bn, Expr::Nil));
+                continue;
+            }
             AST_ERRORS.with(|cell| cell.borrow_mut().push(
-                "class << X body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` are supported in the spike subset".into()
+                "class << X body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` (with `self` receiver) are supported in the spike subset".into()
             ));
             out.push(sp(bn, Expr::Nil));
         }
