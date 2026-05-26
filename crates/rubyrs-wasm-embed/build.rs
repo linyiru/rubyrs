@@ -97,7 +97,15 @@ fn main() {
 /// are typically not silenced even there) and surfaced clearly when
 /// someone wonders why the binary later complains.
 fn stub(path: &std::path::Path, reason: &str) {
-    let _ = fs::write(path, []);
+    // If the stub itself can't be written, `include_bytes!` in
+    // `main.rs` will fail at compile time with a confusing
+    // "file not found" pointing at $OUT_DIR — the user wouldn't
+    // know to look at OUT_DIR's permissions / disk. Surface the
+    // real error immediately as a build failure with a
+    // diagnostic pointing at the actual problem.
+    if let Err(e) = fs::write(path, []) {
+        panic!("failed to write cwasm stub {}: {e}", path.display());
+    }
     println!(
         "cargo:warning=rubyrs-wasm-embed: no cwasm baked in ({}). \
          Set RUBYRS_CWASM=<path> at runtime, or re-build with \
