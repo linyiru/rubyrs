@@ -122,11 +122,20 @@ fn main() -> ExitCode {
         }
     }
 
+    // Extract + collect duplicates in a single pass. The report
+    // API hands back both so we don't parse every `--shared`
+    // source twice (once to detect duplicates, once to inline).
+    let (output, dups) = if shared_specs.is_empty() {
+        (rubyrs_spec_extract::extract(&source), Vec::new())
+    } else {
+        let report = rubyrs_spec_extract::extract_with_shared_report(&source, &shared_specs);
+        (report.output, report.duplicates)
+    };
+
     // Warn (don't fail) when the same shared name was supplied
     // by more than one `--shared` file. The registry keeps the
     // first definition, so the user should know that ordering
     // decided which body got inlined.
-    let dups = rubyrs_spec_extract::shared_duplicates(&shared_specs);
     if !dups.is_empty() {
         eprintln!(
             "rubyrs-spec-extract: {} duplicate shared-example name(s) across --shared files; keeping first definition seen:",
@@ -136,12 +145,6 @@ fn main() -> ExitCode {
             eprintln!("  - {name}");
         }
     }
-
-    let output = if shared_specs.is_empty() {
-        rubyrs_spec_extract::extract(&source)
-    } else {
-        rubyrs_spec_extract::extract_with_shared(&source, &shared_specs)
-    };
     print!("{output}");
 
     if errors.is_empty() && !any_shared_errors {

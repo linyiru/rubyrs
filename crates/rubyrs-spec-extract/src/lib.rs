@@ -35,6 +35,12 @@
 //!   aren't re-rewritten (cluster E in the v0.2 review history).
 //! - Consumer's `before :each` doesn't apply to inlined `it`s
 //!   from a `it_behaves_like` (v0.4) — documented in README.
+//! - Skip-log header is computed from the consumer file's AST
+//!   only. Unhandled patterns that arrive via an inlined shared
+//!   body (e.g. `mock`, `should_receive`) appear verbatim in the
+//!   output but aren't listed in the header. Re-scan the
+//!   substituted body if this becomes a useful signal — for now,
+//!   `grep` over the extractor output remains the fallback.
 //! - `require_relative` lines are stripped via a line-level
 //!   filter (the micro-runner has no loader; an uncaught
 //!   file-scope `require_relative` would fail the file).
@@ -71,17 +77,30 @@ pub struct SharedSpec<'a> {
 ///    skip-log header so the human can either supply the
 ///    missing shared file or hand-translate.
 pub fn extract_with_shared(source: &str, shared: &[SharedSpec<'_>]) -> String {
-    let registry = build_shared_registry(shared);
-    extract_inner(source, &registry)
+    extract_with_shared_report(source, shared).output
 }
 
-/// Names that appeared in more than one [`SharedSpec`]. When this
-/// list is non-empty, only the first definition seen contributed
-/// to the inlined body. The CLI surfaces these to stderr so a user
-/// supplying multiple `--shared` files notices accidental shadowing
-/// instead of having `--shared` order silently decide.
-pub fn shared_duplicates(shared: &[SharedSpec<'_>]) -> Vec<String> {
-    build_shared_registry(shared).duplicates
+/// Rewritten source plus the names of any shared examples that
+/// appeared in more than one [`SharedSpec`]. The keep-first
+/// definition wins; the duplicates list is what the CLI uses to
+/// warn the user that `--shared` ordering decided which body got
+/// inlined.
+pub struct ExtractReport {
+    pub output: String,
+    pub duplicates: Vec<String>,
+}
+
+/// Same as [`extract_with_shared`] but also surfaces the duplicate
+/// shared-example names without re-parsing every `--shared` source
+/// a second time (CLI uses this to warn).
+pub fn extract_with_shared_report(
+    source: &str,
+    shared: &[SharedSpec<'_>],
+) -> ExtractReport {
+    let registry = build_shared_registry(shared);
+    let duplicates = registry.duplicates.clone();
+    let output = extract_inner(source, &registry);
+    ExtractReport { output, duplicates }
 }
 
 /// Recognise `expr.should == val` and rewrite to
@@ -967,6 +986,12 @@ fn build_shared_registry(specs: &[SharedSpec<'_>]) -> SharedRegistry {
         };
         collector.visit(&root);
     }
+    // Dedup the duplicates list. A name defined in 3+ shared
+    // files would push one entry on every collision after the
+    // first, producing a noisy CLI warning with an inflated
+    // count. We just want "names whose first definition won."
+    registry.duplicates.sort();
+    registry.duplicates.dedup();
     registry
 }
 
