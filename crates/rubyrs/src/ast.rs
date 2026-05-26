@@ -140,9 +140,9 @@ pub(crate) enum Expr {
     /// canonical decimal representation built from Prism's
     /// arbitrary-precision integer digits. The compiler interns
     /// the string and emits `Op::LoadBigInt`; the runtime parses
-    /// + caches it. Cfg-gated on `bignum` — without the feature
-    /// the AST arm saturates to `i64::MIN`/`i64::MAX` instead.
-    /// ADR 0018 BigInt placement.
+    /// then caches it. Cfg-gated on `bignum` — without the
+    /// feature the AST arm saturates to `i64::MIN` / `i64::MAX`
+    /// instead. ADR 0018 covers the BigInt placement.
     #[cfg(feature = "bignum")]
     BigIntLit(String),
     InterpolatedStr(Vec<SExpr>),
