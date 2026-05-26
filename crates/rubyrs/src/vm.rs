@@ -1511,6 +1511,19 @@ impl Vm {
             Value::BigInt(id) => self.heap.bigint(*id).clone(),
             _ => unreachable!(),
         };
+        // GC rooting: every `bigint_to_value` call below invokes
+        // `maybe_gc()`. For Int radix (the common case) rem is
+        // always small and demotes to `Value::Int`, no rooting
+        // needed. For BigInt radix, rem can be a heap-backed
+        // `Value::BigInt(id)`; without pinning, an iteration N+1
+        // GC could sweep the BigInts pushed during 1..N before
+        // the Array allocation roots them, leaving dangling
+        // ObjIds in the returned Array. Pin every Value::BigInt
+        // digit as it's produced; the PinGuard drops after the
+        // Array is allocated (heap.alloc itself triggers the
+        // final GC walk, which now sees both the pinned digits
+        // and the freshly-allocated Array as reachable).
+        let mut guard = PinGuard::new(self);
         let mut digits: Vec<Value> = Vec::new();
         if recv_sign == Sign::NoSign {
             digits.push(Value::Int(0));
@@ -1526,13 +1539,19 @@ impl Vm {
                 // handles either path.
                 let rem = &n % &base;
                 n = &n / &base;
-                let digit_val = self.bigint_to_value(rem)?;
+                let digit_val = guard.vm.bigint_to_value(rem)?;
+                if matches!(digit_val, Value::BigInt(_)) {
+                    guard.pin(digit_val.clone());
+                }
                 digits.push(digit_val);
             }
         }
-        self.maybe_gc();
-        self.check_alloc()?;
-        let arr_id = self.heap.alloc(crate::heap::HeapObj::Array(digits));
+        guard.vm.maybe_gc();
+        guard.vm.check_alloc()?;
+        let arr_id = guard.vm.heap.alloc(crate::heap::HeapObj::Array(digits));
+        // `guard` drops here, unpinning the digits — but the
+        // Array now holds them as roots, so the next GC walk
+        // still sees them as reachable.
         Ok(Some(Value::Array(arr_id)))
     }
 }

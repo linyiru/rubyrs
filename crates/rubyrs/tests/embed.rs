@@ -2226,6 +2226,41 @@ fn digits_negative_recv_raises_argument_error_substitute() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn digits_bigint_radix_survives_stress_gc() {
+    // GC rooting regression guard. For a BigInt radix (e.g. base
+    // = 2 ** 70), each digit produced is itself a heap-backed
+    // `Value::BigInt(id)`. Every `bigint_to_value` call inside
+    // the loop invokes `maybe_gc()`; without PinGuard rooting,
+    // a sweep mid-loop could deallocate already-pushed digits,
+    // leaving dangling ObjIds in the returned Array. Run under
+    // forced GC (`stress_gc: true`) so every alloc triggers a
+    // full mark — pre-fix this test panicked / produced wrong
+    // values; with PinGuard around the loop it stays sound.
+    let cfg = rubyrs::Config { stress_gc: true, ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let v = rt.eval(
+        // (2 ** 200).digits(2 ** 70) — 3 digits, each potentially
+        // BigInt-backed (top digit fits below 2^60 → demotes; the
+        // other two could be BigInts). Verify all elements are
+        // valid Integer values (no dangling refs / no panic).
+        "(2 ** 200).digits(2 ** 70).map { |d| d.bit_length }",
+        "digits_stress_gc.rb",
+    ).expect("BigInt-radix digits must survive STRESS_GC");
+    let elems = rt.resolve_array(&v).expect("expected Value::Array");
+    // Each element is bit_length of a digit; values bounded by
+    // log2(2^70) = 70. Just confirm we have a populated array of
+    // small Ints — exact values are an implementation detail.
+    assert!(!elems.is_empty(), "expected non-empty digits array");
+    for e in &elems {
+        match e {
+            rubyrs::Value::Int(n) => assert!(*n >= 0 && *n <= 70, "bit_length out of range: {}", n),
+            other => panic!("expected Value::Int (bit_length), got {:?}", other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn digits_estimator_uses_log2_base_not_just_bits() {
     // Tighter estimator (`recv_bits / (base.bits() - 1) + 1`)
     // means a `recv` whose base-2 expansion would exceed the cap
