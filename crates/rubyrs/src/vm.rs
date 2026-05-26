@@ -901,6 +901,13 @@ impl Vm {
     ) -> Result<Option<Value>, Trap> {
         use num_bigint::{BigInt, Sign};
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
+        let exp_is_bigint = matches!(exp_arg, Value::BigInt(_));
+        // Float / negative-exp paths need to fire here whenever
+        // either operand is BigInt, since numeric_call only covers
+        // pure Int×Int. Without this, `2 ** -(2**100)` or
+        // `1 ** -(2**100)` (Int recv + negative BigInt exp) would
+        // fall through to NoMethodError.
+        let need_float_handling = recv_is_bigint || exp_is_bigint;
         // Read base sign + bit-length via borrowed Cow — avoids
         // the O(n) magnitude clone `as_bigint` would do for BigInt
         // receivers. The Cow borrow ends with the block; later
@@ -950,11 +957,11 @@ impl Vm {
                 Sign::NoSign => {
                     // base == 0. 0**0 == 1; 0**n (n>0) == 0;
                     // 0**n (n<0) is ZeroDivision in CRuby — we
-                    // realise the Float divergence (`inf`) here
-                    // for BigInt receivers (Int receivers go
-                    // through numeric.rs's Float arm first).
+                    // realise the Float divergence (`inf`) for any
+                    // BigInt-flavoured operand (Int recv × Int neg
+                    // exp still defers to numeric.rs's Float arm).
                     if exp_is_negative {
-                        if recv_is_bigint {
+                        if need_float_handling {
                             return Ok(Some(Value::Float(f64::INFINITY)));
                         }
                         return Ok(None);
@@ -964,11 +971,11 @@ impl Vm {
                 }
                 Sign::Plus => {
                     // base == 1: always 1. Negative exp → Float(1.0)
-                    // (documented Rational divergence) — realised
-                    // here for BigInt recv; Int recv defers to
-                    // numeric.rs's parity-preserving ±1 arm.
+                    // for BigInt-flavoured operands (Int×Int still
+                    // defers to numeric.rs's parity-preserving ±1
+                    // arm).
                     if exp_is_negative {
-                        if recv_is_bigint {
+                        if need_float_handling {
                             return Ok(Some(Value::Float(1.0)));
                         }
                         return Ok(None);
@@ -979,7 +986,7 @@ impl Vm {
                     // base == -1: parity decides sign. Negative
                     // exponent: |result| = 1, sign from parity.
                     if exp_is_negative {
-                        if recv_is_bigint {
+                        if need_float_handling {
                             return Ok(Some(Value::Float(if exp_is_odd { -1.0 } else { 1.0 })));
                         }
                         return Ok(None);
@@ -990,18 +997,19 @@ impl Vm {
             }
         }
         // |base| > 1 from here on.
-        // Negative Int / BigInt exp: Float reciprocal. Int
-        // receivers go through numeric.rs first; for BigInt
-        // receivers we realise it here so the path doesn't
-        // NoMethodError.
+        // Negative Int / BigInt exp: Float reciprocal. Pure
+        // Int×Int neg-exp goes through numeric.rs first; we cover
+        // every other shape here (BigInt recv with any neg exp,
+        // OR Int recv with negative BigInt exp) so dispatch
+        // doesn't NoMethodError on `2 ** -(2**100)` and friends.
         if exp_is_negative {
-            if recv_is_bigint {
+            if need_float_handling {
                 let exp_f = match exp_arg {
                     Value::Int(n) => *n as f64,
-                    // BigInt-negative exp on a |base|>1 receiver:
-                    // result is sub-normal Float (~0). Coerce via
-                    // the bounded helper (caps the intermediate
-                    // string at f64-range, ~310 bytes max).
+                    // BigInt-negative exp: result tends toward 0
+                    // for |base|>1. Coerce via the bounded helper
+                    // (caps the intermediate string at f64-range,
+                    // ~310 bytes max).
                     Value::BigInt(id) => {
                         let big = self.heap.bigint(*id);
                         Self::bigint_to_f64_bounded(big)
@@ -1162,9 +1170,15 @@ impl Vm {
                 return Ok(Some(v));
             }
             // Fall through to the rest of bigint_primitive only if
-            // try_bigint_pow declined (operand shape it doesn't
-            // handle, e.g. Float exponent — let primitive_call's
-            // float arm pick up).
+            // try_bigint_pow declined. Decline cases now narrow to
+            // Int recv × Int (positive) exp where numeric_call
+            // already produced a value, or operand shapes that
+            // aren't integer at all (the latter never reaches
+            // bigint_primitive in practice — primitive_call's Int
+            // arm would have matched first). Float and negative-Int
+            // exponents are handled inside try_bigint_pow itself
+            // for BigInt-flavoured operands; Int×Int Float/neg-exp
+            // is owned by numeric_call before we get here.
         }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));

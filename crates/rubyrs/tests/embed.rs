@@ -2017,6 +2017,35 @@ fn bigint_pow_identity_bases_skip_u32_cap() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_pow_int_receiver_negative_bigint_exponent_returns_float() {
+    // Int receiver + NEGATIVE BigInt exponent had no handler:
+    // numeric.rs only covers Int×Int, and try_bigint_pow's
+    // recv_is_bigint gate skipped Int receivers — so
+    // `2 ** -(2**100)` raised NoMethodError despite
+    // `respond_to?(:**)` being true. With the gate widened to
+    // `recv OR exp is BigInt`, dispatch produces a Float
+    // (which underflows toward 0 for |base|>1 since the BigInt
+    // exponent is past f64 range — the helper coerces it to
+    // -Inf, and `2 ^ -Inf` = 0.0).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Build a negative BigInt via subtraction (BigInt unary
+        // `-@` is unshipped Phase B.2).
+        "neg_big = 0 - (2 ** 100)\n\
+         puts (2 ** neg_big).zero?\n\
+         puts (1 ** neg_big)\n\
+         puts ((-1) ** neg_big)",
+        "int_recv_neg_bigint_exp.rb",
+    ).expect("Int recv + negative BigInt exp must not NoMethodError");
+    // 2**-2**100 underflows to 0.0; 1**-big = 1.0 exactly;
+    // (-1)**-big: big = 2^100 is even, so parity → 1.0.
+    assert_eq!(buf.snapshot().trim(), "true\n1.0\n1.0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_pow_bigint_receiver_negative_exponent_returns_float() {
     // BigInt receiver + negative Int exp must not NoMethodError —
     // respond_to?(:**) is true for BigInt, so the dispatch path
