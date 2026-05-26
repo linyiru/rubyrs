@@ -19,20 +19,24 @@
 #
 # What the gate actually measures
 # -------------------------------
-# `perf/wasm_check.sh` takes the MIN wall across 3 runs — that's the
-# stable steady-state floor (the same min-of-N pattern host
-# `baselines.tsv` uses for the same reason). On wasmtime the first
-# run typically populates `~/.cache/wasmtime` and subsequent runs hit
-# warm-cache, so MIN is essentially "warm-cache steady startup,"
-# not literal cold-cache startup. We use steady-state because:
-#   1. CI runners cache between jobs differently, making cold-cache
-#      numbers unreproducible.
-#   2. The regression signal we want is "did the rubyrs interpreter
-#      get slower under wasi", and steady-state isolates that from
-#      wasmtime's own cache-warmup variance.
-# If literal cold-cache measurement is ever needed, that's a separate
-# workload (run wasmtime with --disable-cache or clear the cache
-# between runs) and a separate row.
+# `perf/wasm_check.sh` builds a `.cwasm` ahead of time (raw .wasm →
+# wasm-opt -Oz → `wasmtime compile`) and times each workload via
+# `wasmtime run --allow-precompiled $CWASM`. There is no per-run
+# JIT step — the cwasm carries pre-JIT'd machine code — so the
+# `~/.cache/wasmtime` warm-up cycle that affected raw-.wasm
+# measurements no longer applies; every one of the 3 timed runs
+# is essentially the same shape (load .cwasm + run script).
+#
+# MIN-of-3 (same reducer as host `baselines.tsv`) is still useful
+# despite that: it filters CI spawn jitter, OS page-cache warm-up
+# of the .cwasm file itself, `/usr/bin/time`'s 10 ms-granularity
+# rounding, and other host-level noise that the JIT-elimination
+# can't address.
+#
+# The regression signal we want is "did the rubyrs interpreter
+# get slower under wasi". Pre-compiling to .cwasm isolates that
+# from wasmtime's own JIT cost; min-of-3 then strips spawn
+# jitter from the resulting wall.
 #
 # Initial calibration (Apple M-series, wasmtime 45.0.0,
 # rubyrs.wasm release build, wasm-opt -Oz + wasmtime compile AOT,

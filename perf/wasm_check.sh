@@ -11,13 +11,16 @@
 # the runs, and fail if it exceeds the row's `max_wall_ms`.
 #
 # MIN-of-3 is the steady-state floor — drops both CI jitter
-# spikes AND wasmtime's first-run wasm-cache cold population
-# (subsequent runs hit `~/.cache/wasmtime`, so the warm-cache
-# wall is what `min` picks). This measures rubyrs interpreter
-# cost under wasi, not wasmtime's own cache-warmup time. If a
-# future row needs literal cold-cache measurement, add it as
-# its own row that clears the cache or passes `--disable-cache`
-# between runs — see `perf/wasm_baselines.tsv` for the rationale.
+# spikes AND OS-level noise (page-cache warm-up of the .cwasm,
+# wasmtime's own runtime cold start, process-spawn variance,
+# `/usr/bin/time` 10ms-granularity rounding). Because the gate
+# now measures against a pre-compiled `.cwasm` with
+# `--allow-precompiled`, JIT cost was already eliminated by
+# the build step above; there is no longer a per-run wasm-
+# cache warm-up cycle for min-of-3 to filter. This means each
+# of the 3 timed runs is essentially the same shape (load
+# .cwasm + run script), and the MIN reducer is mostly there
+# to absorb spawn/timer granularity jitter.
 #
 # Why no RSS gate: peak-RSS under wasmtime conflates the host VM's
 # resident size with the guest's linear-memory working set, and
