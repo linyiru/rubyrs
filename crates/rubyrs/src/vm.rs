@@ -1625,8 +1625,18 @@ impl Vm {
         //    guard. No DoS cap on the 2-arg form: modpow never
         //    materialises the intermediate, and the result is
         //    bounded by |mod|.
-        // 4. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
-        // 5. Recv is Int AND a BigInt is among args: covers the
+        // 4. `digits([base])` — produces a `Value::Array` so it
+        //    needs `&mut Vm` (can't live in stateless numeric_call).
+        //    Two sub-checks fire ahead of the dispatch in CRuby
+        //    precedence order: negative recv → ArgumentError "out
+        //    of domain" (Math::DomainError substitute), then arity
+        //    guard for >1 args → ArgumentError. The dispatch
+        //    itself narrows the helper to BigInt receivers; Int
+        //    receivers fall through to dispatch.rs's i64 fast
+        //    path. Sits ahead of the recv-or-arg guard so Int
+        //    receivers don't get filtered out.
+        // 5. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // 6. Recv is Int AND a BigInt is among args: covers the
         //    inverse-receiver operator method-call shape
         //    `1.+(2**63)`, which goes through the Int-side
         //    dispatch path and would otherwise miss BigInt
