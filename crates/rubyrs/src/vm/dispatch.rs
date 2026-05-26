@@ -757,15 +757,27 @@ impl Vm {
         // (handled in the next arm) or stored. Args must be a
         // single Symbol; CRuby also accepts String but we keep
         // the subset narrow for now.
+        //
+        // GC rooting: `recv` here came from the operand-stack pop
+        // at the top of `do_call` and lives only in this Rust
+        // local. The `maybe_gc` below would otherwise sweep its
+        // heap slot (e.g. a fresh `Squared.new.method(:call)`
+        // where the Squared instance has no other root), then the
+        // alloc'd BoundMethod would store a stale ObjId. Repro:
+        // `proc_curry_compose.rb` under STRESS_GC=1 — the
+        // BoundMethod survives but its `recv` points at a Dead
+        // slot, panicking later in `class_of`.
         if &*name == "method" && args.len() == 1
             && let Value::Sym(bound_name_id) = &args[0] {
-                self.maybe_gc();
-                self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::BoundMethod {
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(recv.clone());
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let id = g.vm.heap.alloc(HeapObj::BoundMethod {
                     recv: recv.clone(),
                     name_id: *bound_name_id,
                 });
-                self.stack.push(Value::BoundMethod(id));
+                g.vm.stack.push(Value::BoundMethod(id));
                 return Ok(());
             }
         // `bm.call(args)` / `bm.()` / `bm[args]` — dispatch the
@@ -2293,13 +2305,33 @@ impl Vm {
         // Build the rest Array (if any) BEFORE taking the locals
         // borrow — heap.alloc needs &mut self.heap, which conflicts
         // with the captured.borrow_mut() below.
+        //
+        // GC rooting: at this point the caller has popped the
+        // Value::Block(block_id) off the operand stack (see
+        // `do_call_block` and the Block.call arm in `do_call`),
+        // so the only live reference to the block + its captured
+        // Vec is this fn's `block_id` parameter — *not* a GC root.
+        // Without pinning, the maybe_gc below would sweep the
+        // Block's heap slot and (transitively) every captured
+        // BoundMethod/Block held inside `captured`. The new alloc
+        // could reuse the freed slot, and the forwarder would
+        // dispatch through a dangling ObjId. Reproduced under
+        // STRESS_GC=1 by `proc_curry_compose.rb`'s `(succ >> m).(4)`
+        // — composing a Block with a BoundMethod produces a
+        // compose-forwarder Block with `rest_slot = Some(2)`, so
+        // this branch fires; the Squared instance held inside
+        // `m`'s BoundMethod gets swept between pop and the
+        // recursive `m.call`, panicking later at heap.rs's
+        // `class_of called on non-Object slot`.
         let rest_array_val = if let Some(slot) = rest_slot {
             let rest_args: Vec<Value> = args.iter().skip(n_params as usize).cloned().collect();
             // Truncate args to the leading required slots — the
             // overflow now lives in rest_args.
-            self.maybe_gc();
-            self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Array(rest_args));
+            let mut g = crate::vm::PinGuard::new(self);
+            g.pin(Value::Block(block_id));
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let id = g.vm.heap.alloc(HeapObj::Array(rest_args));
             Some((slot, Value::Array(id)))
         } else {
             None
