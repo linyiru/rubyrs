@@ -760,6 +760,40 @@ impl Vm {
             if !matches!(a, Value::BigInt(_)) && !matches!(b, Value::BigInt(_)) {
                 return Ok(None);
             }
+            // Float ↔ BigInt mixed: coerce the BigInt to f64 (lossy
+            // at extreme magnitudes — matches CRuby's "Float wins
+            // on mix" rule and Integer#to_f's documented precision
+            // loss past 2^53). Without this branch, `2.0 + big`
+            // raised NoMethodError because primitive_call's Float
+            // arms only handle Int/Float rhs.
+            if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+                let to_f = |v: &Value| -> Option<f64> {
+                    match v {
+                        Value::Float(f) => Some(*f),
+                        Value::Int(n) => Some(*n as f64),
+                        Value::BigInt(id) => self.heap.bigint(*id).to_string().parse::<f64>().ok(),
+                        _ => None,
+                    }
+                };
+                let (af, bf) = match (to_f(a), to_f(b)) {
+                    (Some(x), Some(y)) => (x, y),
+                    _ => return Ok(None),
+                };
+                let result = match kind {
+                    BinOpKind::Add => Value::Float(af + bf),
+                    BinOpKind::Sub => Value::Float(af - bf),
+                    BinOpKind::Mul => Value::Float(af * bf),
+                    BinOpKind::Div => Value::Float(af / bf),
+                    BinOpKind::Mod => Value::Float(af.rem_euclid(bf)),
+                    BinOpKind::Lt => Value::Bool(af < bf),
+                    BinOpKind::Le => Value::Bool(af <= bf),
+                    BinOpKind::Gt => Value::Bool(af > bf),
+                    BinOpKind::Ge => Value::Bool(af >= bf),
+                    BinOpKind::Eq => Value::Bool(af == bf),
+                    BinOpKind::Ne => Value::Bool(af != bf),
+                };
+                return Ok(Some(result));
+            }
             // Both operands must be integers (Int or BigInt); if
             // not, decline and let primitive_call try (e.g. for
             // String * BigInt later). Use `as_bigint_ref` to
