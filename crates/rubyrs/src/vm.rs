@@ -1286,14 +1286,25 @@ impl Vm {
         //    declines on i64 overflow so we get the chance to
         //    promote here (`2 ** 100`). Handled before the guard
         //    below so the Int×Int overflow case isn't filtered out.
-        // 2. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
-        // 3. Recv is Int AND a BigInt is among args: covers the
+        // 2. Unary `-@` / `+@` / `abs` — fires for BigInt recv OR
+        //    Int(i64::MIN) recv. numeric_call declines on i64::MIN
+        //    under `bignum` so this arm can promote to the
+        //    BigInt 2^63. Also sits ahead of the recv-or-arg-is-
+        //    BigInt guard for the same reason as `**`.
+        // 3. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // 4. Recv is Int AND a BigInt is among args: covers the
         //    inverse-receiver operator method-call shape
         //    `1.+(2**63)`, which goes through the Int-side
         //    dispatch path and would otherwise miss BigInt
         //    arithmetic entirely (the expression form `1 + big`
         //    works because Op::BinOp already routes via
         //    try_bigint_binop on either-operand-is-BigInt).
+        //
+        // When adding a new entry path that needs to fire for
+        // Int receivers without a BigInt arg (e.g. another auto-
+        // promotion shape), place it BEFORE the
+        // `recv_is_bigint || arg_is_bigint` guard below.
+        //
         // Fall through to the rest of bigint_primitive when
         // `try_bigint_pow` declines. Decline cases narrow to
         // Int recv × Int (positive) exp where `numeric_call`
@@ -1309,11 +1320,7 @@ impl Vm {
         {
             return Ok(Some(v));
         }
-        // 4. Unary `-@` / `+@` / `abs` — fires for BigInt recv OR
-        //    for Int(i64::MIN) recv (numeric_call declined in that
-        //    case so we can promote to the BigInt 2^63). Sits ahead
-        //    of the general guard so the Int(i64::MIN) shape isn't
-        //    filtered out.
+        // Cond 2 — see entry-conditions doc above.
         if args.is_empty() && matches!(name, "-@" | "+@" | "abs") {
             if let Some(v) = self.try_bigint_unary(recv, name)? {
                 return Ok(Some(v));
