@@ -38,7 +38,18 @@ fn main() {
         max_symbols: env::var("RUBYRS_MAX_SYMBOLS").ok().and_then(|s| s.parse().ok()),
         max_value_bytes: env::var("RUBYRS_MAX_VALUE_BYTES").ok().and_then(|s| s.parse().ok()),
         env: Some(env::vars().collect()),
+        // `std::process::id()` panics on wasm32-wasip1 (wasi has no
+        // process-ID concept). The runtime treats `pid: None` as
+        // a sentinel and surfaces `$$` as `Int(0)` (see
+        // `vm/step.rs::"$$"`), not a trap — wasi scripts that
+        // depend on a non-zero PID need to detect the zero
+        // sentinel themselves. Leaving the interpreter alive
+        // rather than panicking at construction is the load-
+        // bearing fix for wasi.
+        #[cfg(not(target_os = "wasi"))]
         pid: std::num::NonZeroU32::new(process::id()),
+        #[cfg(target_os = "wasi")]
+        pid: None,
     };
 
     let mut rt = Runtime::with_config(cfg);

@@ -164,17 +164,40 @@ jobs:
           fi
           echo "WASI_SDK_PATH=/opt/wasi-sdk-24.0-x86_64-linux" >> $GITHUB_ENV
 
-      - name: Build (wasm32-wasip1)
-        # Builds the rubyrs binary as a wasi reactor with `cext` off.
-        # Verifies:
-        # 1. The non-cext core stays wasi-portable.
-        # 2. `libloading` and `rubyrs-cext` are correctly opt-in
-        #    via the `cext` Cargo feature (no leakage onto wasm).
-        # 3. `Kernel#require` returns a clear non-cext trap on this
-        #    build shape rather than panicking.
-        # We don't run the resulting wasm here (would need wasmtime
-        # + a script). A separate smoke job can land later.
-        run: cargo build --release --target wasm32-wasip1 -p rubyrs --no-default-features
+      - name: Install wasmtime
+        # End-to-end smoke (next step) needs a wasi runtime. Pin a
+        # specific release + verify a sha256 over the downloaded
+        # tarball so the CI lane doesn't trust an arbitrary remote
+        # install script. Bump version + checksum together when
+        # `tests/wasm/smoke.sh` starts exercising newer wasi
+        # proposals.
+        run: |
+          set -euo pipefail
+          WASMTIME_VERSION=v45.0.0
+          WASMTIME_SHA256=9d92e6dc04630f617e0e5d532327a5a917ac4898587e07f4fb7a5fc7fffef760
+          TARBALL="wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          URL="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${TARBALL}"
+          curl -sSLo "$TARBALL" "$URL"
+          echo "${WASMTIME_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar xf "$TARBALL"
+          install -m 755 "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.local/bin/wasmtime" 2>/dev/null \
+            || (mkdir -p "$HOME/.local/bin" && install -m 755 "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.local/bin/wasmtime")
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Build + smoke (wasm32-wasip1)
+        # Drives both:
+        # 1. `cargo build --release --target wasm32-wasip1 -p rubyrs
+        #    --no-default-features` (proves the non-cext core stays
+        #    wasi-portable; `libloading` and `rubyrs-cext` are
+        #    correctly opt-in via the `cext` feature; `Kernel#require`
+        #    returns a clear non-cext trap rather than panicking).
+        # 2. wasmtime-runs `tests/wasm/smoke.rb` against the built
+        #    `.wasm` and diffs stdout against `smoke.expected`. This
+        #    is the proof that wasm32-wasip1 isn't just compile-clean
+        #    but actually executes end-to-end — covering puts /
+        #    interpolation / Range / Array / Hash / rescue / while
+        #    break / class def in one tight fixture.
+        run: bash crates/rubyrs/tests/wasm/smoke.sh
 
   panic-budget:
     name: Panic budget (per-file ratchet)
