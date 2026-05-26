@@ -2427,6 +2427,32 @@ impl Vm {
             let base: i64 = match args.first() {
                 None => 10,
                 Some(Value::Int(b)) => *b,
+                // BigInt base under bignum: `n` is i64-sized and
+                // any BigInt that survived `bigint_to_value`'s
+                // demote-on-fit is necessarily > i64::MAX in
+                // magnitude. So `|n| < base` always holds and the
+                // result is a single-element array (n or 0 after
+                // the negative-recv check). Validate the base
+                // sign here — negative BigInt is "negative radix"
+                // matching the i64 path's text.
+                #[cfg(feature = "bignum")]
+                Some(Value::BigInt(id)) => {
+                    if self.heap.bigint(*id).sign() == num_bigint::Sign::Minus {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "negative radix".to_string(),
+                        }));
+                    }
+                    if *n < 0 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "out of domain".to_string(),
+                        }));
+                    }
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::Array(vec![Value::Int(*n)]));
+                    self.stack.push(Value::Array(id));
+                    return Ok(());
+                }
                 Some(other) => return Err(self.trap(RubyError::TypeError {
                     // Share the same class-name helper as the
                     // BigInt-receiver path in `Vm::try_integer_digits`

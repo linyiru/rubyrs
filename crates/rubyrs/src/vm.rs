@@ -1671,15 +1671,12 @@ impl Vm {
         {
             return Ok(Some(v));
         }
-        // Arity guard for BigInt receivers — numeric.rs's arity
-        // guard only catches Int×*, so `big.pow` / `big.pow(1,2,3)`
-        // would otherwise fall through to NoMethodError despite
-        // `respond_to?(:pow)` being true. Match CRuby's exact
-        // ArgumentError message text.
         // `Integer#digits` produces a `Value::Array`, which needs
         // heap allocation — can't live in stateless `numeric_call`.
         // Fires for ANY Int/BigInt receiver (recv-side check is in
-        // the helper). Sits ahead of the recv-or-arg guard so Int
+        // the helper, which now narrows to BigInt only — Int
+        // receivers continue through and hit dispatch.rs's i64
+        // fast path). Sits ahead of the recv-or-arg guard so Int
         // receivers don't get filtered out.
         if name == "digits" && (args.is_empty() || args.len() == 1)
             && let Some(v) = self.try_integer_digits(recv, args)?
@@ -1702,6 +1699,11 @@ impl Vm {
                 ),
             }));
         }
+        // Arity guard for BigInt-receiver `pow` — numeric.rs's
+        // arity guard only catches Int×*, so `big.pow` /
+        // `big.pow(1,2,3)` would otherwise fall through to
+        // NoMethodError despite `respond_to?(:pow)` being true.
+        // Match CRuby's exact ArgumentError message text.
         if name == "pow" && matches!(recv, Value::BigInt(_)) && args.len() != 2 && args.len() != 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(

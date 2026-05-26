@@ -9,7 +9,9 @@
 #
 # Negative-receiver `.digits` raises `Math::DomainError` in CRuby;
 # rubyrs substitutes ArgumentError per the documented subset
-# pattern (dispatch.rs:2402-2403). That case lives in
+# pattern (same convention as other numeric-out-of-domain
+# arms in Vm::do_call — Math::DomainError isn't modelled here).
+# That case lives in
 # `tests/embed.rs` not here, since the error-class names diverge.
 
 # `digits` — small cases stay as Int, no BigInt involvement.

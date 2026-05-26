@@ -2261,11 +2261,11 @@ fn digits_int_path_error_semantics_match_bignum_profile() {
 fn digits_negative_recv_raises_argument_error_substitute() {
     // CRuby raises `Math::DomainError: out of domain` for
     // `(-5).digits` (and the same shape for negative BigInt).
-    // The established subset pattern (dispatch.rs:2402-2403)
-    // substitutes `ArgumentError` because `Math::DomainError`
-    // isn't modelled. Pin the divergence so a future
-    // Math::DomainError addition is an opt-in upgrade rather
-    // than a silent regression.
+    // The established subset pattern (same convention as other
+    // numeric-out-of-domain arms in Vm::do_call) substitutes
+    // `ArgumentError` because `Math::DomainError` isn't modelled.
+    // Pin the divergence so a future Math::DomainError addition
+    // is an opt-in upgrade rather than a silent regression.
     let mut rt = rubyrs::Runtime::new();
     for script in [
         "(-5).digits",
