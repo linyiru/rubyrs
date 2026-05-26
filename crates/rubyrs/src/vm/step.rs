@@ -869,8 +869,14 @@ impl Vm {
                     Some(m) => m,
                     None => {
                         let name = self.interner.resolve(old_id).to_string();
+                        // Use the same "class `Foo'" context wording
+                        // as Op::AliasMethod's NameError so the two
+                        // sites diff cleanly. (CRuby itself spells
+                        // these differently in some cases but the
+                        // singleton/instance distinction is rarely
+                        // load-bearing in real error logs.)
                         let ctx = self.class_stack.last()
-                            .map(|c| format!("singleton class of `{}'", c.name))
+                            .map(|c| format!("class `{}'", c.name))
                             .unwrap_or_else(|| "main".to_string());
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method `{}' for {}", name, ctx),

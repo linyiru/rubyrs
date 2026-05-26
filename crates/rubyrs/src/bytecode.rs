@@ -149,18 +149,25 @@ pub(crate) enum Op {
     /// `NameError` if `old` doesn't exist anywhere on the chain.
     AliasMethod(SymId, SymId),     // new, old
     /// `alias new old` (keyword form) inside a `class << self`
-    /// body that itself sits inside a `class Foo` body. Same as
-    /// `Op::AliasMethod` but resolves `old` along the surrounding
-    /// class's SINGLETON-method chain
+    /// body. Same as `Op::AliasMethod` but resolves `old` along
+    /// the surrounding class's SINGLETON-method chain
     /// (`lookup_class_singleton_method`) and installs the same
     /// Rc<Method> under `new` in
     /// `class_stack.last().singleton_methods`. AST only emits
     /// this op when the receiver is literally `self` (no
     /// class_stack push happens for `class << X` body — without
     /// the SelfExpr guard, non-self receivers would silently
-    /// alias on the wrong table). Outside a class body the
-    /// handler falls back to the toplevel-methods path as a
-    /// defensive shape, but the AST refuses to emit there.
+    /// alias on the wrong table).
+    ///
+    /// At toplevel (`class << self` outside any class), AST
+    /// still emits this op — `self` is `main`. The runtime
+    /// handler then falls back to `toplevel_methods` because
+    /// `class_stack.last()` is None. That landing is correct
+    /// for the common case: toplevel `def foo` installs in
+    /// `toplevel_methods`, so aliasing there keeps both names
+    /// in the same table. (Not a strict CRuby match — CRuby
+    /// installs on main's eigenclass — but observably equivalent
+    /// for the toplevel call shapes that actually appear.)
     AliasSingletonMethod(SymId, SymId), // new, old
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured
