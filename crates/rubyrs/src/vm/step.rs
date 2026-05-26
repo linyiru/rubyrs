@@ -1033,12 +1033,24 @@ impl Vm {
                 // Same scope guard as `AliasSingletonMethod`: only
                 // emitted by AST for `class << self; prepend Mod;
                 // end` inside a class body, so class_stack.last()
-                // is the install target. Idempotency uses identity
-                // (Rc::ptr_eq) for the same reason regular `prepend`
-                // does — repeated `prepend Mod` is a no-op.
+                // is the install target.
+                //
+                // CRuby parity:
+                // 1. The arg must be a Module — Classes (i.e.
+                //    `is_module == false`) raise TypeError. Plain
+                //    non-Class values too.
+                // 2. Idempotency is ancestor-chain-aware, NOT just
+                //    direct-vec — if `M` is already reachable
+                //    transitively (e.g. via a prepended-of-prepend
+                //    chain), the explicit `prepend M` is a no-op.
+                //    Without this, the chain would reorder and
+                //    method resolution would diverge from CRuby.
                 let arg = self.stack.pop().expect("ICE: SingletonChainPrepend with empty stack");
                 let src = match arg {
-                    Value::Class(c) => c,
+                    Value::Class(c) if c.is_module => c,
+                    Value::Class(_) => return Err(self.trap(RubyError::TypeError {
+                        msg: "wrong argument type Class (expected Module)".into(),
+                    })),
                     other => return Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "wrong argument type {} (expected Module)",
@@ -1047,11 +1059,16 @@ impl Vm {
                     })),
                 };
                 if let Some(target) = self.class_stack.last().cloned() {
-                    let mut chain = target.singleton_prepends.borrow_mut();
-                    if !chain.iter().any(|c| Rc::ptr_eq(c, &src)) {
-                        chain.insert(0, src);
+                    // Ancestor-aware dedup: walk every module
+                    // already in `singleton_prepends`, recursing
+                    // through each one's own prepends/includes,
+                    // and skip insertion if `src` is reachable
+                    // anywhere. Matches the instance-side `prepend`
+                    // recogniser's `class_is_a` gate.
+                    if !super::lookup::singleton_chain_contains(&target, &src) {
+                        target.singleton_prepends.borrow_mut().insert(0, src);
+                        self.method_gen = self.method_gen.wrapping_add(1);
                     }
-                    self.method_gen = self.method_gen.wrapping_add(1);
                 }
                 // `class << self; prepend Mod; end` at toplevel —
                 // no enclosing class. Silent no-op, matching the

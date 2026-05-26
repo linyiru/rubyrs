@@ -74,3 +74,44 @@ class CSub < C
 end
 puts CSub.foo                    # "intercepted-C.foo" (inherits both Wrap and C.foo)
 puts CSub.bar                    # "C.bar"
+
+# Class arg (non-Module) raises TypeError with the
+# CRuby-shape "wrong argument type Class (expected Module)"
+# message. Without the is_module check, the Class would silently
+# get installed into singleton_prepends and corrupt lookup.
+class NotAModule; end
+class CType
+  begin
+    class << self
+      prepend NotAModule
+    end
+  rescue TypeError => e
+    puts "class-arg ok"
+  end
+end
+
+# Transitive idempotency — if a singleton-prepended wrapper
+# already includes/prepends Inner, explicitly `prepend Inner`
+# should be a no-op (not reorder the chain).
+module Inner
+  def tag; "inner"; end
+end
+module Outer
+  include Inner                  # Outer transitively reaches Inner
+end
+class TIdem
+  def self.tag; "TIdem"; end
+  class << self
+    prepend Outer                # singleton_prepends = [Outer], Outer.includes = [Inner]
+    prepend Inner                # already reachable via Outer — no-op
+  end
+end
+# Without ancestor-aware dedup, the chain would become
+# [Inner, Outer, TIdem] and TIdem.tag → "inner". With dedup it
+# stays [Outer, TIdem]; Outer.tag resolves to Inner#tag via
+# Outer's includes, so the value is the same — but the order
+# matters when both modules define overlapping methods. Easier
+# observable: Outer doesn't define `tag` of its own, so
+# `TIdem.tag` should still resolve via Outer's include chain
+# to Inner#tag.
+puts TIdem.tag                   # "inner" (Outer's include of Inner is walked)

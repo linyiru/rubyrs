@@ -458,6 +458,36 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
     }
 }
 
+/// `target` is reachable via `cls`'s singleton-class chain — used
+/// to dedupe `class << self; prepend Mod; end` against modules
+/// already reachable transitively (e.g. one of the existing
+/// `singleton_prepends` itself includes/prepends `target`).
+/// CRuby's `prepend` is a no-op when the arg is already in the
+/// ancestor chain; without this check, a later `prepend M` would
+/// silently reorder the chain.
+pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> bool {
+    fn walks_through(
+        node: &Rc<Class>,
+        target: &Rc<Class>,
+        visited: &mut std::collections::HashSet<*const Class>,
+    ) -> bool {
+        if Rc::ptr_eq(node, target) { return true; }
+        if !visited.insert(Rc::as_ptr(node)) { return false; }
+        for pre in node.prepends.borrow().iter() {
+            if walks_through(pre, target, visited) { return true; }
+        }
+        for inc in node.includes.borrow().iter() {
+            if walks_through(inc, target, visited) { return true; }
+        }
+        false
+    }
+    let mut visited = std::collections::HashSet::new();
+    for pre in cls.singleton_prepends.borrow().iter() {
+        if walks_through(pre, target, &mut visited) { return true; }
+    }
+    false
+}
+
 /// Flatten a class's ancestor chain into a Vec in CRuby
 /// dispatch order: at each level — prepends (transitive) → the
 /// class/module itself → includes (transitive) → superclass.
