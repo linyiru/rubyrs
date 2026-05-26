@@ -12,6 +12,7 @@ AssocNode
 BeginNode
 BlockArgumentNode
 BlockNode
+BlockParameterNode
 BlockParametersNode
 BreakNode
 CallNode
