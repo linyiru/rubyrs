@@ -1396,6 +1396,200 @@ impl Vm {
             Err(err) => Err(self.trap(err)),
         }
     }
+
+    /// `Integer#digits([base = 10])` — array of digits in the given
+    /// base, least-significant first. Returns `Some(Value::Array)`
+    /// for BigInt receivers; `Ok(None)` for Int receivers (so the
+    /// i64 fast path in `vm/dispatch.rs::Integer#digits` runs
+    /// instead — keeps small Int×Int#digits off the BigInt
+    /// arithmetic path) and for non-Integer recv (lets dispatch
+    /// fall through to NoMethodError). Traps:
+    /// - Negative receiver → ArgumentError "out of domain"
+    ///   (CRuby raises Math::DomainError; the established subset
+    ///   pattern uses ArgumentError as the substitute since
+    ///   Math::DomainError isn't modelled — same convention as
+    ///   the Range #cover? / numeric-out-of-domain arms in
+    ///   `Vm::do_call`).
+    /// - Base < 0 → ArgumentError "negative radix".
+    /// - Base < 2 → ArgumentError "invalid radix N".
+    /// - Non-Integer base → TypeError "no implicit conversion of
+    ///   X into Integer".
+    /// - Result-array estimate exceeds the active cap → trap
+    ///   ResourceExhausted before allocation. The cap is
+    ///   `Config::max_value_bytes` when set, otherwise a 1 MB
+    ///   safety ceiling (same fallback as `try_bigint_pow`'s
+    ///   estimator — so hostless / default-config users still get
+    ///   a bound on this allocation path). The bound itself uses
+    ///   an integer approximation: `est_count = floor((recv_bits
+    ///   - 1) / log2_lower) + 1`, where `log2_lower = max(1,
+    ///   base.bits() - 1)` is a lower bound on `log2(base)` (since
+    ///   `base >= 2^(base.bits() - 1)`). Dividing by a smaller log
+    ///   gives a safe upper bound on the count without floating-
+    ///   point. Multiply by `size_of::<Value>()` for bytes.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_integer_digits(
+        &mut self,
+        recv: &Value,
+        args: &[Value],
+    ) -> Result<Option<Value>, Trap> {
+        use num_bigint::{BigInt, Sign};
+        // BigInt receivers only — Int receivers route through
+        // `dispatch.rs`'s existing i64 fast path (no BigInt
+        // arithmetic for small Int×Int). Non-Integer recv: decline
+        // so dispatch can fall through to NoMethodError.
+        // Returning `Ok(None)` for Int recv lets `bigint_primitive`
+        // continue through the arity guard (which still fires for
+        // `args.len() > 1` regardless of recv type) and then
+        // through to `dispatch.rs`'s Int#digits handler. The Int
+        // fast path now shares error message text with this BigInt
+        // path (see the matching dispatch.rs edits).
+        let (recv_bits, recv_sign) = match recv {
+            Value::BigInt(id) => {
+                let b = self.heap.bigint(*id);
+                (b.bits(), b.sign())
+            }
+            _ => return Ok(None),
+        };
+        // Negative receiver: out of domain.
+        if recv_sign == Sign::Minus {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "out of domain".to_string(),
+            }));
+        }
+        // Resolve base. Default 10; reject non-Integer args; reject
+        // <2 (with CRuby's two distinct messages).
+        let base: BigInt = match args.first() {
+            None => BigInt::from(10),
+            Some(Value::Int(r)) => {
+                if *r < 0 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "negative radix".to_string(),
+                    }));
+                }
+                if *r < 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("invalid radix {}", r),
+                    }));
+                }
+                BigInt::from(*r)
+            }
+            Some(Value::BigInt(id)) => {
+                let b = self.heap.bigint(*id);
+                // BigInt radix is always > i64::MAX > 1, so >= 2.
+                // Negative BigInt radix would have been demoted to
+                // Int by bigint_to_value if it fit. For BigInts
+                // outside i64 range, we know sign from b.sign().
+                if b.sign() == Sign::Minus {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "negative radix".to_string(),
+                    }));
+                }
+                b.clone()
+            }
+            Some(other) => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        crate::vm::numeric::type_name_for_coerce(other),
+                    ),
+                }));
+            }
+        };
+        // Pre-estimate array length to avoid building a multi-GB
+        // Vec on hostile input. The exact digit count is
+        // `floor(log_base(recv)) + 1`; rewriting via base-2:
+        // `floor((recv_bits - 1) / log2(base)) + 1` (since
+        // `log2(recv) ≈ recv_bits - 1` for recv > 0). We use the
+        // integer lower bound `log2(base) >= base.bits() - 1`
+        // (since `base >= 2^(base.bits() - 1)`); dividing by a
+        // smaller log gives a safe upper bound on the count
+        // without floating-point.
+        //
+        // Base = 2:   log2_lower = 1, est = recv_bits (exact).
+        // Base = 10:  log2_lower = 3, est ≈ recv_bits/3 + 1.
+        // Base = 256: log2_lower = 8, est ≈ recv_bits/8 + 1.
+        //
+        // recv_bits == 0 case (`Sign::NoSign`) sets est_count = 1
+        // explicitly below — the cap check still runs but is
+        // trivially satisfied for any non-pathological cap (a
+        // single-Value array is `size_of::<Value>()` bytes).
+        const VALUE_BYTES: u64 = std::mem::size_of::<Value>() as u64;
+        let log2_lower: u64 = base.bits().saturating_sub(1).max(1);
+        let est_count: u64 = if recv_bits == 0 {
+            1
+        } else {
+            // ceil-form: `(recv_bits - 1) / log2_lower + 1`.
+            // Previous form `recv_bits / log2_lower + 1`
+            // overcounted by 1 for base = 2 (recv_bits = N gave
+            // est = N+1 instead of N) and similarly off-by-one
+            // for any base where `recv_bits % log2_lower == 0`.
+            (recv_bits - 1) / log2_lower + 1
+        };
+        let est_bytes: u64 = est_count.saturating_mul(VALUE_BYTES);
+        let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
+        if est_bytes > cap {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!(
+                    "Integer#digits would need ~{} bytes, exceeding cap {}",
+                    est_bytes, cap
+                ),
+            }));
+        }
+        // Build the digit array. Clone the heap BigInt as the
+        // working value; we mutate `n` via repeated `n = &n / &base`
+        // in the loop below, so an owned BigInt is required.
+        let mut n: BigInt = match recv {
+            Value::BigInt(id) => self.heap.bigint(*id).clone(),
+            _ => unreachable!("recv shape narrowed to BigInt at fn entry"),
+        };
+        // GC rooting: every `bigint_to_value` call below invokes
+        // `maybe_gc()`. For Int radix (the common case) rem is
+        // always small and demotes to `Value::Int`, no rooting
+        // needed. For BigInt radix, rem can be a heap-backed
+        // `Value::BigInt(id)`; without pinning, an iteration N+1
+        // GC could sweep the BigInts pushed during 1..N before
+        // the Array allocation roots them, leaving dangling
+        // ObjIds in the returned Array. Pin every Value::BigInt
+        // digit as it's produced; the PinGuard drops after the
+        // Array is allocated (heap.alloc itself triggers the
+        // final GC walk, which now sees both the pinned digits
+        // and the freshly-allocated Array as reachable).
+        let mut guard = PinGuard::new(self);
+        // Pre-reserve up to `est_count` (already capped against
+        // `max_value_bytes` above, so safe to truncate to usize).
+        // Avoids the geometric reallocation pattern Vec would
+        // otherwise use during the loop on large digit arrays.
+        let cap_count = est_count.min(usize::MAX as u64) as usize;
+        let mut digits: Vec<Value> = Vec::with_capacity(cap_count);
+        if recv_sign == Sign::NoSign {
+            digits.push(Value::Int(0));
+        } else {
+            use num_integer::Integer;
+            while n.sign() != Sign::NoSign {
+                // `div_rem` returns (quotient, remainder) in a
+                // single division step — half the per-iteration
+                // BigInt work vs separate `&n / &base` + `&n %
+                // &base`. `Integer` is impl'd for `BigInt` by
+                // num-bigint. rem fits i64 when base fits i64;
+                // for BigInt base we go through bigint_to_value
+                // so the demote-on-fit funnel handles either.
+                let (quot, rem) = n.div_rem(&base);
+                n = quot;
+                let digit_val = guard.vm.bigint_to_value(rem)?;
+                if matches!(digit_val, Value::BigInt(_)) {
+                    guard.pin(digit_val.clone());
+                }
+                digits.push(digit_val);
+            }
+        }
+        guard.vm.maybe_gc();
+        guard.vm.check_alloc()?;
+        let arr_id = guard.vm.heap.alloc(crate::heap::HeapObj::Array(digits));
+        // `guard` drops here, unpinning the digits — but the
+        // Array now holds them as roots, so the next GC walk
+        // still sees them as reachable.
+        Ok(Some(Value::Array(arr_id)))
+    }
 }
 
 /// BigInt method dispatch — covers the calls `primitive_call`
@@ -1438,8 +1632,18 @@ impl Vm {
         //    guard. No DoS cap on the 2-arg form: modpow never
         //    materialises the intermediate, and the result is
         //    bounded by |mod|.
-        // 4. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
-        // 5. Recv is Int AND a BigInt is among args: covers the
+        // 4. `digits([base])` — produces a `Value::Array` so it
+        //    needs `&mut Vm` (can't live in stateless numeric_call).
+        //    Two sub-checks fire ahead of the dispatch in CRuby
+        //    precedence order: negative recv → ArgumentError "out
+        //    of domain" (Math::DomainError substitute), then arity
+        //    guard for >1 args → ArgumentError. The dispatch
+        //    itself narrows the helper to BigInt receivers; Int
+        //    receivers fall through to dispatch.rs's i64 fast
+        //    path. Sits ahead of the recv-or-arg guard so Int
+        //    receivers don't get filtered out.
+        // 5. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // 6. Recv is Int AND a BigInt is among args: covers the
         //    inverse-receiver operator method-call shape
         //    `1.+(2**63)`, which goes through the Int-side
         //    dispatch path and would otherwise miss BigInt
@@ -1484,11 +1688,64 @@ impl Vm {
         {
             return Ok(Some(v));
         }
-        // Arity guard for BigInt receivers — numeric.rs's arity
-        // guard only catches Int×*, so `big.pow` / `big.pow(1,2,3)`
-        // would otherwise fall through to NoMethodError despite
-        // `respond_to?(:pow)` being true. Match CRuby's exact
-        // ArgumentError message text.
+        // CRuby precedence: a negative receiver for `Integer#digits`
+        // raises `Math::DomainError: out of domain` BEFORE any
+        // arity / base validation. Match that ordering by checking
+        // recv sign first, ahead of the arity guard and digits
+        // dispatch below. The Math::DomainError substitute is
+        // ArgumentError (same convention as other numeric-out-of-
+        // domain arms in Vm::do_call). Concrete examples (CRuby vs
+        // pre-fix rubyrs): `(-5).digits(10, 2)` should raise
+        // "out of domain", not the arity error;
+        // `(-5).digits("foo")` should raise "out of domain", not
+        // a TypeError on the base; etc.
+        if name == "digits" {
+            let neg_recv = match recv {
+                Value::Int(n) => *n < 0,
+                Value::BigInt(id) => self.heap.bigint(*id).sign() == num_bigint::Sign::Minus,
+                _ => false,
+            };
+            if neg_recv {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "out of domain".to_string(),
+                }));
+            }
+        }
+        // `Integer#digits` produces a `Value::Array`, which needs
+        // heap allocation — can't live in stateless `numeric_call`.
+        // Fires for ANY Int/BigInt receiver (recv-side check is in
+        // the helper, which now narrows to BigInt only — Int
+        // receivers continue through and hit dispatch.rs's i64
+        // fast path). Sits ahead of the recv-or-arg guard so Int
+        // receivers don't get filtered out. By the time we reach
+        // here, `recv` is non-negative (the precedence check above
+        // already trapped the negative case).
+        if name == "digits" && (args.is_empty() || args.len() == 1)
+            && let Some(v) = self.try_integer_digits(recv, args)?
+        {
+            return Ok(Some(v));
+        }
+        // Arity guard for `digits` — CRuby raises ArgumentError
+        // ("wrong number of arguments (given N, expected 0..1)")
+        // for arities outside {0, 1}. Without this, `5.digits(10, 2)`
+        // falls through to NoMethodError despite `respond_to?(:digits)`
+        // being true. Fires for any Int/BigInt receiver.
+        if name == "digits"
+            && matches!(recv, Value::Int(_) | Value::BigInt(_))
+            && args.len() > 1
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            }));
+        }
+        // Arity guard for BigInt-receiver `pow` — numeric.rs's
+        // arity guard only catches Int×*, so `big.pow` /
+        // `big.pow(1,2,3)` would otherwise fall through to
+        // NoMethodError despite `respond_to?(:pow)` being true.
+        // Match CRuby's exact ArgumentError message text.
         if name == "pow" && matches!(recv, Value::BigInt(_)) && args.len() != 2 && args.len() != 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(
@@ -1545,6 +1802,28 @@ impl Vm {
                     "negative?" => return Ok(Some(Value::Bool(b.sign() == Sign::Minus))),
                     "even?" => return Ok(Some(Value::Bool((b & num_bigint::BigInt::from(1)) == num_bigint::BigInt::from(0)))),
                     "odd?" => return Ok(Some(Value::Bool((b & num_bigint::BigInt::from(1)) != num_bigint::BigInt::from(0)))),
+                    // `Integer#bit_length` on BigInt. For non-
+                    // negatives: bit position of the highest set
+                    // bit (== `bits()`). For negatives: CRuby's
+                    // two's-complement convention gives the bit
+                    // position of the highest 0-bit, equivalent to
+                    // `bit_length(~n) = bit_length(-n - 1) =
+                    // bits(|n| - 1)`. `bits()` returns u64; cap at
+                    // i64::MAX in case of pathological 2^63-bit
+                    // BigInts (unreachable under our DoS caps, but
+                    // future-proofs the cast).
+                    "bit_length" => {
+                        let bits: u64 = match b.sign() {
+                            Sign::NoSign => 0,
+                            Sign::Plus => b.bits(),
+                            Sign::Minus => {
+                                // |n| - 1 in BigInt land, then bit count.
+                                (b.magnitude() - 1u32).bits()
+                            }
+                        };
+                        let n = i64::try_from(bits).unwrap_or(i64::MAX);
+                        return Ok(Some(Value::Int(n)));
+                    }
                     _ => {}
             }
         }

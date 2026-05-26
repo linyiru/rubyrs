@@ -2271,6 +2271,261 @@ fn pow_method_works_under_no_bignum_profile() {
     assert_eq!(buf.snapshot().trim(), "125\n6\n1\n1\n-1");
 }
 
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn digits_no_bignum_arity_guard_raises_argument_error() {
+    // Under no-bignum, `bigint_primitive`'s arity guard doesn't
+    // exist — the dispatch.rs Int fast path needs its own guard
+    // so `5.digits(10, 2)` raises ArgumentError matching CRuby
+    // instead of falling through to NoMethodError despite
+    // `respond_to?(:digits)` being true.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [
+        ("5.digits(10, 2)", 2),
+        ("5.digits(10, 2, 3)", 3),
+        ("5.digits(10, 2, 3, 4)", 4),
+    ] {
+        let err = rt.eval(script, "no_bignum_digits_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 0..1)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn digits_int_path_error_semantics_match_bignum_profile() {
+    // Cross-profile parity: the no-bignum Int#digits path
+    // (dispatch.rs) must surface the same error class +
+    // message text as the bignum BigInt path
+    // (Vm::try_integer_digits). Pin the dispatch.rs error arms
+    // so a future refactor that flips one side doesn't silently
+    // diverge.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected_msg) in [
+        ("(-5).digits",     "out of domain"),
+        ("5.digits(-2)",    "negative radix"),
+        ("5.digits(1)",     "invalid radix 1"),
+        ("5.digits(0)",     "invalid radix 0"),
+    ] {
+        let err = rt.eval(script, "no_bignum_digits.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(msg, expected_msg, "wrong message for {:?}", script);
+    }
+}
+
+#[test]
+fn digits_negative_recv_takes_precedence_over_arity_and_base_errors() {
+    // CRuby precedence: a negative `Integer#digits` receiver
+    // raises Math::DomainError BEFORE any arity / base validation.
+    // Pre-fix rubyrs checked arity / base type / base sign / base
+    // < 2 first, so each shape surfaced a different error class.
+    // Match CRuby's precedence so user code's `rescue ArgumentError`
+    // catches the negative-recv path regardless of the other args'
+    // shapes. Substitute is ArgumentError "out of domain" (same
+    // convention as other numeric-out-of-domain arms in
+    // Vm::do_call). Runs in both profiles.
+    let mut rt = rubyrs::Runtime::new();
+    for script in [
+        "(-5).digits(10, 2)",     // would have been arity error
+        "(-5).digits(-2)",        // would have been "negative radix"
+        "(-5).digits(\"foo\")",   // would have been TypeError
+        "(-5).digits(1)",         // would have been "invalid radix 1"
+        "(-5).digits",            // pure negative-recv, no other badness
+    ] {
+        let err = rt.eval(script, "digits_precedence.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError (out-of-domain substitute) for {:?}, got {:?}",
+            script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg, "out of domain",
+            "wrong message for {:?} — expected the negative-recv check to fire first",
+            script,
+        );
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_negative_recv_raises_argument_error_substitute() {
+    // CRuby raises `Math::DomainError: out of domain` for
+    // `(-5).digits` (and the same shape for negative BigInt).
+    // The established subset pattern (same convention as other
+    // numeric-out-of-domain arms in Vm::do_call) substitutes
+    // `ArgumentError` because `Math::DomainError` isn't modelled.
+    // Pin the divergence so a future Math::DomainError addition
+    // is an opt-in upgrade rather than a silent regression.
+    let mut rt = rubyrs::Runtime::new();
+    for script in [
+        "(-5).digits",
+        "(0 - (2 ** 100)).digits",
+        "(-1).digits(16)",
+    ] {
+        let err = rt.eval(script, "digits_neg.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(msg, "out of domain", "wrong message for {:?}", script);
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_bigint_radix_survives_stress_gc() {
+    // GC rooting regression guard. For a BigInt radix (e.g. base
+    // = 2 ** 70), each digit produced is itself a heap-backed
+    // `Value::BigInt(id)`. Every `bigint_to_value` call inside
+    // the loop invokes `maybe_gc()`; without PinGuard rooting,
+    // a sweep mid-loop could deallocate already-pushed digits,
+    // leaving dangling ObjIds in the returned Array. Run under
+    // forced GC (`stress_gc: true`) so every alloc triggers a
+    // full mark — pre-fix this test panicked / produced wrong
+    // values; with PinGuard around the loop it stays sound.
+    let cfg = rubyrs::Config { stress_gc: true, ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let v = rt.eval(
+        // (2 ** 200).digits(2 ** 70) — 3 digits, each potentially
+        // BigInt-backed (top digit fits below 2^60 → demotes; the
+        // other two could be BigInts). Verify all elements are
+        // valid Integer values (no dangling refs / no panic).
+        "(2 ** 200).digits(2 ** 70).map { |d| d.bit_length }",
+        "digits_stress_gc.rb",
+    ).expect("BigInt-radix digits must survive STRESS_GC");
+    let elems = rt.resolve_array(&v).expect("expected Value::Array");
+    // Each element is bit_length of a digit; values bounded by
+    // log2(2^70) = 70. Just confirm we have a populated array of
+    // small Ints — exact values are an implementation detail.
+    assert!(!elems.is_empty(), "expected non-empty digits array");
+    for e in &elems {
+        match e {
+            rubyrs::Value::Int(n) => assert!(*n >= 0 && *n <= 70, "bit_length out of range: {}", n),
+            other => panic!("expected Value::Int (bit_length), got {:?}", other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_estimator_uses_log2_base_not_just_bits() {
+    // Tighter estimator (`(recv_bits - 1) / (base.bits() - 1) + 1`)
+    // means a `recv` whose base-2 expansion would exceed the cap
+    // can still succeed in base-10 / base-16 — the actual digit
+    // count for those bases is far smaller. Pin this so a future
+    // refactor that drops the log-2 division and reverts to a
+    // base-independent bound fails immediately.
+    //
+    // `(2 ** 1000).digits` is 302 decimal digits; at 16 B per
+    // Value that's ~4.8 KB, well under an 8 KB cap. The base-2
+    // form of the same recv would estimate 1001 elements
+    // (~16 KB) and would correctly TRAP the 8 KB cap — exactly
+    // the shape the sibling `digits_huge_bigint_in_base_2_traps_under_tight_cap`
+    // test pins. So this test exercises the estimator's
+    // base-awareness rather than its trap path.
+    let cfg = rubyrs::Config { max_value_bytes: Some(8 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let v = rt.eval(
+        "(2 ** 1000).digits.length",
+        "digits_base10_fits.rb",
+    ).expect("base-10 estimate must fit 8 KB cap for 2**1000");
+    match v {
+        rubyrs::Value::Int(n) => {
+            // 2**1000 has 302 decimal digits.
+            assert_eq!(n, 302, "expected 302 decimal digits, got {}", n);
+        }
+        other => panic!("expected Value::Int, got {:?}", other),
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_huge_bigint_in_base_2_traps_under_tight_cap() {
+    // `(2 ** 100_000).digits(2)` would produce a 100_001-element
+    // array (~1.6 MB at 16 B per Value). Under a tight cap, the
+    // helper traps ResourceExhausted before allocating. Pin the
+    // pre-allocation bound so a future refactor that drops the
+    // estimator-trip fails immediately.
+    let cfg = rubyrs::Config { max_value_bytes: Some(16 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "(2 ** 100_000).digits(2)",
+        "digits_huge.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_returns_value_array_with_int_elements() {
+    // Embedding-facing contract: result is `Value::Array` of
+    // `Value::Int` digits (each digit fits i64 since base fits
+    // i64). Lock the public-API shape rather than just the
+    // printed form.
+    let mut rt = rubyrs::Runtime::new();
+    let v = rt.eval("12345.digits", "digits_shape.rb").expect("eval");
+    let elems = rt.resolve_array(&v).expect("expected Value::Array");
+    let nums: Vec<i64> = elems.iter().map(|e| match e {
+        rubyrs::Value::Int(n) => *n,
+        other => panic!("expected Value::Int, got {:?}", other),
+    }).collect();
+    assert_eq!(nums, vec![5, 4, 3, 2, 1]);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bit_length_bigint_two_complement_semantics() {
+    // Embedding-facing contract: `bit_length` on BigInt returns
+    // `Value::Int`. Verify both signs across boundary cases.
+    let mut rt = rubyrs::Runtime::new();
+    let cases: &[(&str, i64)] = &[
+        ("(2 ** 100).bit_length", 101),
+        ("(2 ** 200).bit_length", 201),
+        ("(0 - (2 ** 100)).bit_length", 100),  // bit_length(-2^100) = 100
+        ("(0 - (2 ** 100) - 1).bit_length", 101),  // bit_length(-2^100 - 1) = bit_length(2^100) = 101
+    ];
+    for (script, expected) in cases {
+        let v = rt.eval(script, "bit_length.rb").expect(script);
+        match v {
+            rubyrs::Value::Int(n) => assert_eq!(n, *expected, "{} → {}", script, n),
+            other => panic!("expected Value::Int, got {:?}", other),
+        }
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn pow_arity_guard_fires_for_bigint_receiver() {

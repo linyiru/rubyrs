@@ -2483,18 +2483,92 @@ impl Vm {
             self.stack.push(Value::Array(id));
             return Ok(());
         }
-        // `Integer#digits([base])` — LSB-first digit Array. Default
-        // base 10; custom base must be >= 2. Negative receivers
-        // raise (CRuby raises Math::DomainError; subset uses
-        // ArgumentError since Math::DomainError isn't modelled).
+        // `Integer#digits([base])` for Int receivers — LSB-first
+        // digit Array, i64 fast path (no BigInt arithmetic for
+        // small inputs). Default base 10; base must be >= 2.
+        // Error semantics match `Vm::try_integer_digits` (the
+        // BigInt-receiver path under `feature = "bignum"`) so
+        // both profiles agree on the surface user code sees:
+        //   - Arity > 1 → ArgumentError "wrong number of arguments
+        //     (given N, expected 0..1)" matching CRuby. Under
+        //     bignum the equivalent guard in `bigint_primitive`
+        //     fires first; this arm catches the no-bignum profile.
+        //   - Non-Integer base → TypeError matching CRuby text.
+        //   - Negative base → ArgumentError "negative radix".
+        //   - 0/1 base → ArgumentError "invalid radix N".
+        //   - Negative receiver → ArgumentError "out of domain"
+        //     (CRuby uses Math::DomainError; substituted because
+        //     Math::DomainError isn't modelled in this subset —
+        //     same convention as other numeric-out-of-domain
+        //     arms elsewhere in `Vm::do_call`).
+        // CRuby precedence: negative receiver raises
+        // Math::DomainError BEFORE any arity / base check. Mirror
+        // the order with the substitute ArgumentError, so user
+        // code's `rescue ArgumentError` catches the negative-recv
+        // path regardless of the other args' validity. Under
+        // bignum the equivalent check in `bigint_primitive` fires
+        // before this dispatcher runs, but keep this guard for
+        // the no-bignum profile and as defense-in-depth.
+        if let Value::Int(n) = &recv && &*name == "digits" && *n < 0 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "out of domain".to_string(),
+            }));
+        }
+        if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            }));
+        }
         if let Value::Int(n) = &recv && &*name == "digits" && args.len() <= 1 {
             let base: i64 = match args.first() {
                 None => 10,
                 Some(Value::Int(b)) => *b,
+                // BigInt base under bignum: `n` is i64-sized and
+                // any BigInt that survived `bigint_to_value`'s
+                // demote-on-fit is necessarily > i64::MAX in
+                // magnitude. So `|n| < base` always holds and the
+                // result is a single-element array (n or 0 after
+                // the negative-recv check). Validate the base
+                // sign here — negative BigInt is "negative radix"
+                // matching the i64 path's text.
+                #[cfg(feature = "bignum")]
+                Some(Value::BigInt(id)) => {
+                    if self.heap.bigint(*id).sign() == num_bigint::Sign::Minus {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "negative radix".to_string(),
+                        }));
+                    }
+                    if *n < 0 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "out of domain".to_string(),
+                        }));
+                    }
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::Array(vec![Value::Int(*n)]));
+                    self.stack.push(Value::Array(id));
+                    return Ok(());
+                }
                 Some(other) => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                    // Share the same class-name helper as the
+                    // BigInt-receiver path in `Vm::try_integer_digits`
+                    // so cross-profile error text agrees ("nil",
+                    // "true", "false" vs `Value::type_name`'s
+                    // "NilClass", "Boolean").
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        crate::vm::numeric::type_name_for_coerce(other),
+                    ),
                 })),
             };
+            if base < 0 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "negative radix".to_string(),
+                }));
+            }
             if base < 2 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("invalid radix {}", base),
@@ -2502,7 +2576,7 @@ impl Vm {
             }
             if *n < 0 {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: "numerical argument is out of domain - \"digits\"".into(),
+                    msg: "out of domain".to_string(),
                 }));
             }
             let mut elems: Vec<Value> = Vec::new();
