@@ -768,6 +768,17 @@ impl Vm {
             // The block-form (`Hash.new { |h, k| ... }`) routes
             // through `do_call_block` and has its own parallel
             // intercept there; this arm never sees a block.
+            //
+            // Arity: CRuby `Hash.new` takes 0 or 1 args (the 1-arg
+            // scalar default is silently ignored as a documented
+            // gap — see SUBSET.md). 2+ args is ArgumentError;
+            // raise explicitly so wrong-arity calls don't silently
+            // produce an empty Hash and confuse the caller.
+            if args.len() > 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+                }));
+            }
             self.maybe_gc();
             self.check_alloc()?;
             let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));

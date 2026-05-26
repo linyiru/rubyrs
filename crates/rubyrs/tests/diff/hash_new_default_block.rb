@@ -56,6 +56,15 @@ rescue ArgumentError => e
   puts e.message
 end
 
+# `Hash.new(a, b)` (no block, 2+ positional args) — also
+# ArgumentError. Without an explicit arity check the intercept
+# would silently return an empty Hash, masking the caller bug.
+begin
+  Hash.new(1, 2)
+rescue ArgumentError => e
+  puts e.message
+end
+
 # --- merge preserves receiver's default-block ---
 # CRuby: derived hashes (merge/select/etc.) inherit the
 # receiver's default_proc. Without this, `Hash.new {...}.merge(x)[:y]`
