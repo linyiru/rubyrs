@@ -86,6 +86,7 @@ OrNode
 ParenthesesNode
 ProgramNode
 RangeNode
+RationalNode
 RegularExpressionNode
 RequiredKeywordParameterNode
 RequiredParameterNode

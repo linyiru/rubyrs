@@ -466,6 +466,43 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         return sp(node, Expr::IntLit(v));
     }
+    // Rational literal — `1000.0r`, `1/3r`, `0.5r`. CRuby keeps
+    // exact-fraction arithmetic via a real `Rational` class;
+    // the Tier 1 subset has no Rational type and treats every
+    // rational literal as the equivalent `Float` (numerator /
+    // denominator). This loses CRuby's exact-fraction semantics
+    // for irreducible fractions but lets gem helpers that use
+    // rational literals as plain numeric constants
+    // (`Time.at(sec, nsec / 1000.0r)` style scaling factors,
+    // msgpack-ruby `lib/msgpack/time.rb`'s Ruby-2.x divisor)
+    // load and operate to within Float precision. Exact
+    // Rational arithmetic is Tier 2 deferred work — documented
+    // in SUBSET.md.
+    if let Some(n) = node.as_rational_node() {
+        let to_f64 = |int_value: ruby_prism::Integer<'_>| -> f64 {
+            let (negative, digits) = int_value.to_u32_digits();
+            // Accumulate into f64 directly so the result is
+            // representable even when the magnitude exceeds
+            // i64 (rare for rational literals — Prism keeps the
+            // numerator / denominator small for source-level
+            // literals like `1000.0r`, but the path stays well-
+            // defined for `999999999999999999r/3r`-class
+            // edge cases via f64 saturation to infinity).
+            let mut mag = 0.0_f64;
+            for (i, d) in digits.iter().enumerate() {
+                mag += (*d as f64) * 2f64.powi((i as i32) * 32);
+            }
+            if negative { -mag } else { mag }
+        };
+        let num = to_f64(n.numerator());
+        let den = to_f64(n.denominator());
+        // Prism guarantees a non-zero denominator for rational
+        // literals (the lexer rejects `/0r`), so the division
+        // is safe — but if a future Prism build relaxes that we
+        // still produce a finite value: `0.0 / 0.0 = NaN` flows
+        // through Float arithmetic without panic.
+        return sp(node, Expr::FloatLit(num / den));
+    }
     if let Some(n) = node.as_float_node() {
         return sp(node, Expr::FloatLit(n.value()));
     }
