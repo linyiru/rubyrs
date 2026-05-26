@@ -794,9 +794,12 @@ class KeyError < IndexError
 end
 class ZeroDivisionError < StandardError
 end
-## RangeError — value out of an expected range. Raised by
-## `Integer#chr` on bytes outside `0..255`, and the various
-## numeric / Range arms that wrap a host-side `RubyError::RangeError`.
+## CRuby's RangeError — value out of an expected range. Raised
+## by `Integer#chr` on bytes outside `0..255`,
+## `Integer#pow(exp, mod)` for negative exponents (the modular
+## inverse may not exist; we don't compute it), `Numeric#step` on
+## negative step with no end, and user-level `raise RangeError`.
+## Sits under StandardError so a bare `rescue` catches it.
 class RangeError < StandardError
 end
 ## LocalJumpError — raised when a control-flow keyword

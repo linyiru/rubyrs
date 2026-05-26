@@ -2170,6 +2170,85 @@ fn bigint_unary_neg_demotes_when_result_fits_int() {
     );
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_huge_exponent_skips_dos_cap() {
+    // `2.pow(huge_exp, mod)` must succeed even when `2 ** huge_exp`
+    // would blow far past any reasonable max_value_bytes — modpow
+    // never materialises the intermediate, so the cap on the
+    // pre-modulo `**` path doesn't apply. Pin under a tight 1 KB
+    // cap that `2 ** 100_000` would trip (12.5 KB real magnitude).
+    let cfg = rubyrs::Config { max_value_bytes: Some(1024), ..Default::default() };
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 2.pow(100_000, 1_000_000_007)",
+        "pow_mod_huge.rb",
+    ).expect("modpow must not trip the unmodulated `**` DoS cap");
+    let v: i64 = buf.snapshot().trim().parse().expect("result must be Int");
+    assert!((0..1_000_000_007).contains(&v),
+        "result {} not in [0, mod)", v);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_negative_exponent_raises_range_error() {
+    // CRuby: `5.pow(-1, 7)` raises RangeError. Modular inverse may
+    // not exist and we don't compute it — match by raising rather
+    // than silently producing an unrelated value.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(-1, 7)", "pow_neg_exp_with_mod.rb").unwrap_err();
+    assert!(
+        err.err.is("RangeError"),
+        "expected RangeError, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_zero_modulus_raises_zero_division() {
+    // CRuby: `5.pow(3, 0)` raises ZeroDivisionError ("divided by 0").
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(3, 0)", "pow_zero_mod.rb").unwrap_err();
+    assert!(
+        err.err.is("ZeroDivisionError"),
+        "expected ZeroDivisionError, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_non_integer_args_raise_type_error() {
+    // CRuby: `5.pow(1.5, 7)` raises TypeError. Same for
+    // `5.pow(3, 1.5)`. Pin the type-shape contract.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(1.5, 7)", "pow_float_exp.rb").unwrap_err();
+    assert!(err.err.is("TypeError"), "expected TypeError, got {:?}", err.err);
+    let err = rt.eval("5.pow(3, 1.5)", "pow_float_mod.rb").unwrap_err();
+    assert!(err.err.is("TypeError"), "expected TypeError, got {:?}", err.err);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_result_demotes_when_fits_int() {
+    // The result is always strictly bounded by |mod|. When |mod|
+    // fits i64, the result fits too — `bigint_to_value` should
+    // demote so the embedding-facing `Value` is `Value::Int`, not
+    // `Value::BigInt`. Pins demote-on-fit through the modpow path.
+    let mut rt = rubyrs::Runtime::new();
+    let v = rt.eval(
+        "(2 ** 100).pow(50, 1_000_000_007)",
+        "pow_mod_demote.rb",
+    ).expect("eval must succeed");
+    assert!(
+        matches!(v, Value::Int(_)),
+        "expected Value::Int (mod fits i64), got {:?}", v,
+    );
+}
+
 #[test]
 fn pow_zero_to_negative_exponent_raises_zero_division() {
     // CRuby: `0 ** -1` raises `ZeroDivisionError: divided by 0`

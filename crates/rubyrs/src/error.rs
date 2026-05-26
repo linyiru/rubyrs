@@ -69,8 +69,10 @@ pub enum RubyError {
     ZeroDivisionError { msg: String },
     /// Value out of an expected range. CRuby's `RangeError` —
     /// raised by e.g. `Integer#chr` on bytes outside `0..255`,
-    /// `Numeric#step` on negative step with no end, etc. Rescued
-    /// by `rescue RangeError`.
+    /// `Numeric#step` on negative step with no end, and
+    /// `Integer#pow(exp, mod)` when the exponent is negative
+    /// (the modular inverse may not exist; we don't compute it).
+    /// Rescued by `rescue RangeError`.
     RangeError { msg: String },
     /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
     /// when a Runtime was configured with caps for untrusted scripts.

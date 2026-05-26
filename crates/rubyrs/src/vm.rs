@@ -1285,6 +1285,86 @@ impl Vm {
             _ => Ok(None),
         }
     }
+
+    /// `Integer#pow(exp[, mod])`. 1-arg form is exactly `recv ** exp`
+    /// — delegated to `try_bigint_pow`. 2-arg form is modular
+    /// exponentiation: computes `(recv ** exp) mod modulus` without
+    /// materialising the intermediate (so the DoS cap that bounds
+    /// the plain `**` path is unnecessary here — the result is
+    /// already bounded by `|modulus|`).
+    ///
+    /// CRuby semantics for the 2-arg form:
+    /// - `modulus == 0` → ZeroDivisionError.
+    /// - `exp < 0` → RangeError (modular inverse may not exist; we
+    ///   don't compute it).
+    /// - Otherwise the result follows Ruby's floor-mod convention
+    ///   (same sign as `modulus`). `num_bigint::BigInt::modpow`
+    ///   already returns a value with the same sign as the modulus,
+    ///   matching this convention exactly — no post-adjustment.
+    /// - `exp` and `modulus` must both be Integer (Int / BigInt);
+    ///   Float / String etc. raise TypeError.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_pow_method(
+        &mut self,
+        recv: &Value,
+        args: &[Value],
+    ) -> Result<Option<Value>, Trap> {
+        use num_bigint::Sign;
+        // 1-arg form ≡ `recv ** exp`. Reuse try_bigint_pow's full
+        // shape handling (Float exp, negative exp, BigInt exp,
+        // DoS cap, identity short-circuits, ZeroDivisionError on
+        // 0**-n, etc.). If it declines (None), the caller falls
+        // through to numeric_call's Int×Int path.
+        if args.len() == 1 {
+            return self.try_bigint_pow(recv, &args[0]);
+        }
+        // 2-arg form: pow(exp, mod). recv must be Integer; non-
+        // integer recv returns None so dispatch can fall through
+        // to NoMethodError (Float etc. have no `.pow(exp, mod)`).
+        let base = match self.as_bigint(recv) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        // Exp and mod must be Integer. Anything else is a TypeError
+        // (CRuby raises TypeError, not ArgumentError, for shape).
+        // Match CRuby's exact TypeError messages so user code that
+        // pattern-matches on `e.message` keeps working.
+        let exp = match self.as_bigint(&args[0]) {
+            Some(v) => v,
+            None => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "Integer#pow() 2nd argument not allowed unless a 1st argument is integer".to_string(),
+                }));
+            }
+        };
+        let modulus = match self.as_bigint(&args[1]) {
+            Some(v) => v,
+            None => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "Integer#pow() 2nd argument not allowed unless all arguments are integers".to_string(),
+                }));
+            }
+        };
+        // Modulus 0 → ZeroDivisionError (same shape as `_ / 0`).
+        if modulus.sign() == Sign::NoSign {
+            return Err(self.trap(RubyError::ZeroDivisionError {
+                msg: "divided by 0".to_string(),
+            }));
+        }
+        // Negative exponent with modulus: CRuby raises RangeError
+        // because the modular inverse may not exist (and we don't
+        // compute it via the extended Euclidean algorithm).
+        if exp.sign() == Sign::Minus {
+            return Err(self.trap(RubyError::RangeError {
+                msg: "Integer#pow() 1st argument cannot be negative when 2nd argument specified".to_string(),
+            }));
+        }
+        // BigInt::modpow returns a result with the same sign as
+        // `modulus`, matching Ruby's floor-mod semantics. No
+        // post-adjustment needed. Demote-on-fit via bigint_to_value.
+        let result = base.modpow(&exp, &modulus);
+        Ok(Some(self.bigint_to_value(result)?))
+    }
 }
 
 /// BigInt method dispatch — covers the calls `primitive_call`
@@ -1320,8 +1400,15 @@ impl Vm {
         //    under `bignum` so this arm can promote to the
         //    BigInt 2^63. Also sits ahead of the recv-or-arg-is-
         //    BigInt guard for the same reason as `**`.
-        // 3. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
-        // 4. Recv is Int AND a BigInt is among args: covers the
+        // 3. `pow(exp[, mod])` method form — 1-arg aliases `**`;
+        //    2-arg routes through `BigInt::modpow` for modular
+        //    exponentiation. Fires for any Integer recv (including
+        //    Int×Int×Int), so it sits ahead of the recv-or-arg
+        //    guard. No DoS cap on the 2-arg form: modpow never
+        //    materialises the intermediate, and the result is
+        //    bounded by |mod|.
+        // 4. Recv is BigInt: covers `big.to_s`, `big.+(x)`, etc.
+        // 5. Recv is Int AND a BigInt is among args: covers the
         //    inverse-receiver operator method-call shape
         //    `1.+(2**63)`, which goes through the Int-side
         //    dispatch path and would otherwise miss BigInt
@@ -1352,6 +1439,17 @@ impl Vm {
         // Cond 2 — see entry-conditions doc above.
         if args.is_empty() && matches!(name, "-@" | "+@" | "abs")
             && let Some(v) = self.try_bigint_unary(recv, name)?
+        {
+            return Ok(Some(v));
+        }
+        // `pow(exp[, mod])` method form — 1-arg is an alias for `**`,
+        // 2-arg is modular exponentiation via BigInt::modpow. Fires
+        // ahead of the recv-or-arg guard so Int×Int×Int shapes work
+        // too. No DoS cap needed for the 2-arg form: modpow never
+        // materialises the intermediate, and the result is bounded
+        // by |mod|.
+        if name == "pow" && (args.len() == 1 || args.len() == 2)
+            && let Some(v) = self.try_bigint_pow_method(recv, args)?
         {
             return Ok(Some(v));
         }
