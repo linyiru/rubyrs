@@ -123,7 +123,34 @@ Multi-arg shared examples (`it_behaves_like :foo, :method,
 
 Substitution is plain text replace on the body slice
 because mspec uses bare `@method` identifiers, never as
-prefixes of longer names like `@methodology`.
+prefixes of longer names like `@methodology`. Multi-arg
+forms substitute highest-index first (`@method2` /
+`@method3` / ... before bare `@method`) so the `@method`
+prefix of higher-numbered placeholders doesn't get rewritten
+out from under them.
+
+### Known limitation: `before :each` doesn't cover inlined `it`s
+
+A consumer like
+
+```ruby
+describe "Foo" do
+  before :each do
+    @ctx = 1
+  end
+  it_behaves_like :foo_specs, :method
+end
+```
+
+… should (per mspec semantics) run `@ctx = 1` before each
+inlined `it` block from the shared body. v0.4 doesn't do
+this: the lifter operates on the original AST where
+`it_behaves_like` is a single call, not the inlined `it`s
+it will become. Properly fixing this needs a two-pass
+extract (inline → re-parse → lift) and is deferred to a
+future release. In practice the combination is rare in
+upstream files; when it appears, hand-inline the `before`
+body into each inlined `it` block as part of the polish.
 
 ## v0.3 highlights
 

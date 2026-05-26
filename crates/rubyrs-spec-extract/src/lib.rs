@@ -1046,15 +1046,30 @@ impl SharedInliner<'_> {
         // sound for the upstream convention (mspec uses bare
         // `@method` identifiers, never as substrings of longer
         // identifiers like `@methodology`).
+        //
+        // Iterate HIGHEST-index FIRST: `@method` is a textual
+        // prefix of `@method2`, `@method3`, etc., so if we
+        // replaced `@method` before `@methodN`, the substitution
+        // would also rewrite the prefix of every `@methodN`
+        // (e.g. `@method2` would become `:length2`). Reverse
+        // order means `@methodN` is gone by the time we touch
+        // `@method`, so the prefix-collision can't happen.
         let mut body = body_template.to_string();
-        for (i, arg) in arg_list.iter().skip(1).enumerate() {
-            let placeholder = if i == 0 {
-                "@method".to_string()
-            } else {
-                format!("@method{}", i + 1)
-            };
-            let arg_text = slice(self.source, arg);
-            body = body.replace(&placeholder, &arg_text);
+        let placeholder_args: Vec<(String, String)> = arg_list
+            .iter()
+            .skip(1)
+            .enumerate()
+            .map(|(i, arg)| {
+                let placeholder = if i == 0 {
+                    "@method".to_string()
+                } else {
+                    format!("@method{}", i + 1)
+                };
+                (placeholder, slice(self.source, arg))
+            })
+            .collect();
+        for (placeholder, arg_text) in placeholder_args.iter().rev() {
+            body = body.replace(placeholder, arg_text);
         }
         // Run the matcher recognisers on the substituted body
         // so its `should ==` / predicate / lambda-raise calls

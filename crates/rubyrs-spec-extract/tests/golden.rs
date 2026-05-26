@@ -81,6 +81,18 @@ fn golden_shared_inline() {
     run_golden_with_shared("shared_inline", &["shared_inline.shared.rb"]);
 }
 
+#[test]
+fn golden_shared_inline_multi_arg() {
+    // Locks the round-1 Copilot finding: `@method` was a
+    // prefix of `@method2`, so the old order-of-substitution
+    // (low-index first) would rewrite the prefix of higher-
+    // index placeholders. Reversed order fixes it.
+    run_golden_with_shared(
+        "shared_inline_multi_arg",
+        &["shared_inline_multi_arg.shared.rb"],
+    );
+}
+
 fn run_golden_with_shared(name: &str, shared_names: &[&str]) {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let input_path = base.join(format!("{name}.input.rb"));
