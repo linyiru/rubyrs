@@ -45,6 +45,9 @@
 #                                first run is now flat — no JIT
 #                                step in the wasmtime path because
 #                                we measure against the .cwasm).
+#   brewfile_dsl.rb    ~10 ms   (P2-A pivot workload — ~50 method
+#                                calls, class def, `.each` loops,
+#                                still sub-granularity).
 #   fizzbuzz_1m.rb     ~510 ms.
 #
 # AOT-compiled `.cwasm` means the `startup_floor` story compares
@@ -65,4 +68,5 @@
 # CI bumps or the wasi-sdk shape changes.
 
 crates/rubyrs/tests/wasm/startup_floor.rb	100	AOT cwasm startup floor + rubyrs init
+crates/rubyrs/tests/wasm/brewfile_dsl.rb	150	Brewfile-shape DSL (P2-A pivot demo workload)
 crates/rubyrs/benches/fizzbuzz_1m.rb	2500	1M fizzbuzz under wasi (AOT cwasm)
