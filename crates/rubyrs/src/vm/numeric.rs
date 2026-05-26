@@ -526,6 +526,33 @@ pub(crate) fn numeric_call(
     })
 }
 
+/// Ruby class-name for the `"<X> can't be coerced into Integer"`
+/// TypeError that `Integer#pow(non_numeric)` raises (matches CRuby
+/// exactly for the common types). Stateless so it lives here next
+/// to the pow alias; the bigint_primitive path uses the same fn
+/// via `super::numeric::type_name_for_coerce` rather than
+/// duplicating. Symbols fall back to the class name `"Symbol"`
+/// instead of CRuby's `:symname` (inspect form) because numeric.rs
+/// has no heap access to resolve the SymId — minor divergence
+/// limited to the error message text on a non-numeric exponent.
+pub(crate) fn type_name_for_coerce(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_) => "Integer",
+        Value::Float(_) => "Float",
+        #[cfg(feature = "bignum")]
+        Value::BigInt(_) => "Integer",
+        Value::Str(_) => "String",
+        Value::Sym(_) => "Symbol",
+        Value::Nil => "nil",
+        Value::Bool(true) => "true",
+        Value::Bool(false) => "false",
+        Value::Array(_) => "Array",
+        Value::Hash(_) => "Hash",
+        Value::Range(_) => "Range",
+        _ => "Object",
+    }
+}
+
 // Float#inspect — kept private here because it's a single-line
 // inspect that just defers to to_s; if it grows we'll promote
 // it to a method.

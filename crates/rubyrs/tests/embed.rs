@@ -2225,6 +2225,60 @@ fn pow_arity_guard_fires_for_bigint_receiver() {
 }
 
 #[test]
+fn pow_one_arg_non_numeric_raises_type_error() {
+    // CRuby: `5.pow("x")` raises `TypeError: String can't be
+    // coerced into Integer`. Pre-fix the 1-arg pow alias
+    // recursed unconditionally to `**`, which (separately) only
+    // surfaces NoMethodError for non-numeric args — so pow's
+    // delegate inherited that wrong error class. Validate the
+    // arg type at the pow boundary and raise TypeError directly.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, class_name) in [
+        ("5.pow(\"x\")", "String"),
+        ("5.pow(nil)", "nil"),
+        ("5.pow(true)", "true"),
+        ("5.pow([1])", "Array"),
+        ("5.pow({a: 1})", "Hash"),
+    ] {
+        let err = rt.eval(script, "pow_typeerr.rb").unwrap_err();
+        assert!(
+            err.err.is("TypeError"),
+            "expected TypeError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::TypeError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("{} can't be coerced into Integer", class_name),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_one_arg_non_numeric_raises_type_error_for_bigint_receiver() {
+    // Same fix on the BigInt receiver path — `(2 ** 100).pow("x")`
+    // routes through `try_bigint_pow_method`'s 1-arg branch, which
+    // mirrors the Int-side guard.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "(2 ** 100).pow(\"x\")",
+        "bigint_pow_typeerr.rb",
+    ).unwrap_err();
+    assert!(err.err.is("TypeError"), "got {:?}", err.err);
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(msg, "String can't be coerced into Integer");
+}
+
+#[test]
 fn pow_arity_zero_or_too_many_args_raise_argument_error() {
     // CRuby: `5.pow` and `5.pow(1, 2, 3)` raise ArgumentError
     // ("wrong number of arguments (given N, expected 1..2)").

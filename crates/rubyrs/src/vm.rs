@@ -1313,10 +1313,23 @@ impl Vm {
         // 1-arg form ≡ `recv ** exp`. Reuse try_bigint_pow's full
         // shape handling (Float exp, negative exp, BigInt exp,
         // DoS cap, identity short-circuits, ZeroDivisionError on
-        // 0**-n, etc.). If it declines (None), the caller falls
-        // through to numeric_call's Int×Int path.
+        // 0**-n, etc.). Non-numeric exponents (String, Symbol,
+        // nil, …) raise TypeError matching CRuby — `try_bigint_pow`
+        // would otherwise decline (`Ok(None)`) and dispatch would
+        // surface NoMethodError, which is the wrong error class.
+        // Mirrors the Int-receiver guard in numeric.rs::pow.
         if args.len() == 1 {
-            return self.try_bigint_pow(recv, &args[0]);
+            let arg = &args[0];
+            let acceptable = matches!(arg, Value::Int(_) | Value::Float(_) | Value::BigInt(_));
+            if !acceptable {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "{} can't be coerced into Integer",
+                        crate::vm::numeric::type_name_for_coerce(arg),
+                    ),
+                }));
+            }
+            return self.try_bigint_pow(recv, arg);
         }
         // 2-arg form: pow(exp, mod). Validate shapes first using
         // immutable borrows (no clones). The error paths short-
