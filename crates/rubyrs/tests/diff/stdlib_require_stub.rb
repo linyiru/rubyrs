@@ -48,3 +48,25 @@ puts require('erb')
 
 # `require` returning truthy lets the next statement run.
 puts "post-require: ok"
+
+# Stub now materialises the conventional top-level
+# constant for each stdlib name, so feature-detection
+# patterns like `defined?(URI)` work after require. The
+# shell is empty (no methods); calls into it still fail
+# with NoMethodError, but the "name exists" surface is
+# now correct.
+puts defined?(URI)              # "constant"
+puts defined?(Logger)           # "constant"
+puts defined?(JSON)             # "constant"
+puts defined?(SecureRandom)     # "constant"
+puts defined?(Pathname)         # "constant"
+puts defined?(Forwardable)      # "constant"
+
+# `.name` reads the right string (works for both Module
+# and Class in CRuby; rubyrs models them as Class only).
+puts URI.name
+puts Logger.name
+puts JSON.name
+
+# Constants not in the loaded set stay undefined.
+puts defined?(NonExistentStdlibConstant)   # nil → blank line

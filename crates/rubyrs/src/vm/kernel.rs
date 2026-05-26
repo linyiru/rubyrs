@@ -384,6 +384,32 @@ impl Vm {
                             // "load failed". See ADR 0017 — stdlib
                             // is Tier 3; this is the embeddable-
                             // host lenient-mode bridge.
+                            //
+                            // Materialise the constant shell(s)
+                            // each stdlib name conventionally
+                            // exposes (e.g. `URI`, `Logger`,
+                            // `JSON`) so `defined?(URI)` reports
+                            // "constant" and `URI.is_a?(Class)`
+                            // returns true. The shell has no
+                            // methods — calls into it still fail
+                            // with NoMethodError, but the surface
+                            // for "name exists" is now correct.
+                            for cname in stdlib_constant_names(&path_str) {
+                                let cid = self.interner.intern(cname);
+                                self.classes.entry(cid).or_insert_with(|| {
+                                    std::rc::Rc::new(crate::value::Class {
+                                        name: cname.to_string(),
+                                        methods: std::cell::RefCell::new(std::collections::HashMap::new()),
+                                        singleton_methods: std::cell::RefCell::new(std::collections::HashMap::new()),
+                                        superclass: std::cell::RefCell::new(None),
+                                        includes: std::cell::RefCell::new(Vec::new()),
+                                        class_vars: std::cell::RefCell::new(std::collections::HashMap::new()),
+                                        ivars: std::cell::RefCell::new(std::collections::HashMap::new()),
+                                        #[cfg(feature = "cext")]
+                                        cext_alloc_func: std::cell::Cell::new(None),
+                                    })
+                                });
+                            }
                             Some(Ok(Value::Bool(true)))
                         } else {
                             #[cfg(feature = "cext")]
@@ -860,40 +886,71 @@ impl Vm {
 
 }
 
+/// Top-level constant name(s) each stdlib require conventionally
+/// exposes. After a stubbed `require 'X'` we install an empty
+/// `Class` for each so `defined?(X)` resolves to "constant" and
+/// `X.name` returns the right string. The shell carries no
+/// methods; actual calls still fail with NoMethodError.
+///
+/// Names without an obvious top-level constant return an empty
+/// slice: `digest/sha1` extends `Digest`; `English` installs
+/// `$ERROR_INFO`-style aliases; `time` extends the `Time` class
+/// which rubyrs doesn't model.
+///
+/// Note on Module vs Class: CRuby distinguishes `URI` /
+/// `JSON` (Modules) from `Logger` (Class). rubyrs doesn't model
+/// Module separately, so every stub is a Class. `is_a?(Module)`
+/// returns true in CRuby for both shapes and matches rubyrs's
+/// Class is-a-Module behaviour; `is_a?(Class)` diverges
+/// (true in rubyrs for everything; false in CRuby for the
+/// Module-shaped names). Documented divergence; fixtures
+/// probe `defined?` and `.name` which agree.
+fn stdlib_constant_names(name: &str) -> &'static [&'static str] {
+    match name {
+        "uri" | "uri/generic" | "uri/common" => &["URI"],
+        "set" => &["Set"],
+        "logger" => &["Logger"],
+        "forwardable" => &["Forwardable", "SingleForwardable"],
+        "singleton" => &["Singleton"],
+        "delegate" => &["Delegator", "SimpleDelegator"],
+        "ostruct" => &["OpenStruct"],
+        "pathname" => &["Pathname"],
+        "tempfile" => &["Tempfile"],
+        "stringio" => &["StringIO"],
+        "fileutils" => &["FileUtils"],
+        "digest" => &["Digest"],
+        "digest/md5" | "digest/sha1" | "digest/sha2" => &[],
+        "base64" => &["Base64"],
+        "securerandom" => &["SecureRandom"],
+        "json" => &["JSON"],
+        "yaml" => &["YAML"],
+        "date" => &["Date", "DateTime"],
+        "time" => &[],
+        "csv" => &["CSV"],
+        "optparse" => &["OptionParser"],
+        "english" | "English" => &[],
+        "bigdecimal" => &["BigDecimal"],
+        "monitor" => &["Monitor", "MonitorMixin"],
+        "erb" => &["ERB"],
+        "open3" => &["Open3"],
+        "shellwords" => &["Shellwords"],
+        "weakref" => &["WeakRef"],
+        "cgi" | "cgi/util" => &["CGI"],
+        _ => &[],
+    }
+}
+
 /// Known stdlib-shaped require names that rubyrs Tier 1 stubs to
 /// `true` rather than load. Whitelist is conservative: only the
 /// names script authors typically `require` for feature-detection
 /// or as no-op dependencies of larger files. Anything not in this
 /// set falls through to cext (or "cannot find" if cext is off).
 ///
-/// Scripts that actually USE the stdlib's API (`URI.parse`,
-/// `Logger.new`, `JSON.parse`, ...) get a NameError /
-/// NoMethodError at the call site — which is the right surface
-/// for "feature absent in the embedded runtime" vs the
-/// alternative "the require itself blew up before any of your
-/// code ran." Aligns with the embeddable-DSL niche per
-/// ADR 0017 (stdlib is Tier 3; this stub is the Tier 1
-/// lenient-mode bridge that lets gem helpers load).
-///
-/// The list covers stdlib names referenced in the most
-/// commonly-vendored Ruby sources observed during the
-/// msgpack / Rack / Sinatra / Hanami load-coverage sweeps:
-///   - `uri` — Rack `utils.rb` percent-encoding plumbing
-///   - `set` — modern Ruby cross-cutting (Sinatra, dry-*)
-///   - `logger` — Sinatra `show_exceptions.rb`
-///   - `forwardable` — many gems
-///   - `singleton`, `delegate`, `ostruct` — small util gems
-///   - `pathname`, `tempfile`, `stringio`, `fileutils` —
-///     filesystem-shaped stdlib
-///   - `digest` / `digest/md5` / `digest/sha1` / `digest/sha2` —
-///     bcrypt and friends
-///   - `base64`, `securerandom` — auth / token gems
-///   - `json`, `yaml`, `date`, `time`, `csv`, `optparse`,
-///     `english` — high-frequency entries
-///   - `bigdecimal`, `monitor` — concurrency stubs that
-///     usually get treated as no-ops anyway in our
-///     single-threaded model
-///   - `erb` — template-engine probes (tilt et al.)
+/// Aligns with ADR 0017 (stdlib is Tier 3; this is the Tier 1
+/// lenient-mode bridge that lets gem helpers load). Scripts that
+/// actually USE the stdlib's API (`URI.parse`, `Logger.new`,
+/// `JSON.parse`, ...) get NameError / NoMethodError at the call
+/// site — sharper "feature absent" surface than a failed require.
 fn is_stdlib_stub_name(name: &str) -> bool {
     matches!(
         name,
