@@ -165,13 +165,24 @@ jobs:
           echo "WASI_SDK_PATH=/opt/wasi-sdk-24.0-x86_64-linux" >> $GITHUB_ENV
 
       - name: Install wasmtime
-        # End-to-end smoke (next step) needs a wasi runtime. Pinned
-        # to a recent release; bump if `tests/wasm/smoke.sh` starts
-        # exercising newer wasi proposals.
+        # End-to-end smoke (next step) needs a wasi runtime. Pin a
+        # specific release + verify a sha256 over the downloaded
+        # tarball so the CI lane doesn't trust an arbitrary remote
+        # install script. Bump version + checksum together when
+        # `tests/wasm/smoke.sh` starts exercising newer wasi
+        # proposals.
         run: |
           set -euo pipefail
-          curl -sSL https://wasmtime.dev/install.sh | bash
-          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+          WASMTIME_VERSION=v45.0.0
+          WASMTIME_SHA256=9d92e6dc04630f617e0e5d532327a5a917ac4898587e07f4fb7a5fc7fffef760
+          TARBALL="wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          URL="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${TARBALL}"
+          curl -sSLo "$TARBALL" "$URL"
+          echo "${WASMTIME_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar xf "$TARBALL"
+          install -m 755 "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.local/bin/wasmtime" 2>/dev/null \
+            || (mkdir -p "$HOME/.local/bin" && install -m 755 "wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.local/bin/wasmtime")
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Build + smoke (wasm32-wasip1)
         # Drives both:
