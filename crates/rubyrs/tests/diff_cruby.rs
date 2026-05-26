@@ -273,3 +273,4 @@ fn run_diff(name: &str) {
 #[test] fn singleton_class_prepend() { run_diff("singleton_class_prepend"); }
 #[test] fn tilt_load_capabilities() { run_diff("tilt_load_capabilities"); }
 #[test] fn hash_new_default_block() { run_diff("hash_new_default_block"); }
+#[test] fn array_sort_block() { run_diff("array_sort_block"); }

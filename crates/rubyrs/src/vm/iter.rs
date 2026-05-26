@@ -1321,6 +1321,82 @@ impl Vm {
                 if let Some(e) = early { return Ok(Some(e)); }
                 Some(Value::Hash(result_id))
             }
+            (Value::Array(id), "sort", []) | (Value::Array(id), "sort!", []) => {
+                // Block-form sort: the block is the comparator,
+                // called with `(a, b)` on every comparison and
+                // returning negative / zero / positive (Int) for
+                // ordering. CRuby's contract; no fancy
+                // type-coercion required.
+                //
+                // Same insertion-sort shape as the no-block arms
+                // in `array_collection_call`, but each comparison
+                // routes through the block. PinGuard wraps the
+                // whole impl: the `copy` Vec holds element ObjIds
+                // with no other GC root once the receiver is no
+                // longer on the stack, AND each block invocation
+                // may trigger maybe_gc.
+                //
+                // sort! mutates in place and returns self; sort
+                // allocates a fresh Array. Tilt's `template.rb:252`
+                // uses sort! with a block on locals-key arrays.
+                let is_bang = name == "sort!";
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Array(*id));
+                g.pin(Value::Block(block));
+                let mut copy: Vec<Value> = g.vm.heap.array(*id).clone();
+                let pre_frames = g.vm.frames.len();
+                let n = copy.len();
+                let mut early: Option<Value> = None;
+                'outer: for i in 1..n {
+                    let mut j = i;
+                    while j > 0 {
+                        // Compare copy[j-1] vs copy[j] via the block.
+                        // Block result: Int — negative → prev < curr
+                        // (already in order); zero → equal (in order);
+                        // positive → prev > curr (swap).
+                        let a = copy[j - 1].clone();
+                        let b = copy[j].clone();
+                        g.vm.invoke_block(block, vec![a, b])?;
+                        g.vm.dispatch_until(pre_frames)?;
+                        if g.vm.method_return.is_some() { break 'outer; }
+                        let result = g.vm.stack.pop().unwrap_or(Value::Nil);
+                        if g.vm.break_signaled {
+                            g.vm.break_signaled = false;
+                            early = Some(result);
+                            break 'outer;
+                        }
+                        let ord = match result {
+                            Value::Int(n) if n > 0 => std::cmp::Ordering::Greater,
+                            Value::Int(n) if n < 0 => std::cmp::Ordering::Less,
+                            Value::Int(_) => std::cmp::Ordering::Equal,
+                            _ => return Err(g.vm.trap(crate::error::RubyError::TypeError {
+                                msg: format!(
+                                    "comparison of {} with {} failed",
+                                    result.type_name(),
+                                    result.type_name(),
+                                ),
+                            })),
+                        };
+                        match ord {
+                            std::cmp::Ordering::Greater => {
+                                copy.swap(j - 1, j);
+                                j -= 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                if is_bang {
+                    *g.vm.heap.array_mut(*id) = copy;
+                    Some(Value::Array(*id))
+                } else {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let nid = g.vm.heap.alloc(HeapObj::Array(copy));
+                    Some(Value::Array(nid))
+                }
+            }
             (Value::Array(id), "sort_by", []) => {
                 // PinGuard wraps the entire impl — the previous code
                 // dropped the guard after the key-collection loop,
