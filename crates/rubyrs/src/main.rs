@@ -209,4 +209,14 @@ fn main() {
             process::exit(1);
         }
     }
+    // Final checkpoint AFTER the success-path match returns. This
+    // closes the gap between `eval_done` and process exit so the
+    // breakdown harness's `wall - last_checkpoint` formula
+    // represents strictly pre-`main()` work (wasmtime CLI launch,
+    // wasi-libc init, cwasm load, _start dispatch) rather than
+    // also folding in stdout flush + Runtime drop time. On the
+    // error path we already process::exit() above, so `done`
+    // doesn't fire — that's fine; the harness only times the
+    // success path (puts 1+2 returns Ok).
+    trace.at("done");
 }

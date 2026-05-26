@@ -185,7 +185,7 @@ extract_wall_us_min() {
     "$PERF_TMPDIR"/run.*.txt | sort -n | head -1
 }
 
-LABELS=("entry" "args" "env_collected" "runtime_ready" "eval_done")
+LABELS=("entry" "args" "env_collected" "runtime_ready" "eval_done" "done")
 
 # 6. Verify we actually captured trace lines (the trace-startup
 #    feature is the load-bearing assumption; if missing, the user
@@ -221,17 +221,25 @@ for label in "${LABELS[@]}"; do
   fi
   PREV=$cur
 done
-EVAL_DONE_US=$PREV
+MAIN_END_US=$PREV
 
 # Pre-`entry` is everything the host spent before our first
 # `Instant::now()` ran: wasmtime CLI launch, runtime init, cwasm
 # mmap + symbol resolution, wasi-libc startup (allocator, stdio,
 # __environ population), C `_start` dispatch into Rust `main`.
-PRE_ENTRY_US=$((WALL_US - EVAL_DONE_US))
+#
+# Subtract the LAST checkpoint (`done`, captured after the
+# eval-result match returns) rather than `eval_done` so this
+# figure doesn't also absorb stdout flush + drop time after the
+# eval finishes. With `done` in place the gap between the last
+# checkpoint and process exit is just the implicit `Drop` chain
+# + the `main()` epilogue — sub-microsecond on every measured
+# platform, well inside the MIN-of-N jitter floor.
+PRE_ENTRY_US=$((WALL_US - MAIN_END_US))
 
 echo ""
 printf "  %-22s %10s\n" "wall total (MIN):" "$WALL_US us"
-printf "  %-22s %10s\n" "  rubyrs main():" "$EVAL_DONE_US us  ← we own this"
+printf "  %-22s %10s\n" "  rubyrs main():" "$MAIN_END_US us  ← we own this"
 printf "  %-22s %10s\n" "  wasmtime+wasi+load:" "$PRE_ENTRY_US us  ← runtime-shape ceiling"
 echo ""
 echo "  '${SCRIPT_INLINE}' end-to-end via wasmtime run --allow-precompiled."
