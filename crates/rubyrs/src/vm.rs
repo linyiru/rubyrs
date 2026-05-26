@@ -867,24 +867,32 @@ impl Vm {
 
     /// `**` exponentiation with BigInt promotion and DoS cap.
     /// Returns:
-    /// - `Some(v)` for any Int/BigInt × {Int (non-negative), BigInt,
-    ///   Float, negative Int} where we can produce a value. Float /
-    ///   negative-Int exponents on Int receivers are normally handled
-    ///   by numeric_call BEFORE reaching this fn; we cover them here
-    ///   only when the receiver is a BigInt (otherwise it would
-    ///   NoMethodError even though `respond_to?(:**)` is true) and
-    ///   when |base| ≤ 1 (constant-size results for any exp shape).
+    /// - `Some(v)` for any Int/BigInt × {Int (non-negative), Float,
+    ///   negative Int, BigInt-when-|base|≤1} where we can produce a
+    ///   value. Float / negative-Int exponents on Int receivers are
+    ///   normally handled by numeric_call BEFORE reaching this fn;
+    ///   we cover them here only when the receiver is a BigInt
+    ///   (otherwise NoMethodError despite `respond_to?(:**)` being
+    ///   true) and for the |base|≤1 short-circuit.
+    /// - `Err(...)` for BigInt exponents with |base|>1 — the result
+    ///   would need at least 2^63 bits of storage so we trap
+    ///   `ResourceExhausted` rather than attempting to compute or
+    ///   silently falling through.
     /// - `None` for operand shapes outside this branch's scope
     ///   (non-integer recv, or Int recv + Float/negative exp where
     ///   numeric_call handles it); the caller falls through.
     ///
     /// DoS protection: result bit count is approximately
-    /// `bit_length(base) * exp` — a few bytes of input can ask
-    /// for many GB of output. Pre-estimate and trap
-    /// `ResourceExhausted` before calling `BigInt::pow`. Honours
+    /// `bit_length(base) * exp` (tight as `(bit_length-1) * exp + 1`
+    /// when |base| is a power of two). A few bytes of input can ask
+    /// for many GB of output, so we pre-estimate and trap
+    /// `ResourceExhausted` before calling `BigInt::pow`. The estimate
+    /// rounds up to the BigInt limb size (u64 = 8 bytes) plus a small
+    /// allocator-header overhead so the cap reflects actual heap
+    /// storage, not just the minimal bit count. Honours
     /// `Config::max_value_bytes` (same cap that bounds String /
-    /// Array growth); falls back to a 1 MB safety ceiling when
-    /// no cap is configured.
+    /// Array growth); falls back to a 1 MB safety ceiling when no
+    /// cap is configured.
     #[cfg(feature = "bignum")]
     pub(crate) fn try_bigint_pow(
         &mut self,
@@ -1051,7 +1059,16 @@ impl Vm {
         } else {
             base_bits.saturating_mul(exp_u32 as u64)
         };
-        let est_bytes: u64 = est_bits.saturating_add(7) / 8;
+        // Round up to BigInt limb storage (u64 limbs = 8 bytes each)
+        // plus a small allocator-header overhead so the cap reflects
+        // actual heap storage rather than just the minimal bit count.
+        // This keeps `max_value_bytes` semantically aligned with the
+        // Array/String paths (which count backing-storage bytes) and
+        // closes a small word-boundary bypass on inputs that landed
+        // just under the previous min-bytes estimate.
+        const BIGINT_HEADER_BYTES: u64 = 32;
+        let est_limbs: u64 = est_bits.saturating_add(63) / 64;
+        let est_bytes: u64 = est_limbs.saturating_mul(8).saturating_add(BIGINT_HEADER_BYTES);
         let cap = self.max_value_bytes.unwrap_or(1 << 20);
         if est_bytes > cap as u64 {
             return Err(self.trap(RubyError::ResourceExhausted {
