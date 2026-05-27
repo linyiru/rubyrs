@@ -728,7 +728,7 @@ impl Vm {
                 {
                     let h = self.heap.hash(id);
                     if let Some(v) = h.iter()
-                        .find(|(k, _)| k.ruby_eq(key, &self.heap))
+                        .find(|(k, _)| k.ruby_eql(key, &self.heap))
                         .map(|(_, v)| v.clone())
                     {
                         return Ok(v);

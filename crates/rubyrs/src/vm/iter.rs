@@ -969,7 +969,7 @@ impl Vm {
                     // otherwise append. Matches CRuby's iteration-
                     // order semantics.
                     let existing = g.vm.heap.hash(result_id).iter()
-                        .position(|(k2, _)| k2.ruby_eq(&new_key, &g.vm.heap));
+                        .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap));
                     if let Some(p) = existing {
                         g.vm.heap.hash_mut(result_id)[p] = (new_key, v);
                     } else {
@@ -1010,7 +1010,7 @@ impl Vm {
                 // accept it (handled in non-block path too).
                 let id = *id;
                 let pos = self.heap.hash(id).iter()
-                    .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                    .position(|(key, _)| key.ruby_eql(k, &self.heap));
                 if let Some(p) = pos {
                     return Ok(Some(self.heap.hash(id)[p].1.clone()));
                 }
@@ -1844,7 +1844,7 @@ impl Vm {
                     };
                     // Find or create the bucket array for this key.
                     let pos = g.vm.heap.hash(result_id).iter()
-                        .position(|(k, _)| k.ruby_eq(&key, &g.vm.heap));
+                        .position(|(k, _)| k.ruby_eql(&key, &g.vm.heap));
                     if let Some(p) = pos {
                         if let Value::Array(arr_id) = g.vm.heap.hash(result_id)[p].1 {
                             g.vm.heap.array_mut(arr_id).push(v);
@@ -2392,7 +2392,7 @@ impl Vm {
                     let pair = Value::Array(pid);
                     g.pin(pair.clone());
                     g.pin(group.clone());
-                    let pos = buckets.iter().position(|(gk, _)| gk.ruby_eq(&group, &g.vm.heap));
+                    let pos = buckets.iter().position(|(gk, _)| gk.ruby_eql(&group, &g.vm.heap));
                     match pos {
                         Some(p) => buckets[p].1.push(pair),
                         None => buckets.push((group, vec![pair])),
