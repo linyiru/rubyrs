@@ -55,9 +55,15 @@ describe "Array#last" do
     assert_eq([1, 2, 3, 4, 5, 9].last(10), [1, 2, 3, 4, 5, 9])
   end
 
-  # skipped (method-not-implemented): it "returns an array which is independent to the original when passed count" do
-  #   Uses `ary.last(0).replace([1,2])` — Array#replace not in
-  #   subset yet. Unlock when `Array#replace` ships.
+  it "returns an array which is independent to the original when passed count" do
+    ary = [1, 2, 3, 4, 5]
+    ary.last(0).replace([1, 2])
+    assert_eq(ary, [1, 2, 3, 4, 5])
+    ary.last(1).replace([1, 2])
+    assert_eq(ary, [1, 2, 3, 4, 5])
+    ary.last(6).replace([1, 2])
+    assert_eq(ary, [1, 2, 3, 4, 5])
+  end
 
   # skipped (fixture): it "properly handles recursive arrays" do
   # skipped (mock): it "tries to convert the passed argument to an Integer using #to_int" do

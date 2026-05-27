@@ -542,7 +542,7 @@ impl Vm {
                 "inject" | "reduce" |
                 "to_a" | "reverse" | "uniq" | "compact" |
                 "flatten" | "join" |
-                "+" | "-" | "concat" | "take" | "drop" |
+                "+" | "-" | "concat" | "replace" | "take" | "drop" |
                 "each" | "map" | "select" | "filter" |
                 "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
