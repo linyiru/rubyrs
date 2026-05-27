@@ -167,6 +167,7 @@ fn run_diff(name: &str) {
 #[test] fn private_self_receiver() { run_diff("private_self_receiver"); }
 #[test] fn method_call_block() { run_diff("method_call_block"); }
 #[test] fn yield_through_nested_block() { run_diff("yield_through_nested_block"); }
+#[test] fn string_dump() { run_diff("string_dump"); }
 #[cfg(feature = "bignum")]
 #[test] fn bignum_phase_a() { run_diff("bignum_phase_a"); }
 #[cfg(feature = "bignum")]

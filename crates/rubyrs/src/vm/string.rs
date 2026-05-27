@@ -623,6 +623,71 @@ impl Vm {
                     }
                     return Ok(Some(frozen));
                 }
+                // `String#dump` — round-trippable string literal
+                // representation. Wraps in double quotes; escapes
+                // CRuby's short controls (`\a` `\b` `\t` `\n` `\v`
+                // `\f` `\r` `\e` `\"` `\\`); writes other control
+                // bytes (0x00..=0x1F, 0x7F) as `\xNN` (uppercase);
+                // escapes `#` ONLY when followed by `{` / `@` / `$`
+                // (the interpolation triggers — round-trip parity);
+                // non-ASCII codepoints become `\uHHHH` (BMP) or
+                // `\u{HHHHH}` (above BMP), uppercase hex.
+                //
+                // Motivating use: MRI lib/erb/compiler.rb:312
+                // (`add_put_cmd`) writes template-content chunks
+                // into the compiled source via
+                // `"#{@put_cmd} #{content.dump}.freeze"`. Without
+                // dump, ERB compile crashes inside compile_stag.
+                if name == "dump" && args.is_empty() {
+                    let bytes = s.content.borrow();
+                    let src = String::from_utf8_lossy(&bytes);
+                    let mut out = String::with_capacity(src.len() + 2);
+                    out.push('"');
+                    let chars: Vec<char> = src.chars().collect();
+                    for (i, c) in chars.iter().enumerate() {
+                        let cp = *c as u32;
+                        match c {
+                            '\x07' => out.push_str("\\a"),
+                            '\x08' => out.push_str("\\b"),
+                            '\t'   => out.push_str("\\t"),
+                            '\n'   => out.push_str("\\n"),
+                            '\x0B' => out.push_str("\\v"),
+                            '\x0C' => out.push_str("\\f"),
+                            '\r'   => out.push_str("\\r"),
+                            '\x1B' => out.push_str("\\e"),
+                            '"'    => out.push_str("\\\""),
+                            '\\'   => out.push_str("\\\\"),
+                            '#' => {
+                                // Only escape `#` if it'd open an
+                                // interpolation in the round-tripped
+                                // literal: `#{`, `#@`, `#$`.
+                                let next = chars.get(i + 1).copied();
+                                if matches!(next, Some('{') | Some('@') | Some('$')) {
+                                    out.push_str("\\#");
+                                } else {
+                                    out.push('#');
+                                }
+                            }
+                            _ if cp < 0x20 || cp == 0x7F => {
+                                out.push_str(&format!("\\x{:02X}", cp));
+                            }
+                            _ if cp < 0x7F => {
+                                // Printable ASCII (other than the
+                                // shorthand cases handled above)
+                                // passes through verbatim.
+                                out.push(*c);
+                            }
+                            _ if cp <= 0xFFFF => {
+                                out.push_str(&format!("\\u{:04X}", cp));
+                            }
+                            _ => {
+                                out.push_str(&format!("\\u{{{:X}}}", cp));
+                            }
+                        }
+                    }
+                    out.push('"');
+                    return Ok(Some(Value::new_str(out)));
+                }
                 // Helper closure: bail out of any mutating method
                 // if `s` was frozen. Used by `<<`, `concat`,
                 // `prepend`, `replace`, `[]=`.
