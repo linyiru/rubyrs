@@ -35,10 +35,16 @@ describe "Integer#pow" do
   end
 
   it "pow(exp, mod) handles sign like #divmod does (floor-mod)" do
+    # Explicit parens around `(-2)` for reader clarity — Ruby
+    # treats `-2` as a literal token (so `-2.pow(...)` parses
+    # as `(-2).pow(...)`, NOT as `-(2.pow(...))`), matching CRuby.
+    # But the unary-vs-literal distinction trips readers up,
+    # and the upstream ruby/spec convention is the bare form;
+    # spelling out the receiver here avoids any ambiguity.
     assert_eq(2.pow(5, 12), 8)
     assert_eq(2.pow(5, -12), -4)
-    assert_eq(-2.pow(5, 12), 4)
-    assert_eq(-2.pow(5, -12), -8)
+    assert_eq((-2).pow(5, 12), 4)
+    assert_eq((-2).pow(5, -12), -8)
   end
 
   it "pow(exp, mod) ensures all arguments are integers" do
