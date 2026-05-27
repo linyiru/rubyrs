@@ -918,11 +918,21 @@ impl Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             // Numeric coercion: CRuby treats `5 == 5.0` as `true`.
-            // NaN never equals anything, including itself —
-            // f64::==-on-NaN already gives `false`, so the comparison
-            // via `as f64` does the right thing.
-            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
-            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+            // Routes through `int_cmp_float_lossless` (numeric.rs)
+            // so `|i| > 2^53` doesn't collapse onto the demoted
+            // f64 bit pattern — same fix the BinOp `==` path got
+            // in PR #237, mirrored here so `===` (via ruby_eq)
+            // stays an alias of `==` for large integers.
+            // `cmp == Some(Equal)` returns false for NaN
+            // (helper returns None) — matches CRuby `5 == NaN`.
+            (Value::Int(a), Value::Float(b)) => {
+                crate::vm::int_cmp_float_lossless(*a, *b)
+                    == Some(std::cmp::Ordering::Equal)
+            }
+            (Value::Float(a), Value::Int(b)) => {
+                crate::vm::int_cmp_float_lossless(*b, *a)
+                    == Some(std::cmp::Ordering::Equal)
+            }
             (Value::Str(a), Value::Str(b)) => *a.borrow() == *b.borrow(),
             (Value::Sym(a), Value::Sym(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,

@@ -1346,7 +1346,13 @@ fn bigint_case_compare_float_is_lossless_via_ruby_eq() {
          puts ((-(2**64)) === -(2**64).to_f)         # true (negative exact)\n\
          # Array#include? — uses ruby_eq too\n\
          puts [2**64, 5].include?((2**64).to_f)      # true\n\
-         puts [2**64 + 1, 5].include?((2**64).to_f)  # false (precision preserved)",
+         puts [2**64 + 1, 5].include?((2**64).to_f)  # false (precision preserved)\n\
+         # Int × Float precision via ruby_eq — sibling fix to the\n\
+         # BigInt path (cycle 3 review on PR #248). Demote-to-f64\n\
+         # was the same bug, just on the Int side.\n\
+         puts ((2**62 + 1) === (2**62).to_f)         # false (|i| > 2^53)\n\
+         puts ((2**62) === (2**62).to_f)             # true (exact)\n\
+         puts [2**62 + 1].include?((2**62).to_f)     # false",
         "bigint_eq_float_ruby_eq.rb",
     ).expect("eval");
     let out = buf.snapshot();
@@ -1355,7 +1361,8 @@ fn bigint_case_compare_float_is_lossless_via_ruby_eq() {
         "true", "false", "true", "false",   // === precision + symmetric + fractional
         "false", "false", "false",          // NaN / ±inf
         "true",                              // negative exact
-        "true", "false",                     // Array#include? precision
+        "true", "false",                     // Array#include? precision (BigInt)
+        "false", "true", "false",           // Int × Float precision + include?
     ]);
 }
 
