@@ -433,7 +433,7 @@ impl Vm {
         // be true for every value — feature-detection has to
         // agree with what dispatch will actually accept.
         if matches!(name,
-            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?"
+            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
             | "send" | "__send__"
             // The ivar-introspection family (`instance_variables` /
             // `instance_variable_get` / `instance_variable_set`)

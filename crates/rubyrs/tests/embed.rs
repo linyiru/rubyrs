@@ -1911,6 +1911,55 @@ fn integer_eql_q_is_type_strict_equality() {
 }
 
 #[test]
+fn universal_eql_q_delegates_to_ruby_eq_for_non_numeric_receivers() {
+    // Phase B.7 review: pre-fix nil/Sym/Bool/String/Array/Hash/
+    // arbitrary-Object all raised NoMethodError on `.eql?(x)`
+    // because only Integer (+ Float in this PR) had per-type
+    // arms. CRuby's Kernel#eql? defaults to identity for user
+    // objects, but Array/Hash/String override it to value
+    // equality.
+    //
+    // Add a universal dispatch interceptor that fires AFTER
+    // primitive_call (so per-type type-strict numeric arms still
+    // win) and delegates to `ruby_eq`. This matches CRuby for:
+    //  - immediates (Sym/Bool/Nil) — identity ≡ value
+    //  - String — value equality (via ruby_eq's Str arm)
+    //  - Array/Hash/Range — value equality (recursive ruby_eq)
+    //  - heap-allocated Objects/Methods/Procs — ObjId identity
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Immediates: identity = value.
+        // String: value equality.
+        // Arrays / Hashes: value equality across allocations.
+        // Cross-type: false.
+        // respond_to gated universally.
+        "puts nil.eql?(nil)\n\
+         puts nil.eql?(false)\n\
+         puts :sym.eql?(:sym)\n\
+         puts :sym.eql?(:other)\n\
+         puts \"a\".eql?(\"a\")\n\
+         puts \"a\".eql?(\"b\")\n\
+         puts true.eql?(true)\n\
+         puts true.eql?(false)\n\
+         puts [1, 2].eql?([1, 2])\n\
+         puts [1, 2].eql?([1, 3])\n\
+         puts({a: 1}.eql?({a: 1}))\n\
+         puts({a: 1}.eql?({a: 2}))\n\
+         puts nil.respond_to?(:eql?)\n\
+         puts :sym.respond_to?(:eql?)\n\
+         puts \"x\".respond_to?(:eql?)\n\
+         puts [].respond_to?(:eql?)",
+        "universal_eql.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue"
+    );
+}
+
+#[test]
 fn float_eql_and_hash_are_type_strict_siblings_to_integer() {
     // Phase B.7 review: shipping `eql?`/`hash` only on Integer
     // made the canonical `5.eql?(5.0) == false` case

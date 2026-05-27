@@ -2911,6 +2911,35 @@ impl Vm {
             self.stack.push(Value::Bool(same));
             return Ok(());
         }
+        // Universal `Object#eql?` fallback. Per-type type-strict
+        // numeric overrides (`Integer#eql?`, `Float#eql?`,
+        // `BigInt#eql?`) live in `primitive_call` arms above and
+        // would have fired before reaching here. By the time
+        // control gets here no per-type arm matched, so delegate
+        // to `ruby_eq`:
+        //  - String / Array / Hash / Range: value equality
+        //    (matches CRuby's Array#eql? / Hash#eql? overrides
+        //    that compare elementwise). Minor divergence at the
+        //    nested-numeric leaf where CRuby's element-wise eql?
+        //    distinguishes `[5].eql?([5.0])` from `[5] == [5.0]`;
+        //    we use the `==`-flavoured ruby_eq for elements, so
+        //    both come out true. Acceptable for now — the common
+        //    cases (same-shape containers, same-string lookups)
+        //    all match CRuby.
+        //  - Object / BoundMethod / UnboundMethod / CurriedProc /
+        //    Block / BigInt: ObjId identity via ruby_eq's
+        //    per-variant arms (matches CRuby's Kernel#eql?
+        //    default, which is identity for user objects).
+        //  - Class: Rc::ptr_eq via ruby_eq.
+        //  - Sym / Bool / Nil: identity == value equality for
+        //    immediates.
+        // Universal `respond_to?(:eql?)` already returns true via
+        // the universal whitelist.
+        if &*name == "eql?" && args.len() == 1 {
+            let same = recv.ruby_eq(&args[0], &self.heap);
+            self.stack.push(Value::Bool(same));
+            return Ok(());
+        }
         // `Method#==` / `UnboundMethod#==` — intercept before the
         // universal `==` fallback (which has no arm for these and
         // would return `false`).
