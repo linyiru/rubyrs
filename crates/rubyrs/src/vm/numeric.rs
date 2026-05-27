@@ -514,10 +514,14 @@ pub(crate) fn numeric_call(
         // those hooks don't exist; without this guard
         // `3 & 3.4` falls through to NoMethodError instead of
         // CRuby's TypeError ('no implicit conversion of Float
-        // into Integer'). Limited to non-Int args because the
-        // Int×Int happy path is the broad arm above.
+        // into Integer'). The `!matches!(_, Int)` guard pins
+        // non-Int explicitly instead of relying on arm ordering —
+        // a future refactor that moves this arm above the Int×Int
+        // happy-path arm must not silently capture `3 & 4`.
         #[cfg(not(feature = "bignum"))]
-        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>", [other]) => {
+        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>", [other])
+            if !matches!(other, Value::Int(_)) =>
+        {
             return Err(RubyError::TypeError {
                 msg: format!(
                     "no implicit conversion of {} into Integer",
