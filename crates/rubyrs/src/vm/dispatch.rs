@@ -349,6 +349,51 @@ impl Vm {
         true
     }
 
+    /// `no_recv` builtin-or-host fast path. Tries the host-side
+    /// builtin table first (`builtin_call` covers `puts` / `p` /
+    /// `sprintf` / `require` / ...), then the
+    /// `register_fn`-installed host fns. Returns `Ok(true)` if
+    /// one of those handled the call (caller should `return
+    /// Ok(())` immediately), or `Ok(false)` if neither matched
+    /// and `do_call` should fall through to the next arm.
+    ///
+    /// Extracted from `do_call`'s no_recv preamble per #192
+    /// commit 1/5 (the #152 research's first recommendation,
+    /// scoped narrower than the research's initial estimate
+    /// because the broader 362-431 range turned out to be
+    /// interleaved with `try_fast_primitive` and the stack drain;
+    /// see #192's commit message for why).
+    ///
+    /// `suppress_call_result_push` handling stays inside the
+    /// helper: `require_relative` (and any future builtin that
+    /// could see its caller unwound to an outer `rescue` mid-call)
+    /// sets the flag to signal "don't push my return value — the
+    /// stack is now the rescue handler's, not yours". Helper
+    /// checks + clears the flag (one-shot) just like the inline
+    /// code did.
+    fn try_dispatch_no_recv_builtin_or_host(
+        &mut self,
+        name: &str,
+        name_id: SymId,
+        args: &[Value],
+    ) -> Result<bool, Trap> {
+        if let Some(res) = self.builtin_call(name, args) {
+            let v = res?;
+            if self.suppress_call_result_push {
+                self.suppress_call_result_push = false;
+            } else {
+                self.stack.push(v);
+            }
+            return Ok(true);
+        }
+        if let Some(host) = self.host_fns.get(&name_id).cloned() {
+            let v = self.invoke_host_fn(host, args)?;
+            self.stack.push(v);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
@@ -405,27 +450,10 @@ impl Vm {
             Some(self.stack.pop().expect("ICE: stack underflow before do_call receiver"))
         };
 
+        if no_recv && self.try_dispatch_no_recv_builtin_or_host(&name, name_id, &args)? {
+            return Ok(());
+        }
         if no_recv {
-            if let Some(res) = self.builtin_call(&name, &args) {
-                let v = res?;
-                // `require_relative` (and any future builtin that
-                // could see its caller unwound to an outer `rescue`
-                // mid-call) sets `suppress_call_result_push` to
-                // signal "don't push my return value — the stack
-                // is now the rescue handler's, not yours". Check +
-                // clear here so the flag is one-shot.
-                if self.suppress_call_result_push {
-                    self.suppress_call_result_push = false;
-                } else {
-                    self.stack.push(v);
-                }
-                return Ok(());
-            }
-            if let Some(host) = self.host_fns.get(&name_id).cloned() {
-                let v = self.invoke_host_fn(host, &args)?;
-                self.stack.push(v);
-                return Ok(());
-            }
             // Bare `send(:foo)` / `__send__(:foo)` — CRuby treats
             // these as `self.send(:foo)`. Resolve target and re-aim
             // through `do_call` with `no_recv = true` so the call
@@ -4787,6 +4815,7 @@ impl Vm {
     ///   capture Array; threading them through this helper would
     ///   trigger an extra `maybe_gc` between two heap.alloc calls
     ///   and sweep the unpinned capture Array.
+    ///
     /// These exemptions are intentional; flagged by PR #181
     /// code-review #3.
     pub(crate) fn alloc_default_instance(&mut self, cls: &Rc<Class>) -> Result<Value, Trap> {
