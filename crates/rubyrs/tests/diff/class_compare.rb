@@ -71,3 +71,17 @@ begin
 rescue TypeError => e
   puts "TypeError"
 end
+
+# --- Wrong-arity raises ArgumentError ---
+begin
+  A.send(:<)
+  puts "no raise (BAD)"
+rescue ArgumentError
+  puts "ArgumentError (0 args)"
+end
+begin
+  A.send(:<, A, A)
+  puts "no raise (BAD)"
+rescue ArgumentError
+  puts "ArgumentError (2 args)"
+end

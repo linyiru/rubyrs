@@ -1417,6 +1417,15 @@ impl Vm {
             // arg (not a Class/Module) → TypeError. Used by Class#<
             // family in user code; also reachable through tilt
             // fixtures that assert `Subclass < Parent`.
+            // Wrong-arity guard — without it, `A.send(:<)` or
+            // `A.send(:<, B, C)` would fall through this exact-
+            // one-arg arm and surface as NoMethodError. CRuby
+            // raises ArgumentError instead.
+            ("<" | "<=" | ">" | ">=", args_) if args_.len() != 1 => {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1)", args_.len()),
+                }));
+            }
             ("<" | "<=" | ">" | ">=", [arg]) => {
                 let Value::Class(other) = arg else {
                     return Err(self.trap(RubyError::TypeError {
