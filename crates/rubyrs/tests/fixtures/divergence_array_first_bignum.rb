@@ -11,7 +11,7 @@
 # un-skip the `# skipped (divergent): "raises a RangeError when count
 # is a Bignum"` block in `spec/ruby/array_first_spec.rb`.
 
-big = 99_999_999_999_999_999_999  # 2^66 — beyond i64 ⇒ BigInt
+big = 99_999_999_999_999_999_999  # ≈ 1.0×10^20, between 2^66 and 2^67 — well past i64::MAX ⇒ BigInt
 begin
   [].first(big)
   puts "first(bignum): no error"
