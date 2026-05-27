@@ -2592,7 +2592,9 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // Recognised inner shapes: bare-call (CallNode, e.g.
             // `ruby2_keywords(:use)`) and the `alias new old` form
             // (AliasMethodNode). Both are wrapped as
-            // `Expr::If { cond, then_body: [<inner>], else_body: [Nil] }`.
+            // `Expr::If { cond, then_body: [<inner>], else_body: [] }`
+            // (matches the rest of `tr()` — empty `else_body`
+            // compiles to `LoadNil` at the codegen layer).
             // The condition is translated via the regular `tr()`
             // path (so `respond_to?(...)` / `method_defined? :foo`
             // dispatch through their usual builtins).
@@ -2602,10 +2604,13 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             //   - `ruby2_keywords(:use) if respond_to?(:ruby2_keywords, true)`
             //   - `alias new! new unless method_defined? :new!`
             // The Ruby 2.7 guard pattern: try the call only when
-            // the receiver advertises support. rubyrs's
-            // `respond_to?(:ruby2_keywords)` returns false on
-            // Class shells (no whitelist entry), so the if-true
-            // branch is skipped and the body loads cleanly.
+            // the receiver advertises support. The guard's
+            // truthiness is computed by the regular dispatch
+            // path — whether the guarded call ultimately fires
+            // depends on the same dispatch decisions
+            // `respond_to?` / `method_defined?` make for any
+            // other caller, not on something specific to this
+            // arm.
             //
             // Scope deliberately narrow: only CallNode and
             // AliasMethodNode inner statements are admitted; other
@@ -2667,7 +2672,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         out.push(sp(bn, Expr::If {
                             cond: Box::new(cond),
                             then_body: vec![inner_expr],
-                            else_body: vec![sp(bn, Expr::Nil)],
+                            else_body: vec![],
                         }));
                         continue;
                     }

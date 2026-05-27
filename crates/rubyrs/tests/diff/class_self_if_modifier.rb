@@ -47,12 +47,12 @@ class WithIfMod
   end
 end
 
-## The unconditional and the if-true path both work; the if-false
-## path didn't define the method.
-## (The if-true side effect — `helper-called-at-load-time` —
-## already printed during class-body load above. If absent
-## from rubyrs's stdout, the guard mis-evaluated and the diff
-## harness would catch it.)
+## The if-true alias path defined `hi_installed`; the if-false
+## alias path did not define `hi_skipped`.
+## (The if-true side-effecting puts — `guard-true-fired` —
+## already printed during class-body load above. The absence
+## of `guard-false-fired` from rubyrs's stdout is what pins
+## the if-false branch correctly skipping.)
 
 puts "installed=#{WithIfMod.hi_installed}"
 puts "skipped-respond=#{WithIfMod.respond_to?(:hi_skipped)}"
@@ -63,6 +63,5 @@ rescue NoMethodError
 end
 puts "skipped-direct=#{skipped_direct}"
 
-## The conditional-call to nonexistent_method skipped silently;
-## demonstrate that body load didn't crash.
+## Sentinel that class-body load completed without raising.
 puts "body-loaded=true"
