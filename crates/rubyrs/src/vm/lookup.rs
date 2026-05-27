@@ -605,6 +605,7 @@ impl Vm {
                     "new" | "name" | "to_s" | "inspect"
                     | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
+                    | "<" | "<=" | ">" | ">="
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"

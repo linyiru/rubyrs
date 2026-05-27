@@ -52,6 +52,12 @@ puts (M >= D).inspect      # true
 puts (B < Object).inspect  # true (B → A → Object)
 puts (B <= Object).inspect # true
 
+# --- respond_to? whitelist parity ---
+puts A.respond_to?(:<)        # true
+puts A.respond_to?(:<=)       # true
+puts A.respond_to?(:>)        # true
+puts A.respond_to?(:>=)       # true
+
 # --- TypeError on non-Class/Module arg ---
 begin
   B < "string"
