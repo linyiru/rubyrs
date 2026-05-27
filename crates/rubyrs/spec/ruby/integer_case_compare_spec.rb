@@ -19,12 +19,14 @@
 #   argument is not an Integer" and "returns the result of
 #   'other == self' as a boolean" tests — both require mspec's
 #   mock library.
-# - skipped (divergent): "does not lose precision when comparing
-#   with a Float" leg. rubyrs's `===` for BigInt × Float routes
-#   through `Value::ruby_eq` (in heap.rs), which still demotes
-#   BigInt → f64 for the compare. Sibling bug to the BinOp `==`
-#   path that PR #230 fixed via bigint_equals_float_lossless;
-#   tracked as a follow-up to extend that helper to ruby_eq.
+# - skipped (divergent): "BigInt × Float of the same value" leg.
+#   rubyrs's `===` for BigInt × Float routes through
+#   `Value::ruby_eq` (heap.rs), which has no BigInt×Float match
+#   arm at all — the comparison falls through to the catch-all
+#   `_ => false`, so `(2**64) === (2**64).to_f` returns false
+#   instead of CRuby's true. The BinOp `==` path doesn't have
+#   this gap (PR #230 added `bigint_equals_float_lossless`);
+#   the follow-up is wiring that same helper into `ruby_eq`.
 
 describe "Integer#===" do
   it "fixnum: returns true if self has the same Integer value as other" do
@@ -81,10 +83,12 @@ describe "Integer#===" do
   # skipped (divergent): "bignum: returns true when comparing
   # with a Float of the same numeric value" — `(2**64) ===
   # (2**64).to_f` should be true (2^64 is exact in f64) but
-  # rubyrs's ruby_eq demotes BigInt → f64 (heap.rs:924), losing
-  # precision. The BinOp == path was fixed in PR #230 via
-  # bigint_equals_float_lossless; extending that to ruby_eq is
-  # the follow-up. Without it, this assertion fails.
+  # rubyrs's ruby_eq has no BigInt×Float arm (heap.rs:965-975
+  # covers BigInt×BigInt and BigInt↔Int only), so the
+  # comparison falls through to `_ => false`. The BinOp == path
+  # was fixed in PR #230 via bigint_equals_float_lossless;
+  # extending that to ruby_eq is the follow-up. Without it,
+  # this assertion fails.
   #
   # bignum_it "bignum: returns true when comparing with a Float of the same numeric value" do
   #   bn = 2**64
