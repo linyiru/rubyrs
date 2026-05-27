@@ -620,7 +620,7 @@ impl Vm {
             sym_size,
             sym_to_s,
             sym_inspect,
-            ic_stats: IcStats::default(),
+            ic_stats: IcStats::new(),
             break_signaled: false,
             callable_forwarder_proto: None,
             method_compose_forwarder_proto: None,

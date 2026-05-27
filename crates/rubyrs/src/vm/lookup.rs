@@ -66,6 +66,29 @@ pub struct IcStats {
 pub struct IcStats;
 
 impl IcStats {
+    /// Zero-initialised constructor. Feature-aware so the
+    /// caller never has to know whether `IcStats` is a unit
+    /// struct (feature off) or a four-field counter struct
+    /// (feature on). Using a dedicated `new()` instead of
+    /// `Default::default()` keeps clippy quiet on the
+    /// production (feature-off) build — `default()` on a
+    /// unit struct fires `default_constructed_unit_structs`.
+    #[cfg(feature = "ic-stats")]
+    #[inline(always)]
+    pub(crate) const fn new() -> Self {
+        Self {
+            hits: 0,
+            misses: 0,
+            toplevel_hits: 0,
+            toplevel_misses: 0,
+        }
+    }
+    #[cfg(not(feature = "ic-stats"))]
+    #[inline(always)]
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+
     #[cfg(feature = "ic-stats")]
     #[inline(always)]
     pub(crate) fn record_hit(&mut self) {
