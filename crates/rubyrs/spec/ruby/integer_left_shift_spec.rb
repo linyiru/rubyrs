@@ -152,8 +152,17 @@ describe "Integer#<<" do
     assert_eq(((2**64) << -(2**40)), 0)
   end
 
-  bignum_it "bignum: returns 0 when m > 0 and n == 0" do
+  it "fixnum: returns 0 for m == 0 with a large (long-sized) shift count" do
+    # Upstream splits "m > 0 and n == 0" into a 'long' (fits i64)
+    # and a 'bignum' case. The long-sized case is meaningful under
+    # no-bignum too — `2**40` fits i64 and exercises the
+    # `(*b as u32).min(63)` clamp at numeric.rs:445. Keep it on
+    # both profiles so a regression in the long-count clamp is
+    # caught on no-bignum CI; gate only the bignum-count case.
     assert_eq((0 << (2**40)), 0)
+  end
+
+  bignum_it "bignum: returns 0 for m == 0 with a bignum-sized shift count" do
     assert_eq((0 << (2**64)), 0)
   end
 end

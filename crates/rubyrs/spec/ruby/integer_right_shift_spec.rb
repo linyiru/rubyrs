@@ -153,8 +153,15 @@ describe "Integer#>>" do
     assert_eq(((2**64) >> (2**40)), 0)
   end
 
-  bignum_it "bignum: returns 0 when m < 0 and n == 0" do
+  it "fixnum: returns 0 for m == 0 with a large (long-sized) negative shift count" do
+    # Symmetric to the left-shift split: `-(2**40)` fits i64 and
+    # exercises the negative-count clamp at numeric.rs:483-484
+    # (the `i64::MIN` / `(-b) as u32` boundary added in PR #159).
+    # Keep on both profiles; gate only the bignum-count case.
     assert_eq((0 >> -(2**40)), 0)
+  end
+
+  bignum_it "bignum: returns 0 for m == 0 with a bignum-sized negative shift count" do
     assert_eq((0 >> -(2**64)), 0)
   end
 end
