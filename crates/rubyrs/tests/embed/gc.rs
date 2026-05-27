@@ -524,3 +524,54 @@ fn array_group_by_pin_heap_keys_under_stress_gc() {
         "group_by output corrupted (key slot was reused by bucket alloc), got: {out}"
     );
 }
+
+#[test]
+fn array_group_by_pin_snapshot_under_receiver_mutation() {
+    // Regression: Array#group_by clones the receiver into a Rust-
+    // local `snapshot: Vec<Value>` and iterates it. If the block
+    // mutates the receiver mid-iteration (`arr.shift` / `slice!` /
+    // etc.), the snapshot's original heap-Value elements (e.g.
+    // inner Arrays) are no longer reachable through the pinned
+    // receiver — they live only in the snapshot Vec, which
+    // scan_roots can't see. The first iteration's bucket alloc
+    // (`heap.alloc(HeapObj::Array(vec![v]))`) fires maybe_gc and
+    // sweeps the still-pending snapshot elements; subsequent
+    // iterations read freed slots. Same family as the chunk
+    // defensive pin (PR #187) and the group_by key pin fix in
+    // PR #200.
+    //
+    // Without the defensive `for v in &snapshot { ... }` pin
+    // loop, the reproducer ICEs at `heap.rs:180` with
+    // `use-after-free ObjId(N)`. With the fix it completes —
+    // rubyrs's eager `group_by` produces all three bucket entries
+    // (a documented divergence from CRuby's lazy-enumerator
+    // behaviour which stops after the mutation; not under test
+    // here).
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # `nested` holds three inner Arrays (heap slots). On
+        # iteration 1, the block shifts all elements off the
+        # receiver. After that, iter 2/3's elements are reachable
+        # ONLY via the Rust-local snapshot Vec inside group_by.
+        # Without the defensive pin, STRESS_GC + the bucket alloc
+        # sweeps them and the next read ICEs.
+        nested = [[1, 2], [3, 4], [5, 6]]
+        result = nested.group_by { |inner|
+          nested.shift while nested.length > 0
+          inner.first
+        }
+        puts result.inspect
+    "#, "group_by_mut.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // rubyrs eager group_by — all three inner Arrays processed.
+    // Each first element is unique so each gets its own bucket.
+    assert_eq!(
+        out, "{1 => [[1, 2]], 3 => [[3, 4]], 5 => [[5, 6]]}\n",
+        "group_by corrupted (likely snapshot element swept after receiver mutation), got: {out}"
+    );
+}

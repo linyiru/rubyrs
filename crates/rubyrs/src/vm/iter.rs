@@ -1793,6 +1793,25 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                // Defensive pin of every heap-slot element. Without
+                // this, a block that mutates the receiver mid-
+                // iteration (`arr.shift` / `slice!` / etc.) would
+                // leave the snapshot's heap-Value elements rooted
+                // only via this Rust-local Vec — the subsequent
+                // bucket alloc's maybe_gc would sweep them and the
+                // freshly-built bucket `Array(vec![v])` would
+                // contain a dangling ObjId. CRuby disallows
+                // concurrent mutation entirely; we instead keep
+                // the elements alive defensively so the primitive
+                // completes without ICE'ing. Mirrors the chunk
+                // driver's defensive pin (PR #187). Narrowed via
+                // `is_gc_heap_ref` to avoid O(n) GC scan growth for
+                // immediate/Rc-shared element types.
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() {
+                        g.pin(v.clone());
+                    }
+                }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
@@ -1813,10 +1832,9 @@ impl Vm {
                             g.vm.heap.array_mut(arr_id).push(v);
                         }
                     } else {
-                        // Pin the block-returned `key` across the
-                        // `maybe_gc` / `check_alloc` / `heap.alloc`
-                        // window. Between step_block returning and
-                        // the eventual `hash_mut.push((key, ...))`,
+                        // Pin the block-returned `key` across
+                        // `maybe_gc()`. Between step_block returning
+                        // and the eventual `hash_mut.push((key, ...))`,
                         // `key` lives only in this Rust local. If
                         // it's a heap-slot Value (Array / Hash /
                         // Object / Range / Block / BoundMethod /
@@ -1827,13 +1845,13 @@ impl Vm {
                         // family as the chunk fix in PR #187.
                         //
                         // Pop discipline mirrors the step_block
-                        // dance: the pin only needs to survive
-                        // `maybe_gc()`. We pop BEFORE
-                        // `check_alloc()?` so an Err propagating
-                        // via `?` doesn't skip the pop and leak a
-                        // permanent pin. `heap.alloc` doesn't
-                        // trigger GC and doesn't fail, so it runs
-                        // unpinned safely.
+                        // dance: the pin scope is JUST `maybe_gc()`,
+                        // popped BEFORE `check_alloc()?` so an Err
+                        // propagating via `?` doesn't skip the pop
+                        // and leak a permanent pin. `check_alloc`
+                        // doesn't trigger GC and `heap.alloc`
+                        // doesn't either (and is infallible), so
+                        // they run safely with `key` unpinned.
                         let pin_key = key.is_gc_heap_ref();
                         if pin_key { g.vm.pinned.push(key.clone()); }
                         g.vm.maybe_gc();
