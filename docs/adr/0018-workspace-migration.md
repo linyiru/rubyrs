@@ -288,9 +288,9 @@ any future change:
      bound the output String length, not the underlying BigInt
      storage.
 
-Implementation invariants and call-graph diagrams live in
-`crates/rubyrs/src/vm/bignum.rs`'s module doc — keep it
-synchronised with this section.
+Implementation invariants and the per-function structure
+outline live in `crates/rubyrs/src/vm/bignum.rs`'s module doc —
+keep it synchronised with this section.
 
 ## Consequences
 
