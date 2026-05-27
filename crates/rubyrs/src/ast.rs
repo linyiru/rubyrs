@@ -2586,6 +2586,142 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
+            // `class << self; <stmt> if cond` / `class << self;
+            // <stmt> unless cond` — and structurally-equivalent
+            // block forms `if cond; <stmt>; end` / `unless cond;
+            // <stmt>; end` — at body top level wrapping a single
+            // supported inner stmt. The recogniser admits ANY
+            // `IfNode` / `UnlessNode` with exactly one statement
+            // and no `subsequent` / `else_clause` (Prism's
+            // names for the else/elsif tail): the modifier and one-stmt
+            // block forms compile identically (modifier is just
+            // sugar), so handling both is safe and gives a
+            // slightly broader green path. Tightening to truly
+            // modifier-form via `end_keyword_loc().is_none()`
+            // would be the alternative; chose the broader
+            // wording over the narrower recogniser since the
+            // semantics are equivalent. (PR #218 Copilot
+            // round 3 caught the previous "modifier-form only"
+            // wording as inaccurate.)
+            // Recognised inner shapes: bare-call (CallNode, e.g.
+            // `ruby2_keywords(:use)`) and the `alias new old` form
+            // (AliasMethodNode). Both are wrapped as
+            // `Expr::If { cond, then_body: [<inner>], else_body: [] }`
+            // (matches the rest of `tr()` — empty `else_body`
+            // compiles to `LoadNil` at the codegen layer).
+            // The condition is translated via the regular `tr()`
+            // path (so `respond_to?(...)` / `method_defined? :foo`
+            // dispatch through their usual builtins).
+            //
+            // Motivating call sites (TRY_RUNS pass 9.5 layers
+            // #13 / #15):
+            //   - `ruby2_keywords(:use) if respond_to?(:ruby2_keywords, true)`
+            //   - `alias new! new unless method_defined? :new!`
+            // The Ruby 2.7 guard pattern: try the call only when
+            // the receiver advertises support. The guard's
+            // truthiness is computed by the regular dispatch
+            // path — whether the guarded call ultimately fires
+            // depends on the same dispatch decisions
+            // `respond_to?` / `method_defined?` make for any
+            // other caller, not on something specific to this
+            // arm.
+            //
+            // Scope deliberately narrow: only CallNode and
+            // AliasMethodNode inner statements are admitted; other
+            // shapes (def / attr_* / const-write / cvar-write
+            // wrapped in if/unless) fall through to
+            // NotImplementedError because sinatra/base.rb doesn't
+            // surface them and the inner-form recogniser can be
+            // widened on demand.
+            if recv_is_self {
+                let modifier_if = bn.as_if_node()
+                    .and_then(|if_n| {
+                        if if_n.subsequent().is_some() { return None; }
+                        let stmts = if_n.statements()?;
+                        // Exactly-one-stmt check via a single
+                        // iterator walk: take one, error if there
+                        // are more. Cheaper than `count() + next()`.
+                        let mut it = stmts.body().iter();
+                        let inner = it.next()?;
+                        if it.next().is_some() { return None; }
+                        Some((if_n.predicate(), inner, false))
+                    });
+                let modifier_unless = bn.as_unless_node()
+                    .and_then(|un_n| {
+                        if un_n.else_clause().is_some() { return None; }
+                        let stmts = un_n.statements()?;
+                        let mut it = stmts.body().iter();
+                        let inner = it.next()?;
+                        if it.next().is_some() { return None; }
+                        Some((un_n.predicate(), inner, true))
+                    });
+                if let Some((cond_node, inner, negated)) = modifier_if.or(modifier_unless) {
+                    // Translate the inner stmt only if it's one of
+                    // the admitted shapes; otherwise fall through.
+                    let inner_expr: Option<SExpr> = if let Some(alias_node) = inner.as_alias_method_node()
+                        && let (Some(new_sym), Some(old_sym)) = (
+                            alias_node.new_name().as_symbol_node(),
+                            alias_node.old_name().as_symbol_node(),
+                        )
+                    {
+                        let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
+                        let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
+                        Some(sp(&inner, Expr::AliasSingletonMethod(new_name, old_name)))
+                    } else if let Some(call) = inner.as_call_node() {
+                        // Bare-receiver CallNode admitted only
+                        // when its name is NOT one of the forms
+                        // the body translator would otherwise
+                        // special-case for the singleton class.
+                        // `attr_reader` / `attr_writer` /
+                        // `attr_accessor` / `prepend` translated
+                        // through the regular `tr()` path WITH
+                        // IMPLICIT RECEIVER would install on the
+                        // OUTER class (instance methods), not the
+                        // singleton class — semantic divergence
+                        // from the unconditional forms supported
+                        // earlier in this loop. Calls with an
+                        // EXPLICIT receiver (`Other.attr_reader(:x)
+                        // if cond`) don't trigger the body
+                        // special-casing and route to whatever
+                        // method `Other` provides, so they're
+                        // admitted regardless of name. Real
+                        // sinatra cases (`ruby2_keywords(:use)`)
+                        // are bare-receiver but with names that
+                        // have no body-level special-case, so
+                        // they pass uneventfully. PR #218
+                        // code-review #4 / Copilot round 5.
+                        let is_silently_misdirected = call.receiver().is_none()
+                            && matches!(cid_to_string(call.name()).as_str(),
+                                "attr_reader" | "attr_writer" | "attr_accessor" | "prepend"
+                            );
+                        if is_silently_misdirected {
+                            None
+                        } else {
+                            Some(tr(ctx, &inner))
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(inner_expr) = inner_expr {
+                        let raw_cond = tr(ctx, &cond_node);
+                        let cond = if negated {
+                            sp(&cond_node, Expr::Call {
+                                receiver: Some(Box::new(raw_cond)),
+                                name: "!".into(),
+                                args: vec![],
+                            })
+                        } else {
+                            raw_cond
+                        };
+                        out.push(sp(bn, Expr::If {
+                            cond: Box::new(cond),
+                            then_body: vec![inner_expr],
+                            else_body: vec![],
+                        }));
+                        continue;
+                    }
+                }
+            }
             // `class << self` body: any remaining unsupported form
             // compiles to a runtime `raise NotImplementedError`
             // rather than a parse-time SyntaxError. The raise fires
