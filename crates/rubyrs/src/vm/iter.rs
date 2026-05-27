@@ -873,14 +873,10 @@ impl Vm {
                 let mut early = None;
                 let mut i = start;
                 while i <= stop {
-                    self.invoke_block(block,vec![Value::Int(i)])?;
-                    self.dispatch_until(pre_frames)?;
-                    if self.method_return.is_some() { break; }
-                    let r = self.stack.pop().unwrap_or(Value::Nil);
-                    if self.break_signaled {
-                        self.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match self.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
                     }
                     i += 1;
                 }
@@ -893,14 +889,10 @@ impl Vm {
                 let mut early = None;
                 let mut i = start;
                 while i >= stop {
-                    self.invoke_block(block,vec![Value::Int(i)])?;
-                    self.dispatch_until(pre_frames)?;
-                    if self.method_return.is_some() { break; }
-                    let r = self.stack.pop().unwrap_or(Value::Nil);
-                    if self.break_signaled {
-                        self.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match self.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
                     }
                     i -= 1;
                 }
@@ -921,14 +913,10 @@ impl Vm {
                 let mut early = None;
                 let n_val = *n;
                 for i in 0..n_val {
-                    g.vm.invoke_block(block, vec![Value::Int(i)])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
                     }
                 }
                 Some(early.unwrap_or(Value::Int(n_val)))
