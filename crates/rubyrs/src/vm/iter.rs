@@ -826,6 +826,14 @@ impl Vm {
                 // args would defeat the destructure path because
                 // the block's anonymous slot would get just `k`,
                 // not the pair Array.
+                //
+                // GC discipline: `snapshot` is a Rust-local Vec.
+                // If the block mutates the receiver hash (e.g.
+                // `h.delete(k)`), heap-ref k/v lose their only
+                // GC root before the pair_id alloc — push onto
+                // `vm.pinned` first, gated on `is_gc_heap_ref()`.
+                // `check_alloc?` is replaced with explicit unwind
+                // because PinGuard doesn't track manual pushes.
                 let id = *id;
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
@@ -834,8 +842,16 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
+                    let pinned_k = k.is_gc_heap_ref();
+                    let pinned_v = v.is_gc_heap_ref();
+                    if pinned_k { g.vm.pinned.push(k.clone()); }
+                    if pinned_v { g.vm.pinned.push(v.clone()); }
                     g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
+                    if let Err(e) = g.vm.check_alloc() {
+                        if pinned_v { g.vm.pinned.pop(); }
+                        if pinned_k { g.vm.pinned.pop(); }
+                        return Err(e);
+                    }
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     // Scoped pin: step_block's args→locals copy can
                     // call maybe_gc (block with rest param has to
@@ -846,6 +862,8 @@ impl Vm {
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
+                    if pinned_v { g.vm.pinned.pop(); }
+                    if pinned_k { g.vm.pinned.pop(); }
                     match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
@@ -860,6 +878,9 @@ impl Vm {
                 // running with a single param gets `pair` (an
                 // Array). Two-param destructured form
                 // (`|pair, idx|`) is what users usually want.
+                //
+                // Same snapshot-vs-hash-mutation GC discipline
+                // as `Hash#each` above.
                 let id = *id;
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
@@ -868,8 +889,16 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (i, (k, v)) in snapshot.into_iter().enumerate() {
+                    let pinned_k = k.is_gc_heap_ref();
+                    let pinned_v = v.is_gc_heap_ref();
+                    if pinned_k { g.vm.pinned.push(k.clone()); }
+                    if pinned_v { g.vm.pinned.push(v.clone()); }
                     g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
+                    if let Err(e) = g.vm.check_alloc() {
+                        if pinned_v { g.vm.pinned.pop(); }
+                        if pinned_k { g.vm.pinned.pop(); }
+                        return Err(e);
+                    }
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     // Scoped pin: see Hash#each for rationale. The
                     // previous `g.pin(...)` pushed onto the outer
@@ -879,6 +908,8 @@ impl Vm {
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id), Value::Int(i as i64)], pre_frames);
                     g.vm.pinned.pop();
+                    if pinned_v { g.vm.pinned.pop(); }
+                    if pinned_k { g.vm.pinned.pop(); }
                     match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
@@ -1540,6 +1571,16 @@ impl Vm {
                 // (unlike inject which uses the block's return as the
                 // next accumulator). The block's return value is
                 // ignored; users mutate `memo` for side effects.
+                //
+                // GC discipline: `snapshot` is a Rust-local Vec.
+                // If the block mutates the receiver array (e.g.
+                // `arr.clear`), heap-ref `v` loses its only root
+                // before `step_block` (which can trigger GC during
+                // args→locals copy / rest-Array alloc). Push v
+                // onto `vm.pinned` first, gated on `is_gc_heap_ref()`,
+                // pop after the step_block call returns regardless
+                // of result. `step_result?` runs AFTER the pop so
+                // the Err path doesn't leak the pin.
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
@@ -1548,7 +1589,11 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for v in snapshot {
-                    match g.vm.step_block(block, vec![v, seed.clone()], pre_frames)? {
+                    let pinned_v = v.is_gc_heap_ref();
+                    if pinned_v { g.vm.pinned.push(v.clone()); }
+                    let step_result = g.vm.step_block(block, vec![v, seed.clone()], pre_frames);
+                    if pinned_v { g.vm.pinned.pop(); }
+                    match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}
