@@ -59,6 +59,17 @@ pub(crate) fn value_cmp_v_heap(
             _ => {}
         }
     }
+    // Float×Float — `value_cmp_v` itself doesn't cover floats
+    // (it's the homogeneous-aggregator entrypoint), but
+    // `Array#<=>` reaches here on element-pair compares, and
+    // dropping Float coverage would make `[1.0] <=> [2.0]` and
+    // `[1.0].sort` over multi-element arrays return nil / fail
+    // even though `Float#<=>` itself works. `partial_cmp` on
+    // NaN returns None — propagate that upward, matching CRuby
+    // `[Float::NAN] <=> [Float::NAN] == nil`.
+    if let (Value::Float(x), Value::Float(y)) = (a, b) {
+        return x.partial_cmp(y);
+    }
     // Array#<=> element-wise lex compare. Length is the
     // tiebreaker only when all common-prefix pairs are Equal —
     // matches CRuby `[1,2] <=> [1,2,3] == -1`. If any pair is
