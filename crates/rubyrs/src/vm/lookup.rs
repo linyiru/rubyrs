@@ -599,11 +599,17 @@ impl Vm {
                     | "singleton_class"
                     // `Class#allocate` — bare-instance allocator
                     // without calling `initialize`. Implemented in
-                    // dispatch.rs's `new`-arm neighbour; primitive
-                    // class shells (Integer/String/etc.) raise
-                    // TypeError matching CRuby ("allocator undefined
-                    // for Integer"), but still respond_to? true for
-                    // the method name itself.
+                    // dispatch.rs's `new`-arm neighbour. Some
+                    // primitive shells (Integer/Float/Symbol/...)
+                    // raise TypeError matching CRuby; others
+                    // (String/Array/Hash/Range) raise TypeError as
+                    // a KNOWN GAP — CRuby actually allows those
+                    // builtins to allocate (documented in the
+                    // dispatch arm). Either way `respond_to?` stays
+                    // true for the method name itself (matches
+                    // CRuby's "method exists, allocator may be
+                    // undefined" surface). PR #181 review round 4
+                    // Copilot comment #3 tightened this wording.
                     | "allocate"
                 ) {
                     return true;

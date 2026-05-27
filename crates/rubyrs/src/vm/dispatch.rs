@@ -1192,12 +1192,22 @@ impl Vm {
         //     whitelist): allocate a fresh `HeapObj::Instance` with
         //     the class pointer set, empty ivars, no singleton class.
         //     No `initialize` call.
-        //   - Primitive class shells (Integer / Float / String /
-        //     Array / Hash / Range / Symbol / Regexp / Proc /
-        //     Method / UnboundMethod / TrueClass / FalseClass /
-        //     NilClass / Kernel): raise TypeError matching CRuby's
-        //     "allocator undefined for X" — those values are unboxed
-        //     in rubyrs's heap model, no Instance slot to populate.
+        //   - Primitive class shells fall into two groups:
+        //       * "Truly disallowed" in CRuby — Integer / Float /
+        //         Symbol / Regexp / Proc / Method / UnboundMethod /
+        //         TrueClass / FalseClass / NilClass / Kernel. CRuby
+        //         raises TypeError; rubyrs matches byte-for-byte.
+        //       * "Allowed in CRuby" — String / Array / Hash / Range.
+        //         CRuby produces a bare instance of the builtin
+        //         (empty string / array / hash / Range struct); rubyrs
+        //         currently raises TypeError because the heap model
+        //         unboxes those values and we don't yet route through
+        //         a TypedData allocator. Documented as a KNOWN GAP
+        //         below; the comment used to claim CRuby parity here
+        //         which was wrong (PR #181 review round 4 Copilot
+        //         comment #2).
+        //     Either way: zero Instance slot to populate, so the
+        //     bare-allocator path can't run for any primitive shell.
         //   - Zero args; any positional arg raises ArgumentError
         //     with the standard "wrong number of arguments" shape.
         //
@@ -4594,6 +4604,40 @@ impl Vm {
             return self.invoke_method_with_block(m, target_self, args, Some(block));
         }
 
+        // `Class#allocate` (block form) — CRuby silently ignores
+        // a block passed to `allocate`. Without this arm,
+        // `Box.allocate { ... }` (or `Box.send(:allocate) { ... }`,
+        // which routes here through `do_call_block`) falls through
+        // to method_missing/NoMethodError instead of allocating
+        // (PR #181 review round 4 Copilot comment #1). Mirrors
+        // do_call's allocate arm — same arity / primitive shell /
+        // Module-Class fences, same shared allocator helper, with
+        // the block discarded.
+        if &*name == "allocate"
+            && let Value::Class(cls) = &recv {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                }));
+            }
+            if cls.is_module
+                || cls.name == "Module"
+                || cls.name == "Class"
+                || is_primitive_class_name(&cls.name)
+            {
+                let display = if cls.name.is_empty() {
+                    if cls.is_module { "Module" } else { "Class" }
+                } else {
+                    &cls.name
+                };
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("allocator undefined for {}", display),
+                }));
+            }
+            let obj = self.alloc_default_instance(cls)?;
+            self.stack.push(obj);
+            return Ok(());
+        }
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {

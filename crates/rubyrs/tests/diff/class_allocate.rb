@@ -18,6 +18,14 @@ puts "no-init-marker=#{a.instance_variable_get(:@initialized).inspect}"
 puts "no-value=#{a.instance_variable_get(:@value).inspect}"
 puts "no-ivars=#{a.instance_variables.empty?}"
 
+## Block form: CRuby silently ignores a block passed to
+## `allocate` — the block must NOT run, and allocation must
+## still succeed (PR #181 review round 4 Copilot comment #4).
+block_ran = false
+c = Box.allocate { block_ran = true }
+puts "block-form-class=#{c.class.name}"
+puts "block-form-block-ran=#{block_ran}"
+
 ## Compare against new: ivars set by initialize.
 b = Box.new(42)
 puts "new-value=#{b.value}"
