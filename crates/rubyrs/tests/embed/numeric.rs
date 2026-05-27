@@ -799,6 +799,69 @@ fn bigint_iter_survives_gc_inside_block() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_succ_pred_promote_at_i64_boundary_and_demote_back() {
+    // Closes the subset gap surfaced by integer_bit_length_spec's
+    // commented `.succ`/`.pred` lines. Covers four invariants:
+    //
+    // 1. BigInt#succ / #pred: `+1` / `-1` through bigint_to_value.
+    //    `(1 << 100).succ.bit_length == 101` (no demote — value
+    //    stays > i64::MAX), `(1 << 100).pred.bit_length == 100`
+    //    (one off the round number → narrower).
+    //
+    // 2. Int → BigInt promotion at the i64 boundary:
+    //    `i64::MAX.succ` returns BigInt(2^63), `i64::MIN.pred`
+    //    returns BigInt(-(2^63 + 1)). Pre-fix the wrapping
+    //    `wrapping_add(1)` / `wrapping_sub(1)` in numeric.rs
+    //    wrapped to i64::MIN / i64::MAX respectively, breaking
+    //    Ruby semantics.
+    //
+    // 3. BigInt → Int demote-on-fit: `(2 ** 63).pred` lands on
+    //    i64::MAX which fits, so bigint_to_value demotes back to
+    //    `Value::Int(i64::MAX)`.
+    //
+    // 4. respond_to? whitelist updated so `(2 ** 100).respond_to?(:succ)`
+    //    returns true (previously fell back to method-missing
+    //    answer since the whitelist hadn't listed succ/pred yet).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (1 << 100).succ.bit_length\n\
+         puts (1 << 100).pred.bit_length\n\
+         puts (9223372036854775807).succ\n\
+         puts (9223372036854775807).succ.class.name\n\
+         puts (-9223372036854775808).pred\n\
+         puts (-9223372036854775808).pred.class.name\n\
+         puts (2 ** 63).pred\n\
+         puts (2 ** 63).pred.class.name\n\
+         puts 5.succ\n\
+         puts 5.next\n\
+         puts 5.pred\n\
+         puts (2 ** 100).respond_to?(:succ)\n\
+         puts (2 ** 100).respond_to?(:next)\n\
+         puts (2 ** 100).respond_to?(:pred)",
+        "succ_pred.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "101");
+    assert_eq!(lines[1], "100");
+    assert_eq!(lines[2], "9223372036854775808");
+    assert_eq!(lines[3], "Integer"); // BigInt prints as Integer
+    assert_eq!(lines[4], "-9223372036854775809");
+    assert_eq!(lines[5], "Integer");
+    assert_eq!(lines[6], "9223372036854775807"); // demoted to i64::MAX
+    assert_eq!(lines[7], "Integer");
+    assert_eq!(lines[8], "6");
+    assert_eq!(lines[9], "6");
+    assert_eq!(lines[10], "4");
+    assert_eq!(lines[11], "true");
+    assert_eq!(lines[12], "true");
+    assert_eq!(lines[13], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_bitwise_not_uses_twos_complement_identity() {
     // Phase B.3: BigInt bit ops. `~big` is two's-complement
     // bitwise NOT — equivalent to `-(big + 1)` for any sign.
