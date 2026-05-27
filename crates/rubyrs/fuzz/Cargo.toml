@@ -11,6 +11,13 @@ edition = "2024"
 # silently downgrade. Empty `[workspace]` makes this crate its
 # own little workspace.
 [workspace]
+# Match the root workspace's resolver so a future second
+# fuzz-target dep with conflicting features unifies the same way
+# under nightly as it does under stable elsewhere in the repo.
+# Today the sub-workspace has one member so resolver choice is
+# observably inert; pinning it explicitly removes the silent
+# divergence risk before it bites.
+resolver = "3"
 
 [package.metadata]
 cargo-fuzz = true
