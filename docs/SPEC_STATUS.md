@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 95 |
-| Examples in corpus | 470 |
-| Skipped `it` traces | 145 |
+| Files | 100 |
+| Examples in corpus | 486 |
+| Skipped `it` traces | 150 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 2 |
 | `fixture` | 48 |
-| `method-not-implemented` | 78 |
+| `method-not-implemented` | 83 |
 | `mock` | 17 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -40,7 +40,7 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 19 | 46 | 38 |
+| Hash | 24 | 62 | 43 |
 | Integer | 25 | 211 | 21 |
 | Method | 11 | 57 | 1 |
 | Module | 3 | 15 | 0 |
@@ -72,8 +72,13 @@ Find blocks unlocked by a future feature with e.g.
 | `array_take_spec.rb` | Array#take | `core/array/take_spec.rb` | 5 | 0 |
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
+| `hash_any_spec.rb` | Hash#any? | `core/hash/any_spec.rb` | 5 | 1 |
 | `hash_compact_spec.rb` | Hash#compact | `core/hash/compact_spec.rb` | 2 | 4 |
+| `hash_count_spec.rb` | Hash#count | `core/hash/count_spec.rb + core/enumerable/count_spec.rb` | 3 | 1 |
+| `hash_default_proc_spec.rb` | Hash#default_proc | `core/hash/default_proc_spec.rb` | 2 | 1 |
+| `hash_default_spec.rb` | Hash#default | `core/hash/default_spec.rb` | 3 | 1 |
 | `hash_each_pair_spec.rb` | Hash#each_pair | `core/hash/each_pair_spec.rb + shared/each.rb` | 3 | 2 |
+| `hash_each_with_object_spec.rb` | Hash#each_with_object | `core/enumerable/each_with_object_spec.rb` | 3 | 1 |
 | `hash_empty_spec.rb` | Hash#empty? | `core/hash/empty_spec.rb` | 2 | 0 |
 | `hash_except_spec.rb` | Hash#except | `core/hash/except_spec.rb` | 3 | 1 |
 | `hash_fetch_spec.rb` | Hash#fetch | `core/hash/fetch_spec.rb` | 5 | 1 |
