@@ -70,7 +70,7 @@ def e.beep; "singleton-beep"; end
 bm5 = e.method(:beep)
 puts bm5.call                                # singleton-beep
 
-# --- (7) Singleton-method unbind fence: `c.method(:foo).unbind`
+# --- (6) Singleton-method unbind fence: `c.method(:foo).unbind`
 #     when `foo` is a singleton method on `c` produces an
 #     UnboundMethod whose captured class is the eigenclass.
 #     `bind(another_real_class_instance)` must raise TypeError —
@@ -98,7 +98,7 @@ rescue TypeError
   puts "singleton-unbind + wrong-recv → TypeError"
 end
 
-# --- (6) Implicit-self `method(:foo)` also snapshots from the
+# --- (7) Implicit-self `method(:foo)` also snapshots from the
 #     dispatch class — same singleton-respecting rule.
 class F
   def boop; "class-boop"; end
