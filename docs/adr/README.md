@@ -68,3 +68,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0016 — Method-object reflection chain](0016-method-reflection-chain.md)
 - [0017 — Tier-1 boundary specification](0017-tier1-boundary.md)
 - [0018 — Workspace migration plan for the concentric architecture](0018-workspace-migration.md)
+- [0019 — Tier 2 / Tier 3 boundary specification](0019-tier2-tier3-boundary.md)
