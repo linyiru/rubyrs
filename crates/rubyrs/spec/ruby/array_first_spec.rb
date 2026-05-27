@@ -54,7 +54,14 @@ describe "Array#first" do
     end
   end
 
-  it "raises a RangeError when count is a Bignum" do
+  # Gate with `bignum_it`: under `--no-default-features` (no
+  # bignum), `99_999_999_999_999_999_999` saturates to
+  # `i64::MAX` at the AST layer (a `Value::Int`, not BigInt),
+  # so the call would take the cap-to-length path and silently
+  # return `[]` without raising — the test would fail. Same
+  # gating idiom integer_even_spec.rb uses for its bignum
+  # `**`-literal cases.
+  bignum_it "raises a RangeError when count is a Bignum" do
     assert_raises("RangeError") do
       [].first(99_999_999_999_999_999_999)
     end

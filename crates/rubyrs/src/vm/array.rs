@@ -326,9 +326,12 @@ impl Vm {
                     // so the rationale for raising here is strictly
                     // "value won't fit a C long" — matches
                     // bignum.rs:1361's identical guard for
-                    // `Integer#to_s(big_radix)`. Divergence ratcheted
-                    // by `tests/fixtures/divergence_array_first_bignum.rb`
-                    // (PR #193); this arm retires the ratchet.
+                    // `Integer#to_s(big_radix)`. Divergence was
+                    // pinned by PR #193's
+                    // `divergence_array_first_bignum` ratchet
+                    // (retired in this PR alongside the fix);
+                    // un-skipped spec block lives in
+                    // `spec/ruby/array_first_spec.rb`.
                     #[cfg(feature = "bignum")]
                     ("first", [Value::BigInt(_)]) => {
                         return Err(self.trap(RubyError::RangeError {
