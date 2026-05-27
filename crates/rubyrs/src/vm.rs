@@ -748,22 +748,24 @@ impl Vm {
                     g.pin(Value::Hash(id));
                     g.pin(key.clone());
                     g.pin(Value::Block(block_id));
-                    g.vm.invoke_block(block_id, vec![Value::Hash(id), key.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() {
-                        return Ok(Value::Nil);
+                    // Use the iter.rs step_block helper (#151);
+                    // see `vm/hash.rs::Hash#[]` for the inline
+                    // rationale on the BlockStep arms and why
+                    // Break maps to LocalJumpError (stored Proc,
+                    // not iterator yield).
+                    match g.vm.step_block(block_id, vec![Value::Hash(id), key.clone()], pre_frames)? {
+                        crate::vm::iter::BlockStep::MethodReturn => {
+                            return Ok(Value::Nil);
+                        }
+                        crate::vm::iter::BlockStep::Break(_) => {
+                            return Err(g.vm.trap(crate::error::RubyError::LocalJumpError {
+                                msg: "break from proc-closure".into(),
+                            }));
+                        }
+                        crate::vm::iter::BlockStep::Value(r) => {
+                            return Ok(r);
+                        }
                     }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    // Same Proc-break-LocalJumpError semantics as
-                    // the `Hash#[]` arm. See its comment for the
-                    // rationale (stored block, not iterator yield).
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        return Err(g.vm.trap(crate::error::RubyError::LocalJumpError {
-                            msg: "break from proc-closure".into(),
-                        }));
-                    }
-                    return Ok(r);
                 }
                 Ok(Value::Nil)
             }

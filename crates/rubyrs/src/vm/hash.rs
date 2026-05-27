@@ -68,37 +68,37 @@ impl Vm {
                             g.pin(k.clone());
                             // Pin the block too — it lives on the
                             // heap and could be swept across maybe_gc
-                            // sites in invoke_block / dispatch_until.
+                            // sites inside step_block / dispatch_until.
                             g.pin(Value::Block(block_id));
-                            g.vm.invoke_block(block_id, vec![Value::Hash(id), k.clone()])?;
-                            g.vm.dispatch_until(pre_frames)?;
-                            // Non-local return from inside the block
-                            // (`def foo; h = Hash.new { return :early };
-                            // h[:x]; end` → foo returns :early). The
-                            // outer unwind machinery handles
-                            // method_return; we propagate by leaving
-                            // it set and returning Nil. The `[]` site
-                            // never observes our Nil because the
-                            // dispatch loop sees method_return first.
-                            if g.vm.method_return.is_some() {
-                                return Ok(Some(Value::Nil));
+                            // Reuse the iter.rs step_block helper
+                            // (#151) for the PIN-INVOKE-DISPATCH-CHECK
+                            // boilerplate. Stored-block semantics
+                            // diverge from iterator-yield only at the
+                            // Break arm: a Hash default-block is a
+                            // stored Proc, not an iterator yield, so
+                            // there's no loop body to break out of
+                            // and CRuby raises LocalJumpError. The
+                            // step_block helper leaves break_signaled
+                            // cleared by the time it returns Break(_),
+                            // so the trap doesn't carry the flag.
+                            match g.vm.step_block(block_id, vec![Value::Hash(id), k.clone()], pre_frames)? {
+                                crate::vm::iter::BlockStep::MethodReturn => {
+                                    // Non-local return propagates via
+                                    // method_return staying set; the
+                                    // `[]` site itself never observes
+                                    // our Nil because the dispatch
+                                    // loop sees method_return first.
+                                    return Ok(Some(Value::Nil));
+                                }
+                                crate::vm::iter::BlockStep::Break(_) => {
+                                    return Err(g.vm.trap(crate::error::RubyError::LocalJumpError {
+                                        msg: "break from proc-closure".into(),
+                                    }));
+                                }
+                                crate::vm::iter::BlockStep::Value(r) => {
+                                    return Ok(Some(r));
+                                }
                             }
-                            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                            // `break` from inside a stored Proc
-                            // (which is what a Hash default-block
-                            // is — not an iterator yield) is a
-                            // LocalJumpError in CRuby: there's no
-                            // loop body to break out of. Raise to
-                            // match. Clear the flag first so the
-                            // trap doesn't carry it into the outer
-                            // unwind state.
-                            if g.vm.break_signaled {
-                                g.vm.break_signaled = false;
-                                return Err(g.vm.trap(crate::error::RubyError::LocalJumpError {
-                                    msg: "break from proc-closure".into(),
-                                }));
-                            }
-                            return Ok(Some(r));
                         }
                         Some(Value::Nil)
                     }
