@@ -376,6 +376,26 @@ struct PostPreambleSnapshot {
     /// post-preamble value caps the counter at a known-safe
     /// baseline.
     cache_counter: u32,
+    /// `vm.fuel` at preamble completion — equivalent to
+    /// whatever `Config::fuel` the host passed to `with_config`
+    /// (the preamble itself runs with caps lifted by
+    /// `CapsGuard`, so the value sits unchanged from
+    /// `apply_config(cfg)` through to snapshot capture).
+    /// `reset()` restores it so each post-reset eval gets a
+    /// fresh fuel budget rather than inheriting whatever the
+    /// previous eval failed to consume.
+    ///
+    /// Pre-fix: vm.fuel was monotonically decremented by
+    /// `check_fuel` across the Runtime's lifetime and reset
+    /// didn't touch it. Embedders that call eval-then-reset-
+    /// then-eval would silently see the fuel cap leak across
+    /// resets — first surfaced by PR #222's fuzz harness
+    /// adoption (the harness worked around it with a per-iter
+    /// `apply_config` refresh). The Config-level doc-comment
+    /// for `fuel` is ambiguous about per-eval-vs-lifetime
+    /// semantics; honoring per-eval here makes reset's
+    /// contract match what hosts intuitively expect.
+    fuel: Option<u64>,
     /// `vm.method_gen` at preamble completion. `reset()` bumps
     /// this monotonically (wrapping_add(1) per call) so that
     /// CallCache entries' generation check fires fresh — which
@@ -621,6 +641,7 @@ impl PostPreambleSnapshot {
             interner_len: rt.vm.interner.len(),
             call_caches_len: rt.vm.call_caches.len(),
             cache_counter: rt.vm.cache_counter,
+            fuel: rt.vm.fuel,
             method_gen: rt.vm.method_gen,
             load_path: rt.vm.load_path,
             protos_len: rt.vm.protos.len(),
@@ -1016,6 +1037,18 @@ impl Runtime {
         // wrap and start aliasing unrelated call sites.
         self.vm.call_caches.truncate(snapshot.call_caches_len);
         self.vm.cache_counter = snapshot.cache_counter;
+        // Restore `fuel` so each post-reset eval starts with
+        // the same budget the host configured. Pre-fix this
+        // was missing: vm.fuel decremented monotonically and
+        // reset() didn't touch it, so an embedder calling
+        // eval-then-reset-then-eval saw the cap silently leak.
+        // The Config doc for `fuel` is ambiguous about per-eval
+        // vs lifetime semantics; honoring per-eval here matches
+        // what hosts intuitively expect and makes the
+        // documented "resource caps preserved" contract honest
+        // (caps go back to what apply_config set them to, not
+        // to whatever the prior eval drained them down to).
+        self.vm.fuel = snapshot.fuel;
         // --- Compiled bytecode (protos) ---
         // Truncate `vm.protos` back to the post-preamble length.
         // Every user `eval()` appends compiled `Proto` entries
