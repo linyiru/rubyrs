@@ -10,10 +10,14 @@
 #
 # Re-extracted post-PR #140 — `Array#last(n)` is now in subset
 # (cap-to-length, ArgumentError on negative, block-ignored).
-# One upstream `it` block remains manually skipped because the
+#
+# Five upstream `it` blocks remain skipped — 4 via polish.py
+# DROP_PATTERNS (one fixture-recursive, two mock-machinery,
+# one fixture-subclass) plus 1 hand-added skip because the
 # blanket polish rule was too coarse to handle it:
 #   - .replace-based "independent" check: `Array#replace` not
 #     in subset yet (would unlock when shipped).
+# SPEC_STATUS.md is authoritative for the exact counts.
 
 describe "Array#last" do
   it "returns the last element" do

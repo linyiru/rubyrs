@@ -12,12 +12,16 @@
 #
 # Re-extracted post-PR #140 — `Array#first(n)` is now in subset
 # (cap-to-length, ArgumentError on negative, block-ignored).
-# Two upstream `it` blocks remain manually skipped because the
+#
+# Six upstream `it` blocks remain skipped — 4 via polish.py
+# DROP_PATTERNS (one fixture-recursive, two mock-machinery,
+# one fixture-subclass) plus 2 hand-added skips because the
 # blanket polish rule was too coarse to handle them:
-#   - bignum_value RangeError: rubyrs caps to receiver length
-#     instead of raising; behavior divergence, not unimplemented.
+#   - bignum_value: CRuby raises RangeError; rubyrs raises
+#     NoMethodError (no BigInt arm), traced as `divergent`.
 #   - .replace-based "independent" check: `Array#replace` not
 #     in subset yet (would unlock when shipped).
+# SPEC_STATUS.md is authoritative for the exact counts.
 
 describe "Array#first" do
   it "returns the first element" do
