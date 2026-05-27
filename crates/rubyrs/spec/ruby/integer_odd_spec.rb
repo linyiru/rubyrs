@@ -17,11 +17,16 @@ describe "Integer#odd?" do
 
   # Same bignum-only gating as integer_even_spec.rb's
   # `**`-literal cases — the values overflow i64 and saturate
-  # via `i64::saturating_pow` to `i64::MAX` (odd) or `i64::MIN`
-  # (even) under no-bignum. The mix means some assertions
-  # trivially pass and others trivially fail under saturation;
-  # neither exercises the BigInt `odd?` path the spec was
-  # written for.
+  # via `i64::saturating_pow` to `i64::MAX = 9223372036854775807`
+  # (odd) under no-bignum. Negative literals like
+  # `-9873389**97` parse as `-(9873389**97)` because `**` binds
+  # tighter than unary `-` (see crates/rubyrs/tests/diff/power.rb:82-84),
+  # so the positive saturation is then negated to
+  # `-i64::MAX = -9223372036854775807` (also odd). All four
+  # saturated values end up odd, so under no-bignum the
+  # "odd" assertions trivially pass and the "even" assertions
+  # trivially fail — neither outcome exercises the BigInt
+  # `odd?` path the spec was written for.
   bignum_it "returns true if self is odd and positive" do
     assert_eq((987279**19).odd?, true)
   end
