@@ -1193,6 +1193,53 @@ impl Vm {
                     ),
                 }));
             }
+            // Arity / coerce guards for Int receivers. Sibling to the
+            // BigInt guards above; fire only when the happy-path arms
+            // (Int×Int / Int×BigInt-via-the-BigInt-arm) failed to
+            // match. Without these, wrong shapes fall past iter.rs
+            // entirely and surface as NoMethodError ('undefined
+            // method for Integer') — diverging from CRuby's
+            // ArgumentError (wrong arity) and TypeError (non-Integer
+            // arg). \`respond_to?(:times|:upto|:downto)\` says the
+            // methods exist on every Integer (see lookup.rs), so
+            // user code's \`rescue ArgumentError\` keys on the wrong
+            // class without these.
+            //
+            // Int recv with BigInt arg is handled by the BigInt arm
+            // above (it gates on either-side-is-BigInt), so by the
+            // time control reaches these arms the arg is either
+            // missing, multiple, or non-Integer.
+            (Value::Int(_), "times", _) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len(),
+                    ),
+                }));
+            }
+            (Value::Int(_), "upto" | "downto", []) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1)".to_string(),
+                }));
+            }
+            (Value::Int(_), "upto" | "downto", [other]) => {
+                // Single-arg shape but arg is non-Integer (Float,
+                // String, nil, Symbol, …). CRuby coerce error.
+                return Err(self.trap(crate::error::RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        crate::vm::numeric::type_name_for_coerce(other),
+                    ),
+                }));
+            }
+            (Value::Int(_), "upto" | "downto", many) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        many.len(),
+                    ),
+                }));
+            }
             // `(b..e).step(n) { |i| ... }` — yields each step value.
             // Returns the receiver Range, matching CRuby.
             (Value::Range(id), "step", [Value::Int(n)]) => {

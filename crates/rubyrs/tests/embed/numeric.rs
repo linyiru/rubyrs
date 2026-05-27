@@ -631,6 +631,42 @@ fn bigint_times_upto_downto_iterate_with_demote_on_fit() {
     assert_eq!(lines[10], "true");
 }
 
+#[test]
+fn int_iter_arity_and_coerce_errors_match_cruby() {
+    // Sibling fix to bigint_iter_arity_and_coerce_errors_match_cruby
+    // (PR #174 cycle 2): the Int-recv side of times/upto/downto
+    // had the same gap. Pre-fix `5.upto(3.14)` and `5.times(99)`
+    // both raised NoMethodError; CRuby raises TypeError /
+    // ArgumentError respectively, and `respond_to?(:times|:upto|
+    // :downto)` already returns true on Int via the lookup.rs
+    // whitelist — so the divergence is observable from rescue
+    // clauses.
+    //
+    // Int recv + BigInt arg (e.g. `5.upto(2**100)`) is handled by
+    // the BigInt arm and exercised separately.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected_class, expected_msg) in [
+        ("5.upto(3.14) { }",   "TypeError",     "no implicit conversion of Float into Integer"),
+        ("5.upto(\"x\") { }",  "TypeError",     "no implicit conversion of String into Integer"),
+        ("5.upto(nil) { }",    "TypeError",     "no implicit conversion of nil into Integer"),
+        ("5.upto { }",         "ArgumentError", "wrong number of arguments (given 0, expected 1)"),
+        ("5.upto(1, 2) { }",   "ArgumentError", "wrong number of arguments (given 2, expected 1)"),
+        ("5.downto(3.14) { }", "TypeError",     "no implicit conversion of Float into Integer"),
+        ("5.downto { }",       "ArgumentError", "wrong number of arguments (given 0, expected 1)"),
+        ("5.times(99) { }",    "ArgumentError", "wrong number of arguments (given 1, expected 0)"),
+        ("5.times(1, 2) { }",  "ArgumentError", "wrong number of arguments (given 2, expected 0)"),
+    ] {
+        let err = rt.eval(script, "int_iter_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            other => panic!("expected Uncaught {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_iter_arity_and_coerce_errors_match_cruby() {
