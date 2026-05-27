@@ -10,7 +10,7 @@ puts [1, 2, 3].member?(2)                    # true
 puts [1, 2, 3].member?(99)                   # false
 puts ["a", "b"].member?("a")                 # true
 puts [].member?(:anything)                   # false
-puts [1, "1", :one].member?("1")             # true (uses ruby_eq, not ==)
+puts [1, "1", :one].member?("1")             # true (== semantics, not eql?)
 
 # --- respond_to? whitelist ---
 puts [1, 2].respond_to?(:member?)            # true
