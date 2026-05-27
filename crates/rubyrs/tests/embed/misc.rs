@@ -606,3 +606,35 @@ fn array_spaceship_deep_nesting_does_not_overflow_stack() {
     ).expect("deep-nested spaceship should soft-fail to nil, not abort");
     assert!(matches!(v, Value::Nil), "expected Nil (depth ceiling tripped), got {:?}", v);
 }
+
+#[test]
+fn array_spaceship_mixed_int_float_coerces() {
+    // Mixed Int×Float element pairs previously returned nil
+    // because `value_cmp_v_heap` only had Float×Float — Int↔Float
+    // pairs fell through to `value_cmp_v`, which has no cross-
+    // type numeric arm, and propagated None upward.
+    //
+    // Now `[1.0] <=> [1]` returns 0 (CRuby parity), and
+    // `[2, 1.5].sort` produces `[1.5, 2]` instead of falling
+    // through to NoMethodError on the user_cmp None path.
+    let mut rt = Runtime::new();
+    let v = rt.eval(r#"[1.0] <=> [1]"#, "cmp_lf_ri.rb").unwrap();
+    assert!(matches!(v, Value::Int(0)), "[1.0] <=> [1]: expected 0, got {:?}", v);
+
+    let v = rt.eval(r#"[1] <=> [1.0]"#, "cmp_li_rf.rb").unwrap();
+    assert!(matches!(v, Value::Int(0)), "[1] <=> [1.0]: expected 0, got {:?}", v);
+
+    let v = rt.eval(r#"[1.0] <=> [2]"#, "cmp_lt.rb").unwrap();
+    assert!(matches!(v, Value::Int(-1)), "[1.0] <=> [2]: expected -1, got {:?}", v);
+
+    let v = rt.eval(r#"[2] <=> [1.0]"#, "cmp_gt.rb").unwrap();
+    assert!(matches!(v, Value::Int(1)), "[2] <=> [1.0]: expected 1, got {:?}", v);
+
+    // sort of a mixed Int/Float vector — previously fell through
+    // to NoMethodError on user_cmp None.
+    let v = rt.eval(r#"[2, 1.5].sort.inspect"#, "sort_mixed.rb").unwrap();
+    match &v {
+        Value::Str(s) => assert_eq!(s.to_string_lossy(), "[1.5, 2]"),
+        other => panic!("expected Str, got {:?}", other),
+    }
+}

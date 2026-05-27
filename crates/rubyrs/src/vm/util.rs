@@ -83,16 +83,23 @@ fn value_cmp_v_heap_inner(
             _ => {}
         }
     }
-    // Float×Float — `value_cmp_v` itself doesn't cover floats
-    // (it's the homogeneous-aggregator entrypoint), but
-    // `Array#<=>` reaches here on element-pair compares, and
-    // dropping Float coverage would make `[1.0] <=> [2.0]` and
-    // `[1.0].sort` over multi-element arrays return nil / fail
-    // even though `Float#<=>` itself works. `partial_cmp` on
-    // NaN returns None — propagate that upward, matching CRuby
-    // `[Float::NAN] <=> [Float::NAN] == nil`.
-    if let (Value::Float(x), Value::Float(y)) = (a, b) {
-        return x.partial_cmp(y);
+    // Numeric coercion arms — Float×Float and the mixed
+    // Int↔Float pairs. `value_cmp_v` itself doesn't cover
+    // numerics other than Int×Int (it's the homogeneous-
+    // aggregator entrypoint), so without these arms `Array#<=>`
+    // returns nil on any pair that crosses numeric types even
+    // though `Float#<=>(Integer)` is implemented at the
+    // primitive level. `partial_cmp` on NaN returns None →
+    // propagates upward, matching CRuby `[Float::NAN] <=>
+    // [Float::NAN] == nil`. The Int→f64 cast loses precision
+    // beyond 2^53 but matches CRuby's `Integer#<=>(Float)`
+    // semantics (CRuby's `Float#<=>(Integer)` also coerces
+    // through f64 for the same reason).
+    match (a, b) {
+        (Value::Float(x), Value::Float(y)) => return x.partial_cmp(y),
+        (Value::Int(x), Value::Float(y)) => return (*x as f64).partial_cmp(y),
+        (Value::Float(x), Value::Int(y)) => return x.partial_cmp(&(*y as f64)),
+        _ => {}
     }
     // Array#<=> element-wise lex compare. Length is the
     // tiebreaker only when all common-prefix pairs are Equal —
