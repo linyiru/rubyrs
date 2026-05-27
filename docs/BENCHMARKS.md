@@ -88,6 +88,106 @@ or native MRI wins on throughput (see "Throughput" below where
 rubyrs still trails CRuby's interpreter ~1.76× on a 1M-iteration
 loop). The two niches don't overlap.
 
+## Browser engine variation (Safari vs Chrome)
+
+The P2-A numbers above are under `wasmtime`. In-browser behaviour
+matters too if you're shipping into Safari, Chrome, or an embedded
+WebView. The harness used is checked in at
+[`poc/safari-stack-test/`](../poc/safari-stack-test/) — a minimal
+HTML page loading the wasm via `@bjorn3/browser_wasi_shim`, with a
+virtual filesystem holding the Ruby script. Each browser runs the
+same workload 3 times against a single compiled `Module`; the
+reported number is MIN.
+
+Platform: **x86_64 macOS** (Intel, not Apple Silicon — these
+absolute numbers will be lower on M-series, but the cross-engine
+and cross-runtime ratios should hold). Safari 26.3 (JSC), Chrome
+148 (V8). Both fresh tabs, foreground, no other heavy load.
+
+### Throughput — fizzbuzz 1M (MIN of 3)
+
+| Runtime | Safari/JSC | Chrome/V8 | Safari speedup |
+|---------|-----------:|----------:|---------------:|
+| **rubyrs.wasm** (1.5 MB) | **872 ms** | 1791 ms | **2.05× faster** |
+| ruby.wasm 3.4 minimal (24 MB) | 881 ms | 957 ms | 1.09× faster |
+| **rubyrs vs ruby.wasm on same engine** | **0.99× (tied)** | 1.87× slower | — |
+
+The headline finding: **on Safari, rubyrs.wasm matches ruby.wasm on
+throughput while shipping 16× less bytecode**. On Chrome, V8 happens
+to handle CRuby's dispatch shape better than rubyrs's single
+match-based loop, and rubyrs runs ~1.87× slower. Same binary, same
+script, same harness — the gap is entirely engine-side.
+
+JSC's wasm tier appears unusually friendly to rubyrs's
+single-function `Op::*` match-based dispatch; V8's Liftoff
+baseline is more conservative on long `br_table`s and at this
+workload may not have tiered up to TurboFan. For ruby.wasm both
+engines are within 9% of each other — CRuby's computed-goto split
+across many wasm functions is handled comparably.
+
+### Stack depth — `recurse.rb` (depth probe)
+
+```ruby
+def f(n); return 0 if n <= 0; 1 + f(n - 1); end
+```
+
+Maximum depth reached before either `SystemStackError` (rescuable)
+or a wasm trap:
+
+| Runtime | wasmtime 45 | Safari/JSC | Chrome/V8 |
+|---------|------------:|-----------:|----------:|
+| **rubyrs.wasm** | 1,000,000+ ✓ | **1,000,000+ ✓** | **1,000,000+ ✓** |
+| ruby.wasm 3.4 minimal | ~16,000 (SystemStackError) | ~16,000 | ~16,000 |
+
+rubyrs handles **60–125× deeper Ruby recursion** than ruby.wasm in
+every environment tested. The structural reason: rubyrs stores Ruby
+call frames in a heap-allocated `Vec<Frame>` ([`vm.rs:402`](../crates/rubyrs/src/vm.rs)),
+so Ruby-level recursion is a `Vec::push`, not a wasm function call —
+it doesn't consume the host wasm stack at all. CRuby's
+interpreter walks the host C stack one frame per Ruby call, so the
+maximum Ruby recursion depth in wasm is bounded by the engine's
+wasm stack budget.
+
+This is a "won by design" property of the Rust rewrite, not a
+tunable knob. The 16k floor for ruby.wasm is consistent across
+wasmtime, Safari, and Chrome, suggesting it's CRuby's own
+`stack_chk` triggering a clean SystemStackError before any engine
+trap. Bug reports of harder Safari crashes
+([ruby/ruby.wasm#532](https://github.com/ruby/ruby.wasm/issues/532))
+likely need a different reproducer than depth-only recursion;
+this section only documents the depth ceiling we measured.
+
+### Cold start
+
+The browser harness reports `compile` time separately — i.e. how
+long `WebAssembly.compile(bytes)` takes once the module is fetched.
+Per a single fresh tab (numbers vary ±20 ms run-to-run):
+
+| Runtime | Safari/JSC compile | Chrome/V8 compile |
+|---------|-------------------:|------------------:|
+| rubyrs.wasm | ~10 ms | ~14 ms |
+| ruby.wasm 3.4 minimal | ~120 ms | ~100 ms |
+
+A 10× difference in compile time, driven entirely by binary size.
+The implication: rubyrs's size advantage shows up not just in
+shipping cost but in tab-load latency. For interactive workloads
+(IRB-style demos, in-browser scripting), rubyrs is ready ~100 ms
+sooner per page load.
+
+### Honesty notes
+
+- Sample size is 3 per cell. Spreads were tight (≤±5% for fizzbuzz,
+  ≤±2% for stack depth — see [`poc/safari-stack-test/results.jsonl`](../poc/safari-stack-test/results.jsonl)).
+- Both browsers were given the script via the same virtual-FS shim
+  to keep instantiation overhead apples-to-apples.
+- Compile times are wall-clock from JS, not engine-internal
+  metrics. Background tier-up could continue past the reported
+  number; the throughput measurements that follow include any
+  tier-up effects amortised across 3 runs of the same Module.
+- We did **not** measure JS interop, DOM access, or `JS::Object#await`
+  — rubyrs ships zero JS-host integration today. These results
+  cover script execution only.
+
 ## Throughput
 
 1M iteration loop computing fizzbuzz string lengths.
@@ -144,12 +244,15 @@ short-lived objects with cycles. See [ADR 0003](adr/0003-rc-plus-mark-sweep-hybr
 
 ## Binary size
 
-| Target | Stripped size |
-|--------|--------------|
-| Native (aarch64-apple-darwin) | 997 KB |
-| `wasm32-wasip1` | 644 KB |
+| Target | Size |
+|--------|-----:|
+| Native (aarch64-apple-darwin, stripped) | 3.5 MB |
+| `wasm32-wasip1` (stripped) | 1.3 MB |
+| `wasm32-wasip1` (stripped + `wasm-opt -Oz`) | 1.2 MB |
 
 Includes the vendored Prism parser. There is no separate runtime to ship.
+For comparison, ruby.wasm 3.4 `wasi-minimal` is 24.1 MB raw — see the
+"P2-A pivot" section above for the same-shape comparison.
 
 ## Reproducing
 

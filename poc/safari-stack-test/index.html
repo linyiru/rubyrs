@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>rubyrs.wasm Safari stack test</title>
+  <style>
+    body { font-family: -apple-system, system-ui, monospace; padding: 20px; max-width: 900px; }
+    h1 { font-size: 18px; }
+    #ua { color: #666; font-size: 12px; margin-bottom: 12px; word-break: break-all; }
+    pre { background: #111; color: #0f0; padding: 12px; border-radius: 6px;
+          white-space: pre-wrap; word-break: break-word; min-height: 200px;
+          font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    .err { color: #f55; }
+    button { padding: 8px 14px; margin-right: 8px; font-size: 14px; }
+    label { font-size: 13px; margin-right: 12px; }
+    .row { margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <h1>rubyrs.wasm browser stack-depth test (issue #532 reproducer)</h1>
+  <div id="ua"></div>
+
+  <div class="row">
+    <label>wasm:
+      <select id="which">
+        <option value="rubyrs.wasm">rubyrs.wasm (1.5 MB)</option>
+        <option value="ruby.wasm">ruby.wasm (CRuby, ~22 MB)</option>
+      </select>
+    </label>
+    <label>script:
+      <select id="script">
+        <option value="recurse.rb">recurse.rb (depth probe)</option>
+        <option value="fizzbuzz_1m.rb">fizzbuzz_1m.rb (perf)</option>
+      </select>
+    </label>
+    <label>repeats:
+      <select id="repeats">
+        <option value="1">1</option>
+        <option value="3" selected>3 (report MIN)</option>
+        <option value="5">5 (report MIN)</option>
+      </select>
+    </label>
+    <button id="run">Run</button>
+    <button id="clear">Clear</button>
+  </div>
+
+  <pre id="out">(idle)</pre>
+
+  <script type="module">
+    let WASI, File, OpenFile, ConsoleStdout, PreopenDirectory;
+    try {
+      ({ WASI, File, OpenFile, ConsoleStdout, PreopenDirectory } =
+        await import("https://esm.sh/@bjorn3/browser_wasi_shim@0.4.2"));
+    } catch (e) {
+      document.getElementById("out").textContent =
+        "[harness] failed to load WASI shim from esm.sh: " + e +
+        "\n(check network / CDN reachability)";
+      throw e;
+    }
+
+    const $out = document.getElementById("out");
+    const $ua  = document.getElementById("ua");
+    $ua.textContent = `UA: ${navigator.userAgent}`;
+
+    // Captured output lines for the report POST at end-of-run.
+    let captured = [];
+    function log(msg, cls="") {
+      const line = document.createElement("span");
+      if (cls) line.className = cls;
+      line.textContent = msg + "\n";
+      $out.appendChild(line);
+      captured.push((cls === "err" ? "[err] " : "") + msg);
+    }
+    function clear() { $out.textContent = ""; captured = []; }
+
+    async function report(payload) {
+      try {
+        await fetch("/report", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        log(`[harness] report POST failed: ${e}`, "err");
+      }
+    }
+
+    document.getElementById("clear").onclick = clear;
+    document.getElementById("run").onclick = run;
+
+    async function run() {
+      clear();
+      const which   = document.getElementById("which").value;
+      const script  = document.getElementById("script").value;
+      const repeats = parseInt(document.getElementById("repeats").value, 10);
+      log(`[harness] loading ${which} + ${script} (x${repeats}) ...`);
+
+      const t0 = performance.now();
+
+      // Fetch script & wasm once; reuse compiled Module across iterations.
+      const [scriptBytes, wasmBytes] = await Promise.all([
+        fetch(script).then(r => r.arrayBuffer()),
+        fetch(which).then(r => r.arrayBuffer()),
+      ]);
+      log(`[harness] fetched ${(wasmBytes.byteLength/1024/1024).toFixed(2)} MB wasm, ${scriptBytes.byteLength} B script (${(performance.now()-t0).toFixed(0)} ms)`);
+
+      let compiled;
+      try {
+        compiled = await WebAssembly.compile(wasmBytes);
+      } catch (e) {
+        log(`[harness] compile failed: ${e}`, "err");
+        return;
+      }
+      log(`[harness] compiled (${(performance.now()-t0).toFixed(0)} ms total)`);
+
+      const samples = [];
+      let lastExit = "unknown";
+      for (let i = 1; i <= repeats; i++) {
+        log(`--- iter ${i}/${repeats} ---`);
+        // Fresh WASI + memory per iter (matches `time ruby script.rb`).
+        const rbFile = new File(new Uint8Array(scriptBytes));
+        const fds = [
+          new OpenFile(new File([])),
+          ConsoleStdout.lineBuffered(m => log(m)),
+          ConsoleStdout.lineBuffered(m => log(m, "err")),
+          new PreopenDirectory("/", new Map([[script, rbFile]])),
+        ];
+        const argv = [which.replace(/\.wasm$/, ""), `/${script}`];
+        const wasi = new WASI(argv, [], fds);
+
+        let inst;
+        try {
+          inst = await WebAssembly.instantiate(compiled, {
+            wasi_snapshot_preview1: wasi.wasiImport,
+          });
+        } catch (e) {
+          log(`[harness] instantiate failed: ${e}`, "err");
+          return;
+        }
+
+        const tRun = performance.now();
+        try {
+          wasi.start(inst);
+          lastExit = "clean";
+        } catch (e) {
+          if (e && /exit/i.test(String(e))) {
+            lastExit = `proc_exit (${e})`;
+          } else {
+            lastExit = `TRAP: ${e}`;
+            log(`[harness] TRAP: ${e}`, "err");
+            if (e && e.stack) log(e.stack, "err");
+            break;
+          }
+        }
+        const elapsed = performance.now() - tRun;
+        samples.push(elapsed);
+        log(`[harness] iter ${i}: ${elapsed.toFixed(1)} ms`);
+      }
+
+      const min = samples.length ? Math.min(...samples) : -1;
+      const mean = samples.length ? samples.reduce((a,b)=>a+b,0)/samples.length : -1;
+      log(`[harness] SUMMARY  min=${min.toFixed(1)} ms  mean=${mean.toFixed(1)} ms  samples=[${samples.map(s=>s.toFixed(0)).join(", ")}]`);
+
+      await report({
+        browser: navigator.userAgent,
+        which, script, repeats,
+        min_ms: Math.round(min),
+        mean_ms: Math.round(mean),
+        samples_ms: samples.map(s => Math.round(s)),
+        exit: lastExit,
+        lines: captured.length,
+        output: captured.join("\n"),
+      });
+    }
+  </script>
+</body>
+</html>
