@@ -74,11 +74,14 @@ jobs:
             ${{ runner.os }}-fuzz-${{ matrix.target }}-
 
       - name: Seed corpus from existing test fixtures
-        # First-run bootstrap: every `tests/diff/*.rb` and
-        # `tests/fixtures/*.rb` is by construction valid Ruby that
-        # rubyrs handles, so they're the highest-signal seeds we
-        # have. libfuzzer-sys hashes inputs by content, so re-running
-        # this step is idempotent (no duplicate corpus entries).
+        # First-run bootstrap: every `.rb` under `tests/diff/` and
+        # `tests/fixtures/` (walked recursively — nested entries
+        # like `tests/diff/require_xpkg/**` and
+        # `tests/fixtures/errors/**` count) is by construction
+        # valid Ruby that rubyrs handles, so they're the
+        # highest-signal seeds we have. libfuzzer-sys hashes
+        # inputs by content, so re-running this step is idempotent
+        # (no duplicate corpus entries).
         run: |
           set -euo pipefail
           dest="crates/rubyrs/fuzz/corpus/${{ matrix.target }}"

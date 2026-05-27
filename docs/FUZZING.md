@@ -79,19 +79,22 @@ cargo +nightly fuzz run parse artifacts/parse/crash-abc123
 
 ## Seeding the corpus
 
-The CI workflow seeds from `tests/diff/*.rb` and
-`tests/fixtures/*.rb` on first run; if you're starting locally
-with an empty `corpus/<target>/`, mirror that:
+The CI workflow seeds the corpus by walking `tests/diff/` and
+`tests/fixtures/` recursively — nested entries like
+`tests/diff/require_xpkg/...` or `tests/fixtures/errors/...` are
+picked up too, not just top-level `.rb` files. If you're starting
+locally with an empty `corpus/<target>/`, mirror that with the
+same recursive walk:
 
 ```sh
 mkdir -p crates/rubyrs/fuzz/corpus/parse crates/rubyrs/fuzz/corpus/eval
-cp crates/rubyrs/tests/diff/*.rb     crates/rubyrs/fuzz/corpus/parse/
-cp crates/rubyrs/tests/fixtures/*.rb crates/rubyrs/fuzz/corpus/parse/
-cp crates/rubyrs/tests/diff/*.rb     crates/rubyrs/fuzz/corpus/eval/
-cp crates/rubyrs/tests/fixtures/*.rb crates/rubyrs/fuzz/corpus/eval/
+for target in parse eval; do
+  find crates/rubyrs/tests/diff     -name '*.rb' -exec cp {} "crates/rubyrs/fuzz/corpus/$target/" \;
+  find crates/rubyrs/tests/fixtures -name '*.rb' -exec cp {} "crates/rubyrs/fuzz/corpus/$target/" \;
+done
 ```
 
-Every entry in `tests/diff/` and `tests/fixtures/` is real Ruby that rubyrs already
+Every entry under `tests/diff/` and `tests/fixtures/` is real Ruby that rubyrs already
 handles, so it's the highest-signal starting point we have.
 
 ## When a fuzz finding lands
