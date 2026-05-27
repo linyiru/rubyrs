@@ -4,6 +4,10 @@
 # evicted shape misses and re-fills, thrashing all 4 ways.
 # This is the workload that would benefit from widening
 # IC_WAYS to 5 (or LRU eviction).
+#
+# Accumulator pattern matches workload 02 — load-bearing
+# dispatch result so a future DCE pass can't silently strip
+# the hot site.
 N = 10_000
 class A; def tag; 'a'; end; end
 class B; def tag; 'b'; end; end
@@ -12,9 +16,9 @@ class D; def tag; 'd'; end; end
 class E; def tag; 'e'; end; end
 shapes = [A.new, B.new, C.new, D.new, E.new]
 i = 0
-seen = 0
+total = 0
 while i < N
-  seen += 1 if shapes[i % 5].tag.length > 0
+  total += shapes[i % 5].tag.length
   i += 1
 end
-puts seen
+puts total
