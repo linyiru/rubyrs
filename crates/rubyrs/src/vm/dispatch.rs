@@ -2144,28 +2144,32 @@ impl Vm {
             // override silently bypassed.
             && self.lookup_class_singleton_method(cls, name_id).is_none()
         {
-            // Validate args[0] (source) type: non-String falls
-            // through here (no user override + no block path
-            // matched) and should surface as TypeError, NOT
-            // NoMethodError. `respond_to?(:class_eval)` returns
-            // true, so the dispatch reaching this point means
-            // the method exists — bad arg type is a TypeError.
-            if !matches!(args[0], Value::Str(_)) {
-                return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into String",
-                        args[0].type_name()
-                    ),
-                }));
-            }
-            // CRuby's class_eval(string [, file, line]) signature:
-            // 1..3 args. Extra args silently dropped would mask
-            // caller bugs.
+            // Arity guard FIRST so too-many-arg calls surface as
+            // ArgumentError, matching CRuby's check order (arity
+            // → type). Without this, `C.class_eval(123, "f", 1,
+            // :extra)` would report a misleading TypeError on
+            // args[0] even though the call is out of the 1..3
+            // signature.
             if args.len() > 3 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
                         "wrong number of arguments (given {}, expected 1..3)",
                         args.len()
+                    ),
+                }));
+            }
+            // Validate args[0] (source) type after arity. Non-
+            // String falls through here (no user override + no
+            // block path matched) and should surface as TypeError,
+            // NOT NoMethodError. `respond_to?(:class_eval)`
+            // returns true, so the dispatch reaching this point
+            // means the method exists — bad arg type is a
+            // TypeError.
+            if !matches!(args[0], Value::Str(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        args[0].type_name()
                     ),
                 }));
             }

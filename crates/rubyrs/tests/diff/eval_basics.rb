@@ -135,6 +135,20 @@ rescue TypeError
   puts "eval(bad-file) → TypeError"
 end
 
+# --- Arity guard fires BEFORE type guard (CRuby check order).
+#     `eval(non-str, ..., extra)` reports ArgumentError for the
+#     out-of-signature arity rather than masking with TypeError.
+begin
+  eval(123, nil, "file", 1, :extra)
+rescue ArgumentError
+  puts "eval(>4 args) → ArgumentError"
+end
+begin
+  ArityCheck.class_eval(123, "file", 1, :extra)
+rescue ArgumentError
+  puts "class_eval(>3 args) bad-src → ArgumentError"
+end
+
 # --- Non-Integer line arg raises TypeError (CRuby parity).
 #     Float is accepted (has `to_int`), but String/Symbol/nil aren't.
 begin

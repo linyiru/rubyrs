@@ -752,9 +752,22 @@ impl Vm {
             //     wired through to source-registration (used by
             //     backtraces / `Method#source_location`).
             "eval" => match args {
-                // Validate source arg type first so a non-String
-                // first arg surfaces as TypeError before any arity
-                // / filename checks.
+                // Arity guard FIRST so too-many-arg calls surface
+                // as ArgumentError, matching CRuby's check order
+                // (arity → type). Without this, `eval(123, nil,
+                // "file", 1, :extra)` would TypeError on the
+                // first-arg check below even though the call is
+                // out of the 1..4 signature.
+                _ if args.len() > 4 => {
+                    Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..4)",
+                            args.len()
+                        ),
+                    })))
+                }
+                // Validate source arg type after the arity check.
+                // Non-String first arg surfaces as TypeError.
                 [other, ..] if !matches!(other, Value::Str(_)) => {
                     Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(
