@@ -1774,6 +1774,45 @@ fn bigint_times_upto_downto_iterate_with_demote_on_fit() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_iter_yield_pinned_across_rest_param_gc_window() {
+    // Regression for PR #174 cycle 1: `invoke_block` builds the
+    // rest-args Array via heap.alloc, which runs maybe_gc with
+    // only the Block pinned — leaving any freshly-allocated
+    // yielded Value reachable only from the local args Vec,
+    // which GC doesn't see. Without the per-iteration
+    // `vm.pinned.push(yield_val)` fix, this would sweep the
+    // yielded BigInt and either panic or read garbage into
+    // the rest-Array.
+    //
+    // Reproducer: BigInt counter (`(big - 5).upto(big)` yields
+    // five separately-allocated BigInts), block with `|*args|`
+    // rest param, allocations inside the block to trigger GC.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // `|*args|` triggers the rest-args allocation path in
+        // invoke_block. The body allocates strings to pressure GC.
+        // The yielded BigInt must survive into the rest-Array so
+        // `args[0].to_s` produces the right value.
+        "out = []\n\
+         (2 ** 80).upto(2 ** 80 + 4) do |*args|\n\
+           50.times { |k| _ = \"alloc#{k}\".dup }\n\
+           out << args[0].to_s\n\
+         end\n\
+         puts out.size\n\
+         puts out.first\n\
+         puts out.last",
+        "bigint_iter_rest_gc.rb",
+    ).expect("eval");
+    let lines: Vec<String> = buf.snapshot().trim().split('\n').map(String::from).collect();
+    assert_eq!(lines[0], "5");
+    assert_eq!(lines[1], "1208925819614629174706176"); // 2^80
+    assert_eq!(lines[2], "1208925819614629174706180"); // 2^80 + 4
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_iter_survives_gc_inside_block() {
     // GC stress: the yielded BigInt sits in the block-arg slot
     // (a Ruby stack root) during invocation, but the block may

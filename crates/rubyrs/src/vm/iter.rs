@@ -971,7 +971,20 @@ impl Vm {
                 let mut counter = BigInt::from(0);
                 while counter < recv_owned {
                     let yield_val = g.vm.bigint_to_value(counter.clone())?;
-                    match g.vm.step_block(block, vec![yield_val], pre_frames)? {
+                    // Pin the yielded BigInt across step_block: if
+                    // the block has a rest param, invoke_block
+                    // builds the rest-args Array via heap.alloc,
+                    // which runs maybe_gc with only the Block pinned
+                    // — leaving the freshly-allocated yield_val
+                    // reachable only from the local args Vec, which
+                    // GC doesn't see. Push/pop directly on
+                    // `vm.pinned` (avoiding PinGuard's
+                    // accumulate-and-drop model) so the per-
+                    // iteration pin doesn't leak.
+                    g.vm.pinned.push(yield_val.clone());
+                    let step_result = g.vm.step_block(block, vec![yield_val], pre_frames);
+                    g.vm.pinned.pop();
+                    match step_result? {
                         BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}
@@ -999,7 +1012,13 @@ impl Vm {
                 let mut counter = start;
                 while counter <= stop {
                     let yield_val = g.vm.bigint_to_value(counter.clone())?;
-                    match g.vm.step_block(block, vec![yield_val], pre_frames)? {
+                    // See `times` arm above for the per-iteration
+                    // pin rationale (invoke_block's rest-args path
+                    // runs maybe_gc with only the Block pinned).
+                    g.vm.pinned.push(yield_val.clone());
+                    let step_result = g.vm.step_block(block, vec![yield_val], pre_frames);
+                    g.vm.pinned.pop();
+                    match step_result? {
                         BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}
@@ -1026,7 +1045,12 @@ impl Vm {
                 let mut counter = start;
                 while counter >= stop {
                     let yield_val = g.vm.bigint_to_value(counter.clone())?;
-                    match g.vm.step_block(block, vec![yield_val], pre_frames)? {
+                    // See `times` arm above for the per-iteration
+                    // pin rationale.
+                    g.vm.pinned.push(yield_val.clone());
+                    let step_result = g.vm.step_block(block, vec![yield_val], pre_frames);
+                    g.vm.pinned.pop();
+                    match step_result? {
                         BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}
