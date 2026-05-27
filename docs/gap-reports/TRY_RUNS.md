@@ -124,10 +124,12 @@ something its embedder is expected to provide.
 
 One observation kept passing through the table without being a
 blocker: a `Gem::Version.new(RUBY_VERSION)` call ends up doing
-`"3.4.1" <=> "3.0"` via String comparison, which rubyrs's Tier-1
-String impl gets right. Not in the table because it's not a
-blocker; called out here to record that this *did* go through
-the probe without surprise.
+`RUBY_VERSION <=> "3.0"` via String comparison (the actual
+literal depends on whichever RUBY_VERSION rubyrs reports —
+currently `"3.4.0"` per `crates/rubyrs/src/lib.rs`), which the
+Tier-1 String impl gets right. Not in the table because it's
+not a blocker; called out here to record that this *did* go
+through the probe without surprise.
 
 | # | File / line | Symbol | Category | Notes |
 |---|---|---|---|---|
@@ -156,7 +158,7 @@ In order of "smallest fix that closes the next blocker":
 
 1. **`Object#instance_variable_get` + `Object#instance_variable_set`** — well-defined CRuby built-ins, ~10 lines. Closes layer #2 and likely several others (introspection-heavy gems use these constantly). Tier 1 candidate.
 2. **`Class#allocate`** — bypass-initialize allocator. Closes layer #4; also load-bearing for any framework that stores per-instance C state via TypedData-equivalent. Tier 1.
-3. **`Regexp#freeze` as no-op** — one line. Closes layer #5. Mirrors how rubyrs already treats `String#freeze` (regex literals frozen-by-construction in CRuby 3.x). Tier 1.
+3. **`Regexp#freeze` as no-op** — one line. Closes layer #5. CRuby's `Regexp` values are immutable by construction (no mutating instance methods), so `freeze` on a Regexp has nothing to enforce and is safe to no-op for compatibility. (Distinct from `String#freeze`, which rubyrs implements with real frozen-flag tracking — strings have mutators that need enforcement; regexes don't.) Tier 1.
 4. **`alias` ancestor lookup fix** — layer #6 is the only true bug; the minimal repro shows the lookup chain isn't walking nested-via-path superclasses. _Hypothesis (not yet verified against the implementation)_: alias-time method resolution may consult only the current class's method table rather than walking the `Class.superclass` chain. Modest scope expected; the actionable artifact here is the minimal repro itself, plus one regression test pinning the nested case once the cause is confirmed in code.
 
 ### Cumulative category histogram (sinatra/base.rb body itself, this pass)
