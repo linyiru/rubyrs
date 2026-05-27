@@ -12,9 +12,16 @@ describe "Hash#merge" do
     h = { 1 => :a, 2 => :b, 3 => :c }.merge(a: 1, c: 2)
     assert_eq(h, { c: 2, 1 => :a, 2 => :b, a: 1, 3 => :c })
 
+    # Pin non-mutating behavior: `merge` must return a fresh
+    # Hash, not the receiver or the argument — value equality
+    # alone would still pass if either were returned in place.
     hash = { a: 1, b: 2 }
-    assert_eq({}.merge(hash), hash)
-    assert_eq(hash.merge({}), hash)
+    empty_merge = {}.merge(hash)
+    assert_eq(empty_merge, hash)
+    assert(!empty_merge.equal?(hash))
+    self_empty = hash.merge({})
+    assert_eq(self_empty, hash)
+    assert(!self_empty.equal?(hash))
 
     h = { 1 => :a, 2 => :b, 3 => :c }.merge(1 => :b)
     assert_eq(h, { 1 => :b, 2 => :b, 3 => :c })
