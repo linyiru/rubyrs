@@ -938,11 +938,23 @@ impl Vm {
             // `num_bigint::BigInt` on the Rust stack; per-iteration
             // `bigint_to_value` demotes to `Value::Int` whenever the
             // current count fits i64 (the common in-range case for
-            // `(big - 5).upto(big)` etc.). The yielded Value's heap
-            // entry stays reachable through the block invocation via
-            // the block-arg slot on the Ruby stack — no per-iteration
-            // pin needed beyond pinning recv / stop / block once at
-            // the start.
+            // `(big - 5).upto(big)` etc.). The yielded Value is then
+            // pinned via `vm.pinned.push` / `.pop` around the
+            // `step_block` call — required because `invoke_block`'s
+            // rest-args path (dispatch.rs::invoke_block) calls
+            // `maybe_gc` with only the Block pinned, which would
+            // sweep the freshly-allocated yield BigInt sitting in
+            // the local args Vec. Discovered as a STRESS_GC use-
+            // after-free in PR #174 cycle 1; pinned by
+            // `bigint_iter_yield_pinned_across_rest_param_gc_window`.
+            //
+            // The outer PinGuard scopes recv / stop / block for the
+            // whole loop. Per-iteration pin uses raw `vm.pinned`
+            // push/pop (PinGuard's accumulate-and-drop model would
+            // leak per-iteration entries; the manual pair scopes the
+            // pin to exactly one step_block call, with pop placed
+            // BEFORE the `?` on step_result so Trap propagation also
+            // unpins cleanly).
             //
             // Wall-clock cap is the natural DoS protection for these
             // (a literal `(2**100).times` would run essentially
