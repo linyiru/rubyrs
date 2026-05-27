@@ -361,16 +361,48 @@ impl Runtime {
     }
 
     pub fn with_config(cfg: Config) -> Self {
-        // Apply Config BEFORE loading the preamble so user-supplied
-        // resource caps (fuel, max_frames, max_heap_objects, etc.)
-        // are in effect during preamble eval — and `apply_config`'s
-        // contract ("call before any eval()") is honored. The wizer
-        // path can't do this: it has no host Config at snapshot time,
-        // so its preamble runs under defaults — that's by design and
-        // documented on `new_default_impl`.
+        // Apply Config BEFORE loading the preamble so host-visible
+        // settings (`env`, `pid`, `time_now`, `stress_gc`) the
+        // preamble might consult use the host's values, and
+        // `apply_config`'s contract ("call before any eval()") is
+        // honored. The wizer path can't do this: it has no host
+        // Config at snapshot time, so its preamble runs under
+        // defaults — that's by design and documented on
+        // `new_default_impl`.
+        //
+        // Resource caps (`fuel`, `max_frames`, `max_heap_objects`,
+        // `max_symbols`, `max_value_bytes`, `deadline`) are a
+        // different concern: the preamble is internal
+        // infrastructure, not user code, and consuming the host's
+        // budget for bootstrap means a host that legitimately
+        // wants a tight sandbox (e.g. `Config { fuel: Some(small) }`
+        // for fuzz / untrusted-script evaluation) cannot construct
+        // a Runtime at all — the preamble eval traps and the
+        // `.expect` in `load_preamble` panics with a SIGABRT
+        // instead of returning a recoverable error. Originally
+        // surfaced by the cargo-fuzz harness in PR #180, where a
+        // workaround sized `fuel: Some(50_000)` above the observed
+        // preamble cost.
+        //
+        // Fix: lift resource caps for the duration of preamble
+        // load, then restore them. Net behaviour for callers: the
+        // preamble always runs unbounded; user-supplied caps still
+        // apply to every subsequent `eval()`, exactly as documented.
         let mut rt = Self::build_skeleton();
         rt.apply_config(cfg);
+        let saved_fuel = rt.vm.fuel.take();
+        let saved_max_frames = rt.vm.max_frames.take();
+        let saved_max_symbols = rt.vm.max_symbols.take();
+        let saved_max_value_bytes = rt.vm.max_value_bytes.take();
+        let saved_max_heap = rt.vm.heap.max_live.take();
+        let saved_deadline = rt.deadline.take();
         rt.load_preamble();
+        rt.vm.fuel = saved_fuel;
+        rt.vm.max_frames = saved_max_frames;
+        rt.vm.max_symbols = saved_max_symbols;
+        rt.vm.max_value_bytes = saved_max_value_bytes;
+        rt.vm.heap.max_live = saved_max_heap;
+        rt.deadline = saved_deadline;
         rt
     }
 

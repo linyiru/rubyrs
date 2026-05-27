@@ -491,3 +491,104 @@ fn integer_iter_loops_trap_under_fuel_cap() {
         );
     }
 }
+
+// --- Preamble bypasses user-supplied resource caps -------------------
+//
+// Before this lane existed, `Runtime::with_config` applied user
+// caps before running the exception-class preamble, so a tight
+// budget (any of: `fuel < ~9k`, `max_frames < ~30`,
+// `max_heap_objects < ~50`, sub-millisecond `deadline`) panicked
+// during construction with `ICE: failed to load exception
+// preamble`. Surfaced by the cargo-fuzz harness in PR #180 and
+// fixed by lifting resource caps for the duration of preamble
+// load, then restoring them. These tests pin both halves of the
+// contract: construction succeeds under tight caps, and the
+// caps still apply to every subsequent `eval()`.
+
+#[test]
+fn with_config_succeeds_under_zero_fuel() {
+    // `fuel: Some(0)` is the most extreme case — every op
+    // dispatched should trap. Pre-fix, this panicked on the
+    // first preamble op.
+    let mut rt = Runtime::with_config(Config { fuel: Some(0), ..Default::default() });
+    let err = rt.eval("1 + 1", "tight.rb").unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected user eval to still hit fuel cap, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn with_config_succeeds_under_tight_frames_cap() {
+    // The preamble defines several classes whose bodies push
+    // frames — `max_frames: Some(1)` would have trapped on the
+    // first `class StandardError; ... end` body pre-fix.
+    let mut rt = Runtime::with_config(Config { max_frames: Some(1), ..Default::default() });
+    let err = rt.eval(
+        "def deep(n); deep(n + 1); end; deep(0)",
+        "frames.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected user eval to still hit frames cap, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn with_config_succeeds_under_tight_heap_cap() {
+    // The preamble allocates several `HeapObj::Class` slots
+    // (one per Exception subclass + Object + Comparable + ...).
+    // `max_heap_objects: Some(1)` would have trapped on the
+    // second class allocation pre-fix.
+    let mut rt = Runtime::with_config(Config { max_heap_objects: Some(1), ..Default::default() });
+    let err = rt.eval("Array.new(100) { |i| i }", "heap.rb").unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected user eval to still hit heap cap, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn with_config_succeeds_under_sub_ms_deadline() {
+    // A nanosecond-grade deadline trips on the first
+    // `Op::CheckDeadline` (fires every 1024 ops). Any
+    // sub-millisecond deadline used to panic during
+    // construction; now construction succeeds and the
+    // deadline only applies to user `eval()` calls.
+    let cfg = Config {
+        deadline: Some(std::time::Duration::from_nanos(1)),
+        ..Default::default()
+    };
+    let mut rt = Runtime::with_config(cfg);
+    // Even a trivial `eval` should now trap on the first
+    // deadline check rather than panicking during construction.
+    let _ = rt.eval("", "deadline.rb");
+}
+
+#[test]
+fn with_config_succeeds_under_combined_tight_caps() {
+    // All caps tightened at once — the original failure mode
+    // for fuzz harnesses (`fuel: Some(50_000)` was the magic
+    // workaround number in PR #180 before this fix landed).
+    // Verify a host can now ask for the kind of sandbox a
+    // fuzzer or untrusted-script evaluator actually wants.
+    let cfg = Config {
+        fuel: Some(10),
+        max_frames: Some(8),
+        max_heap_objects: Some(16),
+        max_symbols: Some(64),
+        max_value_bytes: Some(1024),
+        deadline: Some(std::time::Duration::from_millis(50)),
+        ..Default::default()
+    };
+    // Just constructing it would have panicked before. The
+    // sandbox is functional — user eval traps cleanly on the
+    // first cap that bites (fuel here, with 10 ops fizz a
+    // multi-element iteration trivially exceeds it).
+    let mut rt = Runtime::with_config(cfg);
+    let err = rt.eval("[1,2,3,4,5].map { |x| x * 2 }", "sandbox.rb").unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted from one of the tight caps, got {:?}", err.err,
+    );
+}
