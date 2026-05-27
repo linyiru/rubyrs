@@ -1330,10 +1330,17 @@ impl Vm {
     /// Shared backend for `String#[regex]` and `String#[regex, n]`.
     /// Returns the n-th capture group (0 = whole match) as a String,
     /// or Nil if the regex didn't match / the requested group didn't
-    /// participate. Mirrors `String#match` in updating `last_match`
+    /// participate / `n` is out of range. Out-of-range parity with
+    /// CRuby (which also returns nil — `String#[regex, n]` does NOT
+    /// raise on out-of-range indices).
+    ///
+    /// Divergence: negative `n` (CRuby supports `-1` for "last
+    /// group", `-2` for next-to-last, etc.) is not modeled — any
+    /// `n < 0` falls through to the Nil branch instead of indexing
+    /// from the end.
+    ///
+    /// Side-effect: mirrors `String#match` in updating `last_match`
     /// so `$~`, `$&`, `$1..$N`, `` $` ``, `$'`, `$+` stay correct.
-    /// Negative `n` (CRuby allows `-1` for "last group", etc.) is
-    /// not modeled; out-of-range returns Nil rather than raising.
     #[cfg(feature = "regex")]
     fn str_bracket_regex(
         &mut self,
