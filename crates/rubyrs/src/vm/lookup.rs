@@ -39,6 +39,117 @@ pub(crate) struct CallCacheEntry {
 /// megamorphic case (> IC_WAYS distinct classes) degenerates to
 /// the same uncached walk the old single-slot cache did.
 pub(crate) const IC_WAYS: usize = 4;
+
+/// Counters for the per-call-site IC, gated behind the `ic-stats`
+/// cargo feature. ZST + `#[inline(always)]` no-op methods when
+/// off, so production builds pay nothing — same shape as the
+/// `trace-startup` feature.
+///
+/// `hits` / `misses` count receiver-class dispatch via
+/// `lookup_method_cached`; `toplevel_hits` / `toplevel_misses` are
+/// the analogous counters for the implicit-toplevel cache
+/// (`lookup_toplevel_method_cached`). Keeping them separate lets a
+/// reader tell whether a low aggregate hit rate is the receiver-
+/// dispatch path going megamorphic or just the toplevel-`def`
+/// recompile churn that follows any DefMethod.
+#[cfg(feature = "ic-stats")]
+#[derive(Clone, Default, Debug)]
+pub struct IcStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub toplevel_hits: u64,
+    pub toplevel_misses: u64,
+}
+
+#[cfg(not(feature = "ic-stats"))]
+#[derive(Clone, Default, Debug)]
+pub struct IcStats;
+
+impl IcStats {
+    /// Zero-initialised constructor. Feature-aware so the
+    /// caller never has to know whether `IcStats` is a unit
+    /// struct (feature off) or a four-field counter struct
+    /// (feature on). Using a dedicated `new()` instead of
+    /// `Default::default()` keeps clippy quiet on the
+    /// production (feature-off) build — `default()` on a
+    /// unit struct fires `default_constructed_unit_structs`.
+    #[cfg(feature = "ic-stats")]
+    #[inline(always)]
+    pub(crate) const fn new() -> Self {
+        Self {
+            hits: 0,
+            misses: 0,
+            toplevel_hits: 0,
+            toplevel_misses: 0,
+        }
+    }
+    #[cfg(not(feature = "ic-stats"))]
+    #[inline(always)]
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+
+    #[cfg(feature = "ic-stats")]
+    #[inline(always)]
+    pub(crate) fn record_hit(&mut self) {
+        self.hits += 1;
+    }
+    #[cfg(not(feature = "ic-stats"))]
+    #[inline(always)]
+    pub(crate) fn record_hit(&mut self) {}
+
+    #[cfg(feature = "ic-stats")]
+    #[inline(always)]
+    pub(crate) fn record_miss(&mut self) {
+        self.misses += 1;
+    }
+    #[cfg(not(feature = "ic-stats"))]
+    #[inline(always)]
+    pub(crate) fn record_miss(&mut self) {}
+
+    #[cfg(feature = "ic-stats")]
+    #[inline(always)]
+    pub(crate) fn record_toplevel_hit(&mut self) {
+        self.toplevel_hits += 1;
+    }
+    #[cfg(not(feature = "ic-stats"))]
+    #[inline(always)]
+    pub(crate) fn record_toplevel_hit(&mut self) {}
+
+    #[cfg(feature = "ic-stats")]
+    #[inline(always)]
+    pub(crate) fn record_toplevel_miss(&mut self) {
+        self.toplevel_misses += 1;
+    }
+    #[cfg(not(feature = "ic-stats"))]
+    #[inline(always)]
+    pub(crate) fn record_toplevel_miss(&mut self) {}
+
+    /// Aggregate hit ratio across both receiver and toplevel
+    /// paths. Returns `0.0` when no lookups have been recorded so
+    /// callers don't have to special-case division by zero.
+    ///
+    /// When the `ic-stats` cargo feature is OFF, `IcStats` is a
+    /// ZST and this is a stub that always returns `0.0`. The
+    /// stub is `#[inline(always)]` so callers in downstream
+    /// crates can write feature-agnostic code (always-callable
+    /// API) without paying any cost on production builds.
+    #[cfg(feature = "ic-stats")]
+    pub fn hit_rate(&self) -> f64 {
+        let h = self.hits + self.toplevel_hits;
+        let total = h + self.misses + self.toplevel_misses;
+        if total == 0 {
+            0.0
+        } else {
+            h as f64 / total as f64
+        }
+    }
+    #[cfg(not(feature = "ic-stats"))]
+    #[inline(always)]
+    pub fn hit_rate(&self) -> f64 {
+        0.0
+    }
+}
 const TOPLEVEL_METHOD_CACHE_KEY: usize = usize::MAX;
 #[derive(Clone, Default)]
 pub(crate) struct CallCache {
@@ -74,11 +185,13 @@ impl Vm {
             let cur_gen = self.method_gen;
             for w in &cc.ways {
                 if w.class_ptr == class_ptr && w.generation == cur_gen {
+                    self.ic_stats.record_hit();
                     return w.method.clone();
                 }
             }
         }
         // Miss: walk the chain, populate next way.
+        self.ic_stats.record_miss();
         let m = self.lookup_method_uncached(cls, name_id);
         if idx < self.call_caches.len() {
             let cur_gen = self.method_gen;
@@ -116,11 +229,13 @@ impl Vm {
             let cur_gen = self.method_gen;
             for w in &cc.ways {
                 if w.class_ptr == TOPLEVEL_METHOD_CACHE_KEY && w.generation == cur_gen {
+                    self.ic_stats.record_toplevel_hit();
                     return w.method.clone();
                 }
             }
         }
 
+        self.ic_stats.record_toplevel_miss();
         let m = self.toplevel_methods.get(&name_id).cloned();
         if idx < self.call_caches.len() {
             let cur_gen = self.method_gen;
@@ -136,7 +251,15 @@ impl Vm {
         m
     }
 
-    pub(crate) fn lookup_toplevel_method_cache_hit(&self, cache_id: u16) -> Option<Rc<Method>> {
+    /// Fast-path hit lookup for the toplevel cache. Sister to
+    /// `lookup_toplevel_method_cached`'s hot loop, but used by
+    /// `do_call(no_recv)` before the full uncached fallback path
+    /// would run. Takes `&mut self` purely so the `ic-stats`
+    /// counter increment can land here — without that, the fast
+    /// path would silently bypass the IC accounting and the
+    /// `hit_rate()` aggregate would systematically under-report
+    /// for hot toplevel call sites.
+    pub(crate) fn lookup_toplevel_method_cache_hit(&mut self, cache_id: u16) -> Option<Rc<Method>> {
         let idx = cache_id as usize;
         if idx >= self.call_caches.len() {
             return None;
@@ -145,6 +268,7 @@ impl Vm {
         let cur_gen = self.method_gen;
         for w in &cc.ways {
             if w.class_ptr == TOPLEVEL_METHOD_CACHE_KEY && w.generation == cur_gen {
+                self.ic_stats.record_toplevel_hit();
                 return w.method.clone();
             }
         }
