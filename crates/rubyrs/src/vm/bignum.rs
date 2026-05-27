@@ -526,24 +526,45 @@ impl Vm {
     /// side.
     ///
     /// Returns:
-    /// - `Some(v)` for Int/BigInt × Int/BigInt — result funnelled
+    /// - `Some(v)` for Integer × Integer — result funnelled
     ///   through `bigint_to_value` for demote-on-fit (e.g.
     ///   `(2**100) & 0xff` demotes to Int).
-    /// - `Ok(None)` for non-integer args (the caller falls through
-    ///   to the regular dispatch path which produces the right
-    ///   TypeError / NoMethodError).
+    /// - `Ok(None)` when the receiver is not an Integer (caller
+    ///   falls through; not our concern).
+    /// - `Err(TypeError)` when the receiver IS an Integer but the
+    ///   arg is not — CRuby raises "no implicit conversion of X
+    ///   into Integer" here, not NoMethodError. Pre-fix the helper
+    ///   returned Ok(None) for non-Integer args and the
+    ///   fall-through landed at NoMethodError, diverging from both
+    ///   CRuby and from the sibling bignum arithmetic paths which
+    ///   raise TypeError on the same shape.
     ///
     /// Fires for both `(BigInt, op, [_])` and `(Int, op, [BigInt])`
     /// shapes — the recv-or-arg-is-BigInt guard in
     /// `bigint_primitive` is what gates entry. Int × Int is owned
     /// by numeric.rs's existing `(Int, op, [Int])` bit-op arm and
-    /// never reaches here.
+    /// never reaches here, EXCEPT when arg is non-Integer (Float,
+    /// String, …) — that case falls through to this helper so the
+    /// TypeError raise applies uniformly across Int and BigInt
+    /// receivers.
     pub(crate) fn try_bigint_bit_binop(
         &mut self,
         recv: &Value,
         name: &str,
         arg: &Value,
     ) -> Result<Option<Value>, Trap> {
+        if !matches!(recv, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        // Arg-type guard: non-Integer raises TypeError matching
+        // CRuby's coerce-error wording (sibling to the unified
+        // `Integer#to_s(non_integer)` arm in numeric.rs).
+        if !matches!(arg, Value::Int(_) | Value::BigInt(_)) {
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    crate::vm::numeric::type_name_for_coerce(arg),
+                ),
+            }));
+        }
         let result = {
             // Borrow scope: both sides borrowed as Cow<BigInt>
             // (Int wraps via owned `BigInt::from(n)`, BigInt is
@@ -602,8 +623,18 @@ impl Vm {
         // Arg-type guard FIRST so we don't accidentally accept
         // `0 << 1.5` as `0`. Pre-fix the `Value::Int(0)` recv
         // shortcut below ran ahead of this check and swallowed the
-        // TypeError that a non-Integer arg should raise.
-        if !matches!(arg, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        // TypeError that a non-Integer arg should raise. Raises
+        // TypeError directly (same shape as `try_bigint_bit_binop`)
+        // rather than Ok(None)+NoMethodError-fallthrough — CRuby
+        // raises "no implicit conversion of X into Integer" here.
+        if !matches!(arg, Value::Int(_) | Value::BigInt(_)) {
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    crate::vm::numeric::type_name_for_coerce(arg),
+                ),
+            }));
+        }
         // Zero receiver: `0 << anything == 0` and `0 >> anything ==
         // 0` regardless of count sign or magnitude. Short-circuit
         // ahead of the BigInt-count trap and the DoS cap estimator

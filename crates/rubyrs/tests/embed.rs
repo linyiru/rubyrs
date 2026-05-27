@@ -2864,29 +2864,51 @@ fn bigint_responds_to_bit_op_names_matches_dispatch() {
 
 #[cfg(feature = "bignum")]
 #[test]
-fn int_shift_zero_receiver_still_rejects_non_integer_count() {
-    // Regression: the `Value::Int(0)` recv short-circuit in
-    // try_bigint_bit_shift used to run BEFORE the arg-type guard,
-    // so `0 << 1.5` (or `0 >> "foo"`, `0 << nil`, `0 << :sym`)
-    // silently returned 0 instead of raising TypeError. Post-fix
-    // the arg-type guard runs first so the shortcut only fires
-    // for Integer counts.
+fn integer_bit_ops_raise_typeerror_on_non_integer_arg() {
+    // Phase B.3 follow-up: pre-fix `try_bigint_bit_binop` and
+    // `try_bigint_bit_shift` returned `Ok(None)` when the arg
+    // wasn't an Integer, falling through to NoMethodError. CRuby
+    // raises TypeError "no implicit conversion of X into Integer"
+    // — same shape as the BigInt-arith coerce errors and as the
+    // unified `Integer#to_s(non_integer)` arm. Pin that both
+    // Int and BigInt receivers route through the same TypeError
+    // for every bit-op selector. Covers:
+    // - all 5 bit-op selectors (& | ^ << >>)
+    // - all 4 non-Integer arg types (Float, String, nil, Symbol)
+    // - both Int and BigInt receivers
+    // - the special `Int(0)` recv case (which used to short-circuit
+    //   ahead of the arg-type guard)
     let mut rt = rubyrs::Runtime::new();
-    for script in [
-        "0 << 1.5",
-        "0 >> 1.5",
-        "0 << \"foo\"",
-        "0 >> :sym",
+    for (script, expected_arg_type) in [
+        // BigInt recv, every selector × Float arg
+        ("(2 ** 100) & 1.5", "Float"),
+        ("(2 ** 100) | 1.5", "Float"),
+        ("(2 ** 100) ^ 1.5", "Float"),
+        ("(2 ** 100) << 1.5", "Float"),
+        ("(2 ** 100) >> 1.5", "Float"),
+        // Int recv, non-Integer args
+        ("5 & 1.5", "Float"),
+        ("5 << 1.5", "Float"),
+        ("5 >> \"foo\"", "String"),
+        ("5 << nil", "nil"),
+        ("5 << :sym", "Symbol"),
+        // Int(0) recv: regression for the swallow-TypeError fix.
+        ("0 << 1.5", "Float"),
+        ("0 >> :sym", "Symbol"),
+        ("0 << nil", "nil"),
     ] {
-        let err = rt.eval(script, "zero_shift_nonint.rb").unwrap_err();
-        // Pre-fix: eval succeeded with 0. Post-fix: errors. The
-        // exact error class is locked down by the sibling test
-        // below (`bigint_bit_ops_raise_typeerror_on_non_integer_arg`);
-        // here we just assert the eval no longer silently succeeds.
-        assert!(
-            matches!(err.err, rubyrs::RubyError::Uncaught { .. }),
-            "expected error for {:?}, got {:?}", script, err.err,
-        );
+        let err = rt.eval(script, "bit_op_nonint_arg.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "TypeError", "for {:?}", script);
+                assert_eq!(
+                    message,
+                    format!("no implicit conversion of {} into Integer", expected_arg_type),
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught TypeError for {:?}, got {:?}", script, other),
+        }
     }
 }
 
