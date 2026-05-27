@@ -290,7 +290,7 @@ impl Vm {
                     }
                     Value::Str(a) if name_id == self.sym_to_s => Some(Value::Str(a.clone())),
                     Value::Int(n) if name_id == self.sym_to_s || name_id == self.sym_inspect => {
-                        Some(Value::new_str(n.to_string()))
+                        Some(crate::vm::numeric::integer_to_s_value(*n))
                     }
                     _ => None,
                 }
