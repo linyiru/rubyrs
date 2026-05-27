@@ -58,5 +58,18 @@ bench = false
 # stay high. cargo-fuzz's default `dev` profile would otherwise leave
 # us at ~50 exec/s; release-mode lands closer to ~2k exec/s on the
 # parse target.
+#
+# `debug-assertions` + `overflow-checks` are turned back ON despite
+# release codegen, because the harness explicitly hunts the bug
+# classes those guards expose: `debug_assert!` invariants inside
+# `vm/`, and signed-integer arithmetic overflow in primitive ops /
+# index math. Without these, fuzz would only ever catch ICEs and
+# UAF-style memory errors via ASan, missing the larger surface of
+# "the script tickled a wraparound that the VM never noticed."
+# Trade-off: ~5-15% slower per iteration on arithmetic-heavy
+# corpora; over the workflow's 5-min budget that's ~200 iters out
+# of ~2400, well worth the coverage delta.
 [profile.release]
 debug = 1
+debug-assertions = true
+overflow-checks = true

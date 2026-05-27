@@ -5,7 +5,9 @@
 //! the fuzzer never hangs on `while true; end`, `[].cycle.to_a`,
 //! or `"a" * 10**9`. Only Rust panics — `panic!`, `unwrap`/`expect`
 //! ICEs, `unreachable!`, `RefCell` borrow conflicts, integer
-//! overflow under `debug-assertions` — fail the iteration. Every
+//! overflow under the fuzz profile's `overflow-checks`/
+//! `debug-assertions` (re-enabled in Cargo.toml against `cargo
+//! fuzz`'s release default) — fail the iteration. Every
 //! other outcome is a script-level error (`Trap`) and is by
 //! definition correct VM behaviour.
 //!

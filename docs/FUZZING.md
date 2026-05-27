@@ -31,8 +31,12 @@ What we're hunting:
   reachable input proves was actually 🔴.
 - `RefCell` runtime borrow conflicts under unusual call shapes.
 - `unreachable!()` arms that a new AST shape can actually reach.
-- Integer / index arithmetic that overflows under
-  `debug-assertions`.
+- Integer / index arithmetic overflow. The fuzz `[profile.release]`
+  explicitly enables `debug-assertions` and `overflow-checks`
+  despite the release codegen — `cargo fuzz` is otherwise a
+  release build, which strips these guards. Without re-enabling
+  them, signed-wraparound bugs in primitive ops would slip past
+  silently.
 - Memory-safety UB caught by AddressSanitizer (libfuzzer-sys
   ships with ASan on by default): use-after-free, heap / stack
   buffer overruns, double free. Most reachable through the
