@@ -184,3 +184,33 @@ err = begin; ArityBlock.define_method { :body }; "DID-NOT-RAISE"; rescue Argumen
 puts "block-arity-0=#{err}"
 err = begin; ArityBlock.define_method(:a, :b, :c) { :body }; "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
 puts "block-arity-3=#{err}"
+
+## Visibility leak — explicit-receiver `define_method` must
+## NOT inherit the surrounding class body's visibility stack
+## (code-review #245 round 7 #1). Pre-fix the new method on
+## VisTarget picked up VisOuter's `private`, so VisTarget.new.x
+## raised "private method called" even though VisTarget itself
+## is fresh and has no `private` modifier. CRuby installs as
+## public when the receiver is explicit (the lexical visibility
+## frame belongs to whatever class body the call site is in,
+## NOT the install target).
+class VisTarget; end
+class VisOuter
+  private
+  VisTarget.define_method(:x) { 1 }
+end
+puts "explicit-recv-vis=#{VisTarget.new.x.inspect}"
+
+## Bare-call (no_recv) inside a class body STILL respects the
+## surrounding `private` — same semantics as parsed `def`.
+class VisBareTarget
+  private
+  define_method(:y) { 1 }
+end
+err = begin
+  VisBareTarget.new.y
+  "callable-public"
+rescue NoMethodError => e
+  e.message.include?("private method") ? "private-as-expected" : "other-NoMethodError"
+end
+puts "bare-recv-vis=#{err}"

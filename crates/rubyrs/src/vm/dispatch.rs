@@ -5183,17 +5183,27 @@ impl Vm {
         // CRuby returns the method name as a Symbol.
         // (TRY_RUNS pass-9.7d layer #21.)
         if &*name == "define_method" {
-            let target_cls = match &recv {
-                Some(Value::Class(c)) => Some(c.clone()),
+            // Track whether we picked the target via explicit
+            // receiver vs no_recv (bare call in class body). The
+            // `class_visibility_stack` lexical-visibility lookup
+            // below only makes sense for the no_recv path, where
+            // the target IS the surrounding class body. For the
+            // explicit-receiver path, the surrounding visibility
+            // belongs to whatever class body we're currently in —
+            // which may be unrelated to `target_cls`. Leaking the
+            // caller's `private` onto methods installed on an
+            // unrelated class diverges from CRuby
+            // (code-review #245 round 7 #1).
+            let (target_cls, explicit_recv) = match &recv {
+                Some(Value::Class(c)) => (Some(c.clone()), true),
                 None => {
-                    // no_recv: pull self from current frame.
                     let self_val = self.frames.last()
                         .expect("ICE: define_method no_recv with empty frames")
                         .self_val
                         .clone();
-                    if let Value::Class(c) = self_val { Some(c) } else { None }
+                    if let Value::Class(c) = self_val { (Some(c), false) } else { (None, false) }
                 }
-                _ => None,
+                _ => (None, false),
             };
             // Precedence rule (parallels `Module.new` / `Hash.new`):
             // a user-defined `def self.define_method(...)` on the
@@ -5264,8 +5274,19 @@ impl Vm {
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
-                let vis = self.class_visibility_stack.last().copied()
-                    .unwrap_or(crate::value::Visibility::Public);
+                // Explicit-receiver path: visibility defaults to
+                // Public (the new method's target class doesn't
+                // share lexical scope with the caller's visibility
+                // stack). No-recv (bare call in class body): inherit
+                // the surrounding class's current visibility, since
+                // `define_method` and `def` should behave the same
+                // way under `private` / `public` modifiers.
+                let vis = if explicit_recv {
+                    crate::value::Visibility::Public
+                } else {
+                    self.class_visibility_stack.last().copied()
+                        .unwrap_or(crate::value::Visibility::Public)
+                };
                 let m = std::rc::Rc::new(crate::value::Method {
                     params,
                     proto_idx,
