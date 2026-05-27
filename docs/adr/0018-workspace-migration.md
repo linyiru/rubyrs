@@ -253,7 +253,7 @@ call on out-of-i64 values. Lifecycle by PR:
 |---|---|---|
 | B.1 | Base arithmetic, comparison, to_s/inspect, predicates, auto-promote/demote | — (pre-A) |
 | B.2 | `-@` / `+@` / `abs` with i64::MIN promote | #121 |
-| B.3 | `~` / `& \| ^` / `<< >>` two's-complement bit ops + DoS cap | #159 |
+| B.3 | `~` / `& | ^` / `<< >>` two's-complement bit ops + DoS cap | #159 |
 | B.4 | `to_s(radix)` + sprintf `%d/%i/%b/%B/%o/%x/%X` + shared cap estimator | #138 |
 | B.5 | `pow(exp[, mod])` + `bit_length` + `digits` | #123, #129 |
 | B.6 | `times` / `upto` / `downto` block iteration | #174 |
@@ -270,13 +270,23 @@ any future change:
    `try_bigint_unary`'s `+@` / `abs` identity short-circuits
    catch FFI bypasses.
 2. **DoS-cap convention.** Pre-allocation estimators in every
-   arm that can produce arbitrarily large output
-   (`try_bigint_pow`, `try_bigint_bit_shift`,
-   `check_bigint_to_s_cap`, `format_radix_any`, the `%d % big`
-   path in `vm::sprintf`) trap **before** the alloc when the
-   estimated byte cost (limbs + 32-byte header) exceeds
+   arm that can produce arbitrarily large output trap **before**
+   the alloc when the estimated byte cost exceeds
    `Config::max_value_bytes` (fallback 1 MB, same as
-   `try_bigint_pow`'s original).
+   `try_bigint_pow`'s original). Two flavours, depending on what
+   the arm is about to allocate:
+   - **BigInt-allocation caps** — `try_bigint_pow` (result of
+     `base ** exp`) and `try_bigint_bit_shift` (result of
+     `recv << n` / `recv >> n`). Estimate rounds up to u64 limbs
+     + 32-byte allocator header so the cap reflects actual heap
+     storage, not just minimal bit count.
+   - **String-formatting caps** — `check_bigint_to_s_cap`
+     (BigInt#to_s output), `format_radix_any` (sprintf
+     `%b/%B/%o/%x/%X` output), and the `%d/%i % big` path in
+     `vm::sprintf`. Estimate is the rendered character count
+     (digits + sign byte + optional `0x`/`0b` prefix). These
+     bound the output String length, not the underlying BigInt
+     storage.
 
 Implementation invariants and call-graph diagrams live in
 `crates/rubyrs/src/vm/bignum.rs`'s module doc — keep it

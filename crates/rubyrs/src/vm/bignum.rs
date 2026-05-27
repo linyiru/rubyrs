@@ -51,15 +51,23 @@
 //!     that bypasses the funnel.
 //!
 //! DoS-cap convention (shared with the rest of the codebase):
-//!   - Pre-allocation estimators (`try_bigint_pow`,
-//!     `try_bigint_bit_shift`, `check_bigint_to_s_cap`,
-//!     `format_radix_any`, the `%d % big` path in
-//!     `vm::sprintf::ruby_sprintf`) trap **before** the alloc
-//!     when the estimated byte cost exceeds
-//!     `Config::max_value_bytes` (fallback: 1 MB).
-//!   - Estimates round up to BigInt limb storage (u64 limbs +
-//!     32-byte allocator header) so the cap reflects actual heap
-//!     storage, not just minimal bit count.
+//! every arm that can produce arbitrarily large output traps
+//! **before** the alloc when the estimated byte cost exceeds
+//! `Config::max_value_bytes` (fallback: 1 MB, same as
+//! `try_bigint_pow`'s original). Two flavours depending on what
+//! the arm is about to allocate:
+//!   - **BigInt-allocation caps** — `try_bigint_pow` (result of
+//!     `base ** exp`) and `try_bigint_bit_shift` (result of
+//!     `recv << n` / `recv >> n`). Estimate rounds up to u64
+//!     limbs + 32-byte allocator header so the cap reflects
+//!     actual heap storage, not just minimal bit count.
+//!   - **String-formatting caps** — `check_bigint_to_s_cap`
+//!     (BigInt#to_s output), `format_radix_any` (sprintf
+//!     `%b/%B/%o/%x/%X` output), and the `%d/%i % big` path in
+//!     `vm::sprintf::ruby_sprintf`. Estimate is the rendered
+//!     character count (digits + sign byte + optional `0x`/`0b`
+//!     prefix) — bounds the output String length, not the
+//!     underlying BigInt storage.
 //!
 //! Structure (top to bottom):
 //!   - `try_bigint_binop` — `Op::BinOp` cold path (arithmetic +
