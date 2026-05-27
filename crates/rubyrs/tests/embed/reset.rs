@@ -136,8 +136,11 @@ fn reset_preserves_preamble_source_locations() {
             .resolve_array(&v)
             .unwrap_or_else(|| panic!("{} expected Array, got {:?}", tag, v));
         let filename = match arr.first() {
-            Some(rubyrs::Value::Str(s)) => String::from_utf8(s.borrow().to_vec())
-                .unwrap_or_else(|_| panic!("{} filename was not valid UTF-8", tag)),
+            // `to_string_lossy()` matches the convention used elsewhere
+            // in tests/embed (e.g. misc.rs) — drops the manual
+            // `from_utf8 + to_vec` round-trip and gracefully handles
+            // a hypothetical non-UTF8 preamble filename.
+            Some(rubyrs::Value::Str(s)) => s.to_string_lossy(),
             other => panic!("{} expected Str filename at [0], got {:?}", tag, other),
         };
         let line = match arr.get(1) {
