@@ -479,10 +479,13 @@ impl Vm {
                         "-@" => -b,
                         "abs" => -b, // sign == Minus from check above
                         // `~big` two's-complement bitwise NOT.
-                        // Identity: `~b == -(b + 1)`. num_bigint's
-                        // `std::ops::Not` impl does exactly this on
-                        // owned BigInt (converts to two's-complement
-                        // representation, NOTs, converts back).
+                        // Identity: `~b == -(b + 1)`. num_bigint
+                        // impls `Not` for both owned and borrowed
+                        // BigInt (the `&BigInt` form returns a fresh
+                        // owned BigInt without consuming the
+                        // reference) — same shape as the `-b` arms
+                        // above, no clone needed. The two's-
+                        // complement conversion happens internally.
                         // `bigint_to_value` demotes-on-fit so
                         // `~(2**63) == -(2**63 + 1)` stays BigInt
                         // (just past i64::MIN) but `~(2**63 - 1) ==
@@ -490,7 +493,7 @@ impl Vm {
                         // Int receiver `~n` path is unchanged in
                         // numeric.rs because `!i64::MIN == i64::MAX`
                         // fits without promotion.
-                        "~" => !b.clone(),
+                        "~" => !b,
                         _ => return Ok(None),
                     }
                 };
@@ -626,8 +629,16 @@ impl Vm {
                 let sign = self.heap.bigint(*id).sign();
                 let actual_left = if sign == num_bigint::Sign::Minus { !left } else { left };
                 if actual_left {
+                    // Shift count is a Bignum, so by the canonical-
+                    // BigInt invariant its magnitude > i64::MAX.
+                    // Actual-left-shift by that count would need
+                    // ≥ 2^63 bits of storage — well past any sane
+                    // `max_value_bytes`. Frame the trap around the
+                    // would-be result size rather than the count's
+                    // u32::MAX boundary so it reads in the same
+                    // shape as the DoS-cap trap below.
                     return Err(self.trap(RubyError::ResourceExhausted {
-                        msg: "integer shift count exceeds u32::MAX".to_string(),
+                        msg: "integer shift result exceeds max representable size (Bignum shift count)".to_string(),
                     }));
                 }
                 return Ok(Some(self.bit_shift_collapse(recv)));
