@@ -638,11 +638,26 @@ impl Vm {
                 HeapObj::BoundMethod { recv, name_id, method } => (recv.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
             };
-            let cls = match self.class_of(&bm_recv) {
-                Value::Class(c) => c,
-                _ => return Err(self.trap(RubyError::TypeError {
-                    msg: "cannot unbind method on a value without a class".into(),
-                })),
+            // Use the DISPATCH class (heap.class_of) for Object
+            // receivers so the captured class reflects any
+            // singleton class on `recv`. Otherwise the
+            // UnboundMethod would carry the REAL class plus a
+            // singleton-method snapshot — `um.bind(other)` would
+            // pass the is_a fence (other is_a real_class) and
+            // silently invoke the singleton body on an unrelated
+            // instance. With the dispatch class, the captured
+            // class IS the singleton class, and is_a on a
+            // different instance correctly fails (singleton
+            // classes only contain the original instance via
+            // class_is_a).
+            let cls = match &bm_recv {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&bm_recv) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: "cannot unbind method on a value without a class".into(),
+                    })),
+                },
             };
             let snapshot = bm_method.or_else(|| self.lookup_method_uncached(&cls, bm_name_id));
             self.maybe_gc();

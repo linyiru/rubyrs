@@ -70,6 +70,27 @@ def e.beep; "singleton-beep"; end
 bm5 = e.method(:beep)
 puts bm5.call                                # singleton-beep
 
+# --- (7) Singleton-method unbind fence: `c.method(:foo).unbind`
+#     when `foo` is a singleton method on `c` produces an
+#     UnboundMethod whose captured class is the eigenclass.
+#     `bind(another_real_class_instance)` must raise TypeError —
+#     singleton methods only belong to the original instance.
+#     Without the eigenclass-aware capture, this would silently
+#     invoke the singleton body on the wrong receiver.
+class G
+  def boop; "class-boop"; end
+end
+g1 = G.new
+def g1.boop; "singleton-boop"; end
+um7 = g1.method(:boop).unbind
+g2 = G.new
+begin
+  um7.bind(g2).call
+  puts "no raise (BAD)"
+rescue TypeError
+  puts "singleton-unbind + wrong-recv → TypeError"
+end
+
 # --- (6) Implicit-self `method(:foo)` also snapshots from the
 #     dispatch class — same singleton-respecting rule.
 class F
