@@ -229,6 +229,151 @@ fn try_call_with_block_compile_time_intercept(
     false
 }
 
+/// Compile the body of `Expr::Def` — `def name(params) ... end`
+/// and its receiver-prefixed singleton variants. `defaults` is
+/// parallel to `params`: leading `None`s are required, trailing
+/// `Some(expr)`s are optionals (the body proto's prologue emits
+/// `JumpIfArgGiven + <default> + StoreLocal` per optional).
+#[allow(clippy::too_many_arguments)]
+fn compile_def_arm(
+    b: &mut ProtoBuilder,
+    name: &str,
+    params: &[String],
+    defaults: &[Option<SExpr>],
+    rest: &Option<String>,
+    kw_params: &[(String, Option<SExpr>)],
+    kw_rest: &Option<String>,
+    block_param: &Option<String>,
+    receiver: &Option<Box<SExpr>>,
+    body: &[SExpr],
+    protos: &mut Vec<Proto>,
+    interner: &mut Interner,
+    cc: &mut u32,
+) {
+    let n_required_positional = defaults.iter().take_while(|d| d.is_none()).count() as u16;
+    let mut effective_params: Vec<String> = params.to_vec();
+    if let Some(rname) = rest {
+        effective_params.push(rname.clone());
+    }
+    for (kname, _) in kw_params {
+        effective_params.push(kname.clone());
+    }
+    if let Some(krname) = kw_rest {
+        let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
+        effective_params.push(slot_name);
+    }
+    if let Some(bname) = block_param {
+        effective_params.push(bname.clone());
+    }
+    let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
+        d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
+    }).collect();
+    let proto_idx = compile_proto_kind(
+        name.to_string(), effective_params, n_required_positional, defaults.to_vec(), body,
+        b.filename.clone(), protos, interner, cc, /*is_method=*/true,
+        b.class_path.clone(),
+    );
+    if let Some(rname) = rest {
+        protos[proto_idx].rest_param = Some(rname.clone());
+    }
+    protos[proto_idx].kw_param_defaults = kw_lit_defaults;
+    if let Some(krname) = kw_rest {
+        let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
+        protos[proto_idx].kw_rest_param = Some(slot_name);
+    }
+    if let Some(bname) = block_param {
+        protos[proto_idx].block_param = Some(bname.clone());
+    }
+    let name_id = interner.intern(name);
+    match receiver {
+        None => {
+            b.emit(Op::DefMethod(name_id, proto_idx as u32));
+        }
+        Some(recv_expr) if matches!(recv_expr.node, Expr::SelfExpr) => {
+            // `def self.foo` in a class body — install on the
+            // surrounding class's `singleton_methods` table.
+            b.emit(Op::DefSingletonMethod(name_id, proto_idx as u32));
+        }
+        Some(recv_expr) => {
+            // `def obj.foo` — instance-level singleton; pop the
+            // evaluated receiver and install on its eigenclass.
+            compile_expr(b, recv_expr, protos, interner, cc);
+            b.emit(Op::DefObjectSingletonMethod(name_id, proto_idx as u32));
+        }
+    }
+    b.emit(Op::LoadNil);
+}
+
+/// Compile the body of `Expr::Class` — `class Name < Parent ; ... ; end`
+/// and `module Name ; ... ; end`. Threads the lexical
+/// `class_path` so nested definitions alias under the qualified
+/// name (`Foo::Bar::Inner`).
+///
+/// `qual_id` is `SymId(u32::MAX)` when no prefix applies (top
+/// level or already-qualified name) — load-bearing sentinel
+/// read by both `DefClass` and the final `StoreConst` alias.
+/// See #195's R4 risk register.
+#[allow(clippy::too_many_arguments)]
+fn compile_class_arm(
+    b: &mut ProtoBuilder,
+    name: &str,
+    superclass: &Option<String>,
+    body: &[SExpr],
+    is_module: bool,
+    protos: &mut Vec<Proto>,
+    interner: &mut Interner,
+    cc: &mut u32,
+) {
+    let mut child_path = b.class_path.clone();
+    child_path.push(name.to_string());
+    let proto_idx = compile_proto_at(
+        format!("<class:{}>", name), vec![], body,
+        b.filename.clone(), protos, interner, cc, child_path,
+    );
+    // Push the superclass (or Nil for "default to Object") for
+    // DefClass to pop. The parent reference is a const read at
+    // the SURROUNDING lexical scope (not the child class's
+    // scope).
+    if let Some(parent) = superclass {
+        if let Some(chain) = build_const_chain(&b.class_path, parent, interner) {
+            let idx = b.const_chains.len() as u32;
+            b.const_chains.push(chain);
+            b.emit(Op::LoadConstChain(idx));
+        } else {
+            let parent_id = interner.intern(parent);
+            b.emit(Op::LoadConst(parent_id));
+        }
+    } else {
+        b.emit(Op::LoadNil);
+    }
+    let name_id = interner.intern(name);
+    // `SymId(u32::MAX)` sentinel = "no prefix" (top level or
+    // already-qualified). Drives both DefClass's qual-name slot
+    // AND the StoreConst alias below. Do NOT replace with
+    // Option<SymId> — the bytecode op fields are SymId-typed
+    // and the runtime reader compares `qual_id.0 != u32::MAX`.
+    let qual_id = if !b.class_path.is_empty() && !name.contains("::") {
+        let prefixed = format!("{}::{}", b.class_path.join("::"), name);
+        interner.intern(&prefixed)
+    } else {
+        crate::intern::SymId(u32::MAX)
+    };
+    if is_module {
+        b.emit(Op::DefModule(name_id, proto_idx as u32, qual_id));
+    } else {
+        b.emit(Op::DefClass(name_id, proto_idx as u32, qual_id));
+    }
+    // Alias under the prefixed path so `Foo::Bar.new` from
+    // outside resolves. Skipped at top level. Idempotent on
+    // re-open. DefClass's Return arm pushes the freshly-created
+    // / re-opened class; Dup leaves it for the expression value
+    // while StoreConst consumes the dup'd copy.
+    if qual_id.0 != u32::MAX {
+        b.emit(Op::Dup);
+        b.emit(Op::StoreConst(qual_id));
+    }
+}
+
 /// Compile the body of `Expr::MultiWrite` — Ruby's
 /// `a, b, *r, c = expr` parallel assignment. Compiles the
 /// RHS once, then `Dup`s the value across per-target
@@ -1061,90 +1206,10 @@ pub(crate) fn compile_expr(
             compile_call_arm(b, receiver, name, args, protos, interner, cc);
         }
         Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
-            // `defaults` is parallel to `params`: leading `None`s are
-            // required positionals, trailing `Some(expr)`s are
-            // optionals. The compile_proto_kind helper emits a
-            // per-optional `Op::JumpIfArgGiven(slot, skip) + <expr>
-            // + StoreLocal(slot)` prologue at the top of the body
-            // so non-literal defaults (`level = Logger::INFO`,
-            // `b = a + 1`) work — slot is bound before the prologue
-            // runs, so `a` is already readable.
-            let n_required_positional = defaults.iter().take_while(|d| d.is_none()).count() as u16;
-            // Param layout in slot order: positional, then rest
-            // (if any), then keyword params (in source order).
-            // ProtoBuilder allocates slots in that sequence; the
-            // Proto's `rest_param` + `kw_param_defaults` tell
-            // invoke_method how to bind.
-            let mut effective_params = params.clone();
-            if let Some(rname) = rest {
-                effective_params.push(rname.clone());
-            }
-            for (kname, _) in kw_params {
-                effective_params.push(kname.clone());
-            }
-            // `**kwrest` slot goes at the very end of the param
-            // list so the existing kw_params block above stays
-            // contiguous (invoke_method indexes by offset).
-            // Anonymous `**` (no name) still reserves the slot —
-            // it absorbs leftover kwargs but the body has no way
-            // to read them. Implemented with a synthesised
-            // `__kw_rest_anon` name so the invoke_method binding
-            // path uniformly treats both shapes.
-            if let Some(krname) = kw_rest {
-                let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
-                effective_params.push(slot_name);
-            }
-            // `&blk` named block param goes at the very end, after
-            // kw_rest if any. Frame setup binds either Value::Block
-            // (if caller passed a block) or Value::Nil into this slot.
-            if let Some(bname) = block_param {
-                effective_params.push(bname.clone());
-            }
-            let kw_lit_defaults: Vec<Option<Value>> = kw_params.iter().map(|(_, d)| {
-                d.as_ref().map(|sx| literal_to_value(&sx.node, interner))
-            }).collect();
-            let proto_idx = compile_proto_kind(
-                name.clone(), effective_params, n_required_positional, defaults.clone(), body,
-                b.filename.clone(), protos, interner, cc, /*is_method=*/true,
-                // Methods inherit the lexical class_path so any
-                // nested `class Inner` defined inside the method
-                // body still aliases under the surrounding nesting.
-                b.class_path.clone(),
+            compile_def_arm(
+                b, name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body,
+                protos, interner, cc,
             );
-            if let Some(rname) = rest {
-                protos[proto_idx].rest_param = Some(rname.clone());
-            }
-            protos[proto_idx].kw_param_defaults = kw_lit_defaults;
-            if let Some(krname) = kw_rest {
-                let slot_name = if krname.is_empty() { "__kw_rest_anon".to_string() } else { krname.clone() };
-                protos[proto_idx].kw_rest_param = Some(slot_name);
-            }
-            if let Some(bname) = block_param {
-                protos[proto_idx].block_param = Some(bname.clone());
-            }
-            let name_id = interner.intern(name);
-            match receiver {
-                None => {
-                    b.emit(Op::DefMethod(name_id, proto_idx as u32));
-                }
-                Some(recv_expr) if matches!(recv_expr.node, Expr::SelfExpr) => {
-                    // `def self.foo` in a class body — install
-                    // on the surrounding class's
-                    // `singleton_methods` table. Master ships
-                    // this via `Op::DefSingletonMethod` (no
-                    // operand-stack receiver; target via
-                    // `class_stack.last()`).
-                    b.emit(Op::DefSingletonMethod(name_id, proto_idx as u32));
-                }
-                Some(recv_expr) => {
-                    // `def obj.foo` — instance-level singleton.
-                    // Compile the receiver and emit the
-                    // pop-and-install op.
-                    compile_expr(b, recv_expr, protos, interner, cc);
-                    b.emit(Op::DefObjectSingletonMethod(name_id, proto_idx as u32));
-                }
-            }
-            b.emit(Op::LoadNil);
         }
         Expr::Super(args_opt) => {
             // `super` only makes sense inside a method body. The
@@ -1189,75 +1254,7 @@ pub(crate) fn compile_expr(
             b.emit(Op::ApplySuper(name_id));
         }
         Expr::Class { name, superclass, body, is_module } => {
-            // Child path = parent's class_path + [this name]. Threaded
-            // into the body proto so a further-nested `class Inner`
-            // sees the full chain and aliases under
-            // `Foo::Bar::Inner`.
-            let mut child_path = b.class_path.clone();
-            child_path.push(name.clone());
-            let proto_idx = compile_proto_at(
-                format!("<class:{}>", name), vec![], body,
-                b.filename.clone(), protos, interner, cc, child_path,
-            );
-            // Push the superclass (or Nil for "default to Object")
-            // for DefClass to pop. The parent reference is a const
-            // read at the SURROUNDING lexical scope (not the child
-            // class's scope) — `module Foo; class Bar < Plant; end;
-            // end` looks up `Plant` with cref walk
-            // `[Foo::Plant, Plant]`. AST stores `superclass` as a
-            // bare name today, so qualified parents
-            // (`class C < Foo::Bar`) aren't representable here yet;
-            // when they are, this branch will need to dispatch on
-            // ConstantPath vs ConstantRead like the rescue arm does.
-            if let Some(parent) = superclass {
-                if let Some(chain) = build_const_chain(&b.class_path, parent, interner) {
-                    let idx = b.const_chains.len() as u32;
-                    b.const_chains.push(chain);
-                    b.emit(Op::LoadConstChain(idx));
-                } else {
-                    let parent_id = interner.intern(parent);
-                    b.emit(Op::LoadConst(parent_id));
-                }
-            } else {
-                b.emit(Op::LoadNil);
-            }
-            let name_id = interner.intern(name);
-            // Compute the qualified name (`Foo::Bar`) when this
-            // class is being defined inside a `module Foo` /
-            // `class Foo` body. Drives both `Op::DefClass`'s
-            // qual-name slot (for `Class#name` to report the
-            // qualified form) AND the `Op::StoreConst` alias
-            // below (for `Foo::Bar` external resolution).
-            // `SymId(u32::MAX)` sentinel = "no prefix" (top
-            // level or already-qualified name).
-            let qual_id = if !b.class_path.is_empty() && !name.contains("::") {
-                let prefixed = format!("{}::{}", b.class_path.join("::"), name);
-                interner.intern(&prefixed)
-            } else {
-                crate::intern::SymId(u32::MAX)
-            };
-            if *is_module {
-                b.emit(Op::DefModule(name_id, proto_idx as u32, qual_id));
-            } else {
-                b.emit(Op::DefClass(name_id, proto_idx as u32, qual_id));
-            }
-            // Alias under the prefixed path so `Foo::Bar.new` from
-            // outside resolves. Skipped when class_path is empty
-            // (top-level — no prefix needed). Idempotent on re-
-            // open: same Class value stored.
-            //
-            // DefClass's Return arm pushes the freshly-created /
-            // re-opened class onto the operand stack. Dup leaves
-            // it for whoever consumes the class-expression value
-            // while StoreConst consumes the dup'd copy. A direct
-            // LoadConst(name_id) here would miss after the
-            // key-by-qualified-name refactor — the class table is
-            // now keyed by `qual_id` for nested definitions, so a
-            // bare-name LoadConst couldn't find it.
-            if qual_id.0 != u32::MAX {
-                b.emit(Op::Dup);
-                b.emit(Op::StoreConst(qual_id));
-            }
+            compile_class_arm(b, name, superclass, body, *is_module, protos, interner, cc);
         }
         Expr::AliasSingletonMethod(new_name, old_name) => {
             // Counterpart to the existing alias_method compile-
