@@ -81,6 +81,29 @@ class OverrideClassEval
 end
 puts OverrideClassEval.class_eval("ignored")    # override:ignored
 
+# --- Non-String source arg raises TypeError (not NoMethodError) ---
+class BadSrcArg
+end
+begin
+  BadSrcArg.class_eval(123)
+rescue TypeError
+  puts "class_eval(non-string) → TypeError"
+end
+
+# --- block + args raises ArgumentError "expected 0" (CRuby parity)
+class BlockPlusArgs
+end
+begin
+  BlockPlusArgs.class_eval(123) { 1 }
+rescue ArgumentError
+  puts "class_eval(args) {} → ArgumentError"
+end
+begin
+  BlockPlusArgs.class_eval("def x; end") { 1 }
+rescue ArgumentError
+  puts "class_eval(str) {} → ArgumentError"
+end
+
 # --- Bad filename arg raises TypeError (not ArgumentError) ---
 class FilenameType
 end

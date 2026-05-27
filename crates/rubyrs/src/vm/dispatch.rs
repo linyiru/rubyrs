@@ -2113,16 +2113,28 @@ impl Vm {
         if (&*name == "class_eval" || &*name == "module_eval")
             && let Value::Class(cls) = &recv
             && !args.is_empty()
-            && matches!(args[0], Value::Str(_))
             // Defer to user-defined `def self.class_eval(s)` /
             // `def self.module_eval(s)` if present — same
             // ordering as the singleton-method lookup at
             // dispatch.rs:1597. Without this check, a class
             // overriding its own `class_eval` would have the
-            // override silently bypassed whenever the first arg
-            // is a String.
+            // override silently bypassed.
             && self.lookup_class_singleton_method(cls, name_id).is_none()
         {
+            // Validate args[0] (source) type: non-String falls
+            // through here (no user override + no block path
+            // matched) and should surface as TypeError, NOT
+            // NoMethodError. `respond_to?(:class_eval)` returns
+            // true, so the dispatch reaching this point means
+            // the method exists — bad arg type is a TypeError.
+            if !matches!(args[0], Value::Str(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        args[0].type_name()
+                    ),
+                }));
+            }
             // CRuby's class_eval(string [, file, line]) signature:
             // 1..3 args. Extra args silently dropped would mask
             // caller bugs.
@@ -4796,47 +4808,23 @@ impl Vm {
             // def __tilt_xxx; end end`, so the inner block-form
             // (intercepted above) does the actual class context
             // switching. Documented in docs/SUBSET.md.
+            // CRuby parity: `class_eval`/`module_eval` is either
+            // (a) block-only with 0 args (handled above) OR
+            // (b) string-form with 1..3 args and NO block (handled
+            // in do_call). The block+args combination raises
+            // ArgumentError "wrong number of arguments (given N,
+            // expected 0)". Without this guard, passing both
+            // would fall through to NoMethodError.
             if is_class_eval && let Value::Class(cls) = r
-                && !args.is_empty() && matches!(args[0], Value::Str(_))
-                // Defer to user-defined `def self.class_eval`
-                // overrides on the receiver class — same ordering
-                // discipline as `do_call`'s arm above.
+                && !args.is_empty()
                 && self.lookup_class_singleton_method(cls, name_id).is_none()
             {
-                // Same arity guard as the non-block path
-                // (`do_call`'s class_eval arm). Block + string-arg
-                // form is unusual (CRuby ignores the block silently
-                // when string is provided) but we still validate
-                // arity so callers don't accidentally pass extras.
-                if args.len() > 3 {
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 1..3)",
-                            args.len()
-                        ),
-                    }));
-                }
-                if let Some(a1) = args.get(1)
-                    && !matches!(a1, Value::Str(_)) {
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into String",
-                            a1.type_name()
-                        ),
-                    }));
-                }
-                let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
-                let filename = match args.get(1) {
-                    Some(Value::Str(f)) => f.to_string_lossy(),
-                    _ => "(class_eval)".to_string(),
-                };
-                let v = self.eval_string(&src, &filename)?;
-                if !self.suppress_call_result_push {
-                    self.stack.push(v);
-                } else {
-                    self.suppress_call_result_push = false;
-                }
-                return Ok(());
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
+                }));
             }
         }
         if let Some(r) = &recv
