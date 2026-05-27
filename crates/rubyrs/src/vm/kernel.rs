@@ -1435,7 +1435,28 @@ impl Vm {
                 msg: ast_errors.join("; "),
             }));
         }
-        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(filename);
+        // Avoid clobbering a previously-registered source under the
+        // same filename. Without this, repeated `eval("1")` calls
+        // (default filename "(eval)") would each overwrite the
+        // prior source entry, breaking `Method#source_location` /
+        // backtrace line resolution for any method compiled from
+        // an earlier eval that shared the filename. We uniquify
+        // by appending an incrementing suffix only when a
+        // collision is detected — user-supplied unique filenames
+        // (tilt's per-template paths) pass through unchanged.
+        let mut effective_filename: String = filename.to_string();
+        if self.sources.contains_key(effective_filename.as_str()) {
+            let mut n: u64 = 2;
+            loop {
+                let candidate = format!("{}:{}", filename, n);
+                if !self.sources.contains_key(candidate.as_str()) {
+                    effective_filename = candidate;
+                    break;
+                }
+                n = n.saturating_add(1);
+            }
+        }
+        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(effective_filename.as_str());
         let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source);
         self.sources.insert(filename_rc.clone(), source_rc);
         // Cap-aware compile: `compile_proto` interns method names,
