@@ -320,6 +320,22 @@ impl<'a> HostCtx<'a> {
 /// preamble set up.
 pub struct Runtime {
     vm: vm::Vm,
+    /// Per-`eval` fuel budget. The host's intended ceiling
+    /// (`Config::fuel`) lives here; `vm.fuel` is the working
+    /// counter `check_fuel` decrements per op. Each `eval()`
+    /// re-anchors `vm.fuel = self.fuel_budget` at entry so a
+    /// host that reuses a Runtime across many evals sees each
+    /// call get a fresh budget — symmetric with `deadline`
+    /// below. `None` means unlimited.
+    ///
+    /// Stored on `Runtime` (not `Vm`) so `apply_config` can
+    /// update host intent without disturbing the per-eval
+    /// counter, and so `reset()` doesn't need to touch fuel at
+    /// all (the next eval refills it). Replaces the pre-#222
+    /// shape where `Config::fuel` went straight to `vm.fuel`
+    /// and was consumed monotonically across the Runtime's
+    /// lifetime.
+    fuel_budget: Option<u64>,
     /// Per-`eval` wall-clock budget (P2-14a). Retained as a
     /// Duration; an absolute `Instant` is computed at the start of
     /// each `eval` call and stored on `Vm.deadline_at`. `None` means
@@ -393,26 +409,6 @@ struct PostPreambleSnapshot {
     /// post-preamble value caps the counter at a known-safe
     /// baseline.
     cache_counter: u32,
-    /// `vm.fuel` at preamble completion — equivalent to
-    /// whatever `Config::fuel` the host passed to `with_config`
-    /// (the preamble itself runs with caps lifted by
-    /// `CapsGuard`, so the value sits unchanged from
-    /// `apply_config(cfg)` through to snapshot capture).
-    /// `reset()` restores it so each post-reset eval gets a
-    /// fresh fuel budget rather than inheriting whatever the
-    /// previous eval failed to consume.
-    ///
-    /// Pre-fix: vm.fuel was monotonically decremented by
-    /// `check_fuel` across the Runtime's lifetime and reset
-    /// didn't touch it. Embedders that call eval-then-reset-
-    /// then-eval would silently see the fuel cap leak across
-    /// resets — first surfaced by PR #222's fuzz harness
-    /// adoption (the harness worked around it with a per-iter
-    /// `apply_config` refresh). The Config-level doc-comment
-    /// for `fuel` is ambiguous about per-eval-vs-lifetime
-    /// semantics; honoring per-eval here makes reset's
-    /// contract match what hosts intuitively expect.
-    fuel: Option<u64>,
     /// `vm.method_gen` at preamble completion. `reset()` bumps
     /// this monotonically (wrapping_add(1) per call) so that
     /// CallCache entries' generation check fires fresh — which
@@ -590,7 +586,14 @@ impl ResourceCaps {
     /// restored.
     fn take_from(rt: &mut Runtime) -> Self {
         ResourceCaps {
-            fuel: rt.vm.fuel.take(),
+            // `fuel_budget` (not `vm.fuel`) is the source of
+            // truth — `vm.fuel` is just a per-eval working
+            // counter `eval()` overwrites from `fuel_budget` at
+            // entry. Lifting `fuel_budget` to None means the
+            // preamble's internal `self.eval(...)` calls anchor
+            // `vm.fuel = None` (unlimited) for the duration of
+            // the guarded scope.
+            fuel: rt.fuel_budget.take(),
             max_frames: rt.vm.max_frames.take(),
             max_symbols: rt.vm.max_symbols.take(),
             max_value_bytes: rt.vm.max_value_bytes.take(),
@@ -604,7 +607,7 @@ impl ResourceCaps {
     /// field is Copy / bool, so `Drop` can call this through the
     /// guard's reference without moving out.
     fn restore_to(&self, rt: &mut Runtime) {
-        rt.vm.fuel = self.fuel;
+        rt.fuel_budget = self.fuel;
         rt.vm.max_frames = self.max_frames;
         rt.vm.max_symbols = self.max_symbols;
         rt.vm.max_value_bytes = self.max_value_bytes;
@@ -658,7 +661,6 @@ impl PostPreambleSnapshot {
             interner_len: rt.vm.interner.len(),
             call_caches_len: rt.vm.call_caches.len(),
             cache_counter: rt.vm.cache_counter,
-            fuel: rt.vm.fuel,
             method_gen: rt.vm.method_gen,
             load_path: rt.vm.load_path,
             protos_len: rt.vm.protos.len(),
@@ -764,7 +766,7 @@ impl Runtime {
 
         let interner = intern::Interner::new();
         let vm = vm::Vm::new(vec![], interner);
-        Runtime { vm, deadline: None, post_preamble: None }
+        Runtime { vm, fuel_budget: None, deadline: None, post_preamble: None }
     }
 
     /// Wizer-able default Runtime: skeleton + preamble, no host
@@ -804,7 +806,7 @@ impl Runtime {
         // which made the flag monotonic and broke the documented
         // overwrite semantics.
         self.vm.stress_gc = cfg.stress_gc;
-        self.vm.fuel = cfg.fuel;
+        self.fuel_budget = cfg.fuel;
         self.vm.max_frames = cfg.max_frames;
         self.vm.heap.max_live = cfg.max_heap_objects;
         self.vm.max_symbols = cfg.max_symbols;
@@ -841,8 +843,16 @@ impl Runtime {
     /// - Toplevel methods / constants the preamble installed.
     /// - Compiled bytecode (`vm.protos`) and host-registered
     ///   functions (`vm.host_fns`).
-    /// - Resource caps (`Config::fuel`, `max_frames`, ...) and host
-    ///   state (`env`, `pid`, `time_now`, `stress_gc`, `stdout`).
+    /// - Resource caps (`max_frames`, `max_heap_objects`,
+    ///   `max_symbols`, `max_value_bytes`) and host state
+    ///   (`env`, `pid`, `time_now`, `stress_gc`, `stdout`).
+    /// - `Config::fuel` and `Config::deadline` are per-`eval`:
+    ///   each `eval` re-anchors `vm.fuel` from `fuel_budget`
+    ///   and `vm.deadline_at` from `deadline` at entry, so
+    ///   reset doesn't need to touch them. A host that calls
+    ///   `apply_config(tighter)` mid-life sees the tighter cap
+    ///   on the next `eval` regardless of whether `reset` ran
+    ///   in between.
     /// - Pre-interned hot SymIds (`sym_to_s`, etc.) and the literal
     ///   caches (`regex_cache`, `bigint_lit_cache`) — those keys
     ///   were interned by the compiler, not by user code.
@@ -1054,18 +1064,12 @@ impl Runtime {
         // wrap and start aliasing unrelated call sites.
         self.vm.call_caches.truncate(snapshot.call_caches_len);
         self.vm.cache_counter = snapshot.cache_counter;
-        // Restore `fuel` so each post-reset eval starts with
-        // the same budget the host configured. Pre-fix this
-        // was missing: vm.fuel decremented monotonically and
-        // reset() didn't touch it, so an embedder calling
-        // eval-then-reset-then-eval saw the cap silently leak.
-        // The Config doc for `fuel` is ambiguous about per-eval
-        // vs lifetime semantics; honoring per-eval here matches
-        // what hosts intuitively expect and makes the
-        // documented "resource caps preserved" contract honest
-        // (caps go back to what apply_config set them to, not
-        // to whatever the prior eval drained them down to).
-        self.vm.fuel = snapshot.fuel;
+        // `vm.fuel` and `deadline_at` are NOT restored here.
+        // Both are per-eval: `eval()` re-anchors `vm.fuel` from
+        // `self.fuel_budget` and re-computes `vm.deadline_at`
+        // from `self.deadline` at entry. Leaving `vm.fuel`
+        // whatever the last eval drained it to is harmless —
+        // the next eval overwrites it. See `Runtime::eval`.
         // --- Compiled bytecode (protos) ---
         // Truncate `vm.protos` back to the post-preamble length.
         // Every user `eval()` appends compiled `Proto` entries
@@ -1588,6 +1592,18 @@ RUBY_ENGINE = "ruby".freeze
         // Shared with `Runtime::reset` — see the helper for why
         // every signal in this set needs clearing.
         self.vm.clear_control_flow_signals();
+        // Anchor the fuel budget to *this* eval call. Each
+        // `eval` refills `vm.fuel` from the host's configured
+        // ceiling (`Runtime::fuel_budget`, set by `apply_config`)
+        // so a host that reuses a Runtime across many evals sees
+        // each call start with a fresh budget — `vm.fuel`
+        // decrements monotonically inside one eval via
+        // `check_fuel`, but never accumulates across calls.
+        // Symmetric with the deadline re-anchor below. `None`
+        // (unlimited) is the default; preamble runs under
+        // `CapsGuard`-lifted `fuel_budget = None` so it bypasses
+        // the host's cap entirely.
+        self.vm.fuel = self.fuel_budget;
         // Anchor the wall-clock deadline (P2-14a) to *this* eval
         // call. Each `eval` re-computes the absolute Instant from
         // the runtime's stored Duration, so a host can reuse a
@@ -1737,8 +1753,10 @@ mod caps_guard_tests {
     fn caps_guard_restores_on_panic_in_guarded_scope() {
         let mut rt = Runtime::new();
         // Stamp recognisable cap values so the assertion can
-        // distinguish "restored" from "default".
-        rt.vm.fuel = Some(123);
+        // distinguish "restored" from "default". `fuel_budget`
+        // lives on Runtime (not Vm) since the per-eval refactor;
+        // the rest still live on Vm / Runtime as before.
+        rt.fuel_budget = Some(123);
         rt.vm.max_frames = Some(45);
         rt.vm.max_symbols = Some(678);
         rt.vm.max_value_bytes = Some(9012);
@@ -1752,7 +1770,7 @@ mod caps_guard_tests {
         let result = catch_unwind(AssertUnwindSafe(|| {
             let _guard = CapsGuard::lift(&mut rt);
             // Inside the guard, caps should be zero.
-            assert!(_guard.rt.vm.fuel.is_none(), "lift should clear fuel");
+            assert!(_guard.rt.fuel_budget.is_none(), "lift should clear fuel_budget");
             assert!(_guard.rt.vm.max_frames.is_none());
             assert!(_guard.rt.vm.max_symbols.is_none());
             assert!(_guard.rt.vm.max_value_bytes.is_none());
@@ -1764,7 +1782,7 @@ mod caps_guard_tests {
 
         assert!(result.is_err(), "guarded scope should have panicked");
         // After unwind, every cap is back where we stamped it.
-        assert_eq!(rt.vm.fuel, Some(123));
+        assert_eq!(rt.fuel_budget, Some(123));
         assert_eq!(rt.vm.max_frames, Some(45));
         assert_eq!(rt.vm.max_symbols, Some(678));
         assert_eq!(rt.vm.max_value_bytes, Some(9012));
@@ -1780,11 +1798,11 @@ mod caps_guard_tests {
     #[test]
     fn caps_guard_restores_on_normal_scope_exit() {
         let mut rt = Runtime::new();
-        rt.vm.fuel = Some(999);
+        rt.fuel_budget = Some(999);
         {
             let _guard = CapsGuard::lift(&mut rt);
-            assert!(_guard.rt.vm.fuel.is_none());
+            assert!(_guard.rt.fuel_budget.is_none());
         }
-        assert_eq!(rt.vm.fuel, Some(999));
+        assert_eq!(rt.fuel_budget, Some(999));
     }
 }
