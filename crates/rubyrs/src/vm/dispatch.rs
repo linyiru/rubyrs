@@ -1181,6 +1181,61 @@ impl Vm {
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
+        // `Class#allocate` — bare-instance allocator without calling
+        // `initialize`. Used by frameworks for unmarshalling / dup /
+        // clone / ORM hydration, and by the TRY_RUNS pass-7 probe's
+        // `ERB.new` stub (layer #4). Sits before the `new` arm so the
+        // class-receiver path is uniform.
+        //
+        // Semantics:
+        //   - User classes (`Value::Class` not in the primitive
+        //     whitelist): allocate a fresh `HeapObj::Instance` with
+        //     the class pointer set, empty ivars, no singleton class.
+        //     No `initialize` call.
+        //   - Primitive class shells (Integer / Float / String /
+        //     Array / Hash / Range / Symbol / Regexp / Proc /
+        //     Method / UnboundMethod / TrueClass / FalseClass /
+        //     NilClass / Kernel): raise TypeError matching CRuby's
+        //     "allocator undefined for X" — those values are unboxed
+        //     in rubyrs's heap model, no Instance slot to populate.
+        //   - Zero args; any positional arg raises ArgumentError
+        //     with the standard "wrong number of arguments" shape.
+        //
+        // KNOWN GAP: `cext_alloc_func` (set by
+        // `rb_define_alloc_func`) is currently NOT routed through
+        // this arm. The `new` arm below DOES route through it (so a
+        // cext `Foo.new` produces a TypedData-wrapped Object), but
+        // `Foo.allocate` here falls back to the default bare
+        // Instance. For a cext whose initialize-after-allocate
+        // relies on the alloc_func having wrapped its C struct, the
+        // separation of allocate-vs-new becomes visible. No caller
+        // surfaced today (pass-7 probe layer #4 only needs the
+        // bare Instance path). Routed via a follow-up if a cext
+        // surfaces the need; tracked as a comment so a future
+        // reader doesn't think the bare-allocate is an oversight.
+        let allocate_id = self.interner.intern("allocate");
+        if name_id == allocate_id
+            && let Value::Class(cls) = &recv {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                }));
+            }
+            if is_primitive_class_name(&cls.name) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("allocator undefined for {}", cls.name),
+                }));
+            }
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Instance(Instance {
+                class: cls.clone(),
+                ivars: HashMap::new(),
+                singleton_class: None,
+            }));
+            self.stack.push(Value::Object(id));
+            return Ok(());
+        }
         if name_id == new_id
             && let Value::Class(cls) = &recv {
                 // L3-F: cext-registered allocator path. When the class

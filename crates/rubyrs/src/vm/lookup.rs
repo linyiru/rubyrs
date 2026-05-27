@@ -597,6 +597,14 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
+                    // `Class#allocate` — bare-instance allocator
+                    // without calling `initialize`. Implemented in
+                    // dispatch.rs's `new`-arm neighbour; primitive
+                    // class shells (Integer/String/etc.) raise
+                    // TypeError matching CRuby ("allocator undefined
+                    // for Integer"), but still respond_to? true for
+                    // the method name itself.
+                    | "allocate"
                 ) {
                     return true;
                 }
