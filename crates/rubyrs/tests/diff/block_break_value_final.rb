@@ -28,8 +28,8 @@
 # `gsub { break val }` returns val (NOT the partially-built
 # string). Already covered by regex_sub.rb but re-asserted here
 # alongside `sub` for symmetry. Receiver String, regex pattern.
-puts "abcabc".gsub(/./) { |c| break :gsub_stop if c == "b"; c.upcase }  # :gsub_stop
-puts "abcabc".sub(/./)  { |c| break :sub_stop }                          # :sub_stop
+puts "abcabc".gsub(/./) { |c| break :gsub_stop if c == "b"; c.upcase }  # gsub_stop
+puts "abcabc".sub(/./)  { |c| break :sub_stop }                          # sub_stop
 
 # --- Array#chunk non-local return ------------------------------
 # `chunk { return val }` unwinds the caller method (rubyrs
@@ -49,7 +49,7 @@ def chunk_return
   [1, 2, 3].chunk { |x| return :chunk_ret }.to_a
   :unreached
 end
-puts chunk_return                                                        # :chunk_ret
+puts chunk_return                                                        # chunk_ret
 
 # --- Array#bsearch break value ---------------------------------
 # `bsearch { break val }` short-circuits the binary search and
