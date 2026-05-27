@@ -1315,6 +1315,127 @@ impl Vm {
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
+            // `Module#remove_method(name, ...)` — removes the
+            // method(s) from THIS class's own methods table. Does
+            // NOT walk the superclass chain (that's `undef_method`'s
+            // job in CRuby; we route undef as a no-op pending real
+            // semantics).
+            //
+            // Motivating consumer: tilt-2.7.0
+            // `lib/tilt/template.rb:490` calls
+            // `TOPOBJECT.class_eval { remove_method(method_name) }`
+            // after each `evaluate` to wipe the synthesised
+            // `__tilt_<id>` entry. With this arm tilt's cleanup
+            // path runs to completion.
+            //
+            // Variadic: CRuby accepts any number of args
+            // (`remove_method(:a, :b, :c)`); 0 args is a no-op
+            // returning self.
+            //
+            // CRuby raises NameError on a method not defined on
+            // this class, INCLUDING for primitives — verified
+            // against CRuby 3.4 that `String.remove_method(:foo)`
+            // raises. This diverges from the permissive stance
+            // at `instance_method` / `method_defined?` (which DO
+            // skip the user-class fence for primitives because
+            // probing is benign). `remove_method` is a mutation,
+            // not a probe; matching CRuby's strict shape here
+            // avoids quiet divergence on a surface that's
+            // unlikely to be exercised as a feature-detect.
+            ("remove_method", args) if !args.is_empty() => {
+                // Iterative: process args left-to-right, removing
+                // each in turn. If a later arg is missing (or a
+                // TypeError fires), earlier removals stay — CRuby
+                // is partial-mutation on this surface (verified
+                // against 3.4: `A.remove_method(:x, :nope)`
+                // removes `:x` BEFORE raising NameError on
+                // `:nope`). Track whether anything was removed
+                // so we can bump `method_gen` on the error path
+                // too — without that, inline caches would keep
+                // returning the stale lookup for the removed
+                // method.
+                //
+                // Per-arg arg-to-SymId resolution: Symbol uses sid
+                // directly (no resolve/intern roundtrip + no
+                // `max_symbols` check — Symbols are already
+                // interned). String goes through `with_str_lossy`
+                // so the cap check + intern run on a borrowed
+                // &str (zero-alloc on the valid-UTF-8 hot path).
+                // Mirrors the established pattern at the
+                // `instance_method` String arm.
+                //
+                // Strict-on-primitive parity: primitives are NOT
+                // exempt from the missing-method NameError
+                // (unlike `instance_method` / `method_defined?`,
+                // which keep their permissive stance because
+                // probes are benign feature-detects;
+                // `remove_method` is a mutation).
+                //
+                // `any_removed` lets each error-return path bump
+                // `method_gen` so a half-completed variadic call
+                // doesn't leave inline caches stale on the
+                // already-removed methods.
+                let mut any_removed = false;
+                for arg in args {
+                    let sid: SymId = match arg {
+                        Value::Sym(sid) => *sid,
+                        Value::Str(s) => match s.with_str_lossy(|raw| -> Result<SymId, Trap> {
+                            if let Some(max) = self.max_symbols
+                                && !self.interner.contains(raw)
+                                && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                            Ok(self.interner.intern(raw))
+                        }) {
+                            Ok(sid) => sid,
+                            Err(trap) => {
+                                if any_removed {
+                                    self.method_gen = self.method_gen.wrapping_add(1);
+                                }
+                                return Err(trap);
+                            }
+                        },
+                        other => {
+                            let inspected = other.to_inspect(&self.heap, &self.interner);
+                            if any_removed {
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                            }
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!("{} is not a symbol nor a string", inspected),
+                            }));
+                        }
+                    };
+                    // Single `remove()` call: HashMap::remove
+                    // returns Option so we get presence-check +
+                    // mutation in one hash lookup + one
+                    // `borrow_mut()`.
+                    if cls.methods.borrow_mut().remove(&sid).is_none() {
+                        if any_removed {
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                        }
+                        // Resolve name only on the rare missing
+                        // path. Free for the common case.
+                        let name_for_msg = self.interner.resolve(sid).to_string();
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
+                        }));
+                    }
+                    any_removed = true;
+                }
+                // Bump `method_gen` once even for variadic calls —
+                // inline caches see a single coarse generation
+                // bump rather than per-method invalidation.
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Class(cls));
+                Ok(true)
+            }
+            ("remove_method", _) => {
+                // 0-arg form: no-op, return receiver (CRuby parity).
+                self.stack.push(Value::Class(cls));
+                Ok(true)
+            }
             // Arity guard FIRST so wrong-count calls surface as
             // ArgumentError (CRuby check order: arity → type).
             // 0 args / 2+ args both raise here.
@@ -2095,7 +2216,7 @@ impl Vm {
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
@@ -4863,7 +4984,7 @@ impl Vm {
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
