@@ -278,6 +278,35 @@ impl Vm {
                 return Ok(());
             }
         }
+        if !no_recv && argc == 0 {
+            let direct_primitive = {
+                let recv = self
+                    .stack
+                    .last()
+                    .expect("ICE: stack underflow before do_call receiver");
+                match recv {
+                    Value::Str(a) if name_id == self.sym_length || name_id == self.sym_size => {
+                        let bytes = a.borrow();
+                        let len = if bytes.is_ascii() {
+                            bytes.len()
+                        } else {
+                            String::from_utf8_lossy(&bytes).chars().count()
+                        };
+                        Some(Value::Int(len as i64))
+                    }
+                    Value::Str(a) if name_id == self.sym_to_s => Some(Value::Str(a.clone())),
+                    Value::Int(n) if name_id == self.sym_to_s || name_id == self.sym_inspect => {
+                        Some(Value::new_str(n.to_string()))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(v) = direct_primitive {
+                self.stack.pop();
+                self.stack.push(v);
+                return Ok(());
+            }
+        }
         let name = self.interner.resolve(name_id).clone();
         if no_recv {
             let self_val = self.frames.last()

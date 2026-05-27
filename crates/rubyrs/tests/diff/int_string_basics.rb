@@ -63,6 +63,20 @@ puts "hello".end_with?("he")
 puts "ab" * 3
 puts "abc" * 0
 
+# Integer#to_s + String#length/size chaining keeps Ruby-visible results.
+puts 0.to_s.length
+puts 9.to_s.length
+puts 10.to_s.size
+puts (-10).to_s.length
+
+# Non-Integer receivers must still dispatch through user Ruby code.
+class WeirdToSLength
+  def to_s
+    [1, 2, 3]
+  end
+end
+puts WeirdToSLength.new.to_s.length
+
 # Lex comparisons
 puts "apple" < "banana"
 puts "banana" > "apple"

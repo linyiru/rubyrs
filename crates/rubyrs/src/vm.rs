@@ -446,6 +446,10 @@ pub(crate) struct Vm {
     /// lazy on the next call at each site.
     pub(crate) call_caches: Vec<CallCache>,
     pub(crate) method_gen: u32,
+    pub(crate) sym_length: SymId,
+    pub(crate) sym_size: SymId,
+    pub(crate) sym_to_s: SymId,
+    pub(crate) sym_inspect: SymId,
     /// `Op::Break` sets this; iteration drivers check and consume.
     pub(crate) break_signaled: bool,
     /// `Op::ReturnMethod` sets this with the value to return. Both
@@ -541,7 +545,11 @@ impl Vm {
         })
     }
 
-    pub(crate) fn new(protos: Vec<Proto>, interner: Interner) -> Self {
+    pub(crate) fn new(protos: Vec<Proto>, mut interner: Interner) -> Self {
+        let sym_length = interner.intern("length");
+        let sym_size = interner.intern("size");
+        let sym_to_s = interner.intern("to_s");
+        let sym_inspect = interner.intern("inspect");
         Vm {
             protos,
             interner,
@@ -603,6 +611,10 @@ impl Vm {
             max_value_bytes: None,
             call_caches: Vec::new(),
             method_gen: 0,
+            sym_length,
+            sym_size,
+            sym_to_s,
+            sym_inspect,
             break_signaled: false,
             callable_forwarder_proto: None,
             method_compose_forwarder_proto: None,
@@ -812,6 +824,5 @@ impl Vm {
 // accidental revert in the kernel.rs extraction refactor; this
 // branch drops it again to keep the panic-budget honest and
 // -D warnings green.)
-
 
 
