@@ -2534,6 +2534,28 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(sp(bn, Expr::SingletonChainPrepend(Box::new(src))));
                 continue;
             }
+            // `class << self; FOO = expr; ...` — constant assignment
+            // inside the singleton class body. CRuby places the
+            // constant on the singleton class itself, accessible
+            // via `Foo.singleton_class::FOO`. rubyrs's spike-scope
+            // constants model is flatter — `Vm.constants` is a
+            // single name-keyed table — so we route the assignment
+            // through the regular toplevel `Expr::ConstWrite`. The
+            // result: a bare `FOO` read inside the singleton class
+            // resolves through the same table that a top-level
+            // `FOO` would, which is the model rubyrs already uses
+            // for all other constants in the spike scope.
+            //
+            // Motivating call site: sinatra/base.rb:1292's
+            // `class << self; CALLERS_TO_IGNORE = [...].freeze;
+            // attr_reader :routes, ...; def callers_to_ignore;
+            // CALLERS_TO_IGNORE; end; end` — the constant is
+            // assigned once and read from the singleton method
+            // body that follows. (TRY_RUNS pass 9 layer #11.)
+            if recv_is_self && bn.as_constant_write_node().is_some() {
+                out.push(tr(ctx, bn));
+                continue;
+            }
             // `class << self` body: any remaining unsupported form
             // compiles to a runtime `raise NotImplementedError`
             // rather than a parse-time SyntaxError. The raise fires
@@ -2572,7 +2594,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // even silently emitting nil would do the wrong thing
             // (the body's intended target receiver is lost).
             if recv_is_self {
-                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, and `prepend Mod` (single Module arg, with `self` receiver) are supported in the spike subset";
+                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), and constant assignment (`FOO = expr`) are supported in the spike subset";
                 out.push(sp(bn, Expr::Call {
                     receiver: None,
                     name: "raise".into(),
