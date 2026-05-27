@@ -667,6 +667,35 @@ Foo::BAR                       # CRuby: NameError; rubyrs: 1
   divergence is documented here rather than encoded as a passing
   diff).
 
+### `Class#singleton_class` returns the receiver (Tier 1 stub)
+
+```ruby
+class Foo; end
+Foo.singleton_class.equal?(Foo.singleton_class)  # CRuby: true; rubyrs: true
+Foo.singleton_class.class                        # CRuby: Class; rubyrs: Class
+Foo.singleton_class.name                         # CRuby: nil;   rubyrs: "Foo"
+```
+
+- `Class#singleton_class` (and `Module#singleton_class`, same arm)
+  is implemented as a Tier 1 stub that returns the receiver itself.
+  The identity-invariant property
+  `X.singleton_class.equal?(X.singleton_class)` holds, which is the
+  property real consumers (e.g. MRI `lib/erb/compiler.rb`'s
+  `@_init = self.class.singleton_class` cache-invariant check at
+  lines 828 / 900) actually rely on.
+- Divergence: the real metaclass shape isn't visible. Methods called
+  on the result dispatch against the receiver, so singleton_methods
+  defined on `X` do NOT appear as `X.singleton_class.instance_methods`,
+  and `X.singleton_class.name` returns the original class name
+  instead of CRuby's `nil`.
+- `Object#singleton_class` for non-Class receivers is not implemented
+  in this arm and will raise NoMethodError.
+- Why: completes the ERB compile chain (`ERB.new(...).src` runs end-
+  to-end) without pulling the full eigenclass model into the VM.
+- Test: `crates/rubyrs/tests/diff/class_singleton_class.rb` (locks
+  idempotency, `class is Class`, distinct singletons across classes,
+  the ERB-shape `@_init` cache invariant, and `respond_to?` parity).
+
 ## Deferred to outer tiers
 
 Features whose absence is a tier-assignment decision per
