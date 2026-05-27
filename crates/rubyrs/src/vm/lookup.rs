@@ -669,7 +669,7 @@ impl Vm {
                 // primitive arm in vm/string.rs.
                 | "freeze" | "frozen?"
             ),
-            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "hash" | "source_location"),
+            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "bind_call" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "hash" | "source_location"),
             Value::UnboundMethod(_) => matches!(name, "bind" | "bind_call" | "arity" | "parameters" | "==" | "owner" | "hash" | "source_location"),
             Value::CurriedProc(_) => matches!(name, "call" | "[]" | "()"),
         }

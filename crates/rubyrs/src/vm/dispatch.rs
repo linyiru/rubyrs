@@ -756,6 +756,70 @@ impl Vm {
         //
         // Arity: at least 1 arg (the receiver); extra args + block
         // are forwarded to the captured method.
+        // `Method#bind_call(other, *args)` — mirror of
+        // `UnboundMethod#bind_call`, but starts from a bound
+        // Method (which carries a receiver). Equivalent to
+        // `m.unbind.bind(other).call(*args)` but doesn't
+        // allocate intermediate UnboundMethod / Method
+        // wrappers. The is-a fence + snapshot-preferred
+        // dispatch are identical to the UnboundMethod arm
+        // below — see the longer comment block there for the
+        // singleton-class / Module-mixin / Kernel edge cases.
+        if let Value::BoundMethod(bid) = &recv && name == "bind_call" && !args.is_empty() {
+            let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod { recv, name_id, method } => (recv.clone(), *name_id, method.clone()),
+                _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
+            };
+            // Capture class from the original receiver — same
+            // dispatch-class shape `unbind` uses, so singleton
+            // methods round-trip correctly.
+            let cap_class = match &bm_recv {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&bm_recv) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: "cannot bind_call on a Method whose receiver has no class".into(),
+                    })),
+                },
+            };
+            let mut args = args;
+            let target = args.remove(0);
+            let target_class = match &target {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&target) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("bind_call argument must have a class (got {})", target.type_name()),
+                    })),
+                },
+            };
+            if cap_class.name.as_str() != "Kernel"
+                && !cap_class.is_module
+                && !super::class_is_a(&target_class, &cap_class) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "bind_call argument must be an instance of {} (got {})",
+                        cap_class.name, target_class.name,
+                    ),
+                }));
+            }
+            let m = match bm_method.or_else(|| self.lookup_method_uncached(&cap_class, bm_name_id)) {
+                Some(m) => m,
+                None => {
+                    let mname = self.interner.resolve(bm_name_id).to_string();
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("undefined method '{}' for class '{}'", mname, cap_class.name),
+                    }));
+                }
+            };
+            self.invoke_method(m, target, args)?;
+            return Ok(CallableOutcome::Handled);
+        }
+        if let Value::BoundMethod(_) = &recv && name == "bind_call" {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1..)".into(),
+            }));
+        }
         if let Value::UnboundMethod(uid) = &recv && name == "bind_call" && !args.is_empty() {
             let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
                 HeapObj::UnboundMethod { class, name_id, method } => {

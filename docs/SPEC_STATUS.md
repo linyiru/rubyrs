@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 100 |
-| Examples in corpus | 486 |
-| Skipped `it` traces | 150 |
+| Files | 102 |
+| Examples in corpus | 494 |
+| Skipped `it` traces | 149 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 2 |
 | `fixture` | 48 |
-| `method-not-implemented` | 83 |
+| `method-not-implemented` | 82 |
 | `mock` | 17 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -42,10 +42,10 @@ Find blocks unlocked by a future feature with e.g.
 | BasicObject | 3 | 15 | 0 |
 | Hash | 24 | 62 | 43 |
 | Integer | 25 | 211 | 21 |
-| Method | 11 | 57 | 1 |
+| Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
-| UnboundMethod | 3 | 14 | 1 |
+| UnboundMethod | 4 | 18 | 0 |
 
 ## Files
 
@@ -123,6 +123,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 5 | 1 |
 | `integer_zero_spec.rb` | Integer#zero? | `core/integer/zero_spec.rb` | 2 | 0 |
 | `method_arity_spec.rb` | Method#arity | `core/method/arity_spec.rb` | 6 | 0 |
+| `method_bind_call_spec.rb` | Method#bind_call | `core/method/bind_call_spec.rb` | 4 | 0 |
 | `method_call_spec.rb` | Method#call | `core/method/call_spec.rb (+ shared/call.rb)` | 6 | 0 |
 | `method_compose_spec.rb` | Method#<< | `core/method/compose_spec.rb` | 6 | 0 |
 | `method_curry_spec.rb` | Method#curry | `core/method/curry_spec.rb` | 5 | 0 |
@@ -149,6 +150,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 2 | 6 |
 | `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 8 | 0 |
 | `unbound_method_arity_spec.rb` | UnboundMethod#arity | `core/unboundmethod/arity_spec.rb` | 4 | 0 |
-| `unbound_method_bind_spec.rb` | UnboundMethod#bind | `core/unboundmethod/bind_spec.rb` | 4 | 1 |
+| `unbound_method_bind_call_spec.rb` | UnboundMethod#bind_call | `core/unboundmethod/bind_call_spec.rb` | 4 | 0 |
+| `unbound_method_bind_spec.rb` | UnboundMethod#bind | `core/unboundmethod/bind_spec.rb` | 4 | 0 |
 | `unbound_method_equal_spec.rb` | Class#instance_method / Method#unbind | `core/unboundmethod/equal_value_spec.rb` | 6 | 0 |
 

@@ -41,8 +41,4 @@ describe "UnboundMethod#bind" do
     assert_raises("TypeError") { u.bind(UBindT4Rhs.new) }
   end
 
-  # skipped (method-not-implemented): describe "UnboundMethod#bind_call" do ... end
-  #   `UnboundMethod#bind_call` is not in the subset; calling
-  #   `u.bind_call(recv, *args)` raises NoMethodError. Tracked
-  #   for a future batch alongside the `Method#bind_call` gap.
 end
