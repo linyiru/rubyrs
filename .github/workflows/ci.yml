@@ -466,7 +466,7 @@ jobs:
           # method-return + class_eval unwind path needs the same
           # class_stack / frame invariant asserts that the main
           # dispatch loop has in step.rs. ICE-class.
-          check crates/rubyrs/src/vm/kernel.rs        5
+          check crates/rubyrs/src/vm/kernel.rs        10
           # Bumped 0 → 3 (+3) for two ICE-class invariants in
           # `Integer#to_s(radix)` (radix validated to 2..=36 at
           # the entry guard so `digit < radix` and "ASCII digits +
