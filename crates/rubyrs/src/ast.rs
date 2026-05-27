@@ -2157,8 +2157,48 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         } else {
             "?".to_string()
         };
+        // Superclass can be either a bare constant (`class C < P`)
+        // or a constant path (`class C < Foo::Bar`). Without
+        // accepting `ConstantPathNode` here, the path form silently
+        // returned `None` (because `as_constant_read_node` rejects
+        // it), so DefClass popped Nil and the child lost its
+        // inheritance link — observable as "undefined method `m'
+        // for Object" on any child instance. Surfaced as TRY_RUNS
+        // pass-7 layer #6 (the `alias secure? ssl?` bug) but the
+        // root cause was broader: nested-via-path superclass dropped
+        // at AST translation time.
+        //
+        // Compiler downstream (compiler.rs ~line 1036-1044): for
+        // path-shape names containing `::`, `build_const_chain`
+        // bails out (returns `None` because `bare.contains("::")`,
+        // compiler.rs:195), so the emitter falls through to
+        // `Op::LoadConst` with the joined `"Foo::Bar"` SymId. That
+        // works for relative paths because `Op::DefClass` keys the
+        // class table by the qualified SymId (vm/step.rs:1520 uses
+        // `qual_id` over `name_id` when set), so a `module M; class
+        // MP; end; end` definition lands at the same
+        // `interner.intern("M::MP")` slot that `LoadConst("M::MP")`
+        // later reads.
+        //
+        // KNOWN GAP: `flatten_constant_path` (and its `None =>
+        // Some(name)` arm) loses leading-`::` (absolute-path)
+        // information across ALL callers, not just this one.
+        // Effect on superclass: in a nested scope, `class C <
+        // ::Bar` flattens to `"Bar"`, and the cref-walking
+        // `LoadConstChain` built for bare-name lookups in
+        // `compiler.rs` resolves it as `Wrapper::Bar` first,
+        // instead of forcing top-level `Bar` per CRuby semantics.
+        // Pre-existing gap shared with const reads / rescue classes
+        // / etc. — not introduced by this PR; deferred until a
+        // caller surfaces a real failure on it.
         let superclass = n.superclass().and_then(|s| {
-            s.as_constant_read_node().map(|cr| cid_to_string(cr.name()))
+            if let Some(cr) = s.as_constant_read_node() {
+                Some(cid_to_string(cr.name()))
+            } else if s.as_constant_path_node().is_some() {
+                flatten_constant_path(&s)
+            } else {
+                None
+            }
         });
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {

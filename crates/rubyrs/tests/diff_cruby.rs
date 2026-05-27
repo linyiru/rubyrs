@@ -127,6 +127,7 @@ fn run_diff(name: &str) {
 #[test] fn array_zip() { run_diff("array_zip"); }
 #[test] fn comparable() { run_diff("comparable"); }
 #[test] fn instance_variable_get_set() { run_diff("instance_variable_get_set"); }
+#[test] fn inheritance_constant_path() { run_diff("inheritance_constant_path"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }
