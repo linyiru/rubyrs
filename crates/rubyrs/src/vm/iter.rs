@@ -1793,6 +1793,30 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                // Defensive pin of every heap-slot element. Without
+                // this, a block that mutates the receiver mid-
+                // iteration (`arr.shift` / `slice!` / etc.) would
+                // leave the snapshot's heap-Value elements rooted
+                // only via this Rust-local Vec — the subsequent
+                // bucket alloc's maybe_gc would sweep them and the
+                // freshly-built bucket `Array(vec![v])` would
+                // contain a dangling ObjId. CRuby's exact behaviour
+                // under receiver mutation during enumeration is
+                // unspecified / implementation-defined (in practice
+                // it stops processing without raising); rubyrs
+                // keeps the elements alive defensively so the
+                // primitive completes without ICE'ing regardless
+                // of what the user-level semantics turn out to be.
+                // Mirrors the chunk
+                // driver's defensive snapshot pin earlier in this
+                // file. Narrowed via `is_gc_heap_ref` to avoid
+                // O(n) GC scan growth for immediate/Rc-shared
+                // element types.
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() {
+                        g.pin(v.clone());
+                    }
+                }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
@@ -1801,6 +1825,19 @@ impl Vm {
                 let mut early = None;
                 for v in snapshot {
                     let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                        // `break;` (NOT immediate
+                        // `return Ok(Some(Value::Nil))` like chunk /
+                        // bsearch / sort use) is safe here because
+                        // the post-loop tail (`if let Some(e) = early
+                        // ...; Some(Value::Hash(result_id))`) is
+                        // strictly heap-reads — no `maybe_gc`, no
+                        // `check_alloc?`, no `heap.alloc`. There's
+                        // no Trap path that could clobber the
+                        // in-flight `method_return`. If a future
+                        // edit adds an allocation to the tail,
+                        // switch this arm to
+                        // `return Ok(Some(Value::Nil))` to match
+                        // the chunk-arm pattern.
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
@@ -1813,7 +1850,46 @@ impl Vm {
                             g.vm.heap.array_mut(arr_id).push(v);
                         }
                     } else {
+                        // Pin the block-returned `key` across
+                        // `maybe_gc()`. Between step_block returning
+                        // and the eventual `hash_mut.push((key, ...))`,
+                        // `key` lives only in this Rust local. If
+                        // it's a heap-slot Value (Array / Hash /
+                        // Object / Range / Block / BoundMethod /
+                        // UnboundMethod / CurriedProc / BigInt),
+                        // `maybe_gc` would sweep it and the
+                        // subsequent `hash_mut.push` would insert a
+                        // dangling ObjId into result_id. Same
+                        // family as the chunk driver's GC pin.
+                        //
+                        // Pop discipline mirrors the step_block
+                        // dance: the pin scope is JUST `maybe_gc()`,
+                        // popped BEFORE `check_alloc()?` so an Err
+                        // propagating via `?` doesn't skip the pop
+                        // and leak a permanent pin. `check_alloc`
+                        // doesn't trigger GC and `heap.alloc`
+                        // doesn't either (and is infallible), so
+                        // they run safely with `key` unpinned.
+                        //
+                        // Pin-stack discipline: this push/pop pair
+                        // bypasses `PinGuard::pin`'s internal
+                        // `count` accounting (the PinGuard's Drop
+                        // pops exactly `count` items). The pair is
+                        // safe because (a) it's balanced within a
+                        // single straight-line block with no `?`
+                        // between push and pop, (b) `maybe_gc()`
+                        // reads `vm.pinned` but never mutates it,
+                        // so the pop is guaranteed to remove the
+                        // just-pushed `key`. DO NOT insert any
+                        // `g.pin(...)` call (PinGuard-counted)
+                        // between this push and pop — that would
+                        // make the pop remove a PinGuard-tracked
+                        // slot and PinGuard::Drop would under-pop,
+                        // leaking a permanent pin.
+                        let pin_key = key.is_gc_heap_ref();
+                        if pin_key { g.vm.pinned.push(key.clone()); }
                         g.vm.maybe_gc();
+                        if pin_key { g.vm.pinned.pop(); }
                         g.vm.check_alloc()?;
                         let arr_id = g.vm.heap.alloc(HeapObj::Array(vec![v]));
                         g.vm.heap.hash_mut(result_id).push((key, Value::Array(arr_id)));

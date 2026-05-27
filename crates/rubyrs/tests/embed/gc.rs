@@ -485,3 +485,114 @@ fn array_chunk_pin_snapshot_under_receiver_mutation() {
         "chunk corrupted (likely snapshot element swept after receiver mutation), got: {out}"
     );
 }
+
+#[test]
+fn array_group_by_pin_heap_keys_under_stress_gc() {
+    // Regression: Array#group_by holds the block-returned `key` as
+    // a Rust local across `maybe_gc / check_alloc / heap.alloc` for
+    // the bucket Array, then pushes `(key, ...)` into the result
+    // Hash. Without pinning, the explicit `maybe_gc()` BEFORE the
+    // bucket alloc sweeps heap-Value keys; the immediately-
+    // following `heap.alloc` reuses the freed slot for the bucket
+    // Array; the Hash then stores the dangling ObjId alongside the
+    // newly-allocated bucket (which now occupies the same slot).
+    // Same family as the chunk driver's GC pin.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # Block returns a fresh heap Array with content DIFFERENT
+        # from the value: `["k#{x}"]` (key) vs `x` (element). This
+        # distinction is crucial — an earlier draft used `[x]` as
+        # both the key and the bucket-content shape, which masked
+        # the bug: a swept key slot got reused by the
+        # immediately-following bucket alloc and `inspect` still
+        # printed the "expected" shape because key and bucket
+        # happened to be aliased.
+        #
+        # With a distinct shape we get the real failure mode:
+        # without the fix, the swept key slot is overwritten by
+        # the bucket Array, so `inspect` produces e.g.
+        # `{[10] => [10], ...}` instead of CRuby's
+        # `{["k10"] => [10], ...}`.
+        result = [10, 20, 30].group_by { |x| ["k#{x}"] }
+        puts result.inspect
+    "#, "group_by_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    assert_eq!(
+        out, "{[\"k10\"] => [10], [\"k20\"] => [20], [\"k30\"] => [30]}\n",
+        "group_by output corrupted (key slot was reused by bucket alloc), got: {out}"
+    );
+}
+
+#[test]
+fn array_group_by_pin_snapshot_under_receiver_mutation() {
+    // Regression: Array#group_by clones the receiver into a Rust-
+    // local `snapshot: Vec<Value>` and iterates it. If the block
+    // mutates the receiver mid-iteration (`arr.shift` / `slice!` /
+    // etc.), the snapshot's original heap-Value elements (e.g.
+    // inner Arrays) are no longer reachable through the pinned
+    // receiver — they live only in the snapshot Vec, which
+    // scan_roots can't see. The explicit `maybe_gc()` BEFORE the
+    // bucket alloc sweeps the still-pending snapshot elements;
+    // the subsequent `heap.alloc(HeapObj::Array(vec![v]))` just
+    // reuses freed slots, but subsequent iterations then read
+    // those swept slots and crash. Same family as the chunk
+    // driver's defensive snapshot pin and the group_by key pin
+    // earlier in this same file.
+    //
+    // Without the defensive `for v in &snapshot { ... }` pin
+    // loop, the reproducer ICEs at `heap.rs:180` with
+    // `use-after-free ObjId(N)`. With the fix it completes —
+    // rubyrs's `group_by` (eager — returns a Hash directly when a
+    // block is given) produces all three bucket entries, whereas
+    // CRuby's `group_by` stops processing after the receiver
+    // mutation and only produces the first entry. The CRuby
+    // divergence is documented but not under test here; the focus
+    // is on rubyrs surviving the GC pressure without ICE'ing.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # `nested` holds three inner Arrays (heap slots). On
+        # iteration 1, the block shifts all elements off the
+        # receiver. After that, iter 2/3's elements are reachable
+        # ONLY via the Rust-local snapshot Vec inside group_by.
+        # Without the defensive pin, STRESS_GC + the bucket alloc
+        # sweeps them and the next read ICEs.
+        nested = [[1, 2], [3, 4], [5, 6]]
+        result = nested.group_by { |inner|
+          nested.shift while nested.length > 0
+          inner.first
+        }
+        puts result.inspect
+    "#, "group_by_mut.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // Soft assertion focused on the GC-safety invariant rather
+    // than the exact bucket count: the test passes as long as
+    // (a) eval completes without an ICE / SIGABRT (the `expect`
+    // above), and (b) the printed result starts with `{1 => [[1, 2]]`
+    // (the first inner Array survived the snapshot pin and made
+    // it into the output Hash).
+    //
+    // Deliberately NOT asserting exact equality with the eager
+    // rubyrs output `{1 => [[1, 2]], 3 => [[3, 4]], 5 => [[5, 6]]}`
+    // nor with CRuby's `{1 => [[1, 2]]}` — both are valid given
+    // CRuby's "unspecified under concurrent mutation" stance, and
+    // pinning the test to whichever rubyrs happens to do today
+    // would cause spurious failures if the implementation is
+    // later aligned with CRuby's stop-after-mutation behaviour.
+    // The bug this test guards against is a USE-AFTER-FREE on a
+    // swept snapshot element — that failure mode is `expect("eval
+    // should not ICE")`, NOT the bucket layout.
+    assert!(
+        out.starts_with("{1 => [[1, 2]]"),
+        "group_by output corrupted (first inner Array did not survive): {out}"
+    );
+}
