@@ -18,8 +18,28 @@
 
 use libfuzzer_sys::fuzz_target;
 use rubyrs::{Config, Runtime};
+use std::sync::OnceLock;
+
+/// Move the fuzz process cwd into an empty tempdir once at
+/// startup; mirror of the helper in `parse.rs` — see that file's
+/// doc-comment for the full rationale (non-deterministic file
+/// I/O via `require` bypasses fuel/deadline accounting). Each
+/// fuzz target is its own libfuzzer binary so the `OnceLock` is
+/// per-process, not shared between targets.
+fn ensure_sandbox_cwd() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let tmp = std::env::temp_dir()
+            .join(format!("rubyrs-fuzz-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp)
+            .expect("ICE: fuzz sandbox tempdir creation failed");
+        std::env::set_current_dir(&tmp)
+            .expect("ICE: fuzz sandbox set_current_dir failed");
+    });
+}
 
 fuzz_target!(|data: &[u8]| {
+    ensure_sandbox_cwd();
     let source = match std::str::from_utf8(data) {
         Ok(s) => s,
         // Same UTF-8 gate as `parse.rs` — `Runtime::eval` takes

@@ -21,8 +21,36 @@
 
 use libfuzzer_sys::fuzz_target;
 use rubyrs::{Config, Runtime};
+use std::sync::OnceLock;
+
+/// Move the fuzz process cwd into an empty tempdir once at
+/// startup so that any `require '<relative>'` /
+/// `require_relative '...'` the script tries to invoke can't
+/// reach into the runner's filesystem. Without this, the script
+/// could read arbitrary host files via
+/// `std::fs::read_to_string`, which (a) bypasses the
+/// fuel / deadline / max_value_bytes accounting since file I/O
+/// happens before any ops dispatch, (b) makes iterations
+/// non-deterministic because the result depends on host FS
+/// state, and (c) introduces I/O latency that crowds out exec/s.
+/// Sandboxing the cwd doesn't block absolute-path reads, but
+/// fuzzed-byte inputs are vanishingly unlikely to assemble a
+/// hostile absolute path, and our seed corpus is `require_relative
+/// './foo'` shaped — those all dead-end in an empty cwd.
+fn ensure_sandbox_cwd() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let tmp = std::env::temp_dir()
+            .join(format!("rubyrs-fuzz-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp)
+            .expect("ICE: fuzz sandbox tempdir creation failed");
+        std::env::set_current_dir(&tmp)
+            .expect("ICE: fuzz sandbox set_current_dir failed");
+    });
+}
 
 fuzz_target!(|data: &[u8]| {
+    ensure_sandbox_cwd();
     let source = match std::str::from_utf8(data) {
         Ok(s) => s,
         // `Runtime::eval` takes `&str` (UTF-8); skip non-UTF-8
