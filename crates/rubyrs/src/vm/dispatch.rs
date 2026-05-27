@@ -1086,6 +1086,62 @@ impl Vm {
     /// `_name_id` / `_cache_id` are unused today (arms match
     /// on `name: &str`); kept in the signature for forward
     /// compat with future arms that may need them.
+    /// Enforce private/protected access rules for an Object
+    /// receiver dispatch (explicit-receiver path).
+    ///
+    /// Private: cannot be invoked with an explicit receiver,
+    /// except the modern (CRuby 3.x) `self.foo` form where
+    /// `self == recv` by ObjId.
+    ///
+    /// Protected: caller's `self` class must be an instance of
+    /// (or descendant of) the method's *defining* class — CRuby's
+    /// rule, not the receiver's class.
+    ///
+    /// `bypass_visibility` is the `send` / `__send__` one-shot
+    /// override consumed by `do_call` before this call.
+    fn check_method_visibility(
+        &self,
+        m: &Method,
+        recv: &Value,
+        name: &str,
+        bypass_visibility: bool,
+    ) -> Result<(), Trap> {
+        let vis = m.visibility.get();
+        let self_recv = matches!(
+            (recv, self.frames.last().map(|f| &f.self_val)),
+            (Value::Object(rid), Some(Value::Object(sid))) if rid == sid
+        );
+        if vis == Visibility::Private && !bypass_visibility && !self_recv {
+            return Err(self.trap(RubyError::NoMethodError {
+                method: format!("private method '{name}' called"),
+                recv_type: recv.type_name(),
+            }));
+        }
+        if vis == Visibility::Protected && !bypass_visibility {
+            let caller_self = self
+                .frames
+                .last()
+                .map(|f| f.self_val.clone())
+                .unwrap_or(Value::Nil);
+            let caller_cls = match &caller_self {
+                Value::Object(id) => Some(self.heap.class_of(*id)),
+                _ => None,
+            };
+            let defining = m.defining_class.as_ref().and_then(|w| w.upgrade());
+            let allowed = match (&caller_cls, &defining) {
+                (Some(c), Some(d)) => super::class_is_a(c, d),
+                _ => false,
+            };
+            if !allowed {
+                return Err(self.trap(RubyError::NoMethodError {
+                    method: format!("protected method '{name}' called"),
+                    recv_type: recv.type_name(),
+                }));
+            }
+        }
+        Ok(())
+    }
+
     fn try_dispatch_class_intrinsics(
         &mut self,
         name: &str,
@@ -2249,76 +2305,7 @@ impl Vm {
         if let Value::Object(id) = &recv {
             let cls = self.heap.class_of(*id);
             if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
-                // Private methods cannot be invoked with an
-                // explicit receiver. CRuby additionally allows
-                // `self.foo` for some private writers; we keep
-                // the simpler "any explicit receiver = denied"
-                // rule.
-                //
-                // Protected methods can be invoked with an
-                // explicit receiver only when the caller's `self`
-                // is an instance of the receiver's class (or a
-                // descendant). The common DSL use case is
-                // `def >(other); other.balance > balance; end`
-                // where both `self` and `other` are the same
-                // class. We walk the current frame to find the
-                // caller's self class and check kind_of? against
-                // the receiver class via the existing
-                // `class_is_a` helper.
-                let vis = m.visibility.get();
-                // `send` / `__send__` bypass the visibility check
-                // exactly once. The flag was consumed at the top
-                // of `do_call` into a local so it applies even when
-                // the bypassed method itself dispatches other
-                // calls (those see a freshly-cleared flag).
-                //
-                // CRuby 2.7+ also allows `self.foo` (and
-                // `self.foo = v`) to dispatch private methods —
-                // the explicit-self receiver is recognised as the
-                // same as a bare call. Earlier versions only
-                // allowed the setter form; we follow the modern
-                // (3.x) rule. Identity comparison via ObjId on the
-                // current frame's self_val.
-                let self_recv = matches!(
-                    (&recv, self.frames.last().map(|f| &f.self_val)),
-                    (Value::Object(rid), Some(Value::Object(sid))) if rid == sid
-                );
-                if vis == Visibility::Private && !bypass_visibility && !self_recv {
-                    return Err(self.trap(RubyError::NoMethodError {
-                        method: format!("private method '{name}' called"),
-                        recv_type: recv.type_name(),
-                    }));
-                }
-                if vis == Visibility::Protected && !bypass_visibility {
-                    // Check against the method's *defining* class
-                    // (where `def name` literally lives) rather
-                    // than the receiver's class — that's CRuby's
-                    // rule. `a > c` where a=Account and
-                    // c=SavingsAccount(<Account): inside `def >`
-                    // the caller is an Account instance and the
-                    // protected `balance` was defined on Account,
-                    // so `Account.is_a?(Account)` is true and the
-                    // call is allowed even though the receiver
-                    // is a subclass.
-                    let caller_self = self.frames.last()
-                        .map(|f| f.self_val.clone())
-                        .unwrap_or(Value::Nil);
-                    let caller_cls = match &caller_self {
-                        Value::Object(id) => Some(self.heap.class_of(*id)),
-                        _ => None,
-                    };
-                    let defining = m.defining_class.as_ref().and_then(|w| w.upgrade());
-                    let allowed = match (&caller_cls, &defining) {
-                        (Some(c), Some(d)) => super::class_is_a(c, d),
-                        _ => false,
-                    };
-                    if !allowed {
-                        return Err(self.trap(RubyError::NoMethodError {
-                            method: format!("protected method '{name}' called"),
-                            recv_type: recv.type_name(),
-                        }));
-                    }
-                }
+                self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
                 self.invoke_method(m, recv.clone(), args)?;
                 return Ok(());
             }
