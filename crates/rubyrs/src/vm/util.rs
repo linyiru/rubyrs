@@ -84,21 +84,42 @@ fn value_cmp_v_heap_inner(
         }
     }
     // Numeric coercion arms — Float×Float and the mixed
-    // Int↔Float pairs. `value_cmp_v` itself doesn't cover
-    // numerics other than Int×Int (it's the homogeneous-
-    // aggregator entrypoint), so without these arms `Array#<=>`
-    // returns nil on any pair that crosses numeric types even
-    // though `Float#<=>(Integer)` is implemented at the
-    // primitive level. `partial_cmp` on NaN returns None →
-    // propagates upward, matching CRuby `[Float::NAN] <=>
-    // [Float::NAN] == nil`. The Int→f64 cast loses precision
-    // beyond 2^53 but matches CRuby's `Integer#<=>(Float)`
-    // semantics (CRuby's `Float#<=>(Integer)` also coerces
-    // through f64 for the same reason).
+    // Int↔Float / BigInt↔Float pairs. `value_cmp_v` itself
+    // doesn't cover numerics other than Int×Int (it's the
+    // homogeneous-aggregator entrypoint), so without these arms
+    // `Array#<=>` returns nil on any pair that crosses numeric
+    // types even though `Integer#<=>(Float)` is implemented at
+    // the primitive level. NaN propagates upward as None,
+    // matching CRuby `[Float::NAN] <=> [Float::NAN] == nil`.
+    //
+    // Int×Float and Float×Int route through
+    // `numeric::int_cmp_float_lossless` so `[2**62 + 1] <=>
+    // [(2**62).to_f]` returns -1/0/1 correctly instead of
+    // collapsing both sides to the same f64 bit pattern.
+    // BigInt×Float and Float×BigInt route through
+    // `bignum::bigint_cmp_float_lossless` for the same reason
+    // (the heap-side cmp helper is gated on `bignum`).
     match (a, b) {
         (Value::Float(x), Value::Float(y)) => return x.partial_cmp(y),
-        (Value::Int(x), Value::Float(y)) => return (*x as f64).partial_cmp(y),
-        (Value::Float(x), Value::Int(y)) => return x.partial_cmp(&(*y as f64)),
+        (Value::Int(x), Value::Float(y)) => {
+            return crate::vm::numeric::int_cmp_float_lossless(*x, *y);
+        }
+        (Value::Float(x), Value::Int(y)) => {
+            return crate::vm::numeric::int_cmp_float_lossless(*y, *x)
+                .map(|o| o.reverse());
+        }
+        #[cfg(feature = "bignum")]
+        (Value::BigInt(x), Value::Float(y)) => {
+            return crate::vm::bignum::bigint_cmp_float_lossless(
+                heap.bigint(*x), *y,
+            );
+        }
+        #[cfg(feature = "bignum")]
+        (Value::Float(x), Value::BigInt(y)) => {
+            return crate::vm::bignum::bigint_cmp_float_lossless(
+                heap.bigint(*y), *x,
+            ).map(|o| o.reverse());
+        }
         _ => {}
     }
     // Array#<=> element-wise lex compare. Length is the

@@ -1393,6 +1393,37 @@ fn int_cmp_float_is_lossless() {
     ]);
 }
 
+#[test]
+fn aggregate_cmp_int_float_is_lossless() {
+    // Sibling pin to int_cmp_float_is_lossless / bigint_cmp_float_is_lossless,
+    // but for the aggregator path in vm/util.rs::value_cmp_v_heap_inner.
+    // Used by Array#<=>, Array#sort, Array#min/max — pre-cycle-1
+    // it still demoted Int→f64 (and had no BigInt×Float arm at
+    // all, returning nil), so the direct operator and the
+    // aggregate path diverged after the previous PRs in this
+    // series. Both routes now use the same lossless helpers.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts ([2**62 + 1] <=> [(2**62).to_f]).inspect    # 1\n\
+         puts ([2**62] <=> [(2**62).to_f]).inspect        # 0\n\
+         puts ([2**62 - 1] <=> [(2**62).to_f]).inspect    # -1\n\
+         puts ([(2**62).to_f] <=> [2**62 + 1]).inspect    # -1\n\
+         # BigInt × Float (pre-fix returned nil — no arm at all)\n\
+         puts ([2**64 + 1] <=> [(2**64).to_f]).inspect    # 1\n\
+         puts ([2**64] <=> [(2**64).to_f]).inspect        # 0\n\
+         puts ([(2**64).to_f] <=> [2**64 + 1]).inspect    # -1",
+        "agg_cmp_int_float.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "1", "0", "-1", "-1",   // Int × Float (both directions)
+        "1", "0", "-1",         // BigInt × Float (both directions)
+    ]);
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_cmp_float_is_lossless() {
