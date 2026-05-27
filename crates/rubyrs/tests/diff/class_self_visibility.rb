@@ -86,3 +86,47 @@ end
 
 puts "post-singleton-instance=#{LeakGuard.new.public_instance_method}"
 puts "respond-to-instance=#{LeakGuard.new.respond_to?(:public_instance_method)}"
+
+## Exception-unwind leak guard (PR #233 code-review round 2 #4):
+## a raise inside a `class << self` body that's rescued OUTSIDE
+## must still pop the visibility scope, OR subsequent defs in
+## the outer class would inherit the singleton body's last
+## visibility setting. The translator wraps the body in
+## `Begin { ensure: [PopClassVisibility] }` so the pop runs on
+## both normal and exceptional exit.
+##
+## Simulated via `class_eval` (rubyrs handles class_eval's
+## block-as-class-body path). A raise inside the eval'd
+## `class << self` body propagates up; the outer rescue
+## catches it. Then we define a fresh class and check that
+## its instance method is public.
+exception_handled = begin
+  Object.class_eval do
+    class << self
+      private
+      ## Method call that raises NoMethodError (no such method
+      ## exists on the singleton class). The if-modifier
+      ## wrapper from PR #218 admits the syntax; the runtime
+      ## dispatch raises. Both rubyrs and CRuby raise here.
+      no_such_helper_method_for_unwind_test if true
+    end
+  end
+  "did-not-raise"
+rescue NoMethodError, NameError
+  "rescued"
+end
+puts "exception-handled=#{exception_handled}"
+
+## After rescue, define a fresh class — instance method must
+## be Public. If the singleton body's `private` leaked an
+## extra entry into class_visibility_stack and stayed there
+## after the exception, this method would be installed as
+## Private. The ensure-Pop in the AST translator's
+## SingletonClassNode handler is what prevents that.
+class PostUnwindLeakGuard
+  def visible_after_unwind
+    "post-unwind"
+  end
+end
+puts "post-unwind=#{PostUnwindLeakGuard.new.visible_after_unwind}"
+puts "respond-post-unwind=#{PostUnwindLeakGuard.new.respond_to?(:visible_after_unwind)}"

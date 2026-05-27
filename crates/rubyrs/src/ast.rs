@@ -2362,17 +2362,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             Expr::SelfExpr | Expr::ConstRead(_)
         );
         let synth_local = format!("__cls_lt_lt_recv_{}", node_span(node).byte_offset);
-        let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len() + 3);
-        if needs_local {
-            out.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
-        }
-        // Open a fresh visibility scope for the singleton body so
-        // bare `private`/`public`/`protected` modifiers inside
-        // mutate THIS frame rather than leaking into the
-        // enclosing class body's. Pops back at body end. Matches
-        // CRuby's `class << self` body-as-own-scope semantics.
-        // PR #233 code-review #1.
-        out.push(sp(node, Expr::PushClassVisibilityPublic));
+        let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len() + 1);
         // Closure helper: make a `def recv.name(params) body` SExpr
         // rewriting the receiver-less Def into a singleton-method
         // form. Reused for both real DefNodes in the body and for
@@ -2842,12 +2832,33 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // every supported entry's last op is already nil-pushing
         // (Def → LoadNil, expanded attr_* → LoadNil), so this only
         // changes the rare zero-arg/empty edge.
-        // Close the visibility scope opened at body start. Pair
-        // with `PushClassVisibilityPublic` above.
-        out.push(sp(node, Expr::PopClassVisibility));
-        out.push(sp(node, Expr::Nil));
-        return sp(node, Expr::Begin {
+        // Wrap the body in a `Begin { ensure: [Pop] }` so the
+        // visibility scope pop runs on BOTH normal exit and
+        // exception unwind. Without the ensure, a raise inside
+        // the body (or rescued by an outer begin) would skip the
+        // pop and leak an extra entry into
+        // `class_visibility_stack`, corrupting default visibility
+        // for later defs. The Push runs FIRST, OUTSIDE the inner
+        // Begin, so it's not double-counted by any unwind path —
+        // the inner Begin's ensure handles the pairing on every
+        // exit. PR #233 code-review round 2 (#1 unwind safety,
+        // #3 doc accuracy).
+        let inner_begin = sp(node, Expr::Begin {
             body: out,
+            rescue: vec![],
+            ensure: Some(vec![sp(node, Expr::PopClassVisibility)]),
+        });
+        // Outer Begin runs: synthetic-local write (if needed),
+        // Push, inner Begin (with ensure-Pop), final Nil.
+        let mut outer: Vec<SExpr> = Vec::with_capacity(4);
+        if needs_local {
+            outer.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
+        }
+        outer.push(sp(node, Expr::PushClassVisibilityPublic));
+        outer.push(inner_begin);
+        outer.push(sp(node, Expr::Nil));
+        return sp(node, Expr::Begin {
+            body: outer,
             rescue: vec![],
             ensure: None,
         });

@@ -249,16 +249,22 @@ pub(crate) enum Op {
     /// constitutes its own body with its own initial-Public
     /// visibility scope; this opcode replicates the same
     /// isolation by giving the singleton body its own stack
-    /// frame to mutate. PushClassVisibilityPublic must always
-    /// be paired with a matching `PopClassVisibility` at body
-    /// end so the stack stays balanced through error paths
-    /// (which we don't currently emit — class << self has no
-    /// rescue surface). PR #233 code-review #1.
+    /// frame to mutate.
+    ///
+    /// Push/Pop are emitted in an UNWIND-SAFE shape: the
+    /// translator wraps the singleton body in
+    /// `Expr::Begin { ensure: [PopClassVisibility] }`, so the
+    /// Pop runs on BOTH normal exit AND exception unwind. A
+    /// `raise` inside the body (or rescued by an outer
+    /// `begin`) still triggers the ensure clause, keeping
+    /// `class_visibility_stack` balanced. PR #233 code-
+    /// review #1 / #3.
     PushClassVisibilityPublic,
-    /// Pop one entry from `class_visibility_stack`. Pair with
-    /// `PushClassVisibilityPublic` at the boundary of a
-    /// `class << self` body. Restores the enclosing class
-    /// body's visibility state.
+    /// Pop one entry from `class_visibility_stack`. Paired with
+    /// `PushClassVisibilityPublic` via the body's ensure
+    /// clause (see Push docs for unwind details). Underflow is
+    /// a translator-level invariant breakage and triggers
+    /// `debug_assert!` in the handler (PR #233 code-review #2).
     PopClassVisibility,
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured

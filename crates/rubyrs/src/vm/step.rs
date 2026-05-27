@@ -1500,10 +1500,21 @@ impl Vm {
             }
             Op::PopClassVisibility => {
                 // Close a `class << self` visibility scope.
-                // Pops one entry — matches the
-                // `PushClassVisibilityPublic` at body start.
-                // Under-pop would underflow; balance is the
-                // translator's responsibility.
+                // Paired with `PushClassVisibilityPublic` at
+                // body start (in source) and emitted in the
+                // body's `Begin { ensure: [...] }` so the pop
+                // runs on both normal and exception-unwind
+                // exits. Balance is the translator's
+                // responsibility; underflow would mean a
+                // bytecode-level invariant breakage — surface
+                // it as an ICE rather than silently dropping
+                // (debug-only assertion so production runs
+                // remain forgiving). PR #233 code-review #2.
+                debug_assert!(
+                    !self.class_visibility_stack.is_empty(),
+                    "ICE: PopClassVisibility on empty class_visibility_stack — \
+                     translator emitted an unbalanced Pop without a matching Push"
+                );
                 self.class_visibility_stack.pop();
                 self.stack.push(Value::Nil);
             }
