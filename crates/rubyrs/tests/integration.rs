@@ -78,6 +78,7 @@ fn run_error_fixture(name: &str) {
 }
 
 #[test] fn fizzbuzz() { run_fixture("fizzbuzz"); }
+#[test] fn builtin_shadow() { run_fixture("builtin_shadow"); }
 #[test] fn class() { run_fixture("class"); }
 #[test] fn array_hash() { run_fixture("array_hash"); }
 #[test] fn block() { run_fixture("block"); }

@@ -17,6 +17,11 @@ use super::{PinGuard, Vm};
 
 impl Vm {
     pub(crate) fn is_builtin_name(name: &str) -> bool {
+        // Keep this list in sync with the match arms in `builtin_call`
+        // below. Any name handled by `builtin_call` that is missing
+        // here would let the toplevel fast path cache a user `def`
+        // and silently shadow the builtin, which diverges from
+        // master's "builtin always wins" dispatch order.
         matches!(
             name,
             "puts"
@@ -29,6 +34,9 @@ impl Vm {
                 | "Float"
                 | "String"
                 | "Array"
+                | "sprintf"
+                | "format"
+                | "__time_now_raw"
                 | "__method__"
                 | "__callee__"
                 | "block_given?"
