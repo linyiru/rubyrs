@@ -674,13 +674,13 @@ impl Vm {
                 // instead keep the elements alive defensively so
                 // the primitive completes without ICE'ing.
                 //
-                // Narrowed to GC-tracked heap variants — immediates
+                // Narrowed to GC-tracked heap variants via
+                // `Value::is_gc_heap_ref` — immediates
                 // (Int/Float/Bool/Nil/Sym) and Rc-shared variants
                 // (Str/Class/Regex) aren't GC-managed. `maybe_gc`
                 // clones every `vm.pinned` entry into the marking
                 // root set (vm/gc.rs:113-115), so blanket pinning
                 // would add O(n) GC scan work for large arrays.
-                // Same filtering rationale as the per-key pin below.
                 //
                 // The sort driver (iter.rs:1713) uses a blanket pin
                 // of the same shape; left as-is pending its own
@@ -688,17 +688,7 @@ impl Vm {
                 // Pre-existing gap surfaced by Copilot review on
                 // PR #187.
                 for v in &snapshot {
-                    if matches!(
-                        v,
-                        Value::Array(_) | Value::Hash(_) | Value::Object(_)
-                        | Value::Range(_) | Value::Block(_)
-                        | Value::BoundMethod(_) | Value::UnboundMethod(_)
-                        | Value::CurriedProc(_)
-                    ) {
-                        g.pin(v.clone());
-                    }
-                    #[cfg(feature = "bignum")]
-                    if matches!(v, Value::BigInt(_)) {
+                    if v.is_gc_heap_ref() {
                         g.pin(v.clone());
                     }
                 }
@@ -759,17 +749,7 @@ impl Vm {
                         // natural cost ceiling for this primitive.
                         // Pre-existing gap surfaced by Copilot
                         // review on PR #187.
-                        if matches!(
-                            key,
-                            Value::Array(_) | Value::Hash(_) | Value::Object(_)
-                            | Value::Range(_) | Value::Block(_)
-                            | Value::BoundMethod(_) | Value::UnboundMethod(_)
-                            | Value::CurriedProc(_)
-                        ) {
-                            g.pin(key.clone());
-                        }
-                        #[cfg(feature = "bignum")]
-                        if matches!(key, Value::BigInt(_)) {
+                        if key.is_gc_heap_ref() {
                             g.pin(key.clone());
                         }
                         groups.push((key, vec![v]));

@@ -597,6 +597,37 @@ impl Value {
     pub(crate) fn is_truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
     }
+
+    /// True when this `Value` carries an `ObjId` into the GC heap
+    /// (i.e. mark/sweep is the lifetime authority for the payload).
+    ///
+    /// Useful for callers that hold a `Value` only via Rust locals
+    /// and must decide whether to pin it before a potential GC
+    /// safepoint. Immediates (`Int` / `Float` / `Bool` / `Nil` /
+    /// `Sym`) and Rc-shared variants (`Str` / `Class` / `Regex`)
+    /// return `false` — pinning them adds GC scan work without
+    /// improving safety. The list mirrors the `mark` walk in
+    /// `vm/gc.rs` and the variants stored as `HeapObj` slots.
+    ///
+    /// Keep this list aligned with `Vm::mark` whenever a new heap-
+    /// slot `Value` variant is introduced; both have to agree on
+    /// "is this slot in the heap" or pin-protection silently
+    /// rots.
+    pub(crate) fn is_gc_heap_ref(&self) -> bool {
+        match self {
+            Value::Array(_)
+            | Value::Hash(_)
+            | Value::Object(_)
+            | Value::Range(_)
+            | Value::Block(_)
+            | Value::BoundMethod(_)
+            | Value::UnboundMethod(_)
+            | Value::CurriedProc(_) => true,
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => true,
+            _ => false,
+        }
+    }
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "Integer",
