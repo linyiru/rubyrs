@@ -343,6 +343,7 @@ dependencies = [
  "cc",
  "num-bigint",
  "num-integer",
+ "num-traits",
  "regex",
  "ruby-prism",
 ]
