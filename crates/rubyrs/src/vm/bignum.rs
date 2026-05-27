@@ -1,25 +1,87 @@
-//! BigInt arithmetic, comparison, dispatch, and `Integer#digits`
-//! / `**` / `pow` machinery. CRuby analogue: `bignum.c`. Pulled
-//! out of `vm.rs` so the arbitrary-precision integer surface
-//! lives alongside its kin in `vm/`, following the per-class
-//! compilation-unit convention documented in
+//! BigInt arithmetic, comparison, dispatch, and the full Phase B
+//! `Integer` surface for out-of-i64 magnitudes. CRuby analogue:
+//! `bignum.c`. Pulled out of `vm.rs` so the arbitrary-precision
+//! integer surface lives alongside its kin in `vm/`, following the
+//! per-class compilation-unit convention documented in
 //! `docs/ARCHITECTURE.md:53-80`. ADR 0018 BigInt placement.
 //!
+//! Phase B status (all landed):
+//!   - **B.1** — base arithmetic / comparison / `to_s` / `inspect`
+//!     / predicates. Auto-promotion from i64 on overflow; demote
+//!     back to `Value::Int` whenever the result fits.
+//!   - **B.2** — unary `-@` / `+@` / `abs` (with the `i64::MIN`
+//!     auto-promote case so `-(i64::MIN) == 2**63` instead of
+//!     wrapping).
+//!   - **B.3** — bit ops `~`, `& | ^`, `<< >>` with two's-
+//!     complement semantics for negatives (via num_bigint's own
+//!     impls). Left-shift DoS cap mirrors `try_bigint_pow`'s
+//!     estimator. `try_int_shl_lossless` in `numeric.rs` handles
+//!     the Int×Int overflow promote path.
+//!   - **B.4** — `to_s(radix)` + sprintf `'%d/%b/%o/%x' % big`.
+//!     Shared scaled-integer log2 estimator
+//!     ([`bignum_digits_upper_bound`]) caps the pre-allocation
+//!     bound to within ±1 char of the true digit count across
+//!     radix 2..=36. `format_radix_any` does in-place sign/prefix
+//!     prepend to keep peak memory at 1× the estimate.
+//!   - **B.5** — `Integer#pow(exp[, mod])`. 1-arg aliases `**`;
+//!     2-arg routes through `BigInt::modpow` for modular
+//!     exponentiation. Plus `Integer#bit_length` and
+//!     `Integer#digits([base])`.
+//!   - **B.6** — block-form iteration `times` / `upto` / `downto`
+//!     with BigInt operands. Counter held as native
+//!     `num_bigint::BigInt`; yielded `Value` pinned across
+//!     `step_block` to survive `invoke_block`'s rest-args GC
+//!     window. Implementation lives in `iter.rs` to share the
+//!     `collection_call_block` dispatch entry.
+//!   - **B.7** — hash-key canonical equality: `Integer#eql?` /
+//!     `Integer#hash` (Int + BigInt), `Object#equal?` BigInt arm
+//!     (ObjId identity), shared `INT_HASH_TAG` so all Integer
+//!     receivers share a hash domain disjoint from `FLOAT_HASH_TAG`.
+//!
+//! Canonical-BigInt invariant (every revision must preserve):
+//!   - Any `Value::BigInt(id)` reaching dispatch satisfies
+//!     `i64::try_from(heap.bigint(id)).is_err()` — i.e. the
+//!     magnitude is strictly outside `i64::MIN..=i64::MAX`.
+//!   - The single funnel that enforces this is `bigint_to_value`,
+//!     which demotes to `Value::Int` whenever the result fits.
+//!     Every arithmetic / bit-op / iteration arm that produces a
+//!     `BigInt` result MUST route through it.
+//!   - Debug-asserts in `try_bigint_unary` (the `+@` / `abs`
+//!     identity short-circuits) catch any future cext/FFI path
+//!     that bypasses the funnel.
+//!
+//! DoS-cap convention (shared with the rest of the codebase):
+//!   - Pre-allocation estimators (`try_bigint_pow`,
+//!     `try_bigint_bit_shift`, `check_bigint_to_s_cap`,
+//!     `format_radix_any`, the `%d % big` path in
+//!     `vm::sprintf::ruby_sprintf`) trap **before** the alloc
+//!     when the estimated byte cost exceeds
+//!     `Config::max_value_bytes` (fallback: 1 MB).
+//!   - Estimates round up to BigInt limb storage (u64 limbs +
+//!     32-byte allocator header) so the cap reflects actual heap
+//!     storage, not just minimal bit count.
+//!
 //! Structure (top to bottom):
-//!   - `try_bigint_binop` — `Op::BinOp` cold path. Always
-//!     compiled (no-op stub when `bignum` is off so step.rs can
-//!     call it unconditionally).
+//!   - `try_bigint_binop` — `Op::BinOp` cold path (arithmetic +
+//!     comparison). Always compiled (no-op stub when `bignum` is
+//!     off so step.rs can call it unconditionally).
 //!   - `try_bigint_pow` / `bigint_to_f64_bounded` /
 //!     `bigint_recv_to_f64_bounded` — `**` exponentiation with
-//!     DoS cap and the bounded f64 coercion helpers. `bignum`
-//!     only.
-//!   - `try_bigint_unary` — `-@` / `+@` / `abs` with the
-//!     `i64::MIN` promote case.
-//!   - `try_bigint_pow_method` — `Integer#pow(exp[, mod])`.
-//!   - `try_integer_digits` — `Integer#digits([base])`.
+//!     DoS cap and the bounded f64 coercion helpers. `bignum` only.
+//!   - `try_bigint_unary` — `-@` / `+@` / `abs` / `~` with the
+//!     `i64::MIN` promote case (B.2 + B.3a).
+//!   - `try_bigint_bit_binop` / `try_bigint_bit_shift` /
+//!     `bit_shift_collapse` — `& | ^` and `<< >>` two's-complement
+//!     surface (B.3b/c).
+//!   - `try_bigint_pow_method` — `Integer#pow(exp[, mod])` (B.5a).
+//!   - `try_integer_digits` — `Integer#digits([base])` (B.5b).
 //!   - `bigint_primitive` — BigInt method dispatch wrapper that
-//!     fans out to the above (operator method-call shape,
-//!     `to_s`/`inspect`, predicates, `<=>`, etc.).
+//!     fans out to the above plus per-method arms for `to_s` /
+//!     `inspect` / predicates / `<=>` / `eql?` / `hash` (B.4 + B.7
+//!     `eql?` / `hash`).
+//!   - `bignum_log2_per_digit_scaled` / `bignum_digits_upper_bound`
+//!     / `check_bigint_to_s_cap` — shared cap estimator for the
+//!     `to_s` and sprintf base-N paths (B.4).
 //!   - `bigint_to_value` / `as_bigint` / `as_bigint_ref` /
 //!     `bigint_arith` — the lowest-level arithmetic surface.
 //!     `bignum` only.
