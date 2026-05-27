@@ -40,6 +40,97 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
+## Results — 2026-05-27 evening (ninth pass), rubyrs at `076c7135`
+
+Ninth pass after pass-8's layer #8 closed:
+- PR #196 (`fix(vm): expand bare-call Class bridge whitelist`)
+  +3 follow-up commits in the same PR addressing code-review
+  findings (`u16::MAX` cache sentinel, tightened Module-allocate
+  fence assertion, `do_call_block` parallel bridge).
+
+Same probe driver shape as pass-7 / pass-8 (embedder stubs for
+Rack / Gem::Version / ERB / URI / Rack::Utils, then
+`require_relative` into sinatra-4.2.1's base.rb).
+
+### What this pass shows
+
+**The pass-8 wall is gone.** Probe now executes past pass-8's
+line 265 stop point (and earlier line 974 second stop on the
+same pass once the missing `Rack::Utils` constant was stubbed)
+and reaches `sinatra/base.rb:1292` — into the `class << self`
+body that holds Sinatra::Base's DSL surface. The intermediate
+layers between line 265 and 1292 are all embedder-shape
+constants (Cat F): adding stubs for them surfaces the next
+gap in 4-line increments. The interesting one is the LAST one
+hit, which is the actual language-level wall.
+
+### Stacked blockers found this pass
+
+| # | File / line | Symbol | Category | Notes |
+|---|---|---|---|---|
+| 9 | `sinatra/base.rb:974` (`class Base; include Rack::Utils; ...`) | `Rack::Utils` module + accessor methods (`escape_html` / `escape_path` / `unescape` / `parse_nested_query` / `build_nested_query` / `status_code` / `HTTP_STATUS_CODES` constant) | Project shape | Sinatra's `Base` class mixes in `Rack::Utils`. Embedder must stub the module + the small surface base.rb actually consults. Same shape as the Rack middleware row from pass 8. |
+| 10 | `sinatra/base.rb:978` (`URI_INSTANCE = defined?(URI::RFC2396_PARSER) ? URI::RFC2396_PARSER : URI::RFC2396_Parser.new`) | `URI::RFC2396_Parser` class | Project shape | Embedder must stub `URI::RFC2396_Parser` with at least `escape` / `unescape` / `parse`. CRuby ships URI in stdlib; rubyrs doesn't yet. |
+| 11 | `sinatra/base.rb:1292` (`class Base; class << self; CALLERS_TO_IGNORE = [...].freeze; attr_reader :routes, ...; def reset!; ...; end; end; end`) | `class << self` body with constant assignment | **Real gap (AST surface)** | rubyrs's spike subset only accepts `def` / `attr_*` / `alias` / `prepend Mod` inside `class << self`. Sinatra's singleton class body opens with `CALLERS_TO_IGNORE = [...]` — a constant assignment — before the `attr_reader` and `def` blocks. The translator raises `NotImplementedError` at compile time. **First Cat D gap surfaced since pass 4.** |
+
+### Minimal repro for layer #11
+
+```ruby
+class Foo
+  class << self
+    BAR = 42                 # NotImplementedError: class << self body: only `def`/...
+    def get_bar; BAR; end
+  end
+end
+```
+
+`Foo.get_bar` in CRuby returns 42. In rubyrs, compilation
+fails before any code runs. The minimal fix is to extend the
+`class << self` body whitelist to accept `ConstantWriteNode`
+(constants assignments) and store them on the singleton
+class's constants table — same place `def self.X` lives.
+
+### What this tells us
+
+- **Pass 9 surfaces the first Cat D gap since pass 4.** Up to
+  pass 8 the wall was always missing runtime methods or
+  embedder-shape constants; pass 9 hits a translator-level
+  restriction that has stood since the spike. The other two
+  rows (layers #9, #10) are pure Cat F — same shape as the
+  Rack middleware batch from pass 8.
+- **Linear advance shape is holding.** Pass 7 stopped at line
+  64, pass 8 at 265 / 974, pass 9 reaches 1292. Each pass
+  advances roughly 4× through the file, finding one or two
+  Cat F batches plus one language gap.
+- **Cat D gap is broader than this one site.** Sinatra has
+  THREE `class << self` blocks (lines 1292, 1967, 2122);
+  the first one is the cheapest to repro. Whatever fix lands
+  for #11 will likely unblock all three at once.
+
+### Cumulative category histogram (sinatra/base.rb body, this pass)
+
+| Category | This pass | Notes |
+|---|---:|---|
+| Cat B (require) | 0 | Still handled by PR #135 fallback |
+| Cat D (AST node) | 1 | `class << self` body with constant assignment (row 11) |
+| Cat F (project shape) | 2 batches | Rack::Utils (row 9), URI::RFC2396_Parser (row 10) |
+| Cat H (real built-in / runtime gap) | 0 | None this pass |
+| Cat I (real bug) | 0 | None this pass |
+
+### Concrete next moves the data suggests
+
+1. **Extend `class << self` body whitelist to accept
+   `ConstantWriteNode`** — closes layer #11 and unblocks the
+   other two `class << self` blocks at lines 1967 / 2122
+   simultaneously. Translator-side fix, no VM changes required.
+   Tier 1.
+2. **Continue iterating** if further probes are desired —
+   the next stop after layer #11 likely surfaces inside one
+   of those subsequent `class << self` bodies, or in the
+   `Helpers` / `Templates` module bodies the `include`s on
+   lines 975-976 pull in.
+
+---
+
 ## Results — 2026-05-27 (eighth pass), rubyrs at `c1605c04`
 
 Eighth pass after the pass-7 Cat H + Cat I gaps were all closed:
