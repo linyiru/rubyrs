@@ -155,6 +155,50 @@ fn array_include_p_handles_bigint_value_equality() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn integer_and_float_hash_pins_cross_rustc_stable_literal_values() {
+    // Regression for the DefaultHasher cross-rustc stability gap.
+    // Pre-fix `Integer#hash` / `Float#hash` used stdlib's
+    // DefaultHasher, whose algorithm is documented as 'subject
+    // to change' — the absolute u64 it returns for a given input
+    // is allowed to differ between rustc versions. We swapped to
+    // FNV-1a 64-bit (numeric.rs::fnv1a_64), whose constants are
+    // fixed forever, so the digest is reproducible regardless
+    // of toolchain version.
+    //
+    // Pin a handful of literal hash values for the canonical
+    // inputs. If a future maintainer accidentally switches back
+    // to a non-stable hasher, these assertions break before
+    // anyone notices in production.
+    //
+    // Values computed once (rustc 1.x, FNV-1a constants per
+    // <http://www.isthe.com/chongo/tech/comp/fnv/>) and locked
+    // in here. The whole point is that they should NOT change
+    // even when rustc updates.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 0.hash\n\
+         puts 1.hash\n\
+         puts 5.hash\n\
+         puts 5.0.hash\n\
+         puts (2 ** 100).hash",
+        "hash_literals.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Literal values from FNV-1a('I' + i64_le_bytes) /
+    // FNV-1a('F' + f64_bits_le_bytes) / FNV-1a('I' +
+    // bigint_signed_bytes_le). Captured 2026-05-26.
+    assert_eq!(lines[0], "-3998581643000780540");   // 0.hash
+    assert_eq!(lines[1], "-1766266236033191131");   // 1.hash
+    assert_eq!(lines[2], "7751216209806002849");    // 5.hash
+    assert_eq!(lines[3], "-7377979328275632211");   // 5.0.hash
+    assert_eq!(lines[4], "-833697570399297604");    // (2**100).hash
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn integer_hash_is_within_process_stable_and_distinguishes_value() {
     // Phase B.7: `Integer#hash` returns a within-process-stable
     // i64 that satisfies `a.eql?(b) ⇒ a.hash == b.hash`. Pre-fix

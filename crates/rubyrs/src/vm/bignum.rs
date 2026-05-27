@@ -1478,27 +1478,29 @@ impl Vm {
             return Ok(Some(Value::Bool(same)));
         }
         // `Integer#hash` on BigInt receiver — same domain tag as
-        // numeric.rs's Int arm so two separately-allocated BigInts
-        // with the same magnitude hash to the same i64. Hashes the
-        // canonical (sign, magnitude-bytes-LE) pair so positive
-        // and negative same-magnitude don't collide. The Hash
-        // collection itself uses linear scan via ruby_eq (no
-        // hashing) but this method exists for the user-facing
-        // protocol and for pure-Ruby code that does its own
-        // bookkeeping.
+        // numeric.rs's Int arm so the Integer hash domain stays
+        // disjoint from Float's. Hashes via [`fnv1a_64`] (see
+        // numeric.rs's Int arm for the FNV-1a vs DefaultHasher
+        // rationale: cross-rustc-stable digest).
+        //
+        // `to_signed_bytes_le` returns the two's-complement
+        // representation, so positive and negative are
+        // distinguished and same-value pairs across allocs hash
+        // identically.
+        //
+        // The Hash collection itself uses linear scan via
+        // ruby_eq (no hashing) but this method exists for the
+        // user-facing protocol and for pure-Ruby code that does
+        // its own bookkeeping.
         if args.is_empty() && name == "hash"
             && let Value::BigInt(id) = recv
         {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            crate::vm::numeric::INT_HASH_TAG.hash(&mut h);
             let b = self.heap.bigint(*id);
-            // `to_signed_bytes_le` returns the two's-complement
-            // representation, so positive and negative are
-            // distinguished and same-value pairs across allocs
-            // hash identically.
-            b.to_signed_bytes_le().hash(&mut h);
-            return Ok(Some(Value::Int(h.finish() as i64)));
+            let mag_bytes = b.to_signed_bytes_le();
+            let mut bytes = Vec::with_capacity(1 + mag_bytes.len());
+            bytes.push(crate::vm::numeric::INT_HASH_TAG);
+            bytes.extend_from_slice(&mag_bytes);
+            return Ok(Some(Value::Int(crate::vm::numeric::fnv1a_64(&bytes) as i64)));
         }
         // `<=>` — universal three-way comparison. Not in BinOpKind
         // (it returns Int not Bool, so the BinOp machinery doesn't
