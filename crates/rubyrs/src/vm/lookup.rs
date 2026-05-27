@@ -597,21 +597,27 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
-                    // `Class#allocate` — bare-instance allocator
-                    // without calling `initialize`. Implemented in
-                    // dispatch.rs's `new`-arm neighbour. Some
-                    // primitive shells (Integer/Float/Symbol/...)
-                    // raise TypeError matching CRuby; others
-                    // (String/Array/Hash/Range) raise TypeError as
-                    // a KNOWN GAP — CRuby actually allows those
-                    // builtins to allocate (documented in the
-                    // dispatch arm). Either way `respond_to?` stays
-                    // true for the method name itself (matches
-                    // CRuby's "method exists, allocator may be
-                    // undefined" surface). PR #181 review round 4
-                    // Copilot comment #3 tightened this wording.
-                    | "allocate"
                 ) {
+                    return true;
+                }
+                // `Class#allocate` — fence on Modules only.
+                // CRuby: `Module.respond_to?(:allocate)` → false,
+                // `Module.new.respond_to?(:allocate)` → false,
+                // `Integer.respond_to?(:allocate)` → true,
+                // `Class.respond_to?(:allocate)` → true (CRuby
+                // allows Class.allocate to produce an anonymous
+                // Class — rubyrs treats that as a KNOWN GAP but
+                // mirrors CRuby's respond_to surface here so
+                // feature-detection idioms agree on truthiness).
+                // Without this fence the whitelist returned true
+                // on Module receivers where dispatch raises
+                // TypeError, breaking `m.respond_to?(:allocate)
+                // ? m.allocate : …` on module references.
+                // PR #181 code-review #2.
+                if name == "allocate"
+                    && !cls.is_module
+                    && cls.name != "Module"
+                {
                     return true;
                 }
                 self.lookup_class_singleton_method(cls, name_id).is_some()

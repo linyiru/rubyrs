@@ -98,6 +98,13 @@ end
 ## "method exists, but allocator may be undefined" surface).
 puts "respond-user=#{Box.respond_to?(:allocate)}"
 puts "respond-int=#{Integer.respond_to?(:allocate)}"
+## Module shells: CRuby `Module.respond_to?(:allocate)` → false,
+## `Module.new.respond_to?(:allocate)` → false. rubyrs's
+## respond_to? whitelist used to return true here even though
+## dispatch raises TypeError (code-review finding #2).
+puts "respond-module-shell=#{Module.respond_to?(:allocate)}"
+puts "respond-module-anon=#{Module.new.respond_to?(:allocate)}"
+puts "respond-class-shell=#{Class.respond_to?(:allocate)}"
 
 ## Class can be reopened after allocate; the allocated instance
 ## sees the new method (allocate vs subsequent re-open ordering
