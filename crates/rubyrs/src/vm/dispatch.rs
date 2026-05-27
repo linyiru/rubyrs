@@ -4968,6 +4968,39 @@ impl Vm {
             Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
         };
 
+        // Bare `instance_exec { ... }` inside an instance method —
+        // `recv` is None, so the receiver-form arm below won't see
+        // it. Dispatch on `self` from the current frame, mirroring
+        // `self.instance_exec(&block)`. Same override-precedence
+        // probe as the receiver-form arm so a user-defined
+        // `instance_exec` still wins.
+        if no_recv && &*name == "instance_exec" {
+            let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
+            let user_override = match &self_val {
+                Value::Object(id) => {
+                    let cls = self.heap.class_of(*id);
+                    self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                }
+                Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                _ => match self.class_of(&self_val) {
+                    Value::Class(cls) => self.lookup_method_cached(&cls, name_id, cache_id).is_some(),
+                    _ => false,
+                },
+            };
+            if !user_override {
+                self.invoke_block_with_self(block, self_val, /*as_class_body=*/false, args)?;
+                return Ok(());
+            }
+            // User override exists — re-shape stack as receiver form
+            // (`recv, block, args...`) and re-enter so the normal
+            // dispatch finds and invokes the user method.
+            let argc = args.len();
+            self.stack.push(self_val);
+            self.stack.push(Value::Block(block));
+            for a in args { self.stack.push(a); }
+            return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+        }
+
         // `bm.call(args, &block)` — the block-form counterpart to
         // the no-block BoundMethod#call arm in `do_call` (line
         // ~1969). Without this, calling a stored `Method` with a
@@ -5200,6 +5233,44 @@ impl Vm {
         // the way of any hypothetical user-defined
         // `instance_eval(arg)` that someone might define.
         if let Some(r) = &recv {
+            // `instance_exec(*args) { |*a| ... }` — like instance_eval
+            // but the block receives the EXPLICIT args you pass
+            // (not `self`). Same self-swap semantics. Variadic args,
+            // including zero. Sinatra-shape DSL pattern:
+            // `instance.instance_exec(&handler)` runs the captured
+            // route block against a fresh request instance so `@ivar`
+            // and helper methods (defined on the instance's class)
+            // resolve through the swapped self.
+            let is_instance_exec = &*name == "instance_exec";
+            if is_instance_exec {
+                // Override-precedence probe (parity with `send` /
+                // `Hash.new` patterns nearby): only fall into the
+                // builtin path when there's no user-defined
+                // `instance_exec` on the receiver. Without this, a
+                // `class C; def instance_exec(...); ...; end; end`
+                // override (including on primitive classes like
+                // `class String; def instance_exec; end; end`) would
+                // be silently shadowed by the builtin.
+                let user_override = match r {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                    }
+                    Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                    // Primitives — consult the user-class table for
+                    // the primitive's stub class (e.g. `String`,
+                    // `Integer`). Mirrors the primitive-receiver
+                    // fallback in `do_call` at ~line 3066.
+                    _ => match self.class_of(r) {
+                        Value::Class(cls) => self.lookup_method_cached(&cls, name_id, cache_id).is_some(),
+                        _ => false,
+                    },
+                };
+                if !user_override {
+                    self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/false, args)?;
+                    return Ok(());
+                }
+            }
             let is_instance_eval = &*name == "instance_eval";
             let is_class_eval = &*name == "class_eval" || &*name == "module_eval";
             if (is_instance_eval || is_class_eval) && args.is_empty() {
@@ -5320,6 +5391,25 @@ impl Vm {
                     self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
                     return Ok(());
                 }
+            }
+            // Block-form parallel of `do_call`'s user-singleton
+            // bare-call resolution (~line 2439). Inside
+            // `class Foo < Bar; foo do ... end; end`, bare `foo`
+            // is dispatched on `self = Foo` and must walk Foo's
+            // singleton chain (including Bar's, transitively) so
+            // user-defined `def self.foo` and `class << self; def
+            // foo; end; end` methods inherited from a parent class
+            // resolve identically with or without an attached
+            // block. Without this, the Sinatra-shape DSL
+            // (`class App < Sinatra::Base; get '/' do ... end`)
+            // dies at NoMethodError because the route registrar's
+            // block triggers `do_call_block` instead of `do_call`,
+            // and the existing block-form Class bridge below only
+            // covers hardcoded primitive names.
+            if let Value::Class(c) = &self_val
+                && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
+                self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
+                return Ok(());
             }
             // Block-form parallel of `do_call`'s bare-call Class
             // bridge (see comments at the no_recv arm around
