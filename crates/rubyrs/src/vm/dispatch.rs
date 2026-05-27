@@ -1379,8 +1379,13 @@ impl Vm {
                     // before removal isn't a meaningful use case;
                     // matching CRuby's strict shape avoids quiet
                     // divergence on this surface.
-                    let present = cls.methods.borrow().contains_key(&sid);
-                    if !present {
+                    //
+                    // Single `remove()` call: HashMap::remove
+                    // returns Option, so we get presence-check +
+                    // mutation in one hash lookup + one
+                    // `borrow_mut()` (was two — `contains_key`
+                    // then `remove`).
+                    if cls.methods.borrow_mut().remove(&sid).is_none() {
                         // Resolve name only on the rare missing
                         // path. Free for the common case.
                         let name_for_msg = self.interner.resolve(sid).to_string();
@@ -1388,7 +1393,6 @@ impl Vm {
                             msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
                         }));
                     }
-                    cls.methods.borrow_mut().remove(&sid);
                 }
                 // Bump `method_gen` once even for variadic calls —
                 // inline caches see a single coarse generation

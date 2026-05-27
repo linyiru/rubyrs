@@ -84,6 +84,21 @@ rescue NameError
   puts "primitive missing → NameError"
 end
 
+# --- Non-Symbol-non-String arg raises TypeError
+#     "<inspect> is not a symbol nor a string" (CRuby parity).
+class TypeCheck
+end
+begin
+  TypeCheck.remove_method(123)
+rescue TypeError
+  puts "int → TypeError"
+end
+begin
+  TypeCheck.remove_method(nil)
+rescue TypeError
+  puts "nil → TypeError"
+end
+
 # --- 0-arg shape: no-op, returns receiver ---
 class E
 end
