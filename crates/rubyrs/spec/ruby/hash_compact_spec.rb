@@ -15,8 +15,7 @@ describe "Hash#compact" do
 
   it "keeps own pairs" do
     h = { truthy: true, false: false, nil: nil, nil => true }
-    # `Hash#dup` not in subset — re-literal the snapshot.
-    initial = { truthy: true, false: false, nil: nil, nil => true }
+    initial = h.dup
     h.compact
     assert_eq(h, initial)
   end

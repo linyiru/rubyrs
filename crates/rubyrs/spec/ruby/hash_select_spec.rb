@@ -10,9 +10,7 @@ describe "Hash#select" do
   it "yields two arguments: key and value" do
     all_args = []
     { 1 => 2, 3 => 4 }.select { |*args| all_args << args }
-    # `Array#sort` over Array-of-Arrays not in subset; use
-    # `sort_by` on the first element instead.
-    assert_eq(all_args.sort_by { |pair| pair[0] }, [[1, 2], [3, 4]])
+    assert_eq(all_args.sort, [[1, 2], [3, 4]])
   end
 
   it "returns a Hash of entries for which block is true" do
