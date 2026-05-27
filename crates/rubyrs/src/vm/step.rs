@@ -1329,6 +1329,22 @@ impl Vm {
                         // PR #218 (if-modifier) closed the guard
                         // surface; this PR closes the alias-to-
                         // builtin surface uncovered behind it.
+                        //
+                        // Surface boundary: this fallback only fires
+                        // when `class_stack.last()` is Some (a class
+                        // body context is active). The arm's outer
+                        // comment notes "toplevel `class << X` is
+                        // legal but rarely used"; that path falls
+                        // through `existing` to `toplevel_methods`
+                        // for user-defined names but cannot reach
+                        // the synth-forwarder fallback here. Aliasing
+                        // a built-in Class method (e.g. `alias new!
+                        // new`) at TOPLEVEL `class << X; ...; end`
+                        // therefore still raises NameError. The
+                        // motivating case (sinatra/base.rb:1659) is
+                        // nested, so the asymmetry doesn't surface
+                        // — flagged for a future symmetric fix if
+                        // someone needs it. PR #229 code-review #3.
                         let cls_ref = self.class_stack.last().cloned();
                         if let Some(cls) = &cls_ref
                             && self.responds_to(&Value::Class(cls.clone()), old_id) {
