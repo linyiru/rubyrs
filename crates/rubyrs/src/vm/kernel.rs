@@ -1330,6 +1330,14 @@ impl Vm {
 /// (true in rubyrs for everything; false in CRuby for the
 /// Module-shaped names). Documented divergence; fixtures
 /// probe `defined?` and `.name` which agree.
+///
+/// Cfg-gated on `not(wasi)` to match the sole caller's gate
+/// (the `"require" => match args { ... }` arm in
+/// `builtin_call`, line ~547). Under `wasm32-wasip1
+/// --no-default-features` the caller is cfg'd out, so this
+/// function becomes dead code; the gate keeps the
+/// `-D warnings` build green.
+#[cfg(not(target_os = "wasi"))]
 fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
     // Each entry is (constant_name, is_module). `true` for
     // names CRuby exposes as `Module` (URI / JSON / Base64 /
@@ -1385,6 +1393,10 @@ fn stdlib_constant_names(name: &str) -> &'static [(&'static str, bool)] {
 /// actually USE the stdlib's API (`URI.parse`, `Logger.new`,
 /// `JSON.parse`, ...) get NameError / NoMethodError at the call
 /// site — sharper "feature absent" surface than a failed require.
+///
+/// See the gate note on `stdlib_constant_names` above — same
+/// reasoning, same cfg.
+#[cfg(not(target_os = "wasi"))]
 fn is_stdlib_stub_name(name: &str) -> bool {
     matches!(
         name,
