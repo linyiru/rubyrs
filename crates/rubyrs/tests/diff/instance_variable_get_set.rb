@@ -53,12 +53,83 @@ rescue NameError => e
   puts "no-prefix-set=#{e.class}"
 end
 
-## Type validation: non-Symbol-non-String args raise TypeError.
+## Type validation: non-Symbol-non-String args raise TypeError
+## on BOTH get and set paths. CRuby reports exact message
+## "<inspect> is not a symbol nor a string"; pin both class and
+## message so a change in either side surfaces in the diff.
 begin
   b.instance_variable_get(123)
   puts "wrong-type-get=NOT-RAISED"
 rescue TypeError => e
-  puts "wrong-type-get=#{e.class}"
+  puts "wrong-type-get=#{e.class}: #{e.message}"
+end
+begin
+  b.instance_variable_set(123, "x")
+  puts "wrong-type-set=NOT-RAISED"
+rescue TypeError => e
+  puts "wrong-type-set=#{e.class}: #{e.message}"
+end
+
+## Name validation: CRuby ivar names must match
+## `@[A-Za-z_][A-Za-z0-9_]*`. The "starts with @" guard alone
+## isn't enough — names like `@@x` (class var), `@1foo`,
+## `@foo?`, bare `@` all need to be rejected.
+## Probe each shape via its String form so the test output
+## doesn't depend on `Symbol#inspect`'s quoting rules for
+## non-identifier symbols (CRuby wraps these in quotes;
+## rubyrs doesn't yet — out of scope for this PR).
+[
+  "@@klass_var",   # class-variable shape (double @)
+  "@1foo",         # digit start after @
+  "@foo?",         # predicate suffix not legal for ivars
+  "@foo=",         # writer suffix not legal for ivars
+  "@",             # bare @ with no body
+].each do |bad|
+  begin
+    b.instance_variable_get(bad)
+    puts "bad-name-get(#{bad})=NOT-RAISED"
+  rescue NameError => e
+    puts "bad-name-get(#{bad})=#{e.class}"
+  end
+end
+
+## Class receivers carry their own ivar table (mirror of
+## `Op::LoadIvar` / `Op::StoreIvar` in vm/step.rs); both
+## get and set should reach it. This is what CRuby does for
+## `MyClass.instance_variable_get(:@registry)` (a common
+## pattern for class-level state).
+class Holder
+  @registry = "boot"
+end
+puts "class-get=#{Holder.instance_variable_get(:@registry)}"
+Holder.instance_variable_set(:@registry, "updated")
+puts "class-get-after=#{Holder.instance_variable_get(:@registry)}"
+
+## respond_to? must agree with dispatch: every value responds
+## to instance_variable_get / instance_variable_set even if the
+## result is uninteresting (primitives) or raises (set on
+## primitives). Without the universal-method whitelist update
+## in vm/lookup.rs, respond_to? would lie about this.
+[42, "hi", :sym, [1], {a: 1}].each do |v|
+  puts "respond_to-#{v.class}-get=#{v.respond_to?(:instance_variable_get)}"
+  puts "respond_to-#{v.class}-set=#{v.respond_to?(:instance_variable_set)}"
+end
+
+## Wrong-arity: CRuby raises ArgumentError with the standard
+## "wrong number of arguments (given N, expected M)" shape.
+## Without the explicit arity arm, this would fall through to
+## NoMethodError (semantically wrong).
+begin
+  b.instance_variable_get
+  puts "arity-get-0=NOT-RAISED"
+rescue ArgumentError => e
+  puts "arity-get-0=#{e.class}"
+end
+begin
+  b.instance_variable_set(:@x)
+  puts "arity-set-1=NOT-RAISED"
+rescue ArgumentError => e
+  puts "arity-set-1=#{e.class}"
 end
 
 ## End-to-end: the sinatra-shaped Gem::Version#<=> usage that
