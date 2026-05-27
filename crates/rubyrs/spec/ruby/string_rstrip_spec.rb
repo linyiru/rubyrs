@@ -29,5 +29,5 @@ describe "String#rstrip" do
   #   rubyrs's `#rstrip` does not strip `\x00`; CRuby does.
 
   # skipped (method-not-implemented): it "<rstrip! variants>"
-  #   String#rstrip! not in subset (7 upstream blocks).
+  #   String#rstrip! not in subset (8 upstream blocks).
 end
