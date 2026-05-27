@@ -13,14 +13,14 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 91 |
-| Examples in corpus | 443 |
-| Skipped `it` traces | 144 |
+| Examples in corpus | 447 |
+| Skipped `it` traces | 140 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 5 |
+| `divergent` | 1 |
 | `fixture` | 48 |
 | `method-not-implemented` | 78 |
 | `mock` | 13 |
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 19 | 46 | 38 |
-| Integer | 21 | 184 | 20 |
+| Integer | 21 | 188 | 16 |
 | Method | 11 | 57 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -100,7 +100,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_comparison_spec.rb` | Integer#<=> | `core/integer/comparison_spec.rb` | 23 | 2 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
-| `integer_downto_spec.rb` | Integer#downto [stop] when self and stop are Integers | `core/integer/downto_spec.rb` | 3 | 3 |
+| `integer_downto_spec.rb` | Integer#downto [stop] when self and stop are Integers | `core/integer/downto_spec.rb` | 5 | 1 |
 | `integer_eql_spec.rb` | Integer#eql? | `core/integer/eql_spec.rb` | 10 | 1 |
 | `integer_equal_value_spec.rb` | Integer#== | `core/integer/equal_value_spec.rb + core/integer/shared/equal.rb` | 10 | 1 |
 | `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
@@ -111,7 +111,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |
 | `integer_times_spec.rb` | Integer#times | `core/integer/times_spec.rb` | 7 | 1 |
 | `integer_to_s_spec.rb` | Integer#to_s | `core/integer/to_s_spec.rb` | 6 | 2 |
-| `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 3 | 3 |
+| `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 5 | 1 |
 | `integer_zero_spec.rb` | Integer#zero? | `core/integer/zero_spec.rb` | 2 | 0 |
 | `method_arity_spec.rb` | Method#arity | `core/method/arity_spec.rb` | 6 | 0 |
 | `method_call_spec.rb` | Method#call | `core/method/call_spec.rb (+ shared/call.rb)` | 6 | 0 |
