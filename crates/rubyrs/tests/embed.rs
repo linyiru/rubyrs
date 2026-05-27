@@ -1911,6 +1911,40 @@ fn integer_eql_q_is_type_strict_equality() {
 }
 
 #[test]
+fn eql_q_and_hash_raise_argumenterror_on_wrong_arity() {
+    // Phase B.7 review: pre-fix wrong-arity calls on eql?/hash
+    // bypassed the exact-arity per-type arms and surfaced as
+    // NoMethodError instead of CRuby's
+    // ArgumentError. User code's `rescue ArgumentError` keys on
+    // the error class, so the divergence is observable.
+    //
+    // Universal `eql?` interceptor raises for any non-1 arg
+    // count. `hash` arity guard fires only for receivers that
+    // actually support hash (gated by responds_to) so unrelated
+    // `obj.hash(:x)` for obj without hash still surfaces as
+    // NoMethodError per CRuby.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        ("5.eql?(1, 2)",          "wrong number of arguments (given 2, expected 1)"),
+        ("5.hash(:x)",            "wrong number of arguments (given 1, expected 0)"),
+        ("5.0.eql?(1, 2)",        "wrong number of arguments (given 2, expected 1)"),
+        ("5.0.hash(:x)",          "wrong number of arguments (given 1, expected 0)"),
+        ("(2 ** 100).hash(:x)",   "wrong number of arguments (given 1, expected 0)"),
+        ("nil.eql?(1, 2)",        "wrong number of arguments (given 2, expected 1)"),
+        ("\"a\".eql?(1, 2)",      "wrong number of arguments (given 2, expected 1)"),
+    ] {
+        let err = rt.eval(script, "arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "ArgumentError", "for {:?}", script);
+                assert_eq!(message, expected, "for {:?}", script);
+            }
+            other => panic!("expected Uncaught ArgumentError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[test]
 fn universal_eql_q_delegates_to_ruby_eq_for_non_numeric_receivers() {
     // Phase B.7 review: pre-fix nil/Sym/Bool/String/Array/Hash/
     // arbitrary-Object all raised NoMethodError on `.eql?(x)`

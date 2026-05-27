@@ -2935,10 +2935,49 @@ impl Vm {
         //    immediates.
         // Universal `respond_to?(:eql?)` already returns true via
         // the universal whitelist.
-        if &*name == "eql?" && args.len() == 1 {
+        if &*name == "eql?" {
+            // Arity guard fires regardless of receiver — CRuby
+            // raises ArgumentError before doing any per-type
+            // dispatch. Primitive_call's per-type arms above only
+            // match exact 1-arg shape, so we know arity must
+            // mismatch if control reaches this `eql?` block with
+            // != 1 arg.
+            if args.len() != 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len(),
+                    ),
+                }));
+            }
             let same = recv.ruby_eq(&args[0], &self.heap);
             self.stack.push(Value::Bool(same));
             return Ok(());
+        }
+        // Universal `hash` arity guard — fires only after
+        // per-type arms in primitive_call have rejected the
+        // wrong-arity call. The per-type arms (Int/Float/BigInt
+        // /String) only match the exact 0-arg shape, so arity
+        // mismatch reaches here. We don't dispatch hash itself
+        // universally (not every receiver supports it), but we
+        // DO raise ArgumentError for receivers that do —
+        // identified by `responds_to(:hash)`. Without the
+        // `responds_to` check, this would also fire on
+        // `obj.hash(:x)` where obj doesn't support hash at all
+        // (CRuby: NoMethodError for the missing method, not
+        // ArgumentError for arity). Use the existing whitelist
+        // to make the distinction.
+        if &*name == "hash" && !args.is_empty() {
+            let name_id = self.interner.intern("hash");
+            if self.responds_to(&recv, name_id) {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len(),
+                    ),
+                }));
+            }
+            // Falls through to NoMethodError below.
         }
         // `Method#==` / `UnboundMethod#==` — intercept before the
         // universal `==` fallback (which has no arm for these and
