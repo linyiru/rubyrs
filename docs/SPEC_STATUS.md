@@ -13,14 +13,14 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 52 |
-| Examples in corpus | 204 |
-| Skipped `it` traces | 85 |
+| Examples in corpus | 207 |
+| Skipped `it` traces | 82 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 6 |
+| `divergent` | 3 |
 | `fixture` | 32 |
 | `method-not-implemented` | 37 |
 | `mock` | 10 |
@@ -44,7 +44,7 @@ Find blocks unlocked by a future feature with e.g.
 | Integer | 6 | 25 | 7 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
-| String | 13 | 50 | 24 |
+| String | 13 | 53 | 21 |
 | UnboundMethod | 1 | 6 | 0 |
 
 ## Files
@@ -95,12 +95,12 @@ Find blocks unlocked by a future feature with e.g.
 | `string_gsub_spec.rb` | String#gsub with pattern and replacement | `core/string/gsub_spec.rb` | 9 | 0 |
 | `string_include_spec.rb` | String#include? with String | `core/string/include_spec.rb` | 8 | 0 |
 | `string_length_spec.rb` | String#length | `core/string/length_spec.rb` | 1 | 0 |
-| `string_lstrip_spec.rb` | String#lstrip | `core/string/lstrip_spec.rb` | 2 | 2 |
+| `string_lstrip_spec.rb` | String#lstrip | `core/string/lstrip_spec.rb` | 3 | 1 |
 | `string_reverse_spec.rb` | String#reverse | `core/string/reverse_spec.rb` | 5 | 0 |
-| `string_rstrip_spec.rb` | String#rstrip | `core/string/rstrip_spec.rb` | 2 | 2 |
+| `string_rstrip_spec.rb` | String#rstrip | `core/string/rstrip_spec.rb` | 3 | 1 |
 | `string_size_spec.rb` | String#size | `core/string/size_spec.rb` | 1 | 0 |
 | `string_start_with_spec.rb` | String#start_with? | `core/string/start_with_spec.rb + shared/string/start_with.rb` | 3 | 7 |
-| `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 1 | 7 |
+| `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 2 | 6 |
 | `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 8 | 0 |
 | `unbound_method_equal_spec.rb` | Class#instance_method / Method#unbind | `core/unboundmethod/equal_value_spec.rb` | 6 | 0 |
 

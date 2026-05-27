@@ -3,11 +3,6 @@
 # the bang variant `String#strip!` (not in subset; raises
 # NoMethodError) and a `shared/strip.rb` body that exercises
 # encoding-aware paths.
-#
-# The "NULL bytes and whitespace" block is intentionally skipped:
-# rubyrs's `#strip` does NOT remove leading/trailing `\x00`
-# bytes (verified manually), while CRuby does. Behavior
-# divergence; pin with a dedicated diff fixture later.
 
 describe "String#strip" do
   it "returns a new string with leading and trailing whitespace removed" do
@@ -16,8 +11,9 @@ describe "String#strip" do
     assert_eq("\tgoodbye\r\v\n".strip, "goodbye")
   end
 
-  # skipped (divergent): it "returns a copy of self without leading and trailing NULL bytes and whitespace" do
-  #   rubyrs's `#strip` does not strip `\x00`; CRuby does.
+  it "returns a copy of self without leading and trailing NULL bytes and whitespace" do
+    assert_eq(" \x00 goodbye \x00 ".strip, "goodbye")
+  end
 
   # skipped (method-not-implemented): it "modifies self in place and returns self" do
   #   String#strip! not in subset.

@@ -22,6 +22,25 @@ use super::{ruby_sprintf, Vm};
 #[cfg(feature = "regex")]
 use super::PinGuard;
 
+/// CRuby's strip-family whitespace predicate. Matches the
+/// exact set CRuby's `String#strip` / `#lstrip` / `#rstrip`
+/// treat as strippable: SP, HT, LF, VT, FF, CR, plus the NUL
+/// byte. Two gaps from Rust's stdlib idioms we'd otherwise
+/// reach for:
+///   - `char::is_ascii_whitespace` covers SP/HT/LF/FF/CR but
+///     NOT VT (`\x0B`); CRuby strips VT, so a 'goodbye\v'
+///     left-untouched would be observable.
+///   - `char::is_whitespace` covers VT but is Unicode-aware
+///     (e.g. NBSP `\u{00A0}`), which CRuby does NOT strip;
+///     using it would over-strip.
+/// Enumerate the byte set explicitly to match CRuby exactly.
+/// Divergence pinned by `tests/fixtures/divergence_string_strip_nul.rb`
+/// (PR #193) is the gap this predicate closes.
+#[inline]
+fn strip_ws_or_nul(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r' | '\0')
+}
+
 /// Try the Str primitive arms. Returns `Ok(Some(v))` on a
 /// handled call, `Ok(None)` if the receiver/method shape
 /// doesn't match.
@@ -227,9 +246,23 @@ pub(crate) fn string_call(
         // encodings per-string, so the ASCII-8BIT distinction is
         // a no-op for our subset.
         (Value::Str(a), "b", []) => Some(Value::new_str_bytes(a.content.borrow().clone())),
-        (Value::Str(a), "strip", []) => Some(Value::new_str(a.to_string_lossy().trim().to_string())),
-        (Value::Str(a), "lstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_start().to_string())),
-        (Value::Str(a), "rstrip", []) => Some(Value::new_str(a.to_string_lossy().trim_end().to_string())),
+        // CRuby's strip family treats `\x00` as part of the
+        // strippable whitespace set (along with space, tab, NL,
+        // CR, FF, VT). Rust's `is_whitespace()` excludes NUL,
+        // so a bare `.trim()` would leave NUL bytes on the ends
+        // — a divergence pinned in
+        // `tests/fixtures/divergence_string_strip_nul.rb` (PR
+        // #193) until this fix. Use a predicate that matches
+        // CRuby's set exactly.
+        (Value::Str(a), "strip", []) => Some(Value::new_str(
+            a.to_string_lossy().trim_matches(strip_ws_or_nul).to_string()
+        )),
+        (Value::Str(a), "lstrip", []) => Some(Value::new_str(
+            a.to_string_lossy().trim_start_matches(strip_ws_or_nul).to_string()
+        )),
+        (Value::Str(a), "rstrip", []) => Some(Value::new_str(
+            a.to_string_lossy().trim_end_matches(strip_ws_or_nul).to_string()
+        )),
         // PR #53 review #3: use with_str_lossy (Cow-backed) so the
         // valid-UTF-8 hot path is zero-alloc — only the invalid-
         // UTF-8 branch allocates. to_string_lossy() unconditionally

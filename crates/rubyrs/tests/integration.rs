@@ -144,7 +144,10 @@ fn env_cap_typo_warns_on_stderr() {
 // `# skipped (divergent):` trace in `spec/ruby/*.rb`. Surfaced from
 // the spec-ingestion arc in PR #167 / #158 / #188.
 #[test] fn divergence_array_first_bignum() { run_fixture("divergence_array_first_bignum"); }
-#[test] fn divergence_string_strip_nul() { run_fixture("divergence_string_strip_nul"); }
+// `divergence_string_strip_nul` removed when this PR fixed the
+// gap (vm/string.rs now strips NUL bytes alongside CRuby's
+// whitespace set). Spec blocks un-skipped in string_strip_spec.rb /
+// string_lstrip_spec.rb / string_rstrip_spec.rb.
 #[test] fn divergence_hash_eql_keys() { run_fixture("divergence_hash_eql_keys"); }
 #[test] fn divergence_hash_fetch_arity() { run_fixture("divergence_hash_fetch_arity"); }
 // `break`/`next` through an `ensure` body inside a `while` loop is
