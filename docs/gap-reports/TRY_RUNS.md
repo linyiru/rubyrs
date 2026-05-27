@@ -55,13 +55,13 @@ true apples-to-apples re-run.
 **The pass-7 wall is gone.** The probe now executes past pass-7's
 line 64 stop point and lands at `sinatra/base.rb:260` — a 4×
 linear advance through `<class:Sinatra>` body. New layers
-surface in the section that runs after `class Request <
-Rack::Request` finishes loading: middleware definitions
+surface in the section that runs after
+`class Request < Rack::Request` finishes loading: middleware definitions
 (`class CommonLogger < Rack::CommonLogger`), more
 embedder-shape Rack constants, and one new Cat I bug.
 
-The 4 layers pass-7 documented as Cat H / Cat I (`instance_
-variable_get`, `Class#allocate`, `Regexp#freeze`, nested-alias)
+The 4 layers pass-7 documented as Cat H / Cat I
+(`instance_variable_get`, `Class#allocate`, `Regexp#freeze`, nested-alias)
 are now silent — the probe walks past every one of them
 without trace. This is the expected outcome of those PRs but
 worth pinning explicitly: zero regressions on the closed
@@ -79,7 +79,7 @@ surface.
 ```ruby
 class Foo; end
 class Bar < Foo
-  superclass.class_eval do      # NoMethodError: undefined method `superclass' for Class
+  superclass.class_eval do      # NoMethodError: undefined method 'superclass' for Class
     def hi; "from-Foo"; end
   end
 end
