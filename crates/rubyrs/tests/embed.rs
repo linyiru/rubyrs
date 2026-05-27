@@ -2832,7 +2832,9 @@ fn bigint_shift_left_dos_cap_uses_exact_int_bit_length() {
         "puts (5 << 1_000_000).bit_length",
         "shift_dos_exact_bits.rb",
     ).expect("eval");
-    assert_eq!(buf.snapshot().trim(), "1_000_003".replace('_', ""));
+    // `bit_length(5) == 3`, so `(5 << 1_000_000).bit_length == 1_000_003`.
+    // Ruby prints integers without underscores.
+    assert_eq!(buf.snapshot().trim(), "1000003");
 }
 
 #[cfg(feature = "bignum")]
