@@ -1303,6 +1303,45 @@ impl Vm {
                     self.toplevel_methods.get(&old_id).cloned()
                 };
                 let m = match existing {
+                    Some(m) => Some(m),
+                    None => {
+                        // Built-in `Class` method fallback: when
+                        // `old_id` isn't a user-defined singleton
+                        // method, check whether the surrounding
+                        // class advertises it via its primitive
+                        // method set (`new` / `name` / `to_s` /
+                        // `ancestors` / ... — the same set
+                        // lookup.rs's `Value::Class(_)` respond_to
+                        // whitelist exposes). If so, synthesise a
+                        // forwarder Method whose body is
+                        // `LoadSelf; LoadLocal(0); ApplyCall(old_id);
+                        // Return` — same shape as Op::AliasMethod's
+                        // primitive forwarder. Mirrors the
+                        // "msgpack-ruby `alias_method :to_msgpack_ext,
+                        // :name`" pattern (PR #182 era) but for
+                        // singleton/class methods. Motivating case:
+                        // sinatra/base.rb:1659 `class << self;
+                        // alias new! new unless method_defined?
+                        // :new!; end` — `:new` is `Class#new`, not
+                        // a user singleton, so the original lookup
+                        // returned None and the alias raised
+                        // NameError at load time.
+                        // PR #218 (if-modifier) closed the guard
+                        // surface; this PR closes the alias-to-
+                        // builtin surface uncovered behind it.
+                        let cls_ref = self.class_stack.last().cloned();
+                        if let Some(cls) = &cls_ref
+                            && self.responds_to(&Value::Class(cls.clone()), old_id) {
+                            let synth = self.synth_primitive_forwarder(cls, old_id);
+                            cls.singleton_methods.borrow_mut().insert(new_id, synth);
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                            self.stack.push(Value::Nil);
+                            return Ok(true);
+                        }
+                        None
+                    }
+                };
+                let m = match m {
                     Some(m) => m,
                     None => {
                         let name = self.interner.resolve(old_id).to_string();
