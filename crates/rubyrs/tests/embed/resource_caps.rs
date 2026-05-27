@@ -564,7 +564,7 @@ fn with_config_succeeds_under_sub_ms_deadline() {
     // hits, so we can assert ResourceExhausted definitively.
     let err = rt
         .eval("while true; end", "deadline.rb")
-        .expect_err("sub-nanosecond deadline must trap user eval");
+        .expect_err("1ns deadline must trap user eval on the first checkpoint");
     assert!(
         matches!(err.err, RubyError::ResourceExhausted { .. }),
         "expected user eval to hit the restored deadline cap, got {:?}",
