@@ -74,6 +74,26 @@ rescue NameError
 end
 puts "missing-source=#{missing_source}"
 
+## Module fence: `responds_to(Value::Class(Module), :new)` is
+## true in rubyrs's lookup whitelist, but `Class#new` isn't
+## actually callable on a Module instance. Without the fence,
+## the fallback would synth a forwarder and `M.mnew` would
+## silently allocate; CRuby raises NameError at the alias.
+## Both interpreters now raise on the alias line.
+module_new_fenced = begin
+  Object.class_eval do
+    module ::ModForFence
+      class << self
+        alias mnew new
+      end
+    end
+  end
+  "DID-NOT-RAISE"
+rescue NameError
+  "NameError"
+end
+puts "module-new-fence=#{module_new_fenced}"
+
 ## KNOWN GAP (separate PR): the forwarder's body uses
 ## `Op::ApplyCall` (no-block), so `Foo.new!(args) { ... }`
 ## drops the block before reaching `Class#new` → block

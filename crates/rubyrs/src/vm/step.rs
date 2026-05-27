@@ -1332,6 +1332,36 @@ impl Vm {
                         let cls_ref = self.class_stack.last().cloned();
                         if let Some(cls) = &cls_ref
                             && self.responds_to(&Value::Class(cls.clone()), old_id) {
+                            // Module fence on Class-only builtins.
+                            // `responds_to(Value::Class(_), :new)`
+                            // returns true unconditionally (lookup.rs
+                            // whitelists `:new` without an `is_module`
+                            // gate — unlike `:allocate`, which IS
+                            // module-fenced post PR #181). Without
+                            // this fence `module M; class << self;
+                            // alias mnew new; end; end` would synth a
+                            // forwarder that, at call time, dispatches
+                            // `Class#new` on the Module and silently
+                            // produces an instance. CRuby raises
+                            // NameError at the alias because `:new`
+                            // isn't a method on a Module's singleton
+                            // class. Mirror CRuby's NameError-at-load
+                            // by refusing to synth a forwarder for
+                            // `:new` on Module receivers. (No other
+                            // built-in Class methods in the whitelist
+                            // diverge this way — `:name`, `:to_s`,
+                            // `:ancestors`, etc. work on Modules in
+                            // CRuby. PR #229 code-review #1.)
+                            if cls.is_module
+                                && self.interner.resolve(old_id).as_ref() == "new"
+                            {
+                                return Err(self.trap(RubyError::NameError {
+                                    msg: format!(
+                                        "undefined method `new' for class `{}'",
+                                        if cls.name.is_empty() { "Module" } else { &cls.name }
+                                    ),
+                                }));
+                            }
                             let synth = self.synth_primitive_forwarder(cls, old_id);
                             cls.singleton_methods.borrow_mut().insert(new_id, synth);
                             self.method_gen = self.method_gen.wrapping_add(1);
