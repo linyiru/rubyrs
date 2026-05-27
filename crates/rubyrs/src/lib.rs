@@ -355,54 +355,124 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
     }
 }
 
+/// Snapshot of every Runtime field the preamble-bootstrap path
+/// must lift before running `load_preamble` and restore after.
+/// Bundling them into one type means "add a new resource cap"
+/// touches exactly one struct (plus its `take_from` / `restore_to`
+/// pair); previous shape had six paired `.take()` + restore lines
+/// in `with_config`, easy to forget half of on a new cap.
+///
+/// Every field here is either an `Option<primitive>` (Copy) or
+/// `bool`, so the guard can restore by `&self` reference without
+/// moving anything out of itself in `Drop`.
+#[derive(Default)]
+struct ResourceCaps {
+    fuel: Option<u64>,
+    max_frames: Option<usize>,
+    max_symbols: Option<usize>,
+    max_value_bytes: Option<usize>,
+    max_live: Option<usize>,
+    deadline: Option<std::time::Duration>,
+    // `stress_gc` is treated as a cap here even though it isn't a
+    // resource budget — it makes GC fire on every potential point,
+    // ballooning preamble cost ~10× when on. Lifting it during
+    // preamble keeps Runtime construction time observably
+    // independent of the host's stress_gc choice.
+    stress_gc: bool,
+}
+
+impl ResourceCaps {
+    /// Take caps off the Runtime + Vm, leaving zero/None in place.
+    /// Subsequent eval()s run unbounded until the caps are
+    /// restored.
+    fn take_from(rt: &mut Runtime) -> Self {
+        ResourceCaps {
+            fuel: rt.vm.fuel.take(),
+            max_frames: rt.vm.max_frames.take(),
+            max_symbols: rt.vm.max_symbols.take(),
+            max_value_bytes: rt.vm.max_value_bytes.take(),
+            max_live: rt.vm.heap.max_live.take(),
+            deadline: rt.deadline.take(),
+            stress_gc: std::mem::replace(&mut rt.vm.stress_gc, false),
+        }
+    }
+
+    /// Restore the captured caps. Takes `&self` because every
+    /// field is Copy / bool, so `Drop` can call this through the
+    /// guard's reference without moving out.
+    fn restore_to(&self, rt: &mut Runtime) {
+        rt.vm.fuel = self.fuel;
+        rt.vm.max_frames = self.max_frames;
+        rt.vm.max_symbols = self.max_symbols;
+        rt.vm.max_value_bytes = self.max_value_bytes;
+        rt.vm.heap.max_live = self.max_live;
+        rt.deadline = self.deadline;
+        rt.vm.stress_gc = self.stress_gc;
+    }
+}
+
+/// RAII guard that lifts ResourceCaps off a Runtime for as long
+/// as it exists in scope, and restores them on Drop — including
+/// the unwinding path if `load_preamble` (or anything else inside
+/// the guarded scope) Rust-panics. Without this, a host that
+/// catches the unwind via `catch_unwind` could recover a Runtime
+/// with all caps silently zeroed, defeating the very sandbox
+/// they configured.
+struct CapsGuard<'a> {
+    rt: &'a mut Runtime,
+    saved: ResourceCaps,
+}
+
+impl<'a> CapsGuard<'a> {
+    fn lift(rt: &'a mut Runtime) -> Self {
+        let saved = ResourceCaps::take_from(rt);
+        CapsGuard { rt, saved }
+    }
+}
+
+impl Drop for CapsGuard<'_> {
+    fn drop(&mut self) {
+        self.saved.restore_to(self.rt);
+    }
+}
+
 impl Runtime {
     pub fn new() -> Self {
         Self::with_config(Config::default())
     }
 
     pub fn with_config(cfg: Config) -> Self {
-        // Apply Config BEFORE loading the preamble so host-visible
-        // settings (`env`, `pid`, `time_now`, `stress_gc`) the
-        // preamble might consult use the host's values, and
-        // `apply_config`'s contract ("call before any eval()") is
-        // honored. The wizer path can't do this: it has no host
-        // Config at snapshot time, so its preamble runs under
-        // defaults — that's by design and documented on
-        // `new_default_impl`.
+        // Apply Config BEFORE the preamble so host-visible
+        // settings (`env`, `pid`, `time_now`) the preamble might
+        // consult use the host's values, and `apply_config`'s
+        // contract ("call before any eval()") is honored. The
+        // wizer path can't do this: it has no host Config at
+        // snapshot time, so its preamble runs under defaults —
+        // that's by design and documented on `new_default_impl`.
         //
-        // Resource caps (`fuel`, `max_frames`, `max_heap_objects`,
-        // `max_symbols`, `max_value_bytes`, `deadline`) are a
-        // different concern: the preamble is internal
-        // infrastructure, not user code, and consuming the host's
-        // budget for bootstrap means a host that legitimately
-        // wants a tight sandbox (e.g. `Config { fuel: Some(small) }`
-        // for fuzz / untrusted-script evaluation) cannot construct
-        // a Runtime at all — the preamble eval traps and the
-        // `.expect` in `load_preamble` panics with a SIGABRT
-        // instead of returning a recoverable error. Originally
-        // surfaced by the cargo-fuzz harness in PR #180, where a
-        // workaround sized `fuel: Some(50_000)` above the observed
-        // preamble cost.
+        // Then lift the resource caps + `stress_gc` for the
+        // duration of preamble load. The preamble is internal
+        // infrastructure, not user code; consuming the host's
+        // resource budget for bootstrap means a host that wants a
+        // tight sandbox (fuzz, untrusted-script eval) cannot
+        // construct a Runtime at all — the preamble traps and
+        // `.expect` in `load_preamble` panics with SIGABRT instead
+        // of returning a recoverable error. Originally surfaced
+        // by the cargo-fuzz harness in PR #180 with a magic
+        // `fuel: Some(50_000)` workaround.
         //
-        // Fix: lift resource caps for the duration of preamble
-        // load, then restore them. Net behaviour for callers: the
-        // preamble always runs unbounded; user-supplied caps still
-        // apply to every subsequent `eval()`, exactly as documented.
+        // The `CapsGuard` is RAII: on every exit path from this
+        // scope (normal return AND panic unwinding), the saved
+        // caps are restored. A panic mid-preamble that an
+        // embedder catches via `catch_unwind` therefore yields a
+        // Runtime with its sandbox intact, not silently disarmed.
         let mut rt = Self::build_skeleton();
         rt.apply_config(cfg);
-        let saved_fuel = rt.vm.fuel.take();
-        let saved_max_frames = rt.vm.max_frames.take();
-        let saved_max_symbols = rt.vm.max_symbols.take();
-        let saved_max_value_bytes = rt.vm.max_value_bytes.take();
-        let saved_max_heap = rt.vm.heap.max_live.take();
-        let saved_deadline = rt.deadline.take();
-        rt.load_preamble();
-        rt.vm.fuel = saved_fuel;
-        rt.vm.max_frames = saved_max_frames;
-        rt.vm.max_symbols = saved_max_symbols;
-        rt.vm.max_value_bytes = saved_max_value_bytes;
-        rt.vm.heap.max_live = saved_max_heap;
-        rt.deadline = saved_deadline;
+        {
+            let guard = CapsGuard::lift(&mut rt);
+            guard.rt.load_preamble();
+            // guard drops here; caps restored.
+        }
         rt
     }
 
@@ -1035,5 +1105,79 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         #[cfg(all(feature = "cext", not(target_os = "wasi")))]
         rubyrs_cext::reset_state();
+    }
+}
+
+#[cfg(test)]
+mod caps_guard_tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::time::Duration;
+
+    /// `CapsGuard`'s whole purpose is to be panic-safe — Drop
+    /// must fire on unwinding and restore caps even when the
+    /// guarded scope panics. Without this, an embedder that
+    /// catches the unwind via `catch_unwind` (rubund evaluating
+    /// many gemspecs in batch, fuzz harnesses, ...) salvages a
+    /// Runtime with all sandbox caps silently zeroed.
+    ///
+    /// Test directly against the private guard rather than
+    /// through `Runtime::with_config`, because the production
+    /// path is engineered so `load_preamble` doesn't panic — we
+    /// need to simulate the panic to prove the guarantee holds
+    /// if it ever did.
+    #[test]
+    fn caps_guard_restores_on_panic_in_guarded_scope() {
+        let mut rt = Runtime::new();
+        // Stamp recognisable cap values so the assertion can
+        // distinguish "restored" from "default".
+        rt.vm.fuel = Some(123);
+        rt.vm.max_frames = Some(45);
+        rt.vm.max_symbols = Some(678);
+        rt.vm.max_value_bytes = Some(9012);
+        rt.vm.heap.max_live = Some(34);
+        rt.deadline = Some(Duration::from_millis(56));
+        rt.vm.stress_gc = true;
+
+        // Simulate the preamble panicking inside the guarded scope.
+        // `AssertUnwindSafe` because Runtime isn't UnwindSafe; the
+        // test is the one asserting it's safe to unwind through.
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = CapsGuard::lift(&mut rt);
+            // Inside the guard, caps should be zero.
+            assert!(_guard.rt.vm.fuel.is_none(), "lift should clear fuel");
+            assert!(_guard.rt.vm.max_frames.is_none());
+            assert!(_guard.rt.vm.max_symbols.is_none());
+            assert!(_guard.rt.vm.max_value_bytes.is_none());
+            assert!(_guard.rt.vm.heap.max_live.is_none());
+            assert!(_guard.rt.deadline.is_none());
+            assert!(!_guard.rt.vm.stress_gc);
+            panic!("simulated preamble panic");
+        }));
+
+        assert!(result.is_err(), "guarded scope should have panicked");
+        // After unwind, every cap is back where we stamped it.
+        assert_eq!(rt.vm.fuel, Some(123));
+        assert_eq!(rt.vm.max_frames, Some(45));
+        assert_eq!(rt.vm.max_symbols, Some(678));
+        assert_eq!(rt.vm.max_value_bytes, Some(9012));
+        assert_eq!(rt.vm.heap.max_live, Some(34));
+        assert_eq!(rt.deadline, Some(Duration::from_millis(56)));
+        assert!(rt.vm.stress_gc);
+    }
+
+    /// Non-panic happy path — equivalent to what `with_config`
+    /// does on a successful preamble load. Locks in that the
+    /// guard's normal-exit Drop also restores correctly (i.e.
+    /// we're not relying on the panic to trigger restore).
+    #[test]
+    fn caps_guard_restores_on_normal_scope_exit() {
+        let mut rt = Runtime::new();
+        rt.vm.fuel = Some(999);
+        {
+            let _guard = CapsGuard::lift(&mut rt);
+            assert!(_guard.rt.vm.fuel.is_none());
+        }
+        assert_eq!(rt.vm.fuel, Some(999));
     }
 }
