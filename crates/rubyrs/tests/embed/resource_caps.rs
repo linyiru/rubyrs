@@ -102,14 +102,19 @@ fn apply_config_tightens_fuel_for_next_eval() {
     // `Runtime::fuel_budget`; the next eval anchors `vm.fuel`
     // from there.
     rt.apply_config(Config { fuel: Some(100), ..Default::default() });
-    // Same workload now traps on the tight cap.
+    // Same workload now traps on the tight cap. Assert
+    // FUEL-SPECIFIC trap (msg contains "fuel") rather than a
+    // generic ResourceExhausted — otherwise a future regression
+    // that broke fuel application but silently tripped some
+    // OTHER cap (e.g., a future tighter default on max_frames)
+    // would pass this test for the wrong reason.
     let err = rt.eval(
         "a = []; i = 0; while i < 500; a << i; i = i + 1; end; a.length",
         "tight.rb",
     ).unwrap_err();
     assert!(
-        matches!(err.err, RubyError::ResourceExhausted { .. }),
-        "expected ResourceExhausted under tightened cap, got {:?}", err.err,
+        matches!(&err.err, RubyError::ResourceExhausted { msg } if msg.contains("fuel")),
+        "expected ResourceExhausted/fuel under tightened cap, got {:?}", err.err,
     );
     // Reset between evals must NOT revert the tightened cap.
     rt.reset();
@@ -118,8 +123,8 @@ fn apply_config_tightens_fuel_for_next_eval() {
         "tight_after_reset.rb",
     ).unwrap_err();
     assert!(
-        matches!(err2.err, RubyError::ResourceExhausted { .. }),
-        "tightened cap must survive reset(); got {:?}", err2.err,
+        matches!(&err2.err, RubyError::ResourceExhausted { msg } if msg.contains("fuel")),
+        "tightened fuel cap must survive reset(); got {:?}", err2.err,
     );
 }
 
