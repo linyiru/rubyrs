@@ -61,6 +61,77 @@ impl Vm {
                         let a = self.heap.array_mut(id);
                         Some(a.pop().unwrap_or(Value::Nil))
                     }
+                    // `Array#delete(obj)` — value-based delete.
+                    // Removes EVERY element equal to `obj` (using
+                    // `==`, via `ruby_eq`), returns the last
+                    // deleted element, or nil if `obj` wasn't
+                    // found. In-place mutation.
+                    //
+                    // Motivating consumer: tilt's
+                    // `local_extraction` at lib/tilt/template.rb:378
+                    // calls `assignments.delete("locals =
+                    // locals[:locals]")` to decide whether to
+                    // re-append the `locals`-key assignment last.
+                    //
+                    // Divergence: the block form
+                    // `arr.delete(obj) { yield-if-not-found }`
+                    // reaches this arm (via the `first`/`last`-
+                    // style delegation in `collection_call_block`)
+                    // but rubyrs silently drops the block instead
+                    // of yielding `obj` on no-match. CRuby returns
+                    // the block's result on no-match; rubyrs
+                    // returns nil.
+                    ("delete", args) if args.len() != 1 => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 1)",
+                                args.len()
+                            ),
+                        }));
+                    }
+                    ("delete", [needle]) => {
+                        // Two-phase: walk the immutable view to
+                        // collect indices that match (need the
+                        // heap borrow for `ruby_eq`'s
+                        // cross-reference resolution), then drain
+                        // those indices via `array_mut`. Last
+                        // matched element wins as the return
+                        // value, mirroring CRuby.
+                        let a = self.heap.array(id);
+                        let hits: Vec<usize> = a
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, x)| x.ruby_eq(needle, &self.heap))
+                            .map(|(i, _)| i)
+                            .collect();
+                        if hits.is_empty() {
+                            Some(Value::Nil)
+                        } else {
+                            // CRuby returns the LAST matched element
+                            // in array order. Since `==` can hold
+                            // across distinct objects (e.g.
+                            // `1 == 1.0`), this is the highest-index
+                            // hit BEFORE removal — not whatever the
+                            // last drop happens to surface.
+                            let last_idx = *hits.last().unwrap();
+                            let last = self.heap.array(id)[last_idx].clone();
+                            // Single O(n) `retain` pass driven by a
+                            // peekable iterator over the (ascending)
+                            // hit indices, instead of N × `Vec::remove`
+                            // (each of which shifts the tail and would
+                            // make a many-hit delete O(n²)).
+                            let a = self.heap.array_mut(id);
+                            let mut hits_iter = hits.iter().copied().peekable();
+                            let mut i = 0usize;
+                            a.retain(|_| {
+                                let drop = hits_iter.peek() == Some(&i);
+                                if drop { hits_iter.next(); }
+                                i += 1;
+                                !drop
+                            });
+                            Some(last)
+                        }
+                    }
                     // `Array#unshift(v)` / `prepend(v)` — insert at
                     // front, return receiver. Variadic in CRuby
                     // (`unshift(a, b, c)` inserts all at once in

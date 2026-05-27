@@ -467,6 +467,16 @@ impl Vm {
             (Value::Array(id), "first" | "last", _) => {
                 return self.array_collection_call(*id, name, args);
             }
+            // `Array#delete(obj) { ... }`: CRuby yields `obj` on
+            // no-match and returns the block's result. rubyrs's
+            // Tier 1 stub silently drops the block (documented at
+            // the impl site in `array.rs`). The delegation is
+            // still required so wrong-arity arr.delete(){...} /
+            // arr.delete(a,b){...} raises ArgumentError instead
+            // of NoMethodError.
+            (Value::Array(id), "delete", _) => {
+                return self.array_collection_call(*id, name, args);
+            }
             // Same shape for `Range#first / #last` (and arity-1
             // forms). PR #146 added the arity-1 arms only to the
             // non-block dispatcher (`range_collection_call`),
