@@ -792,8 +792,15 @@ impl Vm {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                    g.pin(Value::Array(pair_id));
-                    match g.vm.step_block(block, vec![Value::Array(pair_id), Value::Int(i as i64)], pre_frames)? {
+                    // Scoped pin: see Hash#each for rationale. The
+                    // previous `g.pin(...)` pushed onto the outer
+                    // PinGuard's list, growing O(entries) because
+                    // pin slots are not released until the guard
+                    // drops at the end of the method.
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step_result = g.vm.step_block(block, vec![Value::Array(pair_id), Value::Int(i as i64)], pre_frames);
+                    g.vm.pinned.pop();
+                    match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}

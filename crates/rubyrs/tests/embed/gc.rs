@@ -351,3 +351,30 @@ fn hash_each_pin_pair_id_under_stress_gc() {
         "expected 3 lines from 3 pairs, got: {out}"
     );
 }
+
+#[test]
+fn hash_each_with_index_pin_pair_id_under_stress_gc() {
+    // Regression: Hash#each_with_index pinned pair_id via the
+    // outer PinGuard (`g.pin(Value::Array(pair_id))`), so pins
+    // accumulated O(entries) over the loop and never released
+    // until the method returned. Replaced with the scoped
+    // `pinned.push/pop` pattern. The pin contract itself was
+    // already there (just inefficient); this test mainly locks
+    // in the correctness leg — the block body must still see
+    // a live pair_id under STRESS_GC + rest param.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        { a: 1, b: 2, c: 3 }.each_with_index { |*args| puts args.inspect }
+    "#, "hash_ewi_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    assert_eq!(
+        out.lines().count(),
+        3,
+        "expected 3 lines from 3 pairs, got: {out}"
+    );
+}
