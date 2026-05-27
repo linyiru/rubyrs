@@ -696,6 +696,25 @@ impl Vm {
         std::mem::replace(&mut self.bypass_visibility_once, false)
     }
 
+    /// Reset every "control flow signal" flag — the per-call
+    /// state Op handlers set to communicate break / return /
+    /// loop-transfer / suppress-result / bypass-visibility
+    /// requests across the dispatch loop. Called from both
+    /// `Runtime::eval`'s entry (so a previous eval that left
+    /// signals set doesn't bleed into the next) and
+    /// `Runtime::reset` (same intent, different trigger). One
+    /// helper means a future signal that's added to this set
+    /// can't be missed at one site and present at the other —
+    /// the kind of drift that's caused real bugs elsewhere in
+    /// this codebase.
+    pub(crate) fn clear_control_flow_signals(&mut self) {
+        self.break_signaled = false;
+        self.method_return = None;
+        self.pending_loop_transfer = None;
+        self.suppress_call_result_push = false;
+        self.bypass_visibility_once = false;
+    }
+
     pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         Ok(match recv {
             Value::Array(id) => return self.array_collection_call(*id, name, args),

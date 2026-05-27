@@ -995,12 +995,10 @@ impl Runtime {
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
         // `break_signaled = true`; the next eval's iterators would
-        // see a stale break signal.
-        self.vm.break_signaled = false;
-        self.vm.method_return = None;
-        self.vm.pending_loop_transfer = None;
-        self.vm.suppress_call_result_push = false;
-        self.vm.bypass_visibility_once = false;
+        // see a stale break signal. The same helper is used by
+        // `Runtime::eval`'s entry path so the signal set can't
+        // drift between sites.
+        self.vm.clear_control_flow_signals();
         // `op_counter` is per-eval; `deadline_at` is set per-eval.
         // Both reset by `eval()`'s preamble anyway, but clear here
         // too so a `reset()` between user evals leaves no trail.
@@ -1547,9 +1545,9 @@ RUBY_ENGINE = "ruby".freeze
         self.vm.frames.clear();
         self.vm.stack.clear();
         self.vm.pinned.clear();
-        self.vm.break_signaled = false;
-        self.vm.method_return = None;
-        self.vm.pending_loop_transfer = None;
+        // Shared with `Runtime::reset` — see the helper for why
+        // every signal in this set needs clearing.
+        self.vm.clear_control_flow_signals();
         // Anchor the wall-clock deadline (P2-14a) to *this* eval
         // call. Each `eval` re-computes the absolute Instant from
         // the runtime's stored Duration, so a host can reuse a
