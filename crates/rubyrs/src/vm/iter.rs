@@ -451,10 +451,16 @@ impl Vm {
                             // `scan` would otherwise keep every
                             // capture Array pinned until the loop
                             // ends — O(matches) memory pressure).
+                            //
                             // The `?` short-circuit is moved AFTER
-                            // the pop via `step_block.into()` →
-                            // separate let binding, so an Err from
-                            // step_block still runs the pop.
+                            // the pop by binding `step_block(...)`'s
+                            // Result to a local first (`let step_result =
+                            // ...`), then popping, then `match
+                            // step_result?`. Without this dance an
+                            // Err from step_block would skip the pop
+                            // and leave `gid` permanently pinned —
+                            // the historical PinGuard footgun its
+                            // doc-comment warns about (vm.rs:147).
                             g.vm.pinned.push(Value::Array(gid));
                             let step_result = g.vm.step_block(block, vec![Value::Array(gid)], pre_frames);
                             g.vm.pinned.pop();
