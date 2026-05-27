@@ -663,20 +663,45 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
-                // Defensive pin of every element. Without this,
-                // if the block mutates the receiver mid-iteration
-                // (`arr.clear` / `shift` / `slice!`), elements held
-                // only in the Rust-local `snapshot` / `groups` Vecs
-                // are no longer reachable through the pinned
-                // receiver and a subsequent step_block-triggered
-                // maybe_gc would sweep them. CRuby disallows
-                // concurrent mutation entirely; we instead keep the
-                // elements alive defensively so the primitive
-                // completes without ICE'ing. Matches the sort
-                // driver's `for v in &copy { g.pin(v.clone()); }`
-                // pattern (iter.rs:1713). Pre-existing gap surfaced
-                // by Copilot review on PR #187.
-                for v in &snapshot { g.pin(v.clone()); }
+                // Defensive pin of every heap-slot element. Without
+                // this, if the block mutates the receiver mid-
+                // iteration (`arr.shift` / `slice!` / etc.),
+                // elements held only in the Rust-local `snapshot` /
+                // `groups` Vecs are no longer reachable through the
+                // pinned receiver and a subsequent step_block-
+                // triggered maybe_gc would sweep them. CRuby
+                // disallows concurrent mutation entirely; we
+                // instead keep the elements alive defensively so
+                // the primitive completes without ICE'ing.
+                //
+                // Narrowed to GC-tracked heap variants — immediates
+                // (Int/Float/Bool/Nil/Sym) and Rc-shared variants
+                // (Str/Class/Regex) aren't GC-managed. `maybe_gc`
+                // clones every `vm.pinned` entry into the marking
+                // root set (vm/gc.rs:113-115), so blanket pinning
+                // would add O(n) GC scan work for large arrays.
+                // Same filtering rationale as the per-key pin below.
+                //
+                // The sort driver (iter.rs:1713) uses a blanket pin
+                // of the same shape; left as-is pending its own
+                // perf pass to keep this PR scoped to chunk.
+                // Pre-existing gap surfaced by Copilot review on
+                // PR #187.
+                for v in &snapshot {
+                    if matches!(
+                        v,
+                        Value::Array(_) | Value::Hash(_) | Value::Object(_)
+                        | Value::Range(_) | Value::Block(_)
+                        | Value::BoundMethod(_) | Value::UnboundMethod(_)
+                        | Value::CurriedProc(_)
+                    ) {
+                        g.pin(v.clone());
+                    }
+                    #[cfg(feature = "bignum")]
+                    if matches!(v, Value::BigInt(_)) {
+                        g.pin(v.clone());
+                    }
+                }
                 let pre_frames = g.vm.frames.len();
                 let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
                 let mut early = None;
