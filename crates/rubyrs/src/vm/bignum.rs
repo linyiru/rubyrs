@@ -989,6 +989,18 @@ impl Vm {
                     }
                     *r as u32
                 }
+                // Canonical-BigInt invariant: any Value::BigInt is
+                // out of i64 range, so it can never be in 2..=36. But
+                // BigInt IS an Integer — matching it via `other`
+                // produces TypeError "no implicit conversion of
+                // Integer into Integer" (self-referential nonsense).
+                // CRuby raises `RangeError: bignum too big to convert
+                // into 'long'` for `big.to_s(2**100)`; match that.
+                Value::BigInt(_) => {
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: "bignum too big to convert into `long'".to_string(),
+                    }));
+                }
                 other => {
                     return Err(self.trap(RubyError::TypeError {
                         msg: format!(

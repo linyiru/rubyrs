@@ -122,6 +122,21 @@ pub(crate) fn numeric_call(
         // Int vs BigInt receivers. Lives BEFORE the broad
         // `(Int, op, [Int])` coercion arm for the same shadow
         // reason as the 1-arg `to_s` above.
+        //
+        // BigInt radix is a special sub-case: by the canonical-
+        // BigInt invariant any `Value::BigInt` is out of i64 range,
+        // so it can never be in the 2..=36 valid radix range, but
+        // it IS an Integer — raising TypeError "no implicit
+        // conversion of Integer into Integer" (the literal output
+        // of `type_name_for_coerce`) is nonsensical. CRuby raises
+        // `RangeError: bignum too big to convert into 'long'` for
+        // this exact shape; match that.
+        #[cfg(feature = "bignum")]
+        (Value::Int(_), "to_s", [Value::BigInt(_)]) => {
+            return Err(RubyError::RangeError {
+                msg: "bignum too big to convert into `long'".to_string(),
+            });
+        }
         (Value::Int(_), "to_s", [other]) => {
             return Err(RubyError::TypeError {
                 msg: format!(

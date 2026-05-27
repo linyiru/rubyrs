@@ -2632,6 +2632,34 @@ fn integer_to_s_non_integer_radix_raises_typeerror_on_int_path() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn integer_to_s_bigint_radix_raises_rangeerror_not_self_referential_typeerror() {
+    // Pre-fix the catch-all `(Value::Int(_), "to_s", [other])` arm
+    // intercepted `5.to_s(2**100)` (BigInt radix) and emitted
+    // TypeError "no implicit conversion of Integer into Integer"
+    // — `type_name_for_coerce` maps BigInt → "Integer" so the
+    // wording was self-referential nonsense. CRuby raises
+    // `RangeError: bignum too big to convert into 'long'` for this
+    // shape (any BigInt is by canonical-BigInt invariant outside
+    // i64, hence outside the 2..=36 radix range, but it IS an
+    // Integer so TypeError is the wrong error class).
+    let mut rt = rubyrs::Runtime::new();
+    for script in ["5.to_s(2 ** 100)", "(2 ** 100).to_s(2 ** 100)"] {
+        let err = rt.eval(script, "to_s_bigint_radix.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "RangeError", "for {:?}", script);
+                assert_eq!(
+                    message, "bignum too big to convert into `long'",
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught RangeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn integer_to_s_non_integer_radix_typeerror_message_matches_bigint_path() {
     // Cross-check the parity guard above against the BigInt path
     // so future drift between the two arms is caught immediately.
