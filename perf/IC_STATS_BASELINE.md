@@ -30,19 +30,23 @@ case".
 
 **02 — 4-shape polymorphic.** Cycles among exactly `IC_WAYS = 4`
 classes. All four ways fill on the first cycle, every subsequent
-dispatch hits. Each iteration does two cached dispatches (the
-`shapes[i % 4]` array index also goes through
-`lookup_method_cached`), so total hits ≈ 2 × N. **Confirms
-IC_WAYS = 4 is exactly sized for typical 4-shape polymorphism**.
+dispatch hits. Total hits ≈ 2 × N because both `.tag` (Object
+dispatch on the polymorphic site) AND `shapes[i % 4]` contribute
+IC accounting: `do_call` always consults `lookup_method_cached`
+first, including for `Array#[]`, and caches the (None) result —
+so Array indexing is a monomorphic IC hit on every iteration even
+though the actual indexing runs through `collection_call`'s
+fallback. **Confirms IC_WAYS = 4 is exactly sized for typical
+4-shape polymorphism**.
 
 **03 — 5-shape megamorphic.** One shape past `IC_WAYS`. The
 round-robin eviction (`next_way`) keeps replacing a way that the
 NEXT iteration will need, so every shape misses on a ~5-iteration
-cycle. Hit rate collapses to ~0.5 — half the dispatches still hit
-(the `shapes[i % 5]` indexing IC is mono on Array), the other half
-miss on the megamorphic site. **This is the workload that would
-benefit from widening IC_WAYS to 5 (or switching to LRU eviction
-from round-robin).**
+cycle. Hit rate collapses to ~0.5 — `shapes[i % 5]` still hits
+(Array indexing is monomorphic, see the workload 02 note on the
+negative-cache slot), but the `.tag` site misses on every
+iteration. **This is the workload that would benefit from widening
+IC_WAYS to 5 (or switching to LRU eviction from round-robin).**
 
 **04 — hot toplevel def.** 10 000 calls to a user toplevel `def
 helper`. Implicit-self routing through
@@ -69,11 +73,19 @@ has been observed redefining methods in a hot loop.
 - `puts` and similar builtins go through a builtin-name fast path that
   does NOT touch the IC, so the workload's `puts total` at the end
   doesn't show up in either counter.
-- Primitive dispatches (`Integer#+`, `Array#[]`, `Array#length`) take
-  different paths — `Array#[]` IS observed in the IC counters here
-  (the array index lookup at the hot site routes through
-  `lookup_method_cached`), but most primitive `+`/`-`/etc. work
-  through the inline arithmetic ops and bypass the cache entirely.
+- Primitive dispatch paths split into two camps for IC accounting:
+  - **Inline arithmetic / inline ops** (`Integer#+`, `<`, `==`, ...)
+    are compiled to dedicated opcodes that don't go through `do_call`
+    at all, so they never touch `lookup_method_cached`.
+  - **Generic method calls on a primitive receiver** (`arr[i]`,
+    `str.length`, ...) DO enter `do_call`, which calls
+    `lookup_method_cached` first; the lookup returns `None` (no
+    user-defined override) and the dispatcher falls through to
+    `collection_call` / `primitive_call`. The IC-hit counter
+    still increments because the cache stores the `None` result
+    and subsequent calls match the cached entry. Empirically this
+    means a hot `arr[i]` in a loop contributes ~N IC hits on top
+    of the actual fast-path work.
 
 ## What this says about IC sizing
 
