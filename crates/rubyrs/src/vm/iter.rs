@@ -310,12 +310,20 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut out = String::with_capacity(source.len());
                 let mut last_end = 0usize;
-                let mut bail = false;
                 for m in re.find_iter(&source) {
                     out.push_str(&source[last_end..m.start()]);
                     g.vm.invoke_block(block, vec![Value::new_str(m.as_str().to_string())])?;
                     g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { bail = true; break; }
+                    // Non-local `return` from the block — same
+                    // `Ok(Some(Value::Nil))` shape as Array#sort's
+                    // comparator arm (and the family of fixes in
+                    // PR #166): marking the primitive as
+                    // "matched" so the outer dispatch loop unwinds
+                    // via `method_return`. Returning `Ok(None)`
+                    // would cause `do_call_block` to fall through
+                    // to NoMethodError even though `method_return`
+                    // is set.
+                    if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;
@@ -329,7 +337,6 @@ impl Vm {
                     last_end = m.end();
                     if only_first { break; }
                 }
-                if bail { return Ok(None); }
                 out.push_str(&source[last_end..]);
                 return Ok(Some(Value::new_str(out)));
             }
@@ -393,7 +400,7 @@ impl Vm {
                             let gid = g.vm.heap.alloc(HeapObj::Array(group_vec));
                             g.vm.invoke_block(block, vec![Value::Array(gid)])?;
                             g.vm.dispatch_until(pre_frames)?;
-                            if g.vm.method_return.is_some() { return Ok(None); }
+                            if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
                             let _ = g.vm.stack.pop();
                             if g.vm.break_signaled {
                                 g.vm.break_signaled = false;
@@ -405,7 +412,7 @@ impl Vm {
                         for m in re.find_iter(&source_str) {
                             g.vm.invoke_block(block, vec![Value::new_str(m.as_str())])?;
                             g.vm.dispatch_until(pre_frames)?;
-                            if g.vm.method_return.is_some() { return Ok(None); }
+                            if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
                             let _ = g.vm.stack.pop();
                             if g.vm.break_signaled {
                                 g.vm.break_signaled = false;
@@ -426,7 +433,7 @@ impl Vm {
                             if &bytes[i..i + plen] == pat_bytes {
                                 g.vm.invoke_block(block, vec![Value::new_str_bytes(pat_owned.clone())])?;
                                 g.vm.dispatch_until(pre_frames)?;
-                                if g.vm.method_return.is_some() { return Ok(None); }
+                                if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
                                 let _ = g.vm.stack.pop();
                                 if g.vm.break_signaled {
                                     g.vm.break_signaled = false;
@@ -1180,7 +1187,7 @@ impl Vm {
                     let elem = snapshot[mid].clone();
                     g.vm.invoke_block(block, vec![elem.clone()])?;
                     g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
+                    if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
                     let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                     if g.vm.break_signaled {
                         g.vm.break_signaled = false;

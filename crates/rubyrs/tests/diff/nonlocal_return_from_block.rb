@@ -60,14 +60,16 @@ def via_drop_while
 end
 puts via_drop_while                                  # via_drop
 
-# chunk_while is also fixed (vm/iter.rs's chunk_while arm now
-# returns `Ok(Some(Value::Nil))`), but a diff_cruby case for it
-# can't land here — rubyrs models chunk_while as eager (returns
-# Array of arrays directly), while CRuby returns an Enumerator
-# that doesn't invoke the block until consumed. That divergence
-# is pre-existing and out of scope. The chunk_while
-# MethodReturn fix is exercised indirectly by the same family's
-# fix-pattern verified above.
+# chunk_while: bare-form is rubyrs-eager / CRuby-lazy (Enumerator),
+# so `[1,2,3].chunk_while { return :x }` diverges. The `.to_a`
+# form sidesteps that pre-existing divergence — both runtimes
+# materialise the result, both invoke the block at least once,
+# both see the non-local return escape to `def via_chunk_while`.
+def via_chunk_while
+  [1, 2, 3].chunk_while { return :via_cw }.to_a
+  :unreached_cw
+end
+puts via_chunk_while                                 # via_cw
 
 def via_min_by_n
   [1, 2, 3].min_by(2) { return :via_minby }
@@ -80,3 +82,44 @@ def via_max_by_n
   :unreached_max
 end
 puts via_max_by_n                                    # via_maxby
+
+# Five additional sites surfaced by /code-review on #166 — same
+# `Ok(None)` on method_return pattern, different methods. Pre-fix
+# all five raised NoMethodError; post-fix they propagate
+# `method_return` via `Ok(Some(Value::Nil))`.
+
+def via_gsub
+  "abc".gsub(/./) { return :via_gsub }
+  :unreached_gsub
+end
+puts via_gsub                                        # via_gsub
+
+def via_sub
+  "abc".sub(/./) { return :via_sub }
+  :unreached_sub
+end
+puts via_sub                                         # via_sub
+
+def via_scan_caps
+  "abcabc".scan(/(a)/) { return :via_scan_caps }
+  :unreached_caps
+end
+puts via_scan_caps                                   # via_scan_caps
+
+def via_scan_no_caps
+  "abcabc".scan(/a/) { return :via_scan_no_caps }
+  :unreached_no_caps
+end
+puts via_scan_no_caps                                # via_scan_no_caps
+
+def via_scan_str
+  "abcabc".scan("a") { return :via_scan_str }
+  :unreached_scan_str
+end
+puts via_scan_str                                    # via_scan_str
+
+def via_bsearch
+  [1, 2, 3, 4].bsearch { return :via_bsearch }
+  :unreached_bs
+end
+puts via_bsearch                                     # via_bsearch
