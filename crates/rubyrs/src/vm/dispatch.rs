@@ -5209,13 +5209,28 @@ impl Vm {
                 return self.invoke_method_with_block(m, recv_val, args, Some(block));
             }
             if let Some(target_cls) = target_cls {
-                if args.len() != 1 {
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 1)",
-                            args.len(),
-                        ),
-                    }));
+                // Arity arrangement matches the no-block arm above:
+                //   0       → wrong-arity ArgumentError
+                //   1       → install the block (path below)
+                //   2       → 2-arg Proc/UnboundMethod form NOT
+                //             yet supported (even with a block,
+                //             CRuby silently drops the block and
+                //             uses the proc — too subtle to fake);
+                //             raise NoMethodError so the caller
+                //             gets a clear "not implemented" signal
+                //   3+      → wrong-arity ArgumentError
+                // CRuby's wording is `expected 1..2` even when a
+                // block is attached, so we use the same message
+                // across both arms (PR #245 Copilot round 6 #1).
+                match args.len() {
+                    1 => {}
+                    2 => return Err(self.trap(RubyError::NoMethodError {
+                        method: "define_method".into(),
+                        recv_type: "Class",
+                    })),
+                    n => return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+                    })),
                 }
                 let name_sym = match &args[0] {
                     Value::Sym(s) => *s,

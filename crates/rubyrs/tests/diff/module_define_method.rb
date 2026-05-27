@@ -113,10 +113,13 @@ class Overridden
 end
 puts "override=#{Overridden.define_method(:ignored) { nil }}"
 
-## Parsed `def name; ...; end` returns `:name` (Symbol) — pin
-## CRuby's documented return value. Pre-fix rubyrs's
-## `Op::DefMethodBlock` returned nil; aligned with the
-## runtime-dispatch path in #245 round 1.
+## Compile-time `define_method(:literal_symbol) { … }` intercept
+## (`Op::DefMethodBlock`) returns `:literal_symbol` (Symbol).
+## Aligned with the runtime-dispatch `Module#define_method` arm
+## in #245 round 1 so both intercepts return the same value.
+## (NOT the parsed-`def` path — `def name; …; end` still
+## returns nil via `Op::DefMethod`, a separate divergence not
+## addressed by this PR.)
 class DefReturn
   result = define_method(:from_def) { 42 }
   RESULT = result
@@ -168,3 +171,16 @@ err = begin; Arity.define_method; "DID-NOT-RAISE"; rescue ArgumentError => e; e.
 puts "arity-0=#{err}"
 err = begin; Arity.define_method(:x, :y, :z); "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
 puts "arity-3=#{err}"
+
+## Block-form arity arrangement mirrors the no-block arm
+## (PR #245 Copilot round 6 #1). 0 and 3+ raise the same
+## wrong-arity ArgumentError shape as the no-block path; the
+## 2-arg Proc/UnboundMethod + block form is intentionally
+## unsupported in rubyrs Tier-1 (CRuby silently drops the
+## block and uses the proc — too subtle to fake), so it's
+## not pinned here.
+class ArityBlock; end
+err = begin; ArityBlock.define_method { :body }; "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
+puts "block-arity-0=#{err}"
+err = begin; ArityBlock.define_method(:a, :b, :c) { :body }; "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
+puts "block-arity-3=#{err}"
