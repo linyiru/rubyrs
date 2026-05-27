@@ -229,6 +229,96 @@ fn try_call_with_block_compile_time_intercept(
     false
 }
 
+/// Compile the body of `Expr::Begin` — the `begin / rescue /
+/// ensure / end` arm. Pure mechanical extraction from
+/// `compile_expr`'s match arm: rescue clauses push in REVERSE
+/// source order (so the unwinder, which is LIFO, tries the
+/// first source clause first), multi-class clauses share a
+/// single handler body, and the optional ensure layer compiles
+/// the ensure body twice (normal-path inline + exception-path
+/// terminated by `Op::EndEnsure`).
+///
+/// The `groups: Vec<Vec<usize>>` + LIFO push order has subtle
+/// correctness invariants — see #195's R3 risk register. Do
+/// NOT refactor the iteration order; only the surrounding
+/// scope changed.
+fn compile_begin_arm(
+    b: &mut ProtoBuilder,
+    body: &[SExpr],
+    rescue: &[crate::ast::RescueClause],
+    ensure: &Option<Vec<SExpr>>,
+    protos: &mut Vec<Proto>,
+    interner: &mut Interner,
+    cc: &mut u32,
+) {
+    let pe = ensure.as_ref().map(|_| b.emit(Op::PushEnsure(0)));
+
+    if rescue.is_empty() {
+        compile_body(b, body, protos, interner, cc);
+    } else {
+        let stderr_sym = interner.intern("StandardError");
+        // Per-clause groups of PushRescue placeholders. Same
+        // outer iteration order as `rescue.iter().rev()` (i.e.
+        // last clause first). All placeholders in a single
+        // inner Vec patch to the SAME handler body.
+        let mut groups: Vec<Vec<usize>> = Vec::with_capacity(rescue.len());
+        for rc in rescue.iter().rev() {
+            let (slot, bind) = match &rc.var {
+                Some(name) => (b.local_slot(name), 1u8),
+                None => (0u16, 0u8),
+            };
+            let filter_syms: Vec<crate::intern::SymId> = if rc.classes.is_empty() {
+                vec![stderr_sym]
+            } else {
+                rc.classes.iter().rev().map(|n| interner.intern(n)).collect()
+            };
+            let mut group = Vec::with_capacity(filter_syms.len());
+            for sym in filter_syms {
+                group.push(b.emit(Op::PushRescue(0, slot, bind, sym)));
+            }
+            groups.push(group);
+        }
+        compile_body(b, body, protos, interner, cc);
+        let total: usize = groups.iter().map(|g| g.len()).sum();
+        for _ in 0..total { b.emit(Op::PopRescue); }
+        let mut jump_to_end: Vec<usize> = Vec::with_capacity(rescue.len() + 1);
+        jump_to_end.push(b.emit(Op::Jump(0)));
+        for (i, rc) in rescue.iter().rev().enumerate() {
+            let group = &groups[i];
+            let handler_start = b.pos();
+            for &placeholder in group {
+                let off = handler_start as i32 - placeholder as i32 - 1;
+                if let Op::PushRescue(o, _, _, _) = &mut b.code[placeholder] {
+                    *o = off;
+                }
+            }
+            compile_body(b, &rc.body, protos, interner, cc);
+            jump_to_end.push(b.emit(Op::Jump(0)));
+        }
+        let end = b.pos();
+        for j in jump_to_end { b.patch_jump(j, end); }
+    }
+
+    // Ensure layer (compile body twice — once inline for the
+    // normal path, once for the exception / loop-transfer path
+    // which ends in `Op::EndEnsure`). The terminator routes to
+    // either re-raise the in-flight exception or resume a
+    // pending break/next walk depending on
+    // `vm.pending_loop_transfer`.
+    if let (Some(eb), Some(pe)) = (ensure.as_ref(), pe) {
+        b.emit(Op::PopEnsure);
+        for stmt in eb { compile_stmt(b, stmt, protos, interner, cc); }
+        let je = b.emit(Op::Jump(0));
+        let handler_start = b.pos();
+        let off = handler_start as i32 - pe as i32 - 1;
+        if let Op::PushEnsure(o) = &mut b.code[pe] { *o = off; }
+        for stmt in eb { compile_stmt(b, stmt, protos, interner, cc); }
+        b.emit(Op::EndEnsure);
+        let end = b.pos();
+        b.patch_jump(je, end);
+    }
+}
+
 /// Compile the body of `Expr::Call` — the no-block call arm.
 /// Tries the literal-symbol intercepts (`attr_*` / `alias_method`)
 /// and the special forms (`__seq__`, `raise`, BinOp fusion);
@@ -1360,111 +1450,7 @@ pub(crate) fn compile_expr(
             b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
         }
         Expr::Begin { body, rescue, ensure } => {
-            // Layered: optional outer ensure, zero-or-more inner
-            // rescue clauses, then the body. With multiple `rescue`
-            // clauses we want the first source-listed clause to be
-            // tried first; the VM's unwinder pops handlers LIFO, so
-            // we push them in REVERSE source order. Each clause
-            // declaring an explicit class (or none = bare = filter
-            // StandardError) gets its own PushRescue. A clause
-            // listing multiple classes (`rescue A, B => e`) emits
-            // one PushRescue per class, all sharing the same
-            // handler body — the unwinder's per-handler filter
-            // match naturally routes any of A/B/… into the body.
-            // ConstantPath (`Foo::Bar`) uses the trailing segment.
-            let pe = ensure.as_ref().map(|_| b.emit(Op::PushEnsure(0)));
-
-            if rescue.is_empty() {
-                compile_body(b, body, protos, interner, cc);
-            } else {
-                // Ruby semantics: the first source-listed `rescue`
-                // clause is tried first. The VM's unwinder pops the
-                // rescues stack LIFO, so we PUSH in REVERSE source
-                // order — the first source clause ends up on top.
-                // Within a single multi-class clause we also push
-                // in reverse class order so the unwinder pops the
-                // first listed class first (CRuby: `rescue A, B`
-                // tries A before B).
-                let stderr_sym = interner.intern("StandardError");
-                // Per-clause groups of PushRescue placeholders.
-                // Same outer iteration order as `rescue.iter().rev()`
-                // (i.e. last clause first). All placeholders in a
-                // single inner Vec patch to the SAME handler body.
-                let mut groups: Vec<Vec<usize>> = Vec::with_capacity(rescue.len());
-                for rc in rescue.iter().rev() {
-                    let (slot, bind) = match &rc.var {
-                        Some(name) => (b.local_slot(name), 1u8),
-                        None => (0u16, 0u8),
-                    };
-                    let filter_syms: Vec<crate::intern::SymId> = if rc.classes.is_empty() {
-                        vec![stderr_sym]
-                    } else {
-                        // reverse so the first listed class lands
-                        // on top of the rescue stack and is tried
-                        // first by the unwinder.
-                        rc.classes.iter().rev().map(|n| interner.intern(n)).collect()
-                    };
-                    let mut group = Vec::with_capacity(filter_syms.len());
-                    for sym in filter_syms {
-                        group.push(b.emit(Op::PushRescue(0, slot, bind, sym)));
-                    }
-                    groups.push(group);
-                }
-                compile_body(b, body, protos, interner, cc);
-                // One PopRescue per emitted PushRescue.
-                let total: usize = groups.iter().map(|g| g.len()).sum();
-                for _ in 0..total { b.emit(Op::PopRescue); }
-                // Normal-path exit from body jumps past every
-                // handler body to the merge point. Each handler
-                // body also jumps to the same merge after running.
-                let mut jump_to_end: Vec<usize> = Vec::with_capacity(rescue.len() + 1);
-                jump_to_end.push(b.emit(Op::Jump(0)));
-                // Handler bodies emitted in the same order as the
-                // groups collected (reverse source order). All
-                // placeholders within a group are patched to the
-                // same handler_start — the multi-class semantics
-                // is "any of these classes runs THIS body".
-                for (i, rc) in rescue.iter().rev().enumerate() {
-                    let group = &groups[i];
-                    let handler_start = b.pos();
-                    for &placeholder in group {
-                        let off = handler_start as i32 - placeholder as i32 - 1;
-                        if let Op::PushRescue(o, _, _, _) = &mut b.code[placeholder] {
-                            *o = off;
-                        }
-                    }
-                    compile_body(b, &rc.body, protos, interner, cc);
-                    jump_to_end.push(b.emit(Op::Jump(0)));
-                }
-                let end = b.pos();
-                for j in jump_to_end { b.patch_jump(j, end); }
-            }
-
-            // Ensure layer (compile body twice — once inline for the normal
-            // path, once for the exception / loop-transfer path which
-            // ends in Op::EndEnsure — that terminator routes to either
-            // re-raise the in-flight exception or resume a pending
-            // break/next walk depending on `vm.pending_loop_transfer`).
-            if let (Some(eb), Some(pe)) = (ensure.as_ref(), pe) {
-                b.emit(Op::PopEnsure);
-                // Normal path: run ensure body, then jump past handler.
-                for stmt in eb { compile_stmt(b, stmt, protos, interner, cc); }
-                let je = b.emit(Op::Jump(0));
-                // Exception path: PushEnsure target. Exception value is on
-                // top of stack (only when entered via exception unwind);
-                // for `break`/`next` walking through ensures the stack
-                // is NOT pushed-to on entry and `vm.pending_loop_transfer`
-                // is set instead. `Op::EndEnsure` at the tail handles
-                // both cases — exception → pop + re-raise; transfer →
-                // resume walk to the loop target.
-                let handler_start = b.pos();
-                let off = handler_start as i32 - pe as i32 - 1;
-                if let Op::PushEnsure(o) = &mut b.code[pe] { *o = off; }
-                for stmt in eb { compile_stmt(b, stmt, protos, interner, cc); }
-                b.emit(Op::EndEnsure);
-                let end = b.pos();
-                b.patch_jump(je, end);
-            }
+            compile_begin_arm(b, body, rescue, ensure, protos, interner, cc);
         }
     }
 }
