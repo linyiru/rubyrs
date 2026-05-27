@@ -2360,6 +2360,30 @@ fn sprintf_radix_bigint_traps_via_pre_alloc_cap() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn sprintf_decimal_bigint_traps_via_pre_alloc_cap() {
+    // Companion to `sprintf_radix_bigint_traps_via_pre_alloc_cap`:
+    // `'%d' % big` used to call `to_string()` directly with no
+    // pre-allocation cap, leaving the most common integer
+    // format-spec exposed to the host-OOM scenario the base-N
+    // pre-alloc helper defends against.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    // `(2 ** 1_000_000)` is ~301_030 decimal digits — well above
+    // the 64 KB cap, well below any reasonable host RAM ceiling
+    // (~120 KB of BigInt magnitude). Pre-alloc check must trap
+    // before `to_string()` materialises the 300 KB decimal string.
+    let err = rt.eval(
+        "'%d' % (2 ** 1_000_000)",
+        "sprintf_decimal_pre_alloc_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_to_s_radix_cap_does_not_false_trap_decimal_at_exact_length() {
     // Regression for cycle 10: earlier the cap estimator used
     // integer `floor(log2(radix))` as the per-digit bit yield,

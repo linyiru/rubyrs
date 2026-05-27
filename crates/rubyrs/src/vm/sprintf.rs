@@ -85,7 +85,33 @@ pub(crate) fn ruby_sprintf(
                 // — see those format-spec match arms below.
                 #[cfg(feature = "bignum")]
                 let big_decimal: Option<String> = match arg {
-                    Value::BigInt(id) => Some(heap.bigint(*id).to_string()),
+                    Value::BigInt(id) => {
+                        // Same pre-allocation cap rationale as
+                        // `format_radix_any`: `to_string()` on a
+                        // 10M-bit BigInt allocates ~3 MB before the
+                        // post-format `out.len() > max` check in
+                        // kernel.rs / string.rs can fire — host can
+                        // OOM first. Estimate the decimal length from
+                        // `bits()` and trap BEFORE the alloc via the
+                        // same shared helper that protects the base-N
+                        // arms. `sign_byte` accounts for the `-` /
+                        // `+` / ` ` byte the formatting below may
+                        // prepend (radix=10 has no `0x`/`0b` prefix).
+                        let b = heap.bigint(*id);
+                        let digits_est = super::bignum::bignum_digits_upper_bound(b.bits(), 10);
+                        let sign_byte: u64 = if b.sign() == num_bigint::Sign::Minus
+                            || flag_plus
+                            || flag_space
+                        { 1 } else { 0 };
+                        let est = digits_est.saturating_add(sign_byte);
+                        let cap = max_value_bytes.unwrap_or(1 << 20) as u64;
+                        if est > cap {
+                            return Err(RubyError::ResourceExhausted {
+                                msg: format!("sprintf value size ~{} bytes > cap {}", est, cap),
+                            });
+                        }
+                        Some(b.to_string())
+                    },
                     _ => None,
                 };
                 #[cfg(not(feature = "bignum"))]
