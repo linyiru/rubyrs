@@ -114,6 +114,24 @@ puts "after-class-body-from-mod=#{Bar.new.from_mod}"
 ## TypeError, which neither arm catches, so the fixture would
 ## fail loudly instead of silently accepting `!msg.empty?`
 ## for any error class. PR #196 code-review #2.
+## Block-form bare calls — `do_call_block`'s parallel bridge
+## (PR #196 code-review #3). CRuby silently discards the block
+## for whitelisted Class methods like `ancestors` / `superclass`
+## / `name`; verified locally that the block does NOT run. Pre-
+## existing gap before this PR: do_call_block had no Class
+## bridge, so block-form bare calls inside a class body raised
+## NoMethodError even when the blockless form worked.
+class BlockBareBar < Foo
+  block_marker = "not-run"
+  result = ancestors { block_marker = "ran" }
+  puts "block-bare-ancestors-prefix=#{result.map(&:to_s).take(3).inspect}"
+  puts "block-bare-block-discarded=#{block_marker.inspect}"
+
+  name_result = name { block_marker = "ran-name" }
+  puts "block-bare-name=#{name_result.inspect}"
+  puts "block-bare-block-discarded-name=#{block_marker.inspect}"
+end
+
 module ModAllocFence
   begin
     allocate

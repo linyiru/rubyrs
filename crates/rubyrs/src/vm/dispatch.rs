@@ -4579,6 +4579,55 @@ impl Vm {
                     return Ok(());
                 }
             }
+            // Block-form parallel of `do_call`'s bare-call Class
+            // bridge (see comments at the no_recv arm around
+            // ~line 537). Without this, bare whitelisted Class
+            // methods invoked with an attached block from inside
+            // a class body would raise NoMethodError even though
+            // their blockless counterparts dispatch correctly —
+            // breaks the lockstep contract for the block form.
+            // Stack restoration matches do_call_block's
+            // `[..., recv, block, *args]` shape so re-entry
+            // sees the receiver-form layout it expects.
+            // PR #196 code-review #3.
+            if let Value::Class(cls) = &self_val {
+                let in_set = matches!(&*name,
+                    "new" | "name" | "to_s" | "inspect"
+                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "superclass" | "ancestors" | "include?"
+                    | "instance_methods" | "public_instance_methods"
+                    | "private_instance_methods" | "protected_instance_methods"
+                    | "constants"
+                    | "autoload" | "private_constant" | "public_constant"
+                    | "deprecate_constant"
+                    | "singleton_class"
+                );
+                let allocate_allowed =
+                    &*name == "allocate"
+                        && !cls.is_module
+                        && cls.name != "Module";
+                if in_set || allocate_allowed {
+                    // Route through the blockless `do_call`, NOT
+                    // `do_call_block` — CRuby silently discards the
+                    // block for these Class methods (verified:
+                    // `class Bar < Foo; ancestors { ran = true };
+                    // end` returns the ancestor array AND `ran`
+                    // stays false). do_call_block doesn't have
+                    // receiver-form arms for most of these names,
+                    // so routing the block form there would
+                    // produce NoMethodError. The `allocate` case
+                    // already has a do_call_block arm that
+                    // discards its block — re-entering do_call
+                    // hits the dedicated allocate arm there
+                    // instead, with the same fences. Same
+                    // outcome, simpler routing.
+                    let argc = args.len();
+                    self.stack.push(self_val.clone());
+                    for a in args { self.stack.push(a); }
+                    let _ = block; // explicitly discarded per CRuby
+                    return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+                }
+            }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
                 return Ok(());
