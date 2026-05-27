@@ -175,3 +175,73 @@ sees the connection.
   shouldn't wait for a fuzz pass before merging; the panic-budget
   + diff_cruby + miri jobs already guard PRs at the
   short-iteration layer.
+
+## Known limits + future work
+
+Three concrete gaps the current harness leaves on the table.
+Each is in scope for a follow-up PR; none is a blocker for the
+initial soak workload paying for itself.
+
+### 1. Filesystem sandbox covers `require` only
+
+`ensure_sandbox_cwd` moves the process cwd into a tempdir, which
+makes `require '<relative>'` and `require_relative '...'` look
+up against an empty directory. It does **not** intercept:
+
+- `File.open(absolute_path)` / `IO.read(absolute_path)` —
+  absolute paths ignore cwd.
+- `Dir.glob('/etc/*')` — same.
+- `__FILE__` / `__dir__` resolved against the host's repo
+  layout.
+- `require '<absolute>'` (rare but a real Ruby shape).
+
+Libfuzzer's coverage-guided mutation will eventually walk into
+the `vm/fileops.rs` arms via byte sequences shaped like
+`File.open(...)`. When that happens, the sandbox is irrelevant.
+
+The right fix is `Config { allow_filesystem_io: bool }` (or
+stricter, `allowed_paths: Option<Vec<PathBuf>>`) honoured
+uniformly across every I/O sink in `vm/`. Same need lives in
+`rubund`, which evaluates untrusted gemspecs; landing the API
+there benefits both consumers and removes the cwd-tempdir trick
+as a per-consumer rediscovery.
+
+### 2. Runtime preamble rebuilt every iteration
+
+Each fuzz iteration calls `Runtime::with_config(cfg)`, which
+runs the exception-class preamble during construction (~30k ops
+as of 2026-05). At ~2k iter/sec that's ~60M bootstrap ops/sec —
+roughly 30-40% of the workflow's 5-min budget spent on identical
+setup rather than coverage.
+
+The fix is a `Runtime::reset()` API in the main crate that
+clears heap + frames + symbol-interner deltas while preserving
+the preamble's class tables and method definitions. Then the
+harness can cache one `Runtime` in `thread_local!` and call
+`reset()` between iterations. Realistic gain: 1.5-2× iter/sec.
+
+Out of scope for the initial harness because the reset API
+needs to be carefully scoped (which Rc<RefCell> state is
+per-iter vs. preamble-built?). Tracked as a follow-up.
+
+### 3. Preamble-fuel coupling
+
+`Runtime::with_config` consumes user-supplied `Config::fuel`
+during preamble load (lib.rs:460-499). The harness works
+around this by sizing `Caps::tight()`'s fuel above the observed
+~30k preamble cost — but that number is undocumented in the
+embed API and grows silently with each rubyrs PR that adds
+exception classes.
+
+The workflow's `Preamble-fuel smoke check` step catches the
+case where the preamble exceeds the cap (single-input run of
+empty source; if it traps, the workflow fails fast before
+soaking 5 min on identical crashes). But that's a guard, not a
+fix.
+
+The right fix is one of:
+- preamble loader uses an unbounded internal fuel budget and
+  only the post-construction `eval()` calls observe user fuel;
+- `.expect("ICE: failed to load exception preamble")` at
+  lib.rs:460 downgrades to a `Trap` return so the host can
+  gracefully handle setup failure.
