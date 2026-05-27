@@ -1486,31 +1486,42 @@ impl Vm {
                 self.stack.push(Value::Nil);
             }
             Op::PushClassVisibilityPublic => {
-                // Open a `class << self` visibility scope —
-                // bare `private` / `public` / `protected` inside
-                // the singleton body mutate THIS top entry
-                // rather than the enclosing class body's,
-                // preventing leakage. Emitted at body start by
-                // the AST translator at the SingletonClassNode
-                // SelfExpr-receiver path. Paired with
-                // `PopClassVisibility` at body end. PR #233
-                // code-review #1.
+                // Open a `class << <expr>` visibility scope — bare
+                // `private` / `public` / `protected` inside the
+                // singleton body mutate THIS top entry rather than
+                // the enclosing class body's, preventing leakage.
+                // Emitted at body start by the AST translator for
+                // every SingletonClassNode (receiver-independent —
+                // `class << self`, `class << obj`, `class << Const`
+                // all wrap their body with Push/Pop). Paired with
+                // `PopClassVisibility` at body end via the body's
+                // `Begin { ensure: [...] }`.
+                // PR #233 code-review #1 / round 3 #1.
                 self.class_visibility_stack.push(Visibility::Public);
                 self.stack.push(Value::Nil);
             }
             Op::PopClassVisibility => {
-                // Close a `class << self` visibility scope.
-                // Paired with `PushClassVisibilityPublic` at
-                // body start (in source) and emitted in the
-                // body's `Begin { ensure: [...] }` so the pop
-                // runs on both normal and exception-unwind
-                // exits. Balance is the translator's
-                // responsibility; underflow would mean a
-                // bytecode-level invariant breakage — surface
-                // it as an ICE rather than silently dropping
-                // (debug-only assertion so production runs
-                // remain forgiving). PR #233 code-review #2.
-                debug_assert!(
+                // Close a `class << <expr>` visibility scope.
+                // Paired with `PushClassVisibilityPublic` at body
+                // start and emitted inside the body's
+                // `Begin { ensure: [...] }` so the pop runs on
+                // both normal exit and exception unwind. Balance
+                // is the translator's responsibility; underflow
+                // would mean a bytecode-level invariant breakage,
+                // so surface it as an ICE.
+                //
+                // Uses an UNCONDITIONAL `assert!` (not
+                // `debug_assert!`) because the project's CI runs
+                // `cargo test --release`, where debug assertions
+                // are disabled — a debug-only assert would let an
+                // unbalanced Pop slip through automated testing
+                // and silently corrupt visibility state in release
+                // builds. The runtime cost of a single bounds
+                // check per `class << ...; end` boundary is
+                // negligible, and the alternative (silent state
+                // corruption) is significantly worse.
+                // PR #233 code-review #2 / round 3 #2.
+                assert!(
                     !self.class_visibility_stack.is_empty(),
                     "ICE: PopClassVisibility on empty class_visibility_stack — \
                      translator emitted an unbalanced Pop without a matching Push"

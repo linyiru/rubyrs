@@ -241,14 +241,16 @@ pub(crate) enum Op {
     /// superclass level.
     SingletonChainPrepend,
     /// Push a new `Visibility::Public` entry onto
-    /// `class_visibility_stack`. Emitted by the `class << self`
-    /// body translator at body start so bare `private` / `public`
-    /// / `protected` modifiers inside the singleton body don't
-    /// leak their visibility mutation back into the enclosing
-    /// class body's stack entry. CRuby's `class << self`
-    /// constitutes its own body with its own initial-Public
-    /// visibility scope; this opcode replicates the same
-    /// isolation by giving the singleton body its own stack
+    /// `class_visibility_stack`. Emitted by the AST translator
+    /// at the start of EVERY `class << <expr>` body (receiver-
+    /// independent — `class << self`, `class << obj`,
+    /// `class << Const` all wrap their body with Push/Pop) so
+    /// bare `private` / `public` / `protected` modifiers inside
+    /// the singleton body don't leak their visibility mutation
+    /// back into the enclosing class body's stack entry. CRuby's
+    /// `class << <expr>` constitutes its own body with its own
+    /// initial-Public visibility scope; this opcode replicates
+    /// that isolation by giving the singleton body its own stack
     /// frame to mutate.
     ///
     /// Push/Pop are emitted in an UNWIND-SAFE shape: the
