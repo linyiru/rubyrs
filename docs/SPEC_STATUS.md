@@ -82,7 +82,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_abs_spec.rb` | Integer#abs | `core/integer/abs_spec.rb + shared/abs.rb` | 1 | 1 |
 | `integer_bit_and_spec.rb` | Integer#& | `core/integer/bit_and_spec.rb` | 11 | 0 |
 | `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 0 |
-| `integer_bit_or_spec.rb` | Integer#| | `core/integer/bit_or_spec.rb` | 10 | 0 |
+| `integer_bit_or_spec.rb` | Integer#\| | `core/integer/bit_or_spec.rb` | 10 | 0 |
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
