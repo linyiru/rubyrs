@@ -1,0 +1,8 @@
+[toolchain]
+# `cargo-fuzz` needs `-Z sanitizer=address` and the unstable
+# `#[no_main]` rules libfuzzer-sys wires in — both nightly-only.
+# The repo root's `rust-toolchain.toml` pins stable 1.95 for the
+# rest of the workspace; this file overrides it for fuzz invocations
+# only because rustup walks up from the cwd and stops at the first
+# `rust-toolchain.toml` it finds.
+channel = "nightly"

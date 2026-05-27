@@ -1,0 +1,116 @@
+name: Fuzz (nightly + on-demand)
+
+# Two trigger shapes:
+#
+# 1. `schedule` — runs once a day at 04:17 UTC (off-peak vs the
+#    test workflow's PR traffic). Each target gets ~5 min, which
+#    on a release-mode + libfuzzer-sys build is ~600k–1M execs:
+#    enough to walk a non-trivial corpus, not so much that the
+#    workflow charges a noticeable share of the org's CI budget.
+#
+# 2. `workflow_dispatch` — manual trigger with a `duration_seconds`
+#    knob for when a contributor wants to soak a specific suspect
+#    path. Same job, different timeouts.
+#
+# This workflow is deliberately NOT wired to `push` / `pull_request`
+# — fuzzing is a soak workload, not a per-PR gate, and 10 min of
+# nightly cargo-fuzz catches the same regressions as 30 s on every
+# PR while costing ~1/10 the CI minutes.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: "Per-target soak time in seconds (default 300)"
+        required: false
+        default: "300"
+        type: string
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse, eval]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install nightly toolchain
+        # libfuzzer-sys needs nightly's `-Z sanitizer=address` and
+        # the unstable `#[no_main]` rules cargo-fuzz wires in. The
+        # parent workspace pins stable 1.95; the fuzz sub-crate
+        # detaches via its own empty `[workspace]` so this nightly
+        # install only affects the fuzz invocation.
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        # Cached install — `cargo install` would otherwise rebuild
+        # cargo-fuzz on every run (~90 s).
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.12
+
+      - name: Cache cargo + fuzz corpus
+        # Persist the per-target corpus across runs. cargo-fuzz
+        # writes new "interesting" inputs into `fuzz/corpus/<target>/`;
+        # restoring last run's corpus means each iteration starts
+        # from the discovered surface area, not from scratch. The
+        # `restore-keys` falls back to any prior run on this OS so
+        # a first-time run on a new toolchain still benefits.
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/rubyrs/fuzz/target
+            crates/rubyrs/fuzz/corpus
+          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('crates/rubyrs/fuzz/Cargo.toml', 'crates/rubyrs/fuzz/fuzz_targets/**') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-${{ matrix.target }}-
+
+      - name: Seed corpus from existing test fixtures
+        # First-run bootstrap: every `tests/diff/*.rb` and
+        # `tests/fixtures/*.rb` is by construction valid Ruby that
+        # rubyrs handles, so they're the highest-signal seeds we
+        # have. libfuzzer-sys hashes inputs by content, so re-running
+        # this step is idempotent (no duplicate corpus entries).
+        run: |
+          set -euo pipefail
+          mkdir -p crates/rubyrs/fuzz/corpus/${{ matrix.target }}
+          find crates/rubyrs/tests/diff -name '*.rb' -exec cp {} crates/rubyrs/fuzz/corpus/${{ matrix.target }}/ \; 2>/dev/null || true
+          find crates/rubyrs/tests/fixtures -name '*.rb' -exec cp {} crates/rubyrs/fuzz/corpus/${{ matrix.target }}/ \; 2>/dev/null || true
+          echo "seeded $(ls crates/rubyrs/fuzz/corpus/${{ matrix.target }} | wc -l) corpus entries"
+
+      - name: Run fuzz ${{ matrix.target }}
+        # `-max_total_time` is libFuzzer's wall-clock budget.
+        # `-rss_limit_mb` caps memory at 2 GB so a runaway
+        # `"a" * fuel` allocation times out cleanly instead of
+        # OOM-killing the GitHub runner. `-timeout` per-input is at
+        # 5 s so a single hung iteration surfaces as a SIGABRT and
+        # fails the job — same shape as a panic crash so the artifact
+        # upload path catches both.
+        run: |
+          cd crates/rubyrs/fuzz
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ github.event.inputs.duration_seconds || '300' }} \
+            -rss_limit_mb=2048 \
+            -timeout=5
+
+      - name: Upload crash artifacts on failure
+        # `cargo fuzz` writes minimised crash repros to
+        # `fuzz/artifacts/<target>/`. Surfacing these as a workflow
+        # artifact means a triager can download and replay locally
+        # with `cargo fuzz run <target> path/to/crash-XXXX` without
+        # waiting for someone to re-run nightly.
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
+          path: crates/rubyrs/fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30

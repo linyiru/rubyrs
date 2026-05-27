@@ -1,0 +1,48 @@
+[package]
+name = "rubyrs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+# Detach from the parent workspace — `cargo fuzz` builds this crate
+# with the nightly toolchain (libfuzzer-sys needs `-Z sanitizer`),
+# while the rest of the workspace pins stable 1.95 via
+# `rust-toolchain.toml`. Letting cargo resolve them together
+# would either fail (nightly features in stable build) or
+# silently downgrade. Empty `[workspace]` makes this crate its
+# own little workspace.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# `default-features = false` drops the `cext` feature: dlopen-loading
+# C extensions isn't part of the script-input attack surface (user
+# input is `*.rb` text, not native code) and pulling in
+# `libloading` + the `rubyrs-cext` crate would bloat the fuzz
+# binary and slow each iteration with no signal gain.
+rubyrs = { path = "..", default-features = false, features = ["regex", "bignum"] }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eval"
+path = "fuzz_targets/eval.rs"
+test = false
+doc = false
+bench = false
+
+# Optimised build for the fuzz binaries — libfuzzer needs the
+# instrumentation that the cargo-fuzz wrapper passes via RUSTFLAGS,
+# but we still want release-mode codegen so iterations per second
+# stay high. cargo-fuzz's default `dev` profile would otherwise leave
+# us at ~50 exec/s; release-mode lands closer to ~2k exec/s on the
+# parse target.
+[profile.release]
+debug = 1

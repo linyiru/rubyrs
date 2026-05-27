@@ -1,0 +1,43 @@
+//! Full VM eval fuzz target.
+//!
+//! Lets the parsed program actually run for longer than the
+//! parse-focused target, with every resource cap turned on so
+//! the fuzzer never hangs on `while true; end`, `[].cycle.to_a`,
+//! or `"a" * 10**9`. Only Rust panics — `panic!`, `unwrap`/`expect`
+//! ICEs, `unreachable!`, `RefCell` borrow conflicts, integer
+//! overflow under `debug-assertions` — fail the iteration. Every
+//! other outcome is a script-level error (`Trap`) and is by
+//! definition correct VM behaviour.
+//!
+//! Pairs with `parse.rs`: that one biases toward parser + AST→IR
+//! coverage with a tighter budget; this one stresses dispatch,
+//! GC, method lookup, and the primitive method registry. A new
+//! VM ICE will surface here first.
+
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+use rubyrs::{Config, Runtime};
+
+fuzz_target!(|data: &[u8]| {
+    let source = match std::str::from_utf8(data) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let cfg = Config {
+        // Larger op budget than parse.rs — preamble + nontrivial
+        // user code (small recursion, a few iterators) should run
+        // to completion. Tuned for ~2k exec/s.
+        fuel: Some(500_000),
+        max_value_bytes: Some(1 << 16),
+        max_symbols: Some(1 << 14),
+        max_frames: Some(128),
+        max_heap_objects: Some(4096),
+        deadline: Some(std::time::Duration::from_millis(500)),
+        ..Default::default()
+    };
+
+    let mut rt = Runtime::with_config(cfg);
+    let _ = rt.eval(source, "fuzz.rb");
+});

@@ -53,6 +53,13 @@ members = [
     "crates/rubyrs-wasm-timer",
     "crates/rubyrs-wasm-embed",
 ]
+# `crates/rubyrs/fuzz` is the cargo-fuzz sub-crate. It builds with
+# nightly + libfuzzer-sys instrumentation that `rust-toolchain.toml`'s
+# pinned stable build can't produce. Excluding it here keeps the
+# default `cargo build --workspace` working under stable while
+# `cargo fuzz run …` resolves the fuzz crate independently. See
+# `docs/FUZZING.md` for the run procedure.
+exclude = ["crates/rubyrs/fuzz"]
 
 # Shared metadata — individual crates pick these up with
 # `version.workspace = true`, `edition.workspace = true`, etc.

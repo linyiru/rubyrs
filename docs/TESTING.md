@@ -35,10 +35,19 @@ pipeline we are building to scale that.
 │  - Run on rubyrs AND CRuby; compare PASS counts                  │
 │  - SPEC_STATUS.md is auto-generated; coverage drives credibility │
 └─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer 5: cargo-fuzz soak (nightly)                              │
+│  - libfuzzer-sys harness over Runtime::eval + parser path        │
+│  - Discovers panics / ICEs no hand-written fixture would find    │
+│  - Findings get pinned as Layer 2 / 3 fixtures and fixed         │
+│  - See docs/FUZZING.md                                           │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 Layers 2 and 3 are *hand-curated* — we choose the cases. Layer 4 is
 the antidote: an external standard chooses the cases for us.
+Layer 5 closes a different loop: nothing chooses the cases — the
+fuzzer mutates bytes until the binary crashes.
 
 ## Why ruby/spec, not our own tests
 
