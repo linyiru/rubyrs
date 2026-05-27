@@ -336,9 +336,14 @@ pub(crate) fn numeric_call(
                         Some(Value::Int(a.wrapping_shr(mag)))
                     } else {
                         // Left-shift via negative count: overflow
-                        // path declines for bigint_primitive promote.
-                        if *b == i64::MIN { return Ok(None); }
-                        try_int_shl_lossless(*a, -b).map(Value::Int)
+                        // path declines (returns None) so
+                        // bigint_primitive promotes. `i64::MIN`
+                        // negation overflows i64; treat that
+                        // boundary as "always overflow" by yielding
+                        // None directly, keeping control flow inside
+                        // the match expression (no early return).
+                        if *b == i64::MIN { None }
+                        else { try_int_shl_lossless(*a, -b).map(Value::Int) }
                     }
                 }
                 #[cfg(not(feature = "bignum"))]
