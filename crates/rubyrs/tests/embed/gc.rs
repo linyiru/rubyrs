@@ -491,9 +491,12 @@ fn array_group_by_pin_heap_keys_under_stress_gc() {
     // Regression: Array#group_by holds the block-returned `key` as
     // a Rust local across `maybe_gc / check_alloc / heap.alloc` for
     // the bucket Array, then pushes `(key, ...)` into the result
-    // Hash. Without pinning, heap-Value keys get swept during the
-    // alloc, leaving a dangling ObjId inside the Hash. Same family
-    // as the chunk driver's GC pin.
+    // Hash. Without pinning, the explicit `maybe_gc()` BEFORE the
+    // bucket alloc sweeps heap-Value keys; the immediately-
+    // following `heap.alloc` reuses the freed slot for the bucket
+    // Array; the Hash then stores the dangling ObjId alongside the
+    // newly-allocated bucket (which now occupies the same slot).
+    // Same family as the chunk driver's GC pin.
     let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
         stress_gc: true,
         ..Default::default()
@@ -533,10 +536,11 @@ fn array_group_by_pin_snapshot_under_receiver_mutation() {
     // etc.), the snapshot's original heap-Value elements (e.g.
     // inner Arrays) are no longer reachable through the pinned
     // receiver — they live only in the snapshot Vec, which
-    // scan_roots can't see. The first iteration's bucket alloc
-    // (`heap.alloc(HeapObj::Array(vec![v]))`) fires maybe_gc and
-    // sweeps the still-pending snapshot elements; subsequent
-    // iterations read freed slots. Same family as the chunk
+    // scan_roots can't see. The explicit `maybe_gc()` BEFORE the
+    // bucket alloc sweeps the still-pending snapshot elements;
+    // the subsequent `heap.alloc(HeapObj::Array(vec![v]))` just
+    // reuses freed slots, but subsequent iterations then read
+    // those swept slots and crash. Same family as the chunk
     // driver's defensive snapshot pin and the group_by key pin
     // earlier in this same file.
     //
