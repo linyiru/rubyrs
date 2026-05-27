@@ -323,7 +323,7 @@ fn render_markdown(summaries: &[SpecSummary]) -> String {
         out.push_str(&format!(
             "| `{}` | {} | {} | {} | {} |\n",
             s.file,
-            desc,
+            md_table_escape(desc),
             if up.is_empty() { String::new() } else { format!("`{}`", up) },
             s.examples,
             sk,
@@ -332,6 +332,14 @@ fn render_markdown(summaries: &[SpecSummary]) -> String {
     out.push('\n');
 
     out
+}
+
+/// Escape characters that would break a Markdown table cell — currently
+/// just `|`, which Markdown parsers treat as a column separator. Without
+/// this, a describe cell like `Integer#|` splits the row into one extra
+/// column and shifts every following cell over by one.
+fn md_table_escape(s: &str) -> String {
+    s.replace('|', "\\|")
 }
 
 fn collect_summaries() -> Vec<SpecSummary> {

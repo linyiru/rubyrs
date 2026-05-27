@@ -309,6 +309,25 @@ pub(crate) fn numeric_call(
                 ),
             });
         }
+        // Arity guard for the bit ops, sibling to `pow`'s above
+        // (and PR #186's iter-method guards). `respond_to?` returns
+        // true for `:& :| :^ :<< :>>` on Integer, so
+        // `5.send(:&, 1, 2)` / `5.send(:&)` must raise ArgumentError
+        // (CRuby behavior) instead of falling through to
+        // NoMethodError. The Int×Int happy-path arm below only
+        // matches `[Int]` (1-arg); under bignum, bigint_primitive
+        // also early-returns when `args.len() != 1`. Without this
+        // guard the 0-arg and 2+-arg shapes escape on both profiles.
+        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>", args_slice)
+            if args_slice.len() != 1 =>
+        {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args_slice.len(),
+                ),
+            });
+        }
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
@@ -486,6 +505,30 @@ pub(crate) fn numeric_call(
             }
             _ => None,
         },
+        // Int-side coerce guard for bit ops (sibling to the
+        // BigInt-side guard in try_bigint_bit_binop /
+        // try_bigint_bit_shift, and to the times/upto/downto
+        // guards landed in PR #186). Under bignum, this is dead
+        // code — Int×non-Int routes through bigint_primitive's
+        // hooks which raise TypeError directly. Under no-bignum,
+        // those hooks don't exist; without this guard
+        // `3 & 3.4` falls through to NoMethodError instead of
+        // CRuby's TypeError ('no implicit conversion of Float
+        // into Integer'). The `!matches!(_, Int)` guard pins
+        // non-Int explicitly instead of relying on arm ordering —
+        // a future refactor that moves this arm above the Int×Int
+        // happy-path arm must not silently capture `3 & 4`.
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>", [other])
+            if !matches!(other, Value::Int(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
         // 2-arg form `pow(exp, mod)` — under `bignum`, declined here
         // so bigint_primitive's modpow path handles it (full
         // Integer×Integer×Integer coverage including BigInt).

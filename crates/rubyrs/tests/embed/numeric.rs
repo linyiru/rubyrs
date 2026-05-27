@@ -1134,6 +1134,42 @@ fn int_shift_i64_min_count_does_not_panic_under_no_bignum() {
     assert_eq!(lines[1], "-1");
 }
 
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn int_bit_ops_raise_typeerror_on_non_integer_arg_no_bignum() {
+    // Sibling guard to `integer_bit_ops_raise_typeerror_on_non_integer_arg`
+    // (bignum-on profile) — under no-bignum the BigInt-side
+    // helpers don't exist, so without the Int-side coerce arm
+    // in numeric.rs `3 & 3.4` would fall through to
+    // NoMethodError instead of CRuby's TypeError. Pin the
+    // Int-side guard added in B.6 bit-ops spec batch (sibling
+    // to PR #186's iter-method guards).
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected_arg_type) in [
+        ("3 & 3.4", "Float"),
+        ("3 | 3.4", "Float"),
+        ("3 ^ 3.4", "Float"),
+        ("3 << 3.4", "Float"),
+        ("3 >> 3.4", "Float"),
+        ("3 & nil", "nil"),
+        ("3 << \"4\"", "String"),
+        ("3 >> :sym", "Symbol"),
+    ] {
+        let err = rt.eval(script, "int_bit_op_typeerr.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "TypeError", "for {:?}", script);
+                assert_eq!(
+                    message,
+                    format!("no implicit conversion of {} into Integer", expected_arg_type),
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught TypeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn integer_bit_ops_raise_typeerror_on_non_integer_arg() {
@@ -1180,6 +1216,43 @@ fn integer_bit_ops_raise_typeerror_on_non_integer_arg() {
                 );
             }
             other => panic!("expected Uncaught TypeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[test]
+fn int_bit_ops_raise_argumenterror_on_bad_arity() {
+    // Arity guard sibling to `pow`'s in numeric.rs: `respond_to?`
+    // returns true for `:& :| :^ :<< :>>` on Integer, so
+    // `5.send(:&, 1, 2)` / `5.send(:&)` must raise ArgumentError
+    // (CRuby) instead of falling through to NoMethodError. Pin
+    // exact message + count for both 0-arg and 2-arg shapes
+    // across every bit-op selector. Lives outside the cfg-gated
+    // typeerror tests because the same guard runs on both profiles.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, given) in [
+        ("5.send(:&)", 0),
+        ("5.send(:|)", 0),
+        ("5.send(:^)", 0),
+        ("5.send(:<<)", 0),
+        ("5.send(:>>)", 0),
+        ("5.send(:&, 1, 2)", 2),
+        ("5.send(:|, 1, 2)", 2),
+        ("5.send(:^, 1, 2)", 2),
+        ("5.send(:<<, 1, 2)", 2),
+        ("5.send(:>>, 1, 2)", 2),
+    ] {
+        let err = rt.eval(script, "int_bit_op_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "ArgumentError", "for {:?}", script);
+                assert_eq!(
+                    message,
+                    format!("wrong number of arguments (given {}, expected 1)", given),
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught ArgumentError for {:?}, got {:?}", script, other),
         }
     }
 }
