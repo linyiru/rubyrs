@@ -1407,6 +1407,52 @@ impl Vm {
                 self.stack.push(v);
                 Ok(true)
             }
+            // `Class#<` / `<=` / `>` / `>=` — subclass relation. CRuby:
+            //   A <  B → true if A is a STRICT descendant of B
+            //                 (B appears in A's ancestor chain, A != B)
+            //   A <= B → A == B OR A < B
+            //   A >  B → B <  A
+            //   A >= B → B <= A
+            // Unrelated classes return nil (not false!). Wrong-type
+            // arg (not a Class/Module) → TypeError. Used by Class#<
+            // family in user code; also reachable through tilt
+            // fixtures that assert `Subclass < Parent`.
+            // Wrong-arity guard — without it, `A.send(:<)` or
+            // `A.send(:<, B, C)` would fall through this exact-
+            // one-arg arm and surface as NoMethodError. CRuby
+            // raises ArgumentError instead.
+            ("<" | "<=" | ">" | ">=", args_) if args_.len() != 1 => {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1)", args_.len()),
+                }));
+            }
+            ("<" | "<=" | ">" | ">=", [arg]) => {
+                let Value::Class(other) = arg else {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: "compared with non class/module".to_string(),
+                    }));
+                };
+                let same = std::rc::Rc::ptr_eq(&cls, other);
+                let self_is_desc = !same && super::class_is_a(&cls, other);
+                let other_is_desc = !same && super::class_is_a(other, &cls);
+                let result = match name {
+                    "<"  => if self_is_desc { Value::Bool(true) }
+                            else if same || other_is_desc { Value::Bool(false) }
+                            else { Value::Nil },
+                    "<=" => if same || self_is_desc { Value::Bool(true) }
+                            else if other_is_desc { Value::Bool(false) }
+                            else { Value::Nil },
+                    ">"  => if other_is_desc { Value::Bool(true) }
+                            else if same || self_is_desc { Value::Bool(false) }
+                            else { Value::Nil },
+                    ">=" => if same || other_is_desc { Value::Bool(true) }
+                            else if self_is_desc { Value::Bool(false) }
+                            else { Value::Nil },
+                    _ => unreachable!(),
+                };
+                self.stack.push(result);
+                Ok(true)
+            }
             // Tier 1 stub — return receiver itself.
             // See docs/SUBSET.md for the metaclass divergence.
             ("singleton_class", []) => {
