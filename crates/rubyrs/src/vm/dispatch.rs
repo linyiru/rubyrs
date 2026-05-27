@@ -1243,7 +1243,7 @@ impl Vm {
                     msg: format!("allocator undefined for {}", cls.name),
                 }));
             }
-            let obj = self.alloc_default_instance(&cls.clone())?;
+            let obj = self.alloc_default_instance(cls)?;
             self.stack.push(obj);
             return Ok(());
         }
@@ -4582,17 +4582,15 @@ impl Vm {
             && let Value::Class(cls) = &recv {
                 // Pin args during the alloc window — see the matching
                 // comment in `do_call`'s new-branch for the rationale.
-                let id = {
+                // Route through `Vm::alloc_default_instance` so the
+                // block-call `new` path can't drift from the
+                // no-block `new` arm or `Class#allocate` (PR #181
+                // review round 2).
+                let obj = {
                     let mut g = PinGuard::new(self);
                     for a in &args { g.pin(a.clone()); }
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    g.vm.heap.alloc(HeapObj::Instance(Instance {
-                        class: cls.clone(), ivars: HashMap::new(),
-                        singleton_class: None,
-                    }))
+                    g.vm.alloc_default_instance(cls)?
                 };
-                let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
                 if let Some(m) = self.lookup_method_uncached(cls, init_id) {
                     self.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
