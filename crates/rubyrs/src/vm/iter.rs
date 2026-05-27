@@ -1071,6 +1071,57 @@ impl Vm {
                 }
                 Some(early.unwrap_or_else(|| recv_v.clone()))
             }
+            // Arity / coerce guards for BigInt receivers. The loop
+            // arms above only match exact-arity, integer-arg shapes
+            // (`big.times` with no args; `big.upto(int_or_big)` with
+            // one Integer arg). Without these guards, wrong shapes
+            // fall past iter.rs entirely and surface as
+            // NoMethodError ('undefined method for Integer') —
+            // diverging from CRuby's ArgumentError (wrong arity)
+            // and TypeError (non-Integer arg). \`respond_to?\` says
+            // the methods exist (see lookup.rs whitelist), so user
+            // code's \`rescue ArgumentError\` keys on the wrong
+            // class without these arms.
+            //
+            // Limited to BigInt receivers — the parallel Int-recv
+            // gaps (`5.times(99)`, `5.upto(3.14)`) are pre-existing
+            // and out of this PR's scope.
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "times", _) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len(),
+                    ),
+                }));
+            }
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "upto" | "downto", []) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1)".to_string(),
+                }));
+            }
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "upto" | "downto", [other]) => {
+                // The loop arm above matched Int/BigInt stop; if we
+                // reach here the stop is some other type. CRuby
+                // raises TypeError (coerce failure).
+                return Err(self.trap(crate::error::RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        crate::vm::numeric::type_name_for_coerce(other),
+                    ),
+                }));
+            }
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "upto" | "downto", many) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        many.len(),
+                    ),
+                }));
+            }
             // `(b..e).step(n) { |i| ... }` — yields each step value.
             // Returns the receiver Range, matching CRuby.
             (Value::Range(id), "step", [Value::Int(n)]) => {

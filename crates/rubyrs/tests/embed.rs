@@ -1774,6 +1774,66 @@ fn bigint_times_upto_downto_iterate_with_demote_on_fit() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_iter_arity_and_coerce_errors_match_cruby() {
+    // Phase B.6 review cycle 2: pre-fix wrong-arity / non-Integer
+    // arg calls bypassed the loop arms and fell through to
+    // NoMethodError — diverging from CRuby's ArgumentError /
+    // TypeError. \`respond_to?\` answers true for these methods
+    // (the lookup.rs whitelist gates by name only), so user
+    // code's \`rescue ArgumentError\` keys on the wrong class
+    // without explicit guards.
+    let mut rt = rubyrs::Runtime::new();
+    let big = "(2 ** 70)";
+    for (script, expected_class, expected_msg) in [
+        (
+            format!("{}.times(99) {{ }}", big),
+            "ArgumentError",
+            "wrong number of arguments (given 1, expected 0)",
+        ),
+        (
+            format!("{}.times(1, 2) {{ }}", big),
+            "ArgumentError",
+            "wrong number of arguments (given 2, expected 0)",
+        ),
+        (
+            format!("{}.upto {{ }}", big),
+            "ArgumentError",
+            "wrong number of arguments (given 0, expected 1)",
+        ),
+        (
+            format!("{}.upto(1, 2) {{ }}", big),
+            "ArgumentError",
+            "wrong number of arguments (given 2, expected 1)",
+        ),
+        (
+            format!("{}.upto(3.14) {{ }}", big),
+            "TypeError",
+            "no implicit conversion of Float into Integer",
+        ),
+        (
+            format!("{}.downto(\"x\") {{ }}", big),
+            "TypeError",
+            "no implicit conversion of String into Integer",
+        ),
+        (
+            format!("{}.downto(nil) {{ }}", big),
+            "TypeError",
+            "no implicit conversion of nil into Integer",
+        ),
+    ] {
+        let err = rt.eval(&script, "iter_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            other => panic!("expected Uncaught {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_iter_yield_pinned_across_rest_param_gc_window() {
     // Regression for PR #174 cycle 1: `invoke_block` builds the
     // rest-args Array via heap.alloc, which runs maybe_gc with
