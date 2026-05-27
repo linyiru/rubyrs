@@ -70,7 +70,7 @@ hit, which is the actual language-level wall.
 |---|---|---|---|---|
 | 9 | `sinatra/base.rb:974` (`class Base; include Rack::Utils; ...`) | `Rack::Utils` module + accessor methods (`escape_html` / `escape_path` / `unescape` / `parse_nested_query` / `build_nested_query` / `status_code` / `HTTP_STATUS_CODES` constant) | Cat F (project shape) | Sinatra's `Base` class mixes in `Rack::Utils`. Embedder must stub the module + the small surface base.rb actually consults. Same shape as the Rack middleware row from pass 8. |
 | 10 | `sinatra/base.rb:978` (`URI_INSTANCE = defined?(URI::RFC2396_PARSER) ? URI::RFC2396_PARSER : URI::RFC2396_Parser.new`) | `URI::RFC2396_Parser` class | Cat F (project shape) | Embedder must stub `URI::RFC2396_Parser` with at least `escape` / `unescape` / `parse`. CRuby ships URI in stdlib; rubyrs doesn't yet. |
-| 11 | `sinatra/base.rb:1292` (`class Base; class << self; CALLERS_TO_IGNORE = [...].freeze; attr_reader :routes, ...; def reset!; ...; end; end; end`) | `class << self` body with constant assignment | **Cat D (AST surface)** | rubyrs's spike subset only accepts `def` / `attr_*` / `alias` / `prepend Mod` inside `class << self`. Sinatra's singleton class body opens with `CALLERS_TO_IGNORE = [...]` — a constant assignment — before the `attr_reader` and `def` blocks. The translator raises `NotImplementedError` at compile time. **First Cat D gap surfaced since pass 4.** |
+| 11 | `sinatra/base.rb:1292` (`class Base; class << self; CALLERS_TO_IGNORE = [...].freeze; attr_reader :routes, ...; def reset!; ...; end; end; end`) | `class << self` body with constant assignment | **Cat D (AST surface)** | rubyrs's spike subset only accepts `def` / `attr_*` / `alias` / `prepend Mod` inside `class << self`. Sinatra's singleton class body opens with `CALLERS_TO_IGNORE = [...]` — a constant assignment — before the `attr_reader` and `def` blocks. The translator compiles the unsupported form into a runtime `raise NotImplementedError`, which fires when the class body executes (typically file load time). **First Cat D gap surfaced since pass 4.** |
 
 ### Minimal repro for layer #11
 
@@ -83,8 +83,11 @@ class Foo
 end
 ```
 
-`Foo.get_bar` in CRuby returns 42. In rubyrs, compilation
-fails before any code runs. The minimal fix is to extend the
+`Foo.get_bar` in CRuby returns 42. In rubyrs, file load fails
+when the class body executes — the translator compiles the
+unsupported form into a runtime `raise NotImplementedError`,
+which fires the first time the surrounding scope runs (the
+class body, in this case, executes at load time). The minimal fix is to extend the
 `class << self` body whitelist to accept `ConstantWriteNode`
 (constant assignments) and store them on the same singleton
 class object that already holds `def self.X` (in its constants
