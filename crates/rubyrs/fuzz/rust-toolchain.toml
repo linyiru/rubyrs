@@ -5,4 +5,15 @@
 # rest of the workspace; this file overrides it for fuzz invocations
 # only because rustup walks up from the cwd and stops at the first
 # `rust-toolchain.toml` it finds.
-channel = "nightly"
+#
+# Pinned to a specific date rather than the rolling `nightly`
+# channel — without the pin, a nightly regression in libfuzzer-sys
+# or the sanitizer support would show up as a flaky red on the
+# scheduled fuzz workflow and look like a repo bug. Bump this
+# manually when there's a concrete reason (e.g. a new
+# libfuzzer-sys release needs a newer rustc, or a sanitizer
+# feature we want to use lands later). The version chosen at
+# initial harness setup (2026-05-24) was simply the latest
+# nightly available locally that day; no project-specific
+# constraint demands it.
+channel = "nightly-2026-05-24"
