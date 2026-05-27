@@ -695,22 +695,44 @@ impl Vm {
                         groups.last_mut().unwrap().1.push(v);
                     } else {
                         // Pin block-returned `key` for the rest of
-                        // the primitive. `groups` is a Rust-local
-                        // Vec, not part of scan_roots; if `key` is a
-                        // heap Value (Array/Hash/Object/Str returned
-                        // by the block), the next iteration's
-                        // step_block can fire maybe_gc and sweep it,
-                        // leaving `groups.last()` / `ruby_eq` /
-                        // post-loop materialization reading freed
-                        // memory. `v` itself is safe (transitively
-                        // rooted through the pinned source Array),
-                        // so only `key` needs pinning.
+                        // the primitive — but only when it's a
+                        // GC-tracked heap reference. `groups` is a
+                        // Rust-local Vec, not part of scan_roots;
+                        // if `key` is a heap-slot Value (Array /
+                        // Hash / Object / Range / Block /
+                        // BoundMethod / UnboundMethod / CurriedProc
+                        // / BigInt returned by the block), the next
+                        // iteration's step_block can fire maybe_gc
+                        // and sweep it, leaving `groups.last()` /
+                        // `ruby_eq` / post-loop materialization
+                        // reading freed memory. Immediate variants
+                        // (Int / Float / Bool / Nil / Sym) and Rc-
+                        // shared variants (Str / Class / Regex) are
+                        // not GC-managed and don't need pinning;
+                        // pinning them would just grow the pinned
+                        // root set + GC scan budget. `v` itself is
+                        // safe regardless (transitively rooted via
+                        // the pinned source Array), so only `key`
+                        // needs the check.
                         //
-                        // O(distinct_keys) pin growth — bounded by
-                        // the output size, which is the natural cost
-                        // ceiling for this primitive. Pre-existing
-                        // gap surfaced by Copilot review on PR #187.
-                        g.pin(key.clone());
+                        // O(distinct_heap_keys) pin growth —
+                        // bounded by the output size, which is the
+                        // natural cost ceiling for this primitive.
+                        // Pre-existing gap surfaced by Copilot
+                        // review on PR #187.
+                        if matches!(
+                            key,
+                            Value::Array(_) | Value::Hash(_) | Value::Object(_)
+                            | Value::Range(_) | Value::Block(_)
+                            | Value::BoundMethod(_) | Value::UnboundMethod(_)
+                            | Value::CurriedProc(_)
+                        ) {
+                            g.pin(key.clone());
+                        }
+                        #[cfg(feature = "bignum")]
+                        if matches!(key, Value::BigInt(_)) {
+                            g.pin(key.clone());
+                        }
                         groups.push((key, vec![v]));
                     }
                 }
