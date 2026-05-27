@@ -130,9 +130,14 @@ master / fixtures-dependent). When master lands a feature that
 unblocks a previously-skipped block, the comment becomes the
 ratchet: un-skip and re-test.
 
-Progress beyond this baseline goes either by hand (one PR per
-upstream area) until the v0.1 extractor lands, or by
-extractor-then-curate once it does.
+Progress goes by extractor-then-curate: run
+`crates/rubyrs-spec-extract` (v0.4 shipped) on the upstream spec
++ any shared bodies, then pipe through
+`crates/rubyrs-spec-extract/scripts/polish.py` to drop fixture /
+mock / unimplemented-method blocks. Hand-translated files remain
+as a validation oracle — "does the tool produce the same output
+as a human did?" — and are kept in lockstep when the extractor
+gains new patterns.
 
 ## Workflow for adding a feature
 
@@ -143,7 +148,10 @@ The intended pull request flow:
 2. Implement the language feature.
 3. Write at least one hand-crafted fixture in `tests/fixtures/` to lock
    in observable behaviour. This stays small and human-readable.
-4. Run `tools/spec_extract` to regenerate `tests/spec/`.
+4. If the feature unlocks a previously-skipped block, regenerate the
+   affected spec via the extractor + polish pipeline (see
+   [`crates/rubyrs-spec-extract/README.md`](../crates/rubyrs-spec-extract/README.md))
+   and drop the skip from `crates/rubyrs/spec/ruby/<feature>_spec.rb`.
 5. Run `cargo test`. New tests should pass; old ones must still pass.
 6. Regenerate SPEC_STATUS.md: `UPDATE_SPEC_STATUS=1 cargo test -p
    rubyrs --test spec_status`. CI's `spec_status_is_up_to_date`
