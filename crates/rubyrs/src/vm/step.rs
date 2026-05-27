@@ -17,7 +17,7 @@ use std::rc::Rc;
 use crate::bytecode::{BinOpKind, Op};
 use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
-use crate::value::{BlockHandle, Class, Method, Value, Visibility};
+use crate::value::{BlockHandle, Class, Method, ObjId, Value, Visibility};
 
 use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm};
 
@@ -684,65 +684,15 @@ impl Vm {
                     Value::Class(c)
                 } else if let Some(v) = self.constants.get(&name_id).cloned() {
                     v
-                } else if &**self.interner.resolve(name_id) == "ENV" {
+                } else if self.interner.resolve(name_id).as_ref() == "ENV" {
                     // ADR 0017 Rule 1+2: the ENV map a script sees is
                     // exactly the one the host provided via
-                    // `Config::env` — never the host process's real
-                    // env vars. `None` (default) → empty Hash; the
-                    // CLI binary `rubyrs` populates from
-                    // `std::env::vars()` to preserve `rubyrs script.rb`
-                    // ergonomics. Cached for the lifetime of the Vm
-                    // so all `ENV` reads see a single object — writes
-                    // via `ENV[k] = v` mutate the snapshot but not
-                    // anything host-side (documented divergence).
-                    let id = if let Some(id) = self.env_hash {
-                        id
-                    } else {
-                        // Order matters: do the fallible
-                        // `maybe_gc` + `check_alloc()?` step BEFORE
-                        // consuming `env_override`. Calling `take()`
-                        // first and then trapping on the heap cap
-                        // would permanently drop the host-injected
-                        // ENV map (the `?` early-return preserves no
-                        // override state), and any subsequent `ENV`
-                        // access would rebuild as empty — a silent
-                        // capability loss the host has no way to
-                        // recover from.
-                        self.maybe_gc();
-                        self.check_alloc()?;
-                        // ADR 0017 Rule 1 requires deterministic
-                        // iteration. `Config::env: HashMap` has
-                        // randomised hash order, so collect the
-                        // entries into a key-sorted Vec before
-                        // materialising the Ruby Hash (which preserves
-                        // insertion order); otherwise `ENV.each` /
-                        // `ENV.to_a` / `ENV.inspect` would vary across
-                        // runs even for identical host injection.
-                        //
-                        // `take()` consumes the override on first
-                        // build (now that we know alloc will succeed):
-                        // once the Ruby Hash is allocated it is the
-                        // canonical ENV, so keeping a second copy on
-                        // `Vm` would just retain duplicate memory and
-                        // force per-entry String clones every time.
-                        // Moving the Strings into `Value::new_str`
-                        // avoids both.
-                        let pairs: Vec<(Value, Value)> = match self.env_override.take() {
-                            Some(map) => {
-                                let mut entries: Vec<(String, String)> = map.into_iter().collect();
-                                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                                entries
-                                    .into_iter()
-                                    .map(|(k, v)| (Value::new_str(k), Value::new_str(v)))
-                                    .collect()
-                            }
-                            None => Vec::new(),
-                        };
-                        let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
-                        self.env_hash = Some(id);
-                        id
-                    };
-                    Value::Hash(id)
+                    // `Config::env`. See `env_hash_or_init` for the
+                    // lazy-build details. Shared with the chain-walk
+                    // fallback in Op::LoadConstChain so a bare `ENV`
+                    // inside a nested class body resolves the same
+                    // way (PR #234 / pass-9.7c layer #20).
+                    Value::Hash(self.env_hash_or_init()?)
                 } else {
                     // CRuby raises `NameError: uninitialized constant
                     // <name>` for missing constants — silent-nil here
@@ -802,6 +752,26 @@ impl Vm {
                 let v = match found {
                     Some(v) => v,
                     None => {
+                        // ENV fallback: when the chain walk fails to
+                        // find any user-defined constant matching the
+                        // qualified candidates, AND the bare-name
+                        // (LAST entry in the chain — innermost-first
+                        // ordering means the unqualified fallback is
+                        // last) is "ENV", lazy-build the env_hash via
+                        // the same intercept path Op::LoadConst uses.
+                        // Without this, a bare `ENV` reference inside
+                        // a nested class body emits LoadConstChain
+                        // (which previously didn't know about ENV),
+                        // so sinatra-style `ENV['VAR']` at body level
+                        // raised \"uninitialized constant
+                        // Foo::Bar::ENV\". PR #234 / pass-9.7c
+                        // layer #20.
+                        let bare = *chain.last().expect("ICE: LoadConstChain with empty chain");
+                        if self.interner.resolve(bare).as_ref() == "ENV" {
+                            let id = self.env_hash_or_init()?;
+                            self.stack.push(Value::Hash(id));
+                            return Ok(true);
+                        }
                         // Report the INNERMOST-scope qualified form
                         // in the NameError so the user sees the path
                         // CRuby would have searched first — e.g.
@@ -1985,4 +1955,63 @@ impl Vm {
         Ok(true)
     }
 
+    /// Lazy-build (or return cached) ObjId for the script-visible
+    /// `ENV` Hash. Shared between `Op::LoadConst("ENV")` and
+    /// `Op::LoadConstChain`'s bare-name fallback so the same
+    /// constant resolves identically whether referenced bare at
+    /// toplevel (`ENV`) or inside a nested class body where the
+    /// chain walk previously failed (`Foo::Bar::ENV` → falls
+    /// through to bare `ENV`).
+    ///
+    /// ADR 0017 Rule 1+2: the ENV map a script sees is exactly
+    /// the one the host provided via `Config::env` — never the
+    /// host process's real env vars. `None` (default) → empty
+    /// Hash; the CLI binary `rubyrs` populates from
+    /// `std::env::vars()` to preserve `rubyrs script.rb`
+    /// ergonomics. Cached for the lifetime of the Vm so all
+    /// `ENV` reads see a single object — writes via `ENV[k] = v`
+    /// mutate the snapshot but not anything host-side
+    /// (documented divergence).
+    ///
+    /// Order matters: do the fallible `maybe_gc` + `check_alloc()?`
+    /// BEFORE consuming `env_override`. Calling `take()` first
+    /// and then trapping on heap cap would permanently drop the
+    /// host-injected ENV map (the `?` early-return preserves no
+    /// override state), and any subsequent `ENV` access would
+    /// rebuild as empty — a silent capability loss the host has
+    /// no way to recover from.
+    pub(crate) fn env_hash_or_init(&mut self) -> Result<ObjId, Trap> {
+        if let Some(id) = self.env_hash {
+            return Ok(id);
+        }
+        self.maybe_gc();
+        self.check_alloc()?;
+        // ADR 0017 Rule 1 requires deterministic iteration.
+        // `Config::env: HashMap` has randomised hash order, so
+        // collect entries into a key-sorted Vec before
+        // materialising the Ruby Hash (which preserves insertion
+        // order); otherwise `ENV.each` / `ENV.to_a` / `ENV.inspect`
+        // would vary across runs even for identical host injection.
+        //
+        // `take()` consumes the override on first build (now that
+        // we know alloc will succeed): once the Ruby Hash is
+        // allocated it IS the canonical ENV, so keeping a second
+        // copy on `Vm` would just retain duplicate memory and
+        // force per-entry String clones every time. Moving the
+        // Strings into `Value::new_str` avoids both.
+        let pairs: Vec<(Value, Value)> = match self.env_override.take() {
+            Some(map) => {
+                let mut entries: Vec<(String, String)> = map.into_iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (Value::new_str(k), Value::new_str(v)))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+        self.env_hash = Some(id);
+        Ok(id)
+    }
 }

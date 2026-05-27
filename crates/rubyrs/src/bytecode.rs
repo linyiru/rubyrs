@@ -112,11 +112,17 @@ pub(crate) enum Op {
     /// runtime should try in turn (innermost-scope first, falling
     /// back outward to the top-level bare name). First hit in
     /// `Vm.classes` then `Vm.constants` wins; running off the end
-    /// raises `NameError`. ENV intercept doesn't apply — chains
-    /// are only emitted for bare reads from inside scopes that
-    /// would never reach the ENV name anyway. Top-level reads
-    /// (empty class_path at compile time) keep using
-    /// `LoadConst(SymId)` directly.
+    /// invokes the same ENV lazy-build intercept that
+    /// `LoadConst("ENV")` uses, BUT only when the chain's tail
+    /// (the unqualified bare-name candidate, last entry due to
+    /// innermost-first ordering) is "ENV". This lets nested
+    /// `class Foo; ENV[...]; end` resolve the same toplevel
+    /// ENV that bare `ENV` at the top level resolves — without
+    /// it, the chain `[Foo::ENV, ENV]` would fail because the
+    /// fallback never consulted the intercept (PR #239 /
+    /// pass-9.7c layer #20). Any other unresolved name still
+    /// raises `NameError`. Top-level reads (empty class_path
+    /// at compile time) keep using `LoadConst(SymId)` directly.
     LoadConstChain(u32),
     /// Silent-nil variant of `LoadConstChain` for the `||=` read
     /// position; running off the chain returns `Value::Nil`
