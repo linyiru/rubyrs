@@ -1444,6 +1444,25 @@ impl Vm {
         // by appending an incrementing suffix only when a
         // collision is detected — user-supplied unique filenames
         // (tilt's per-template paths) pass through unchanged.
+        // Cap-aware compile: `compile_proto` interns method names,
+        // locals, constants, and other symbols from the eval'd
+        // source. Unlike top-level / require source (which is host-
+        // loaded under embedder control), eval'd strings can be
+        // dynamically constructed by Ruby code — `eval("def m#{i};
+        // end")` in a loop would grow the interner past any
+        // configured cap. Pre-check BEFORE registering the source
+        // so a rejected eval doesn't leak a `(eval):N` source entry.
+        // Post-check after compile removes the source entry on cap
+        // failure for the same reason — best-effort: the interner
+        // may briefly grow past the cap before the trap fires (we
+        // don't roll back interns themselves).
+        let cap_at_entry = self.max_symbols;
+        if let Some(max) = cap_at_entry
+            && self.interner.len() >= max {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!("interner exhausted before eval: {} symbols", max),
+            }));
+        }
         let mut effective_filename: String = filename.to_string();
         if self.sources.contains_key(effective_filename.as_str()) {
             let mut n: u64 = 2;
@@ -1459,29 +1478,16 @@ impl Vm {
         let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(effective_filename.as_str());
         let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source);
         self.sources.insert(filename_rc.clone(), source_rc);
-        // Cap-aware compile: `compile_proto` interns method names,
-        // locals, constants, and other symbols from the eval'd
-        // source. Unlike top-level / require source (which is host-
-        // loaded under embedder control), eval'd strings can be
-        // dynamically constructed by Ruby code — `eval("def m#{i};
-        // end")` in a loop would grow the interner past any
-        // configured cap. Snapshot the cap; post-check after
-        // compile. Documented best-effort: the interner may briefly
-        // grow past the cap before the trap fires (we don't roll
-        // back interns).
-        let cap_at_entry = self.max_symbols;
-        if let Some(max) = cap_at_entry
-            && self.interner.len() >= max {
-            return Err(self.trap(RubyError::ResourceExhausted {
-                msg: format!("interner exhausted before eval: {} symbols", max),
-            }));
-        }
         let entry = crate::compiler::compile_proto(
-            "<eval>".into(), vec![], &[prog], filename_rc,
+            "<eval>".into(), vec![], &[prog], filename_rc.clone(),
             &mut self.protos, &mut self.interner, &mut self.cache_counter,
         );
         if let Some(max) = cap_at_entry
             && self.interner.len() > max {
+            // Don't leave the orphan source entry behind when we
+            // refuse the eval — the compiled proto won't be
+            // executed and nothing else will consult its source.
+            self.sources.remove(&filename_rc);
             return Err(self.trap(RubyError::ResourceExhausted {
                 msg: format!("eval grew interner past cap: {} symbols", max),
             }));
