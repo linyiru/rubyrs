@@ -957,6 +957,30 @@ impl Vm {
                     }
                     return Ok(None);
                 }
+                // String#[regex] / String#[regex, n] — Regex
+                // overloads of `[]` / `slice`. Tilt uses
+                // `script[/.../n, 1]` in `extract_magic_comment`
+                // to pull the encoding name out of a magic
+                // comment, so the (Regex, Int) form is the
+                // motivating consumer. Returns the whole match
+                // (1-arg) or the n-th capture group (2-arg with
+                // n>=0, where 0 is the whole match), or nil if
+                // there's no match / the requested group didn't
+                // participate. Side-effect: updates `last_match`
+                // (`$~`, `$1..$N`, `$&`, `$``, `$'`, `$+`) the
+                // same way `String#match` does.
+                #[cfg(feature = "regex")]
+                if (name == "[]" || name == "slice") && args.len() == 1 {
+                    if let Value::Regex(re) = &args[0] {
+                        return Ok(Some(self.str_bracket_regex(&s, re, 0)?));
+                    }
+                }
+                #[cfg(feature = "regex")]
+                if (name == "[]" || name == "slice") && args.len() == 2 {
+                    if let (Value::Regex(re), Value::Int(n)) = (&args[0], &args[1]) {
+                        return Ok(Some(self.str_bracket_regex(&s, re, *n)?));
+                    }
+                }
                 if (name == "[]" || name == "slice") && args.len() == 1 {
                     let chars: Vec<char> = s.to_string_lossy().chars().collect();
                     let len = chars.len() as i64;
@@ -1300,6 +1324,64 @@ impl Vm {
                     }
                     _ => None,
                 }
+        })
+    }
+
+    /// Shared backend for `String#[regex]` and `String#[regex, n]`.
+    /// Returns the n-th capture group (0 = whole match) as a String,
+    /// or Nil if the regex didn't match / the requested group didn't
+    /// participate / `n` is out of range. Out-of-range parity with
+    /// CRuby (which also returns nil — `String#[regex, n]` does NOT
+    /// raise on out-of-range indices).
+    ///
+    /// Divergence: negative `n` (CRuby supports `-1` for "last
+    /// group", `-2` for next-to-last, etc.) is not modeled — any
+    /// `n < 0` falls through to the Nil branch instead of indexing
+    /// from the end.
+    ///
+    /// Side-effect: mirrors `String#match` in updating `last_match`
+    /// so `$~`, `$&`, `$1..$N`, `` $` ``, `$'`, `$+` stay correct.
+    #[cfg(feature = "regex")]
+    fn str_bracket_regex(
+        &mut self,
+        s: &std::rc::Rc<RStr>,
+        re: &std::rc::Rc<regex::Regex>,
+        n: i64,
+    ) -> Result<Value, Trap> {
+        let bound = s.to_string_lossy();
+        let captures = re.captures(&bound);
+        let caps = match captures {
+            None => {
+                self.last_match = None;
+                return Ok(Value::Nil);
+            }
+            Some(c) => c,
+        };
+        let m0 = caps.get(0).unwrap();
+        let (m_start, m_end) = (m0.start(), m0.end());
+        let whole = m0.as_str().to_string();
+        let mut last_caps: Vec<Option<String>> = Vec::with_capacity(caps.len().saturating_sub(1));
+        for i in 1..caps.len() {
+            last_caps.push(caps.get(i).map(|m| m.as_str().to_string()));
+        }
+        let picked = if n == 0 {
+            Some(whole.clone())
+        } else if n > 0 && (n as usize) <= last_caps.len() {
+            last_caps[(n as usize) - 1].clone()
+        } else {
+            None
+        };
+        drop(caps);
+        self.last_match = Some(crate::vm::LastMatch {
+            whole,
+            caps: last_caps,
+            input: bound,
+            m_start,
+            m_end,
+        });
+        Ok(match picked {
+            Some(s) => Value::new_str(s),
+            None => Value::Nil,
         })
     }
 }

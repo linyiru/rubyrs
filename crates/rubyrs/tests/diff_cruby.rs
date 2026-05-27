@@ -172,6 +172,8 @@ fn run_diff(name: &str) {
 #[test] fn string_dump() { run_diff("string_dump"); }
 #[test] fn string_count() { run_diff("string_count"); }
 #[test] fn class_singleton_class() { run_diff("class_singleton_class"); }
+#[cfg(feature = "regex")]
+#[test] fn string_bracket_regex() { run_diff("string_bracket_regex"); }
 #[cfg(feature = "bignum")]
 #[test] fn bignum_phase_a() { run_diff("bignum_phase_a"); }
 #[cfg(feature = "bignum")]
