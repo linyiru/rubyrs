@@ -16,15 +16,11 @@
 #   only way to observe it without mocks would be via a
 #   user-defined class — that's enumerator/class-coverage
 #   territory, out of B.6 scope.
-# - skipped (divergent): the "does not lose precision when
-#   comparing with a Float" case. rubyrs's BigInt == Float
-#   currently coerces BigInt down to Float for the compare,
-#   so `(2**64 + 1) == (2**64).to_f` returns true (both sides
-#   collapse to 1.8446744073709552e19) where CRuby returns
-#   false. The fix is on the BigInt-side `==` arm — convert
-#   the Float losslessly (or compare via integral-Float
-#   detection) rather than demoting the BigInt. Tracked as a
-#   follow-up; out of B.6 scope.
+# The "does not lose precision when comparing with a Float" case
+# is active — the BigInt == Float arm now converts the Float
+# losslessly (via num_traits FromPrimitive) instead of demoting
+# the BigInt to f64. See bigint_equals_float_lossless in
+# bignum.rs. Lt/Le/Gt/Ge still demote (tracked as a follow-up).
 
 describe "Integer#==" do
   it "fixnum: returns true if self has the same Integer value as other" do
@@ -88,23 +84,15 @@ describe "Integer#==" do
     assert_eq(bn == 9.01, false)
   end
 
-  # skipped (divergent): "does not lose precision when comparing
-  # with a Float". See file header — rubyrs demotes BigInt to
-  # Float on the compare and the precision-loss assertion fails.
-  # The (2**64) == (2**64).to_f leg is already covered above
-  # under "returns true when comparing with a Float of the same
-  # numeric value", but that exact-Float case passes for the wrong
-  # reason on rubyrs (both sides collapse to the same Float bits).
-  #
-  # TODO(bignum-eq-float-precision): when the BigInt==Float arm is
-  # fixed to compare losslessly, uncomment this block — it is the
-  # only assertion that distinguishes the demote-to-Float bug from
-  # a correct implementation. Grep for the TODO tag above.
-  #
-  # bignum_it "bignum: does not lose precision when comparing with a Float" do
-  #   assert_eq((2**64 + 1) == (2**64).to_f, false)
-  #   assert_eq((2**64) == (2**64).to_f, true)
-  # end
+  bignum_it "bignum: does not lose precision when comparing with a Float" do
+    # The Float side is the "round-down" of `2**64 + 1` (the gap
+    # between consecutive f64s at 2^64 is 2); the Integer side
+    # must NOT round, so `(2**64 + 1) == (2**64).to_f` is false
+    # even though `(2**64) == (2**64).to_f` is true. Pin the
+    # lossless `==` path added in bigint_equals_float_lossless.
+    assert_eq((2**64 + 1) == (2**64).to_f, false)
+    assert_eq((2**64) == (2**64).to_f, true)
+  end
 
   # skipped (mock): "calls 'other == self' if the given argument
   # is not an Integer" / "returns the result of 'other == self'
