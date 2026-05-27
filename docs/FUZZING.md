@@ -178,14 +178,9 @@ sees the connection.
 
 ## Known limits + future work
 
-One concrete gap remains on the table. The earlier two items in
-this list — the preamble-fuel coupling ICE (#3 below) and the
-preamble-rebuilt-every-iteration cost (#2 below) — were closed
-by PR #204 and PR #212 + the adoption PR respectively; the
-sections are kept inline as historical anchors for the
-follow-up tracking.
+One concrete gap remains on the table.
 
-### 1. Filesystem sandbox covers `require` only
+### Filesystem sandbox covers `require` only
 
 `ensure_sandbox_cwd` moves the process cwd into a tempdir, which
 makes `require '<relative>'` and `require_relative '...'` look
@@ -209,7 +204,15 @@ uniformly across every I/O sink in `vm/`. Same need lives in
 there benefits both consumers and removes the cwd-tempdir trick
 as a per-consumer rediscovery.
 
-### 2. ~~Runtime preamble rebuilt every iteration~~ — fixed in PR #212 + adoption PR
+## Historical: closed gaps
+
+The next two sections describe gaps that were closed during the
+initial fuzz-harness rollout. They're kept here as anchors for
+the follow-up work they motivated — re-flagging the same items
+as "future work" would be misleading. New gaps belong above
+under "Known limits + future work".
+
+### ~~Runtime preamble rebuilt every iteration~~ — fixed in PR #212 + adoption PR
 
 PR #212 landed `Runtime::reset()` which rewinds a Runtime to
 its post-preamble baseline without re-running the preamble.
@@ -228,7 +231,7 @@ honours (per-class methods/ivars/singleton_methods restored,
 heap truncated to post-preamble high-water, interner truncation
 respects post-construction host_fn / cext SymIds, etc.).
 
-### 3. ~~Preamble-fuel coupling~~ — fixed in PR #204
+### ~~Preamble-fuel coupling~~ — fixed in PR #204
 
 `Runtime::with_config` used to consume user-supplied
 `Config::fuel` during preamble load — a host setting a tight
