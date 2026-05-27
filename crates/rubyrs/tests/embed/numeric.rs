@@ -1342,6 +1342,57 @@ fn bigint_eq_float_is_lossless() {
     ]);
 }
 
+#[test]
+fn int_cmp_float_is_lossless() {
+    // Sibling to bigint_cmp_float_is_lossless. The Int×Float
+    // arm in numeric.rs pre-fix demoted the i64 to f64 for the
+    // compare; for |i| > 2^53 the cast loses bits, so e.g.
+    // `(2**62 + 1) > (2**62).to_f` returned false. Runs on
+    // BOTH profiles because the helper is pure i64+f64 (no
+    // BigInt required).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "nan = 0.0 / 0.0\n\
+         inf = 1.0 / 0.0\n\
+         # <=> (Int × Float, both directions)\n\
+         puts ((2**62 + 1) <=> (2**62).to_f).inspect    # 1\n\
+         puts ((2**62) <=> (2**62).to_f).inspect        # 0\n\
+         puts ((2**62 - 1) <=> (2**62).to_f).inspect    # -1\n\
+         puts ((2**62).to_f <=> (2**62 + 1)).inspect    # -1 (Float × Int reverses)\n\
+         puts (1 <=> nan).inspect                       # nil\n\
+         puts (1 <=> inf).inspect                       # -1\n\
+         puts (1 <=> -inf).inspect                      # 1\n\
+         # Ordering operators\n\
+         puts ((2**62 + 1) > (2**62).to_f)              # true\n\
+         puts ((2**62 + 1) < (2**62).to_f)              # false\n\
+         puts ((2**62 + 1) <= (2**62).to_f)             # false\n\
+         puts ((2**62 + 1) >= (2**62).to_f)             # true\n\
+         puts ((2**62).to_f < (2**62 + 1))              # true (Float × Int direction)\n\
+         # NaN: all four ordering ops are false (CRuby parity)\n\
+         puts (1 < nan)                                 # false\n\
+         puts (1 > nan)                                 # false\n\
+         puts (1 <= nan)                                # false\n\
+         puts (1 >= nan)                                # false\n\
+         # Float-exact happy paths (under 2^53 — must still work)\n\
+         puts (1 == 1.0)                                # true\n\
+         puts (5 < 5.5)                                 # true\n\
+         puts ((-3) == -3.0)                            # true",
+        "int_cmp_float.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "1", "0", "-1", "-1",                  // <=> precision + symmetric
+        "nil", "-1", "1",                      // <=> NaN/±inf
+        "true", "false", "false", "true",      // Lt/Le/Gt/Ge precision
+        "true",                                 // Float × Int direction
+        "false", "false", "false", "false",    // NaN ordering
+        "true", "true", "true",                // Float-exact happy paths
+    ]);
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_cmp_float_is_lossless() {
