@@ -83,6 +83,13 @@ end
 g1 = G.new
 def g1.boop; "singleton-boop"; end
 um7 = g1.method(:boop).unbind
+# Positive: binding back to the ORIGINAL instance succeeds.
+# Without an eigenclass-aware target_class derivation in bind /
+# bind_call, this would fail too — the original instance's
+# real class doesn't walk through its own singleton class.
+puts um7.bind(g1).call                       # singleton-boop
+puts um7.bind_call(g1)                       # singleton-boop
+# Negative: binding to a DIFFERENT instance raises TypeError.
 g2 = G.new
 begin
   um7.bind(g2).call

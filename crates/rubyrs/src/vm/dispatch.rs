@@ -682,11 +682,20 @@ impl Vm {
             };
             let mut args = args;
             let target = args.swap_remove(0);
-            let target_class = match self.class_of(&target) {
-                Value::Class(c) => c,
-                _ => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("bind argument must have a class (got {})", target.type_name()),
-                })),
+            // Use dispatch class (heap.class_of) for Object
+            // targets — matches the eigenclass-aware capture in
+            // unbind. Otherwise binding a singleton-method
+            // UnboundMethod back to its ORIGINAL instance would
+            // fail the is_a fence (target's real class doesn't
+            // walk through the singleton class).
+            let target_class = match &target {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&target) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("bind argument must have a class (got {})", target.type_name()),
+                    })),
+                },
             };
             // Kernel is the universally-bindable sentinel — CRuby
             // models it as a Module included in Object, so every
@@ -756,11 +765,18 @@ impl Vm {
             };
             let mut args = args;
             let target = args.remove(0);
-            let target_class = match self.class_of(&target) {
-                Value::Class(c) => c,
-                _ => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("bind_call argument must have a class (got {})", target.type_name()),
-                })),
+            // Dispatch class for Object targets — mirrors the
+            // eigenclass-aware capture in unbind so a
+            // singleton-method UnboundMethod can bind_call back
+            // to its original receiver.
+            let target_class = match &target {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&target) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("bind_call argument must have a class (got {})", target.type_name()),
+                    })),
+                },
             };
             // Skip the is-a fence when:
             // (a) captured class is Kernel — every value is_a
@@ -4933,11 +4949,18 @@ impl Vm {
             };
             let mut args = args;
             let target = args.remove(0);
-            let target_class = match self.class_of(&target) {
-                Value::Class(c) => c,
-                _ => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("bind_call argument must have a class (got {})", target.type_name()),
-                })),
+            // Dispatch class for Object targets — mirrors the
+            // eigenclass-aware capture in unbind so a
+            // singleton-method UnboundMethod can bind_call back
+            // to its original receiver.
+            let target_class = match &target {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&target) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("bind_call argument must have a class (got {})", target.type_name()),
+                    })),
+                },
             };
             // Same is_a fence as the no-block path: Kernel sentinel
             // and any Module captured class are exempt; Class
