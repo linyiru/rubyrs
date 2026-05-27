@@ -935,6 +935,195 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Int(n_val)))
             }
+            // BigInt iteration: `times` / `upto` / `downto` with at
+            // least one BigInt operand. Counter lives as a native
+            // `num_bigint::BigInt` on the Rust stack; per-iteration
+            // `bigint_to_value` demotes to `Value::Int` whenever the
+            // current count fits i64 (the common in-range case for
+            // `(big - 5).upto(big)` etc.). The yielded Value is then
+            // pinned via `vm.pinned.push` / `.pop` around the
+            // `step_block` call — required because `invoke_block`'s
+            // rest-args path (dispatch.rs::invoke_block) calls
+            // `maybe_gc` with only the Block pinned, which would
+            // sweep the freshly-allocated yield BigInt sitting in
+            // the local args Vec. Discovered as a STRESS_GC use-
+            // after-free in PR #174 cycle 1; pinned by
+            // `bigint_iter_yield_pinned_across_rest_param_gc_window`.
+            //
+            // The outer PinGuard scopes recv / stop / block for the
+            // whole loop. Per-iteration pin uses raw `vm.pinned`
+            // push/pop (PinGuard's accumulate-and-drop model would
+            // leak per-iteration entries; the manual pair scopes the
+            // pin to exactly one step_block call, with pop placed
+            // BEFORE the `?` on step_result so Trap propagation also
+            // unpins cleanly).
+            //
+            // Wall-clock cap is the natural DoS protection for these
+            // (a literal `(2**100).times` would run essentially
+            // forever, exactly as in CRuby; the host's deadline trips
+            // long before any other bound).
+            //
+            // Lives BELOW the Int×Int arms above so pure-Int cases
+            // keep using the optimized i64 fast path.
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "times", []) => {
+                use num_bigint::BigInt;
+                let recv_owned = self.heap.bigint(match recv { Value::BigInt(id) => *id, _ => unreachable!() }).clone();
+                // Negative `recv.times` is 0 iterations in CRuby —
+                // mirrors the Int path (`(-5).times { ... }` → no
+                // calls). For any negative BigInt we'd skip the
+                // loop entirely; bail early to avoid the
+                // alloc/check pattern.
+                if recv_owned.sign() == num_bigint::Sign::Minus {
+                    return Ok(Some(recv.clone()));
+                }
+                let mut g = PinGuard::new(self);
+                g.pin(recv.clone());
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut counter = BigInt::from(0);
+                while counter < recv_owned {
+                    let yield_val = g.vm.bigint_to_value(counter.clone())?;
+                    // Pin the yielded BigInt across step_block: if
+                    // the block has a rest param, invoke_block
+                    // builds the rest-args Array via heap.alloc,
+                    // which runs maybe_gc with only the Block pinned
+                    // — leaving the freshly-allocated yield_val
+                    // reachable only from the local args Vec, which
+                    // GC doesn't see. Push/pop directly on
+                    // `vm.pinned` (avoiding PinGuard's
+                    // accumulate-and-drop model) so the per-
+                    // iteration pin doesn't leak.
+                    g.vm.pinned.push(yield_val.clone());
+                    let step_result = g.vm.step_block(block, vec![yield_val], pre_frames);
+                    g.vm.pinned.pop();
+                    match step_result? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                    counter += 1;
+                }
+                Some(early.unwrap_or_else(|| recv.clone()))
+            }
+            // `big.upto(stop) { |i| ... }` — counts up from recv to
+            // stop inclusive. Fires when either operand is BigInt;
+            // the Int×Int case is handled by the arm above. CRuby:
+            // returns recv at the end (or the break value).
+            #[cfg(feature = "bignum")]
+            (recv_v @ (Value::Int(_) | Value::BigInt(_)), "upto", [stop_v @ (Value::Int(_) | Value::BigInt(_))])
+                if matches!(recv_v, Value::BigInt(_)) || matches!(stop_v, Value::BigInt(_)) =>
+            {
+                let start = self.as_bigint(recv_v).expect("guarded");
+                let stop = self.as_bigint(stop_v).expect("guarded");
+                let mut g = PinGuard::new(self);
+                g.pin(recv_v.clone());
+                g.pin(stop_v.clone());
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut counter = start;
+                while counter <= stop {
+                    let yield_val = g.vm.bigint_to_value(counter.clone())?;
+                    // See `times` arm above for the per-iteration
+                    // pin rationale (invoke_block's rest-args path
+                    // runs maybe_gc with only the Block pinned).
+                    g.vm.pinned.push(yield_val.clone());
+                    let step_result = g.vm.step_block(block, vec![yield_val], pre_frames);
+                    g.vm.pinned.pop();
+                    match step_result? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                    counter += 1;
+                }
+                Some(early.unwrap_or_else(|| recv_v.clone()))
+            }
+            // `big.downto(stop) { |i| ... }` — counts down from recv
+            // to stop inclusive. Same shape as upto with `>=` /
+            // `-=` 1.
+            #[cfg(feature = "bignum")]
+            (recv_v @ (Value::Int(_) | Value::BigInt(_)), "downto", [stop_v @ (Value::Int(_) | Value::BigInt(_))])
+                if matches!(recv_v, Value::BigInt(_)) || matches!(stop_v, Value::BigInt(_)) =>
+            {
+                let start = self.as_bigint(recv_v).expect("guarded");
+                let stop = self.as_bigint(stop_v).expect("guarded");
+                let mut g = PinGuard::new(self);
+                g.pin(recv_v.clone());
+                g.pin(stop_v.clone());
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut counter = start;
+                while counter >= stop {
+                    let yield_val = g.vm.bigint_to_value(counter.clone())?;
+                    // See `times` arm above for the per-iteration
+                    // pin rationale.
+                    g.vm.pinned.push(yield_val.clone());
+                    let step_result = g.vm.step_block(block, vec![yield_val], pre_frames);
+                    g.vm.pinned.pop();
+                    match step_result? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                    counter -= 1;
+                }
+                Some(early.unwrap_or_else(|| recv_v.clone()))
+            }
+            // Arity / coerce guards for BigInt receivers. The loop
+            // arms above only match exact-arity, integer-arg shapes
+            // (`big.times` with no args; `big.upto(int_or_big)` with
+            // one Integer arg). Without these guards, wrong shapes
+            // fall past iter.rs entirely and surface as
+            // NoMethodError ('undefined method for Integer') —
+            // diverging from CRuby's ArgumentError (wrong arity)
+            // and TypeError (non-Integer arg). \`respond_to?\` says
+            // the methods exist (see lookup.rs whitelist), so user
+            // code's \`rescue ArgumentError\` keys on the wrong
+            // class without these arms.
+            //
+            // Limited to BigInt receivers — the parallel Int-recv
+            // gaps (`5.times(99)`, `5.upto(3.14)`) are pre-existing
+            // and out of this PR's scope.
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "times", _) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len(),
+                    ),
+                }));
+            }
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "upto" | "downto", []) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1)".to_string(),
+                }));
+            }
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "upto" | "downto", [other]) => {
+                // The loop arm above matched Int/BigInt stop; if we
+                // reach here the stop is some other type. CRuby
+                // raises TypeError (coerce failure).
+                return Err(self.trap(crate::error::RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        crate::vm::numeric::type_name_for_coerce(other),
+                    ),
+                }));
+            }
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "upto" | "downto", many) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        many.len(),
+                    ),
+                }));
+            }
             // `(b..e).step(n) { |i| ... }` — yields each step value.
             // Returns the receiver Range, matching CRuby.
             (Value::Range(id), "step", [Value::Int(n)]) => {
