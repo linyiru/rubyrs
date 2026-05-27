@@ -386,28 +386,29 @@ fn config_default_picks_up_stress_gc_env() {
 }
 
 #[test]
-fn preamble_fits_under_tight_resource_caps() {
-    // Regression guard for PR #116 cycle 7 refactor: moving
-    // `apply_config` BEFORE `load_preamble` in `Runtime::with_config`
-    // means the built-in preamble (Exception hierarchy + ancillary
-    // classes) now runs UNDER user-supplied caps. The 67 existing
-    // embed tests currently pass with caps like `max_heap_objects:
-    // Some(50)`, `max_symbols: Some(64)`, `fuel: Some(10_000)`,
-    // `deadline: Some(50ms)` — but nothing asserts the preamble
-    // actually fits. A future contributor adding even a handful of
-    // built-in classes (e.g. Comparable, Numeric, Range methods)
-    // could silently push the preamble past one of these budgets,
-    // panicking deep inside `load_preamble().expect("ICE: …")`
-    // during Runtime construction — manifesting as an inscrutable
-    // ICE in tests that on the surface look like they're testing
-    // user-script caps.
+fn runtime_functional_after_construction_under_realistic_caps() {
+    // Originally added as `preamble_fits_under_tight_resource_caps`
+    // (PR #116 cycle 7) when the preamble DID run under user-
+    // supplied caps — the test pinned "preamble fits under {fuel:
+    // 10_000, max_heap_objects: 50, ...}" so a future preamble-
+    // growth PR would break this canary loudly instead of
+    // surfacing as an ICE inside an unrelated cap-trap test.
     //
-    // Pin a budget tighter than ANY cap used elsewhere in this
-    // file (sweep above shows `max_heap_objects: Some(50)` and
-    // `max_symbols: Some(64)` as the floors). If preamble growth
-    // breaks this canary first, the failure points at the right
-    // root cause; without it, the failure surfaces as a panic in
-    // an unrelated cap-trap test.
+    // PR #204 changed the contract: the preamble is internal
+    // infrastructure and runs UNBOUNDED regardless of user caps
+    // (see `with_config_succeeds_under_*` tests below for the
+    // per-cap contract). The preamble-growth canary the original
+    // test was guarding against is moot now.
+    //
+    // Repurpose as a Runtime-functionality smoke test under a
+    // realistic embedder Config: caps tight enough to be
+    // production-shaped but loose enough that a trivial user eval
+    // still succeeds. If a future refactor of `with_config`'s
+    // cap-lift sequencing breaks the post-preamble cap restoration
+    // (e.g. caps stay zeroed because of a bug in the restore
+    // path), `1 + 1` will still succeed — but a regression that
+    // leaks preamble state into user-visible Vm counters would
+    // fail this trivial eval.
     let cfg = rubyrs::Config {
         max_heap_objects: Some(50),
         max_symbols: Some(64),
@@ -415,16 +416,35 @@ fn preamble_fits_under_tight_resource_caps() {
         max_frames: Some(64),
         max_value_bytes: Some(1024),
         deadline: Some(std::time::Duration::from_millis(50)),
+        // Pin off so STRESS_GC=1 in the runner env can't make
+        // this test interact differently with GC-frequency
+        // assumptions in the cap-restore path.
+        stress_gc: false,
         ..Default::default()
     };
-    // Construction itself is the assertion: if any cap trips during
-    // preamble eval, `load_preamble().expect(...)` panics here.
     let mut rt = rubyrs::Runtime::with_config(cfg);
-    // Sanity: the resulting Runtime should still be able to eval a
-    // trivial expression — i.e. the preamble didn't quietly consume
-    // every last unit of fuel/heap. The caps are intentionally
-    // tight, so this only succeeds if there's headroom left.
-    rt.eval("1 + 1", "preamble_canary.rb").expect("trivial eval must succeed after preamble under tight caps");
+    // Sanity: realistic-budget construction still allows a
+    // trivial eval.
+    rt.eval("1 + 1", "post_preamble_smoke.rb")
+        .expect("trivial eval must succeed after construction under realistic caps");
+    // Real assertion: the fuel cap WAS restored after preamble.
+    // Without this second eval, a regression that left caps
+    // zeroed by skipping the restore would pass silently (every
+    // budget-respecting eval succeeds when budget is `None`).
+    // Run a tight loop that needs more than the configured 10k
+    // fuel and assert ResourceExhausted — proves the restore
+    // path is live.
+    let err = rt
+        .eval(
+            "i = 0; while i < 100_000; i = i + 1; end",
+            "post_preamble_fuel_check.rb",
+        )
+        .expect_err("restored fuel cap must trap the loop");
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted from restored fuel cap, got {:?}",
+        err.err,
+    );
 }
 
 
@@ -490,4 +510,130 @@ fn integer_iter_loops_trap_under_fuel_cap() {
             script, err.err,
         );
     }
+}
+
+// --- Preamble bypasses user-supplied resource caps -------------------
+//
+// Before this lane existed, `Runtime::with_config` applied user
+// caps before running the exception-class preamble, so a tight
+// budget (any of: `fuel < ~9k`, `max_frames < ~30`,
+// `max_heap_objects < ~50`, sub-millisecond `deadline`) panicked
+// during construction with `ICE: failed to load exception
+// preamble`. Surfaced by the cargo-fuzz harness in PR #180 and
+// fixed by lifting resource caps for the duration of preamble
+// load, then restoring them. These tests pin both halves of the
+// contract: construction succeeds under tight caps, and the
+// caps still apply to every subsequent `eval()`.
+
+#[test]
+fn with_config_succeeds_under_zero_fuel() {
+    // `fuel: Some(0)` is the most extreme case — every op
+    // dispatched should trap. Pre-fix, this panicked on the
+    // first preamble op.
+    let mut rt = Runtime::with_config(Config {
+        fuel: Some(0),
+        stress_gc: false, // see runtime_functional_after_construction_under_realistic_caps
+        ..Default::default()
+    });
+    let err = rt.eval("1 + 1", "tight.rb").unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected user eval to still hit fuel cap, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn with_config_succeeds_under_tight_frames_cap() {
+    // The preamble defines several classes whose bodies push
+    // frames — `max_frames: Some(1)` would have trapped on the
+    // first `class StandardError; ... end` body pre-fix.
+    let mut rt = Runtime::with_config(Config {
+        max_frames: Some(1),
+        stress_gc: false,
+        ..Default::default()
+    });
+    let err = rt.eval(
+        "def deep(n); deep(n + 1); end; deep(0)",
+        "frames.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected user eval to still hit frames cap, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn with_config_succeeds_under_tight_heap_cap() {
+    // The preamble allocates several `HeapObj::Class` slots
+    // (one per Exception subclass + Object + Comparable + ...).
+    // `max_heap_objects: Some(1)` would have trapped on the
+    // second class allocation pre-fix.
+    let mut rt = Runtime::with_config(Config {
+        max_heap_objects: Some(1),
+        stress_gc: false,
+        ..Default::default()
+    });
+    let err = rt.eval("Array.new(100) { |i| i }", "heap.rb").unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected user eval to still hit heap cap, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn with_config_succeeds_under_sub_ms_deadline() {
+    // A nanosecond-grade deadline trips on the first
+    // `Op::CheckDeadline` (fires every 1024 ops). Any
+    // sub-millisecond deadline used to panic during
+    // construction; now construction succeeds and the
+    // deadline only applies to user `eval()` calls.
+    let cfg = Config {
+        deadline: Some(std::time::Duration::from_nanos(1)),
+        stress_gc: false,
+        ..Default::default()
+    };
+    let mut rt = Runtime::with_config(cfg);
+    // Run a script long enough to cross at least one 1024-op
+    // deadline checkpoint. An empty eval (or `1 + 1`) finishes
+    // in well under 1024 ops and may complete before the
+    // deadline check fires — pinning the eval result would be
+    // flaky. A `while true` spin guarantees the checkpoint
+    // hits, so we can assert ResourceExhausted definitively.
+    let err = rt
+        .eval("while true; end", "deadline.rb")
+        .expect_err("1ns deadline must trap user eval on the first checkpoint");
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected user eval to hit the restored deadline cap, got {:?}",
+        err.err,
+    );
+}
+
+#[test]
+fn with_config_succeeds_under_combined_tight_caps() {
+    // All caps tightened at once — the original failure mode
+    // for fuzz harnesses (`fuel: Some(50_000)` was the magic
+    // workaround number in PR #180 before this fix landed).
+    // Verify a host can now ask for the kind of sandbox a
+    // fuzzer or untrusted-script evaluator actually wants.
+    let cfg = Config {
+        fuel: Some(10),
+        max_frames: Some(8),
+        max_heap_objects: Some(16),
+        max_symbols: Some(64),
+        max_value_bytes: Some(1024),
+        deadline: Some(std::time::Duration::from_millis(50)),
+        stress_gc: false,
+        ..Default::default()
+    };
+    // Just constructing it would have panicked before. The
+    // sandbox is functional — user eval traps cleanly on the
+    // first cap that bites (fuel here, since 10 ops is well
+    // below what a 5-element iteration with `* 2` consumes).
+    let mut rt = Runtime::with_config(cfg);
+    let err = rt.eval("[1,2,3,4,5].map { |x| x * 2 }", "sandbox.rb").unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted from one of the tight caps, got {:?}", err.err,
+    );
 }
