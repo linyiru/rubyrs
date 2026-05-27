@@ -514,6 +514,59 @@ impl Vm {
         }
     }
 
+    /// Bitwise binary ops `&` / `|` / `^` on Integer operands with
+    /// at least one BigInt. num_bigint's `BitAnd` / `BitOr` /
+    /// `BitXor` impls perform unbounded two's-complement
+    /// conversion for negatives before applying the op and convert
+    /// back — so `(-1) & 0xff == 0xff` and `(-256) & 0xff == 0`
+    /// match CRuby without any sign-extension bookkeeping on our
+    /// side.
+    ///
+    /// Returns:
+    /// - `Some(v)` for Int/BigInt × Int/BigInt — result funnelled
+    ///   through `bigint_to_value` for demote-on-fit (e.g.
+    ///   `(2**100) & 0xff` demotes to Int).
+    /// - `Ok(None)` for non-integer args (the caller falls through
+    ///   to the regular dispatch path which produces the right
+    ///   TypeError / NoMethodError).
+    ///
+    /// Fires for both `(BigInt, op, [_])` and `(Int, op, [BigInt])`
+    /// shapes — the recv-or-arg-is-BigInt guard in
+    /// `bigint_primitive` is what gates entry. Int × Int is owned
+    /// by numeric.rs's existing `(Int, op, [Int])` bit-op arm and
+    /// never reaches here.
+    pub(crate) fn try_bigint_bit_binop(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        arg: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        let result = {
+            // Borrow scope: both sides borrowed as Cow<BigInt>
+            // (Int wraps via owned `BigInt::from(n)`, BigInt is
+            // borrowed from the heap with no clone). Drop before
+            // calling bigint_to_value (&mut self).
+            let ax = match self.as_bigint_ref(recv) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            let bx = match self.as_bigint_ref(arg) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            // Owned-by-ref op — num_bigint defines `&BigInt op
+            // &BigInt`, so no clone of either operand. The result
+            // is a fresh owned BigInt that outlives the borrow.
+            match name {
+                "&" => &*ax & &*bx,
+                "|" => &*ax | &*bx,
+                "^" => &*ax ^ &*bx,
+                _ => return Ok(None),
+            }
+        };
+        Ok(Some(self.bigint_to_value(result)?))
+    }
+
     /// `Integer#pow(exp[, mod])`. 1-arg form is exactly `recv ** exp`
     /// — delegated to `try_bigint_pow`. 2-arg form is modular
     /// exponentiation: computes `(recv ** exp) mod modulus` without
@@ -898,6 +951,18 @@ impl Vm {
         // `-(b + 1)` form via try_bigint_unary.
         if args.is_empty() && matches!(name, "-@" | "+@" | "abs" | "~")
             && let Some(v) = self.try_bigint_unary(recv, name)?
+        {
+            return Ok(Some(v));
+        }
+        // Bitwise binary `&` / `|` / `^` on Integer × Integer where
+        // at least one operand is BigInt. numeric.rs's `(Int, op,
+        // [Int])` arm handles the pure Int × Int case; this fires
+        // for the mixed shapes (`big & 0xff`, `5 & (2**100)`,
+        // `big & big`). Sits ahead of the recv-or-arg guard below
+        // because the Int-recv-with-BigInt-arg shape is exactly
+        // what the guard is gating in.
+        if args.len() == 1 && matches!(name, "&" | "|" | "^")
+            && let Some(v) = self.try_bigint_bit_binop(recv, name, &args[0])?
         {
             return Ok(Some(v));
         }

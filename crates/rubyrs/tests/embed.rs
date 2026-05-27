@@ -2660,6 +2660,56 @@ fn bigint_bitwise_not_uses_twos_complement_identity() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_bitwise_and_or_xor_two_complement_semantics() {
+    // Phase B.3b: `&` / `|` / `^` with at least one BigInt operand.
+    // CRuby uses unbounded two's-complement representation for
+    // negatives in bitwise ops. num_bigint's BitAnd/Or/Xor impls
+    // perform the conversion internally so we just route through
+    // them — but pin the expected results to catch any future
+    // regression in either the num_bigint contract or our hook.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Magnitude masks: `(2**100) & 0xff == 0` (low 8 bits of
+        // 2^100 are all 0), demotes to Int.
+        // Sign extension: `(-1) & (2**100) == 2**100` (-1 is
+        // all-ones in two's-complement).
+        // Sign extension: `(-256) & 0xff == 0` (low 8 bits of
+        // two's-complement -256 are clear).
+        // OR with low bit: `(2**100) | 1` lights bit 0 — full
+        // BigInt result.
+        // Self-XOR: cancels to 0 (Int via demote).
+        // Inverse receiver: `5 & (2**100)` — Int recv + BigInt arg,
+        // exercises the recv-or-arg guard path.
+        // Mixed sign: `(-(2**100)) & 0xff == 0` (bit 0..7 of
+        // -(2^100) in two's-complement are 0).
+        "puts ((2 ** 100) & 0xff)\n\
+         puts ((2 ** 100) & 0xff).class.name\n\
+         puts ((-1) & (2 ** 100))\n\
+         puts ((-256) & 0xff)\n\
+         puts ((2 ** 100) | 1)\n\
+         puts ((2 ** 100) ^ (2 ** 100))\n\
+         puts ((2 ** 100) ^ (2 ** 100)).class.name\n\
+         puts (5 & (2 ** 100))\n\
+         puts ((-(2 ** 100)) & 0xff)",
+        "bigint_bitops.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "1267650600228229401496703205376");
+    assert_eq!(lines[3], "0");
+    assert_eq!(lines[4], "1267650600228229401496703205377");
+    assert_eq!(lines[5], "0");
+    assert_eq!(lines[6], "Integer");
+    assert_eq!(lines[7], "0");
+    assert_eq!(lines[8], "0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {
     // Two distinct CRuby behaviours for negative integers in
     // non-decimal bases:
