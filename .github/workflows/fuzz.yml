@@ -81,10 +81,16 @@ jobs:
         # this step is idempotent (no duplicate corpus entries).
         run: |
           set -euo pipefail
-          mkdir -p crates/rubyrs/fuzz/corpus/${{ matrix.target }}
-          find crates/rubyrs/tests/diff -name '*.rb' -exec cp {} crates/rubyrs/fuzz/corpus/${{ matrix.target }}/ \; 2>/dev/null || true
-          find crates/rubyrs/tests/fixtures -name '*.rb' -exec cp {} crates/rubyrs/fuzz/corpus/${{ matrix.target }}/ \; 2>/dev/null || true
-          echo "seeded $(ls crates/rubyrs/fuzz/corpus/${{ matrix.target }} | wc -l) corpus entries"
+          dest="crates/rubyrs/fuzz/corpus/${{ matrix.target }}"
+          mkdir -p "$dest"
+          # No `2>/dev/null || true` — if either fixture tree is missing or
+          # a copy fails (renames, perms, FS error) we want the step to
+          # fail loudly, not run with a half-populated corpus that looks
+          # like a regression in the next morning's fuzz report.
+          find crates/rubyrs/tests/diff     -name '*.rb' -exec cp {} "$dest/" \;
+          find crates/rubyrs/tests/fixtures -name '*.rb' -exec cp {} "$dest/" \;
+          count=$(find "$dest" -type f | wc -l)
+          echo "seeded $count corpus entries"
 
       - name: Run fuzz ${{ matrix.target }}
         # `-max_total_time` is libFuzzer's wall-clock budget.

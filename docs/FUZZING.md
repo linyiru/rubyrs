@@ -33,8 +33,16 @@ What we're hunting:
 - `unreachable!()` arms that a new AST shape can actually reach.
 - Integer / index arithmetic that overflows under
   `debug-assertions`.
-- Stacked / Tree Borrows violations (libfuzzer-sys runs with
-  AddressSanitizer; UB shows up immediately).
+- Memory-safety UB caught by AddressSanitizer (libfuzzer-sys
+  ships with ASan on by default): use-after-free, heap / stack
+  buffer overruns, double free. Most reachable through the
+  `unsafe` blocks in `vm/gc.rs`, `vm/dispatch.rs`, and the
+  cext FFI surface.
+
+ASan does **not** model Rust's aliasing rules (Stacked / Tree
+Borrows). Those live in the [Miri CI job](../.github/workflows/ci.yml)
+which runs a fixed-corpus smoke each PR; fuzz inputs that
+exercise an aliasing violation will not crash here, only there.
 
 ## Running locally
 
