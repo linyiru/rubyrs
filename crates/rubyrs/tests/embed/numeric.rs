@@ -646,12 +646,17 @@ fn int_iter_arity_and_coerce_errors_match_cruby() {
     // the BigInt arm and exercised separately.
     let mut rt = rubyrs::Runtime::new();
     for (script, expected_class, expected_msg) in [
-        ("5.upto(3.14) { }",   "TypeError",     "no implicit conversion of Float into Integer"),
-        ("5.upto(\"x\") { }",  "TypeError",     "no implicit conversion of String into Integer"),
-        ("5.upto(nil) { }",    "TypeError",     "no implicit conversion of nil into Integer"),
+        // Float endpoint is accepted (yields up to floor / down to
+        // ceil) — covered separately. Non-numeric endpoints raise
+        // ArgumentError, matching CRuby's "comparison of Integer
+        // with X failed" wording (the upto/downto loop uses `<=>`
+        // internally, so the comparison failure surfaces as
+        // ArgumentError rather than TypeError).
+        ("5.upto(\"x\") { }",  "ArgumentError", "comparison of Integer with String failed"),
+        ("5.upto(nil) { }",    "ArgumentError", "comparison of Integer with nil failed"),
         ("5.upto { }",         "ArgumentError", "wrong number of arguments (given 0, expected 1)"),
         ("5.upto(1, 2) { }",   "ArgumentError", "wrong number of arguments (given 2, expected 1)"),
-        ("5.downto(3.14) { }", "TypeError",     "no implicit conversion of Float into Integer"),
+        ("5.downto(\"x\") { }", "ArgumentError", "comparison of Integer with String failed"),
         ("5.downto { }",       "ArgumentError", "wrong number of arguments (given 0, expected 1)"),
         ("5.times(99) { }",    "ArgumentError", "wrong number of arguments (given 1, expected 0)"),
         ("5.times(1, 2) { }",  "ArgumentError", "wrong number of arguments (given 2, expected 0)"),
@@ -700,20 +705,20 @@ fn bigint_iter_arity_and_coerce_errors_match_cruby() {
             "ArgumentError",
             "wrong number of arguments (given 2, expected 1)",
         ),
-        (
-            format!("{}.upto(3.14) {{ }}", big),
-            "TypeError",
-            "no implicit conversion of Float into Integer",
-        ),
+        // Float endpoint for BigInt receiver: still TypeError —
+        // the Float arm only covers Int receivers; BigInt × Float
+        // hasn't been wired up (out of B.6 scope). Sibling case
+        // for non-numeric arg shifted to ArgumentError to match
+        // the Int-recv side.
         (
             format!("{}.downto(\"x\") {{ }}", big),
-            "TypeError",
-            "no implicit conversion of String into Integer",
+            "ArgumentError",
+            "comparison of Integer with String failed",
         ),
         (
             format!("{}.downto(nil) {{ }}", big),
-            "TypeError",
-            "no implicit conversion of nil into Integer",
+            "ArgumentError",
+            "comparison of Integer with nil failed",
         ),
     ] {
         let err = rt.eval(&script, "iter_arity.rb").unwrap_err();

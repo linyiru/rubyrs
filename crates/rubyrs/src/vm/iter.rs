@@ -1057,10 +1057,53 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Int(start)))
             }
+            // Float endpoint — CRuby `1.upto(13.3)` yields up to
+            // floor(13.3) == 13. NaN floor-cast produces 0; if
+            // start > 0 the loop yields nothing (matches CRuby).
+            // Infinity saturates to i64::MAX via `as i64` — the
+            // wall-clock deadline cap catches the runaway.
+            (Value::Int(start), "upto", [Value::Float(stop_f)]) => {
+                let start = *start;
+                let stop = stop_f.floor() as i64;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut i = start;
+                while i <= stop {
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                    i += 1;
+                }
+                Some(early.unwrap_or(Value::Int(start)))
+            }
             (Value::Int(start), "downto", [Value::Int(stop)]) => {
                 // Same pin rationale as Int#upto above.
                 let start = *start;
                 let stop = *stop;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut i = start;
+                while i >= stop {
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                    i -= 1;
+                }
+                Some(early.unwrap_or(Value::Int(start)))
+            }
+            // Mirror image of `upto` with a Float endpoint:
+            // CRuby `9.downto(1.3)` yields down to ceil(1.3) == 2.
+            (Value::Int(start), "downto", [Value::Float(stop_f)]) => {
+                let start = *start;
+                let stop = stop_f.ceil() as i64;
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
@@ -1297,10 +1340,12 @@ impl Vm {
             (Value::BigInt(_), "upto" | "downto", [other]) => {
                 // The loop arm above matched Int/BigInt stop; if we
                 // reach here the stop is some other type. CRuby
-                // raises TypeError (coerce failure).
-                return Err(self.trap(crate::error::RubyError::TypeError {
+                // raises ArgumentError ("comparison of Integer
+                // with X failed") — see the Int sibling arm below
+                // for the rationale.
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
                     msg: format!(
-                        "no implicit conversion of {} into Integer",
+                        "comparison of Integer with {} failed",
                         crate::vm::numeric::type_name_for_coerce(other),
                     ),
                 }));
@@ -1344,11 +1389,18 @@ impl Vm {
                 }));
             }
             (Value::Int(_), "upto" | "downto", [other]) => {
-                // Single-arg shape but arg is non-Integer (Float,
-                // String, nil, Symbol, …). CRuby coerce error.
-                return Err(self.trap(crate::error::RubyError::TypeError {
+                // Single-arg shape but arg is non-numeric (String,
+                // nil, Symbol, …). CRuby raises ArgumentError
+                // ("comparison of Integer with X failed") here,
+                // not TypeError — the upto/downto loop uses `<=>`
+                // internally, and the comparison failure surfaces
+                // as ArgumentError. Float endpoints are accepted
+                // by the Float arms above, so by this point the
+                // arg is genuinely non-numeric. BigInt arg would
+                // already be handled by the BigInt arm above.
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
                     msg: format!(
-                        "no implicit conversion of {} into Integer",
+                        "comparison of Integer with {} failed",
                         crate::vm::numeric::type_name_for_coerce(other),
                     ),
                 }));
