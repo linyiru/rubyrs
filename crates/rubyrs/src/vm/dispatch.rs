@@ -212,9 +212,6 @@ impl Vm {
         }
     }
 
-    /// Parse the first arg of a `send` / `__send__` call as the
-    /// target method name. Symbol passes through; String is
-    /// interned (CRuby's transparent `to_sym` on the name arg).
     /// Resolve a `Symbol` / `String` arg into a SymId for the ivar
     /// name, validating it against CRuby's ivar-name grammar:
     /// `@[A-Za-z_][A-Za-z0-9_]*`. Rejects:
@@ -264,6 +261,9 @@ impl Vm {
         }
     }
 
+    /// Parse the first arg of a `send` / `__send__` call as the
+    /// target method name. Symbol passes through; String is
+    /// interned (CRuby's transparent `to_sym` on the name arg).
     /// Anything else returns the CRuby-shape TypeError
     /// (`<inspect> is not a symbol nor a string`); zero args
     /// returns the CRuby-shape ArgumentError. Shared by all four

@@ -17,7 +17,7 @@ puts "direct=#{b.value}"
 puts "get-sym=#{b.instance_variable_get(:@value)}"
 
 ## Read by String — same result.
-puts "get-str=#{b.instance_variable_get("@value")}"
+puts "get-str=#{b.instance_variable_get('@value')}"
 
 ## Reading an undefined ivar returns nil (CRuby semantics:
 ## no warning, no NameError).
@@ -29,7 +29,7 @@ puts "set-ret=#{ret}"
 puts "direct-after-set=#{b.value}"
 
 ## Write by String.
-b.instance_variable_set("@value", 99)
+b.instance_variable_set('@value', 99)
 puts "direct-after-str-set=#{b.value}"
 
 ## Write a new (previously-unset) ivar — succeeds; subsequent
@@ -113,6 +113,20 @@ puts "class-get-after=#{Holder.instance_variable_get(:@registry)}"
 [42, "hi", :sym, [1], {a: 1}].each do |v|
   puts "respond_to-#{v.class}-get=#{v.respond_to?(:instance_variable_get)}"
   puts "respond_to-#{v.class}-set=#{v.respond_to?(:instance_variable_set)}"
+end
+
+## Primitive-receiver semantics. respond_to? returning true
+## (above) is only meaningful if the actual call behaves
+## as documented: get returns nil; set raises FrozenError.
+## Exercise an Integer receiver explicitly so a regression
+## that ICE's (or silently returns the wrong shape) trips
+## here instead of much later in a downstream gem.
+puts "int-get=#{42.instance_variable_get(:@x).inspect}"
+begin
+  42.instance_variable_set(:@x, 1)
+  puts "int-set=NOT-RAISED"
+rescue FrozenError => e
+  puts "int-set=#{e.class}"
 end
 
 ## Wrong-arity: CRuby raises ArgumentError with the standard
