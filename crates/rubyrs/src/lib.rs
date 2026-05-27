@@ -497,6 +497,15 @@ impl Runtime {
             "<rubyrs:preamble:mutex>",
         )
             .expect("ICE: failed to load Mutex preamble");
+        // Thread — single-threaded Tier 1 stub. Only
+        // `Thread.current.object_id` is modeled (tilt uses it to
+        // suffix compiled-method names). See preamble/thread.rb
+        // for the divergence surface.
+        self.eval(
+            include_str!("preamble/thread.rb"),
+            "<rubyrs:preamble:thread>",
+        )
+            .expect("ICE: failed to load Thread preamble");
         const PREAMBLE: &str = r#"
 ## Stub classes for built-in types. Without these, `5.class` and
 ## friends have nothing to return; the bodies stay empty because
