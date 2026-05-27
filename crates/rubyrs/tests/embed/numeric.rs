@@ -1490,6 +1490,70 @@ fn by_aggregators_cmp_int_float_is_lossless() {
     ]);
 }
 
+#[test]
+fn integer_bit_predicates_arity_typeerror() {
+    // Pin the `allbits?` / `anybits?` / `nobits?` arity guards
+    // and the non-Integer-arg TypeError, sibling to the bit-op
+    // guards landed in PR #211. Covers Int recv on both profiles;
+    // BigInt recv pinned where the bignum feature is on.
+    let mut rt = rubyrs::Runtime::new();
+    // Happy paths first — ensure all 3 selectors dispatch.
+    for (script, expected) in [
+        ("p 42.allbits?(42)", "true"),
+        ("p 42.anybits?(42)", "true"),
+        ("p 42.nobits?(42)", "false"),
+        ("p 0b0100_0101.nobits?(0b1010_1010)", "true"),
+        ("p (-42).allbits?(-42)", "true"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "predicates.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Arity: 0 args + 2+ args → ArgumentError. Cover both Int
+    // recv (numeric.rs's guard) and BigInt recv (bignum.rs's
+    // sibling guard added per PR #241 cycle 3 review — previously
+    // BigInt fell through to NoMethodError).
+    for (script, given) in [
+        ("5.send(:allbits?)", 0),
+        ("5.send(:anybits?, 1, 2)", 2),
+        ("5.send(:nobits?, 1, 2, 3)", 3),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:allbits?)", 0),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:anybits?, 1, 2)", 2),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:nobits?, 1, 2, 3)", 3),
+    ] {
+        let err = rt.eval(script, "predicates_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "ArgumentError", "for {:?}", script);
+                assert_eq!(
+                    message,
+                    format!("wrong number of arguments (given {}, expected 1)", given),
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected ArgumentError for {:?}, got {:?}", script, other),
+        }
+    }
+    // Non-Integer arg → TypeError.
+    for script in ["13.allbits?(\"10\")", "13.anybits?(:sym)", "13.nobits?(3.5)"] {
+        let err = rt.eval(script, "predicates_type.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "TypeError", "for {:?}", script);
+                assert!(
+                    message.starts_with("no implicit conversion of "),
+                    "for {:?}: {:?}", script, message,
+                );
+            }
+            other => panic!("expected TypeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_cmp_float_is_lossless() {

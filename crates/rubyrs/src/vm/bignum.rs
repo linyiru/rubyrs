@@ -875,6 +875,52 @@ impl Vm {
         Ok(Some(self.bigint_to_value(result)?))
     }
 
+    /// Bit-mask predicates `allbits?` / `anybits?` / `nobits?`
+    /// on Integer × Integer where at least one side is BigInt.
+    /// Sibling helper to `try_bigint_bit_binop` — same arg-type
+    /// guard (non-Integer raises CRuby's "no implicit conversion"
+    /// TypeError) and same Cow-based borrow discipline (no clones
+    /// for BigInt sides; Int wraps via owned `BigInt::from(n)`).
+    /// Returns the boolean result directly (no `bigint_to_value`
+    /// hop), since `Value::Bool` doesn't allocate.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_bit_predicate(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        arg: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        if !matches!(recv, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        if !matches!(arg, Value::Int(_) | Value::BigInt(_)) {
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    crate::vm::numeric::type_name_for_coerce(arg),
+                ),
+            }));
+        }
+        let ax = match self.as_bigint_ref(recv) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let bx = match self.as_bigint_ref(arg) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        use num_traits::Zero;
+        let masked = &*ax & &*bx;
+        let result = match name {
+            "allbits?" => masked == *bx,
+            // `is_zero()` from num_traits avoids the
+            // `BigInt::from(0)` allocation that the literal
+            // comparison would do on every call.
+            "anybits?" => !masked.is_zero(),
+            "nobits?"  => masked.is_zero(),
+            _ => return Ok(None),
+        };
+        Ok(Some(Value::Bool(result)))
+    }
+
     /// Bitwise shifts `<<` / `>>` with BigInt promotion.
     ///
     /// CRuby semantics (two's-complement, arbitrary precision):
@@ -1449,6 +1495,38 @@ impl Vm {
             && let Some(v) = self.try_bigint_bit_binop(recv, name, &args[0])?
         {
             return Ok(Some(v));
+        }
+        // Bit-mask predicates `allbits?` / `anybits?` / `nobits?`
+        // — same recv/arg shape as `&|^` above. numeric.rs's pure
+        // Int×Int arm handles the fixnum happy path; this fires
+        // for the mixed shapes (`big.allbits?(0xff)`,
+        // `0xff.allbits?(big)`, `big.allbits?(big)`). Defined as
+        //   allbits?(m): (recv & m) == m
+        //   anybits?(m): (recv & m) != 0
+        //   nobits?(m):  (recv & m) == 0
+        if args.len() == 1
+            && matches!(name, "allbits?" | "anybits?" | "nobits?")
+            && let Some(v) = self.try_bigint_bit_predicate(recv, name, &args[0])?
+        {
+            return Ok(Some(v));
+        }
+        // BigInt-recv arity guard for the bit predicates. The
+        // 1-arg dispatch above handles the happy path; the Int-recv
+        // arity guard in numeric.rs only catches Int receivers, so
+        // `(2**64).allbits?` / `(2**64).anybits?(1, 2)` would
+        // otherwise fall through to NoMethodError despite
+        // `respond_to?` advertising the methods. Sibling to the
+        // Int-side guard (numeric.rs L346).
+        if matches!(recv, Value::BigInt(_))
+            && matches!(name, "allbits?" | "anybits?" | "nobits?")
+            && args.len() != 1
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args.len(),
+                ),
+            }));
         }
         // Bitwise shifts `<<` / `>>`. Fires for any Integer recv +
         // any Integer arg, including the Int×Int overflow path

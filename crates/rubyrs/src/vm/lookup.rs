@@ -470,6 +470,7 @@ impl Vm {
                 "succ" | "next" | "pred" | "-@" | "+@" |
                 "times" | "upto" | "downto" |
                 "digits" | "bit_length" | "[]" |
+                "allbits?" | "anybits?" | "nobits?" |
                 "eql?" | "hash"
             ),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
@@ -498,6 +499,7 @@ impl Vm {
                 "zero?" | "positive?" | "negative?" |
                 "even?" | "odd?" |
                 "bit_length" | "digits" |
+                "allbits?" | "anybits?" | "nobits?" |
                 "times" | "upto" | "downto" |
                 "succ" | "next" | "pred" |
                 "eql?" | "hash"
