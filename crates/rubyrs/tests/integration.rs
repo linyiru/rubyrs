@@ -134,6 +134,19 @@ fn env_cap_typo_warns_on_stderr() {
 #[test] fn err_nomethod() { run_error_fixture("nomethod"); }
 #[test] fn err_wrong_args() { run_error_fixture("wrong_args"); }
 #[test] fn err_yield_no_block() { run_error_fixture("yield_no_block"); }
+
+// Divergence ratchets — fixtures that pin rubyrs's CURRENT divergent
+// behavior against CRuby. Each fixture's body documents the gap
+// inline + the spec block it un-locks once the underlying behavior
+// is brought into line; the `.expected` golden matches rubyrs today.
+// When a future PR fixes the gap, the golden mismatch fires + the
+// fix PR deletes the ratchet fixture and un-skips the matching
+// `# skipped (divergent):` trace in `spec/ruby/*.rb`. Surfaced from
+// the spec-ingestion arc in PR #167 / #158 / #188.
+#[test] fn divergence_array_first_bignum() { run_fixture("divergence_array_first_bignum"); }
+#[test] fn divergence_string_strip_nul() { run_fixture("divergence_string_strip_nul"); }
+#[test] fn divergence_hash_eql_keys() { run_fixture("divergence_hash_eql_keys"); }
+#[test] fn divergence_hash_fetch_arity() { run_fixture("divergence_hash_fetch_arity"); }
 // `break`/`next` through an `ensure` body inside a `while` loop is
 // implemented with full Ruby semantics (run the ensure body, then
 // complete the structured transfer). The defensive `NotImplementedError`

@@ -1,0 +1,6 @@
+strip:  "\u0000 hello \u0000"
+lstrip: "\u0000 hello"
+rstrip: "hello \u0000"
+strip:  "hello"
+lstrip: "hello"
+rstrip: "hello"
