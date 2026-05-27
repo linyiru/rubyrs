@@ -32,6 +32,8 @@ mod gc;
 mod misc;
 #[path = "embed/numeric.rs"]
 mod numeric;
+#[path = "embed/reset.rs"]
+mod reset;
 #[path = "embed/resource_caps.rs"]
 mod resource_caps;
 #[path = "embed/tier1_capability.rs"]

@@ -696,6 +696,61 @@ impl Vm {
         std::mem::replace(&mut self.bypass_visibility_once, false)
     }
 
+    /// Compute the maximum SymId still referenced by long-lived
+    /// VM tables that must stay valid across `Runtime::reset` —
+    /// `host_fns` (host-registered Ruby methods), and the two
+    /// cext method tables. `Runtime::reset` uses this to floor
+    /// the interner truncation so post-construction-registered
+    /// names don't get their SymIds invalidated.
+    ///
+    /// `None` when all three tables are empty (no host or cext
+    /// registrations) — caller treats this as "truncate to
+    /// `snapshot.interner_len` unconditionally".
+    ///
+    /// Returns `usize` (the underlying repr of SymId) so the
+    /// caller can do `keep_len = max(snapshot_len, this + 1)`
+    /// directly. Walking all three tables on every reset is
+    /// O(num_registered_methods); when cext libraries grow large,
+    /// an incremental cache on each register-site would be
+    /// cheaper — flagged as future work in PR #212's review.
+    pub(crate) fn long_lived_sym_id_max(&self) -> Option<usize> {
+        let mut max: Option<usize> = self
+            .host_fns
+            .keys()
+            .map(|sym| sym.0 as usize)
+            .max();
+        for inner in self.cext_class_methods.values() {
+            if let Some(m) = inner.keys().map(|sym| sym.0 as usize).max() {
+                max = Some(max.map_or(m, |c| c.max(m)));
+            }
+        }
+        for inner in self.cext_instance_methods.values() {
+            if let Some(m) = inner.keys().map(|sym| sym.0 as usize).max() {
+                max = Some(max.map_or(m, |c| c.max(m)));
+            }
+        }
+        max
+    }
+
+    /// Reset every "control flow signal" flag — the per-call
+    /// state Op handlers set to communicate break / return /
+    /// loop-transfer / suppress-result / bypass-visibility
+    /// requests across the dispatch loop. Called from both
+    /// `Runtime::eval`'s entry (so a previous eval that left
+    /// signals set doesn't bleed into the next) and
+    /// `Runtime::reset` (same intent, different trigger). One
+    /// helper means a future signal that's added to this set
+    /// can't be missed at one site and present at the other —
+    /// the kind of drift that's caused real bugs elsewhere in
+    /// this codebase.
+    pub(crate) fn clear_control_flow_signals(&mut self) {
+        self.break_signaled = false;
+        self.method_return = None;
+        self.pending_loop_transfer = None;
+        self.suppress_call_result_push = false;
+        self.bypass_visibility_once = false;
+    }
+
     pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         Ok(match recv {
             Value::Array(id) => return self.array_collection_call(*id, name, args),
