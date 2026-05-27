@@ -135,6 +135,21 @@ rescue TypeError
   puts "eval(bad-file) → TypeError"
 end
 
+# --- Non-Integer line arg raises TypeError (CRuby parity).
+#     Float is accepted (has `to_int`), but String/Symbol/nil aren't.
+begin
+  eval("1", nil, "file", "not-int")
+rescue TypeError
+  puts "eval(bad-line) → TypeError"
+end
+class LineCheck
+end
+begin
+  LineCheck.class_eval("1", "file", "not-int")
+rescue TypeError
+  puts "class_eval(bad-line) → TypeError"
+end
+
 # --- Wrong arity raises ArgumentError (1..3 supported) ---
 class ArityCheck
 end

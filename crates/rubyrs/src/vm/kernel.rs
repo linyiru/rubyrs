@@ -788,6 +788,21 @@ impl Vm {
                         ),
                     })))
                 }
+                // 4-arg with non-Integer-coercible line arg: CRuby
+                // raises TypeError "no implicit conversion of X
+                // into Integer". Accept Int and Float (Float has
+                // `to_int` in CRuby); reject everything else even
+                // though we ultimately ignore the line offset.
+                // Silent acceptance would mask caller bugs.
+                [Value::Str(_), _binding, Value::Str(_), line_arg]
+                    if !matches!(line_arg, Value::Int(_) | Value::Float(_)) => {
+                    Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            line_arg.type_name()
+                        ),
+                    })))
+                }
                 [Value::Str(src), _binding, Value::Str(file)]
                 | [Value::Str(src), _binding, Value::Str(file), _] => {
                     let owned = src.to_string_lossy();

@@ -2174,6 +2174,20 @@ impl Vm {
                     ),
                 }));
             }
+            // Validate args[2] (line) when present: CRuby raises
+            // TypeError for non-Integer-coercible values. Accept
+            // Int and Float (Float has `to_int`); reject other
+            // types even though we ultimately ignore the line
+            // offset — silent acceptance would mask caller bugs.
+            if let Some(a2) = args.get(2)
+                && !matches!(a2, Value::Int(_) | Value::Float(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        a2.type_name()
+                    ),
+                }));
+            }
             let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
             let filename = match args.get(1) {
                 Some(Value::Str(f)) => f.to_string_lossy(),
