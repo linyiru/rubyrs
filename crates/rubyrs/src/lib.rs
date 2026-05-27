@@ -1829,6 +1829,41 @@ mod caps_guard_tests {
     /// field between evals MUST NOT show the drained value the
     /// prior eval left behind. Symmetric: the cleanup applies
     /// whether the eval succeeded, trapped, or ran unbounded.
+    /// `Runtime::reset` must keep preamble filenames in
+    /// `vm.sources`. Companion to
+    /// `tests/embed/reset.rs::reset_preserves_preamble_source_locations`
+    /// which pins the contract through the public
+    /// `Method#source_location` surface. This in-crate test
+    /// pins the internal invariant directly: the HashMap keys
+    /// must include the preamble fragment names after reset.
+    /// A future refactor that moves preamble source-text to
+    /// a different lookup path would silently still pass the
+    /// surface test (line numbers would resolve through the
+    /// new path); this test would fail loudly because it
+    /// inspects `vm.sources` directly.
+    #[test]
+    fn reset_keeps_preamble_filenames_in_vm_sources() {
+        let mut rt = Runtime::new();
+        // Sanity: post-construction, vm.sources has the preamble
+        // entries that load_preamble populated.
+        let pre = rt.vm.sources.contains_key("<rubyrs:preamble:exceptions>");
+        assert!(pre, "preamble:exceptions must be in vm.sources after with_config");
+        // Pollute vm.sources with a user-eval entry, then reset.
+        // The user entry should disappear; the preamble entry
+        // should remain.
+        rt.eval("1 + 1", "user.rb").unwrap();
+        assert!(rt.vm.sources.contains_key("user.rb"));
+        rt.reset();
+        assert!(
+            rt.vm.sources.contains_key("<rubyrs:preamble:exceptions>"),
+            "preamble:exceptions must survive reset",
+        );
+        assert!(
+            !rt.vm.sources.contains_key("user.rb"),
+            "user.rb must be dropped by reset",
+        );
+    }
+
     #[test]
     fn eval_clears_per_eval_working_counters_post_run() {
         // Bounded fuel + bounded deadline → both should clear.
