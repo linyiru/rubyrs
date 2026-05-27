@@ -90,6 +90,11 @@ pub struct Config {
     /// `ResourceExhausted` trap. Includes ops inside blocks via
     /// `dispatch_until`, so a runaway `[1].each { while true ... }`
     /// cannot bypass the limit.
+    ///
+    /// The budget is per-`eval`: each call re-anchors the working
+    /// counter to `n`, so a host can reuse a Runtime across many
+    /// short evaluations and each gets a fresh `n` ops. Symmetric
+    /// with `deadline` below.
     pub fuel: Option<u64>,
     /// If `Some(n)`, allocating past `n` simultaneously-live heap
     /// objects (Instance / Array / Hash) returns a `ResourceExhausted`
@@ -320,21 +325,12 @@ impl<'a> HostCtx<'a> {
 /// preamble set up.
 pub struct Runtime {
     vm: vm::Vm,
-    /// Per-`eval` fuel budget. The host's intended ceiling
-    /// (`Config::fuel`) lives here; `vm.fuel` is the working
-    /// counter `check_fuel` decrements per op. Each `eval()`
-    /// re-anchors `vm.fuel = self.fuel_budget` at entry so a
-    /// host that reuses a Runtime across many evals sees each
-    /// call get a fresh budget — symmetric with `deadline`
-    /// below. `None` means unlimited.
-    ///
-    /// Stored on `Runtime` (not `Vm`) so `apply_config` can
-    /// update host intent without disturbing the per-eval
-    /// counter, and so `reset()` doesn't need to touch fuel at
-    /// all (the next eval refills it). Replaces the pre-#222
-    /// shape where `Config::fuel` went straight to `vm.fuel`
-    /// and was consumed monotonically across the Runtime's
-    /// lifetime.
+    /// Host's per-`eval` fuel ceiling (`Config::fuel`); `vm.fuel`
+    /// is re-anchored from this at every `eval` entry. Stored on
+    /// Runtime so `apply_config` can update intent without
+    /// disturbing the per-op working counter and `reset()` doesn't
+    /// need to touch fuel. `None` means unlimited. Symmetric with
+    /// `deadline` below.
     fuel_budget: Option<u64>,
     /// Per-`eval` wall-clock budget (P2-14a). Retained as a
     /// Duration; an absolute `Instant` is computed at the start of

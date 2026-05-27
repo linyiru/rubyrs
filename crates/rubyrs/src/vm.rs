@@ -409,8 +409,10 @@ pub(crate) struct Vm {
     pub(crate) pinned: Vec<Value>,
     pub(crate) stdout: Box<dyn std::io::Write>,
     pub(crate) stress_gc: bool,
-    /// Remaining fuel; `Some(0)` means exhausted, `None` means unlimited.
-    /// Decremented per op dispatched. Configured by `Config::fuel`.
+    /// Per-eval working counter; `Some(0)` means exhausted, `None`
+    /// means unlimited. Re-anchored at each `Runtime::eval` entry
+    /// from `Runtime::fuel_budget` (which `apply_config` writes
+    /// from `Config::fuel`); decremented per op by `check_fuel`.
     pub(crate) fuel: Option<u64>,
     /// Maximum simultaneously-live frames. `frames.push()` checks this
     /// against `frames.len()` before pushing. Default `None` is unlimited.
