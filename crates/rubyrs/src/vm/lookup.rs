@@ -618,6 +618,13 @@ impl Vm {
                     // when `self` is a Class. Keep this list in lockstep
                     // with the bridge whitelist there.
                     | "class_eval" | "module_eval"
+                    // Runtime-dispatch `Module#define_method` arm in
+                    // dispatch.rs accepts both explicit-receiver and
+                    // no_recv (bare-call inside class_eval) shapes on
+                    // any Class/Module. Feature-detection has to
+                    // agree: `C.respond_to?(:define_method)` should
+                    // be true if dispatch will accept the call.
+                    | "define_method"
                 ) {
                     return true;
                 }

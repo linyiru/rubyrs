@@ -85,3 +85,40 @@ Closure.define_method(:bump) {
 puts "closure-1=#{Closure.new.bump}"
 puts "closure-2=#{Closure.new.bump}"
 puts "closure-3=#{Closure.new.bump}"
+
+## respond_to?(:define_method) on a Class — feature detection
+## must agree with what dispatch will accept (Copilot review
+## #245 round 1). Pre-fix the Class whitelist in
+## `Vm::responds_to` omitted `define_method`, so this returned
+## false even though the call works.
+class FeatureCheck; end
+puts "respond-to-define-method=#{FeatureCheck.respond_to?(:define_method)}"
+
+## String name returns the interned symbol (`:from_str`), same
+## as Symbol-name path — pins return-value shape for the
+## String→Sym intern arm.
+class StringName; end
+sym_back = StringName.define_method("from_str") { "ok" }
+puts "string-name-returns=#{sym_back.inspect}"
+puts "string-name-call=#{StringName.new.from_str.inspect}"
+
+## User-defined `def self.define_method(...)` on a class
+## overrides the built-in intrinsic (Copilot review #245
+## round 1). Singleton-method precedence parallels
+## `Module.new` / `Hash.new`.
+class Overridden
+  def self.define_method(*a, &blk)
+    "user-override:#{a.inspect}:block=#{!blk.nil?}"
+  end
+end
+puts "override=#{Overridden.define_method(:ignored) { nil }}"
+
+## Parsed `def name; ...; end` returns `:name` (Symbol) — pin
+## CRuby's documented return value. Pre-fix rubyrs's
+## `Op::DefMethodBlock` returned nil; aligned with the
+## runtime-dispatch path in #245 round 1.
+class DefReturn
+  result = define_method(:from_def) { 42 }
+  RESULT = result
+end
+puts "def-return=#{DefReturn::RESULT.inspect}"

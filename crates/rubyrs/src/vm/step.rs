@@ -1537,7 +1537,14 @@ impl Vm {
                 if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 self.method_gen = self.method_gen.wrapping_add(1);
-                self.stack.push(Value::Nil);
+                // CRuby: `def name; …; end` evaluates to `:name`,
+                // and `define_method(:foo) { … }` returns `:foo`.
+                // Align this parsed-def install path with the
+                // runtime-dispatch `Module#define_method` arm
+                // (vm/dispatch.rs) so `x = define_method(:foo) {}`
+                // returns the same Symbol regardless of whether
+                // the compiler intercept fires.
+                self.stack.push(Value::Sym(name_id));
             }
             Op::DefObjectSingletonMethodBlock(name_id) => {
                 // `recv.define_singleton_method(:foo) { |args| ... }`

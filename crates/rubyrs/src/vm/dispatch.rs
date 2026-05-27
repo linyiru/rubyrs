@@ -5134,6 +5134,19 @@ impl Vm {
                 }
                 _ => None,
             };
+            // Precedence rule (parallels `Module.new` / `Hash.new`):
+            // a user-defined `def self.define_method(...)` on the
+            // receiver (or its singleton-prepended chain) wins over
+            // the built-in intrinsic. Without this check, override
+            // attempts silently shadow into this arm. Only consult
+            // when we actually resolved a target class — otherwise
+            // fall through to normal dispatch (which will raise
+            // NoMethodError on the non-Class receiver).
+            if let Some(cls) = &target_cls
+                && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                let recv_val = Value::Class(cls.clone());
+                return self.invoke_method_with_block(m, recv_val, args, Some(block));
+            }
             if let Some(target_cls) = target_cls {
                 if args.len() != 1 {
                     return Err(self.trap(RubyError::ArgumentError {
@@ -5145,7 +5158,23 @@ impl Vm {
                 }
                 let name_sym = match &args[0] {
                     Value::Sym(s) => *s,
-                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    Value::Str(s) => {
+                        // Same `Config::max_symbols` cap as
+                        // `parse_send_target` / `resolve_ivar_name_arg`
+                        // — without this, untrusted code could grow
+                        // the interner unbounded via
+                        // `cls.define_method("dyn_#{i}") {}` in a loop.
+                        // Existing symbols always re-resolve; only
+                        // fresh names count against the cap.
+                        let raw = s.to_string_lossy();
+                        if let Some(max) = self.max_symbols
+                            && !self.interner.contains(&raw) && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                        self.interner.intern(&raw)
+                    }
                     other => return Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "wrong argument type {} (expected Symbol or String)",
