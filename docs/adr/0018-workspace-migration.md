@@ -254,7 +254,7 @@ call on out-of-i64 values. Lifecycle by PR:
 | B.1 | Base arithmetic, comparison, to_s/inspect, predicates, auto-promote/demote | — (pre-A) |
 | B.2 | `-@` / `+@` / `abs` with i64::MIN promote | #121 |
 | B.3 | `~` / `& \| ^` / `<< >>` two's-complement bit ops + DoS cap | #159 |
-| B.4 | `to_s(radix)` + sprintf `%d/%b/%o/%x` + shared cap estimator | #138 |
+| B.4 | `to_s(radix)` + sprintf `%d/%i/%b/%B/%o/%x/%X` + shared cap estimator | #138 |
 | B.5 | `pow(exp[, mod])` + `bit_length` + `digits` | #123, #129 |
 | B.6 | `times` / `upto` / `downto` block iteration | #174 |
 | B.7 | `eql?` / `hash` / `Object#equal?` BigInt arm | #171 |

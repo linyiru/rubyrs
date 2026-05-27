@@ -17,7 +17,7 @@
 //!     impls). Left-shift DoS cap mirrors `try_bigint_pow`'s
 //!     estimator. `try_int_shl_lossless` in `numeric.rs` handles
 //!     the Int×Int overflow promote path.
-//!   - **B.4** — `to_s(radix)` + sprintf `'%d/%b/%o/%x' % big`.
+//!   - **B.4** — `to_s(radix)` + sprintf `'%d/%i/%b/%B/%o/%x/%X' % big`.
 //!     Shared scaled-integer log2 estimator
 //!     ([`bignum_digits_upper_bound`]) caps the pre-allocation
 //!     bound to within ±1 char of the true digit count across
