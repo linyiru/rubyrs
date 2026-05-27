@@ -478,6 +478,19 @@ impl Vm {
                     match name {
                         "-@" => -b,
                         "abs" => -b, // sign == Minus from check above
+                        // `~big` two's-complement bitwise NOT.
+                        // Identity: `~b == -(b + 1)`. num_bigint's
+                        // `std::ops::Not` impl does exactly this on
+                        // owned BigInt (converts to two's-complement
+                        // representation, NOTs, converts back).
+                        // `bigint_to_value` demotes-on-fit so
+                        // `~(2**63) == -(2**63 + 1)` stays BigInt
+                        // (just past i64::MIN) but `~(2**63 - 1) ==
+                        // -(2**63)` demotes to Int(i64::MIN). The
+                        // Int receiver `~n` path is unchanged in
+                        // numeric.rs because `!i64::MIN == i64::MAX`
+                        // fits without promotion.
+                        "~" => !b.clone(),
                         _ => return Ok(None),
                     }
                 };
@@ -878,8 +891,12 @@ impl Vm {
         {
             return Ok(Some(v));
         }
-        // Cond 2 — see entry-conditions doc above.
-        if args.is_empty() && matches!(name, "-@" | "+@" | "abs")
+        // Cond 2 — see entry-conditions doc above. `~` joins the
+        // arity-0 unary group: numeric.rs's `(Int, "~", [])` arm
+        // handles Int receivers (no promotion — `!i64::MIN` fits
+        // in i64), but BigInt receivers need the two's-complement
+        // `-(b + 1)` form via try_bigint_unary.
+        if args.is_empty() && matches!(name, "-@" | "+@" | "abs" | "~")
             && let Some(v) = self.try_bigint_unary(recv, name)?
         {
             return Ok(Some(v));

@@ -2622,6 +2622,44 @@ fn sprintf_radix_int_min_does_not_panic() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_bitwise_not_uses_twos_complement_identity() {
+    // Phase B.3: BigInt bit ops. `~big` is two's-complement
+    // bitwise NOT — equivalent to `-(big + 1)` for any sign.
+    // Numeric.rs's `(Int, "~", [])` arm handles Int receivers
+    // (since `!i64::MIN == i64::MAX` fits without promotion),
+    // but BigInt receivers need bigint_primitive's path.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // - `~(2**100)` = -(2^100 + 1) — stays BigInt.
+        // - `~(-(2**100))` = -(-(2^100) + 1) = 2^100 - 1 — stays BigInt.
+        // - `~(2**63)` = -(2^63 + 1) — one past i64::MIN, stays BigInt.
+        // - `~(2**63 - 1)` = -(2^63) = i64::MIN — demotes to Int via
+        //   bigint_to_value's demote-on-fit. Pins that the demote
+        //   funnel runs for `~` results too (catches a regression
+        //   where the bit-op path bypassed bigint_to_value).
+        // - `~~big == big` round-trip (involution).
+        "puts (~(2 ** 100)).to_s\n\
+         puts (~(-(2 ** 100))).to_s\n\
+         puts (~(2 ** 63)).to_s\n\
+         puts (~(2 ** 63 - 1)).to_s\n\
+         puts (~(2 ** 63 - 1)).class.name\n\
+         puts (~~(2 ** 100)).to_s == (2 ** 100).to_s",
+        "bigint_bitnot.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-1267650600228229401496703205377");
+    assert_eq!(lines[1], "1267650600228229401496703205375");
+    assert_eq!(lines[2], "-9223372036854775809");
+    assert_eq!(lines[3], "-9223372036854775808");
+    assert_eq!(lines[4], "Integer");
+    assert_eq!(lines[5], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {
     // Two distinct CRuby behaviours for negative integers in
     // non-decimal bases:
