@@ -435,7 +435,7 @@ impl Vm {
                         }));
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
-                    ("include?", [needle]) => {
+                    ("include?", [needle]) | ("member?", [needle]) => {
                         let a = self.heap.array(id);
                         let hit = a.iter().any(|x| x.ruby_eq(needle, &self.heap));
                         Some(Value::Bool(hit))

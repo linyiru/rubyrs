@@ -68,7 +68,7 @@ impl Vm {
                                 }
                                 return Ok(Some(Value::Int(n)));
                             }
-                            ("include?", [Value::Str(needle)]) | ("cover?", [Value::Str(needle)]) => {
+                            ("include?", [Value::Str(needle)]) | ("member?", [Value::Str(needle)]) | ("cover?", [Value::Str(needle)]) => {
                                 let n = needle.to_string_lossy();
                                 let lo_ok = n >= start;
                                 let hi_ok = if excl { n < stop } else { n <= stop };
@@ -182,7 +182,7 @@ impl Vm {
                             };
                             return Ok(Some(Value::Bool(lo_ok && hi_ok)));
                         }
-                        ("include?", [Value::Int(v)]) => {
+                        ("include?", [Value::Int(v)]) | ("member?", [Value::Int(v)]) => {
                             let lo_ok = match begin_int { Some(lo) => *v >= lo, None => true };
                             let hi_ok = match end_int {
                                 Some(hi) => if excl { *v < hi } else { *v <= hi },
@@ -300,7 +300,7 @@ impl Vm {
                     } else { e.clone() }),
                     ("size", []) | ("length", []) | ("count", []) => Some(Value::Int(count)),
                     ("exclude_end?", []) => Some(Value::Bool(excl)),
-                    ("include?", [Value::Int(v)]) => {
+                    ("include?", [Value::Int(v)]) | ("member?", [Value::Int(v)]) => {
                         let in_r = if excl { *v >= bi && *v < ei } else { *v >= bi && *v <= ei };
                         Some(Value::Bool(in_r))
                     }
@@ -317,7 +317,7 @@ impl Vm {
                     // BigInt-bound branch below handles the
                     // BigInt-bound case.)
                     #[cfg(feature = "bignum")]
-                    ("include?", [Value::BigInt(_)]) | ("cover?", [Value::BigInt(_)]) => {
+                    ("include?", [Value::BigInt(_)]) | ("member?", [Value::BigInt(_)]) | ("cover?", [Value::BigInt(_)]) => {
                         Some(Value::Bool(false))
                     }
                     // `r.cover?(other_range)` — true iff the

@@ -536,7 +536,7 @@ impl Vm {
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "unshift" | "prepend" |
                 "shift" | "pop" | "delete" | "reverse_each" |
-                "first" | "last" | "empty?" | "include?" |
+                "first" | "last" | "empty?" | "include?" | "member?" |
                 "count" | "sum" | "min" | "max" | "sort" | "tally" |
                 "combination" | "permutation" | "assoc" | "rassoc" | "pack" |
                 "inject" | "reduce" |
