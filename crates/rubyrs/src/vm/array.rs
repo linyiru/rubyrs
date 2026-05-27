@@ -112,13 +112,23 @@ impl Vm {
                             // across distinct objects (e.g.
                             // `1 == 1.0`), this is the highest-index
                             // hit BEFORE removal — not whatever the
-                            // last `remove` call happens to return.
+                            // last drop happens to surface.
                             let last_idx = *hits.last().unwrap();
                             let last = self.heap.array(id)[last_idx].clone();
+                            // Single O(n) `retain` pass driven by a
+                            // peekable iterator over the (ascending)
+                            // hit indices, instead of N × `Vec::remove`
+                            // (each of which shifts the tail and would
+                            // make a many-hit delete O(n²)).
                             let a = self.heap.array_mut(id);
-                            for &i in hits.iter().rev() {
-                                a.remove(i);
-                            }
+                            let mut hits_iter = hits.iter().copied().peekable();
+                            let mut i = 0usize;
+                            a.retain(|_| {
+                                let drop = hits_iter.peek() == Some(&i);
+                                if drop { hits_iter.next(); }
+                                i += 1;
+                                !drop
+                            });
                             Some(last)
                         }
                     }
