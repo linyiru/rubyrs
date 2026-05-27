@@ -86,8 +86,10 @@ end
 `Foo.get_bar` in CRuby returns 42. In rubyrs, compilation
 fails before any code runs. The minimal fix is to extend the
 `class << self` body whitelist to accept `ConstantWriteNode`
-(constant assignments) and store them on the singleton
-class's constants table — same place `def self.X` lives.
+(constant assignments) and store them on the same singleton
+class object that already holds `def self.X` (in its constants
+table, separate from the method table where `def self.X`
+lives).
 
 ### What this tells us
 
@@ -116,7 +118,7 @@ class's constants table — same place `def self.X` lives.
 | Cat H (real built-in / runtime gap) | 0 | None this pass |
 | Cat I (real bug) | 0 | None this pass |
 
-### Concrete next moves the data suggests
+### Concrete next moves suggested by the data
 
 1. **Extend `class << self` body whitelist to accept
    `ConstantWriteNode`** — closes layer #11 and unblocks the
