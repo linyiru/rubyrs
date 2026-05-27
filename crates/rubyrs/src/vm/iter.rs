@@ -1056,11 +1056,15 @@ impl Vm {
             //     regardless of how trivial the body is. Trips with
             //     `ResourceExhausted: "out of fuel"`.
             //   - `Config::deadline` — wall-clock cap, checked every
-            //     1024 ops by `vm/gc.rs::check_fuel` (the deadline
-            //     check piggybacks on the per-op fuel decrement so
-            //     `Instant::now()` only runs periodically). Trips
-            //     with `ResourceExhausted: "wall-clock deadline
-            //     exceeded"`.
+            //     1024 ops by `vm/gc.rs::check_fuel`. The deadline
+            //     check is unconditional (runs on every op
+            //     regardless of whether `Config::fuel` is set); it
+            //     shares the same `check_fuel` function as the fuel
+            //     decrement only because both fire on the same op
+            //     cadence (and bundling lets `Instant::now()` —
+            //     which is a syscall on most platforms — amortise
+            //     to once per 1024 ops). Trips with
+            //     `ResourceExhausted: "wall-clock deadline exceeded"`.
             // A host that configures NEITHER cap accepts unbounded
             // CPU consumption as a documented trade-off (consistent
             // with the rest of the runtime's "explicit opt-in" cap

@@ -465,9 +465,21 @@ fn integer_iter_loops_trap_under_fuel_cap() {
             ..Default::default()
         });
         let err = rt.eval(script, "iter_fuel.rb").unwrap_err();
+        // Pin the exact "out of fuel" message so the test fails
+        // closed if a future regression accidentally trips a
+        // different ResourceExhausted source (e.g. max_value_bytes,
+        // max_heap_objects, max_frames) — those caps aren't
+        // configured here, so reaching them would indicate the
+        // fuel guard slipped and a different cap caught it
+        // incidentally. Match on `&err.err` so the failure
+        // message can still include the actual error.
         assert!(
-            matches!(err.err, RubyError::ResourceExhausted { .. }),
-            "expected ResourceExhausted for {:?}, got {:?}", script, err.err,
+            matches!(
+                &err.err,
+                RubyError::ResourceExhausted { msg } if msg == "out of fuel"
+            ),
+            "expected ResourceExhausted(\"out of fuel\") for {:?}, got {:?}",
+            script, err.err,
         );
     }
 }
