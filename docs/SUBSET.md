@@ -508,6 +508,28 @@ they're handled as universal arms in `primitive_call` /
 Deliberate behavioural differences. Each is locked in by a
 test so it stays a choice, not drift.
 
+### Anonymous block forwarding outside `def foo(&)`
+
+```ruby
+def bar
+  inner(&)   # no enclosing `def bar(&)`
+end
+```
+
+- CRuby raises `SyntaxError: no anonymous block parameter` at
+  parse time.
+- rubyrs translates `inner(&)` to `inner(&local["&"])`, and the
+  read auto-creates the slot as `nil`. The call degenerates to
+  `inner(&nil)` — i.e. proceeds without a block. The callee
+  no-ops if it doesn't use the block; if it calls the block,
+  rubyrs raises `NoMethodError` on `nil.call` at runtime.
+- Why: pushing this diagnostic up to parse time would require
+  threading anonymous-block-availability through the AST
+  translator and SExpr context. The runtime behavior is still
+  a failure on the same call sites — same observable safety,
+  later diagnostic.
+- Test: `anon_block_forward` in `crates/rubyrs/tests/diff/`.
+
 ### `rescue` with an unresolved class name
 
 ```ruby
