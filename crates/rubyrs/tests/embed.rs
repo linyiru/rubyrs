@@ -1705,6 +1705,50 @@ fn sprintf_radix_int_min_does_not_panic() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn integer_eql_q_is_type_strict_equality() {
+    // Phase B.7: `Integer#eql?` is value equality restricted to
+    // matching numeric class. CRuby uses this (not `==`) for Hash
+    // key matching at the language level, so it must distinguish
+    // `5 == 5.0` (true) from `5.eql?(5.0)` (false). Pre-fix
+    // rubyrs raised NoMethodError on every `Integer#eql?` call.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Int receiver:
+        //   eql?(Int_same) → true
+        //   eql?(Int_diff) → false
+        //   eql?(Float) → false (type strict, even when values match)
+        //   eql?(BigInt) → false (canonical invariant)
+        //   eql?(String) → false
+        // BigInt receiver:
+        //   eql?(BigInt_same_value) → true (separate allocs OK)
+        //   eql?(BigInt_diff) → false
+        //   eql?(Int) → false (canonical invariant)
+        //   eql?(Float) → false (type strict)
+        // respond_to? whitelist covers both receivers.
+        "puts 5.eql?(5)\n\
+         puts 5.eql?(6)\n\
+         puts 5.eql?(5.0)\n\
+         puts 5.eql?(2 ** 100)\n\
+         puts 5.eql?(\"5\")\n\
+         puts (2 ** 100).eql?(2 ** 100)\n\
+         puts (2 ** 100).eql?(2 ** 100 + 1)\n\
+         puts (2 ** 100).eql?(5)\n\
+         puts (2 ** 100).eql?(2.0)\n\
+         puts 5.respond_to?(:eql?)\n\
+         puts (2 ** 100).respond_to?(:eql?)",
+        "integer_eql.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    assert_eq!(
+        out.trim(),
+        "true\nfalse\nfalse\nfalse\nfalse\ntrue\nfalse\nfalse\nfalse\ntrue\ntrue"
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_equal_q_is_object_identity_not_value_equality() {
     // Phase B.7: `Object#equal?` is BasicObject identity, not
     // value equality. For heap-managed types (Array, Hash, Str,

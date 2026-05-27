@@ -153,6 +153,31 @@ pub(crate) fn numeric_call(
                 ),
             });
         }
+        // `Integer#eql?(other)` — type-strict equality.
+        // - Int.eql?(Int) → magnitude equality
+        // - Int.eql?(Float) → always false (`5.eql?(5.0) == false`),
+        //   even though `5 == 5.0`. This is the whole point of
+        //   `eql?` vs `==`.
+        // - Int.eql?(BigInt) → always false. The canonical-BigInt
+        //   invariant guarantees any `Value::BigInt` is outside
+        //   i64, so no Int and BigInt can share a value.
+        // - Anything else → false. Hash's internal key lookup
+        //   doesn't go through user-facing `eql?` (it uses ruby_eq
+        //   directly), but exposing the method matters for pure-
+        //   Ruby code that gates on `respond_to?(:eql?)` or
+        //   delegates to it.
+        //
+        // Lives BEFORE the broad `(Int, op, [Int])` coercion arm
+        // because that arm's inner-op match would otherwise shadow
+        // this (None-fallthrough inside the inner match doesn't
+        // surface to the outer pattern walk — same lesson as the
+        // `to_s(radix)` / `pow(exp)` / `Integer#[]` arms above).
+        (Value::Int(a), "eql?", [other]) => {
+            Some(Value::Bool(match other {
+                Value::Int(b) => a == b,
+                _ => false,
+            }))
+        }
         // `Integer#pow(exp)` — 1-arg form is an alias for `**` for
         // numeric exponents (Int / Float / BigInt under bignum).
         // Sits BEFORE the broader `(Int, op, [Int])` arm because

@@ -1387,6 +1387,24 @@ impl Vm {
         {
             return Ok(Some(v));
         }
+        // `Integer#eql?(other)` on BigInt receiver — type-strict
+        // equality. Only true when `other` is also a BigInt AND the
+        // two magnitudes match (separately-allocated BigInts of
+        // equal value pass). The canonical-BigInt invariant
+        // guarantees Int and BigInt can't share a value, so
+        // `(2**64).eql?(some_int)` is always false. Mirrors
+        // numeric.rs's Int-receiver arm.
+        if args.len() == 1 && name == "eql?"
+            && let Value::BigInt(id) = recv
+        {
+            let same = match &args[0] {
+                Value::BigInt(other_id) => {
+                    *id == *other_id || self.heap.bigint(*id) == self.heap.bigint(*other_id)
+                }
+                _ => false,
+            };
+            return Ok(Some(Value::Bool(same)));
+        }
         // `<=>` — universal three-way comparison. Not in BinOpKind
         // (it returns Int not Bool, so the BinOp machinery doesn't
         // model it), so we handle it here for Int/BigInt operands.

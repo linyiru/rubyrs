@@ -456,21 +456,24 @@ impl Vm {
                 "zero?" | "positive?" | "negative?" |
                 "succ" | "next" | "pred" | "-@" | "+@" |
                 "times" | "upto" | "downto" |
-                "digits" | "bit_length" | "[]"
+                "digits" | "bit_length" | "[]" |
+                "eql?" | "hash"
             ),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
             // unary (`-@`/`+@`/`abs`) + Phase B.3 bit ops (`~`,
             // `& | ^`, `<< >>`) + Phase B.5 `pow(exp, mod)` +
-            // Phase B.5 leftover (`bit_length`, `digits`) —
-            // arithmetic, comparison, to_s/inspect, pure predicates,
+            // Phase B.5 leftover (`bit_length`, `digits`) + Phase
+            // B.7 hash-key surface (`eql?`, `hash`) — arithmetic,
+            // comparison, to_s/inspect, pure predicates,
             // exponentiation (auto-promote / DoS-capped), unary
             // sign/magnitude, two's-complement bit ops, modular
-            // exponentiation, two's-complement bit count, and
-            // base-N digit decomposition. Iteration helpers
-            // (`times`, `upto`, `downto`) remain unshipped Phase B
-            // groups. The predicates below only READ the bigint to
-            // compute a Bool/Int, so they fit cleanly in the
-            // existing bigint_primitive shape.
+            // exponentiation, two's-complement bit count, base-N
+            // digit decomposition, and the canonical-equality
+            // entry points. Iteration helpers (`times`, `upto`,
+            // `downto`) remain unshipped Phase B groups. The
+            // predicates below only READ the bigint to compute a
+            // Bool/Int, so they fit cleanly in the existing
+            // bigint_primitive shape.
             #[cfg(feature = "bignum")]
             Value::BigInt(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
@@ -481,7 +484,8 @@ impl Vm {
                 "to_i" | "to_f" |
                 "zero?" | "positive?" | "negative?" |
                 "even?" | "odd?" |
-                "bit_length" | "digits"
+                "bit_length" | "digits" |
+                "eql?" | "hash"
             ),
             Value::Float(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" |
