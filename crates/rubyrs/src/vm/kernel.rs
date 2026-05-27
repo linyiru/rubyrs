@@ -53,6 +53,7 @@ impl Vm {
                 | "__defined_ivar?"
                 | "__defined_method?"
                 | "__defined_const?"
+                | "eval"
         )
     }
 
@@ -180,6 +181,7 @@ impl Vm {
                         "puts" | "p" | "pp" | "print" | "require" |
                         "sprintf" | "format" | "__time_now_raw" |
                         "Integer" | "Float" | "String" | "Array" |
+                        "eval" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
                     );
                     let host_hit = self.host_fns.contains_key(sid);
@@ -737,6 +739,99 @@ impl Vm {
             "require_relative" => Some(Err(self.trap(RubyError::RuntimeError {
                 msg: "require_relative: file I/O not available on wasm32-wasi".into(),
             }))),
+            // `Kernel#eval(string [, _binding, _file, _line])` —
+            // parse + compile + run the source string at top
+            // level. Returns the final expression's value.
+            //
+            // Tier 1 divergences (documented in docs/SUBSET.md):
+            //   - `Binding` is not modeled — any 2nd-arg binding
+            //     is silently ignored; eval'd code sees only top-
+            //     level scope, not the caller's locals.
+            //   - The optional `file` / `line` args are accepted
+            //     for signature compatibility but only `file` is
+            //     wired through to source-registration (used by
+            //     backtraces / `Method#source_location`).
+            "eval" => match args {
+                // Arity guard FIRST so too-many-arg calls surface
+                // as ArgumentError, matching CRuby's check order
+                // (arity → type). Without this, `eval(123, nil,
+                // "file", 1, :extra)` would TypeError on the
+                // first-arg check below even though the call is
+                // out of the 1..4 signature.
+                _ if args.len() > 4 => {
+                    Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..4)",
+                            args.len()
+                        ),
+                    })))
+                }
+                // Validate source arg type after the arity check.
+                // Non-String first arg surfaces as TypeError.
+                [other, ..] if !matches!(other, Value::Str(_)) => {
+                    Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name()
+                        ),
+                    })))
+                }
+                [Value::Str(src)] => {
+                    let owned = src.to_string_lossy();
+                    Some(self.eval_string(&owned, "(eval)", /*synthetic=*/true))
+                }
+                // Common 2-arg shape: `eval(src, binding)` — drop
+                // binding silently per the documented divergence.
+                [Value::Str(src), _binding] => {
+                    let owned = src.to_string_lossy();
+                    Some(self.eval_string(&owned, "(eval)", /*synthetic=*/true))
+                }
+                // 3-arg / 4-arg with filename: validate file arg
+                // type FIRST (CRuby raises TypeError, not
+                // ArgumentError, on non-String file). Then use
+                // it for source registration so backtraces point
+                // at the right place (tilt passes its template
+                // path here).
+                [Value::Str(_), _binding, file_arg, ..]
+                    if !matches!(file_arg, Value::Str(_)) => {
+                    Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            file_arg.type_name()
+                        ),
+                    })))
+                }
+                // 4-arg with non-Integer-coercible line arg: CRuby
+                // raises TypeError "no implicit conversion of X
+                // into Integer". Accept Int and Float (Float has
+                // `to_int` in CRuby); reject everything else even
+                // though we ultimately ignore the line offset.
+                // Silent acceptance would mask caller bugs.
+                [Value::Str(_), _binding, Value::Str(_), line_arg]
+                    if !matches!(line_arg, Value::Int(_) | Value::Float(_)) => {
+                    Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            line_arg.type_name()
+                        ),
+                    })))
+                }
+                [Value::Str(src), _binding, Value::Str(file)]
+                | [Value::Str(src), _binding, Value::Str(file), _] => {
+                    let owned = src.to_string_lossy();
+                    let fname = file.to_string_lossy();
+                    // `synthetic=false`: caller supplied the
+                    // filename explicitly. Pass through to keep
+                    // `__FILE__` stable across repeated evals.
+                    Some(self.eval_string(&owned, &fname, /*synthetic=*/false))
+                }
+                _ => Some(Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..4)",
+                        args.len()
+                    ),
+                }))),
+            },
             _ => None,
         }
     }
@@ -1129,7 +1224,7 @@ impl Vm {
                 msg: ast_errors.join("; "),
             }));
         }
-        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(canon.to_string_lossy().into_owned());
+        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(canon.to_string_lossy());
         // Register the loaded source so `Method#source_location` and
         // any other Vm-side byte-offset → line/col resolver can find
         // it. `Runtime::eval` does the same for top-level scripts; we
@@ -1307,6 +1402,218 @@ impl Vm {
         // returns the load-status Bool.
         let _ = self.stack.pop();
         Ok(Value::Bool(true))
+    }
+
+    /// `Kernel#eval(string)` / `Class#class_eval(string, ...)`
+    /// — runtime parse + compile + run of a Ruby source string.
+    /// Returns the final expression's value (matching CRuby's
+    /// `eval`).
+    ///
+    /// Unlike `compile_and_run_source` (which is `require`-
+    /// flavoured), this:
+    ///   - skips `loaded_features` tracking — eval'd strings
+    ///     aren't files;
+    ///   - returns the top-of-stack expression value instead of
+    ///     `Bool(true)`;
+    ///   - is NOT wasi-gated (no filesystem dependency).
+    ///
+    /// Source is registered in `self.sources` so backtraces and
+    /// `Method#source_location` for methods defined inside the
+    /// eval'd source resolve.
+    ///
+    /// Tier 1 divergence (consumer of this helper):
+    ///   `Class#class_eval(string)` is wired to call this as
+    ///   if it were a top-level eval — it does NOT switch the
+    ///   class-body context to the receiver class. That means
+    ///   bare `Foo.class_eval("def bar; end")` lands `bar` at
+    ///   top level, not on `Foo`. The motivating consumer
+    ///   (tilt-2.7.0) self-wraps the string in a NESTED
+    ///   block-form `class_eval do def ... end end`, so its
+    ///   defs land correctly via the existing block-form path
+    ///   in `dispatch.rs`. Documented in docs/SUBSET.md.
+    /// `synthetic` distinguishes our own default labels (`(eval)` /
+    /// `(class_eval)`) from caller-supplied filenames. Only the
+    /// synthetic case opts into the `:N` collision-suffix dedupe;
+    /// explicit user filenames pass through unchanged so `__FILE__`
+    /// stays stable across repeated evals — including the edge case
+    /// where the caller deliberately passes the literal default
+    /// string as a filename.
+    pub(crate) fn eval_string(
+        &mut self,
+        source: &str,
+        filename: &str,
+        synthetic: bool,
+    ) -> Result<Value, Trap> {
+        // Fast-fail BEFORE any parse / AST / compile work when
+        // the frame cap is already exhausted. CPU-bound parse of
+        // a large untrusted eval string shouldn't run just to
+        // fail at the frame push at the bottom.
+        self.check_frames()?;
+        let parse_result = ruby_prism::parse(source.as_bytes());
+        let mut parse_errors = parse_result.errors().peekable();
+        if parse_errors.peek().is_some() {
+            let msg = crate::error::format_prism_errors(source, parse_errors);
+            return Err(self.trap(RubyError::SyntaxError { msg }));
+        }
+        let (prog, ast_errors) = crate::ast::tr_with_errors_on_source(
+            &parse_result.node(),
+            parse_result.source(),
+        );
+        if !ast_errors.is_empty() {
+            return Err(self.trap(RubyError::SyntaxError {
+                msg: ast_errors.join("; "),
+            }));
+        }
+        // Cap-aware compile: `compile_proto` interns method names,
+        // locals, constants, and other symbols from the eval'd
+        // source. Unlike top-level / require source (which is host-
+        // loaded under embedder control), eval'd strings can be
+        // dynamically constructed by Ruby code — `eval("def m#{i};
+        // end")` in a loop would grow the interner past any
+        // configured cap. Pre-check BEFORE registering the source
+        // so a rejected eval doesn't leak a `(eval):N` source entry.
+        // Post-check after compile removes the source entry on cap
+        // failure for the same reason — best-effort: the interner
+        // may briefly grow past the cap before the trap fires (we
+        // don't roll back interns themselves).
+        let cap_at_entry = self.max_symbols;
+        if let Some(max) = cap_at_entry
+            && self.interner.len() >= max {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!("interner exhausted before eval: {} symbols", max),
+            }));
+        }
+        // Avoid clobbering a previously-registered source ONLY for
+        // synthetic default labels: on collision, append an
+        // incrementing `:N` suffix to the source-table key so the
+        // prior entry is preserved for backtraces /
+        // `Method#source_location`. User-supplied filenames
+        // (`synthetic = false`) pass through unchanged so
+        // `__FILE__` keeps returning the caller's name across
+        // repeated evals — a `:N` suffix would leak into
+        // observable metadata (`eval("__FILE__", nil, "foo.rb")`
+        // called twice should both see "foo.rb", not "foo.rb:2",
+        // and the same holds for the rare case where the caller
+        // explicitly passes the literal default label as a
+        // filename). The trade-off: explicit-filename collisions
+        // clobber the source-table entry (matching CRuby's actual
+        // behavior); the suffix dedupe applies only to the common
+        // ephemeral case of repeated bare `eval(...)` /
+        // `cls.class_eval(str)` calls where we ourselves chose
+        // the default label.
+        let mut effective_filename: String = filename.to_string();
+        if synthetic && self.sources.contains_key(effective_filename.as_str()) {
+            let mut n: u64 = 2;
+            loop {
+                let candidate = format!("{}:{}", filename, n);
+                if !self.sources.contains_key(candidate.as_str()) {
+                    effective_filename = candidate;
+                    break;
+                }
+                n = n.saturating_add(1);
+            }
+        }
+        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(effective_filename.as_str());
+        let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source);
+        self.sources.insert(filename_rc.clone(), source_rc);
+        let entry = crate::compiler::compile_proto(
+            "<eval>".into(), vec![], &[prog], filename_rc.clone(),
+            &mut self.protos, &mut self.interner, &mut self.cache_counter,
+        );
+        if let Some(max) = cap_at_entry
+            && self.interner.len() > max {
+            // Don't leave the orphan source entry behind when we
+            // refuse the eval — the compiled proto won't be
+            // executed and nothing else will consult its source.
+            self.sources.remove(&filename_rc);
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!("eval grew interner past cap: {} symbols", max),
+            }));
+        }
+        let cc = self.cache_counter as usize;
+        self.ensure_call_caches(cc);
+        let depth_before = self.frames.len();
+        let stack_before = self.stack.len();
+        // `check_frames()` was already called at the top of
+        // `eval_string` (before source registration / compile) so
+        // the cap-rejected path leaves no VM state behind. The
+        // frame stack hasn't grown since then — we haven't pushed
+        // a frame yet — so we don't need a second check here.
+        self.frames.push(super::Frame {
+            proto_idx: entry,
+            ip: 0,
+            locals: std::rc::Rc::new(std::cell::RefCell::new(
+                super::vec_nil(self.protos[entry].n_locals as usize)
+            )),
+            self_val: Value::Nil,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: None,
+            is_block: false,
+            n_given_positional: 0,
+            rescues: vec![],
+            loop_rescue_depths: vec![], loop_stack_depths: vec![],
+        });
+        // Same dispatch-loop shape as compile_and_run_source;
+        // a non-local `return` defined INSIDE the eval'd string
+        // should unwind locally, but a `return` escaping the
+        // eval'd top level pops back into the caller's frame.
+        loop {
+            if let Err(trap) = self.dispatch_until(depth_before) {
+                return Err(trap);
+            }
+            if self.method_return.is_none() {
+                break;
+            }
+            let val = self.take_method_return().unwrap();
+            while let Some(f) = self.frames.last() {
+                if !f.is_block { break; }
+                if self.frames.len() <= depth_before + 1 {
+                    break;
+                }
+                let f = self.frames.pop().unwrap();
+                self.stack.truncate(f.base_sp);
+                if f.is_class_body {
+                    let _cls = self.class_stack.pop()
+                        .expect("ICE: class_stack empty unwinding through class_eval (eval_string)");
+                    self.class_visibility_stack.pop();
+                }
+            }
+            if self.frames.len() <= depth_before + 1 {
+                self.method_return = Some(val);
+                break;
+            }
+            let f = self.frames.pop().unwrap();
+            self.stack.truncate(f.base_sp);
+            if f.is_class_body {
+                let cls = self.class_stack.pop()
+                    .expect("ICE: class_stack empty on method-return (eval_string)");
+                self.class_visibility_stack.pop();
+                self.stack.push(Value::Class(cls));
+            } else if let Some(r) = f.swap_return {
+                self.stack.push(r);
+            } else {
+                self.stack.push(val);
+            }
+        }
+        // Method-return escaping out of the eval — let outer
+        // dispatch finish the unwind.
+        if self.method_return.is_some() {
+            self.suppress_call_result_push = true;
+            return Ok(Value::Nil);
+        }
+        // Outer-rescue-unwound-past-us — stack already truncated
+        // by the rescue handler; suppress the result push.
+        if self.stack.len() != stack_before + 1 {
+            self.suppress_call_result_push = true;
+            return Ok(Value::Nil);
+        }
+        // Normal completion: the eval'd source's last expression
+        // sits on top of the operand stack. Pop and return it
+        // (CRuby semantics: `eval("1+2")` → 3).
+        Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
 
 }

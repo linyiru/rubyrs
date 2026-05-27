@@ -1836,6 +1836,13 @@ impl Vm {
             // (applied below); the rest of the names apply to
             // all `Value::Class` receivers.
             //
+            // `class_eval` / `module_eval` added so a bare call
+            // inside a class body (`class C; class_eval(...); end`)
+            // reaches the receiver-form dispatch instead of falling
+            // through to NoMethodError, mirroring how
+            // `self.class_eval(...)` and `respond_to?(:class_eval)`
+            // already work.
+            //
             // (A future refactor could lift this list to a
             // shared `pub(crate) const &[&str]` consumed by
             // both sites — out of scope for this PR but tracked
@@ -1851,6 +1858,7 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
+                    | "class_eval" | "module_eval"
                 );
                 // `allocate` gets the same Module fence as
                 // lookup.rs's respond_to gate so bare `allocate`
@@ -2155,6 +2163,117 @@ impl Vm {
         }
 
         let recv = recv.expect("ICE: receiver missing");
+
+        // `cls.class_eval(source_string [, file, line])` — runtime
+        // parse + compile + run of a Ruby source string. Tier 1
+        // divergence (documented in docs/SUBSET.md): does NOT
+        // switch to the receiver class's class-body context, so
+        // `Foo.class_eval("def bar; end")` lands `bar` at top
+        // level. Tilt's tilt-2.7.0 `eval_compiled_method` self-
+        // wraps its source in a nested block-form
+        // `Tilt::TOPOBJECT.class_eval do def ... end end`, so
+        // the inner block-form (intercepted in `do_call_block`)
+        // does the actual class context switching.
+        // No-arg, no-block `C.class_eval` / `C.module_eval` would
+        // otherwise fall through to NoMethodError, but
+        // respond_to?(:class_eval) reports true. CRuby raises
+        // ArgumentError "wrong number of arguments (given 0,
+        // expected 1..3)" for the no-arg string-form call;
+        // (block-only form is handled in do_call_block).
+        if (&*name == "class_eval" || &*name == "module_eval")
+            && let Value::Class(cls) = &recv
+            && args.is_empty()
+            && self.lookup_class_singleton_method(cls, name_id).is_none()
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1..3)".into(),
+            }));
+        }
+        if (&*name == "class_eval" || &*name == "module_eval")
+            && let Value::Class(cls) = &recv
+            && !args.is_empty()
+            // Defer to user-defined `def self.class_eval(s)` /
+            // `def self.module_eval(s)` if present — same
+            // ordering as the singleton-method lookup at
+            // dispatch.rs:1597. Without this check, a class
+            // overriding its own `class_eval` would have the
+            // override silently bypassed.
+            && self.lookup_class_singleton_method(cls, name_id).is_none()
+        {
+            // Arity guard FIRST so too-many-arg calls surface as
+            // ArgumentError, matching CRuby's check order (arity
+            // → type). Without this, `C.class_eval(123, "f", 1,
+            // :extra)` would report a misleading TypeError on
+            // args[0] even though the call is out of the 1..3
+            // signature.
+            if args.len() > 3 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..3)",
+                        args.len()
+                    ),
+                }));
+            }
+            // Validate args[0] (source) type after arity. Non-
+            // String falls through here (no user override + no
+            // block path matched) and should surface as TypeError,
+            // NOT NoMethodError. `respond_to?(:class_eval)`
+            // returns true, so the dispatch reaching this point
+            // means the method exists — bad arg type is a
+            // TypeError.
+            if !matches!(args[0], Value::Str(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        args[0].type_name()
+                    ),
+                }));
+            }
+            // Validate args[1] (filename) type when present:
+            // CRuby raises TypeError for non-String. Falling back
+            // to the default label would silently ignore the
+            // caller's mistake.
+            if let Some(a1) = args.get(1)
+                && !matches!(a1, Value::Str(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        a1.type_name()
+                    ),
+                }));
+            }
+            // Validate args[2] (line) when present: CRuby raises
+            // TypeError for non-Integer-coercible values. Accept
+            // Int and Float (Float has `to_int`); reject other
+            // types even though we ultimately ignore the line
+            // offset — silent acceptance would mask caller bugs.
+            if let Some(a2) = args.get(2)
+                && !matches!(a2, Value::Int(_) | Value::Float(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        a2.type_name()
+                    ),
+                }));
+            }
+            let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
+            // Track whether the filename is our synthetic default
+            // or caller-supplied. Only the synthetic case opts
+            // into the source-table collision-suffix dedupe; an
+            // explicit user filename should stay verbatim across
+            // repeated calls so `__FILE__` is stable.
+            let (filename, synthetic) = match args.get(1) {
+                Some(Value::Str(f)) => (f.to_string_lossy(), false),
+                _ => ("(class_eval)".to_string(), true),
+            };
+            let v = self.eval_string(&src, &filename, synthetic)?;
+            if self.suppress_call_result_push {
+                self.suppress_call_result_push = false;
+            } else {
+                self.stack.push(v);
+            }
+            return Ok(());
+        }
 
         // `Object#send(:name, args...)` / `__send__(:name, args...)`
         // — dynamic dispatch. Resolve the first arg as the target
@@ -4712,6 +4831,34 @@ impl Vm {
                 self.invoke_block_with_self(block, r.clone(), is_class_eval, block_args)?;
                 return Ok(());
             }
+            // String-arg form: `cls.class_eval(source [, file, line])`
+            // — parse + compile + run the source. Tier 1 divergence:
+            // does NOT switch to the receiver class's class-body
+            // context (so bare `Foo.class_eval("def bar; end")`
+            // lands `bar` at top level instead of on Foo). Tilt's
+            // tilt-2.7.0 `eval_compiled_method` path self-wraps its
+            // source in a nested `Tilt::TOPOBJECT.class_eval do
+            // def __tilt_xxx; end end`, so the inner block-form
+            // (intercepted above) does the actual class context
+            // switching. Documented in docs/SUBSET.md.
+            // CRuby parity: `class_eval`/`module_eval` is either
+            // (a) block-only with 0 args (handled above) OR
+            // (b) string-form with 1..3 args and NO block (handled
+            // in do_call). The block+args combination raises
+            // ArgumentError "wrong number of arguments (given N,
+            // expected 0)". Without this guard, passing both
+            // would fall through to NoMethodError.
+            if is_class_eval && let Value::Class(cls) = r
+                && !args.is_empty()
+                && self.lookup_class_singleton_method(cls, name_id).is_none()
+            {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
+                }));
+            }
         }
         if let Some(r) = &recv
             && let Some(v) = self.collection_call_block(r, &name, &args, block)? {
@@ -4804,12 +4951,29 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
+                    | "class_eval" | "module_eval"
                 );
                 let allocate_allowed =
                     &*name == "allocate"
                         && !cls.is_module
                         && cls.name != "Module";
                 if in_set || allocate_allowed {
+                    // `class_eval` / `module_eval` are the ONLY
+                    // bridge-set members whose block is load-
+                    // bearing. `class C; class_eval { def foo;
+                    // end }; end` defines `foo` on `C` via the
+                    // block-form intercept in do_call_block's
+                    // recv-form path. Re-route through
+                    // do_call_block (preserving block) instead
+                    // of the do_call discard path the other
+                    // bridge names use.
+                    if matches!(&*name, "class_eval" | "module_eval") {
+                        let argc = args.len();
+                        self.stack.push(self_val.clone());
+                        self.stack.push(Value::Block(block));
+                        for a in args { self.stack.push(a); }
+                        return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+                    }
                     // Route through the blockless `do_call`, NOT
                     // `do_call_block` — CRuby silently discards the
                     // block for these Class methods (verified:

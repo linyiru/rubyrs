@@ -179,6 +179,7 @@ fn run_diff(name: &str) {
 #[test] fn string_bracket_regex() { run_diff("string_bracket_regex"); }
 #[test] fn array_delete() { run_diff("array_delete"); }
 #[test] fn thread_current() { run_diff("thread_current"); }
+#[test] fn eval_basics() { run_diff("eval_basics"); }
 #[cfg(feature = "bignum")]
 #[test] fn bignum_phase_a() { run_diff("bignum_phase_a"); }
 #[cfg(feature = "bignum")]
