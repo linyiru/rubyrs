@@ -72,6 +72,31 @@ end
 puts WhiteListed.respond_to?(:class_eval)       # true
 puts WhiteListed.respond_to?(:module_eval)      # true
 
+# --- User `def self.class_eval(s)` override wins over the
+#     string-form intercept (singleton-method ordering parity). ---
+class OverrideClassEval
+  def self.class_eval(s)
+    "override:#{s}"
+  end
+end
+puts OverrideClassEval.class_eval("ignored")    # override:ignored
+
+# --- Bad filename arg raises TypeError (not ArgumentError) ---
+class FilenameType
+end
+begin
+  FilenameType.class_eval("1", 123)
+rescue TypeError
+  puts "class_eval(bad-file) → TypeError"
+end
+
+# --- Same TypeError shape for Kernel#eval's file arg ---
+begin
+  eval("1", nil, 123)
+rescue TypeError
+  puts "eval(bad-file) → TypeError"
+end
+
 # --- Wrong arity raises ArgumentError (1..3 supported) ---
 class ArityCheck
 end

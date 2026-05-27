@@ -752,6 +752,17 @@ impl Vm {
             //     wired through to source-registration (used by
             //     backtraces / `Method#source_location`).
             "eval" => match args {
+                // Validate source arg type first so a non-String
+                // first arg surfaces as TypeError before any arity
+                // / filename checks.
+                [other, ..] if !matches!(other, Value::Str(_)) => {
+                    Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name()
+                        ),
+                    })))
+                }
                 [Value::Str(src)] => {
                     let owned = src.to_string_lossy();
                     Some(self.eval_string(&owned, "(eval)"))
@@ -762,22 +773,26 @@ impl Vm {
                     let owned = src.to_string_lossy();
                     Some(self.eval_string(&owned, "(eval)"))
                 }
-                // 3-arg / 4-arg with filename: use it for source
-                // registration so backtraces point at the right
-                // place (tilt passes its template path here).
+                // 3-arg / 4-arg with filename: validate file arg
+                // type FIRST (CRuby raises TypeError, not
+                // ArgumentError, on non-String file). Then use
+                // it for source registration so backtraces point
+                // at the right place (tilt passes its template
+                // path here).
+                [Value::Str(_), _binding, file_arg, ..]
+                    if !matches!(file_arg, Value::Str(_)) => {
+                    Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            file_arg.type_name()
+                        ),
+                    })))
+                }
                 [Value::Str(src), _binding, Value::Str(file)]
                 | [Value::Str(src), _binding, Value::Str(file), _] => {
                     let owned = src.to_string_lossy();
                     let fname = file.to_string_lossy();
                     Some(self.eval_string(&owned, &fname))
-                }
-                [other, ..] if !matches!(other, Value::Str(_)) => {
-                    Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into String",
-                            other.type_name()
-                        ),
-                    })))
                 }
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
                     msg: format!(

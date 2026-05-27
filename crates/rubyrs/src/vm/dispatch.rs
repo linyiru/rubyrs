@@ -2111,9 +2111,17 @@ impl Vm {
         // the inner block-form (intercepted in `do_call_block`)
         // does the actual class context switching.
         if (&*name == "class_eval" || &*name == "module_eval")
-            && matches!(recv, Value::Class(_))
+            && let Value::Class(cls) = &recv
             && !args.is_empty()
             && matches!(args[0], Value::Str(_))
+            // Defer to user-defined `def self.class_eval(s)` /
+            // `def self.module_eval(s)` if present — same
+            // ordering as the singleton-method lookup at
+            // dispatch.rs:1597. Without this check, a class
+            // overriding its own `class_eval` would have the
+            // override silently bypassed whenever the first arg
+            // is a String.
+            && self.lookup_class_singleton_method(cls, name_id).is_none()
         {
             // CRuby's class_eval(string [, file, line]) signature:
             // 1..3 args. Extra args silently dropped would mask
@@ -2123,6 +2131,19 @@ impl Vm {
                     msg: format!(
                         "wrong number of arguments (given {}, expected 1..3)",
                         args.len()
+                    ),
+                }));
+            }
+            // Validate args[1] (filename) type when present:
+            // CRuby raises TypeError for non-String. Falling back
+            // to the default label would silently ignore the
+            // caller's mistake.
+            if let Some(a1) = args.get(1)
+                && !matches!(a1, Value::Str(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        a1.type_name()
                     ),
                 }));
             }
@@ -4775,8 +4796,13 @@ impl Vm {
             // def __tilt_xxx; end end`, so the inner block-form
             // (intercepted above) does the actual class context
             // switching. Documented in docs/SUBSET.md.
-            if is_class_eval && matches!(r, Value::Class(_))
-                && !args.is_empty() && matches!(args[0], Value::Str(_)) {
+            if is_class_eval && let Value::Class(cls) = r
+                && !args.is_empty() && matches!(args[0], Value::Str(_))
+                // Defer to user-defined `def self.class_eval`
+                // overrides on the receiver class — same ordering
+                // discipline as `do_call`'s arm above.
+                && self.lookup_class_singleton_method(cls, name_id).is_none()
+            {
                 // Same arity guard as the non-block path
                 // (`do_call`'s class_eval arm). Block + string-arg
                 // form is unusual (CRuby ignores the block silently
@@ -4787,6 +4813,15 @@ impl Vm {
                         msg: format!(
                             "wrong number of arguments (given {}, expected 1..3)",
                             args.len()
+                        ),
+                    }));
+                }
+                if let Some(a1) = args.get(1)
+                    && !matches!(a1, Value::Str(_)) {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            a1.type_name()
                         ),
                     }));
                 }
