@@ -229,6 +229,66 @@ fn try_call_with_block_compile_time_intercept(
     false
 }
 
+/// Compile the body of `Expr::While` — both the pre-condition
+/// (`while cond; body; end`) and post-condition (`begin body
+/// end while cond`) forms.
+///
+/// The `loop_break_jumps` / `loop_next_jumps` push/pop pairing
+/// is invariant — both stacks must be popped in this function
+/// (NOT split across helpers). See #195's R5 risk register.
+fn compile_while_arm(
+    b: &mut ProtoBuilder,
+    cond: &SExpr,
+    body: &[SExpr],
+    post: bool,
+    protos: &mut Vec<Proto>,
+    interner: &mut Interner,
+    cc: &mut u32,
+) {
+    b.emit(Op::EnterLoop);
+    b.loop_break_jumps.push(vec![]);
+    b.loop_next_jumps.push(vec![]);
+    let iter_check;
+    if post {
+        // `begin … end while cond` — body runs first, cond
+        // is checked after.
+        let body_start = b.pos();
+        compile_body(b, body, protos, interner, cc);
+        b.emit(Op::Pop);
+        iter_check = b.pos();
+        compile_expr(b, cond, protos, interner, cc);
+        let jf = b.emit(Op::JumpIfFalse(0));
+        let j = b.emit(Op::Jump(0));
+        b.patch_jump(j, body_start);
+        let exit_normal = b.pos();
+        b.patch_jump(jf, exit_normal);
+        b.emit(Op::LoadNil);
+    } else {
+        // Pre-condition `while cond; …; end`.
+        let start = b.pos();
+        iter_check = start;
+        compile_expr(b, cond, protos, interner, cc);
+        let jf = b.emit(Op::JumpIfFalse(0));
+        compile_body(b, body, protos, interner, cc);
+        b.emit(Op::Pop);
+        let j = b.emit(Op::Jump(0));
+        b.patch_jump(j, start);
+        let exit_normal = b.pos();
+        b.patch_jump(jf, exit_normal);
+        b.emit(Op::LoadNil);
+    }
+    // Patch `next` placeholders to iter_check (re-eval cond);
+    // patch `break` placeholders to the join.
+    for j in b.loop_next_jumps.pop().expect("ICE: while popped loop_next_jumps without push") {
+        b.patch_jump(j, iter_check);
+    }
+    let join = b.pos();
+    for j in b.loop_break_jumps.pop().expect("ICE: while popped loop_break_jumps without push") {
+        b.patch_jump(j, join);
+    }
+    b.emit(Op::ExitLoop);
+}
+
 /// Compile the body of `Expr::Def` — `def name(params) ... end`
 /// and its receiver-prefixed singleton variants. `defaults` is
 /// parallel to `params`: leading `None`s are required, trailing
@@ -1138,69 +1198,7 @@ pub(crate) fn compile_expr(
             b.patch_jump(je, end);
         }
         Expr::While { cond, body, post } => {
-            // EnterLoop / ExitLoop bracket the loop so `break` and
-            // `next` inside the body can pop dynamic rescue/ensure
-            // handlers down to the depth at loop entry. Two parallel
-            // placeholder stacks on the builder: break jumps land at
-            // the join (loop end), next jumps land at the iter-check
-            // (cond expression's position) so the loop re-evaluates
-            // the guard and continues or falls through.
-            b.emit(Op::EnterLoop);
-            b.loop_break_jumps.push(vec![]);
-            b.loop_next_jumps.push(vec![]);
-            // iter_check is captured per arm — it points at the cond
-            // evaluation that decides whether to loop again. For the
-            // pre-form this coincides with the loop's start label.
-            // For the post-form it sits AFTER the body's terminal Pop,
-            // so `next` skips the partial body but still re-checks.
-            let iter_check;
-            if *post {
-                // `begin … end while cond` — body runs first, cond
-                // is checked after. JumpIfFalse-to-end, jump-back-
-                // to-start, but the start label is BEFORE the cond
-                // so the body re-runs only when cond stayed truthy.
-                let body_start = b.pos();
-                compile_body(b, body, protos, interner, cc);
-                b.emit(Op::Pop);
-                iter_check = b.pos();
-                compile_expr(b, cond, protos, interner, cc);
-                let jf = b.emit(Op::JumpIfFalse(0));
-                let j = b.emit(Op::Jump(0));
-                b.patch_jump(j, body_start);
-                let exit_normal = b.pos();
-                b.patch_jump(jf, exit_normal);
-                b.emit(Op::LoadNil);
-            } else {
-                // Pre-condition `while cond; …; end` — cond first,
-                // body only runs when truthy.
-                let start = b.pos();
-                iter_check = start;
-                compile_expr(b, cond, protos, interner, cc);
-                let jf = b.emit(Op::JumpIfFalse(0));
-                compile_body(b, body, protos, interner, cc);
-                b.emit(Op::Pop);
-                let j = b.emit(Op::Jump(0));
-                b.patch_jump(j, start);
-                let exit_normal = b.pos();
-                b.patch_jump(jf, exit_normal);
-                b.emit(Op::LoadNil);
-            }
-            // Patch `next` placeholders to the iter-check label
-            // BEFORE the join, because next must re-evaluate cond
-            // (the loop's natural-exit LoadNil branch handles the
-            // false case).
-            for j in b.loop_next_jumps.pop().expect("ICE: while popped loop_next_jumps without push") {
-                b.patch_jump(j, iter_check);
-            }
-            // Join label: both normal exit (after LoadNil) and every
-            // `break` converge here. `BreakLoop` jumps with the
-            // break value already on the stack, so we don't push
-            // again. `ExitLoop` is the last shared step.
-            let join = b.pos();
-            for j in b.loop_break_jumps.pop().expect("ICE: while popped loop_break_jumps without push") {
-                b.patch_jump(j, join);
-            }
-            b.emit(Op::ExitLoop);
+            compile_while_arm(b, cond, body, *post, protos, interner, cc);
         }
         Expr::Call { receiver, name, args } => {
             compile_call_arm(b, receiver, name, args, protos, interner, cc);
