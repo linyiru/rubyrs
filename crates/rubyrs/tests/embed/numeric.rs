@@ -1302,8 +1302,10 @@ fn bigint_eq_float_is_lossless() {
     // Pin the BigInt × Float `==` lossless path
     // (bigint_equals_float_lossless in bignum.rs). Pre-fix the arm
     // demoted BigInt to f64 for the compare, so values within the
-    // same Float "gap" (e.g. 2**64 vs 2**64+1, gap of 2 at that
-    // magnitude) wrongly compared equal.
+    // same Float ULP wrongly compared equal. Example: f64 ULP at
+    // 2^64 is 2^(64-52)=4096, so 2**64+1 rounds to exactly 2**64,
+    // and the pre-fix BigInt-side also collapsed to 2**64 — both
+    // sides end up at the same Float bit pattern.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
@@ -1315,7 +1317,7 @@ fn bigint_eq_float_is_lossless() {
          inf = 1.0 / 0.0\n\
          puts (2**64) == (2**64).to_f         # true (Float-exact)\n\
          puts (2**64 + 1) == (2**64).to_f     # false (precision)\n\
-         puts (2**64) == (2**64 + 1).to_f     # true (RHS: 2**64+1 is exactly halfway between two f64s with gap 2; round-to-nearest-even picks the even-mantissa neighbor → 2**64)\n\
+         puts (2**64) == (2**64 + 1).to_f     # true (RHS rounds: f64 ULP at 2^64 is 2^(64-52)=4096; 2**64+1 is far closer to 2**64 than to 2**64+4096, so it rounds to exactly 2**64)\n\
          puts (2**64).to_f == (2**64 + 1)     # false (Float side is 2**64, not 2**64+1)\n\
          puts (2**64) == nan                  # false (NaN)\n\
          puts (2**64) == inf                  # false (+inf)\n\
@@ -1337,6 +1339,55 @@ fn bigint_eq_float_is_lossless() {
         "false", "false",                   // fractional / zero
         "true", "true",                     // negative-exact / 2^100-exact
         "true", "false", "true",            // != cases
+    ]);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_cmp_float_is_lossless() {
+    // Sibling to bigint_eq_float_is_lossless. Pre-fix the
+    // BigInt × Float Lt/Le/Gt/Ge arm demoted both sides to f64,
+    // and the `<=>` arm returned nil (because the existing
+    // arm required both sides to be BigInt-castable). Both
+    // collapse values within the same f64 ULP onto the
+    // same bit pattern (ULP at 2^64 is 2^(64-52)=4096), so e.g.
+    // `(2**64 + 1) > (2**64).to_f` returned false. Pin the
+    // lossless path via bigint_cmp_float_lossless.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "nan = 0.0 / 0.0\n\
+         inf = 1.0 / 0.0\n\
+         # <=> (BigInt × Float, both directions)\n\
+         puts ((2**64 + 1) <=> (2**64).to_f).inspect    # 1\n\
+         puts ((2**64) <=> (2**64).to_f).inspect        # 0\n\
+         puts ((2**64 - 1) <=> (2**64).to_f).inspect    # -1\n\
+         puts ((2**64).to_f <=> (2**64 + 1)).inspect    # -1\n\
+         puts ((2**64) <=> nan).inspect                 # nil\n\
+         puts ((2**64) <=> inf).inspect                 # -1\n\
+         puts ((2**64) <=> -inf).inspect                # 1\n\
+         # Ordering operators (Lt/Le/Gt/Ge)\n\
+         puts ((2**64 + 1) > (2**64).to_f)              # true\n\
+         puts ((2**64 + 1) < (2**64).to_f)              # false\n\
+         puts ((2**64 + 1) <= (2**64).to_f)             # false\n\
+         puts ((2**64 + 1) >= (2**64).to_f)             # true\n\
+         puts ((2**64).to_f < (2**64 + 1))              # true (Float × BigInt)\n\
+         # NaN: all four ordering ops are false (CRuby parity)\n\
+         puts ((2**64) < nan)                           # false\n\
+         puts ((2**64) > nan)                           # false\n\
+         puts ((2**64) <= nan)                          # false\n\
+         puts ((2**64) >= nan)                          # false",
+        "bigint_cmp_float.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "1", "0", "-1", "-1",               // <=> precision + symmetric
+        "nil", "-1", "1",                   // <=> NaN/±inf
+        "true", "false", "false", "true",   // Lt/Le/Gt/Ge precision
+        "true",                             // Float × BigInt direction
+        "false", "false", "false", "false", // NaN ordering
     ]);
 }
 

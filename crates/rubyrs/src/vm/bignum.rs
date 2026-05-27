@@ -110,7 +110,7 @@ use crate::vm::PinGuard;
 ///
 /// Without this, demoting the BigInt to f64 collapses values like
 /// `2**64` and `2**64 + 1` onto the same Float bit pattern (the
-/// gap between consecutive f64s at that magnitude is 2), making
+/// ULP at that magnitude is 2^(64-52)=4096), making
 /// `(2**64 + 1) == (2**64).to_f` wrongly return true. CRuby's
 /// `rb_big_eq` short-circuits on NaN / infinity / non-integral
 /// floats and otherwise compares against a losslessly-constructed
@@ -143,6 +143,77 @@ fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool
         // finite-f64 magnitude, since the largest finite f64
         // is ~1.8e308 which fits trivially in a BigInt).
         None => false,
+    }
+}
+
+/// CRuby-parity lossless three-way comparison between a BigInt
+/// and a Float.
+///
+/// Scope: BigInt × Float only. Int × Float (Fixnum range) still
+/// demotes the Int to f64 in numeric.rs's Int×Float arm, so
+/// e.g. `(2**62 + 1) <=> (2**62).to_f` currently returns 0
+/// instead of CRuby's 1 — fixing that would require an Int-side
+/// lossless path with i64-vs-f64 mantissa-bit reasoning, tracked
+/// as a follow-up.
+///
+/// Returns:
+/// - `None` for NaN (CRuby's `bigint <=> nan` returns `nil`;
+///   `bigint < nan` / `> nan` / `<= nan` / `>= nan` all return
+///   `false`).
+/// - `Some(Less)` if `bigint < float` (bigint is more negative).
+/// - `Some(Equal)` if exactly equal.
+/// - `Some(Greater)` if `bigint > float`.
+///
+/// Without this, demoting the BigInt to f64 collapses values
+/// within the same Float ULP onto the same bit pattern: f64 has
+/// 53-bit precision, so above 2^53 the ULP is 2^(N-52) for
+/// magnitude 2^N — e.g. ULP=2^12=4096 at 2^64. `(2**64 + 1)` is
+/// closer to 2^64 than to 2^64+4096, so it rounds to exactly
+/// 2^64; without the lossless path `(2**64 + 1) > (2**64).to_f`
+/// wrongly returned false. Mirror `bigint_equals_float_lossless`
+/// — finite floats convert losslessly via `from_f64` (truncates
+/// toward zero) and the fractional sign disambiguates the tie.
+#[cfg(feature = "bignum")]
+fn bigint_cmp_float_lossless(
+    bigint: &num_bigint::BigInt,
+    float: f64,
+) -> Option<std::cmp::Ordering> {
+    use num_traits::FromPrimitive;
+    use std::cmp::Ordering;
+    if float.is_nan() {
+        return None;
+    }
+    // ±inf: bigint is finite, so always strictly less than +inf
+    // and strictly greater than -inf.
+    if float == f64::INFINITY {
+        return Some(Ordering::Less);
+    }
+    if float == f64::NEG_INFINITY {
+        return Some(Ordering::Greater);
+    }
+    // Finite float: convert losslessly via truncation (toward
+    // zero). The fractional sign then disambiguates the tie:
+    //   f = 2.7 → trunc=2,  frac=+0.7 → if bigint==2 then bigint < f
+    //   f = -2.7 → trunc=-2, frac=-0.7 → if bigint==-2 then bigint > f
+    //   f = 2.0 → trunc=2,  frac=0     → if bigint==2 then equal
+    // Defensive: from_f64 returns None only for NaN/±inf
+    // (filtered above). A future num-bigint version that narrowed
+    // the range would land here; "not comparable" is the safe
+    // default.
+    let trunc = num_bigint::BigInt::from_f64(float)?;
+    let cmp = bigint.cmp(&trunc);
+    if cmp != Ordering::Equal {
+        return Some(cmp);
+    }
+    let frac = float - float.trunc();
+    if frac == 0.0 {
+        Some(Ordering::Equal)
+    } else if frac > 0.0 {
+        // f is between trunc and trunc+1; bigint == trunc < f
+        Some(Ordering::Less)
+    } else {
+        // f is between trunc-1 and trunc; bigint == trunc > f
+        Some(Ordering::Greater)
     }
 }
 
@@ -186,14 +257,41 @@ impl Vm {
                 // a BigInt converted FROM the float (exact when the
                 // float is integral; pre-rejected when fractional).
                 //
-                // TODO(bigint-cmp-float-precision): Lt/Le/Gt/Ge have
-                // the same precision-loss issue — `(2**64 + 1) >
-                // (2**64).to_f` currently returns false because both
-                // sides collapse to the same f64. The demote path
-                // below preserves the buggy behavior. Fix involves
-                // trickier semantics (NaN: CRuby raises ArgumentError
-                // for `<=>` but returns false for `<`); deferred to
-                // a follow-up. Grep this tag.
+                // Lt/Le/Gt/Ge take the same lossless treatment via
+                // `bigint_cmp_float_lossless` — NaN yields false for
+                // every ordering operator (CRuby parity), finite
+                // floats compare via truncation + fractional sign.
+                if matches!(
+                    kind,
+                    BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge,
+                ) {
+                    use std::cmp::Ordering;
+                    let (big_id, float_v, big_is_lhs) = match (a, b) {
+                        (Value::BigInt(id), Value::Float(f)) => (*id, *f, true),
+                        (Value::Float(f), Value::BigInt(id)) => (*id, *f, false),
+                        _ => unreachable!("BigInt × Float invariant"),
+                    };
+                    let cmp = bigint_cmp_float_lossless(
+                        self.heap.bigint(big_id),
+                        float_v,
+                    );
+                    // Flip Ordering if BigInt sits on the RHS so the
+                    // operator interpretation stays in lhs-vs-rhs
+                    // direction.
+                    let cmp = cmp.map(|o| if big_is_lhs { o } else { o.reverse() });
+                    let result = match (cmp, kind) {
+                        // NaN → all four ordering ops are false.
+                        (None, _) => false,
+                        (Some(Ordering::Less), BinOpKind::Lt) => true,
+                        (Some(Ordering::Less), BinOpKind::Le) => true,
+                        (Some(Ordering::Equal), BinOpKind::Le) => true,
+                        (Some(Ordering::Equal), BinOpKind::Ge) => true,
+                        (Some(Ordering::Greater), BinOpKind::Gt) => true,
+                        (Some(Ordering::Greater), BinOpKind::Ge) => true,
+                        _ => false,
+                    };
+                    return Ok(Some(Value::Bool(result)));
+                }
                 if matches!(kind, BinOpKind::Eq | BinOpKind::Ne) {
                     // The outer "at least one is BigInt" guard plus
                     // this "at least one is Float" guard mean exactly
@@ -235,12 +333,14 @@ impl Vm {
                     BinOpKind::Mul => Value::Float(af * bf),
                     BinOpKind::Div => Value::Float(af / bf),
                     BinOpKind::Mod => Value::Float(af.rem_euclid(bf)),
-                    BinOpKind::Lt => Value::Bool(af < bf),
-                    BinOpKind::Le => Value::Bool(af <= bf),
-                    BinOpKind::Gt => Value::Bool(af > bf),
-                    BinOpKind::Ge => Value::Bool(af >= bf),
-                    // Eq/Ne handled above via the lossless path.
-                    BinOpKind::Eq | BinOpKind::Ne => unreachable!(),
+                    // Eq/Ne handled above via bigint_equals_float_lossless;
+                    // Lt/Le/Gt/Ge via bigint_cmp_float_lossless.
+                    BinOpKind::Eq
+                    | BinOpKind::Ne
+                    | BinOpKind::Lt
+                    | BinOpKind::Le
+                    | BinOpKind::Gt
+                    | BinOpKind::Ge => unreachable!("comparison ops handled via lossless paths above"),
                 };
                 return Ok(Some(result));
             }
@@ -1652,19 +1752,40 @@ impl Vm {
         // CRuby's Integer#<=> returns nil for incomparable rhs
         // (e.g. `1 <=> "foo"`); we do the same by deferring to the
         // numeric_call path via None.
-        if args.len() == 1 && name == "<=>"
-            && let (Some(ax), Some(bx)) = (
+        if args.len() == 1 && name == "<=>" {
+            // BigInt × Float (either direction): use the lossless
+            // path so e.g. `(2**64 + 1) <=> (2**64).to_f` returns
+            // 1 instead of 0. NaN → nil; ±inf → ∓1.
+            if let Some((big_id, float_v, big_is_lhs)) = match (recv, &args[0]) {
+                (Value::BigInt(id), Value::Float(f)) => Some((*id, *f, true)),
+                (Value::Float(f), Value::BigInt(id)) => Some((*id, *f, false)),
+                _ => None,
+            } {
+                let cmp = bigint_cmp_float_lossless(
+                    self.heap.bigint(big_id),
+                    float_v,
+                );
+                let cmp = cmp.map(|o| if big_is_lhs { o } else { o.reverse() });
+                let v = match cmp {
+                    None => Value::Nil,
+                    Some(std::cmp::Ordering::Less) => Value::Int(-1),
+                    Some(std::cmp::Ordering::Equal) => Value::Int(0),
+                    Some(std::cmp::Ordering::Greater) => Value::Int(1),
+                };
+                return Ok(Some(v));
+            }
+            if let (Some(ax), Some(bx)) = (
                 self.as_bigint_ref(recv),
                 self.as_bigint_ref(&args[0]),
-            )
-        {
-            let ord = ax.cmp(&bx);
-            let n = match ord {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            };
-            return Ok(Some(Value::Int(n)));
+            ) {
+                let ord = ax.cmp(&bx);
+                let n = match ord {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                };
+                return Ok(Some(Value::Int(n)));
+            }
         }
         Ok(None)
     }
