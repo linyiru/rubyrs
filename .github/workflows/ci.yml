@@ -382,7 +382,16 @@ jobs:
           # BoundMethod slot-type ICE panics in do_call_block. All
           # sites are ICE-class (compiler-emitted invariants on
           # stack shape and Op pairing); not user-reachable.
-          check crates/rubyrs/src/vm/dispatch.rs     26
+          #
+          # Bumped 26 → 27 (+1) by PRs #171 (BigInt phase B7 hash
+          # equality) / #172 (Class#singleton_class). One of the
+          # universal-eql? / singleton-class arms added a new
+          # `.expect("ICE: stack underflow before do_call receiver")`
+          # at the receiver pop — same ICE-class shape as the
+          # surrounding do_call stack invariants. Bump landed
+          # retroactively in this CI-debt-clearance commit because
+          # the merging PRs didn't bump.
+          check crates/rubyrs/src/vm/dispatch.rs     27
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
