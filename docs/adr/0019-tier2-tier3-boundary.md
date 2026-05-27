@@ -2,9 +2,11 @@
 
 ## Status
 
-Proposed (2026-05). Revised 2026-05-27 after parallel review (see
-"Revision log" at the bottom). Not yet accepted; supersedes its own
-v1 draft, which lives in git history at commit `d53b044a`.
+Proposed (2026-05). v3 revised 2026-05-27 after a second round of
+parallel review against v2 (see "Revision log"). Not yet accepted;
+supersedes its own v1 (commit `d53b044a`) and v2 (commit `8fda8f69`)
+drafts, both in git history. Companion amendment to ADR 0017's
+`ObjectSpace` row lands in the same PR as v3.
 
 ## Context
 
@@ -120,6 +122,7 @@ leave Rust-implemented batteries (SQLite, HTTP, S3) homeless.
    | **e. Time / entropy source** | Battery reads wall clock or system entropy (`_chrono` NTP, native PRNG) | Yes — non-deterministic, but documented |
    | **f. Memory-map / shared memory** | Battery uses `mmap`, shared memory, or other heap-cap-bypassing allocation | Conditional — must self-impose a cap honouring `Config::max_value_bytes` |
    | **g. Native-thread spawn** | Battery creates OS threads or thread pools (`_thread`, `_ractor`, network batteries that use `tokio` internally) | Yes — Tier 3 by definition; cannot exist in Tier 1/2 |
+   | **h. Pure-Ruby semantic-parity divergence** | Native accelerator cannot bit-exactly match pure-Ruby reference behaviour (JSON `Float::INFINITY` / `NaN` handling, locale-dependent `Date.parse`, `BigDecimal` precision edge cases). The deviation lists the exact divergence axes (not "trust me, mostly close") | Yes — necessary for any non-trivial native accelerator (Rule 7); battery ADR enumerates each divergence axis with rationale |
 
    **Inadmissible deviation classes** (must NOT be claimed):
    - **Capability bypass via env-var trapdoors** (e.g. a
@@ -134,8 +137,36 @@ leave Rust-implemented batteries (SQLite, HTTP, S3) homeless.
    The per-battery ADR (Rule 7 below) MUST list which
    deviation classes apply. CI grep can verify the ADR
    contains a `## Deviations` section enumerating from the
-   table above. The list above is the closed taxonomy for
-   v0.x — adding a class requires amending ADR 0019.
+   table above (this checks **form**, not **truth** — a
+   battery claiming class `a` while doing class `c` is a
+   review-judgement matter, not a mechanical one; the ADR
+   is honest about this). The list above is the closed
+   taxonomy for v0.x — adding a class requires amending
+   ADR 0019.
+
+   **Runtime enforcement sub-rule (mirrors Deno 2.5
+   permission sets).** Batteries claiming deviation classes
+   **a, c, d, f** MUST accept an embedder-supplied
+   allowlist via the `Runtime`/`Config` surface (ADR 0007).
+   Examples:
+
+   - `_http` (class a + sometimes c): `Config::http_allow_hosts:
+     Option<Vec<String>>` — when `Some(hosts)`, requests
+     beyond the allowlist trap with `SecurityError`. When
+     `None`, no host restriction (current Tier 1 default of
+     "no network").
+   - `_sqlite` (class a): `Config::sqlite_allow_paths` for
+     filesystem scoping.
+   - `_s3` (class c + g): `Config::s3_allow_buckets`.
+
+   This makes the static deviation declaration auditable at
+   runtime — an embedder building a sandbox can refuse to
+   ship a battery whose allowlist is None. **The 2025 NDSS
+   "Securing Deno" paper found CLI-arg-only permission
+   declarations get coarse-grained adoption** — we get
+   ahead of that by making the allowlist a typed `Config`
+   field (programmatic) AND optionally a JSON file load
+   path, both first-class.
 
 5. **Dependency direction is strict.** Tier 3 may import
    Tier 2 may import Tier 1. The reverse is forbidden. This
@@ -153,12 +184,26 @@ leave Rust-implemented batteries (SQLite, HTTP, S3) homeless.
    When a battery has both shapes (e.g. JSON pure-Ruby AND
    `_json_native`), the pure-Ruby implementation is the
    reference. The native battery is a drop-in
-   *performance* upgrade; its observable behaviour
-   (results, error shapes, edge cases) must match the
-   pure-Ruby version. The native PR is required to
-   pass the pure-Ruby's test suite. If a divergence is
-   intentional, the native battery's ADR records it as a
-   deviation.
+   *performance* upgrade; its observable behaviour should
+   match the pure-Ruby version **as closely as the
+   underlying Rust crate permits**.
+
+   **Parity is best-effort, not bit-exact.** Genuinely
+   hard cases (JSON Float precision / `Float::INFINITY` /
+   `NaN` representation, locale-dependent `Date.parse`,
+   `BigDecimal` precision) are expected to diverge and
+   are recorded as **deviation class `h`** (Rule 4) in the
+   native battery's ADR. The native PR runs the pure-Ruby
+   test suite to surface every divergence axis; failures
+   become enumerated class-`h` deviations rather than
+   blockers.
+
+   This is the **Deno stdlib-on-JSR direction** — pure
+   forms work everywhere, native forms are the
+   build-time optimisation. Embedders who care about
+   semantics get the pure form's portability; embedders
+   who care about throughput add `--features _json_native`
+   and accept the documented class-`h` divergences.
 
    This is the **Deno stdlib-on-JSR direction** — pure
    forms work everywhere, native forms are the
@@ -182,11 +227,28 @@ leave Rust-implemented batteries (SQLite, HTTP, S3) homeless.
      which `register_fn_v2` slots to wire if they want to
      gate the battery's reach)
 
-   This is enforced mechanically: CI fails any PR that
-   adds a `_<name>` Cargo feature without a matching
-   `docs/adr/00XX-battery-<name>.md` file (~20 lines of
-   bash, paralleling the existing per-file panic budget at
-   `.github/workflows/ci.yml`).
+   This is enforced mechanically by
+   `scripts/check-battery-adrs.sh` (~30 lines of bash,
+   paralleling the existing per-file panic budget at
+   `.github/workflows/ci.yml`). The check:
+
+   - **Naming convention**: `_pure_*` features (pure-Ruby
+     canon members of the `stdlib` umbrella) are exempt
+     from ADR-per-battery — they're library code, not
+     batteries. All OTHER `_<name>` features require an
+     ADR. The aggregate features (`language`, `stdlib`,
+     `cli-defaults`, `everything`) are also exempt.
+   - **Forward check**: every non-exempt `_<name>` in any
+     workspace `crates/*/Cargo.toml` must have a
+     `docs/adr/00XX-battery-<name>.md` file.
+   - **Reverse check**: every `docs/adr/00XX-battery-<name>.md`
+     must have a corresponding `_<name>` feature; an ADR
+     without a feature is an orphan (battery was renamed
+     or removed without ADR cleanup).
+   - **Helper crates covered**: glob `crates/*/Cargo.toml`
+     handles direct workspace children. Deeper nesting
+     (workspace-within-workspace) would need glob update;
+     not present today.
 
 8. **Namespace convention for Rust-backed batteries.**
    Native batteries expose themselves under
@@ -203,8 +265,35 @@ leave Rust-implemented batteries (SQLite, HTTP, S3) homeless.
 
    Rationale: Node solved this exact problem with `node:`
    prefix mandatory on its native built-ins
-   (`node:sqlite`, `node:test`). The Ruby analogue keeps
-   `rubyrs/` as the prefix.
+   (`node:sqlite`, `node:test`). **Bun adopts the same
+   pattern with its own `bun:` prefix** (`bun:sqlite`,
+   `bun:test`, `bun:ffi`) and explicitly directs users to
+   prefer `bun:sqlite` over `node:sqlite` because the
+   native form has more features. The Ruby analogue keeps
+   `rubyrs/` as the prefix — establishing it now means
+   Tier 4 MRI-compat (when it lands) can route
+   `require "sqlite3"` to a real MRI gem while
+   `require "rubyrs/sqlite"` stays pinned to our native
+   battery.
+
+   **Resolver semantics.** `require "rubyrs/<name>"`
+   resolves via a built-in feature registry maintained by
+   the runtime. The registry is populated at build time by
+   each native battery's startup code; if `_<name>` was
+   not enabled at compile, the require returns
+   `LoadError` (NOT a fall-through to gem search). Bare
+   `require "<name>"` is unchanged from current behaviour:
+   first the runtime's stub map (pure-Ruby canon when
+   `stdlib` is on), then Tier 4 gem search if available.
+
+   **Enforcement.** Battery registration code MUST go
+   through a registration helper
+   (`runtime.register_native_battery(name, init_fn)`) that
+   internally prefixes the registry key with `rubyrs/`. A
+   battery cannot accidentally claim a bare name because
+   the public registration API does not accept one. A
+   `grep -rn '\.constants\.insert' rubyrs-stdlib/src/`
+   audit confirms no battery bypasses the helper.
 
 ### Part C — shape aliases (orthogonal to tier)
 
@@ -221,8 +310,8 @@ Three shape aliases, defined as Cargo feature sets in the
 | Shape | Triggered by | Includes | Target user | Size budget |
 |---|---|---|---|---|
 | **embed** | `cargo add rubyrs-core` (or `rubyrs --no-default-features`) | Tier 1 only | Embedding Ruby in Rust hosts; WASM | ≤ 6 MB (ADR 0015 Rule 7) |
-| **cli-defaults** | `cargo install rubyrs` (facade default) | Tier 1 + Tier 2 + Tier 3 pure-Ruby canon | Ruby CLI tool authors | ≤ 25 MB |
-| **everything** | `cargo install rubyrs --features everything` | All tiers + all native batteries (SQLite, HTTP, S3, WS, OpenSSL, ...) | Bun-class CLI / Edge runtime | ≤ 150 MB |
+| **cli-defaults** | `cargo install rubyrs` (facade default) | Tier 1 + Tier 2 + Tier 3 pure-Ruby canon + **`_sqlite` + `_http`** | Ruby CLI tool authors — fresh `cargo install` should have the Bun-class demo (`require "rubyrs/sqlite"`) work out of the box | ≤ 40 MB |
+| **everything** | `cargo install rubyrs --features everything` | All tiers + all native batteries (SQLite, HTTP, S3, WS, OpenSSL, OS threads, ...) | Bun-class CLI / Edge runtime | ≤ 150 MB |
 
 Cargo shape:
 
@@ -240,10 +329,13 @@ stdlib     = [                          # pure-Ruby canon only
 ]
 
 # Shape aliases (CLI defaults, NOT library defaults)
-cli-defaults = ["stdlib"]               # facade crate's default
+# `cli-defaults` includes _sqlite + _http so a fresh
+# `cargo install rubyrs` user can run `require "rubyrs/sqlite"`
+# without further --features incantation (Bun-class demo).
+cli-defaults = ["stdlib", "_sqlite", "_http"]
 everything   = [
     "cli-defaults",
-    "_sqlite", "_http", "_s3", "_websocket",
+    "_s3", "_websocket",
     "_openssl", "_yaml_native", "_csv_native", "_json_native",
     "_thread", "_io",
 ]
@@ -257,9 +349,14 @@ The facade crate (`crates/rubyrs/Cargo.toml`) sets its own
 `default = ["cli-defaults"]`. The library crate
 (`crates/rubyrs-core/Cargo.toml`) sets `default = []`.
 
-This is the wasmtime pattern (CLI binary defaults differ
-from library defaults) and the convention Cargo's own
-documentation endorses.
+This is the **split-crate workaround** for Cargo's known
+limitation that a single crate cannot have different
+defaults for library vs binary consumers (tracked at
+[rust-lang/cargo#12054](https://github.com/rust-lang/cargo/issues/12054)).
+**wasmtime** uses the same workaround — its library
+`crates/wasmtime/Cargo.toml` has a different `default`
+than the CLI workspace root's `Cargo.toml`. We follow the
+established Rust-ecosystem pattern.
 
 ### Part D — binary-size budgets per shape
 
@@ -271,17 +368,29 @@ backing:
 | Shape | Binary size | Cold start | RSS for `puts 1+2` |
 |---|---|---|---|
 | **embed** | ≤ 6 MB | ≤ 5 ms | ≤ 8 MB |
-| **cli-defaults** | ≤ 25 MB | ≤ 15 ms | ≤ 20 MB |
+| **cli-defaults** | ≤ 40 MB (was 25 in v2 — bumped to absorb `_sqlite` ~4 MB + `_http` ~8 MB) | ≤ 20 ms | ≤ 30 MB |
 | **everything** | ≤ 150 MB | ≤ 40 ms | ≤ 60 MB |
 
-CI gates each shape (`scripts/check-shape-budgets.sh` runs
-per shape, matching the existing peak-RSS ratchet pattern in
-`.github/workflows/ci.yml`).
+Reference points: **Wasmer ships a 0.8 MB embed binary**
+([wasmer.io comparison](https://wasmer.io/wasmer-vs-wasmtime)) —
+the real "tight embed" benchmark in the WASM-runtime
+neighbourhood. wasmtime is 13.8 MB. Our 6 MB target sits
+between them, with the Ruby language surface as the
+positive cost driver.
 
-Per-battery delta accounting: each battery's own ADR
-records the binary-size delta its `_<name>` feature adds
-to the `cli-defaults` baseline. This makes the cost
-visible per-PR rather than per-release.
+**Implementation TODO** (not blocking ratification, blocking
+Phase 1 of ADR 0018): `scripts/check-shape-budgets.sh` does
+not exist yet. The script must follow the panic-budget
+ratchet pattern (the existing template at
+`.github/workflows/ci.yml`'s "Panic budget per-file"
+step). Cold-start budgets need min-of-N≥5 sampling to
+survive GitHub-hosted-runner jitter; 20% headroom on the
+embed-tier 5 ms target. **Per-battery delta accounting**:
+each battery's own ADR records the binary-size delta its
+`_<name>` feature adds to the `cli-defaults` baseline.
+
+This makes per-battery cost visible per-PR rather than
+per-release.
 
 ### Part E — implementation-locus matrix (revised)
 
@@ -294,8 +403,21 @@ visible per-PR rather than per-release.
 | `Thread`, `Mutex`, `Queue`, `ConditionVariable` | **3** (`_thread`) | `rubyrs-stdlib + _thread battery` | Deviation class `g`. Embed/wasm builds omit. **Resolves conflict with ADR 0017** by moving to Tier 3 |
 | `Ractor` | **3** (`_ractor`) | `rubyrs-stdlib + _ractor battery` | Isolated VM per ractor; deviation class `g` |
 | **Reflection** | | | |
-| Bounded `ObjectSpace.each_object(Class)` | 2 | `rubyrs-language` — GC root walk | Limited surface; weak-ref table NOT included |
-| `ObjectSpace` weak-ref tables, full reflection | **4** | `rubyrs-mri-compat` | **Resolves conflict with ADR 0017**: full surface stays Tier 4 as 0017 says; limited form available at Tier 2 |
+| `ObjectSpace.each_object(Class)` (Class arg required) | 2 (`_object_space_introspect`) | `rubyrs-language` — GC root walk | Bounded by caller-supplied Class; iteration order spec'd "unspecified within run, stable within GC cycle" |
+| `ObjectSpace.count_objects` | 2 (`_object_space_introspect`) | `rubyrs-language` — type histogram | Cheap; same GC walk |
+| `ObjectSpace::WeakMap`, `WeakRef`, `WeakKeyMap`, `WeakValueMap` | 2 (`_object_space_introspect`) | `rubyrs-language` — new weak-ref table on GC | Real cache-gem need (request_store, weakref-based caches); legitimate VM extension |
+| `ObjectSpace.each_object` (no arg — walk whole heap) | 4 | `rubyrs-mri-compat` | Rule 1 (non-deterministic full walk); debugger-only |
+| `ObjectSpace._id2ref`, `define_finalizer`, `undefine_finalizer`, `memsize_of`, `RubyVM::*` | 4 | `rubyrs-mri-compat` | CRuby ABI-shape parity (reverse-id table, finalizer queue, ABI byte counts) — cext lifecycle territory |
+
+**Companion amendment to ADR 0017.** v2 of this ADR
+silently placed bounded `ObjectSpace.each_object(Class)`
+at Tier 2 while ADR 0017's OUT table listed `ObjectSpace`
+at Tier 4 unconditionally. v3 amends 0017 in the same PR
+to split its row into a bounded-Tier-2 entry and a
+full-Tier-4 entry, both annotated "Per ADR 0019 v3". The
+Rule-4-vs-Rule-1 typo in 0017's old row (it cited the
+threading rule, should have cited determinism) is fixed
+in the same edit.
 | `TracePoint`, `set_trace_func` | 2 | `rubyrs-language` — instruction-level hooks | VM-level instrumentation surface |
 | `RubyVM::InstructionSequence` | 4 | `rubyrs-mri-compat` | CRuby-ABI parity, not language semantics |
 | **Serialisation** | | | |
@@ -344,11 +466,47 @@ visible per-PR rather than per-release.
 field. Today's `Value::Str` is UTF-8 only. Adding encoding
 state is a Tier 1 decision (touches `Value` layout) or a
 Tier 2 decision (Tier 1 stays UTF-8, Tier 2 layers
-multi-encoding on top). ADR 0019 marks it "TBD" — a
-follow-up ADR (or amendment to ADR 0017) resolves before
-the first Tier 3 battery that produces non-UTF-8 bytes
-ships (`_csv` reading Latin-1 files is the realistic
-forcing case).
+multi-encoding on top). ADR 0019 marks it "TBD".
+
+**Hard block on textual batteries until resolved.** The
+following batteries MUST NOT ship until a successor ADR
+(provisionally **ADR 0020**) settles encoding placement:
+
+- `_csv` (pure-Ruby) and `_csv_native` — both can encounter
+  Latin-1 / Shift-JIS / Windows-1252 files
+- `_yaml` (pure-Ruby; depends on `_yaml_native`) and
+  `_yaml_native` — YAML 1.1 supports multiple encodings
+- Any HTTP-body-decoding surface on `_http` that produces
+  Strings (current scope: `_http` returns bytes; String
+  decoding is the caller's job — this stays the v0.x
+  contract until Encoding ADR lands)
+
+Rationale: Rule 6 requires `_csv_native` to behaviour-match
+pure `_csv`. If pure `_csv` cannot represent non-UTF-8
+strings, Rule 6 is unimplementable for textual data.
+Resolution must come first.
+
+Batteries unaffected by this block (can ship in any order):
+`_sqlite` (TEXT columns are UTF-8 by convention),
+`_http` (returns bytes), `_s3` (returns bytes),
+`_websocket` (UTF-8 frames or binary), `_openssl`,
+`_thread`, `_ractor`, `_json_native` (JSON is UTF-8 by
+spec; non-UTF-8 input is a JSON-spec error).
+
+### What changes vs ADR 0019 v2 (this revision is v3)
+
+| v2 said | v3 says | Reason |
+|---|---|---|
+| Bounded `ObjectSpace.each_object(Class)` → Tier 2 | **Tier 2 split into 4 entries**: `each_object(Class)` + `count_objects` + WeakMap family — all under `_object_space_introspect`. **Tier 4** gets `each_object` (no-arg) + `_id2ref` + finalizers + `memsize_of` + RubyVM | v2's single "bounded" row silently amended ADR 0017 (caught by review). v3 explicitly splits surfaces; companion 0017 amendment lands in same PR |
+| 7-class deviation taxonomy (a–g) | **8-class — added class `h` (pure-Ruby semantic-parity divergence)** | Rule 6 was unimplementable for JSON Float / locale-dependent Date.parse without a slot for documented divergences |
+| Rule 6 "must match pure-Ruby behaviour" | **Rule 6 softened: best-effort parity, divergences become class-`h` deviations** | Bit-exact parity is unrealistic across Float / locale / precision edge cases; honest framing prevents Rule 6 from being permanently violated |
+| Rule 4 was design-time only | **Rule 4 gains runtime sub-rule**: batteries claiming classes a/c/d/f must accept embedder `Config` allowlists (Deno 2.5 permission-set pattern) | Static deviation declarations aren't auditable at runtime; review cited NDSS 2025 paper finding Deno's CLI-arg-only model gets coarse-grained adoption |
+| `cli-defaults` = `stdlib` (pure-Ruby canon only), ≤ 25 MB | **`cli-defaults` = `stdlib` + `_sqlite` + `_http`, ≤ 40 MB** | Bun-class demo (`require "rubyrs/sqlite"`) must work on fresh `cargo install`; pure-canon-only `cli-defaults` left the marketing punch undelivered |
+| Rule 7 CI script as ~20 lines | **Rule 7 expanded with `_pure_*` naming exemption + bidirectional check (forward + reverse)** | Review found edge cases: pure-Ruby canon members confused with batteries; renamed features leaving orphan ADRs |
+| Rule 8 namespace as convention only | **Rule 8 adds resolver semantics + enforcement via registration helper API** | Review: no resolver story; nothing prevents a battery from claiming a bare name |
+| `check-shape-budgets.sh` referenced as if it existed | **Explicitly marked as implementation TODO** (blocks Phase 1 of ADR 0018, not ratification) | Review: script didn't exist; honest framing |
+| Encoding TBD as a soft note | **Hard block on `_csv`, `_yaml`, `_csv_native`, `_yaml_native` until Encoding ADR (provisional 0020) lands**; non-textual batteries unaffected | Review: Rule 6 + UTF-8-only `Value::Str` made textual batteries unimplementable — clearer to block them than let the first PR re-litigate |
+| Bun-shape mention | **Bun-shape AND Bun's `bun:` prefix cited as second precedent alongside Node's `node:`** | Review: industry convention now spans both; rationale stronger with both cited |
 
 ### What changes vs ADR 0019 v1
 
@@ -509,7 +667,7 @@ forcing case).
    pointed out that shape and tier are orthogonal — the
    embed crate (`rubyrs-core`) can stay 5 MB while the CLI
    facade defaults to `cli-defaults` and optionally goes to
-   `everything`. v2 (this revision) reverses the rejection:
+   `everything`. v2 reversed the rejection (v3 preserves this):
    **Bun shape is allowed as a feature alias**, and serves
    the Bun-class marketing story rather than working
    against it.
@@ -536,7 +694,22 @@ forcing case).
    exactly what CRuby does (C ext + Ruby wrapper) and what
    makes its stdlib boundary perpetually fuzzy. Rejected.
 
-7. **Putting Thread / Mutex in Tier 2** (v1 position).
+7. **Node 22 SEA (Single Executable Applications)
+   approach — ship one fat binary, configure via embed-time
+   blob.** Node 22+ supports compiling a JavaScript app
+   into one statically-linked binary via SEA, with
+   configuration injected at build time through `postject`.
+   This is the *opposite* axis to ADR 0019: instead of
+   "many shapes from Cargo features," it's "one shape,
+   parameterised by a post-build asset blob." Considered
+   and rejected for rubyrs's tier story — SEA solves the
+   *embedder* problem (ship my Ruby script as one .exe),
+   not the *runtime composition* problem (which batteries
+   does the runtime carry). Both could coexist later: a
+   future "rubyrs SEA mode" would build atop a frozen
+   shape from ADR 0019, not replace it.
+
+8. **Putting Thread / Mutex in Tier 2** (v1 position).
    Reasoning was "implementing it requires VM changes,
    therefore Tier 2." Review identified this as confusing
    necessary and sufficient conditions: Fiber also requires
@@ -547,7 +720,41 @@ forcing case).
 
 ## Revision log
 
-- **2026-05-27 — v2 (this revision).** Major rewrite after
+- **2026-05-27 — v3 (this revision).** Second-round
+  review against v2 found 1 new blocker (v2's "bounded
+  ObjectSpace" silently amended ADR 0017) + 8 unaddressed
+  majors. v3 resolutions:
+  - Blocker: explicit ADR 0017 companion amendment in the
+    same PR; ObjectSpace surface split into 5 entries
+    across Tier 2 and Tier 4 (matrix Part E)
+  - Major: Rule 6 + Rule 4 — added deviation class `h`
+    (pure-Ruby semantic-parity divergence) and softened
+    Rule 6 from "must match" to "best-effort + class-`h`
+    documented divergence"
+  - Major: Rule 4 gains a runtime-enforcement sub-rule
+    (`Config`-supplied allowlists for deviation classes
+    a/c/d/f), citing Deno 2.5 permission sets
+  - Major: `cli-defaults` promoted from
+    `stdlib`-pure-Ruby-only to include `_sqlite` + `_http`
+    (Bun-class demo works on fresh `cargo install`); size
+    budget bumped 25 → 40 MB
+  - Major: Rule 7 expanded with `_pure_*` exemption and
+    bidirectional ADR-feature check
+  - Major: Rule 8 adds resolver semantics +
+    registration-helper enforcement (battery cannot claim
+    bare name through the public API)
+  - Major: `check-shape-budgets.sh` flagged as implementation
+    TODO (blocks ADR 0018 Phase 1, not v3 ratification)
+  - Major: Encoding TBD hardened into explicit block-list of
+    affected textual batteries until ADR 0020 lands;
+    non-textual batteries unaffected
+  - Prior art: Bun `bun:` prefix added next to Node's
+    `node:`; Wasmer's 0.8 MB binary cited as the embed
+    reference point; Cargo `#12054` cited for the
+    split-crate workaround
+  - Alternative 7 added (Node 22 SEA contrast)
+- **2026-05-27 — v2 (commit `8fda8f69`, kept in git
+  history).** Major rewrite after
   three parallel agent reviews flagged 3 blockers, 8 majors,
   and 4 minors against v1. Resolutions:
   - Blocker 1 (Thread vs ADR 0017): moved Thread/Mutex/
@@ -573,8 +780,9 @@ forcing case).
   not opt-out") gets a CLI-vs-library carve-out in Part C.
 - [ADR 0017 — Tier-1 boundary specification](0017-tier1-boundary.md)
   — the inner-ring spec; ADR 0019 mirrors the exercise one
-  ring out. v2's Thread and ObjectSpace placements align
-  with ADR 0017's existing rows.
+  ring out. v3 lands a companion amendment to 0017's
+  `ObjectSpace` row (split bounded/Tier-2 vs full/Tier-4) in
+  the same PR.
 - [ADR 0018 — Workspace migration plan](0018-workspace-migration.md)
   — the phased path to land the multi-crate split. ADR 0019
   shapes what Phase 3 (`rubyrs-language` extraction) and
@@ -588,3 +796,35 @@ forcing case).
   — the cext ABI used by msgpack / flori_json / bcrypt is
   itself a Tier 4 mechanism, but the policy applies to any
   Tier 3 battery that opts into cext-style native code.
+
+### External prior art cited
+
+- [Node.js built-in modules — `node:` prefix](https://nodejs.org/api/modules.html#built-in-modules)
+  — Rule 8 namespace convention precedent
+- [Bun built-in modules — `bun:sqlite`, `bun:test`, `bun:ffi`](https://bun.com/docs/runtime/sqlite)
+  — Rule 8 second precedent; `cli-defaults` Bun-class
+  framing
+- [Bun `node:sqlite` reference (prefers `bun:sqlite`)](https://bun.com/reference/node/sqlite)
+  — direct quote on prefix preference
+- [Deno 2.5 — permission sets](https://deno.com/blog/v2.5)
+  — Rule 4 runtime sub-rule (`Config`-supplied allowlists)
+- [Deno permissions documentation](https://docs.deno.com/runtime/fundamentals/security/)
+  — `--allow-net=host` host-allowlist pattern
+- [NDSS 2025 — "Securing Deno" paper](https://www.ndss-symposium.org/wp-content/uploads/2025-284-paper.pdf)
+  — empirical finding: CLI-arg-only permission models get
+  coarse-grained adoption (motivates typed `Config`
+  approach over CLI-flag-only)
+- [Wasmer vs Wasmtime size comparison](https://wasmer.io/wasmer-vs-wasmtime)
+  — Part D `embed` budget reference point (0.8 MB Wasmer
+  vs 13.8 MB wasmtime; our 6 MB target sits between)
+- [wasmtime workspace `Cargo.toml`](https://github.com/bytecodealliance/wasmtime/blob/main/Cargo.toml)
+  + [wasmtime library `Cargo.toml`](https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/Cargo.toml)
+  — Part C split-crate-default precedent
+- [rust-lang/cargo#12054 — Different default features for
+  bin vs lib](https://github.com/rust-lang/cargo/issues/12054)
+  — Cargo limitation that forces the split-crate workaround
+- [Node 22 Single Executable Applications](https://nodejs.org/api/single-executable-applications.html)
+  — Alternative 7 (compile-time blob configuration as
+  contrast to feature-flag composition)
+- mruby `mrbgems` — Rule 3 individually-opt-in precedent
+  (not URL-cited; docs at the mruby repo's `doc/guides/mrbgems.md`)

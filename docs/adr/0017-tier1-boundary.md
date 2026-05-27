@@ -126,7 +126,8 @@ scope for rubyrs."
 | `Net::HTTP`, `Socket`, `OpenSSL`, `URI` | 3 | Rule 2. |
 | `Kernel#system`, `` Kernel#` ``, `exec`, `spawn`, `Process.*` | 3 or never | Rule 2; capability-gated even when present. (`` Kernel#` `` is Ruby's backtick command-execution operator.) |
 | `Marshal`, `Psych` (YAML), serialization with state | 3 | Mostly rule 1 (non-deterministic on object id), partly rule 2. |
-| `ObjectSpace`, `GC.start`-style reflection | 4 (`mri-compat`) | Violates rule 4 (introspects shared global state); needed only for CRuby-shape parity. |
+| `ObjectSpace` bounded surface (`each_object(Class)` with Class arg required, `count_objects`, `WeakMap`, `WeakRef`, `WeakKeyMap`, `WeakValueMap`) | 2 (`_object_space_introspect` feature) | Bounded by caller-supplied Class; iteration order is spec'd as "unspecified within run, stable within a single GC cycle" — satisfies Rule 1 (deterministic *given the GC cycle as an implicit input*). Per ADR 0019 v3. |
+| `ObjectSpace` full surface (`each_object` no-arg, `_id2ref`, `define_finalizer` / `undefine_finalizer`, `memsize_of`, `RubyVM::*`) and `GC.start`-style reflection | 4 (`mri-compat`) | Rule 1 violation (non-deterministic global heap walk + ABI-shape byte counts) + tied to CRuby-shape parity for cext lifecycle. Per ADR 0019 v3. |
 | `Time` (wall-clock) | 2 with capability injection from host | Rule 1; a `Time.now` host fn is the supported way. |
 | `Random`, `SecureRandom` | 2 with seeded mode in tier 1 | Rule 1; deterministic seeded `Random.new(seed)` is fine, system-entropy `Random.new` belongs out. |
 | `ENV[…]` reading host-process env vars | 2 (host-injected map only) | Rule 1+2. Direct host-process env reads are out (non-deterministic + capability leak); the supported Tier-1 shape is `Config::env`-injected map exposed under the `ENV` name (TBD API). |
