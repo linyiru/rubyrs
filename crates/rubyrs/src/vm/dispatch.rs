@@ -2605,11 +2605,18 @@ impl Vm {
                 }
             }
         }
-        // Wrong-arity arms for ivar accessors — match CRuby's
-        // ArgumentError surface. Without these, `obj
-        // .instance_variable_get()` or `obj.instance_variable_set
-        // (:@x)` would fall through to NoMethodError, which is
-        // wrong (CRuby reports arity, not unknown method).
+        // Wrong-arity arms for the ivar-introspection family —
+        // match CRuby's ArgumentError surface. Without these,
+        // `obj.instance_variables(1)`, `obj.instance_variable_get()`,
+        // or `obj.instance_variable_set(:@x)` would fall through to
+        // NoMethodError, which is wrong (CRuby reports arity, not
+        // unknown method). `instance_variables` takes zero args;
+        // `_get` takes one; `_set` takes two.
+        if &*name == "instance_variables" {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+            }));
+        }
         if &*name == "instance_variable_get" {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),

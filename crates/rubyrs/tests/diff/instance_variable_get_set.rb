@@ -131,9 +131,11 @@ rescue FrozenError => e
 end
 
 ## Wrong-arity: CRuby raises ArgumentError with the standard
-## "wrong number of arguments (given N, expected M)" shape.
-## Without the explicit arity arm, this would fall through to
-## NoMethodError (semantically wrong).
+## "wrong number of arguments (given N, expected M)" shape on
+## all three family members (instance_variables takes 0 args,
+## _get takes 1, _set takes 2). Without the explicit arity
+## arms, these would fall through to NoMethodError
+## (semantically wrong).
 begin
   b.instance_variable_get
   puts "arity-get-0=NOT-RAISED"
@@ -145,6 +147,12 @@ begin
   puts "arity-set-1=NOT-RAISED"
 rescue ArgumentError => e
   puts "arity-set-1=#{e.class}"
+end
+begin
+  b.instance_variables(1)
+  puts "arity-vars-1=NOT-RAISED"
+rescue ArgumentError => e
+  puts "arity-vars-1=#{e.class}"
 end
 
 ## End-to-end: the sinatra-shaped Gem::Version#<=> usage that
