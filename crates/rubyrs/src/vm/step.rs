@@ -1072,7 +1072,24 @@ impl Vm {
                 self.stack.push(Value::Block(id));
             }
             Op::Yield(argc) => {
-                let block = match self.frames.last().expect("ICE: Yield no frame").block_arg {
+                // `yield` resolves to the block of the enclosing
+                // METHOD, not the current frame. When yield runs
+                // inside a nested block (e.g.
+                // `def f; xs.each { |x| yield x }; end`), the
+                // current frame is the `each` block; we must walk
+                // through `is_block` frames to find the nearest
+                // method frame and pick up ITS block_arg.
+                //
+                // CRuby implements the same lookup via the cfp
+                // chain (vm_get_yield_method_cfp). Without the
+                // walk, every block-wrapped yield raises
+                // "no block given (yield)" — broke ERB's scanner
+                // (lib/erb/compiler.rb:166-169 nests `yield(token)`
+                // inside `line.scan { |tokens| tokens.each { ... } }`).
+                let block = self.frames.iter().rev()
+                    .find(|f| !f.is_block)
+                    .and_then(|f| f.block_arg);
+                let block = match block {
                     Some(b) => b,
                     None => return Err(self.trap(RubyError::RuntimeError {
                         msg: "no block given (yield)".to_string(),
