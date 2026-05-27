@@ -1506,6 +1506,24 @@ impl Vm {
         {
             return Ok(Some(v));
         }
+        // BigInt-recv arity guard for the bit predicates. The
+        // 1-arg dispatch above handles the happy path; the Int-recv
+        // arity guard in numeric.rs only catches Int receivers, so
+        // `(2**64).allbits?` / `(2**64).anybits?(1, 2)` would
+        // otherwise fall through to NoMethodError despite
+        // `respond_to?` advertising the methods. Sibling to the
+        // Int-side guard (numeric.rs L346).
+        if matches!(recv, Value::BigInt(_))
+            && matches!(name, "allbits?" | "anybits?" | "nobits?")
+            && args.len() != 1
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args.len(),
+                ),
+            }));
+        }
         // Bitwise shifts `<<` / `>>`. Fires for any Integer recv +
         // any Integer arg, including the Int×Int overflow path
         // (`1 << 64`) that numeric.rs declined under bignum. Sits

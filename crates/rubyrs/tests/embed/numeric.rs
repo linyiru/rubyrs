@@ -1510,11 +1510,20 @@ fn integer_bit_predicates_arity_typeerror() {
         rt.eval(script, "predicates.rb").expect("eval");
         assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
     }
-    // Arity: 0 args + 2+ args → ArgumentError.
+    // Arity: 0 args + 2+ args → ArgumentError. Cover both Int
+    // recv (numeric.rs's guard) and BigInt recv (bignum.rs's
+    // sibling guard added per PR #241 cycle 3 review — previously
+    // BigInt fell through to NoMethodError).
     for (script, given) in [
         ("5.send(:allbits?)", 0),
         ("5.send(:anybits?, 1, 2)", 2),
         ("5.send(:nobits?, 1, 2, 3)", 3),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:allbits?)", 0),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:anybits?, 1, 2)", 2),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:nobits?, 1, 2, 3)", 3),
     ] {
         let err = rt.eval(script, "predicates_arity.rb").unwrap_err();
         match err.err {
