@@ -2599,8 +2599,17 @@ impl Vm {
                         self.stack.push(value);
                         return Ok(());
                     }
+                    // TypedData (and any future non-Instance Object
+                    // heap variant) genuinely accepts ivars in CRuby
+                    // — the limitation is rubyrs-specific (no ivar
+                    // table on `TypedDataObj`). RubyError doesn't
+                    // model `NotImplementedError` yet, so RuntimeError
+                    // is the closest fit; keep the message terse and
+                    // explicit about the rubyrs-side limitation so a
+                    // gem hitting this knows it's not a CRuby
+                    // semantic difference.
                     _ => return Err(self.trap(RubyError::RuntimeError {
-                        msg: "instance_variable_set: receiver's heap slot is not an Instance (e.g. TypedData); rubyrs doesn't yet model ivars on those heap variants".to_string(),
+                        msg: "instance_variable_set on TypedData receivers is not yet supported in rubyrs".to_string(),
                     })),
                 },
                 Value::Class(cls) => {
