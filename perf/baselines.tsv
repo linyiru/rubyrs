@@ -108,7 +108,7 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	6500	1100	2M method_missing di
 # growth is dm-specific (define_method's closure surface
 # touches the bumped tables); other workloads have their own
 # headroom.
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	6700	700	2M define_method dispatch (closure-method)
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	6700	780	2M define_method dispatch (closure-method)
 crates/rubyrs/examples/metaprog_bench/static_bench.rb	6500	1000	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
@@ -122,6 +122,14 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	6500	800	1M fizzbuzz; BinOpInt + IncLocal +
 # the ratchet is absolute so it still trips. Bumping to
 # 6700 gives ~200 KB headroom without inflating the cap
 # enough to mask a future regression.
-crates/rubyrs/benches/gc_churn.rb	6700	280	200k short-lived Array+Hash allocs; stresses mark/sweep
+crates/rubyrs/benches/gc_churn.rb	6700	320	200k short-lived Array+Hash allocs; stresses mark/sweep
 crates/rubyrs/benches/string_interp.rb	6500	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
-crates/rubyrs/benches/hash_mutate.rb	6500	650	200k Hash[]= overwrites + 1k Hash[] reads
+# hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
+# consecutive master CI runs observed 690-710ms (4-9% over
+# 650 budget). Same pattern on dm_bench (700→780) and
+# gc_churn (280→320) in the same time window — consistent
+# with a GitHub-hosted runner perf shift, not a code
+# regression (no relevant merges in the affected window).
+# Headroom is ~3% over observed max; future regressions
+# still surface.
+crates/rubyrs/benches/hash_mutate.rb	6500	730	200k Hash[]= overwrites + 1k Hash[] reads

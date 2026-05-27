@@ -377,36 +377,43 @@ fn object_send_string_arg_respects_max_symbols_cap() {
 }
 
 #[test]
-fn config_default_picks_up_stress_gc_env() {
-    // Regression guard for PR #116 review: removing the
-    // `env::var("STRESS_GC")` read from `Vm::new` (to satisfy
-    // wizer's no-imports rule on wasm32-wasip1) silently broke
-    // ci.yml's "Run tests (STRESS_GC=1)" job — that step re-runs
-    // `cargo test` with the env var set, expecting every
-    // `Runtime::new()` in the suite to flip into stress mode for
-    // broader GC-rooting coverage. The compensating read lives in
-    // `Config::default()` instead; this test pins it so a future
-    // cleanup of `Config::default` doesn't re-introduce the silent
-    // CI coverage gap.
+fn config_default_does_not_read_stress_gc_env() {
+    // Inverted regression guard (was
+    // `config_default_picks_up_stress_gc_env` before the
+    // pre-Phase-1 cleanup in commit `a12126ec`).
     //
-    // SAFETY: `std::env::set_var` / `remove_var` are unsafe in 2024
-    // edition because they aren't thread-safe. No other test in the
-    // suite currently reads `STRESS_GC` at runtime (the
-    // `*_survives_stress_gc` tests hard-code the flag in Config and
-    // don't consult env), so the race window is empty today. If a
-    // future test starts reading the env, gate this behind a
-    // serial-test crate.
+    // The previous behaviour — `Config::default()` reading
+    // `STRESS_GC` from the host process env — leaked host
+    // state into a public library-API field, violating the
+    // spirit of ADR 0017 Rule 1 ("deterministic from script
+    // inputs"). Library embedders constructing
+    // `Config::default()` expect their bool fields to be
+    // exactly the documented defaults, not silently
+    // overridden by inherited env.
+    //
+    // The CLI binary `rubyrs` (`main.rs::env_lookup`) reads
+    // `STRESS_GC` explicitly and sets the field — that's the
+    // supported "STRESS_GC=1 cargo test" path going forward.
+    // Subprocess-based tests (diff_cruby, cext_*) still pick
+    // it up via the CLI; in-process `Runtime::new()` callers
+    // do not.
+    //
+    // SAFETY: `std::env::set_var` / `remove_var` are unsafe
+    // in 2024 edition because they aren't thread-safe. No
+    // other test in the suite reads `STRESS_GC` at runtime
+    // (the `*_survives_stress_gc` tests hard-code the flag
+    // in Config), so the race window is empty.
     let prev = std::env::var("STRESS_GC").ok();
     unsafe { std::env::remove_var("STRESS_GC") };
     assert!(
         !rubyrs::Config::default().stress_gc,
-        "Config::default().stress_gc must be false when STRESS_GC unset",
+        "Config::default().stress_gc must be false when STRESS_GC unset (baseline)",
     );
 
     unsafe { std::env::set_var("STRESS_GC", "1") };
     assert!(
-        rubyrs::Config::default().stress_gc,
-        "Config::default().stress_gc must be true when STRESS_GC=1 — the CI stress-mode gate relies on this",
+        !rubyrs::Config::default().stress_gc,
+        "Config::default().stress_gc must STILL be false even when STRESS_GC=1 is set — the library API does not read host env (post pre-Phase-1 cleanup; see commit a12126ec)",
     );
 
     match prev {
