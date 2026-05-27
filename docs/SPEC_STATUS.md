@@ -12,16 +12,17 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 72 |
-| Examples in corpus | 337 |
-| Skipped `it` traces | 120 |
+| Files | 75 |
+| Examples in corpus | 350 |
+| Skipped `it` traces | 127 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
+| `divergent` | 4 |
 | `fixture` | 45 |
-| `method-not-implemented` | 64 |
+| `method-not-implemented` | 67 |
 | `mock` | 11 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -40,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 13 | 30 | 29 |
-| Integer | 14 | 122 | 7 |
+| Integer | 17 | 135 | 14 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -92,12 +93,15 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
+| `integer_downto_spec.rb` | Integer#downto [stop] when self and stop are Integers | `core/integer/downto_spec.rb` | 3 | 3 |
 | `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
 | `integer_left_shift_spec.rb` | Integer#<< | `core/integer/left_shift_spec.rb` | 26 | 0 |
 | `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |
 | `integer_pow_spec.rb` | Integer#pow | `core/integer/pow_spec.rb` | 7 | 0 |
 | `integer_right_shift_spec.rb` | Integer#>> | `core/integer/right_shift_spec.rb` | 26 | 0 |
 | `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |
+| `integer_times_spec.rb` | Integer#times | `core/integer/times_spec.rb` | 7 | 1 |
+| `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 3 | 3 |
 | `integer_zero_spec.rb` | Integer#zero? | `core/integer/zero_spec.rb` | 2 | 0 |
 | `method_call_spec.rb` | Method#call | `core/method/call_spec.rb (+ shared/call.rb)` | 6 | 0 |
 | `method_compose_spec.rb` | Method#<< | `core/method/compose_spec.rb` | 6 | 0 |
