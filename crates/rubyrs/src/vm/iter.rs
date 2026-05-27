@@ -1804,9 +1804,10 @@ impl Vm {
                 // concurrent mutation entirely; we instead keep
                 // the elements alive defensively so the primitive
                 // completes without ICE'ing. Mirrors the chunk
-                // driver's defensive pin (PR #187). Narrowed via
-                // `is_gc_heap_ref` to avoid O(n) GC scan growth for
-                // immediate/Rc-shared element types.
+                // driver's defensive snapshot pin earlier in this
+                // file. Narrowed via `is_gc_heap_ref` to avoid
+                // O(n) GC scan growth for immediate/Rc-shared
+                // element types.
                 for v in &snapshot {
                     if v.is_gc_heap_ref() {
                         g.pin(v.clone());
@@ -1842,7 +1843,7 @@ impl Vm {
                         // `maybe_gc` would sweep it and the
                         // subsequent `hash_mut.push` would insert a
                         // dangling ObjId into result_id. Same
-                        // family as the chunk fix in PR #187.
+                        // family as the chunk driver's GC pin.
                         //
                         // Pop discipline mirrors the step_block
                         // dance: the pin scope is JUST `maybe_gc()`,

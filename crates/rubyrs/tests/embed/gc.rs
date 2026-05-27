@@ -493,7 +493,7 @@ fn array_group_by_pin_heap_keys_under_stress_gc() {
     // the bucket Array, then pushes `(key, ...)` into the result
     // Hash. Without pinning, heap-Value keys get swept during the
     // alloc, leaving a dangling ObjId inside the Hash. Same family
-    // as the chunk fix in PR #187.
+    // as the chunk driver's GC pin.
     let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
         stress_gc: true,
         ..Default::default()
