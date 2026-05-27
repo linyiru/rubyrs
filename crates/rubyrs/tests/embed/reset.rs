@@ -149,6 +149,62 @@ fn reset_undoes_redefinition_of_preamble_method() {
 }
 
 #[test]
+fn reset_restores_heap_next_gc_to_preamble_baseline() {
+    // GC's resize heuristic in heap.rs ratchets `next_gc`
+    // upward whenever live_count approaches it. Without
+    // snapshotting next_gc, a long-lived Runtime + many user
+    // evals drives next_gc to large values, so post-reset
+    // (where live_count is restored to baseline) GC stops
+    // firing at the expected threshold. Pin the contract:
+    // next_gc returns to the post-preamble value after reset.
+    let mut rt = Runtime::new();
+    let baseline = rt.vm_heap_next_gc();
+    // Heavy allocation pushes next_gc up via GC's resize.
+    rt.eval(
+        "arrs = []; i = 0; while i < 2000; arrs << [i]; i = i + 1; end",
+        "alloc.rb",
+    ).expect("alloc heavy");
+    assert!(
+        rt.vm_heap_next_gc() > baseline,
+        "heavy alloc should have ratcheted next_gc above baseline {}; got {}",
+        baseline, rt.vm_heap_next_gc(),
+    );
+    rt.reset();
+    assert_eq!(
+        rt.vm_heap_next_gc(), baseline,
+        "reset must restore next_gc to baseline {}",
+        baseline,
+    );
+}
+
+#[test]
+fn reset_keeps_method_gen_bounded_across_cycles() {
+    // Pre-fix: `reset()` did `method_gen.wrapping_add(1)`,
+    // growing the counter unbounded; at ~10k resets/sec the
+    // u32 wraps in ~5 days. Post-fix: reset clamps the counter
+    // at `snapshot.method_gen + 1`, so 100 resets all land at
+    // the same value.
+    let mut rt = Runtime::new();
+    let baseline = rt.vm_method_gen();
+    // First reset: post-construction state means method_gen
+    // should already be at snapshot.method_gen (no user defs
+    // bumped it). Reset bumps to baseline+1.
+    rt.reset();
+    let after_first = rt.vm_method_gen();
+    assert_eq!(after_first, baseline.wrapping_add(1));
+    // Many resets must NOT keep advancing — the counter is
+    // capped at baseline+1 every cycle.
+    for _ in 0..100 {
+        rt.reset();
+    }
+    assert_eq!(
+        rt.vm_method_gen(),
+        baseline.wrapping_add(1),
+        "method_gen must stay clamped at baseline+1 across resets",
+    );
+}
+
+#[test]
 fn reset_clears_user_singleton_method_on_preamble_class() {
     // `def self.foo` inside a class body installs into the
     // class's `singleton_methods` RefCell, not `methods`. A
@@ -351,6 +407,8 @@ fn reset_clears_user_interned_symbols() {
 trait RuntimeInternals {
     fn vm_live_count(&self) -> usize;
     fn vm_interner_len(&self) -> usize;
+    fn vm_heap_next_gc(&self) -> usize;
+    fn vm_method_gen(&self) -> u32;
 }
 
 // Note: these accessors are `pub fn` on `Runtime` with the
@@ -364,6 +422,12 @@ trait RuntimeInternals {
 impl RuntimeInternals for Runtime {
     fn vm_live_count(&self) -> usize {
         Runtime::__test_vm_live_count(self)
+    }
+    fn vm_heap_next_gc(&self) -> usize {
+        Runtime::__test_vm_heap_next_gc(self)
+    }
+    fn vm_method_gen(&self) -> u32 {
+        Runtime::__test_vm_method_gen(self)
     }
     fn vm_interner_len(&self) -> usize {
         Runtime::__test_vm_interner_len(self)

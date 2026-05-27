@@ -343,6 +343,17 @@ struct PostPreambleSnapshot {
     /// `vm.heap.live_count` at preamble completion. `reset()`
     /// restores live_count to this value.
     heap_live_count: usize,
+    /// `vm.heap.next_gc` at preamble completion. Without
+    /// restoring this, the GC trigger threshold ratchets upward
+    /// across reset cycles (gc.rs's resize heuristic bumps
+    /// `next_gc` whenever live_count nears it). Post-reset
+    /// `live_count` would drop to baseline but `next_gc` would
+    /// stay high — so subsequent allocations don't trigger GC
+    /// until the threshold, meaning memory usage and GC timing
+    /// drift from a fresh Runtime. Restoring sync'd with
+    /// `live_count` keeps each reset+eval cycle behaviourally
+    /// indistinguishable from a fresh Runtime.
+    heap_next_gc: usize,
     /// `vm.interner.len()` at preamble completion. `reset()`
     /// truncates `interner.vec` and drains stale `interner.map`
     /// entries — but never past any SymId still referenced by
@@ -365,6 +376,18 @@ struct PostPreambleSnapshot {
     /// post-preamble value caps the counter at a known-safe
     /// baseline.
     cache_counter: u32,
+    /// `vm.method_gen` at preamble completion. `reset()` bumps
+    /// this monotonically (wrapping_add(1) per call) so that
+    /// CallCache entries' generation check fires fresh — which
+    /// is correct in the short term but unbounded over a
+    /// long-lived Runtime. At ~10k resets/sec the u32 wraps in
+    /// ~5 days; after the wrap a surviving CallCache entry
+    /// (within `[0, call_caches_len)`) populated at the
+    /// pre-wrap `method_gen=N` could collide with a fresh
+    /// lookup at the post-wrap same N. Restoring `method_gen`
+    /// to the post-preamble baseline at each reset caps the
+    /// counter and rules out the wrap entirely.
+    method_gen: u32,
     /// `vm.load_path` as of preamble completion (currently
     /// `None` — `$LOAD_PATH` is materialised lazily on first
     /// user access). `reset()` restores this so a stale `ObjId`
@@ -576,9 +599,11 @@ impl PostPreambleSnapshot {
         PostPreambleSnapshot {
             heap_slot_count: rt.vm.heap.slots.len(),
             heap_live_count: rt.vm.heap.live_count,
+            heap_next_gc: rt.vm.heap.next_gc,
             interner_len: rt.vm.interner.len(),
             call_caches_len: rt.vm.call_caches.len(),
             cache_counter: rt.vm.cache_counter,
+            method_gen: rt.vm.method_gen,
             load_path: rt.vm.load_path,
             classes: rt.vm.classes.clone(),
             constants: rt.vm.constants.clone(),
@@ -806,6 +831,7 @@ impl Runtime {
         // is safer than asserting empty).
         self.vm.heap.free.retain(|&idx| (idx as usize) < snapshot.heap_slot_count);
         self.vm.heap.live_count = snapshot.heap_live_count;
+        self.vm.heap.next_gc = snapshot.heap_next_gc;
         // --- Interner: drop user-interned symbols, but never
         //     truncate past any SymId referenced by long-lived
         //     tables. ---
@@ -955,13 +981,29 @@ impl Runtime {
         // wrap and start aliasing unrelated call sites.
         self.vm.call_caches.truncate(snapshot.call_caches_len);
         self.vm.cache_counter = snapshot.cache_counter;
-        // Bump `method_gen` so any stale `CallCache` entries
-        // (within the surviving range — see truncate above)
-        // pointing at user-defined methods removed above
-        // invalidate on next lookup. `CallCache` re-checks
-        // `method_gen` per hit; no need to clear the slots
-        // themselves.
-        self.vm.method_gen = self.vm.method_gen.wrapping_add(1);
+        // Set `method_gen` to `snapshot.method_gen + 1`. Two
+        // properties at once:
+        //
+        //   1. Bumped exactly one past the snapshot baseline →
+        //      every surviving CallCache entry (which has gen
+        //      ≤ snapshot.method_gen because all post-snapshot
+        //      slots were just truncated) fails its gen check
+        //      and falls back to a fresh lookup. Same
+        //      invalidation effect the previous
+        //      `method_gen.wrapping_add(1)` against the current
+        //      value gave.
+        //
+        //   2. Bounded: doesn't accumulate across resets. The
+        //      previous shape grew unbounded — at ~10k
+        //      resets/sec, u32 wraps in ~5 days, and the wrap
+        //      can alias an old gen onto a fresh lookup. The
+        //      bounded form rules that out entirely.
+        //
+        // `wrapping_add` for the edge case where preamble bumps
+        // hit u32::MAX (impossible in practice — preamble has
+        // ~hundreds of method defs — but the explicit annotation
+        // documents the intent).
+        self.vm.method_gen = snapshot.method_gen.wrapping_add(1);
     }
 
     // Internal-only inspectors: let integration tests in
@@ -986,6 +1028,14 @@ impl Runtime {
     #[doc(hidden)]
     pub fn __test_vm_interner_len(&self) -> usize {
         self.vm.interner.len()
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_heap_next_gc(&self) -> usize {
+        self.vm.heap.next_gc
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_method_gen(&self) -> u32 {
+        self.vm.method_gen
     }
 
     /// Bootstrap the built-in Ruby class hierarchy (currently just
