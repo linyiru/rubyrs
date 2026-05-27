@@ -55,8 +55,9 @@ describe "Array#first" do
 
   # skipped (divergent): it "raises a RangeError when count is a Bignum" do
   #   rubyrs caps the count to receiver length (see
-  #   tests/diff/array_first_last_n.rb:34) rather than raising
-  #   RangeError; behavior divergence, not unimplemented form.
+  #   crates/rubyrs/tests/diff/array_first_last_n.rb:34) rather
+  #   than raising RangeError; behavior divergence, not
+  #   unimplemented form.
 
   it "returns the entire array when count > length" do
     assert_eq([1, 2, 3, 4, 5, 9].first(10), [1, 2, 3, 4, 5, 9])

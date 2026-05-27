@@ -285,9 +285,13 @@ fn render_markdown(summaries: &[SpecSummary]) -> String {
             out.push_str(&format!("| `{}` | {} |\n", cat, n));
         }
         out.push('\n');
-        out.push_str("Categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s\n");
-        out.push_str("`DROP_PATTERNS`. Find blocks unlocked by a future feature with e.g.\n");
-        out.push_str("`git grep \"# skipped (method-not-implemented)\"`.\n\n");
+        out.push_str("Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s\n");
+        out.push_str("`DROP_PATTERNS` (`fixture` / `mock` / `method-not-implemented` plus the\n");
+        out.push_str("hook-form `before-not-lifted` / `after-not-supported`). Specs may also\n");
+        out.push_str("introduce manually-authored categories — e.g. `divergent` marks a block\n");
+        out.push_str("rubyrs runs but with intentionally-different observable behavior.\n");
+        out.push_str("Find blocks unlocked by a future feature with e.g. `git grep \"# skipped\n");
+        out.push_str("(method-not-implemented)\"`.\n\n");
     }
 
     out.push_str("## By class\n\n");
