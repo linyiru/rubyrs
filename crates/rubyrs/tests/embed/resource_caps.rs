@@ -416,11 +416,35 @@ fn runtime_functional_after_construction_under_realistic_caps() {
         max_frames: Some(64),
         max_value_bytes: Some(1024),
         deadline: Some(std::time::Duration::from_millis(50)),
+        // Pin off so STRESS_GC=1 in the runner env can't make
+        // this test interact differently with GC-frequency
+        // assumptions in the cap-restore path.
+        stress_gc: false,
         ..Default::default()
     };
     let mut rt = rubyrs::Runtime::with_config(cfg);
+    // Sanity: realistic-budget construction still allows a
+    // trivial eval.
     rt.eval("1 + 1", "post_preamble_smoke.rb")
         .expect("trivial eval must succeed after construction under realistic caps");
+    // Real assertion: the fuel cap WAS restored after preamble.
+    // Without this second eval, a regression that left caps
+    // zeroed by skipping the restore would pass silently (every
+    // budget-respecting eval succeeds when budget is `None`).
+    // Run a tight loop that needs more than the configured 10k
+    // fuel and assert ResourceExhausted — proves the restore
+    // path is live.
+    let err = rt
+        .eval(
+            "i = 0; while i < 100_000; i = i + 1; end",
+            "post_preamble_fuel_check.rb",
+        )
+        .expect_err("restored fuel cap must trap the loop");
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted from restored fuel cap, got {:?}",
+        err.err,
+    );
 }
 
 
@@ -506,7 +530,11 @@ fn with_config_succeeds_under_zero_fuel() {
     // `fuel: Some(0)` is the most extreme case — every op
     // dispatched should trap. Pre-fix, this panicked on the
     // first preamble op.
-    let mut rt = Runtime::with_config(Config { fuel: Some(0), ..Default::default() });
+    let mut rt = Runtime::with_config(Config {
+        fuel: Some(0),
+        stress_gc: false, // see runtime_functional_after_construction_under_realistic_caps
+        ..Default::default()
+    });
     let err = rt.eval("1 + 1", "tight.rb").unwrap_err();
     assert!(
         matches!(err.err, RubyError::ResourceExhausted { .. }),
@@ -519,7 +547,11 @@ fn with_config_succeeds_under_tight_frames_cap() {
     // The preamble defines several classes whose bodies push
     // frames — `max_frames: Some(1)` would have trapped on the
     // first `class StandardError; ... end` body pre-fix.
-    let mut rt = Runtime::with_config(Config { max_frames: Some(1), ..Default::default() });
+    let mut rt = Runtime::with_config(Config {
+        max_frames: Some(1),
+        stress_gc: false,
+        ..Default::default()
+    });
     let err = rt.eval(
         "def deep(n); deep(n + 1); end; deep(0)",
         "frames.rb",
@@ -536,7 +568,11 @@ fn with_config_succeeds_under_tight_heap_cap() {
     // (one per Exception subclass + Object + Comparable + ...).
     // `max_heap_objects: Some(1)` would have trapped on the
     // second class allocation pre-fix.
-    let mut rt = Runtime::with_config(Config { max_heap_objects: Some(1), ..Default::default() });
+    let mut rt = Runtime::with_config(Config {
+        max_heap_objects: Some(1),
+        stress_gc: false,
+        ..Default::default()
+    });
     let err = rt.eval("Array.new(100) { |i| i }", "heap.rb").unwrap_err();
     assert!(
         matches!(err.err, RubyError::ResourceExhausted { .. }),
@@ -553,6 +589,7 @@ fn with_config_succeeds_under_sub_ms_deadline() {
     // deadline only applies to user `eval()` calls.
     let cfg = Config {
         deadline: Some(std::time::Duration::from_nanos(1)),
+        stress_gc: false,
         ..Default::default()
     };
     let mut rt = Runtime::with_config(cfg);
@@ -586,6 +623,7 @@ fn with_config_succeeds_under_combined_tight_caps() {
         max_symbols: Some(64),
         max_value_bytes: Some(1024),
         deadline: Some(std::time::Duration::from_millis(50)),
+        stress_gc: false,
         ..Default::default()
     };
     // Just constructing it would have panicked before. The
