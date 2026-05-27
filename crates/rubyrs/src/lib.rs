@@ -469,6 +469,18 @@ struct PostPreambleSnapshot {
     /// those would leak across resets if left out of the
     /// snapshot, so capture them all.
     class_states: std::collections::HashMap<intern::SymId, ClassStateSnapshot>,
+    /// `vm.sources` (filename → source-text) as of preamble
+    /// completion. Restored by clone-and-replace, so
+    /// `Method#source_location` on preamble-defined methods
+    /// (`Exception#message`, etc.) and trap backtraces through
+    /// preamble frames keep resolving their line numbers across
+    /// `reset()`. Without this, a long-lived Runtime with a
+    /// fuzz/per-request reset loop loses preamble source-text
+    /// on the first reset and source_location lookups silently
+    /// fall back to line 0 from there on. The HashMap values are
+    /// `Rc<str>` so the clone is a cheap reference-count bump,
+    /// not a string copy.
+    sources: std::collections::HashMap<std::rc::Rc<str>, std::rc::Rc<str>>,
 }
 
 /// Per-Class snapshot covering every `RefCell` field on `Class`
@@ -664,6 +676,7 @@ impl PostPreambleSnapshot {
             constants: rt.vm.constants.clone(),
             toplevel_methods: rt.vm.toplevel_methods.clone(),
             class_states,
+            sources: rt.vm.sources.clone(),
         }
     }
 }
@@ -955,10 +968,15 @@ impl Runtime {
         //
         // Rc<Class> / Rc<Method> / Value::Str(Rc<...>) all clone
         // by refcount bump, so the actual cost is HashMap copies
-        // (~hundreds of entries; sub-microsecond).
-        self.vm.classes = snapshot.classes.clone();
-        self.vm.constants = snapshot.constants.clone();
-        self.vm.toplevel_methods = snapshot.toplevel_methods.clone();
+        // (~hundreds of entries; sub-microsecond). `clone_from`
+        // (not `= ...clone()`) reuses the existing map's
+        // allocation across resets — matches the pattern
+        // `ClassStateSnapshot::restore_into` already uses for the
+        // per-class RefCells, and shaves allocator churn off the
+        // fuzz / per-request hot path.
+        self.vm.classes.clone_from(&snapshot.classes);
+        self.vm.constants.clone_from(&snapshot.constants);
+        self.vm.toplevel_methods.clone_from(&snapshot.toplevel_methods);
         // --- Per-class state: replace EVERY mutable RefCell
         //     field on each preamble Class with the snapshot's
         //     captured value. ---
@@ -1013,18 +1031,10 @@ impl Runtime {
             self.vm.loaded_features.clear();
             self.vm.loaded_stdlib_stubs.clear();
         }
-        // `vm.sources` is the filename → source-text map used by
-        // `Method#source_location` and trap backtraces.
-        // User-supplied filenames accumulate as user evals run;
-        // a stale entry can return the wrong source-text for
-        // line-number resolution if the same filename string is
-        // reused by a later eval with different content (or by
-        // a preamble Method whose name lookup happens to clash).
-        // The Vm struct's own doc-comment for this field
-        // describes it as "can clear between evals". Clear here
-        // unconditionally — the file-source cache is a
-        // user-eval-time concern, not a preamble one.
-        self.vm.sources.clear();
+        // Restore preamble filename→source-text so `Method#source_location`
+        // and trap backtraces on preamble methods keep resolving
+        // after reset; see `PostPreambleSnapshot::sources`.
+        self.vm.sources.clone_from(&snapshot.sources);
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
@@ -1819,6 +1829,41 @@ mod caps_guard_tests {
     /// field between evals MUST NOT show the drained value the
     /// prior eval left behind. Symmetric: the cleanup applies
     /// whether the eval succeeded, trapped, or ran unbounded.
+    /// `Runtime::reset` must keep preamble filenames in
+    /// `vm.sources`. Companion to
+    /// `tests/embed/reset.rs::reset_preserves_preamble_source_locations`
+    /// which pins the contract through the public
+    /// `Method#source_location` surface. This in-crate test
+    /// pins the internal invariant directly: the HashMap keys
+    /// must include the preamble fragment names after reset.
+    /// A future refactor that moves preamble source-text to
+    /// a different lookup path would silently still pass the
+    /// surface test (line numbers would resolve through the
+    /// new path); this test would fail loudly because it
+    /// inspects `vm.sources` directly.
+    #[test]
+    fn reset_keeps_preamble_filenames_in_vm_sources() {
+        let mut rt = Runtime::new();
+        // Sanity: post-construction, vm.sources has the preamble
+        // entries that load_preamble populated.
+        let pre = rt.vm.sources.contains_key("<rubyrs:preamble:exceptions>");
+        assert!(pre, "preamble:exceptions must be in vm.sources after with_config");
+        // Pollute vm.sources with a user-eval entry, then reset.
+        // The user entry should disappear; the preamble entry
+        // should remain.
+        rt.eval("1 + 1", "user.rb").unwrap();
+        assert!(rt.vm.sources.contains_key("user.rb"));
+        rt.reset();
+        assert!(
+            rt.vm.sources.contains_key("<rubyrs:preamble:exceptions>"),
+            "preamble:exceptions must survive reset",
+        );
+        assert!(
+            !rt.vm.sources.contains_key("user.rb"),
+            "user.rb must be dropped by reset",
+        );
+    }
+
     #[test]
     fn eval_clears_per_eval_working_counters_post_run() {
         // Bounded fuel + bounded deadline → both should clear.
