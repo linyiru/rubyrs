@@ -4810,6 +4810,59 @@ impl Vm {
             for a in args { self.stack.push(a); }
             return self.do_call_block(bm_name_id, argc_new, false, u16::MAX);
         }
+        // `ubm.bind_call(recv, *args, &block)` — block-form parallel
+        // of the no-block bind_call arm in `try_dispatch_callable_intrinsics`
+        // (line ~690). That arm runs via `do_call`'s pre-block
+        // dispatch path and never sees a block argument; tilt's
+        // `method.bind_call(scope, **locals, &block)` (template.rb:
+        // ~392) passes one, which lands here. Without this arm
+        // the call raises NoMethodError even though the blockless
+        // shape succeeds.
+        if let Some(Value::UnboundMethod(uid)) = &recv && &*name == "bind_call" {
+            if args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1..)".into(),
+                }));
+            }
+            let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
+                HeapObj::UnboundMethod { class, name_id, method } => {
+                    (class.clone(), *name_id, method.clone())
+                }
+                _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
+            };
+            let mut args = args;
+            let target = args.remove(0);
+            let target_class = match self.class_of(&target) {
+                Value::Class(c) => c,
+                _ => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("bind_call argument must have a class (got {})", target.type_name()),
+                })),
+            };
+            // Same is_a fence as the no-block path: Kernel sentinel
+            // and any Module captured class are exempt; Class
+            // capture is strict.
+            if cap_class.name.as_str() != "Kernel"
+                && !cap_class.is_module
+                && !super::class_is_a(&target_class, &cap_class) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "bind_call argument must be an instance of {} (got {})",
+                        cap_class.name, target_class.name,
+                    ),
+                }));
+            }
+            let m = match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
+                Some(m) => m,
+                None => {
+                    let mname = self.interner.resolve(cap_name_id).to_string();
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("undefined method '{}' for class '{}'", mname, cap_class.name),
+                    }));
+                }
+            };
+            self.invoke_method_with_block(m, target, args, Some(block))?;
+            return Ok(());
+        }
 
         // P2-13: `block` (now an ObjId in a Rust local) is no
         // longer rooted after popping off the stack. Each native

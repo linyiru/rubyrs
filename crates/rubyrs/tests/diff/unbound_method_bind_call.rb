@@ -63,5 +63,39 @@ rescue ArgumentError
   puts "0-arg → ArgumentError"
 end
 
+# --- Block-form: `bind_call` forwards an attached block to the
+#     captured method's body. Tilt's motivating call passes
+#     `&block` here; without the block path bind_call would
+#     raise NoMethodError on any layout/yield template.
+module Yielder
+  def each_double
+    yield 1
+    yield 2
+    yield 3
+  end
+end
+um_y = Yielder.instance_method(:each_double)
+total = 0
+um_y.bind_call(Object.new) { |x| total += x * 10 }
+puts total                                         # 60
+
+# --- Block-form: same is_a fence enforcement (Class strict) ---
+class StrictA
+  def beep; yield 7; end
+end
+um_s = StrictA.instance_method(:beep)
+begin
+  um_s.bind_call(Object.new) { |x| x }
+rescue TypeError
+  puts "block + wrong-class → TypeError"
+end
+
+# --- Block-form: 0-arg ArgumentError ---
+begin
+  um_y.bind_call { 1 }
+rescue ArgumentError
+  puts "block + 0-arg → ArgumentError"
+end
+
 # --- respond_to? whitelist consistency ---
 puts m.respond_to?(:bind_call)                     # true
