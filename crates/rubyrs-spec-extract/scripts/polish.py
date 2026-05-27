@@ -73,13 +73,22 @@ DROP_PATTERNS = [
     # number, negative literal, identifier, expression) — so
     # `[1].min(-1)` and `[].pop(bignum_value)` both get dropped.
     #
-    # `Array#first(n)` / `#last(n)` are NOT in this list — PR #140
-    # implemented the count form (cap-to-length, ArgumentError on
-    # negative, block-ignored). The remaining incompatibility is
-    # bignum_value → CRuby raises RangeError, rubyrs caps to length;
-    # that single block is skipped per-file rather than via a
-    # blanket polish rule, since the cap-to-length behaviour is
-    # right for every other count case.
+    # `Array#first(n)` / `#last(n)` were also in this list pre-#140;
+    # removed once PR #140 shipped (cap-to-length, ArgumentError on
+    # negative, block-ignored). The two upstream incompatibilities
+    # — bignum_value (NoMethodError vs CRuby's RangeError; no
+    # BigInt arm) and `.replace`-based independence check (no
+    # Array#replace) — are skipped per-file rather than via a
+    # blanket polish rule.
+    #
+    # CAVEAT: these regexes match the LEFT-HAND TEXT of `.first(`
+    # / `.last(`, not the receiver type — `(1..5).first(2)` and
+    # `[1,2].first(2)` are indistinguishable to polish. Ingesting
+    # `core/range/first_spec.rb` or `core/enumerable/first_spec.rb`
+    # in the future means `Range#first(n)` / `Enumerable#first(n)`
+    # blocks would slip through; verify those count forms are
+    # implemented before adding the corresponding ingestion PR,
+    # or re-add a narrower rule scoped via assert_eq's LHS.
     (r"\.min\(\s*[^)\s]", "method-not-implemented"),
     (r"\.max\(\s*[^)\s]", "method-not-implemented"),
     (r"\.pop\(\s*[^)\s]", "method-not-implemented"),
