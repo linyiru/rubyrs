@@ -106,3 +106,24 @@ puts E.remove_method.equal?(E)           # true
 
 # --- respond_to? whitelist consistency ---
 puts A.respond_to?(:remove_method)       # true
+
+# --- Variadic partial failure: CRuby is NOT atomic — earlier
+#     removals stick before NameError on a later missing name.
+#     `method_gen` is still bumped so inline caches don't keep
+#     returning the removed entries.
+class PartialFail
+  def alpha; "alpha"; end
+  def beta;  "beta";  end
+end
+begin
+  PartialFail.remove_method(:alpha, :nonexistent_xyz)
+rescue NameError
+  puts "partial-fail raised"
+end
+# :alpha was removed BEFORE the error (CRuby parity).
+begin
+  PartialFail.new.alpha
+  puts "alpha still here (BAD)"
+rescue NoMethodError
+  puts "alpha removed (good)"
+end

@@ -1343,17 +1343,43 @@ impl Vm {
             // avoids quiet divergence on a surface that's
             // unlikely to be exercised as a feature-detect.
             ("remove_method", args) if !args.is_empty() => {
-                // Per-arg processing: Symbol uses sid directly (no
-                // resolve/intern roundtrip + no max_symbols check —
-                // Symbols are already interned). String goes
-                // through `with_str_lossy` so the cap check +
-                // intern run on a borrowed &str (zero-alloc on the
-                // valid-UTF-8 hot path). Mirrors the established
-                // pattern at the `instance_method` String arm.
+                // Iterative: process args left-to-right, removing
+                // each in turn. If a later arg is missing (or a
+                // TypeError fires), earlier removals stay — CRuby
+                // is partial-mutation on this surface (verified
+                // against 3.4: `A.remove_method(:x, :nope)`
+                // removes `:x` BEFORE raising NameError on
+                // `:nope`). Track whether anything was removed
+                // so we can bump `method_gen` on the error path
+                // too — without that, inline caches would keep
+                // returning the stale lookup for the removed
+                // method.
+                //
+                // Per-arg arg-to-SymId resolution: Symbol uses sid
+                // directly (no resolve/intern roundtrip + no
+                // `max_symbols` check — Symbols are already
+                // interned). String goes through `with_str_lossy`
+                // so the cap check + intern run on a borrowed
+                // &str (zero-alloc on the valid-UTF-8 hot path).
+                // Mirrors the established pattern at the
+                // `instance_method` String arm.
+                //
+                // Strict-on-primitive parity: primitives are NOT
+                // exempt from the missing-method NameError
+                // (unlike `instance_method` / `method_defined?`,
+                // which keep their permissive stance because
+                // probes are benign feature-detects;
+                // `remove_method` is a mutation).
+                //
+                // `any_removed` lets each error-return path bump
+                // `method_gen` so a half-completed variadic call
+                // doesn't leave inline caches stale on the
+                // already-removed methods.
+                let mut any_removed = false;
                 for arg in args {
                     let sid: SymId = match arg {
                         Value::Sym(sid) => *sid,
-                        Value::Str(s) => s.with_str_lossy(|raw| -> Result<SymId, Trap> {
+                        Value::Str(s) => match s.with_str_lossy(|raw| -> Result<SymId, Trap> {
                             if let Some(max) = self.max_symbols
                                 && !self.interner.contains(raw)
                                 && self.interner.len() >= max {
@@ -1362,30 +1388,33 @@ impl Vm {
                                 }));
                             }
                             Ok(self.interner.intern(raw))
-                        })?,
+                        }) {
+                            Ok(sid) => sid,
+                            Err(trap) => {
+                                if any_removed {
+                                    self.method_gen = self.method_gen.wrapping_add(1);
+                                }
+                                return Err(trap);
+                            }
+                        },
                         other => {
                             let inspected = other.to_inspect(&self.heap, &self.interner);
+                            if any_removed {
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                            }
                             return Err(self.trap(RubyError::TypeError {
                                 msg: format!("{} is not a symbol nor a string", inspected),
                             }));
                         }
                     };
-                    // Unlike `instance_method` / `method_defined?`
-                    // — which are permissive on primitive classes
-                    // so probe-style usage doesn't trip — CRuby
-                    // raises NameError on missing entries even for
-                    // primitives (verified against CRuby 3.4:
-                    // `String.remove_method(:foo)` raises). Probing
-                    // before removal isn't a meaningful use case;
-                    // matching CRuby's strict shape avoids quiet
-                    // divergence on this surface.
-                    //
                     // Single `remove()` call: HashMap::remove
-                    // returns Option, so we get presence-check +
+                    // returns Option so we get presence-check +
                     // mutation in one hash lookup + one
-                    // `borrow_mut()` (was two — `contains_key`
-                    // then `remove`).
+                    // `borrow_mut()`.
                     if cls.methods.borrow_mut().remove(&sid).is_none() {
+                        if any_removed {
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                        }
                         // Resolve name only on the rare missing
                         // path. Free for the common case.
                         let name_for_msg = self.interner.resolve(sid).to_string();
@@ -1393,6 +1422,7 @@ impl Vm {
                             msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
                         }));
                     }
+                    any_removed = true;
                 }
                 // Bump `method_gen` once even for variadic calls —
                 // inline caches see a single coarse generation
