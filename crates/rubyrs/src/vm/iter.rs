@@ -1825,6 +1825,19 @@ impl Vm {
                 let mut early = None;
                 for v in snapshot {
                     let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                        // `break;` (NOT immediate
+                        // `return Ok(Some(Value::Nil))` like chunk /
+                        // bsearch / sort use) is safe here because
+                        // the post-loop tail (`if let Some(e) = early
+                        // ...; Some(Value::Hash(result_id))`) is
+                        // strictly heap-reads — no `maybe_gc`, no
+                        // `check_alloc?`, no `heap.alloc`. There's
+                        // no Trap path that could clobber the
+                        // in-flight `method_return`. If a future
+                        // edit adds an allocation to the tail,
+                        // switch this arm to
+                        // `return Ok(Some(Value::Nil))` to match
+                        // the chunk-arm pattern.
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
@@ -1857,6 +1870,22 @@ impl Vm {
                         // doesn't trigger GC and `heap.alloc`
                         // doesn't either (and is infallible), so
                         // they run safely with `key` unpinned.
+                        //
+                        // Pin-stack discipline: this push/pop pair
+                        // bypasses `PinGuard::pin`'s internal
+                        // `count` accounting (the PinGuard's Drop
+                        // pops exactly `count` items). The pair is
+                        // safe because (a) it's balanced within a
+                        // single straight-line block with no `?`
+                        // between push and pop, (b) `maybe_gc()`
+                        // reads `vm.pinned` but never mutates it,
+                        // so the pop is guaranteed to remove the
+                        // just-pushed `key`. DO NOT insert any
+                        // `g.pin(...)` call (PinGuard-counted)
+                        // between this push and pop — that would
+                        // make the pop remove a PinGuard-tracked
+                        // slot and PinGuard::Drop would under-pop,
+                        // leaking a permanent pin.
                         let pin_key = key.is_gc_heap_ref();
                         if pin_key { g.vm.pinned.push(key.clone()); }
                         g.vm.maybe_gc();
