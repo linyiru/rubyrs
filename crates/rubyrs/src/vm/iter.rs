@@ -39,12 +39,19 @@ use super::{value_cmp_v, PinGuard, Vm};
 ///
 /// - `Break(v)` — structured `break v` from inside the block.
 ///   The break is already "caught" here (`break_signaled` is
-///   cleared), so the driver decides how to use `v` — usually
-///   "return this as the method's result" (each / map / inject
-///   all do this), occasionally "discard and return early sentinel"
-///   (any? / all? short-circuit). The caller is responsible for
-///   either propagating `v` or substituting a method-specific
-///   shape.
+///   cleared), so the driver decides how to use `v`. CRuby's
+///   universal contract is "break value short-circuits the
+///   enumerator and becomes the method's result" — even for
+///   predicate methods like `any?` / `all?` / `find`.
+///   `[1,2,3].any? { break :tag }` returns `:tag`, NOT `false`
+///   (verified against CRuby; see iter_array_filter's existing
+///   `early = Some(r)` / `early.unwrap_or(Value::Bool(bool_acc))`
+///   shape at line 152/170). So the driver almost always wants
+///   `BlockStep::Break(r) => { early = Some(r); break; }` and
+///   then returns `early.unwrap_or(<method-default>)`. What
+///   *does* vary across methods is the short-circuit on
+///   *truthy/falsy block result* (the `BlockStep::Value` arm),
+///   NOT how break is handled.
 ///
 /// Why not also a `Next` variant: `next` from a block returns
 /// the block normally (with the `next`-supplied value, or nil),
