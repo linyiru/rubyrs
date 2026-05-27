@@ -5100,6 +5100,81 @@ impl Vm {
             )?;
             return Ok(());
         }
+        // `Module#define_method(:name) { |args| body }` —
+        // dynamically install a block-as-method on the receiver
+        // class's instance-methods table. Mirrors the
+        // `Op::DefMethodBlock` opcode's install logic but is
+        // entered via runtime dispatch rather than a parsed
+        // `def`. Both shapes accepted:
+        //   - explicit receiver: `cls.define_method(:foo) { ... }`
+        //     → recv = Some(Value::Class(target))
+        //   - bare-call inside `class_eval do ... end` where
+        //     self is the class:
+        //     `cls.class_eval { define_method(:foo) { ... } }`
+        //     → no_recv = true, frame self_val = the class.
+        //     Sinatra/base.rb's `define_singleton` uses this
+        //     shape; the block_arg `&content` becomes the
+        //     attached block.
+        //
+        // Closure semantics match DefMethodBlock: the
+        // BlockHandle's `captured` Rc is shared with the
+        // installed Method so outer-scope locals stay live.
+        // CRuby returns the method name as a Symbol.
+        // (TRY_RUNS pass-9.7d layer #21.)
+        if &*name == "define_method" {
+            let target_cls = match &recv {
+                Some(Value::Class(c)) => Some(c.clone()),
+                None => {
+                    // no_recv: pull self from current frame.
+                    let self_val = self.frames.last()
+                        .expect("ICE: define_method no_recv with empty frames")
+                        .self_val
+                        .clone();
+                    if let Value::Class(c) = self_val { Some(c) } else { None }
+                }
+                _ => None,
+            };
+            if let Some(target_cls) = target_cls {
+                if args.len() != 1 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+                let name_sym = match &args[0] {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Symbol or String)",
+                            other.type_name(),
+                        ),
+                    })),
+                };
+                let (proto_idx, captured, param_start, n_params) = {
+                    let bh = self.heap.block(block);
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                };
+                let proto = &self.protos[proto_idx];
+                let params = proto.params.clone();
+                let vis = self.class_visibility_stack.last().copied()
+                    .unwrap_or(crate::value::Visibility::Public);
+                let m = std::rc::Rc::new(crate::value::Method {
+                    params,
+                    proto_idx,
+                    fixed_arity: None,
+                    defining_class: Some(std::rc::Rc::downgrade(&target_cls)),
+                    visibility: std::cell::Cell::new(vis),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                });
+                target_cls.methods.borrow_mut().insert(name_sym, m);
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Sym(name_sym));
+                return Ok(());
+            }
+        }
         if &*name == "new"
             && let Some(Value::Class(cls)) = &recv
             && cls.name.as_str() == "Hash"
