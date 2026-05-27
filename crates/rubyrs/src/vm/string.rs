@@ -664,7 +664,7 @@ impl Vm {
                     macro_rules! ensure_room {
                         ($out:expr, $add:expr) => {
                             if let Some(max) = max_cap
-                                && $out.len() + $add + 1 > max {
+                                && $out.len().saturating_add($add).saturating_add(1) > max {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("String#dump output exceeds {max} bytes"),
                                 }));
@@ -676,7 +676,7 @@ impl Vm {
                     // dumps to `""`. ensure_room reserves the
                     // closing quote on every push; the opening
                     // quote needs its own check.
-                    let mut out = String::with_capacity(bytes.len() + 2);
+                    let mut out = String::with_capacity(bytes.len().saturating_add(2));
                     ensure_room!(out, 1);
                     out.push('"');
                     let mut i = 0;
