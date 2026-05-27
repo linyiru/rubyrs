@@ -135,9 +135,13 @@ fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool
     // means there's nothing to truncate.
     match num_bigint::BigInt::from_f64(float) {
         Some(rhs) => *bigint == rhs,
-        // from_f64 returns None only for NaN/inf (filtered above)
-        // and pathologically-huge floats. Treat the latter as not
-        // equal — they exceed any representable BigInt anyway.
+        // `from_f64` returns `None` only for NaN / ±inf — both
+        // already filtered above by `is_finite()`. Defensive
+        // arm: a future num-bigint version that narrowed the
+        // accepted range would land here, and "not equal" is
+        // the safe default (BigInt itself can represent any
+        // finite-f64 magnitude, since the largest finite f64
+        // is ~1.8e308 which fits trivially in a BigInt).
         None => false,
     }
 }

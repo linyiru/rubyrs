@@ -1321,7 +1321,7 @@ fn bigint_eq_float_is_lossless() {
          puts (2**64) == inf                  # false (+inf)\n\
          puts (2**64) == -inf                 # false (-inf)\n\
          puts (2**64) == 1.5                  # false (fractional)\n\
-         puts (2**64) == 0.0                  # false (sign-only diff)\n\
+         puts (2**64) == 0.0                  # false (nonzero BigInt vs zero Float)\n\
          puts (-(2**64)) == -(2**64).to_f     # true (negative exact)\n\
          puts (2**100) == (2**100).to_f       # true (2^100 exact in f64)\n\
          puts (2**64 + 1) != (2**64).to_f     # true (negation)\n\
