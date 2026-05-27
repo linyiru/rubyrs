@@ -70,7 +70,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_fetch_spec.rb` | Hash#fetch | `core/hash/fetch_spec.rb` | 4 | 2 |
 | `hash_invert_spec.rb` | Hash#invert | `core/hash/invert_spec.rb` | 2 | 5 |
 | `hash_keys_spec.rb` | Hash#keys | `core/hash/keys_spec.rb` | 2 | 0 |
-| `hash_size_spec.rb` | Hash#size | `core/hash/size_spec.rb (delegates via `it_behaves_like :hash_size, :size` to `shared/length.rb`)` | 3 | 0 |
+| `hash_size_spec.rb` | Hash#size | `core/hash/size_spec.rb` | 3 | 0 |
 | `hash_to_a_spec.rb` | Hash#to_a | `core/hash/to_a_spec.rb` | 1 | 1 |
 | `hash_values_spec.rb` | Hash#values | `core/hash/values_spec.rb` | 1 | 0 |
 | `instance_eval_spec.rb` | BasicObject#instance_eval | `core/basicobject/instance_eval_spec.rb` | 4 | 0 |

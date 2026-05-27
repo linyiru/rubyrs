@@ -1,12 +1,11 @@
-# Adapted from ruby/spec core/hash/size_spec.rb (delegates via
-# `it_behaves_like :hash_size, :size` to `shared/length.rb`) at
-# upstream commit 448cb340 (2026-05). Hand-translated — the
-# shared body's `@method` indirection is inlined as direct
-# `.size` calls.
-#
-# The shared body has two `it` blocks: "returns 0 ..." and
-# "returns 0 ... with default values too". Both are covered
-# here. Length (`#length`) is the alias; see hash_length_spec.rb.
+# Adapted from ruby/spec core/hash/size_spec.rb at upstream
+# commit 448cb340 (2026-05). Hand-translated — the upstream
+# file delegates to a shared body via it_behaves_like; the
+# `@method` indirection there is inlined as direct `.size`
+# calls. Two upstream blocks are covered ("returns the count"
+# + "is unaffected by the default value"). `Hash#length` is an
+# alias of `Hash#size` in CRuby; its own describe is included
+# below rather than split into a sibling file.
 
 describe "Hash#size" do
   it "returns the number of entries" do
