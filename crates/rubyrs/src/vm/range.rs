@@ -81,15 +81,40 @@ impl Vm {
                         ("begin", []) | ("first", []) | ("min", []) => return Ok(Some(b.clone())),
                         ("end", []) | ("last", []) | ("max", []) => return Ok(Some(e.clone())),
                         ("first", [Value::Int(n)]) => {
-                            // Endless (1..) supports first(n);
-                            // beginless (..n) doesn't — CRuby raises
-                            // `RangeError: cannot get the first
-                            // element of beginless range`.
+                            // Three reachable cases in this partial-
+                            // range branch:
+                            //   1. Truly beginless `(..e)`:
+                            //      `b == Value::Nil` → CRuby raises
+                            //      `RangeError: cannot get the first
+                            //      element of beginless range`,
+                            //      regardless of n's sign. The
+                            //      beginless check has to come BEFORE
+                            //      the negative-n guard so
+                            //      `(..5).first(-1)` produces
+                            //      RangeError, not ArgumentError.
+                            //   2. Endless `(b..)` with Int begin:
+                            //      walk Ints from `bi`. Negative n is
+                            //      ArgumentError per CRuby (and per
+                            //      #140's Array policy).
+                            //   3. Non-Int begin (BigInt, etc.) with
+                            //      missing/non-Int end: not
+                            //      implemented here; return
+                            //      NoMethodError via `Ok(None)`.
+                            //      Implementing BigInt iteration is
+                            //      tracked in #143 follow-ups; until
+                            //      then, an honest NoMethodError is
+                            //      preferable to a misleading
+                            //      "beginless range" RangeError.
                             //
-                            // Negative `n` is an ArgumentError in
-                            // CRuby, not a silent clamp to 0. Mirrors
-                            // the policy `Array#first(n)` adopted in
-                            // #140.
+                            // Case 1 first.
+                            if matches!(&b, Value::Nil) {
+                                return Err(self.trap(RubyError::RangeError {
+                                    msg: "cannot get the first element of beginless range".into(),
+                                }));
+                            }
+                            // Then negative-n. Past this point we know
+                            // begin is non-Nil; either Int (case 2)
+                            // or non-Int non-Nil (case 3).
                             if *n < 0 {
                                 return Err(self.trap(RubyError::ArgumentError {
                                     msg: "negative array size (or size too big)".into(),
@@ -117,9 +142,13 @@ impl Vm {
                                 let nid = self.heap.alloc(HeapObj::Array(out));
                                 return Ok(Some(Value::Array(nid)));
                             }
-                            return Err(self.trap(RubyError::RangeError {
-                                msg: "cannot get the first element of beginless range".into(),
-                            }));
+                            // Case 3: non-Int non-Nil begin (e.g.
+                            // BigInt-bounded range). Fall through to
+                            // the outer `_ => return Ok(None)` which
+                            // produces NoMethodError. This matches
+                            // the pre-#146 behaviour for the same
+                            // inputs.
+                            return Ok(None);
                         }
                         ("cover?", [Value::Int(v)]) => {
                             let lo_ok = match begin_int { Some(lo) => *v >= lo, None => true };

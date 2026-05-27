@@ -83,6 +83,20 @@ begin
 rescue RangeError => e
   puts "(..5).first(2): #{e.message}"     # cannot get the first element of beginless range
 end
+# The beginless RangeError MUST fire before any negative-n
+# check — CRuby raises RangeError regardless of n's sign.
+# Earlier #146 shipped with the guards in the wrong order and
+# `(..5).first(-1)` produced ArgumentError instead.
+begin
+  (..5).first(-1)
+rescue RangeError => e
+  puts "(..5).first(-1): #{e.message}"    # cannot get the first element of beginless range
+end
+begin
+  (..5).first(0)
+rescue RangeError => e
+  puts "(..5).first(0): #{e.message}"     # cannot get the first element of beginless range
+end
 puts (..5).last.inspect                    # 5
 
 # No-arg form (regression guard — was already supported before).
