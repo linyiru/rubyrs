@@ -32,7 +32,11 @@ describe "Integer#|" do
     assert_eq((-13 | -12), -9)
   end
 
-  it "fixnum: returns self bitwise OR a bignum" do
+  bignum_it "fixnum: returns self bitwise OR a bignum" do
+    # `2**64` saturates to i64::MAX under no-bignum; under
+    # saturation `-1 | i64::MAX == -1` would also pass
+    # vacuously without exercising bignum-OR semantics. Gate
+    # so it only runs where the assertion is meaningful.
     assert_eq((-1 | 2**64), -1)
   end
 

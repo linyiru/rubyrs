@@ -43,7 +43,11 @@ describe "Integer#&" do
     assert_eq((-13 & -12), -16)
   end
 
-  it "fixnum: returns self bitwise AND a bignum" do
+  bignum_it "fixnum: returns self bitwise AND a bignum" do
+    # `2**64` saturates to i64::MAX under no-bignum, making the
+    # assertion vacuously test `-1 & i64::MAX == i64::MAX` instead
+    # of the bignum-AND semantics. Gate so it only runs where
+    # the assertion is meaningful.
     assert_eq((-1 & 2**64), 18446744073709551616)
   end
 

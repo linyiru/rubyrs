@@ -28,7 +28,11 @@ describe "Integer#^" do
     assert_eq((-13 ^ -12), 7)
   end
 
-  it "fixnum: returns self bitwise EXCLUSIVE OR a bignum" do
+  bignum_it "fixnum: returns self bitwise EXCLUSIVE OR a bignum" do
+    # `2**64` saturates to i64::MAX under no-bignum, and the
+    # expected value `-18446744073709551617` doesn't fit i64
+    # — the assertion would not survive saturation. Gate so it
+    # only runs where bignum semantics are available.
     assert_eq((-1 ^ 2**64), -18446744073709551617)
   end
 
