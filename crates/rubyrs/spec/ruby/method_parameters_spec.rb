@@ -1,9 +1,9 @@
 # Adapted from ruby/spec core/method/parameters_spec.rb at
 # upstream commit 448cb340 (2026-05). Hand-translated — the
 # six baseline parameter shapes are inlined: empty, req, opt,
-# rest, key/keyreq, keyrest. The `:block` form is intention-
-# ally skipped — rubyrs reports `def f(&blk)` as `[[:opt, :blk]]`
-# instead of `[[:block, :blk]]` (divergent, see below).
+# rest, key/keyreq, keyrest. The `:block` form is skipped on
+# purpose — rubyrs reports `def f(&blk)` as `[[:opt, :blk]]`
+# rather than `[[:block, :blk]]` (divergent, see below).
 
 describe "Method#parameters" do
   it "returns an empty array for a no-argument method" do
