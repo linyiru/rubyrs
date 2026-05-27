@@ -309,6 +309,25 @@ pub(crate) fn numeric_call(
                 ),
             });
         }
+        // Arity guard for the bit ops, sibling to `pow`'s above
+        // (and PR #186's iter-method guards). `respond_to?` returns
+        // true for `:& :| :^ :<< :>>` on Integer, so
+        // `5.send(:&, 1, 2)` / `5.send(:&)` must raise ArgumentError
+        // (CRuby behavior) instead of falling through to
+        // NoMethodError. The Int×Int happy-path arm below only
+        // matches `[Int]` (1-arg); under bignum, bigint_primitive
+        // also early-returns when `args.len() != 1`. Without this
+        // guard the 0-arg and 2+-arg shapes escape on both profiles.
+        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>", args_slice)
+            if args_slice.len() != 1 =>
+        {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args_slice.len(),
+                ),
+            });
+        }
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
