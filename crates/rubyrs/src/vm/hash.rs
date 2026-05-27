@@ -37,7 +37,7 @@ impl Vm {
                         {
                             let h = self.heap.hash(id);
                             for (key, val) in h {
-                                if key.ruby_eq(k, &self.heap) {
+                                if key.ruby_eql(k, &self.heap) {
                                     return Ok(Some(val.clone()));
                                 }
                             }
@@ -106,7 +106,7 @@ impl Vm {
                         // Need a way to compare without borrowing heap while mutating.
                         // Snapshot positions first.
                         let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
                         // P2-14c byte cap: only a key that isn't
                         // already present grows the table. Update
                         // of an existing key is free (size-wise).
@@ -131,7 +131,7 @@ impl Vm {
                     ("dig", keys) if !keys.is_empty() => {
                         // Walk the keys/indices, looking up at each
                         // step. Nil at any level short-circuits.
-                        // Type-dispatch per step: Hash → ruby_eq
+                        // Type-dispatch per step: Hash → ruby_eql
                         // lookup, Array → integer index. Other types
                         // would need `dig` defined; treat as nil.
                         let mut cur = Value::Hash(id);
@@ -148,7 +148,7 @@ impl Vm {
                         // `begin ... rescue KeyError => e; ... end`
                         // catches it like CRuby.
                         let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
                         match pos {
                             Some(p) => Some(self.heap.hash(id)[p].1.clone()),
                             None => {
@@ -161,7 +161,7 @@ impl Vm {
                     }
                     ("fetch", [k, default]) => {
                         let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
                         Some(match pos {
                             Some(p) => self.heap.hash(id)[p].1.clone(),
                             None => default.clone(),
@@ -185,7 +185,7 @@ impl Vm {
                     }
                     ("include?", [k]) | ("has_key?", [k]) | ("key?", [k]) | ("member?", [k]) => {
                         let h = self.heap.hash(id);
-                        let hit = h.iter().any(|(key, _)| key.ruby_eq(k, &self.heap));
+                        let hit = h.iter().any(|(key, _)| key.ruby_eql(k, &self.heap));
                         Some(Value::Bool(hit))
                     }
                     ("keys", []) => {
@@ -272,7 +272,7 @@ impl Vm {
                         let mut out: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
                         for (k, v) in extra {
-                            let pos = out.iter().position(|(ek, _)| ek.ruby_eq(&k, &self.heap));
+                            let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
                             if let Some(p) = pos {
                                 out[p].1 = v;
                             } else {
@@ -315,7 +315,7 @@ impl Vm {
                     }
                     ("delete", [k]) => {
                         let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
                         if let Some(p) = pos {
                             let removed = self.heap.hash_mut(id).remove(p).1;
                             Some(removed)
@@ -332,7 +332,7 @@ impl Vm {
                         // the last one through wins. Dedup keeping latest.
                         let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
                         for (k, v) in pairs {
-                            let pos = out.iter().position(|(ek, _)| ek.ruby_eq(&k, &self.heap));
+                            let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
                             if let Some(p) = pos { out[p].1 = v; } else { out.push((k, v)); }
                         }
                         self.maybe_gc();
@@ -365,7 +365,7 @@ impl Vm {
                     // present in the receiver are silently skipped.
                     ("except", keys) => {
                         let pairs: Vec<(Value, Value)> = self.heap.hash(id).iter()
-                            .filter(|(k, _)| !keys.iter().any(|x| x.ruby_eq(k, &self.heap)))
+                            .filter(|(k, _)| !keys.iter().any(|x| x.ruby_eql(k, &self.heap)))
                             .cloned()
                             .collect();
                         self.maybe_gc();
@@ -380,7 +380,7 @@ impl Vm {
                         let mut pairs: Vec<(Value, Value)> = Vec::new();
                         for k in keys {
                             if let Some(pair) = self.heap.hash(id).iter()
-                                .find(|(hk, _)| hk.ruby_eq(k, &self.heap)) {
+                                .find(|(hk, _)| hk.ruby_eql(k, &self.heap)) {
                                 pairs.push(pair.clone());
                             }
                         }
@@ -390,7 +390,7 @@ impl Vm {
                     }
                     ("store", [k, v]) => {
                         let pos = self.heap.hash(id).iter()
-                            .position(|(key, _)| key.ruby_eq(k, &self.heap));
+                            .position(|(key, _)| key.ruby_eql(k, &self.heap));
                         let h = self.heap.hash_mut(id);
                         if let Some(p) = pos { h[p].1 = v.clone(); }
                         else { h.push((k.clone(), v.clone())); }

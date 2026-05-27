@@ -1579,9 +1579,23 @@ impl Vm {
                 let n = n as usize;
                 let split = self.stack.len() - n * 2;
                 let flat: Vec<Value> = self.stack.drain(split..).collect();
+                // Dedup `eql?`-equal keys with last-write-wins, matching
+                // CRuby's `{a: 1, a: 2}` → `{a: 2}` semantics. Pre-#193
+                // ratchet retire: `{1 => :a, 1 => :b}` was reported as
+                // size 2, and `{1.0 => :a, 1 => :b}` left both entries
+                // but lookups returned the first under `==`. `ruby_eql`
+                // is the strict comparator (no Int↔Float coercion), so
+                // `{1.0 => :a, 1 => :b}` keeps size 2 (correct under
+                // eql?), while same-type duplicates collapse correctly.
                 let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n);
                 let mut iter = flat.into_iter();
-                while let (Some(k), Some(v)) = (iter.next(), iter.next()) { pairs.push((k, v)); }
+                while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+                    if let Some(p) = pairs.iter().position(|(ek, _)| ek.ruby_eql(&k, &self.heap)) {
+                        pairs[p].1 = v;
+                    } else {
+                        pairs.push((k, v));
+                    }
+                }
                 let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                 self.stack.push(Value::Hash(id));
             }

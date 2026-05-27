@@ -778,6 +778,58 @@ impl Value {
             _ => self.to_display(heap, interner),
         }
     }
+    /// CRuby's `Object#eql?` — like `==` but WITHOUT cross-numeric-type
+    /// coercion. `1.eql?(1.0)` is `false`; `1 == 1.0` is `true`.
+    /// Used for Hash key collision / lookup so `{ 1.0 => :a, 1 => :b }`
+    /// keeps both entries (CRuby semantics). Distinct from `ruby_eq`
+    /// which is the `==` predicate used by Array#include?, the BinOp
+    /// `==` opcode, etc.
+    ///
+    /// For non-numeric types this delegates to `ruby_eq` — they have
+    /// no numeric-type-class to coerce across in the first place.
+    /// Composite types (Array, Hash, Range) defer to the contained
+    /// elements via this same `ruby_eql` so the strict semantics
+    /// nest correctly: `[1.0] != [1]` under eql?, matching CRuby.
+    ///
+    /// Divergence ratcheted by PR #193's `divergence_hash_eql_keys`
+    /// fixture; this method is the surface that retires it.
+    pub(crate) fn ruby_eql(&self, other: &Value, heap: &Heap) -> bool {
+        match (self, other) {
+            // Numeric strictness: no Int↔Float or Int↔BigInt
+            // coercion. Two values of DIFFERENT numeric type can
+            // never be eql?, even when their `==` would be true.
+            (Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_)) => false,
+            #[cfg(feature = "bignum")]
+            (Value::Int(_), Value::BigInt(_)) | (Value::BigInt(_), Value::Int(_)) => false,
+            #[cfg(feature = "bignum")]
+            (Value::Float(_), Value::BigInt(_)) | (Value::BigInt(_), Value::Float(_)) => false,
+            // Composites recurse via ruby_eql so the strictness
+            // propagates: `[1] eql? [1.0]` is false.
+            (Value::Array(a), Value::Array(b)) => {
+                if a == b { return true; }
+                let x = heap.array(*a); let y = heap.array(*b);
+                x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| p.ruby_eql(q, heap))
+            }
+            (Value::Hash(a), Value::Hash(b)) => {
+                if a == b { return true; }
+                let x = heap.hash(*a); let y = heap.hash(*b);
+                if x.len() != y.len() { return false; }
+                x.iter().all(|(k, v)| {
+                    y.iter().any(|(k2, v2)| k.ruby_eql(k2, heap) && v.ruby_eql(v2, heap))
+                })
+            }
+            (Value::Range(a), Value::Range(b)) => {
+                if a == b { return true; }
+                let x = heap.range(*a); let y = heap.range(*b);
+                x.exclusive == y.exclusive
+                    && x.begin.ruby_eql(&y.begin, heap)
+                    && x.end.ruby_eql(&y.end, heap)
+            }
+            // Same-type primitives + non-numeric paths reuse ruby_eq.
+            _ => self.ruby_eq(other, heap),
+        }
+    }
+
     pub(crate) fn ruby_eq(&self, other: &Value, heap: &Heap) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,

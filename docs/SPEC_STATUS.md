@@ -12,15 +12,14 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 55 |
-| Examples in corpus | 222 |
-| Skipped `it` traces | 80 |
+| Files | 52 |
+| Examples in corpus | 210 |
+| Skipped `it` traces | 79 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 1 |
 | `fixture` | 32 |
 | `method-not-implemented` | 37 |
 | `mock` | 10 |
@@ -40,8 +39,8 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 12 | 42 | 45 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 7 | 16 | 7 |
-| Integer | 9 | 38 | 7 |
+| Hash | 7 | 17 | 6 |
+| Integer | 6 | 25 | 7 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -68,19 +67,16 @@ Find blocks unlocked by a future feature with e.g.
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
 | `hash_empty_spec.rb` | Hash#empty? | `core/hash/empty_spec.rb` | 2 | 0 |
 | `hash_fetch_spec.rb` | Hash#fetch | `core/hash/fetch_spec.rb` | 5 | 1 |
-| `hash_invert_spec.rb` | Hash#invert | `core/hash/invert_spec.rb` | 2 | 5 |
+| `hash_invert_spec.rb` | Hash#invert | `core/hash/invert_spec.rb` | 3 | 4 |
 | `hash_keys_spec.rb` | Hash#keys | `core/hash/keys_spec.rb` | 2 | 0 |
 | `hash_size_spec.rb` | Hash#size | `core/hash/size_spec.rb` | 3 | 0 |
 | `hash_to_a_spec.rb` | Hash#to_a | `core/hash/to_a_spec.rb` | 1 | 1 |
 | `hash_values_spec.rb` | Hash#values | `core/hash/values_spec.rb` | 1 | 0 |
 | `instance_eval_spec.rb` | BasicObject#instance_eval | `core/basicobject/instance_eval_spec.rb` | 4 | 0 |
 | `integer_abs_spec.rb` | Integer#abs | `core/integer/abs_spec.rb + shared/abs.rb` | 1 | 1 |
-| `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 0 |
-| `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
 | `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
 | `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |
-| `integer_pow_spec.rb` | Integer#pow | `core/integer/pow_spec.rb` | 7 | 0 |
 | `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |
 | `integer_zero_spec.rb` | Integer#zero? | `core/integer/zero_spec.rb` | 2 | 0 |
 | `method_call_spec.rb` | Method#call | `core/method/call_spec.rb (+ shared/call.rb)` | 6 | 0 |

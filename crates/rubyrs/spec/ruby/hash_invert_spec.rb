@@ -19,13 +19,12 @@ describe "Hash#invert" do
     assert_eq(h.invert[1], override_key)
   end
 
-  # skipped (divergent): it "compares new keys with eql? semantics" do
-  #   CRuby's Hash uses `eql?` so `{ a: 1.0, b: 1 }` keeps both
-  #   entries (1.0 != 1 under eql?). rubyrs's Hash collapses
-  #   numerically-equal keys, so `{ a: 1.0, b: 1 }` becomes
-  #   `{ 1.0 => :b }` (the later write wins) and `invert[1] ==
-  #   invert[1.0] == :b`. Behavior divergence, not unimplemented;
-  #   would need Float/Int eql? distinction in Hash key lookup.
+  it "compares new keys with eql? semantics" do
+    h = { a: 1.0, b: 1 }
+    i = h.invert
+    assert_eq(i[1.0], :a)
+    assert_eq(i[1], :b)
+  end
 
   # skipped (fixture): it "does not return subclass instances for subclasses" do
   #   Uses `HashSpecs::MyHash`.
