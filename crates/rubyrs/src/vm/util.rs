@@ -68,6 +68,18 @@ pub(crate) fn value_cmp_v_heap(
     // `value_cmp_v_heap` means nested Arrays-of-Arrays compose
     // automatically.
     if let (Value::Array(xa), Value::Array(xb)) = (a, b) {
+        // Self-comparison short-circuit: when both sides reference
+        // the same Array heap slot, the result is Equal without
+        // recursing into the pairs. Without this, a self-cycle
+        // (`a = []; a << a; a <=> a`) recurses into a[0] vs a[0]
+        // → same slot → ... and overflows the stack. CRuby uses a
+        // per-thread recursion-tracking table to detect arbitrary
+        // mutual cycles; rubyrs catches the common direct case
+        // here. Deeper mutual cycles (`a << b; b << a; a <=> b`)
+        // remain a gap.
+        if *xa == *xb {
+            return Some(std::cmp::Ordering::Equal);
+        }
         let av = heap.array(*xa);
         let bv = heap.array(*xb);
         let common = av.len().min(bv.len());

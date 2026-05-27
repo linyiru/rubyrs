@@ -554,3 +554,25 @@ fn range_first_last_non_int_n_raises_no_method_error_today() {
     assert_no_method("(1..).first(2.0)");
 }
 
+
+#[test]
+fn array_spaceship_self_referential_does_not_overflow_stack() {
+    // `value_cmp_v_heap`'s Array×Array recursion would stack-
+    // overflow when comparing the same self-referential Array
+    // (`a = []; a << a; a <=> a`): a[0] is `a` again, recurse,
+    // and the base case never fires. The Array-id short-circuit
+    // in `value_cmp_v_heap` catches the direct same-ObjId case
+    // and returns Equal. Deeper mutual cycles (`a << b; b << a`)
+    // would still overflow — that's a documented gap and is not
+    // covered here.
+    let mut rt = Runtime::new();
+    let v = rt.eval(
+        r#"
+        a = []
+        a << a
+        a <=> a
+        "#,
+        "spaceship_self.rb",
+    ).expect("self-spaceship should return Int, not overflow");
+    assert!(matches!(v, Value::Int(0)), "expected Int(0), got {:?}", v);
+}
