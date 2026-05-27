@@ -106,10 +106,15 @@ lives).
   64, pass 8 at 265 / 974, pass 9 reaches 1292. Each pass
   advances roughly 4× through the file, finding one or two
   Cat F batches plus one language gap.
-- **Cat D gap is broader than this one site.** Sinatra has
-  THREE `class << self` blocks (lines 1292, 1967, 2122);
-  the first one is the cheapest to repro. Whatever fix lands
-  for #11 will likely unblock all three at once.
+- **Cat D gap is scoped to the constant-assignment shape.**
+  Sinatra has THREE `class << self` blocks (lines 1292, 1967,
+  2122). The other two only contain forms already in the
+  spike-subset whitelist — line 1967 is `alias`-only and
+  line 2122 is `attr_accessor`-only — so they would already
+  parse if the probe reached them. Only the line 1292 block
+  needs the layer-#11 fix because it opens with a
+  `CALLERS_TO_IGNORE = [...]` constant assignment that the
+  whitelist rejects.
 
 ### Cumulative category histogram (sinatra/base.rb body, this pass)
 
@@ -124,10 +129,12 @@ lives).
 ### Concrete next moves suggested by the data
 
 1. **Extend `class << self` body whitelist to accept
-   `ConstantWriteNode`** — closes layer #11 and unblocks the
-   other two `class << self` blocks at lines 1967 / 2122
-   simultaneously. Translator-side fix, no VM changes required.
-   Tier 1.
+   `ConstantWriteNode`** — closes layer #11 (sinatra/base.rb:1292).
+   The other two `class << self` blocks in the same file (lines
+   1967, 2122) only use forms already in the spike-subset
+   whitelist (alias-only / attr_accessor-only), so they parse
+   today and don't need this fix. Translator-side fix, no VM
+   changes required. Tier 1.
 2. **Continue iterating** if further probes are desired —
    the next stop after layer #11 likely surfaces inside one
    of those subsequent `class << self` bodies, or in the
