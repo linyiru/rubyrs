@@ -105,6 +105,29 @@ impl Drop for SpanGuard<'_> {
     }
 }
 
+/// Allocate a fresh inline-cache id and emit the appropriate
+/// `Op::Call*` variant for a method dispatch. Centralises the
+/// 4-way `(has_recv, has_block)` matrix that previously lived
+/// as if/else pairs inline in `compile_expr`.
+fn emit_method_call(
+    b: &mut ProtoBuilder,
+    name: crate::intern::SymId,
+    argc: u8,
+    has_recv: bool,
+    has_block: bool,
+    cc: &mut u32,
+) {
+    let cid = *cc as u16;
+    *cc += 1;
+    let op = match (has_recv, has_block) {
+        (true, false) => Op::Call(name, argc, cid),
+        (false, false) => Op::CallNoRecv(name, argc, cid),
+        (true, true) => Op::CallBlock(name, argc, cid),
+        (false, true) => Op::CallNoRecvBlock(name, argc, cid),
+    };
+    b.emit(op);
+}
+
 impl ProtoBuilder {
     pub(crate) fn new(params: &[String], filename: Rc<str>) -> Self {
         let mut b = Self {
@@ -372,8 +395,7 @@ pub(crate) fn compile_expr(
                         Expr::StrLit(_) => compile_expr(b, p, protos, interner, cc),
                         _ => {
                             compile_expr(b, p, protos, interner, cc);
-                            let cid = *cc as u16; *cc += 1;
-                            b.emit(Op::Call(to_s, 0, cid));
+                            emit_method_call(b, to_s, 0, true, false, cc);
                         }
                     }
                     if idx > 0 {
@@ -399,8 +421,7 @@ pub(crate) fn compile_expr(
                         Expr::StrLit(_) => compile_expr(b, p, protos, interner, cc),
                         _ => {
                             compile_expr(b, p, protos, interner, cc);
-                            let cid = *cc as u16; *cc += 1;
-                            b.emit(Op::Call(to_s, 0, cid));
+                            emit_method_call(b, to_s, 0, true, false, cc);
                         }
                     }
                     if idx > 0 {
@@ -599,8 +620,7 @@ pub(crate) fn compile_expr(
                     for (i, target) in targets.iter().enumerate() {
                         b.emit(Op::Dup);
                         b.emit(Op::LoadConstInt(i as i64));
-                        let cid = *cc as u16; *cc += 1;
-                        b.emit(Op::Call(bracket_id, 1, cid));
+                        emit_method_call(b, bracket_id, 1, true, false, cc);
                         emit_store(b, interner, target);
                     }
                 }
@@ -616,16 +636,14 @@ pub(crate) fn compile_expr(
                     for (i, target) in targets.iter().enumerate().take(s) {
                         b.emit(Op::Dup);
                         b.emit(Op::LoadConstInt(i as i64));
-                        let cid = *cc as u16; *cc += 1;
-                        b.emit(Op::Call(bracket_id, 1, cid));
+                        emit_method_call(b, bracket_id, 1, true, false, cc);
                         emit_store(b, interner, target);
                     }
                     // splat slice: `arr.__mw_splat(pre, post)`
                     b.emit(Op::Dup);
                     b.emit(Op::LoadConstInt(s as i64));
                     b.emit(Op::LoadConstInt(post as i64));
-                    let cid = *cc as u16; *cc += 1;
-                    b.emit(Op::Call(splat_id, 2, cid));
+                    emit_method_call(b, splat_id, 2, true, false, cc);
                     emit_store(b, interner, &targets[s]);
                     // Post-splat: need pre+post counts at runtime
                     // so __mw_post can implement CRuby's "pre
@@ -636,8 +654,7 @@ pub(crate) fn compile_expr(
                         b.emit(Op::LoadConstInt(j as i64));
                         b.emit(Op::LoadConstInt(s as i64));
                         b.emit(Op::LoadConstInt(post as i64));
-                        let cid = *cc as u16; *cc += 1;
-                        b.emit(Op::Call(post_id, 3, cid));
+                        emit_method_call(b, post_id, 3, true, false, cc);
                         emit_store(b, interner, &targets[s + 1 + j]);
                     }
                 }
@@ -895,12 +912,7 @@ pub(crate) fn compile_expr(
             if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
-            let cid = *cc as u16; *cc += 1;
-            if has_recv {
-                b.emit(Op::Call(name_id, argc, cid));
-            } else {
-                b.emit(Op::CallNoRecv(name_id, argc, cid));
-            }
+            emit_method_call(b, name_id, argc, has_recv, false, cc);
         }
         Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
             // `defaults` is parallel to `params`: leading `None`s are
@@ -1187,12 +1199,7 @@ pub(crate) fn compile_expr(
             b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
-            let cid = *cc as u16; *cc += 1;
-            if has_recv {
-                b.emit(Op::CallBlock(name_id, argc, cid));
-            } else {
-                b.emit(Op::CallNoRecvBlock(name_id, argc, cid));
-            }
+            emit_method_call(b, name_id, argc, has_recv, true, cc);
         }
         Expr::CallWithBlockArg { receiver, name, args, block_arg } => {
             // `foo(&proc_value)`. Same stack shape as CallWithBlock
@@ -1210,12 +1217,7 @@ pub(crate) fn compile_expr(
             compile_expr(b, block_arg, protos, interner, cc);
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
-            let cid = *cc as u16; *cc += 1;
-            if has_recv {
-                b.emit(Op::CallBlock(name_id, argc, cid));
-            } else {
-                b.emit(Op::CallNoRecvBlock(name_id, argc, cid));
-            }
+            emit_method_call(b, name_id, argc, has_recv, true, cc);
         }
         Expr::Return(val) => {
             // CRuby `return` has two scoping rules depending on the
