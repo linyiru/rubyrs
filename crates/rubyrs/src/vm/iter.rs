@@ -1820,22 +1820,26 @@ impl Vm {
                         // `key` lives only in this Rust local. If
                         // it's a heap-slot Value (Array / Hash /
                         // Object / Range / Block / BoundMethod /
-                        // UnboundMethod / CurriedProc / BigInt), the
-                        // alloc-time maybe_gc would sweep it and the
-                        // subsequent push would insert a dangling
-                        // ObjId into result_id. Same family as the
-                        // chunk fix in PR #187. Scoped push/pop
-                        // (single-iteration lifetime) keeps the pin
-                        // set from accumulating across the loop.
-                        if key.is_gc_heap_ref() {
-                            g.vm.pinned.push(key.clone());
-                        }
+                        // UnboundMethod / CurriedProc / BigInt),
+                        // `maybe_gc` would sweep it and the
+                        // subsequent `hash_mut.push` would insert a
+                        // dangling ObjId into result_id. Same
+                        // family as the chunk fix in PR #187.
+                        //
+                        // Pop discipline mirrors the step_block
+                        // dance: the pin only needs to survive
+                        // `maybe_gc()`. We pop BEFORE
+                        // `check_alloc()?` so an Err propagating
+                        // via `?` doesn't skip the pop and leak a
+                        // permanent pin. `heap.alloc` doesn't
+                        // trigger GC and doesn't fail, so it runs
+                        // unpinned safely.
+                        let pin_key = key.is_gc_heap_ref();
+                        if pin_key { g.vm.pinned.push(key.clone()); }
                         g.vm.maybe_gc();
+                        if pin_key { g.vm.pinned.pop(); }
                         g.vm.check_alloc()?;
                         let arr_id = g.vm.heap.alloc(HeapObj::Array(vec![v]));
-                        if key.is_gc_heap_ref() {
-                            g.vm.pinned.pop();
-                        }
                         g.vm.heap.hash_mut(result_id).push((key, Value::Array(arr_id)));
                     }
                 }
