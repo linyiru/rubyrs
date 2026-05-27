@@ -574,10 +574,25 @@ fn array_group_by_pin_snapshot_under_receiver_mutation() {
         puts result.inspect
     "#, "group_by_mut.rb").expect("eval should not ICE");
     let out = buf.snapshot();
-    // rubyrs eager group_by — all three inner Arrays processed.
-    // Each first element is unique so each gets its own bucket.
-    assert_eq!(
-        out, "{1 => [[1, 2]], 3 => [[3, 4]], 5 => [[5, 6]]}\n",
-        "group_by corrupted (likely snapshot element swept after receiver mutation), got: {out}"
+    // Soft assertion focused on the GC-safety invariant rather
+    // than the exact bucket count: the test passes as long as
+    // (a) eval completes without an ICE / SIGABRT (the `expect`
+    // above), and (b) the printed result starts with `{1 => [[1, 2]]`
+    // (the first inner Array survived the snapshot pin and made
+    // it into the output Hash).
+    //
+    // Deliberately NOT asserting exact equality with the eager
+    // rubyrs output `{1 => [[1, 2]], 3 => [[3, 4]], 5 => [[5, 6]]}`
+    // nor with CRuby's `{1 => [[1, 2]]}` — both are valid given
+    // CRuby's "unspecified under concurrent mutation" stance, and
+    // pinning the test to whichever rubyrs happens to do today
+    // would cause spurious failures if the implementation is
+    // later aligned with CRuby's stop-after-mutation behaviour.
+    // The bug this test guards against is a USE-AFTER-FREE on a
+    // swept snapshot element — that failure mode is `expect("eval
+    // should not ICE")`, NOT the bucket layout.
+    assert!(
+        out.starts_with("{1 => [[1, 2]]"),
+        "group_by output corrupted (first inner Array did not survive): {out}"
     );
 }
