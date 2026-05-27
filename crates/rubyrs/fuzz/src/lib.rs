@@ -27,9 +27,17 @@ use std::sync::OnceLock;
 /// single-user ephemeral runners, but the safer construction is
 /// one line longer so there's no reason not to pay it.
 ///
-/// The `TempDir` value is intentionally leaked via `.keep()` —
-/// the fuzz process owns this directory for its entire lifetime;
-/// the OS reclaims it when the process exits.
+/// The `TempDir` value is intentionally leaked via `.keep()` so
+/// the fuzz process owns the directory for its entire lifetime —
+/// libfuzzer often exits via `abort()` (a real crash, a SIGABRT
+/// from an ASan finding, an OOM), and a held `TempDir`'s `Drop`
+/// would not run on those paths anyway. The trade-off: the
+/// directory is left on disk after the fuzz process ends; on
+/// CI's ephemeral runner that's a non-issue (whole filesystem
+/// is discarded), and locally the OS tmp cleaner (systemd-tmpfiles
+/// on Linux, periodic on macOS) reaps `tempfile`-prefixed dirs
+/// over the next reboot cycle. Each fuzz process gets a fresh
+/// random suffix, so leftover dirs don't conflict across runs.
 pub fn ensure_sandbox_cwd() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
