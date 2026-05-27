@@ -139,6 +139,42 @@ jobs:
           count=$(find "$dest" -type f | wc -l)
           echo "seeded $count corpus entries"
 
+      - name: Preamble-fuel smoke check
+        # The harness's `fuel` cap (50k for parse, 500k for eval)
+        # is load-bearing on `Runtime::with_config` being able to
+        # load the exception-class preamble within budget — see
+        # docs/FUZZING.md "What this turned up". If a future rubyrs
+        # PR grows the preamble past either target's fuel limit,
+        # every fuzz iteration will trap with
+        # `ICE: failed to load exception preamble` and the
+        # workflow will report a torrent of identical panics. Catch
+        # that at the workflow's "is the harness alive at all"
+        # boundary by running the empty-input case for 5 s and
+        # asserting it neither crashes nor saves an artifact —
+        # `cargo fuzz run` exits non-zero on crash, which fails
+        # this step before the real soak burns a full 5 min.
+        run: |
+          set -euo pipefail
+          cd crates/rubyrs/fuzz
+          # Seed: one empty file. libfuzzer will run a few hundred
+          # iters mutating it; if the preamble traps on iter 1
+          # this step exits with the ICE panic.
+          smoke_corpus="$(mktemp -d)"
+          : > "$smoke_corpus/empty"
+          cargo fuzz run ${{ matrix.target }} "$smoke_corpus" -- \
+            -max_total_time=5 \
+            -runs=200 \
+            -rss_limit_mb=2048 \
+            -timeout=5
+          # Belt-and-braces: the run-with-corpus path doesn't write
+          # to `artifacts/` on success, but if one crash got
+          # through libfuzzer's filter, fail loudly.
+          if [ -d artifacts/${{ matrix.target }} ] && [ "$(find artifacts/${{ matrix.target }} -type f | wc -l)" -gt 0 ]; then
+            echo "smoke-check produced crash artifacts:"
+            ls -la artifacts/${{ matrix.target }}/
+            exit 1
+          fi
+
       - name: Run fuzz ${{ matrix.target }}
         # `-max_total_time` is libFuzzer's wall-clock budget.
         # `-rss_limit_mb` caps memory at 2 GB so a runaway
