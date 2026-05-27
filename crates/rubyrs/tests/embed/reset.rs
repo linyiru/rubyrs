@@ -107,18 +107,21 @@ fn reset_clears_user_methods_added_to_preamble_class() {
 }
 
 #[test]
-fn reset_restores_fuel_to_post_preamble_budget() {
-    // Pre-fix `reset()` left `vm.fuel` untouched — the counter
-    // decremented monotonically across the Runtime's lifetime,
-    // so a host that exhausted the budget in one eval saw the
-    // cap permanently exhausted for every eval thereafter,
-    // even across `reset()`. Surfaced by PR #222's fuzz harness
-    // adoption (the harness initially worked around it with a
-    // per-iter `apply_config` refresh).
+fn eval_after_reset_gets_fresh_fuel_budget() {
+    // Specific eval-reset-eval shape of the broader "fuel is
+    // per-eval" contract — companion to
+    // `resource_caps::fuel_resets_between_eval_calls` which
+    // exercises eval-eval (no reset between). Together they pin
+    // that fuel refills regardless of whether reset is called.
     //
-    // Pin the contract: a heavy eval consumes fuel toward
-    // exhaustion, then reset rewinds the budget and a second
-    // heavy eval succeeds independently.
+    // Mechanism (post-PR #222 + per-eval-fuel-budget refactor):
+    // `Runtime::eval` at entry re-anchors `vm.fuel` from
+    // `Runtime::fuel_budget` (set by `apply_config`). `reset()`
+    // doesn't touch `vm.fuel` at all; the next eval refills it.
+    //
+    // Pre-PR-#222 `vm.fuel` decremented monotonically across the
+    // Runtime's lifetime and `reset()` didn't touch it, so the
+    // second eval here would trap with "out of fuel".
     let cfg = Config { fuel: Some(10_000), ..Default::default() };
     let mut rt = Runtime::with_config(cfg);
     // First eval: ~3k ops, comfortably within the 10k budget.
@@ -130,11 +133,9 @@ fn reset_restores_fuel_to_post_preamble_budget() {
         .expect("first eval under budget");
     assert!(matches!(v1, rubyrs::Value::Int(500)));
     rt.reset();
-    // Second eval, same script. Pre-fix this would trap with
-    // `out of fuel` (the first eval consumed enough fuel that
-    // the second eval's 3k extra ops exceed what's left);
-    // post-fix the fuel snapshot is restored and the same
-    // script runs cleanly again.
+    // Second eval, same script. Re-anchoring at eval entry
+    // restores the full 10k budget regardless of how much the
+    // first eval consumed.
     let v2 = rt
         .eval(
             "a = []; i = 0; while i < 500; a << i; i = i + 1; end; a.length",
