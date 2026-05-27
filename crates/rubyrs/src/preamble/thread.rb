@@ -20,14 +20,28 @@
 #     implemented globally — defining it just on the Thread class
 #     keeps the contract narrow and the surface obviously a stub.
 #
-# DIVERGENCE: this is the entire Thread API. `Thread.new {...}`,
-# `Thread.list`, `#join`, `#value`, `Thread.kill`, the whole
-# Mutex/ConditionVariable interplay — all absent. Any code that
-# inspects the returned `.current` object beyond `.object_id`
-# will surface a NoMethodError. Will revisit if/when Tier 2 ever
-# introduces real concurrency.
+# DIVERGENCE: this is the entire Thread API.
+# - `Thread.new {...}` raises NotImplementedError instead of
+#   silently allocating an instance and dropping the block (a
+#   fail-loud override on top of `Class#new` — otherwise the
+#   default allocator would accept the call and quietly ignore
+#   the thread body, which is the kind of silent divergence
+#   single-threaded shims tend to leak).
+# - `Thread.list`, `#join`, `#value`, `Thread.kill`, the whole
+#   Mutex/ConditionVariable interplay — all absent.
+# - Because `Thread.current` returns the Thread class itself,
+#   class-level reflection calls like `.class` / `.name` /
+#   `.ancestors` resolve via Class's normal dispatch and DON'T
+#   raise NoMethodError. That's a known consequence of the
+#   "return self" shape; nothing in tilt's call site exercises
+#   them.
+# Will revisit if/when Tier 2 ever introduces real concurrency.
 
 class Thread
+  def self.new(*args)
+    raise NotImplementedError,
+      "Thread.new is not supported in single-threaded rubyrs (ADR 0017 Tier 1 Rule 4)"
+  end
   def self.current
     self
   end

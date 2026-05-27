@@ -42,3 +42,10 @@ puts a == b                                           # true
 name = "__tilt_#{Thread.current.object_id.abs}"
 puts name.start_with?("__tilt_")                      # true
 puts name.length > "__tilt_".length                   # true
+
+# `Thread.new` raising NotImplementedError is INTENTIONALLY not
+# locked here as a byte-parity case — CRuby launches a real OS
+# thread and runs the block, rubyrs raises. The behaviors are
+# inherently divergent; covering the rubyrs side is done as a
+# runtime probe outside the diff_cruby parity oracle (see the
+# divergence note in `preamble/thread.rb`).
