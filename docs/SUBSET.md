@@ -248,7 +248,7 @@ Covered (no-block): `length` / `size`, `push` / `<<`, `[]`,
 `[]=`, `first` / `last`, `empty?`, `include?`, `count` /
 `count(needle)`, `sum` (Int-only), `min` / `max`, `sort`,
 `reverse`, `uniq`, `compact`, `flatten` (depth 1), `join` /
-`join(sep)`, `+` / `-`, `concat`, `take(n)` / `drop(n)`,
+`join(sep)`, `+` / `-`, `concat`, `replace(other)`, `take(n)` / `drop(n)`,
 `to_a`, `tally`, `combination(n)` / `permutation([n])` (both
 return materialised Arrays — Enumerator isn't modelled),
 `assoc` / `rassoc`, `pack(format)` (subset of CRuby's
