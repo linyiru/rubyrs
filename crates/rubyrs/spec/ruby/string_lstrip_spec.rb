@@ -1,0 +1,28 @@
+# Adapted from ruby/spec core/string/lstrip_spec.rb at upstream
+# commit 448cb340 (2026-05). Hand-translated — upstream
+# includes the bang variant `String#lstrip!` (not in subset)
+# and a shared body. The `\x00`-stripping block is skipped:
+# rubyrs's `#lstrip` does not strip NUL bytes, CRuby does.
+
+describe "String#lstrip" do
+  it "returns a copy of self with leading whitespace removed" do
+    assert_eq("  hello  ".lstrip, "hello  ")
+    assert_eq("  hello world  ".lstrip, "hello world  ")
+    assert_eq("\n\r\t\n\v\r hello world  ".lstrip, "hello world  ")
+    assert_eq("hello".lstrip, "hello")
+    assert_eq(" こにちわ".lstrip, "こにちわ")
+  end
+
+  it "works with lazy substrings" do
+    assert_eq("  hello  "[1...-1].lstrip, "hello ")
+    assert_eq("  hello world  "[1...-1].lstrip, "hello world ")
+    assert_eq("\n\r\t\n\v\r hello world  "[1...-1].lstrip, "hello world ")
+    assert_eq("   こにちわ "[1...-1].lstrip, "こにちわ")
+  end
+
+  # skipped (divergent): it "strips leading \\0" do
+  #   rubyrs's `#lstrip` does not strip `\x00`; CRuby does.
+
+  # skipped (method-not-implemented): it "<lstrip! variants>"
+  #   String#lstrip! not in subset (7 upstream blocks).
+end
