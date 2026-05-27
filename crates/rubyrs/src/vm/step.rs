@@ -500,10 +500,17 @@ impl Vm {
             Op::IncLocalNoPush(s) => {
                 let slot = s as usize;
                 let frame = self.frames.last().expect("ICE: IncLocalNoPush no frame");
-                let cur = frame.locals.borrow()[slot].clone();
-                if let Value::Int(n) = cur {
-                    frame.locals.borrow_mut()[slot] = Value::Int(n.wrapping_add(1));
-                } else {
+                let slow_cur = {
+                    let mut locals = frame.locals.borrow_mut();
+                    match &mut locals[slot] {
+                        Value::Int(n) => {
+                            *n = (*n).wrapping_add(1);
+                            None
+                        }
+                        cur => Some(cur.clone()),
+                    }
+                };
+                if let Some(cur) = slow_cur {
                     // Slow path: rebind via `+`. push, dispatch, store, drop result.
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
@@ -516,12 +523,21 @@ impl Vm {
             Op::IncLocal(s) => {
                 let slot = s as usize;
                 let frame = self.frames.last().expect("ICE: IncLocal no frame");
-                let cur = frame.locals.borrow()[slot].clone();
-                if let Value::Int(n) = cur {
-                    let new_n = n.wrapping_add(1);
-                    frame.locals.borrow_mut()[slot] = Value::Int(new_n);
+                let fast_new_n = {
+                    let mut locals = frame.locals.borrow_mut();
+                    match &mut locals[slot] {
+                        Value::Int(n) => {
+                            let new_n = (*n).wrapping_add(1);
+                            *n = new_n;
+                            Some(new_n)
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(new_n) = fast_new_n {
                     self.stack.push(Value::Int(new_n));
                 } else {
+                    let cur = frame.locals.borrow()[slot].clone();
                     // Slow path: replicate `slot = slot + 1` via BinOp semantics,
                     // including user-defined `+` on the receiver type.
                     self.stack.push(cur);
@@ -1109,9 +1125,12 @@ impl Vm {
                 // Stored as Weak — see Method.defining_class docs.
                 let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
+                let params = proto.params.clone();
+                let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
                 let m = Rc::new(Method {
-                    params: proto.params.clone(),
+                    params,
                     proto_idx: p_idx as usize,
+                    fixed_arity,
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
                     closure: None,
@@ -1133,9 +1152,12 @@ impl Vm {
                 let proto = &self.protos[p_idx as usize];
                 let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
+                let params = proto.params.clone();
+                let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
                 let m = Rc::new(Method {
-                    params: proto.params.clone(),
+                    params,
                     proto_idx: p_idx as usize,
+                    fixed_arity,
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
                     closure: None,
@@ -1180,9 +1202,12 @@ impl Vm {
                 // as `Weak` so the (sc ↔ Method) cycle doesn't
                 // pin the eigenclass past the receiver's
                 // lifetime — see PR #31 review for the analysis.
+                let params = proto.params.clone();
+                let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
                 let m = Rc::new(Method {
-                    params: proto.params.clone(),
+                    params,
                     proto_idx: p_idx as usize,
+                    fixed_arity,
                     defining_class: Some(Rc::downgrade(&sc)),
                     visibility: std::cell::Cell::new(Visibility::Public),
                     closure: None,
@@ -1405,6 +1430,7 @@ impl Vm {
                 let m = Rc::new(Method {
                     params,
                     proto_idx,
+                    fixed_arity: None,
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
@@ -1453,6 +1479,7 @@ impl Vm {
                 let m = Rc::new(Method {
                     params,
                     proto_idx,
+                    fixed_arity: None,
                     // Weak — same cycle break as DefSingletonMethod.
                     defining_class: Some(Rc::downgrade(&sc)),
                     visibility: std::cell::Cell::new(Visibility::Public),
@@ -1788,6 +1815,5 @@ impl Vm {
         }
         Ok(true)
     }
-
 
 }

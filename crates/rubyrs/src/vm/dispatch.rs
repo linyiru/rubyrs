@@ -254,7 +254,6 @@ impl Vm {
     }
 
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
-        let name = self.interner.resolve(name_id).clone();
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
         // vis-check would leak the flag whenever the dispatch
@@ -264,6 +263,37 @@ impl Vm {
         // — the flag would survive and silently bypass the next
         // call's vis check).
         let bypass_visibility = self.take_bypass_visibility();
+        if no_recv {
+            let self_val = self
+                .frames
+                .last()
+                .expect("ICE: do_call(no_recv) with empty frames")
+                .self_val
+                .clone();
+            if matches!(self_val, Value::Nil)
+                && !self.host_fns.contains_key(&name_id)
+                && let Some(m) = self.lookup_toplevel_method_cache_hit(cache_id)
+                && self.try_invoke_fixed_method_from_stack(m, self_val, argc, None)?
+            {
+                return Ok(());
+            }
+        }
+        let name = self.interner.resolve(name_id).clone();
+        if no_recv {
+            let self_val = self.frames.last()
+                .expect("ICE: do_call(no_recv) with empty frames")
+                .self_val.clone();
+            let can_try_toplevel_fast_path = matches!(self_val, Value::Nil)
+                && !self.host_fns.contains_key(&name_id)
+                && !Self::is_builtin_name(&name)
+                && !matches!(&*name, "send" | "__send__" | "method" | "__dir__");
+            if can_try_toplevel_fast_path
+                && let Some(m) = self.lookup_toplevel_method_cached(name_id, cache_id)
+                && self.try_invoke_fixed_method_from_stack(m, self_val, argc, None)?
+            {
+                return Ok(());
+            }
+        }
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
         let recv = if no_recv {
@@ -437,7 +467,7 @@ impl Vm {
                 self.stack.push(Value::new_str(dir));
                 return Ok(());
             }
-            if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
+            if let Some(m) = self.lookup_toplevel_method_cached(name_id, cache_id) {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());
             }
@@ -2941,6 +2971,64 @@ impl Vm {
         self.invoke_method_with_block(m, self_val, args, None)
     }
 
+    fn try_invoke_fixed_method_from_stack(
+        &mut self,
+        m: Rc<Method>,
+        self_val: Value,
+        argc: usize,
+        block: Option<ObjId>,
+    ) -> Result<bool, Trap> {
+        if m.closure.is_some() {
+            return Ok(false);
+        }
+        let fixed = match m.fixed_arity {
+            Some(fixed) if fixed.required as usize == argc => fixed,
+            _ => return Ok(false),
+        };
+        self.check_frames()?;
+        let n_locals = fixed.n_locals as usize;
+        let locals = if n_locals == argc {
+            match argc {
+                0 => Vec::new(),
+                1 => vec![
+                    self.stack
+                        .pop()
+                        .expect("ICE: fixed method fast path arg underflow"),
+                ],
+                _ => {
+                    let split = self.stack.len() - argc;
+                    self.stack.drain(split..).collect()
+                }
+            }
+        } else {
+            let mut locals = vec_nil(n_locals);
+            for slot in (0..argc).rev() {
+                locals[slot] = self
+                    .stack
+                    .pop()
+                    .expect("ICE: fixed method fast path arg underflow");
+            }
+            locals
+        };
+        self.frames.push(Frame {
+            proto_idx: m.proto_idx,
+            ip: 0,
+            locals: Rc::new(RefCell::new(locals)),
+            self_val,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: block,
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            is_block: false,
+            n_given_positional: fixed.required,
+            rescues: vec![],
+            loop_rescue_depths: vec![],
+            loop_stack_depths: vec![],
+        });
+        Ok(true)
+    }
+
 
 
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
@@ -2986,6 +3074,30 @@ impl Vm {
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
                 rescues: vec![], loop_rescue_depths: vec![], loop_stack_depths: vec![],
+            });
+            return Ok(());
+        }
+        if let Some(fixed) = m.fixed_arity
+            && args.len() == fixed.required as usize
+        {
+            self.check_frames()?;
+            let mut locals = args;
+            locals.resize(fixed.n_locals as usize, Value::Nil);
+            self.frames.push(Frame {
+                proto_idx: m.proto_idx,
+                ip: 0,
+                locals: Rc::new(RefCell::new(locals)),
+                self_val,
+                base_sp: self.stack.len(),
+                is_class_body: false,
+                swap_return: None,
+                block_arg: block,
+                defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+                is_block: false,
+                n_given_positional: fixed.required,
+                rescues: vec![],
+                loop_rescue_depths: vec![],
+                loop_stack_depths: vec![],
             });
             return Ok(());
         }
@@ -4233,6 +4345,7 @@ impl Vm {
         Rc::new(crate::value::Method {
             params: vec!["args".to_string()],
             proto_idx: idx,
+            fixed_arity: None,
             defining_class: Some(Rc::downgrade(cls)),
             visibility: std::cell::Cell::new(crate::value::Visibility::Public),
             closure: None,

@@ -6,7 +6,7 @@ use crate::bytecode::Proto;
 use crate::error::Trap;
 use crate::heap::Heap;
 use crate::intern::{Interner, SymId};
-use crate::value::{Class, Method, ObjId, Value, Visibility};
+use crate::value::{Class, FixedArity, Method, ObjId, Value, Visibility};
 
 mod array;
 mod bignum;
@@ -516,6 +516,31 @@ pub(crate) struct Vm {
 
 
 impl Vm {
+    pub(crate) fn fixed_arity_for_proto(proto: &Proto, params_len: usize) -> Option<FixedArity> {
+        let has_rest = proto.rest_param.is_some();
+        let has_kw_rest = proto.kw_rest_param.is_some();
+        let has_block_param = proto.block_param.is_some();
+        let kw_count = proto.kw_param_defaults.len();
+        let positional_max = params_len
+            - (if has_rest { 1 } else { 0 })
+            - kw_count
+            - (if has_kw_rest { 1 } else { 0 })
+            - (if has_block_param { 1 } else { 0 });
+        let required = proto.n_required_positional as usize;
+        if has_rest
+            || has_kw_rest
+            || has_block_param
+            || kw_count != 0
+            || required != positional_max
+        {
+            return None;
+        }
+        Some(FixedArity {
+            required: proto.n_required_positional,
+            n_locals: proto.n_locals,
+        })
+    }
+
     pub(crate) fn new(protos: Vec<Proto>, interner: Interner) -> Self {
         Vm {
             protos,
@@ -787,8 +812,6 @@ impl Vm {
 // accidental revert in the kernel.rs extraction refactor; this
 // branch drops it again to keep the panic-budget honest and
 // -D warnings green.)
-
-
 
 
 

@@ -317,3 +317,4 @@ fn run_diff(name: &str) {
 #[test] fn encoding_stub() { run_diff("encoding_stub"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_strscan() { run_diff("stdlib_strscan"); }
+#[test] fn fixed_arity_fast_path() { run_diff("fixed_arity_fast_path"); }

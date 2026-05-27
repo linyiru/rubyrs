@@ -16,6 +16,46 @@ use crate::value::Value;
 use super::{PinGuard, Vm};
 
 impl Vm {
+    pub(crate) fn is_builtin_name(name: &str) -> bool {
+        // Keep this list in sync with the match arms in `builtin_call`
+        // below. Any name handled by `builtin_call` that is missing
+        // here would let the toplevel fast path cache a user `def`
+        // and silently shadow the builtin, which diverges from
+        // master's "builtin always wins" dispatch order.
+        //
+        // There is also a *third* hand-maintained mirror of this set
+        // inside the `"__defined_method?"` arm below (the
+        // `let is_builtin = matches!(&*name, ...)` local). It is
+        // pre-existing, already drifts from this list for several
+        // names (`require_relative`, `__method__`, `__callee__`,
+        // `block_given?`), and is out of scope for the PR that
+        // introduced this gate — but maintainers updating
+        // `builtin_call` should be aware that *three* places need to
+        // change together, not two.
+        matches!(
+            name,
+            "puts"
+                | "p"
+                | "pp"
+                | "print"
+                | "require"
+                | "require_relative"
+                | "Integer"
+                | "Float"
+                | "String"
+                | "Array"
+                | "sprintf"
+                | "format"
+                | "__time_now_raw"
+                | "__method__"
+                | "__callee__"
+                | "block_given?"
+                | "__defined_ivar?"
+                | "__defined_method?"
+                | "__defined_const?"
+        )
+    }
+
     pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
         match name {
             "puts" => {
