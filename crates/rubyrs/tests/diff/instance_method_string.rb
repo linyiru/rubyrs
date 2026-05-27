@@ -13,9 +13,10 @@
 #   - Symbol form returns UnboundMethod (pre-existing)
 #   - String form returns UnboundMethod (this PR)
 #   - Missing-method on user class raises NameError (both shapes)
-#   - Primitive-class permissive: `String.instance_method(:foo)`
-#     returns an UnboundMethod even for unknown names (existing
-#     stance, locked here to confirm String arg doesn't change it)
+#   - Primitive-class (e.g. `String`) accepts both Symbol and
+#     String arg shapes for a real method like `:length` — locked
+#     here to confirm the new String overload doesn't regress the
+#     existing primitive-receiver path.
 #   - Module receiver also accepts both shapes (tilt's TOPOBJECT
 #     is a Module — `module CompiledTemplates`)
 
@@ -46,6 +47,11 @@ begin
 rescue NameError
   puts "missing(sym) → NameError"
 end
+
+# Primitive-class receiver (`String`) accepts both Symbol and
+# String arg shapes for an existing method ---
+puts String.instance_method(:length).class    # UnboundMethod
+puts String.instance_method("length").class   # UnboundMethod
 
 # Module receiver also works (tilt's TOPOBJECT is a Module) ---
 module CompiledLike
