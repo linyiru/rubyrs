@@ -1315,6 +1315,27 @@ impl Vm {
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
+            // Arity guard FIRST so wrong-count calls surface as
+            // ArgumentError (CRuby check order: arity → type).
+            // 0 args / 2+ args both raise here.
+            ("instance_method", args) if args.len() != 1 => {
+                Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len()
+                    ),
+                }))
+            }
+            // 1 arg of a type other than Symbol or String: CRuby
+            // raises TypeError "<inspect> is not a symbol nor a
+            // string" (the literal wording from
+            // rb_mod_instance_method).
+            ("instance_method", [other]) if !matches!(other, Value::Sym(_) | Value::Str(_)) => {
+                let inspected = other.to_inspect(&self.heap, &self.interner);
+                Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} is not a symbol nor a string", inspected),
+                }))
+            }
             ("instance_method", [Value::Sym(sid)]) => {
                 let found = self.lookup_method_uncached(&cls, *sid).is_some();
                 if !found && !is_primitive_class_name(&cls.name) {
@@ -1328,6 +1349,39 @@ impl Vm {
                 let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls.clone(), name_id: *sid });
                 self.stack.push(Value::UnboundMethod(id));
                 Ok(true)
+            }
+            // `instance_method` accepts a String too (CRuby
+            // `to_sym`'s it). Tilt-2.7.0 lib/tilt/template.rb:489
+            // calls `TOPOBJECT.instance_method(method_name)`
+            // where `method_name` is a String synthesised via
+            // `"__tilt_#{...}"` interpolation. `with_str_lossy` is
+            // Cow-backed: zero-alloc on the valid-UTF-8 hot path.
+            // Cap check + intern + lookup all happen inside the
+            // closure; the NameError path `format!`s the borrowed
+            // `raw` directly. Same parity stance as the
+            // `method_defined?` arm above.
+            ("instance_method", [Value::Str(s)]) => {
+                s.with_str_lossy(|raw| {
+                    if let Some(max) = self.max_symbols
+                        && !self.interner.contains(raw)
+                        && self.interner.len() >= max {
+                        return Err(self.trap(RubyError::ResourceExhausted {
+                            msg: format!("interner exhausted: {} symbols", max),
+                        }));
+                    }
+                    let sid = self.interner.intern(raw);
+                    let found = self.lookup_method_uncached(&cls, sid).is_some();
+                    if !found && !is_primitive_class_name(&cls.name) {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("undefined method '{}' for class '{}'", raw, cls.name),
+                        }));
+                    }
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls.clone(), name_id: sid });
+                    self.stack.push(Value::UnboundMethod(id));
+                    Ok(true)
+                })
             }
             _ => Ok(false),
         }
