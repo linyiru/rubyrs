@@ -2837,6 +2837,37 @@ fn bigint_shift_left_dos_cap_uses_exact_int_bit_length() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn int_shift_zero_receiver_never_traps_regardless_of_count() {
+    // Regression for PR #159 cycle 2: `0 << anything == 0` and
+    // `0 >> anything == 0` in Ruby — should never allocate, never
+    // trap on the DoS cap, never trap on the BigInt-count "shift
+    // exceeds u32::MAX" guard. Pre-fix `0 << 1_000_000` under a
+    // 1024-byte cap would trap because the cap estimator computed
+    // `est_bits = 0 + 1_000_000` → 125 KB which exceeds 1 KB.
+    let cfg = rubyrs::Config { max_value_bytes: Some(1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Tight cap, huge shift counts: all should return 0
+        // without touching the DoS estimator or the BigInt-count
+        // trap.
+        "puts (0 << 1_000_000)\n\
+         puts (0 << (2 ** 100))\n\
+         puts (0 >> 1_000_000)\n\
+         puts (0 >> -(2 ** 100))",
+        "zero_shift.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "0");
+    assert_eq!(lines[2], "0");
+    assert_eq!(lines[3], "0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_shift_left_traps_dos_via_max_value_bytes() {
     // Left-shift DoS cap: `1 << 100_000_000` would allocate
     // ~12.5 MB. Pre-cap estimator must trap before BigInt::shl

@@ -596,6 +596,17 @@ impl Vm {
     ) -> Result<Option<Value>, Trap> {
         let left = match name { "<<" => true, ">>" => false, _ => return Ok(None) };
         if !matches!(recv, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        // Zero receiver: `0 << anything == 0` and `0 >> anything ==
+        // 0` regardless of count sign or magnitude. Short-circuit
+        // ahead of the BigInt-count trap and the DoS cap estimator
+        // so `0 << 1_000_000` (or `0 << (2**100)`) doesn't
+        // false-trap under a tight `max_value_bytes`. The canonical-
+        // BigInt invariant means `Value::BigInt(_)` can never be
+        // zero (any in-i64 magnitude demotes), so this check only
+        // fires for `Value::Int(0)`.
+        if matches!(recv, Value::Int(0)) {
+            return Ok(Some(Value::Int(0)));
+        }
         // Resolve shift magnitude + actual direction.
         // - Int arg: direction may flip if negative; magnitude
         //   stored as u64. `i64::MIN` negation overflows, so handle
@@ -603,7 +614,7 @@ impl Vm {
         // - BigInt arg: magnitude is by invariant > i64::MAX. If
         //   the actual direction is left we trap immediately
         //   (would need > 2^63 bits); if right, collapse via
-        //   shift_collapse_recv.
+        //   `bit_shift_collapse`.
         let (shift_mag, actual_left): (u64, bool) = match arg {
             Value::Int(n) => {
                 if *n == 0 { return Ok(Some(recv.clone())); }
