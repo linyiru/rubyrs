@@ -4968,6 +4968,39 @@ impl Vm {
             Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
         };
 
+        // Bare `instance_exec { ... }` inside an instance method —
+        // `recv` is None, so the receiver-form arm below won't see
+        // it. Dispatch on `self` from the current frame, mirroring
+        // `self.instance_exec(&block)`. Same override-precedence
+        // probe as the receiver-form arm so a user-defined
+        // `instance_exec` still wins.
+        if no_recv && &*name == "instance_exec" {
+            let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
+            let user_override = match &self_val {
+                Value::Object(id) => {
+                    let cls = self.heap.class_of(*id);
+                    self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                }
+                Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                _ => match self.class_of(&self_val) {
+                    Value::Class(cls) => self.lookup_method_cached(&cls, name_id, cache_id).is_some(),
+                    _ => false,
+                },
+            };
+            if !user_override {
+                self.invoke_block_with_self(block, self_val, /*as_class_body=*/false, args)?;
+                return Ok(());
+            }
+            // User override exists — re-shape stack as receiver form
+            // (`recv, block, args...`) and re-enter so the normal
+            // dispatch finds and invokes the user method.
+            let argc = args.len();
+            self.stack.push(self_val);
+            self.stack.push(Value::Block(block));
+            for a in args { self.stack.push(a); }
+            return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+        }
+
         // `bm.call(args, &block)` — the block-form counterpart to
         // the no-block BoundMethod#call arm in `do_call` (line
         // ~1969). Without this, calling a stored `Method` with a
@@ -5215,14 +5248,23 @@ impl Vm {
                 // builtin path when there's no user-defined
                 // `instance_exec` on the receiver. Without this, a
                 // `class C; def instance_exec(...); ...; end; end`
-                // override would be silently shadowed by the builtin.
+                // override (including on primitive classes like
+                // `class String; def instance_exec; end; end`) would
+                // be silently shadowed by the builtin.
                 let user_override = match r {
                     Value::Object(id) => {
                         let cls = self.heap.class_of(*id);
                         self.lookup_method_cached(&cls, name_id, cache_id).is_some()
                     }
                     Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
-                    _ => false,
+                    // Primitives — consult the user-class table for
+                    // the primitive's stub class (e.g. `String`,
+                    // `Integer`). Mirrors the primitive-receiver
+                    // fallback in `do_call` at ~line 3066.
+                    _ => match self.class_of(r) {
+                        Value::Class(cls) => self.lookup_method_cached(&cls, name_id, cache_id).is_some(),
+                        _ => false,
+                    },
                 };
                 if !user_override {
                     self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/false, args)?;

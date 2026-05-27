@@ -87,6 +87,16 @@ class Override
 end
 puts Override.new.instance_exec(1, 2) { "ignored" }   # user-override([1, 2])
 
+# --- Bare `instance_exec` inside an instance method ---
+# `recv` is implicit (self); should dispatch on self.
+class Bare
+  def initialize; @flag = "bare-self"; end
+  def run
+    instance_exec { @flag }
+  end
+end
+puts Bare.new.run                                       # bare-self
+
 # --- Singleton inheritance ladder: grandparent → parent → child ---
 class G
   def self.boom(x); "g-boom(#{x})"; end
