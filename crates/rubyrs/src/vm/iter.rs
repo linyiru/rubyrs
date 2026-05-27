@@ -695,6 +695,15 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
                 let mut early = None;
+                // True when the previous yielded key was the
+                // separator sentinel (`nil`). CRuby's chunk treats
+                // `nil` as "drop this element AND end the current
+                // group" — without resetting this state, a sequence
+                // like `[1, nil-key, 1]` would merge the two 1s
+                // into a single group across the separator, which
+                // violates the "consecutive elements" rule.
+                // Surfaced by Copilot review on PR #187.
+                let mut separator_just_hit = false;
                 for v in snapshot {
                     let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
                         // Return immediately (don't fall through to
@@ -715,11 +724,18 @@ impl Vm {
                     // `:_alone` would also be special but is rare;
                     // we don't model it (documented divergence).
                     if matches!(key, Value::Nil) {
+                        separator_just_hit = true;
                         continue;
                     }
-                    let same_as_last = groups.last()
+                    // Skip the merge-into-previous-group check if a
+                    // separator was just hit — even when the new
+                    // key equals the previous group's key, they
+                    // must be split into two groups.
+                    let same_as_last = !separator_just_hit
+                        && groups.last()
                         .map(|(k, _)| k.ruby_eq(&key, &g.vm.heap))
                         .unwrap_or(false);
+                    separator_just_hit = false;
                     if same_as_last {
                         groups.last_mut().unwrap().1.push(v);
                     } else {
