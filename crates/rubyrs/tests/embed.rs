@@ -2862,6 +2862,38 @@ fn bigint_responds_to_bit_op_names_matches_dispatch() {
     assert_eq!(out.trim(), "true\ntrue\ntrue\ntrue\ntrue\ntrue");
 }
 
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn int_shift_i64_min_count_does_not_panic_under_no_bignum() {
+    // Regression for the no-bignum `<<` / `>>` arms in
+    // numeric.rs: pre-fix `(-b) as u32` overflowed when
+    // `b == i64::MIN` (debug builds panicked with "attempt to
+    // negate with overflow"; release silently wrapped to a
+    // 63-bit shift via two-step wrap). Pin clamp semantics so
+    // both profiles agree on the result for this corner.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    // `5 << i64::MIN` == `5 >> |i64::MIN|` == `5 >> 63` == 0.
+    // `(-1) << i64::MIN` == `(-1) >> |i64::MIN|` == -1 (sign-ext).
+    // `5 >> i64::MIN` == `5 << |i64::MIN|` clamped to 63 bits;
+    //   `5.wrapping_shl(63)` produces `i64::MIN`-relative bit
+    //   pattern (5 << 63 wraps), but the saturating-shift
+    //   semantics under no-bignum just want no-panic + matching
+    //   the existing wrapping behaviour. Pin the result so
+    //   future refactors don't accidentally change it.
+    rt.eval(
+        "x = -9223372036854775807 - 1\n\
+         puts (5 << x)\n\
+         puts ((-1) << x)",
+        "shift_i64_min_no_bignum.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "-1");
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn integer_bit_ops_raise_typeerror_on_non_integer_arg() {

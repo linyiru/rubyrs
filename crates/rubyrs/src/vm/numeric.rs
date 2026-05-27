@@ -323,6 +323,12 @@ pub(crate) fn numeric_call(
                 #[cfg(not(feature = "bignum"))]
                 { Some(Value::Int(
                     if *b >= 0 { a.wrapping_shl((*b as u32).min(63)) }
+                    // `i64::MIN` negation overflows i64; treat that
+                    // boundary as "shift past sign bit" via the same
+                    // 63-clamp the bignum-on profile uses. Pre-fix
+                    // `(-b) as u32` panicked in debug builds and
+                    // silently wrapped in release.
+                    else if *b == i64::MIN { a.wrapping_shr(63) }
                     else { a.wrapping_shr(((-b) as u32).min(63)) }
                 )) }
             }
@@ -349,6 +355,12 @@ pub(crate) fn numeric_call(
                 #[cfg(not(feature = "bignum"))]
                 { Some(Value::Int(
                     if *b >= 0 { a.wrapping_shr((*b as u32).min(63)) }
+                    // `i64::MIN` negation overflows i64; clamp the
+                    // negative-count left-shift to a 63-bit shift
+                    // (saturating-shift semantics mirror the bignum-
+                    // on profile). Pre-fix `(-b) as u32` panicked
+                    // in debug builds.
+                    else if *b == i64::MIN { a.wrapping_shl(63) }
                     else { a.wrapping_shl(((-b) as u32).min(63)) }
                 )) }
             }
