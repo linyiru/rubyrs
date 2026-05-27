@@ -1142,6 +1142,197 @@ impl Vm {
         Ok(())
     }
 
+    /// Class-receiver introspection arms — the second Class
+    /// cluster deferred from #192 commit 4. Matches when
+    /// `recv` is `Value::Class` AND `name` is one of the
+    /// `ancestors` / `include?` / `superclass` /
+    /// `singleton_class` / `instance_methods` family /
+    /// `constants` / `method_defined?` / `undef_method` /
+    /// `instance_method` arms. Returns `Ok(true)` when
+    /// handled, `Ok(false)` when the receiver isn't a Class
+    /// or no arm matched (caller falls through to the
+    /// remaining do_call dispatch).
+    ///
+    /// No cext integration (unlike commit 4's first Class
+    /// cluster) — pure runtime introspection. Free of the
+    /// R1 borrow-conflict risk that motivated that helper's
+    /// pre-cloning discipline.
+    fn try_dispatch_class_introspection(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        recv: &Value,
+    ) -> Result<bool, Trap> {
+        let Value::Class(cls_ref) = recv else { return Ok(false); };
+        let cls = cls_ref.clone();
+        match (name, args) {
+            ("ancestors", []) => {
+                let chain: Vec<Value> = super::flatten_ancestors(&cls)
+                    .into_iter()
+                    .map(Value::Class)
+                    .collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(chain));
+                self.stack.push(Value::Array(id));
+                Ok(true)
+            }
+            ("include?", [Value::Class(m)]) => {
+                if !m.is_module {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: "wrong argument type Class (expected Module)".to_string(),
+                    }));
+                }
+                let included = super::class_is_a(&cls, m);
+                self.stack.push(Value::Bool(included));
+                Ok(true)
+            }
+            ("include?", [other]) => {
+                Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "wrong argument type {} (expected Module)",
+                        other.type_name(),
+                    ),
+                }))
+            }
+            ("superclass", []) => {
+                let v = match cls.superclass.borrow().clone() {
+                    Some(p) => Value::Class(p),
+                    None => Value::Nil,
+                };
+                self.stack.push(v);
+                Ok(true)
+            }
+            // Tier 1 stub — return receiver itself.
+            // See docs/SUBSET.md for the metaclass divergence.
+            ("singleton_class", []) => {
+                self.stack.push(Value::Class(cls));
+                Ok(true)
+            }
+            ("instance_methods", args_)
+            | ("public_instance_methods", args_)
+            | ("private_instance_methods", args_)
+            | ("protected_instance_methods", args_)
+                if args_.is_empty()
+                    || matches!(args_, [Value::Bool(_)]) =>
+            {
+                use crate::value::Visibility;
+                let inherited = !matches!(args_, [Value::Bool(false)]);
+                let allow: fn(Visibility) -> bool = match name {
+                    "instance_methods" => |v| matches!(v, Visibility::Public | Visibility::Protected),
+                    "public_instance_methods" => |v| v == Visibility::Public,
+                    "private_instance_methods" => |v| v == Visibility::Private,
+                    "protected_instance_methods" => |v| v == Visibility::Protected,
+                    _ => unreachable!(),
+                };
+                let mut sids: Vec<crate::intern::SymId> = Vec::new();
+                if inherited {
+                    let mut visited: Vec<*const crate::value::Class> = Vec::new();
+                    fn walk(
+                        c: &std::rc::Rc<crate::value::Class>,
+                        allow: fn(Visibility) -> bool,
+                        out: &mut Vec<crate::intern::SymId>,
+                        visited: &mut Vec<*const crate::value::Class>,
+                    ) {
+                        let ptr = std::rc::Rc::as_ptr(c);
+                        if visited.contains(&ptr) { return; }
+                        visited.push(ptr);
+                        for (k, m) in c.methods.borrow().iter() {
+                            if allow(m.visibility.get()) && !out.contains(k) {
+                                out.push(*k);
+                            }
+                        }
+                        for inc in c.includes.borrow().iter() {
+                            walk(inc, allow, out, visited);
+                        }
+                        if let Some(sup) = c.superclass.borrow().clone() {
+                            walk(&sup, allow, out, visited);
+                        }
+                    }
+                    walk(&cls, allow, &mut sids, &mut visited);
+                } else {
+                    for (k, m) in cls.methods.borrow().iter() {
+                        if allow(m.visibility.get()) {
+                            sids.push(*k);
+                        }
+                    }
+                }
+                sids.sort_by(|a, b| {
+                    self.interner.resolve(*a).cmp(self.interner.resolve(*b))
+                });
+                let elems: Vec<Value> = sids.into_iter().map(Value::Sym).collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(elems));
+                self.stack.push(Value::Array(id));
+                Ok(true)
+            }
+            ("constants", args_) if args_.is_empty()
+                || matches!(args_, [Value::Bool(_)]) =>
+            {
+                let mut names: Vec<String> = Vec::new();
+                let collect = |prefix: &str, names: &mut Vec<String>| {
+                    for k in self.constants.keys() {
+                        let s = self.interner.resolve(*k).to_string();
+                        if let Some(short) = s.strip_prefix(prefix)
+                            && !short.contains("::")
+                            && !names.contains(&short.to_string()) {
+                            names.push(short.to_string());
+                        }
+                    }
+                };
+                let own_prefix = format!("{}::", cls.name);
+                collect(&own_prefix, &mut names);
+                for inc in cls.includes.borrow().iter() {
+                    let inc_prefix = format!("{}::", inc.name);
+                    collect(&inc_prefix, &mut names);
+                }
+                names.sort();
+                let elems: Vec<Value> = names.into_iter()
+                    .map(|n| Value::Sym(self.interner.intern(&n)))
+                    .collect();
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::Array(elems));
+                self.stack.push(Value::Array(id));
+                Ok(true)
+            }
+            ("method_defined?", [Value::Sym(sid)])
+            | ("method_defined?", [Value::Sym(sid), _]) => {
+                let answer = class_method_defined(self, &cls, *sid);
+                self.stack.push(Value::Bool(answer));
+                Ok(true)
+            }
+            ("method_defined?", [Value::Str(s)])
+            | ("method_defined?", [Value::Str(s), _]) => {
+                let sid = self.interner.intern(&s.to_string_lossy());
+                let answer = class_method_defined(self, &cls, sid);
+                self.stack.push(Value::Bool(answer));
+                Ok(true)
+            }
+            ("undef_method", _) => {
+                // Tier 1 no-op. See docs/SUBSET.md.
+                self.stack.push(Value::Class(cls));
+                Ok(true)
+            }
+            ("instance_method", [Value::Sym(sid)]) => {
+                let found = self.lookup_method_uncached(&cls, *sid).is_some();
+                if !found && !is_primitive_class_name(&cls.name) {
+                    let mname = self.interner.resolve(*sid).to_string();
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
+                    }));
+                }
+                self.maybe_gc();
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls.clone(), name_id: *sid });
+                self.stack.push(Value::UnboundMethod(id));
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn try_dispatch_class_intrinsics(
         &mut self,
         name: &str,
@@ -2689,338 +2880,13 @@ impl Vm {
                 self.stack.push(Value::Bool(result));
                 return Ok(());
             }
-        // Class introspection: `ancestors` / `include?`. Walks the
-        // chain via `class_is_a` (covers superclass + includes).
-        // Returned Array is freshly allocated, so the path needs
-        // heap access — kept here rather than in `primitive_call`.
-        if let Value::Class(cls) = &recv {
-            match (&*name, args.as_slice()) {
-                ("ancestors", []) => {
-                    // Go through `flatten_ancestors` so the result
-                    // matches the dispatch order
-                    // `lookup_method_uncached` actually walks —
-                    // transitive expansion of includes/prepends +
-                    // diamond dedup. Without this, the user-visible
-                    // ancestors list could diverge from CRuby's
-                    // linearization (and from what method resolution
-                    // actually does).
-                    let chain: Vec<Value> = super::flatten_ancestors(cls)
-                        .into_iter()
-                        .map(Value::Class)
-                        .collect();
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::Array(chain));
-                    self.stack.push(Value::Array(id));
-                    return Ok(());
-                }
-                ("include?", [Value::Class(m)]) => {
-                    // CRuby parity: `Module#include?` requires
-                    // the argument to be a Module, not a Class.
-                    // `Sub.include?(Foo)` where `Foo` is a Class
-                    // raises TypeError. rubyrs stores both with
-                    // the same struct + an `is_module` flag, so
-                    // the check is one field-read.
-                    if !m.is_module {
-                        // CRuby's message uses the receiver's
-                        // *type* name ("Class"), not the
-                        // class's identity name. Matches CRuby
-                        // verbatim.
-                        return Err(self.trap(RubyError::TypeError {
-                            msg: "wrong argument type Class (expected Module)".to_string(),
-                        }));
-                    }
-                    let included = super::class_is_a(cls, m);
-                    self.stack.push(Value::Bool(included));
-                    return Ok(());
-                }
-                // Non-Class / non-Module arg — also TypeError in
-                // CRuby. Catch-all so the diagnostic surface
-                // matches.
-                ("include?", [other]) => {
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "wrong argument type {} (expected Module)",
-                            other.type_name(),
-                        ),
-                    }));
-                }
-                // `Module#superclass` — direct parent class, or
-                // nil at the top of the chain. CRuby returns
-                // Object's superclass as BasicObject and
-                // BasicObject's as nil; rubyrs doesn't model
-                // BasicObject so the chain bottoms out earlier.
-                ("superclass", []) => {
-                    let v = match cls.superclass.borrow().clone() {
-                        Some(p) => Value::Class(p),
-                        None => Value::Nil,
-                    };
-                    self.stack.push(v);
-                    return Ok(());
-                }
-                // `Module#singleton_class` / `Class#singleton_class`
-                // — this arm fires only for `Value::Class` receivers
-                // (Class/Module objects). CRuby returns the per-object
-                // metaclass (eigenclass) that holds the receiver's
-                // singleton methods. Real metaclass has its own
-                // identity, its `instance_methods` are the original's
-                // singleton_methods, and its `class` is `Class`.
-                //
-                // rubyrs Tier 1 stub: return the receiver itself.
-                // Idempotent (`X.singleton_class.equal?(X.singleton_class)`
-                // is true because both calls return the same `X`),
-                // which is the property real consumers (e.g. tilt's
-                // `@_init = self.class.singleton_class` cache-
-                // invariant check at MRI lib/erb/compiler.rb:828 /
-                // 900) actually need. Methods called on the
-                // "singleton_class" result are dispatched against
-                // the receiver — singleton_methods are NOT visible
-                // as instance_methods of the singleton-class object,
-                // which diverges from CRuby. `Object#singleton_class`
-                // for `Value::Object` receivers is not implemented
-                // here. Documented in docs/SUBSET.md; revisit when
-                // a consumer relies on the real metaclass shape.
-                ("singleton_class", []) => {
-                    self.stack.push(Value::Class(cls.clone()));
-                    return Ok(());
-                }
-                // `Module#instance_methods` — Symbol Array of
-                // instance method names. CRuby's filter rules:
-                //   - `instance_methods` returns public +
-                //     protected (excludes private)
-                //   - `public_instance_methods` only public
-                //   - `private_instance_methods` only private
-                //   - `protected_instance_methods` only protected
-                // No-arg / `true` walks the full ancestor chain
-                // (own + includes + superclass, recursing into
-                // each module's own includes). `false` returns
-                // only this class's own methods table.
-                ("instance_methods", args)
-                | ("public_instance_methods", args)
-                | ("private_instance_methods", args)
-                | ("protected_instance_methods", args)
-                    if args.is_empty()
-                        || matches!(args, [Value::Bool(_)]) => {
-                    use crate::value::Visibility;
-                    let inherited = !matches!(args, [Value::Bool(false)]);
-                    // Visibility filter per CRuby semantics.
-                    let allow: fn(Visibility) -> bool = match &*name {
-                        "instance_methods" => |v| matches!(v, Visibility::Public | Visibility::Protected),
-                        "public_instance_methods" => |v| v == Visibility::Public,
-                        "private_instance_methods" => |v| v == Visibility::Private,
-                        "protected_instance_methods" => |v| v == Visibility::Protected,
-                        _ => unreachable!(),
-                    };
-                    let mut sids: Vec<crate::intern::SymId> = Vec::new();
-                    if inherited {
-                        let mut visited: Vec<*const crate::value::Class> = Vec::new();
-                        fn walk(
-                            c: &std::rc::Rc<crate::value::Class>,
-                            allow: fn(Visibility) -> bool,
-                            out: &mut Vec<crate::intern::SymId>,
-                            visited: &mut Vec<*const crate::value::Class>,
-                        ) {
-                            let ptr = std::rc::Rc::as_ptr(c);
-                            if visited.contains(&ptr) { return; }
-                            visited.push(ptr);
-                            for (k, m) in c.methods.borrow().iter() {
-                                if allow(m.visibility.get()) && !out.contains(k) {
-                                    out.push(*k);
-                                }
-                            }
-                            for inc in c.includes.borrow().iter() {
-                                walk(inc, allow, out, visited);
-                            }
-                            if let Some(sup) = c.superclass.borrow().clone() {
-                                walk(&sup, allow, out, visited);
-                            }
-                        }
-                        walk(cls, allow, &mut sids, &mut visited);
-                    } else {
-                        for (k, m) in cls.methods.borrow().iter() {
-                            if allow(m.visibility.get()) {
-                                sids.push(*k);
-                            }
-                        }
-                    }
-                    // Lexicographic sort for stable cross-run
-                    // output; matches `methods`' shape.
-                    sids.sort_by(|a, b| {
-                        self.interner.resolve(*a).cmp(self.interner.resolve(*b))
-                    });
-                    let elems: Vec<Value> = sids.into_iter().map(Value::Sym).collect();
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::Array(elems));
-                    self.stack.push(Value::Array(id));
-                    return Ok(());
-                }
-                // `Module#constants` — Symbol Array of constant
-                // names directly on this module. Tier 1 stores
-                // constants in `Vm.constants` keyed by their
-                // (potentially prefixed) name; we filter by
-                // prefix match against the class's own
-                // qualified name. Documented divergence: CRuby
-                // also walks included modules; rubyrs returns
-                // only directly-defined names for simplicity.
-                // The 1-arg `false` form (only-own) is the
-                // default here; the `true` form is the same.
-                ("constants", args) if args.is_empty()
-                    || matches!(args, [Value::Bool(_)]) => {
-                    // CRuby: `Module#constants` walks the
-                    // receiver's own constants table AND
-                    // every included module's constants. The
-                    // boolean arg (`false` to exclude
-                    // inherited from included modules) is
-                    // accepted but rubyrs's chain is shallow
-                    // enough that the distinction rarely
-                    // matters; we always walk the includes for
-                    // simplicity. Documented behaviour.
-                    //
-                    // Constants are stored under their dual-
-                    // write prefixed key (`Foo::BAR`) per
-                    // PR #89, so the filter scans the global
-                    // table for entries matching `{cls.name}::`
-                    // — directly-defined names — and repeats
-                    // the scan for each `include`'d module's
-                    // own prefix. Dedup via the running set.
-                    let mut names: Vec<String> = Vec::new();
-                    let collect = |prefix: &str, names: &mut Vec<String>| {
-                        for k in self.constants.keys() {
-                            let s = self.interner.resolve(*k).to_string();
-                            if let Some(short) = s.strip_prefix(prefix)
-                                && !short.contains("::")
-                                && !names.contains(&short.to_string()) {
-                                names.push(short.to_string());
-                            }
-                        }
-                    };
-                    let own_prefix = format!("{}::", cls.name);
-                    collect(&own_prefix, &mut names);
-                    for inc in cls.includes.borrow().iter() {
-                        let inc_prefix = format!("{}::", inc.name);
-                        collect(&inc_prefix, &mut names);
-                    }
-                    names.sort();
-                    let elems: Vec<Value> = names.into_iter()
-                        .map(|n| Value::Sym(self.interner.intern(&n)))
-                        .collect();
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::Array(elems));
-                    self.stack.push(Value::Array(id));
-                    return Ok(());
-                }
-                // `Class#instance_method(:sym)` — direct UnboundMethod
-                // construction. Walks the ancestor chain via
-                // `lookup_method_uncached`; NameError if the method
-                // isn't defined anywhere in the chain. Captures the
-                // receiver class (not the *defining* class) — the
-                // same approximation as `Method#unbind`.
-                //
-                // Primitive-class special case: classes whose
-                // instances are backed by non-Object `Value`
-                // variants (Integer / Float / String / Symbol /
-                // Array / Hash / Range / Regexp / Proc / Method /
-                // UnboundMethod / TrueClass / FalseClass / NilClass)
-                // have no entries in their `methods` table — their
-                // dispatch happens through `primitive_call` /
-                // `numeric_call` / etc. instead of user-Method
-                // records. `lookup_method_uncached` always returns
-                // None for them.
-                //
-                // The CRuby-faithful answer here is "look up the
-                // built-in dispatch table and synthesise an
-                // UnboundMethod with real arity / parameters."
-                // The Tier 1 pragmatic answer is "produce a
-                // synthetic UnboundMethod that exists for any
-                // method name on these classes; the downstream
-                // `arity` / `parameters` arms already return the
-                // sensible fallback (arity = -1,
-                // parameters = [[:rest]]) when the Method record
-                // is absent." That's enough to let pure-Ruby gem
-                // helpers (msgpack's `lib/msgpack/bigint.rb`'s
-                // `if Integer.instance_method(:[]).arity != 1`
-                // version detect) load cleanly. User classes
-                // still raise NameError for unknown methods —
-                // matching CRuby behaviour for the case that
-                // matters most (typo detection in user code).
-                // `Class#method_defined?(:sym)` — presence check
-                // for an instance method anywhere on the class's
-                // own table or its ancestor chain (own +
-                // `include`-d modules + superclass). CRuby's
-                // 2-arg form (`method_defined?(:foo, false)`)
-                // excludes the private-method tail; we don't
-                // model visibility-aware skipping, so we
-                // implement the canonical 1-arg shape and a
-                // permissive 2-arg form whose second arg is
-                // accepted-and-ignored. Primitive classes —
-                // those whose instances are non-Object `Value`
-                // variants (Integer / Float / String / Symbol /
-                // Array / Hash / Range / Regexp / Proc / Method
-                // / UnboundMethod / TrueClass / FalseClass /
-                // NilClass) — return `true` for any name so
-                // pure-Ruby helpers that probe these classes
-                // (msgpack-ruby's `lib/msgpack/symbol.rb`'s
-                // `if method_defined?(:name)` Ruby-2.7+ version
-                // detect) don't trip on a hard-false where
-                // CRuby would say yes. Matches the same shape as
-                // the `instance_method` arm above.
-                ("method_defined?", [Value::Sym(sid)])
-                | ("method_defined?", [Value::Sym(sid), _]) => {
-                    let answer = class_method_defined(self, cls, *sid);
-                    self.stack.push(Value::Bool(answer));
-                    return Ok(());
-                }
-                ("method_defined?", [Value::Str(s)])
-                | ("method_defined?", [Value::Str(s), _]) => {
-                    let sid = self.interner.intern(&s.to_string_lossy());
-                    let answer = class_method_defined(self, cls, sid);
-                    self.stack.push(Value::Bool(answer));
-                    return Ok(());
-                }
-                // `Class#undef_method(:name)` — CRuby removes
-                // the method from the class so subsequent calls
-                // raise NoMethodError. The Tier 1 subset doesn't
-                // model "undefined-by-name-but-not-by-table-
-                // delete", and the typical use case is purely
-                // defensive (`undef_method :dup` on cext-owned
-                // classes to discourage scripts from cloning a
-                // pointer-backed object). No-op for now — matches
-                // the same conservative shape `Class#private` /
-                // `#public` take when called with arguments
-                // (visibility flag isn't propagated). Documented
-                // divergence; lets msgpack-ruby `lib/msgpack/
-                // packer.rb` / `buffer.rb` / `unpacker.rb` load
-                // cleanly (each calls `undef_method :dup` /
-                // `:clone` at class-body top level). Accepts
-                // Symbol/String args; variadic per CRuby.
-                ("undef_method", _) => {
-                    // Return the class itself (CRuby returns the
-                    // Module the call was made on) so chain-style
-                    // uses (`MyClass.undef_method(:foo).new`)
-                    // remain syntactically valid; not a primary
-                    // use case but cheap to preserve.
-                    self.stack.push(Value::Class(cls.clone()));
-                    return Ok(());
-                }
-                ("instance_method", [Value::Sym(sid)]) => {
-                    let found = self.lookup_method_uncached(cls, *sid).is_some();
-                    if !found && !is_primitive_class_name(&cls.name) {
-                        let mname = self.interner.resolve(*sid).to_string();
-                        return Err(self.trap(RubyError::NameError {
-                            msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
-                        }));
-                    }
-                    let cls_owned = cls.clone();
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls_owned, name_id: *sid });
-                    self.stack.push(Value::UnboundMethod(id));
-                    return Ok(());
-                }
-                _ => {}
-            }
+        // Class-receiver introspection cluster (the second
+        // Class cluster from #192 commit 4 — deferred to its
+        // own helper). Returns true when an arm matched and
+        // pushed a result; otherwise falls through to the
+        // remaining dispatch.
+        if self.try_dispatch_class_introspection(&name, &args, &recv)? {
+            return Ok(());
         }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
