@@ -93,11 +93,15 @@ fn classify_returns_expected_for_known_classes() {
     assert_eq!(classify("UnlessNode"), Classification::Supported);
     assert_eq!(classify("ArgumentsNode"), Classification::RidesAlong);
     assert_eq!(classify("RescueNode"), Classification::RidesAlong);
-    assert_eq!(classify("BackReferenceReadNode"), Classification::Missing);
     // ForNode is still outside the subset (the old-style
     // imperative-for loop; rubocop deters its use anyway).
     // ClassVariableWriteNode used to be in this list and
     // landed as supported alongside the cvar PR.
+    // BackReferenceReadNode used to be in this list and landed
+    // as supported in `ee56021` (the $&/$+/$`/$' regex globals
+    // feature). The two remaining probes (ForNode, ImaginaryNode
+    // — checked in the fixture-set test below) are the canonical
+    // "stayed missing" canaries.
     assert_eq!(classify("ForNode"), Classification::Missing);
     // Sanity: a name that is not a Prism node at all also lands in
     // Missing (caller's job to validate using `unknown_classes_in`).
@@ -134,17 +138,23 @@ fn fixture_exercises_exact_missing_class_set() {
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    // Exact set, exact counts. ClassVariableWriteNode landed in
-    // the cvar PR; ForNode (`for x in […]`) replaces it as the
-    // third tripwire — old-style imperative loop, rare enough
-    // in real code that rubocop flags it, won't accidentally
-    // land soon.
+    // Exact set, exact counts. ClassVariableWriteNode landed
+    // in the cvar PR; BackReferenceReadNode landed in the
+    // $&/$+/$`/$' PR (`ee56021`). ForNode (`for x in […]`) and
+    // ImaginaryNode are the two remaining tripwires — old-
+    // style imperative loop (rubocop flags it) and Complex
+    // arithmetic literal (rare in real code), both unlikely
+    // to land soon. The fixture
+    // `tests/fixtures/missing_features.rb` still includes the
+    // `$&` example for documentation purposes, but that line
+    // now counts as a Supported BackReferenceReadNode in the
+    // histogram (drops out of the Missing set below).
     let expected: std::collections::BTreeSet<&str> =
-        ["BackReferenceReadNode", "ImaginaryNode", "ForNode"]
+        ["ImaginaryNode", "ForNode"]
             .into_iter()
             .collect();
     assert_eq!(names, expected, "Missing-class set drifted");
-    for cls in ["BackReferenceReadNode", "ImaginaryNode", "ForNode"] {
+    for cls in ["ImaginaryNode", "ForNode"] {
         let count = report.histogram.get(cls).map(|s| s.count).unwrap_or(0);
         assert_eq!(count, 1, "{cls} count");
     }
@@ -174,15 +184,24 @@ fn json_roundtrip_preserves_essentials() {
 
 #[test]
 fn diff_detects_closed_and_new_gaps() {
-    // Synthetic before/after: before has BackReferenceReadNode missing, after
-    // does not — closed gap. After introduces ForNode — new gap.
-    // (ClassVariableWriteNode used to be the "new gap" probe but
-    // landed as supported in the cvar PR; ForNode replaces it as
-    // a still-unsupported old-imperative-Ruby canary.)
+    // Synthetic before/after: before has ImaginaryNode missing,
+    // after does not — closed gap. After introduces ForNode —
+    // new gap.
+    //
+    // History of this fixture's "closed gap" probe:
+    //   - Originally ClassVariableWriteNode (cvar PR closed it).
+    //   - Then BackReferenceReadNode (`ee56021` $&/$+/$`/$'
+    //     closed it).
+    //   - Now ImaginaryNode (still Missing — Complex literal
+    //     arithmetic is well below the rubyrs subset boundary).
+    //
+    // ForNode stays as the "new gap" probe — still Missing, will
+    // be for a while (old-imperative `for x in […]` is rubocop-
+    // flagged in production Ruby).
     let mut before = Report::default();
     before.total_nodes = 10;
     before.histogram.insert(
-        "BackReferenceReadNode".to_string(),
+        "ImaginaryNode".to_string(),
         rubyrs_gapscan::NodeStat {
             count: 5,
             ..Default::default()
@@ -216,7 +235,7 @@ fn diff_detects_closed_and_new_gaps() {
     let d = diff(&before, &after);
     assert_eq!(d.supported_delta, 5);
     assert_eq!(d.missing_delta, -3);
-    assert_eq!(d.closed_missing_classes, vec![("BackReferenceReadNode".to_string(), 5)]);
+    assert_eq!(d.closed_missing_classes, vec![("ImaginaryNode".to_string(), 5)]);
     assert_eq!(d.new_missing_classes, vec![("ForNode".to_string(), 2)]);
 }
 
