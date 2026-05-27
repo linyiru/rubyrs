@@ -1813,9 +1813,29 @@ impl Vm {
                             g.vm.heap.array_mut(arr_id).push(v);
                         }
                     } else {
+                        // Pin the block-returned `key` across the
+                        // `maybe_gc` / `check_alloc` / `heap.alloc`
+                        // window. Between step_block returning and
+                        // the eventual `hash_mut.push((key, ...))`,
+                        // `key` lives only in this Rust local. If
+                        // it's a heap-slot Value (Array / Hash /
+                        // Object / Range / Block / BoundMethod /
+                        // UnboundMethod / CurriedProc / BigInt), the
+                        // alloc-time maybe_gc would sweep it and the
+                        // subsequent push would insert a dangling
+                        // ObjId into result_id. Same family as the
+                        // chunk fix in PR #187. Scoped push/pop
+                        // (single-iteration lifetime) keeps the pin
+                        // set from accumulating across the loop.
+                        if key.is_gc_heap_ref() {
+                            g.vm.pinned.push(key.clone());
+                        }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
                         let arr_id = g.vm.heap.alloc(HeapObj::Array(vec![v]));
+                        if key.is_gc_heap_ref() {
+                            g.vm.pinned.pop();
+                        }
                         g.vm.heap.hash_mut(result_id).push((key, Value::Array(arr_id)));
                     }
                 }

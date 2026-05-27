@@ -485,3 +485,42 @@ fn array_chunk_pin_snapshot_under_receiver_mutation() {
         "chunk corrupted (likely snapshot element swept after receiver mutation), got: {out}"
     );
 }
+
+#[test]
+fn array_group_by_pin_heap_keys_under_stress_gc() {
+    // Regression: Array#group_by holds the block-returned `key` as
+    // a Rust local across `maybe_gc / check_alloc / heap.alloc` for
+    // the bucket Array, then pushes `(key, ...)` into the result
+    // Hash. Without pinning, heap-Value keys get swept during the
+    // alloc, leaving a dangling ObjId inside the Hash. Same family
+    // as the chunk fix in PR #187.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # Block returns a fresh heap Array with content DIFFERENT
+        # from the value: `["k#{x}"]` (key) vs `x` (element). This
+        # distinction is crucial — an earlier draft used `[x]` as
+        # both the key and the bucket-content shape, which masked
+        # the bug: a swept key slot got reused by the
+        # immediately-following bucket alloc and `inspect` still
+        # printed the "expected" shape because key and bucket
+        # happened to be aliased.
+        #
+        # With a distinct shape we get the real failure mode:
+        # without the fix, the swept key slot is overwritten by
+        # the bucket Array, so `inspect` produces e.g.
+        # `{[10] => [10], ...}` instead of CRuby's
+        # `{["k10"] => [10], ...}`.
+        result = [10, 20, 30].group_by { |x| ["k#{x}"] }
+        puts result.inspect
+    "#, "group_by_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    assert_eq!(
+        out, "{[\"k10\"] => [10], [\"k20\"] => [20], [\"k30\"] => [30]}\n",
+        "group_by output corrupted (key slot was reused by bucket alloc), got: {out}"
+    );
+}
