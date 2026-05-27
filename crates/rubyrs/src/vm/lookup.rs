@@ -43,8 +43,10 @@ pub(crate) struct CallCacheEntry {
 /// IC_WAYS + 1 shapes (hit rate ~0.5 with round-robin eviction),
 /// so 5 is the smallest width that comfortably absorbs the common
 /// "Array of 4 user-class instances plus a sentinel" pattern.
-/// Each extra way is ~24 bytes per call site, so even a script
-/// with thousands of call sites pays only single-digit KB.
+/// Each extra way is ~24 bytes per call site, so 1 000 call
+/// sites cost ~24 KB and ~10 000 call sites cost ~240 KB —
+/// negligible against any real-world memory budget but worth
+/// pricing accurately if a future widening is considered.
 pub(crate) const IC_WAYS: usize = 5;
 
 /// Counters for the per-call-site IC, gated behind the `ic-stats`
