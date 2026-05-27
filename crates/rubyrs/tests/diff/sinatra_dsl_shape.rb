@@ -73,6 +73,20 @@ puts result.inspect                          # [42, 10, 20, 30]
 # --- instance_exec with no args ---
 puts c.instance_exec { @ivar * 2 }           # 84
 
+# --- respond_to? feature detection parity ---
+puts Object.new.respond_to?(:instance_exec)  # true
+puts "x".respond_to?(:instance_exec)         # true
+puts 42.respond_to?(:instance_exec)          # true
+puts App.respond_to?(:instance_exec)         # true (Class responds too)
+
+# --- User-override precedence: `def instance_exec` wins ---
+class Override
+  def instance_exec(*args, &blk)
+    "user-override(#{args.inspect})"
+  end
+end
+puts Override.new.instance_exec(1, 2) { "ignored" }   # user-override([1, 2])
+
 # --- Singleton inheritance ladder: grandparent → parent → child ---
 class G
   def self.boom(x); "g-boom(#{x})"; end

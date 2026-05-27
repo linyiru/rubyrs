@@ -5210,8 +5210,24 @@ impl Vm {
             // resolve through the swapped self.
             let is_instance_exec = &*name == "instance_exec";
             if is_instance_exec {
-                self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/false, args)?;
-                return Ok(());
+                // Override-precedence probe (parity with `send` /
+                // `Hash.new` patterns nearby): only fall into the
+                // builtin path when there's no user-defined
+                // `instance_exec` on the receiver. Without this, a
+                // `class C; def instance_exec(...); ...; end; end`
+                // override would be silently shadowed by the builtin.
+                let user_override = match r {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                    }
+                    Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                    _ => false,
+                };
+                if !user_override {
+                    self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/false, args)?;
+                    return Ok(());
+                }
             }
             let is_instance_eval = &*name == "instance_eval";
             let is_class_eval = &*name == "class_eval" || &*name == "module_eval";
