@@ -233,13 +233,19 @@ impl Vm {
     fn resolve_ivar_name_arg(&mut self, arg: &Value) -> Result<SymId, Trap> {
         match arg {
             Value::Sym(id) => {
-                let resolved = self.interner.resolve(*id).clone();
-                if !is_valid_ivar_name(&resolved) {
-                    return Err(self.trap(RubyError::NameError {
-                        msg: format!("'{}' is not allowed as an instance variable name", resolved),
-                    }));
+                let resolved = self.interner.resolve(*id);
+                if is_valid_ivar_name(resolved) {
+                    return Ok(*id);
                 }
-                Ok(*id)
+                // Happy path returns above with no allocation. Only
+                // the error path materialises the message; build the
+                // String here so the borrow of `resolved` is dropped
+                // before the `&mut self` call to `trap`.
+                let msg = format!(
+                    "'{}' is not allowed as an instance variable name",
+                    resolved,
+                );
+                Err(self.trap(RubyError::NameError { msg }))
             }
             Value::Str(s) => {
                 let raw = s.to_string_lossy();
