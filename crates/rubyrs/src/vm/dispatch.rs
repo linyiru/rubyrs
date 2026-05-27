@@ -1315,6 +1315,70 @@ impl Vm {
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
+            // `Module#remove_method(name, ...)` — removes the
+            // method(s) from THIS class's own methods table. Does
+            // NOT walk the superclass chain (that's `undef_method`'s
+            // job in CRuby; we route undef as a no-op pending real
+            // semantics).
+            //
+            // Motivating consumer: tilt-2.7.0
+            // `lib/tilt/template.rb:490` calls
+            // `TOPOBJECT.class_eval { remove_method(method_name) }`
+            // after each `evaluate` to wipe the synthesised
+            // `__tilt_<id>` entry. With this arm tilt's cleanup
+            // path runs to completion.
+            //
+            // Variadic: CRuby accepts any number of args
+            // (`remove_method(:a, :b, :c)`); 0 args is a no-op
+            // returning self.
+            //
+            // CRuby raises NameError on a method not defined on
+            // this class. Mirror that — primitives are exempt
+            // since their method tables aren't user-populated and
+            // a "missing" probe on `String.remove_method(:foo)`
+            // would surface as a confusing error path (same
+            // permissive stance as `instance_method` /
+            // `method_defined?`).
+            ("remove_method", args) if !args.is_empty() => {
+                for arg in args {
+                    let raw_owned: String = match arg {
+                        Value::Sym(sid) => self.interner.resolve(*sid).to_string(),
+                        Value::Str(s) => s.to_string_lossy(),
+                        other => {
+                            let inspected = other.to_inspect(&self.heap, &self.interner);
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!("{} is not a symbol nor a string", inspected),
+                            }));
+                        }
+                    };
+                    if let Some(max) = self.max_symbols
+                        && !self.interner.contains(&raw_owned)
+                        && self.interner.len() >= max {
+                        return Err(self.trap(RubyError::ResourceExhausted {
+                            msg: format!("interner exhausted: {} symbols", max),
+                        }));
+                    }
+                    let sid = self.interner.intern(&raw_owned);
+                    let present = cls.methods.borrow().contains_key(&sid);
+                    if !present && !is_primitive_class_name(&cls.name) {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("method '{}' not defined in {}", raw_owned, cls.name),
+                        }));
+                    }
+                    cls.methods.borrow_mut().remove(&sid);
+                }
+                // Bump `method_gen` once even for variadic calls —
+                // inline caches see a single coarse generation
+                // bump rather than per-method invalidation.
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Class(cls));
+                Ok(true)
+            }
+            ("remove_method", _) => {
+                // 0-arg form: no-op, return receiver (CRuby parity).
+                self.stack.push(Value::Class(cls));
+                Ok(true)
+            }
             // Arity guard FIRST so wrong-count calls surface as
             // ArgumentError (CRuby check order: arity → type).
             // 0 args / 2+ args both raise here.
@@ -2095,7 +2159,7 @@ impl Vm {
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
@@ -4863,7 +4927,7 @@ impl Vm {
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
