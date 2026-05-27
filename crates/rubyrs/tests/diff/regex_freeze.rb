@@ -39,5 +39,5 @@ begin
   r.freeze(:extra)
   puts "wrong-arity=NOT-RAISED"
 rescue ArgumentError => e
-  puts "wrong-arity=#{e.class}"
+  puts "wrong-arity=#{e.class}: #{e.message}"
 end
