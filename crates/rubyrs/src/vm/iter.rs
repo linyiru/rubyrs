@@ -1800,10 +1800,14 @@ impl Vm {
                 // only via this Rust-local Vec — the subsequent
                 // bucket alloc's maybe_gc would sweep them and the
                 // freshly-built bucket `Array(vec![v])` would
-                // contain a dangling ObjId. CRuby disallows
-                // concurrent mutation entirely; we instead keep
-                // the elements alive defensively so the primitive
-                // completes without ICE'ing. Mirrors the chunk
+                // contain a dangling ObjId. CRuby's exact behaviour
+                // under receiver mutation during enumeration is
+                // unspecified / implementation-defined (in practice
+                // it stops processing without raising); rubyrs
+                // keeps the elements alive defensively so the
+                // primitive completes without ICE'ing regardless
+                // of what the user-level semantics turn out to be.
+                // Mirrors the chunk
                 // driver's defensive snapshot pin earlier in this
                 // file. Narrowed via `is_gc_heap_ref` to avoid
                 // O(n) GC scan growth for immediate/Rc-shared

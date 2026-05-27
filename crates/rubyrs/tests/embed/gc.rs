@@ -547,10 +547,12 @@ fn array_group_by_pin_snapshot_under_receiver_mutation() {
     // Without the defensive `for v in &snapshot { ... }` pin
     // loop, the reproducer ICEs at `heap.rs:180` with
     // `use-after-free ObjId(N)`. With the fix it completes —
-    // rubyrs's eager `group_by` produces all three bucket entries
-    // (a documented divergence from CRuby's lazy-enumerator
-    // behaviour which stops after the mutation; not under test
-    // here).
+    // rubyrs's `group_by` (eager — returns a Hash directly when a
+    // block is given) produces all three bucket entries, whereas
+    // CRuby's `group_by` stops processing after the receiver
+    // mutation and only produces the first entry. The CRuby
+    // divergence is documented but not under test here; the focus
+    // is on rubyrs surviving the GC pressure without ICE'ing.
     let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
         stress_gc: true,
         ..Default::default()
