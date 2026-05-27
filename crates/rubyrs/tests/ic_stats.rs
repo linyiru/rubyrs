@@ -24,8 +24,8 @@ fn hot_loop_drives_ic_hit_rate_high() {
     // 1000 iterations of `f.ping` against a user-class instance —
     // every dispatch is `Value::Object` so the call routes
     // through `lookup_method_cached`. Single class shape means
-    // the 4-way IC sees no eviction; after the first miss every
-    // subsequent lookup should hit.
+    // the IC sees no eviction regardless of `IC_WAYS`; after the
+    // first miss every subsequent lookup should hit.
     //
     // Snapshot before/after the workload eval so the assertion
     // is on the DELTA, not on aggregate counters that also

@@ -38,7 +38,14 @@ pub(crate) struct CallCacheEntry {
 /// ways are full evicts via simple round-robin (`next_way`); the
 /// megamorphic case (> IC_WAYS distinct classes) degenerates to
 /// the same uncached walk the old single-slot cache did.
-pub(crate) const IC_WAYS: usize = 4;
+///
+/// Sized at 5 ways: PR #175 measured a sharp cliff at exactly
+/// IC_WAYS + 1 shapes (hit rate ~0.5 with round-robin eviction),
+/// so 5 is the smallest width that comfortably absorbs the common
+/// "Array of 4 user-class instances plus a sentinel" pattern.
+/// Each extra way is ~24 bytes per call site, so even a script
+/// with thousands of call sites pays only single-digit KB.
+pub(crate) const IC_WAYS: usize = 5;
 
 /// Counters for the per-call-site IC, gated behind the `ic-stats`
 /// cargo feature. ZST + `#[inline(always)]` no-op methods when
