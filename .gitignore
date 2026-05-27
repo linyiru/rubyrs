@@ -1,4 +1,5 @@
 /target
+crates/rubyrs/target/
 .antigravitycli/
 .claude/
 .rubund_global_cache/

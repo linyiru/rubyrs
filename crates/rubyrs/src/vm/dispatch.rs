@@ -3705,6 +3705,33 @@ impl Vm {
             Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
         };
 
+        // `bm.call(args, &block)` — the block-form counterpart to
+        // the no-block BoundMethod#call arm in `do_call` (line
+        // ~1969). Without this, calling a stored `Method` with a
+        // block (`@scan_line.call(@src, &block)` — ERB's
+        // lib/erb/compiler.rb:147 pattern) raises NoMethodError
+        // because the fallthrough never sees Method as a valid
+        // receiver. Re-shape the stack as
+        // `bm_recv, block, args...` (the order do_call_block
+        // expects — see the push sequence below) and recursively
+        // dispatch through `do_call_block` so the underlying
+        // method receives the block argument.
+        if let Some(Value::BoundMethod(bid)) = &recv
+            && matches!(&*name, "call" | "[]" | "()") {
+            let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+                _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
+            };
+            // do_call_block entry expects stack layout
+            // `recv, block, args...` (drain last `argc` for args,
+            // then pop block, then pop recv). Push in that order.
+            let argc_new = args.len();
+            self.stack.push(bm_recv);
+            self.stack.push(Value::Block(block));
+            for a in args { self.stack.push(a); }
+            return self.do_call_block(bm_name_id, argc_new, false, u16::MAX);
+        }
+
         // P2-13: `block` (now an ObjId in a Rust local) is no
         // longer rooted after popping off the stack. Each native
         // iterator driver (`iter_array_filter`, the inline
