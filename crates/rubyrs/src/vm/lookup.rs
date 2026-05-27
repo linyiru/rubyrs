@@ -40,12 +40,12 @@ pub(crate) struct CallCacheEntry {
 /// the same uncached walk the old single-slot cache did.
 ///
 /// Sized at 5 ways: PR #175 measured a sharp cliff at exactly
-/// the-then-IC_WAYS + 1 = 5 shapes (hit rate ~0.5 with round-
-/// robin eviction at the previous `IC_WAYS = 4`). PR #185
-/// widened to 5 ways so 5-shape workloads now hit, and the
-/// cliff moved to 6 shapes (still ~0.5 there). 5 is the
-/// smallest width that comfortably absorbs the common
-/// "Array of 4 user-class instances plus a sentinel" pattern.
+/// `IC_WAYS + 1 = 5` shapes under the prior `IC_WAYS = 4`
+/// (hit rate ~0.5 with round-robin eviction). PR #185 widened
+/// to 5 ways so 5-shape workloads now hit; the cliff moved to
+/// 6 shapes (still ~0.5 there). 5 is the smallest width that
+/// comfortably absorbs the common "Array of 4 user-class
+/// instances plus a sentinel" pattern.
 /// Each extra way is ~24 bytes per call site, so 1 000 call
 /// sites cost ~24 KB and ~10 000 call sites cost ~240 KB —
 /// negligible against any real-world memory budget but worth
