@@ -412,7 +412,13 @@ jobs:
           # stack-shape assertions. All sites are `.expect("ICE:
           # ...")` invariants on op pairing; not user-reachable.
           check crates/rubyrs/src/vm/step.rs         73
-          check crates/rubyrs/src/vm/iter.rs         10
+          # Bumped 10 → 14 (+4) by PR #178 (step-block iter
+          # refactor extracting Select/Reject accumulator logic).
+          # Each accumulator path adds one `acc_id.unwrap()` —
+          # ICE-class because `acc_id: Option<ObjId>` is `Some`
+          # by construction before the loop body runs. Same
+          # pattern as the existing iter.rs sites.
+          check crates/rubyrs/src/vm/iter.rs         14
           check crates/rubyrs/src/vm/cext.rs          6
           # Bumped 3 → 10 by PR #78 (break/next through ensure).
           # The proper unwinder needs frame/rescue-stack invariant
@@ -429,11 +435,21 @@ jobs:
           # invariants. All sites are ICE-class — radix < 16 by
           # construction, `caps.get(0)` always Some on a successful
           # match, `to_chars.last()` after a non-empty validation.
-          check crates/rubyrs/src/vm/string.rs        4
+          #
+          # Bumped 4 → 5 (+1) by PR #178 (step-block iter refactor
+          # migrating String#scan to the shared block iter helper).
+          # The migration adds one more `caps.get(0).unwrap()` at
+          # the scan branch — same regex-caps ICE pattern as the
+          # existing String#match site.
+          check crates/rubyrs/src/vm/string.rs        5
           # The remaining vm/* submodules (array, fileops, gc, hash,
           # numeric, primitive, sprintf, util) have zero panic-class
           # sites; ratcheting them at 0 keeps them honest.
-          check crates/rubyrs/src/vm/array.rs         0
+          # Bumped 0 → 1 (+1) by PR #179 (Array#delete) — one
+          # `hits.last().unwrap()` after a `hits.is_empty()`
+          # short-circuit higher up the same branch. ICE-class;
+          # the empty-vec guard makes the unwrap statically safe.
+          check crates/rubyrs/src/vm/array.rs         1
           check crates/rubyrs/src/vm/fileops.rs       0
           check crates/rubyrs/src/vm/gc.rs            0
           check crates/rubyrs/src/vm/hash.rs          0

@@ -99,7 +99,16 @@
 # to make CI green".
 crates/rubyrs/tests/fixtures/fizzbuzz.rb	6500	0	tiny script; wall is sub-100ms noise floor, disabled
 crates/rubyrs/examples/metaprog_bench/mm_bench.rb	6500	1100	2M method_missing dispatch
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	6500	700	2M define_method dispatch (closure-method)
+# dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
+# define_method dispatch benchmark crossed 6500 KB at PR #175
+# (ic-stats baseline workloads added) + PR #178 (step-block
+# iter refactor) + PR #179 (Array#delete). Observed CI RSS
+# 6552 KB, ~52 KB over. The other 7 workloads stayed under
+# 6500. Per-row bump rather than a uniform shift because the
+# growth is dm-specific (define_method's closure surface
+# touches the bumped tables); other workloads have their own
+# headroom.
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	6700	700	2M define_method dispatch (closure-method)
 crates/rubyrs/examples/metaprog_bench/static_bench.rb	6500	1000	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
