@@ -867,13 +867,24 @@ impl Vm {
                 Some(r)
             }
             (Value::Int(start), "upto", [Value::Int(stop)]) => {
+                // Pin the block — the body may allocate freely
+                // (e.g. `1.upto(10) { (1..1000).to_a }`), and GC
+                // would otherwise sweep the block ObjId mid-loop.
+                // Same fix shape Int#times already used; Int#upto
+                // and Int#downto were missing it (pre-existing GC
+                // bug — STRESS_GC reproduces the
+                // "ICE: heap slot is not a Block" panic at
+                // heap.rs without these pins). Empirically
+                // verified pre-fix / post-fix on this branch.
                 let start = *start;
                 let stop = *stop;
-                let pre_frames = self.frames.len();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 let mut i = start;
                 while i <= stop {
-                    match self.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}
@@ -883,13 +894,16 @@ impl Vm {
                 Some(early.unwrap_or(Value::Int(start)))
             }
             (Value::Int(start), "downto", [Value::Int(stop)]) => {
+                // Same pin rationale as Int#upto above.
                 let start = *start;
                 let stop = *stop;
-                let pre_frames = self.frames.len();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 let mut i = start;
                 while i >= stop {
-                    match self.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}

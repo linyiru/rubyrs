@@ -3026,3 +3026,42 @@ fn range_first_last_non_int_n_raises_no_method_error_today() {
     // matches Value::Int(n).
     assert_no_method("(1..).first(2.0)");
 }
+
+#[test]
+fn int_upto_downto_pin_block_under_stress_gc() {
+    // Regression: `Int#upto` and `Int#downto` did not wrap their
+    // loop in a PinGuard pinning `Value::Block(block)`. With
+    // STRESS_GC every block-body allocation triggers GC, and the
+    // block ObjId — no longer on the operand stack at this point
+    // — was swept mid-loop. Next iteration's `invoke_block`
+    // panicked at heap.rs:320 with "ICE: heap slot is not a
+    // Block". Sibling `Int#times` already had the right pin
+    // pattern + documenting comment; upto / downto were missing
+    // it. Surfaced by Copilot review on PR #173 (step_block
+    // migration made the pin contract explicit, exposing the
+    // omission).
+    //
+    // This test triggers the regression by allocating inside
+    // the block body — a fresh Array via `(1..50).to_a` is
+    // enough to satisfy STRESS_GC's "GC at every alloc check"
+    // policy, and the resulting sweep finds the block ObjId
+    // unrooted unless the driver has pinned it.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # upto + downto under STRESS_GC. The body allocates,
+        # forcing GC each iter. Without a Block pin, the second
+        # iteration's invoke_block hits a dangling slot and
+        # panics — diff_cruby couldn't catch this because the
+        # ICE is a host-side panic, not a Ruby-level mismatch.
+        1.upto(5) { |i| (1..50).to_a; puts "upto #{i}" }
+        5.downto(1) { |i| (1..50).to_a; puts "downto #{i}" }
+    "#, "upto_downto_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    assert!(out.contains("upto 5"), "upto did not complete: {out}");
+    assert!(out.contains("downto 1"), "downto did not complete: {out}");
+}
