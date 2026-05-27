@@ -585,6 +585,45 @@ pub(crate) fn type_name_for_coerce(v: &Value) -> &'static str {
     }
 }
 
+/// Like `type_name_for_coerce` but returns the CRuby **class name**
+/// instead of the inspect-friendly token, and preserves real class
+/// names for the heap-managed variants that `type_name_for_coerce`
+/// collapses to its generic `"Object"` fallback.
+///
+/// Use this when building error messages that should match CRuby's
+/// exact text — `"can't modify frozen NilClass: nil"` rather than
+/// `"can't modify frozen nil: nil"`, `"frozen Proc: ..."` rather
+/// than `"frozen Object: ..."`. Divergences from
+/// `type_name_for_coerce`:
+///
+///   - `Nil` → `NilClass` (not `nil`)
+///   - `Bool(true)` → `TrueClass`; `Bool(false)` → `FalseClass`
+///     (not `true` / `false`)
+///   - `Block` / `CurriedProc` → `Proc` (CRuby class for closures)
+///   - `BoundMethod` → `Method`
+///   - `UnboundMethod` → `UnboundMethod`
+///   - `Regex` → `Regexp` (under the `regex` feature)
+///
+/// Numeric / String / Sym / Array / Hash / Range share their names
+/// with `type_name_for_coerce`. `Value::Object` (user-class
+/// instance) still falls back to `"Object"` here because the
+/// helper doesn't have heap access to resolve the per-instance
+/// class — callers that need the precise class name on Object
+/// receivers should use `Vm::class_of` directly.
+pub(crate) fn class_name_for_error(v: &Value) -> &'static str {
+    match v {
+        Value::Nil => "NilClass",
+        Value::Bool(true) => "TrueClass",
+        Value::Bool(false) => "FalseClass",
+        Value::Block(_) | Value::CurriedProc(_) => "Proc",
+        Value::BoundMethod(_) => "Method",
+        Value::UnboundMethod(_) => "UnboundMethod",
+        #[cfg(feature = "regex")]
+        Value::Regex(_) => "Regexp",
+        other => type_name_for_coerce(other),
+    }
+}
+
 // Float#inspect — kept private here because it's a single-line
 // inspect that just defers to to_s; if it grows we'll promote
 // it to a method.

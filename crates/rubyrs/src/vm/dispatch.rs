@@ -212,6 +212,65 @@ impl Vm {
         }
     }
 
+    /// Resolve a `Symbol` / `String` arg into a SymId for the ivar
+    /// name, validating it against an **ASCII-only subset** of
+    /// CRuby's ivar-name grammar: `@[A-Za-z_][A-Za-z0-9_]*`.
+    /// CRuby accepts some non-ASCII identifier characters too;
+    /// rubyrs takes the conservative ASCII subset because no
+    /// caller in the surfaced surface needs Unicode ivar names —
+    /// see `is_valid_ivar_name` for the precise grammar. Rejects:
+    ///   - bare `@` (no body)
+    ///   - `@@x` (class var — two `@`)
+    ///   - `@1` (digit start after `@`)
+    ///   - `@foo?` / `@foo=` / `@foo!` (suffixes that work for
+    ///     methods but not for ivars)
+    ///
+    /// String path enforces `Config::max_symbols` so untrusted code
+    /// can't grow the interner unbounded via
+    /// `instance_variable_{get,set}("@x#{i}", ...)` in a loop.
+    /// Non-Symbol-non-String args raise TypeError matching the
+    /// shape `parse_send_target` uses for `send` / `__send__`.
+    fn resolve_ivar_name_arg(&mut self, arg: &Value) -> Result<SymId, Trap> {
+        match arg {
+            Value::Sym(id) => {
+                let resolved = self.interner.resolve(*id);
+                if is_valid_ivar_name(resolved) {
+                    return Ok(*id);
+                }
+                // Happy path returns above with no allocation. Only
+                // the error path materialises the message; build the
+                // String here so the borrow of `resolved` is dropped
+                // before the `&mut self` call to `trap`.
+                let msg = format!(
+                    "'{}' is not allowed as an instance variable name",
+                    resolved,
+                );
+                Err(self.trap(RubyError::NameError { msg }))
+            }
+            Value::Str(s) => {
+                let raw = s.to_string_lossy();
+                if !is_valid_ivar_name(&raw) {
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("'{}' is not allowed as an instance variable name", raw),
+                    }));
+                }
+                if let Some(max) = self.max_symbols
+                    && !self.interner.contains(&raw) && self.interner.len() >= max {
+                        return Err(self.trap(RubyError::ResourceExhausted {
+                            msg: format!("interner exhausted: {} symbols", max),
+                        }));
+                    }
+                Ok(self.interner.intern(&raw))
+            }
+            other => {
+                let inspected = other.to_inspect(&self.heap, &self.interner);
+                Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} is not a symbol nor a string", inspected),
+                }))
+            }
+        }
+    }
+
     /// Parse the first arg of a `send` / `__send__` call as the
     /// target method name. Symbol passes through; String is
     /// interned (CRuby's transparent `to_sym` on the name arg).
@@ -2491,18 +2550,26 @@ impl Vm {
             return Ok(());
         }
         // `obj.instance_variables` — Array of Symbols (with `@`
-        // prefix). Only Value::Object instances actually carry
-        // ivars; other shapes get an empty Array.
+        // prefix). Reads ivars from `Value::Object` (Instance) and
+        // `Value::Class` receivers (cls.ivars), staying consistent
+        // with `instance_variable_get` / `_set` which also support
+        // both shapes. Other receivers (primitives, Array/Hash/etc.
+        // that don't carry ivars in rubyrs's heap model) get an
+        // empty Array.
         if &*name == "instance_variables" && args.is_empty() {
             let mut names: Vec<Value> = Vec::new();
-            if let Value::Object(id) = &recv {
-                let ivar_ids: Vec<crate::intern::SymId> = {
+            let ivar_ids: Vec<crate::intern::SymId> = match &recv {
+                Value::Object(id) => {
                     if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
                         inst.ivars.keys().copied().collect()
                     } else {
                         Vec::new()
                     }
-                };
+                }
+                Value::Class(cls) => cls.ivars.borrow().keys().copied().collect(),
+                _ => Vec::new(),
+            };
+            if !ivar_ids.is_empty() {
                 let mut decorated: Vec<(String, crate::intern::SymId)> = ivar_ids.into_iter()
                     .map(|s| {
                         let raw = self.interner.resolve(s).to_string();
@@ -2524,6 +2591,112 @@ impl Vm {
             let id = self.heap.alloc(HeapObj::Array(names));
             self.stack.push(Value::Array(id));
             return Ok(());
+        }
+        // `obj.instance_variable_get(name)` / `instance_variable_set(name, value)`
+        // — pure ivar read/write by name. Surfaced as a blocker
+        // for sinatra/indifferent_hash.rb's `Gem::Version#<=>` shape
+        // (TRY_RUNS pass 7 layer #2) and load-bearing for any
+        // introspection-heavy gem.
+        //
+        // Name validation: CRuby ivar names must match
+        // `@[A-Za-z_][A-Za-z0-9_]*` — single `@` followed by an
+        // identifier char (letter or underscore), then zero or more
+        // identifier-or-digit chars. Rejects `@@x` (class var),
+        // `@1` (digit start), `@foo?` (predicate suffix), bare `@`.
+        // String intern path enforces `Config::max_symbols`.
+        //
+        // Heap shape: read/write reaches the ivar table on
+        // `Value::Object` (Instance) and `Value::Class` (Class)
+        // receivers — same storage that `Op::LoadIvar` /
+        // `Op::StoreIvar` in vm/step.rs:552/562 read and write.
+        // The set path is MORE defensive than `Op::StoreIvar`:
+        // that op still calls `heap.instance_mut(*oid)` which
+        // panics with the same "ICE: heap slot is not an
+        // Instance" assertion this fix avoids; if `Op::StoreIvar`
+        // is ever reached for a non-Instance Object slot it will
+        // still ICE (a separate hardening concern, not covered
+        // by this PR). The `_ =>` arm below catches every
+        // non-Object/non-Class receiver — Int/Str/Float/Sym/
+        // Nil/Bool/Array/Hash/Range/Proc/etc. — and raises
+        // FrozenError. For mutable shapes like Array/Hash that
+        // CRuby DOES allow ivars on, supporting that surface
+        // would require ivar slots on those HeapObj variants;
+        // explicit out-of-scope until a caller surfaces it.
+        if &*name == "instance_variable_get" && args.len() == 1 {
+            let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
+            let v = match &recv {
+                Value::Object(oid) => match self.heap.get(*oid) {
+                    crate::heap::HeapObj::Instance(inst) => {
+                        inst.ivars.get(&ivar_id).cloned().unwrap_or(Value::Nil)
+                    }
+                    _ => Value::Nil,
+                },
+                Value::Class(cls) => {
+                    cls.ivars.borrow().get(&ivar_id).cloned().unwrap_or(Value::Nil)
+                }
+                _ => Value::Nil,
+            };
+            self.stack.push(v);
+            return Ok(());
+        }
+        if &*name == "instance_variable_set" && args.len() == 2 {
+            let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
+            let value = args[1].clone();
+            match &recv {
+                Value::Object(oid) => match self.heap.get_mut(*oid) {
+                    crate::heap::HeapObj::Instance(inst) => {
+                        inst.ivars.insert(ivar_id, value.clone());
+                        self.stack.push(value);
+                        return Ok(());
+                    }
+                    // TypedData (and any future non-Instance Object
+                    // heap variant) genuinely accepts ivars in CRuby
+                    // — the limitation is rubyrs-specific (no ivar
+                    // table on `TypedDataObj`). RubyError doesn't
+                    // model `NotImplementedError` yet, so RuntimeError
+                    // is the closest fit; keep the message terse and
+                    // explicit about the rubyrs-side limitation so a
+                    // gem hitting this knows it's not a CRuby
+                    // semantic difference.
+                    _ => return Err(self.trap(RubyError::RuntimeError {
+                        msg: "instance_variable_set on TypedData receivers is not yet supported in rubyrs".to_string(),
+                    })),
+                },
+                Value::Class(cls) => {
+                    cls.ivars.borrow_mut().insert(ivar_id, value.clone());
+                    self.stack.push(value);
+                    return Ok(());
+                }
+                _ => {
+                    let cls = crate::vm::numeric::class_name_for_error(&recv);
+                    let inspected = recv.to_inspect(&self.heap, &self.interner);
+                    return Err(self.trap(RubyError::FrozenError {
+                        msg: format!("can't modify frozen {}: {}", cls, inspected),
+                    }));
+                }
+            }
+        }
+        // Wrong-arity arms for the ivar-introspection family —
+        // match CRuby's ArgumentError surface. Without these,
+        // `obj.instance_variables(1)`, `obj.instance_variable_get()`,
+        // or `obj.instance_variable_set(:@x)` would fall through to
+        // NoMethodError, which is wrong (CRuby reports arity, not
+        // unknown method). `instance_variables` takes zero args;
+        // `_get` takes one; `_set` takes two.
+        if &*name == "instance_variables" {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+            }));
+        }
+        if &*name == "instance_variable_get" {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+            }));
+        }
+        if &*name == "instance_variable_set" {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+            }));
         }
         // `Integer#digits([base])` for Int receivers — LSB-first
         // digit Array, i64 fast path (no BigInt arithmetic for
@@ -4428,4 +4601,36 @@ fn method_recv_hash(v: &Value) -> i64 {
         #[cfg(feature = "regex")]
         Value::Regex(r) => Rc::as_ptr(r) as i64,
     }
+}
+
+/// Is `s` a syntactically valid CRuby instance-variable name?
+///
+/// CRuby grammar (from `parse.y` / docs): a single `@` followed by
+/// a Ruby identifier — leading char must be ASCII letter or `_`,
+/// subsequent chars must be ASCII letter / digit / `_`. Used by
+/// `instance_variable_get` / `instance_variable_set` to reject
+/// names that CRuby would also reject:
+///
+///   - bare `@` (no identifier body)
+///   - `@@foo` (class-variable shape, double `@`)
+///   - `@1foo` (digit start after `@`)
+///   - `@foo?` / `@foo=` / `@foo!` (method-name suffixes that
+///     aren't legal in ivar names)
+///   - non-ASCII bodies (CRuby permits some, rubyrs takes the
+///     conservative ASCII-only subset; not load-bearing for
+///     any caller surfaced today)
+fn is_valid_ivar_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    // Need `@` + at least one identifier char.
+    if bytes.len() < 2 || bytes[0] != b'@' {
+        return false;
+    }
+    // First body char: letter or `_`. Rejects `@@x`, `@1x`, `@?x`.
+    let first = bytes[1];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    // Remaining: letter / digit / `_`. Rejects `@foo?`, `@foo=`,
+    // `@foo!`, `@foo-bar`.
+    bytes[2..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }

@@ -311,6 +311,14 @@ impl Vm {
         if matches!(name,
             "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?"
             | "send" | "__send__"
+            // The ivar-introspection family (`instance_variables` /
+            // `instance_variable_get` / `instance_variable_set`)
+            // is implemented as universal dispatch arms in
+            // `Vm::do_call`, so feature detection has to agree:
+            // `obj.respond_to?(:instance_variable_get)` should be
+            // true for every value even if the result will be nil
+            // (primitives) or raise FrozenError (set on primitives).
+            | "instance_variables" | "instance_variable_get" | "instance_variable_set"
         ) {
             return true;
         }
