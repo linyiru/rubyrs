@@ -52,6 +52,23 @@ impl RStr {
     pub fn to_string_lossy(&self) -> String {
         String::from_utf8_lossy(&self.content.borrow()).into_owned()
     }
+
+    /// UTF-8 character count — what Ruby's `String#length` / `#size`
+    /// returns. ASCII-only buffers short-circuit on `is_ascii()`
+    /// (every byte is one char); non-ASCII falls back to a chars
+    /// walk over the lossy view, where invalid byte sequences each
+    /// count as one U+FFFD (matches CRuby's "length on a UTF-8
+    /// String" semantic). The shortcut means the canonical builtin
+    /// path and dispatch's primitive fast-path stay in lock-step
+    /// without one of them silently winning a perf round.
+    pub fn char_count(&self) -> usize {
+        let bytes = self.content.borrow();
+        if bytes.is_ascii() {
+            bytes.len()
+        } else {
+            String::from_utf8_lossy(&bytes).chars().count()
+        }
+    }
 }
 
 impl std::ops::Deref for RStr {

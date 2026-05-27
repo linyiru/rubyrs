@@ -286,13 +286,7 @@ impl Vm {
                     .expect("ICE: stack underflow before do_call receiver");
                 match recv {
                     Value::Str(a) if name_id == self.sym_length || name_id == self.sym_size => {
-                        let bytes = a.borrow();
-                        let len = if bytes.is_ascii() {
-                            bytes.len()
-                        } else {
-                            String::from_utf8_lossy(&bytes).chars().count()
-                        };
-                        Some(Value::Int(len as i64))
+                        Some(Value::Int(a.char_count() as i64))
                     }
                     Value::Str(a) if name_id == self.sym_to_s => Some(Value::Str(a.clone())),
                     Value::Int(n) if name_id == self.sym_to_s || name_id == self.sym_inspect => {
