@@ -1537,13 +1537,19 @@ impl Vm {
                 if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 self.method_gen = self.method_gen.wrapping_add(1);
-                // CRuby: `def name; …; end` evaluates to `:name`,
-                // and `define_method(:foo) { … }` returns `:foo`.
-                // Align this parsed-def install path with the
-                // runtime-dispatch `Module#define_method` arm
-                // (vm/dispatch.rs) so `x = define_method(:foo) {}`
-                // returns the same Symbol regardless of whether
-                // the compiler intercept fires.
+                // `Op::DefMethodBlock` is emitted ONLY for the
+                // compile-time `define_method(:literal_symbol) { … }`
+                // intercept (compiler.rs:209); it is NOT the parsed
+                // `def` path. CRuby's `define_method` evaluates to
+                // the method name as a Symbol — pushing
+                // `Value::Sym(name_id)` aligns this intercept with
+                // the runtime-dispatch `Module#define_method` arm
+                // in vm/dispatch.rs so `x = define_method(:foo) {}`
+                // returns the same value regardless of which
+                // intercept fires. Parsed `def name; …; end` still
+                // returns `nil` in rubyrs (`Op::DefMethod` pushes
+                // Nil) — that's a separate CRuby-divergence not
+                // addressed by this PR.
                 self.stack.push(Value::Sym(name_id));
             }
             Op::DefObjectSingletonMethodBlock(name_id) => {

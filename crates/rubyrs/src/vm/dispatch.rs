@@ -1937,17 +1937,27 @@ impl Vm {
         self.stack.push(Value::Class(m));
         return Ok(ClassOutcome::Handled);
     }
-    // `Module#define_method(:name)` called WITHOUT a block (and
-    // not via the 2-arg Proc form — rubyrs Tier-1 doesn't yet
-    // support `define_method(:foo, proc { … })`). CRuby raises
-    // `ArgumentError ("tried to create Proc object without a
-    // block")`; the block-form path lives in `do_call_block`'s
-    // intrinsic arm. Without this gate, the no-block call would
-    // fall through to NoMethodError, which doesn't match CRuby
-    // and means `define_method` shows up in `respond_to?` /
-    // bridge whitelists but raises the wrong error class.
-    // (PR #245 Copilot round 2 #2.)
+    // `Module#define_method(:name)` called WITHOUT a block, in
+    // the 1-arg "name only" shape. CRuby raises `ArgumentError
+    // ("tried to create Proc object without a block")`; the
+    // block-form path lives in `do_call_block`'s intrinsic arm.
+    // Without this gate the no-block call would fall through to
+    // NoMethodError, which doesn't match CRuby and means
+    // `define_method` shows up in `respond_to?` / bridge
+    // whitelists but raises the wrong error class.
+    //
+    // Gated on `args.len() <= 1` (CRuby's arity for
+    // `define_method` is 1..2): the 2-arg Proc/UnboundMethod
+    // form (`define_method(:foo, proc { … })`) is NOT yet
+    // supported in rubyrs Tier-1 — it falls through to standard
+    // dispatch and surfaces as NoMethodError so a caller that
+    // hits the unsupported shape gets a clear "not implemented"
+    // signal rather than a misleading ArgumentError. A future
+    // PR landing the 2-arg form should widen this gate and add
+    // the install arm below it.
+    // (PR #245 Copilot round 2 #2 + round 4 #1.)
     if &*name == "define_method"
+        && args.len() <= 1
         && let Value::Class(cls) = &recv
     {
         // Same precedence rule as the block-form arm — user
