@@ -552,15 +552,11 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for v in snapshot {
-                    g.vm.invoke_block(block, vec![v])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
-                    }
+                    let r = match g.vm.step_block(block, vec![v], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
                     if r.is_truthy() {
                         g.vm.heap.array_mut(result_id).push(r);
                     }
@@ -773,15 +769,11 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    g.vm.invoke_block(block, vec![k, v])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
-                    }
+                    let r = match g.vm.step_block(block, vec![k, v], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
                     if r.is_truthy() {
                         g.vm.heap.array_mut(result_id).push(r);
                     }
@@ -801,15 +793,11 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    g.vm.invoke_block(block, vec![k])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
-                    let new_key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(new_key);
-                        break;
-                    }
+                    let new_key = match g.vm.step_block(block, vec![k], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
                     // Last-wins collision: overwrite existing slot
                     // if the new_key equals one already present;
                     // otherwise append. Matches CRuby's iteration-
@@ -840,15 +828,11 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    g.vm.invoke_block(block, vec![v])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
-                    let new_v = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(new_v);
-                        break;
-                    }
+                    let new_v = match g.vm.step_block(block, vec![v], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
                     g.vm.heap.hash_mut(result_id).push((k, new_v));
                 }
                 Some(early.unwrap_or(Value::Hash(result_id)))
@@ -967,14 +951,10 @@ impl Vm {
                 let step = *n;
                 let mut early = None;
                 while i <= end_inc {
-                    g.vm.invoke_block(block, vec![Value::Int(i)])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
                     }
                     i = i.saturating_add(step);
                 }
@@ -1141,15 +1121,11 @@ impl Vm {
                 let mut crossed = false;
                 let mut crossing_idx: Option<usize> = None;
                 for (i, v) in snapshot.iter().enumerate() {
-                    g.vm.invoke_block(block, vec![v.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
-                    }
+                    let r = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
                     if !r.is_truthy() {
                         crossed = true;
                         crossing_idx = Some(i);
@@ -1252,15 +1228,11 @@ impl Vm {
                 let mut current_chunk: Vec<Value> = vec![snapshot[0].clone()];
                 let mut early: Option<Value> = None;
                 for pair in snapshot.windows(2) {
-                    g.vm.invoke_block(block, vec![pair[0].clone(), pair[1].clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
-                    }
+                    let r = match g.vm.step_block(block, vec![pair[0].clone(), pair[1].clone()], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
                     if r.is_truthy() {
                         current_chunk.push(pair[1].clone());
                     } else {
@@ -1313,15 +1285,11 @@ impl Vm {
                 let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
                 let mut early: Option<Value> = None;
                 for v in snapshot {
-                    g.vm.invoke_block(block, vec![v.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(None); }
-                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(key);
-                        break;
-                    }
+                    let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
                     pairs.push((key, v));
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
