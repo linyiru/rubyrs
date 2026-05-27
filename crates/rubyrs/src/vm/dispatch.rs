@@ -586,7 +586,16 @@ impl Vm {
                     let argc = args.len();
                     self.stack.push(self_val.clone());
                     for a in args { self.stack.push(a); }
-                    return self.do_call(name_id, argc, /*no_recv=*/false, cache_id);
+                    // `cache_id = u16::MAX` (sentinel: skip cache
+                    // write) — re-entry from a bare-call site
+                    // into a receiver-form lookup; the cache
+                    // slot was minted for the bare shape and
+                    // mustn't be populated with a receiver-form
+                    // entry that a future bare retry could
+                    // consult. Same pattern as send / send_with_
+                    // block re-entries (lines ~464 / ~924, plus
+                    // the lib.rs sentinel comment at ~77).
+                    return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
                 }
             }
             // `__dir__` — returns the directory of the source
