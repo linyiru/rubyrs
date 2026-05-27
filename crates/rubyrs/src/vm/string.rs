@@ -623,6 +623,147 @@ impl Vm {
                     }
                     return Ok(Some(frozen));
                 }
+                // `String#dump` — round-trippable string literal
+                // representation. Wraps in double quotes; escapes
+                // CRuby's short controls (`\a` `\b` `\t` `\n` `\v`
+                // `\f` `\r` `\e` `\"` `\\`); writes other control
+                // bytes (0x00..=0x1F, 0x7F) as `\xNN` (uppercase);
+                // escapes `#` ONLY when followed by `{` / `@` / `$`
+                // (the interpolation triggers — round-trip parity);
+                // non-ASCII codepoints become `\uHHHH` (BMP, fixed
+                // 4 digits) or `\u{H...}` (above BMP, 5-6
+                // uppercase hex digits — Unicode scalar values
+                // top out at U+10FFFF).
+                //
+                // Motivating use: MRI lib/erb/compiler.rb:312
+                // (`add_put_cmd`) writes template-content chunks
+                // into the compiled source via
+                // `"#{@put_cmd} #{content.dump}.freeze"`. Without
+                // dump, ERB compile crashes inside compile_stag.
+                if name == "dump" && args.is_empty() {
+                    // Walk bytes directly so binary strings
+                    // (Value::new_str_bytes, File.read with non-
+                    // UTF-8 content, cext-allocated bytes) keep
+                    // their invalid sequences as `\xNN` instead
+                    // of being smudged to U+FFFD by a lossy decode.
+                    // Output reconstructs the exact bytes via eval.
+                    //
+                    // Direct `push_str` / `write!` into the
+                    // output String — no per-byte intermediate
+                    // allocation. Projection check before each
+                    // write traps ResourceExhausted before
+                    // pathological 9x-expansion inputs balloon
+                    // the buffer.
+                    use std::fmt::Write;
+                    let bytes = s.content.borrow();
+                    let max_cap = self.max_value_bytes;
+                    // Project current+add+closing-quote against
+                    // cap. Macro avoids the `&mut self` borrow
+                    // hassle of a closure that also wants to call
+                    // `self.trap`.
+                    macro_rules! ensure_room {
+                        ($out:expr, $add:expr) => {
+                            if let Some(max) = max_cap
+                                && $out.len().saturating_add($add).saturating_add(1) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("String#dump output exceeds {max} bytes"),
+                                }));
+                            }
+                        };
+                    }
+                    // Pre-check the minimum 2-byte cap (opening
+                    // and closing quotes) — even an empty input
+                    // dumps to `""`. ensure_room reserves the
+                    // closing quote on every push; the opening
+                    // quote needs its own check.
+                    let mut out = String::with_capacity(bytes.len().saturating_add(2));
+                    ensure_room!(out, 1);
+                    out.push('"');
+                    let mut i = 0;
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        if b < 0x80 {
+                            let short: Option<&'static str> = match b {
+                                0x07 => Some("\\a"),
+                                0x08 => Some("\\b"),
+                                0x09 => Some("\\t"),
+                                0x0A => Some("\\n"),
+                                0x0B => Some("\\v"),
+                                0x0C => Some("\\f"),
+                                0x0D => Some("\\r"),
+                                0x1B => Some("\\e"),
+                                b'"' => Some("\\\""),
+                                b'\\' => Some("\\\\"),
+                                _ => None,
+                            };
+                            if let Some(s) = short {
+                                ensure_room!(out, s.len());
+                                out.push_str(s);
+                            } else if b == b'#' {
+                                let next = bytes.get(i + 1).copied();
+                                if matches!(next, Some(b'{') | Some(b'@') | Some(b'$')) {
+                                    ensure_room!(out, 2);
+                                    out.push_str("\\#");
+                                } else {
+                                    ensure_room!(out, 1);
+                                    out.push('#');
+                                }
+                            } else if b < 0x20 || b == 0x7F {
+                                ensure_room!(out, 4);
+                                let _ = write!(out, "\\x{:02X}", b);
+                            } else {
+                                ensure_room!(out, 1);
+                                out.push(b as char);
+                            }
+                            i += 1;
+                        } else {
+                            // Try to decode a 2-4 byte UTF-8
+                            // sequence; fall back to \xNN for the
+                            // leading byte on failure.
+                            let max_seq = (bytes.len() - i).min(4);
+                            let mut decoded: Option<(u32, usize)> = None;
+                            for n in 2..=max_seq {
+                                if let Ok(s) = std::str::from_utf8(&bytes[i..i + n])
+                                    && let Some(c) = s.chars().next()
+                                    && c.len_utf8() == n {
+                                    decoded = Some((c as u32, n));
+                                    break;
+                                }
+                            }
+                            match decoded {
+                                Some((cp, n)) if cp <= 0xFFFF => {
+                                    ensure_room!(out, 6);
+                                    let _ = write!(out, "\\u{:04X}", cp);
+                                    i += n;
+                                }
+                                Some((cp, n)) => {
+                                    // Output width is exact: 4
+                                    // overhead bytes (\u{ and })
+                                    // plus the hex-digit count. cp
+                                    // is in 0x10000..=0x10FFFF here,
+                                    // so 5 or 6 digits. Compute the
+                                    // precise projection so a tight
+                                    // max_value_bytes can't false-
+                                    // trap codepoints that would
+                                    // actually fit.
+                                    let hex_digits = if cp <= 0xFFFFF { 5 } else { 6 };
+                                    ensure_room!(out, 4 + hex_digits);
+                                    let _ = write!(out, "\\u{{{:X}}}", cp);
+                                    i += n;
+                                }
+                                None => {
+                                    ensure_room!(out, 4);
+                                    let _ = write!(out, "\\x{:02X}", b);
+                                    i += 1;
+                                }
+                            }
+                        }
+                    }
+                    // Closing quote reserved on every ensure_room
+                    // check above — push unconditionally.
+                    out.push('"');
+                    return Ok(Some(Value::new_str(out)));
+                }
                 // Helper closure: bail out of any mutating method
                 // if `s` was frozen. Used by `<<`, `concat`,
                 // `prepend`, `replace`, `[]=`.
