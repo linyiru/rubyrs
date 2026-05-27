@@ -278,6 +278,16 @@ impl Vm {
                 return Ok(());
             }
         }
+        // Primitive-receiver fast-path. Currently safe to run after
+        // `take_bypass_visibility()` above because every arm here
+        // matches `Value::Int` / `Value::Str` — primitives have no
+        // visibility model, so the consumed flag can't be needed.
+        // BEFORE adding any `Value::Object` (or other receiver with
+        // a user-Class method table) arm to this match, the flag
+        // must be threaded into the lookup that follows OR the
+        // consume at line ~265 has to move below this block — see
+        // the comment there for why moving it naively re-leaks the
+        // flag past dispatches that bottom out elsewhere.
         if !no_recv && argc == 0 {
             let direct_primitive = {
                 let recv = self
