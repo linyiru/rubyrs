@@ -40,6 +40,24 @@ impl Vm {
                     // methods by the no-recv fall-through.
                     ("freeze", []) => Some(Value::Array(id)),
                     ("frozen?", []) => Some(Value::Bool(false)),
+                    // Array#<=> — element-wise lex compare; length is
+                    // the tiebreaker when the common prefix is Equal.
+                    // Returns nil when any element pair is incompara-
+                    // ble (cross-type with no ordering). Delegates to
+                    // `value_cmp_v_heap`, which recurses into nested
+                    // Arrays so `[[1,2],[3,4]] <=> [[1,2],[3,5]]` works.
+                    ("<=>", [Value::Array(other)]) => {
+                        Some(match super::util::value_cmp_v_heap(
+                            &Value::Array(id),
+                            &Value::Array(*other),
+                            &self.interner,
+                            &self.heap,
+                        ) {
+                            Some(o) => Value::Int(o as i64),
+                            None => Value::Nil,
+                        })
+                    }
+                    ("<=>", [_]) => Some(Value::Nil),
                     ("freeze" | "frozen?", many) => {
                         return Err(self.trap(crate::error::RubyError::ArgumentError {
                             msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),

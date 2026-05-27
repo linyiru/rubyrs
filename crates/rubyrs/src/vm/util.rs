@@ -43,7 +43,6 @@ pub(crate) fn value_cmp_v_heap(
     interner: &Interner,
     heap: &crate::heap::Heap,
 ) -> Option<std::cmp::Ordering> {
-    let _ = heap; // referenced only under `feature = "bignum"`
     #[cfg(feature = "bignum")]
     {
         use num_bigint::BigInt;
@@ -60,6 +59,28 @@ pub(crate) fn value_cmp_v_heap(
             _ => {}
         }
     }
+    // Array#<=> element-wise lex compare. Length is the
+    // tiebreaker only when all common-prefix pairs are Equal —
+    // matches CRuby `[1,2] <=> [1,2,3] == -1`. If any pair is
+    // incomparable (cross-type without ordering), the whole
+    // comparison is incomparable — propagate None upward, mirror-
+    // ing CRuby's `[1,2] <=> [1,"x"] == nil`. Recursing into
+    // `value_cmp_v_heap` means nested Arrays-of-Arrays compose
+    // automatically.
+    if let (Value::Array(xa), Value::Array(xb)) = (a, b) {
+        let av = heap.array(*xa);
+        let bv = heap.array(*xb);
+        let common = av.len().min(bv.len());
+        for i in 0..common {
+            match value_cmp_v_heap(&av[i], &bv[i], interner, heap) {
+                Some(std::cmp::Ordering::Equal) => continue,
+                Some(ord) => return Some(ord),
+                None => return None,
+            }
+        }
+        return Some(av.len().cmp(&bv.len()));
+    }
+    let _ = heap; // unused without bignum + when neither arm above fires
     value_cmp_v(a, b, interner)
 }
 
