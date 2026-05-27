@@ -1605,10 +1605,14 @@ RUBY_ENGINE = "ruby".freeze
         // the runtime's stored Duration, so a host can reuse a
         // Runtime across many short evaluations without inheriting
         // a stale timer. `None` (unlimited) is the default.
-        if let Some(d) = self.deadline {
-            self.vm.deadline_at = Some(std::time::Instant::now() + d);
-            self.vm.op_counter = 0;
-        }
+        //
+        // Unconditional `.map` (rather than `if let Some`) to
+        // mirror the fuel anchor above — both write
+        // `vm.deadline_at` / `vm.fuel` on every eval entry.
+        // `op_counter` is freely wrapping per its vm.rs doc, so
+        // zeroing it unconditionally is harmless.
+        self.vm.deadline_at = self.deadline.map(|d| std::time::Instant::now() + d);
+        self.vm.op_counter = 0;
         // PinGuard balance check: pinned was just zeroed; after
         // run, it must still be zero. The assert is debug-only —
         // release builds skip so a regression won't crash a host.
