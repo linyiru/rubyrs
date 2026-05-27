@@ -213,8 +213,12 @@ impl Vm {
     }
 
     /// Resolve a `Symbol` / `String` arg into a SymId for the ivar
-    /// name, validating it against CRuby's ivar-name grammar:
-    /// `@[A-Za-z_][A-Za-z0-9_]*`. Rejects:
+    /// name, validating it against an **ASCII-only subset** of
+    /// CRuby's ivar-name grammar: `@[A-Za-z_][A-Za-z0-9_]*`.
+    /// CRuby accepts some non-ASCII identifier characters too;
+    /// rubyrs takes the conservative ASCII subset because no
+    /// caller in the surfaced surface needs Unicode ivar names —
+    /// see `is_valid_ivar_name` for the precise grammar. Rejects:
     ///   - bare `@` (no body)
     ///   - `@@x` (class var — two `@`)
     ///   - `@1` (digit start after `@`)
