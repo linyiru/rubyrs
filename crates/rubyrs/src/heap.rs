@@ -51,12 +51,44 @@ pub(crate) enum HeapObj {
     /// `Object#method(:name)` result. `recv` is any Value the GC
     /// must walk; `name_id` is the captured method name. `.call`
     /// dispatches the captured method on the captured receiver.
-    BoundMethod { recv: Value, name_id: crate::intern::SymId },
+    ///
+    /// `method` mirrors `UnboundMethod.method` — an optional
+    /// snapshot of the resolved `Method` captured at the time
+    /// the BoundMethod was constructed. Used so `bm.call` works
+    /// after a subsequent `remove_method` on the captured class
+    /// (CRuby parity: capture-then-remove-then-call returns the
+    /// original body). The snapshot is also propagated through
+    /// `unbind`/`bind` round-trips: `ubm.bind(x).call` keeps the
+    /// snapshot inherited from the UnboundMethod. When None,
+    /// `.call` falls back to live chain lookup on the receiver.
+    BoundMethod {
+        recv: Value,
+        name_id: crate::intern::SymId,
+        method: Option<std::rc::Rc<crate::value::Method>>,
+    },
     /// `Method#unbind` result. `class` is the receiver's class
     /// at unbind time; `bind(obj)` checks `obj.is_a?(class)`
     /// before reconstituting a BoundMethod. `Rc<Class>` is not
-    /// a heap reference, so this variant carries no GC obligation.
-    UnboundMethod { class: std::rc::Rc<crate::value::Class>, name_id: crate::intern::SymId },
+    /// a heap reference, so this variant carries no GC
+    /// obligation.
+    ///
+    /// `method` is an optional snapshot of the resolved `Method`
+    /// captured AT THE TIME the UnboundMethod was constructed.
+    /// It exists so `bind` / `bind_call` survive a subsequent
+    /// `remove_method` that strips the entry from the captured
+    /// class's methods table between capture and call. Tilt-2.7.0
+    /// uses exactly this pattern in `compile_template_method`
+    /// (lib/tilt/template.rb:489-490): `instance_method(name)`
+    /// to capture, then `remove_method(name)` to clean up,
+    /// then `bind_call` on the captured handle to invoke. When
+    /// the snapshot is present, bind/bind_call use it directly
+    /// (no class-chain re-lookup); otherwise they fall back to
+    /// the live `lookup_method_uncached(class, name_id)` path.
+    UnboundMethod {
+        class: std::rc::Rc<crate::value::Class>,
+        name_id: crate::intern::SymId,
+        method: Option<std::rc::Rc<crate::value::Method>>,
+    },
     /// `Method#curry` / `Proc#curry` partial-application state.
     /// `underlying` is the callable (BoundMethod or Block) being
     /// curried; `gathered` are args accumulated so far; once
@@ -320,11 +352,29 @@ impl Heap {
         if let HeapObj::Block(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a Block") }
     }
     pub(crate) fn bound_method(&self, id: ObjId) -> (&Value, crate::intern::SymId) {
-        if let HeapObj::BoundMethod { recv, name_id } = self.get(id) { (recv, *name_id) }
+        if let HeapObj::BoundMethod { recv, name_id, .. } = self.get(id) { (recv, *name_id) }
+        else { panic!("ICE: heap slot is not a BoundMethod") }
+    }
+    /// Extended accessor that also returns the snapshot Method
+    /// (Some at instance_method / Object#method / bind capture
+    /// time, None for `unbind`'d legacy values). Callers that
+    /// drive introspection (arity / parameters / source_location
+    /// / owner) should prefer the snapshot so the captured
+    /// metadata survives a subsequent `remove_method`.
+    pub(crate) fn bound_method_full(&self, id: ObjId) -> (&Value, crate::intern::SymId, &Option<std::rc::Rc<crate::value::Method>>) {
+        if let HeapObj::BoundMethod { recv, name_id, method } = self.get(id) { (recv, *name_id, method) }
         else { panic!("ICE: heap slot is not a BoundMethod") }
     }
     pub(crate) fn unbound_method(&self, id: ObjId) -> (std::rc::Rc<crate::value::Class>, crate::intern::SymId) {
-        if let HeapObj::UnboundMethod { class, name_id } = self.get(id) { (class.clone(), *name_id) }
+        if let HeapObj::UnboundMethod { class, name_id, .. } = self.get(id) { (class.clone(), *name_id) }
+        else { panic!("ICE: heap slot is not an UnboundMethod") }
+    }
+    /// Same shape as `bound_method_full` for UnboundMethod —
+    /// introspection paths prefer the snapshot when present.
+    pub(crate) fn unbound_method_full(&self, id: ObjId) -> (std::rc::Rc<crate::value::Class>, crate::intern::SymId, Option<std::rc::Rc<crate::value::Method>>) {
+        if let HeapObj::UnboundMethod { class, name_id, method } = self.get(id) {
+            (class.clone(), *name_id, method.clone())
+        }
         else { panic!("ICE: heap slot is not an UnboundMethod") }
     }
     pub(crate) fn curried_proc(&self, id: ObjId) -> (&Value, &Vec<Value>, u16) {
@@ -471,11 +521,44 @@ impl Heap {
                     drop(captured);
                     Heap::visit_value(&bh.self_val, &mut self.marks, &mut worklist);
                 }
-                Slot::Live(HeapObj::BoundMethod { recv, .. }) => {
+                Slot::Live(HeapObj::BoundMethod { recv, method, .. }) => {
                     // Walk the captured receiver. The method name
                     // is a SymId (not heap-managed) so no further
                     // visit is needed.
                     Heap::visit_value(recv, &mut self.marks, &mut worklist);
+                    // Same captured-locals walk as UnboundMethod
+                    // below: the snapshot may carry closure
+                    // captures that are unreachable via the
+                    // class table after a `remove_method`.
+                    if let Some(m) = method
+                        && let Some(cl) = &m.closure {
+                        for v in cl.captured.borrow().iter() {
+                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                        }
+                    }
+                }
+                Slot::Live(HeapObj::UnboundMethod { method, .. }) => {
+                    // The snapshot Method may carry a closure
+                    // whose `captured` Vec holds heap-referenced
+                    // Values (`define_method { ... }` captures
+                    // locals). When the class table entry is
+                    // dropped via `remove_method`, the snapshot
+                    // is the sole holder — the regular
+                    // `Vm.maybe_gc` root walker won't reach it
+                    // because it only iterates `Vm.classes`'s
+                    // method tables. Walk explicitly here so the
+                    // captured locals stay reachable for as long
+                    // as the UnboundMethod is alive. Parallel to
+                    // the singleton-class loop at line ~425.
+                    // `class` is `Rc<Class>` (not heap-managed)
+                    // so no further visit needed; `name_id` is a
+                    // SymId.
+                    if let Some(m) = method
+                        && let Some(cl) = &m.closure {
+                        for v in cl.captured.borrow().iter() {
+                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                        }
+                    }
                 }
                 Slot::Live(HeapObj::CurriedProc { underlying, gathered, .. }) => {
                     Heap::visit_value(underlying, &mut self.marks, &mut worklist);

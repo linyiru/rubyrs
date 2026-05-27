@@ -580,6 +580,29 @@ impl Vm {
         // slot, panicking later in `class_of`.
         if name == "method" && args.len() == 1
             && let Value::Sym(bound_name_id) = &args[0] {
+                // Snapshot the resolved Method at capture time so
+                // `bm.call` survives a subsequent `remove_method`
+                // (CRuby parity, matches the `instance_method` arm).
+                //
+                // Use the DISPATCH class (`heap.class_of`) for
+                // Object receivers — that's the class chain that
+                // a regular `recv.foo` would walk, and it
+                // honours singleton methods (`def obj.foo; ...`).
+                // `Vm::class_of` reports the *real* class for
+                // script-visible `obj.class`, which skips the
+                // eigenclass; using that here would snapshot the
+                // real-class body and silently invoke it instead
+                // of the singleton override.
+                let snapshot = match &recv {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_uncached(&cls, *bound_name_id)
+                    }
+                    _ => match self.class_of(&recv) {
+                        Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
+                        _ => None,
+                    },
+                };
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(recv.clone());
                 g.vm.maybe_gc();
@@ -587,6 +610,7 @@ impl Vm {
                 let id = g.vm.heap.alloc(HeapObj::BoundMethod {
                     recv: recv.clone(),
                     name_id: *bound_name_id,
+                    method: snapshot,
                 });
                 g.vm.stack.push(Value::BoundMethod(id));
                 return Ok(CallableOutcome::Handled);
@@ -603,19 +627,46 @@ impl Vm {
         // `class_of` is the closest approximation and roundtrips
         // through `bind` correctly for the common shapes.
         if let Value::BoundMethod(bid) = &recv && name == "unbind" && args.is_empty() {
-            let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
-                HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+            // Inherit the snapshot the BoundMethod was carrying;
+            // if it has none (legacy values constructed before
+            // the snapshot field, or `method` capture sites that
+            // synthesise a transient BM), look up live from the
+            // receiver's class. The resulting UnboundMethod
+            // survives a subsequent `remove_method` on either
+            // side of the round-trip.
+            let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod { recv, name_id, method } => (recv.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
             };
-            let cls = match self.class_of(&bm_recv) {
-                Value::Class(c) => c,
-                _ => return Err(self.trap(RubyError::TypeError {
-                    msg: "cannot unbind method on a value without a class".into(),
-                })),
+            // Use the DISPATCH class (heap.class_of) for Object
+            // receivers so the captured class reflects any
+            // singleton class on `recv`. Otherwise the
+            // UnboundMethod would carry the REAL class plus a
+            // singleton-method snapshot — `um.bind(other)` would
+            // pass the is_a fence (other is_a real_class) and
+            // silently invoke the singleton body on an unrelated
+            // instance. With the dispatch class, the captured
+            // class IS the singleton class, and is_a on a
+            // different instance correctly fails (singleton
+            // classes only contain the original instance via
+            // class_is_a).
+            let cls = match &bm_recv {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&bm_recv) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: "cannot unbind method on a value without a class".into(),
+                    })),
+                },
             };
+            let snapshot = bm_method.or_else(|| self.lookup_method_uncached(&cls, bm_name_id));
             self.maybe_gc();
             self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls, name_id: bm_name_id });
+            let id = self.heap.alloc(HeapObj::UnboundMethod {
+                class: cls,
+                name_id: bm_name_id,
+                method: snapshot,
+            });
             self.stack.push(Value::UnboundMethod(id));
             return Ok(CallableOutcome::Handled);
         }
@@ -623,25 +674,40 @@ impl Vm {
         // that `obj` is_a? the captured class. Raises TypeError on
         // mismatch, matching CRuby.
         if let Value::UnboundMethod(uid) = &recv && name == "bind" && args.len() == 1 {
-            let (cap_class, cap_name_id) = match self.heap.get(*uid) {
-                HeapObj::UnboundMethod { class, name_id } => (class.clone(), *name_id),
+            let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
+                HeapObj::UnboundMethod { class, name_id, method } => {
+                    (class.clone(), *name_id, method.clone())
+                }
                 _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
             };
             let mut args = args;
             let target = args.swap_remove(0);
-            let target_class = match self.class_of(&target) {
-                Value::Class(c) => c,
-                _ => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("bind argument must have a class (got {})", target.type_name()),
-                })),
+            // Use dispatch class (heap.class_of) for Object
+            // targets — matches the eigenclass-aware capture in
+            // unbind. Otherwise binding a singleton-method
+            // UnboundMethod back to its ORIGINAL instance would
+            // fail the is_a fence (target's real class doesn't
+            // walk through the singleton class).
+            let target_class = match &target {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&target) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("bind argument must have a class (got {})", target.type_name()),
+                    })),
+                },
             };
             // Kernel is the universally-bindable sentinel — CRuby
             // models it as a Module included in Object, so every
-            // value is_a Kernel. We don't model Modules; skipping
-            // the is_a check here gives `Kernel.instance_method(:foo)
-            //   .bind(any_value)` the same shape without forcing a
-            // synthetic Kernel-ancestor onto every primitive class.
+            // value is_a Kernel. Modules in general also accept
+            // any receiver: CRuby's
+            // `Module#instance_method(:foo).bind(obj)` succeeds
+            // regardless of whether obj's class includes the
+            // module (verified against 3.4). Class.instance_method
+            // stays strict — `obj.is_a?(cls)` required. Same
+            // fence as the `bind_call` arm below.
             if cap_class.name.as_str() != "Kernel"
+                && !cap_class.is_module
                 && !super::class_is_a(&target_class, &cap_class) {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
@@ -663,9 +729,106 @@ impl Vm {
             g.pin(target.clone());
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
-            let id = g.vm.heap.alloc(HeapObj::BoundMethod { recv: target, name_id: cap_name_id });
+            // Propagate the snapshot from the UnboundMethod —
+            // a later `bm.call` after a `remove_method` on the
+            // captured class still invokes the original body.
+            let id = g.vm.heap.alloc(HeapObj::BoundMethod {
+                recv: target,
+                name_id: cap_name_id,
+                method: cap_method,
+            });
             g.vm.stack.push(Value::BoundMethod(id));
             return Ok(CallableOutcome::Handled);
+        }
+        // `ubm.bind_call(recv, *args)` — CRuby 2.7+ fused
+        // bind-then-call: identical to `ubm.bind(recv).call(*args)`
+        // but without allocating a transient BoundMethod heap
+        // object. Re-uses the same is_a check (with the Kernel
+        // sentinel) and dispatches the captured method with
+        // `recv` pushed below the args.
+        //
+        // Motivating consumer: tilt-2.7.0
+        // `lib/tilt/template.rb:496` calls
+        // `method.bind_call(scope, **locals, &block)` per render —
+        // the fast path that replaces older `bind(scope).call(...)`
+        // shapes. Without this arm tilt falls through to
+        // NoMethodError on every render.
+        //
+        // Arity: at least 1 arg (the receiver); extra args + block
+        // are forwarded to the captured method.
+        if let Value::UnboundMethod(uid) = &recv && name == "bind_call" && !args.is_empty() {
+            let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
+                HeapObj::UnboundMethod { class, name_id, method } => {
+                    (class.clone(), *name_id, method.clone())
+                }
+                _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
+            };
+            let mut args = args;
+            let target = args.remove(0);
+            // Dispatch class for Object targets — mirrors the
+            // eigenclass-aware capture in unbind so a
+            // singleton-method UnboundMethod can bind_call back
+            // to its original receiver.
+            let target_class = match &target {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&target) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("bind_call argument must have a class (got {})", target.type_name()),
+                    })),
+                },
+            };
+            // Skip the is-a fence when:
+            // (a) captured class is Kernel — every value is_a
+            //     Kernel in CRuby; we don't model the Kernel
+            //     Module-mixin and use this sentinel to match.
+            // (b) captured class is any Module — CRuby's
+            //     `Module#instance_method(:foo).bind_call(obj)`
+            //     accepts ANY obj, not just instances of classes
+            //     that include the module. Verified against 3.4:
+            //     `module M; def foo; end; end;
+            //      M.instance_method(:foo).bind_call(Object.new)`
+            //     succeeds and runs `foo`. Note the captured
+            //     method is invoked directly via `invoke_method`
+            //     on the resolved Method (snapshot-preferred,
+            //     `cap_class`-chain fallback) — no name-based
+            //     lookup on the receiver's class chain happens,
+            //     so the receiver doesn't need to have `foo`
+            //     defined on its class.
+            //     `Class.instance_method(:foo).bind_call(obj)`
+            //     stays strict — `obj.is_a?(cls)` required.
+            if cap_class.name.as_str() != "Kernel"
+                && !cap_class.is_module
+                && !super::class_is_a(&target_class, &cap_class) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "bind_call argument must be an instance of {} (got {})",
+                        cap_class.name, target_class.name,
+                    ),
+                }));
+            }
+            // Prefer the snapshot taken at capture time — tilt's
+            // pattern of capture→remove→bind_call would otherwise
+            // miss the now-removed entry. Fall back to live chain
+            // lookup when no snapshot exists (e.g. UnboundMethod
+            // values created from `unbind` paths that pre-date
+            // the snapshot field).
+            let m = match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
+                Some(m) => m,
+                None => {
+                    let mname = self.interner.resolve(cap_name_id).to_string();
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("undefined method '{}' for class '{}'", mname, cap_class.name),
+                    }));
+                }
+            };
+            self.invoke_method(m, target, args)?;
+            return Ok(CallableOutcome::Handled);
+        }
+        if let Value::UnboundMethod(_) = &recv && name == "bind_call" {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1..)".into(),
+            }));
         }
         // `m.to_proc` — explicit conversion to a Proc. Equivalent
         // to the implicit `&m` coercion: routes through the same
@@ -843,20 +1006,27 @@ impl Vm {
         // synthesised protos for forwarders / preamble eval).
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
             && name == "source_location" && args.is_empty() {
-                let (class, m_name_id) = match &recv {
+                // Prefer the snapshot Method so introspection
+                // survives a subsequent `remove_method` between
+                // capture and the source_location query.
+                let (class, m_name_id, snapshot) = match &recv {
                     Value::BoundMethod(bid) => {
-                        let (r, n) = self.heap.bound_method(*bid);
+                        let (r, n, snap) = self.heap.bound_method_full(*bid);
                         let r = r.clone();
+                        let snap = snap.clone();
                         let cls = match self.class_of(&r) {
                             Value::Class(c) => c,
                             _ => { self.stack.push(Value::Nil); return Ok(CallableOutcome::Handled); }
                         };
-                        (cls, n)
+                        (cls, n, snap)
                     }
-                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        (cls, n, snap)
+                    }
                     _ => unreachable!(),
                 };
-                let m = match self.lookup_method_uncached(&class, m_name_id) {
+                let m = match snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id)) {
                     Some(m) => m,
                     None => { self.stack.push(Value::Nil); return Ok(CallableOutcome::Handled); }
                 };
@@ -899,24 +1069,30 @@ impl Vm {
                         _ => unreachable!(),
                     };
                 }
-                // owner: resolve Method through lookup; prefer its
-                // defining_class.upgrade() over the captured class.
-                let (cap_class, m_name_id) = match &recv {
+                // owner: resolve Method through snapshot (or live
+                // lookup as fallback) and prefer its
+                // `defining_class.upgrade()` over the captured
+                // class.
+                let (cap_class, m_name_id, snapshot) = match &recv {
                     Value::BoundMethod(bid) => {
-                        let (r, n) = self.heap.bound_method(*bid);
+                        let (r, n, snap) = self.heap.bound_method_full(*bid);
                         let r = r.clone();
+                        let snap = snap.clone();
                         let cls = match self.class_of(&r) {
                             Value::Class(c) => c,
                             _ => return Err(self.trap(RubyError::TypeError {
                                 msg: "Method receiver has no resolvable class".into(),
                             })),
                         };
-                        (cls, n)
+                        (cls, n, snap)
                     }
-                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        (cls, n, snap)
+                    }
                     _ => unreachable!(),
                 };
-                let owner = match self.lookup_method_uncached(&cap_class, m_name_id) {
+                let owner = match snapshot.or_else(|| self.lookup_method_uncached(&cap_class, m_name_id)) {
                     Some(m) => m.defining_class.as_ref()
                         .and_then(|w| w.upgrade())
                         .unwrap_or_else(|| cap_class.clone()),
@@ -933,11 +1109,11 @@ impl Vm {
         // UnboundMethod.
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
             && matches!(name, "arity" | "parameters") && args.is_empty() {
-                let (class, m_name_id) = match &recv {
+                let (class, m_name_id, snapshot) = match &recv {
                     Value::BoundMethod(bid) => {
-                        let (bm_recv, nid) = {
-                            let (r, n) = self.heap.bound_method(*bid);
-                            (r.clone(), n)
+                        let (bm_recv, nid, snap) = {
+                            let (r, n, snap) = self.heap.bound_method_full(*bid);
+                            (r.clone(), n, snap.clone())
                         };
                         let cls = match self.class_of(&bm_recv) {
                             Value::Class(c) => c,
@@ -945,12 +1121,17 @@ impl Vm {
                                 msg: "Method receiver has no resolvable class".into(),
                             })),
                         };
-                        (cls, nid)
+                        (cls, nid, snap)
                     }
-                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        (cls, n, snap)
+                    }
                     _ => unreachable!(),
                 };
-                let m_opt = self.lookup_method_uncached(&class, m_name_id);
+                // Prefer the snapshot Method — survives a later
+                // remove_method that strips the live entry.
+                let m_opt = snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id));
                 let (arity, params_info) = match m_opt {
                     Some(m) => {
                         let proto = &self.protos[m.proto_idx];
@@ -1044,10 +1225,21 @@ impl Vm {
             }
         if let Value::BoundMethod(bid) = &recv
             && matches!(name, "call" | "[]" | "()") {
-                let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
-                    HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+                let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
+                    HeapObj::BoundMethod { recv, name_id, method } => {
+                        (recv.clone(), *name_id, method.clone())
+                    }
                     _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
                 };
+                // Snapshot fast path: invoke the captured Method
+                // directly so a `remove_method` on the captured
+                // class between capture and call doesn't break
+                // `bm.call` (CRuby parity, matches the bind_call
+                // path).
+                if let Some(m) = bm_method {
+                    self.invoke_method(m, bm_recv, args)?;
+                    return Ok(CallableOutcome::Handled);
+                }
                 let argc = args.len();
                 self.stack.push(bm_recv);
                 for a in args {
@@ -1458,8 +1650,14 @@ impl Vm {
                 }))
             }
             ("instance_method", [Value::Sym(sid)]) => {
-                let found = self.lookup_method_uncached(&cls, *sid).is_some();
-                if !found && !is_primitive_class_name(&cls.name) {
+                // Snapshot the Method here so the UnboundMethod
+                // survives a subsequent `remove_method` between
+                // capture and bind/bind_call. Tilt's
+                // `compile_template_method` does exactly that —
+                // captures, then removes from the class table,
+                // then bind_call's the captured handle.
+                let snapshot = self.lookup_method_uncached(&cls, *sid);
+                if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                     let mname = self.interner.resolve(*sid).to_string();
                     return Err(self.trap(RubyError::NameError {
                         msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
@@ -1467,7 +1665,11 @@ impl Vm {
                 }
                 self.maybe_gc();
                 self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls.clone(), name_id: *sid });
+                let id = self.heap.alloc(HeapObj::UnboundMethod {
+                    class: cls.clone(),
+                    name_id: *sid,
+                    method: snapshot,
+                });
                 self.stack.push(Value::UnboundMethod(id));
                 Ok(true)
             }
@@ -1491,15 +1693,19 @@ impl Vm {
                         }));
                     }
                     let sid = self.interner.intern(raw);
-                    let found = self.lookup_method_uncached(&cls, sid).is_some();
-                    if !found && !is_primitive_class_name(&cls.name) {
+                    let snapshot = self.lookup_method_uncached(&cls, sid);
+                    if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method '{}' for class '{}'", raw, cls.name),
                         }));
                     }
                     self.maybe_gc();
                     self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls.clone(), name_id: sid });
+                    let id = self.heap.alloc(HeapObj::UnboundMethod {
+                        class: cls.clone(),
+                        name_id: sid,
+                        method: snapshot,
+                    });
                     self.stack.push(Value::UnboundMethod(id));
                     Ok(true)
                 })
@@ -2122,11 +2328,29 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
             if &*name == "method" && args.len() == 1
                 && let Value::Sym(bound_name_id) = &args[0] {
+                    // Snapshot the Method at capture time so the
+                    // BoundMethod survives a later remove_method.
+                    // Use `heap.class_of` for Object self so a
+                    // singleton method on `self` is captured
+                    // (matches dispatch); `Vm::class_of` would
+                    // skip the eigenclass and snapshot the real
+                    // class's body instead.
+                    let snapshot = match &self_val {
+                        Value::Object(id) => {
+                            let cls = self.heap.class_of(*id);
+                            self.lookup_method_uncached(&cls, *bound_name_id)
+                        }
+                        _ => match self.class_of(&self_val) {
+                            Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
+                            _ => None,
+                        },
+                    };
                     self.maybe_gc(); // allow: gc-rooting — BoundMethod holds `recv: self_val.clone()` (cloned from `frames.last().self_val`, which stays rooted via `self.frames` for the whole alloc window) and a primitive `SymId`; no unrooted slot at risk.
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::BoundMethod {
                         recv: self_val.clone(),
                         name_id: *bound_name_id,
+                        method: snapshot,
                     });
                     self.stack.push(Value::BoundMethod(id));
                     return Ok(());
@@ -4699,10 +4923,19 @@ impl Vm {
         // method receives the block argument.
         if let Some(Value::BoundMethod(bid)) = &recv
             && matches!(&*name, "call" | "[]" | "()") {
-            let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
-                HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+            let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod { recv, name_id, method } => {
+                    (recv.clone(), *name_id, method.clone())
+                }
                 _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
             };
+            // Snapshot fast path — invoke directly with the
+            // attached block, matching the no-block BoundMethod#call
+            // arm's parity with capture-then-remove-then-call.
+            if let Some(m) = bm_method {
+                self.invoke_method_with_block(m, bm_recv, args, Some(block))?;
+                return Ok(());
+            }
             // do_call_block entry expects stack layout
             // `recv, block, args...` (drain last `argc` for args,
             // then pop block, then pop recv). Push in that order.
@@ -4711,6 +4944,66 @@ impl Vm {
             self.stack.push(Value::Block(block));
             for a in args { self.stack.push(a); }
             return self.do_call_block(bm_name_id, argc_new, false, u16::MAX);
+        }
+        // `ubm.bind_call(recv, *args, &block)` — block-form parallel
+        // of the no-block bind_call arm in `try_dispatch_callable_intrinsics`
+        // (line ~690). That arm runs via `do_call`'s pre-block
+        // dispatch path and never sees a block argument; tilt's
+        // `method.bind_call(scope, **locals, &block)` (template.rb:
+        // ~392) passes one, which lands here. Without this arm
+        // the call raises NoMethodError even though the blockless
+        // shape succeeds.
+        if let Some(Value::UnboundMethod(uid)) = &recv && &*name == "bind_call" {
+            if args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: "wrong number of arguments (given 0, expected 1..)".into(),
+                }));
+            }
+            let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
+                HeapObj::UnboundMethod { class, name_id, method } => {
+                    (class.clone(), *name_id, method.clone())
+                }
+                _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
+            };
+            let mut args = args;
+            let target = args.remove(0);
+            // Dispatch class for Object targets — mirrors the
+            // eigenclass-aware capture in unbind so a
+            // singleton-method UnboundMethod can bind_call back
+            // to its original receiver.
+            let target_class = match &target {
+                Value::Object(id) => self.heap.class_of(*id),
+                _ => match self.class_of(&target) {
+                    Value::Class(c) => c,
+                    _ => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("bind_call argument must have a class (got {})", target.type_name()),
+                    })),
+                },
+            };
+            // Same is_a fence as the no-block path: Kernel sentinel
+            // and any Module captured class are exempt; Class
+            // capture is strict.
+            if cap_class.name.as_str() != "Kernel"
+                && !cap_class.is_module
+                && !super::class_is_a(&target_class, &cap_class) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "bind_call argument must be an instance of {} (got {})",
+                        cap_class.name, target_class.name,
+                    ),
+                }));
+            }
+            let m = match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
+                Some(m) => m,
+                None => {
+                    let mname = self.interner.resolve(cap_name_id).to_string();
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("undefined method '{}' for class '{}'", mname, cap_class.name),
+                    }));
+                }
+            };
+            self.invoke_method_with_block(m, target, args, Some(block))?;
+            return Ok(());
         }
 
         // P2-13: `block` (now an ObjId in a Rust local) is no
