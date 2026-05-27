@@ -10,7 +10,7 @@ describe "Method#unbind" do
       def f; :ok; end
     end
     u = UnbT1.new.method(:f).unbind
-    assert_eq(u.class.name, "UnboundMethod")
+    assert_eq(u.class.to_s, "UnboundMethod")
   end
 
   it "round-trips via bind on a fresh receiver" do

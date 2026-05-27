@@ -10,7 +10,7 @@ describe "UnboundMethod#bind" do
       def add(x); x + 1; end
     end
     bound = UBindT1.instance_method(:add).bind(UBindT1.new)
-    assert_eq(bound.class.name, "Method")
+    assert_eq(bound.class.to_s, "Method")
   end
 
   it "produces a callable Method that runs the original body" do
@@ -38,13 +38,7 @@ describe "UnboundMethod#bind" do
     class UBindT4Rhs
     end
     u = UBindT4Lhs.instance_method(:f)
-    raised = false
-    begin
-      u.bind(UBindT4Rhs.new)
-    rescue TypeError
-      raised = true
-    end
-    assert_eq(raised, true)
+    assert_raises("TypeError") { u.bind(UBindT4Rhs.new) }
   end
 
   # skipped (method-not-implemented): describe "UnboundMethod#bind_call" do ... end
