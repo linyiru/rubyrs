@@ -106,6 +106,13 @@ puts "class-get=#{Holder.instance_variable_get(:@registry)}"
 Holder.instance_variable_set(:@registry, "updated")
 puts "class-get-after=#{Holder.instance_variable_get(:@registry)}"
 
+## `instance_variables` should also reach Class ivars now —
+## family consistency with get/set above. Without this, a
+## class-level `@foo` would be readable/writable but invisible
+## to enumeration.
+Holder.instance_variable_set(:@second, 1)
+puts "class-vars=#{Holder.instance_variables.sort.inspect}"
+
 ## respond_to? must agree with dispatch: every value responds
 ## to instance_variable_get / instance_variable_set even if the
 ## result is uninteresting (primitives) or raises (set on

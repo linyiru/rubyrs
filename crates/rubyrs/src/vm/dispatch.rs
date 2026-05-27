@@ -2508,18 +2508,26 @@ impl Vm {
             return Ok(());
         }
         // `obj.instance_variables` — Array of Symbols (with `@`
-        // prefix). Only Value::Object instances actually carry
-        // ivars; other shapes get an empty Array.
+        // prefix). Reads ivars from `Value::Object` (Instance) and
+        // `Value::Class` receivers (cls.ivars), staying consistent
+        // with `instance_variable_get` / `_set` which also support
+        // both shapes. Other receivers (primitives, Array/Hash/etc.
+        // that don't carry ivars in rubyrs's heap model) get an
+        // empty Array.
         if &*name == "instance_variables" && args.is_empty() {
             let mut names: Vec<Value> = Vec::new();
-            if let Value::Object(id) = &recv {
-                let ivar_ids: Vec<crate::intern::SymId> = {
+            let ivar_ids: Vec<crate::intern::SymId> = match &recv {
+                Value::Object(id) => {
                     if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
                         inst.ivars.keys().copied().collect()
                     } else {
                         Vec::new()
                     }
-                };
+                }
+                Value::Class(cls) => cls.ivars.borrow().keys().copied().collect(),
+                _ => Vec::new(),
+            };
+            if !ivar_ids.is_empty() {
                 let mut decorated: Vec<(String, crate::intern::SymId)> = ivar_ids.into_iter()
                     .map(|s| {
                         let raw = self.interner.resolve(s).to_string();
