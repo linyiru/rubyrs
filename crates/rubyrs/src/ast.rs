@@ -2587,8 +2587,21 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 continue;
             }
             // `class << self; <stmt> if cond` / `class << self;
-            // <stmt> unless cond` — modifier-form If/Unless at body
-            // top level wrapping a single supported inner stmt.
+            // <stmt> unless cond` — and structurally-equivalent
+            // block forms `if cond; <stmt>; end` / `unless cond;
+            // <stmt>; end` — at body top level wrapping a single
+            // supported inner stmt. The recogniser admits ANY
+            // `IfNode` / `UnlessNode` with exactly one statement
+            // and no else/consequent: the modifier and one-stmt
+            // block forms compile identically (modifier is just
+            // sugar), so handling both is safe and gives a
+            // slightly broader green path. Tightening to truly
+            // modifier-form via `end_keyword_loc().is_none()`
+            // would be the alternative; chose the broader
+            // wording over the narrower recogniser since the
+            // semantics are equivalent. (PR #218 Copilot
+            // round 3 caught the previous "modifier-form only"
+            // wording as inaccurate.)
             // Recognised inner shapes: bare-call (CallNode, e.g.
             // `ruby2_keywords(:use)`) and the `alias new old` form
             // (AliasMethodNode). Both are wrapped as
