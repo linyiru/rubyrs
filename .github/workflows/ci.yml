@@ -371,7 +371,18 @@ jobs:
           # B6 / F4 / F6 that landed new ICE-class invariants in
           # dispatch + step + iter). The total can ratchet down
           # if/when individual sites become Trap-class.
-          check crates/rubyrs/src/vm/dispatch.rs     16
+          # Bumped 16 → 26 (+10) to catch up with accumulated master
+          # feature work. New ICE-class `.expect("ICE: ...")` /
+          # `panic!("ICE: ...")` sites from: PR #155 (fizzbuzz method
+          # cache loop), PR #138 (bignum to_s/sprintf), PR #144
+          # (Object#instance_variable_get/set), PR #163 (String#dump),
+          # PR #159 (BigInt bit ops), PR #167 (String batch:
+          # chars/strip/lstrip/rstrip/start_with?/end_with?), PR #168
+          # (String#count), plus the existing UnboundMethod /
+          # BoundMethod slot-type ICE panics in do_call_block. All
+          # sites are ICE-class (compiler-emitted invariants on
+          # stack shape and Op pairing); not user-reachable.
+          check crates/rubyrs/src/vm/dispatch.rs     26
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
@@ -386,7 +397,12 @@ jobs:
           # byte_literals pool, gated by `.expect("ICE:
           # LoadConstStrBytes no frame")` — same invariant pattern
           # as every other LoadConst* arm in step.rs.
-          check crates/rubyrs/src/vm/step.rs         65
+          # Bumped 65 → 73 (+8) from BigInt Phase B bit-ops work
+          # (PR #159) and follow-on string-batch / spec-ingestion
+          # PRs landing new `Op::*` arms with ICE-class frame /
+          # stack-shape assertions. All sites are `.expect("ICE:
+          # ...")` invariants on op pairing; not user-reachable.
+          check crates/rubyrs/src/vm/step.rs         73
           check crates/rubyrs/src/vm/iter.rs         10
           check crates/rubyrs/src/vm/cext.rs          6
           # Bumped 3 → 10 by PR #78 (break/next through ensure).
@@ -398,7 +414,13 @@ jobs:
           check crates/rubyrs/src/vm/raise.rs        10
           check crates/rubyrs/src/vm/lookup.rs        3
           check crates/rubyrs/src/vm/range.rs         1
-          check crates/rubyrs/src/vm/string.rs        1
+          # Bumped 1 → 4 (+3) from PR #163 (String#dump — hex pair
+          # `char::from_digit(N, 16).unwrap()` for high/low nibbles)
+          # and PR #163 / #168 regex caps and String#tr last-char
+          # invariants. All sites are ICE-class — radix < 16 by
+          # construction, `caps.get(0)` always Some on a successful
+          # match, `to_chars.last()` after a non-empty validation.
+          check crates/rubyrs/src/vm/string.rs        4
           # The remaining vm/* submodules (array, fileops, gc, hash,
           # numeric, primitive, sprintf, util) have zero panic-class
           # sites; ratcheting them at 0 keeps them honest.
@@ -412,7 +434,15 @@ jobs:
           # class_stack / frame invariant asserts that the main
           # dispatch loop has in step.rs. ICE-class.
           check crates/rubyrs/src/vm/kernel.rs        5
-          check crates/rubyrs/src/vm/numeric.rs       0
+          # Bumped 0 → 3 (+3) for two ICE-class invariants in
+          # `Integer#to_s(radix)` (radix validated to 2..=36 at
+          # the entry guard so `digit < radix` and "ASCII digits +
+          # sign" both hold by construction) plus one
+          # `.expect("ICE: bigint_arith None for Int operands")`
+          # in `apply_int_promote`'s overflow path — fall-through
+          # is impossible under `feature = "bignum"` because that
+          # arm only fires after `apply_int` returned None.
+          check crates/rubyrs/src/vm/numeric.rs       3
           check crates/rubyrs/src/vm/primitive.rs     0
           check crates/rubyrs/src/vm/sprintf.rs       0
           check crates/rubyrs/src/vm/util.rs          0
@@ -425,7 +455,14 @@ jobs:
           # Bumped 12 → 13 by F6: the eigenclass accessor on
           # Instance.singleton_class adds one more ICE-class
           # accessor in the same shape.
-          check crates/rubyrs/src/heap.rs             15
+          # Bumped 15 → 20 (+5) from the slot-type accessor surface
+          # expanding to cover Hash default block / default value
+          # (PR #144 ivar work consumes them), CurriedProc,
+          # UnboundMethod variants — same "ICE: heap slot is not
+          # an X" pattern as the existing 15 accessors. All 🟡:
+          # programmer-error if a wrong-typed ObjId reaches the
+          # accessor.
+          check crates/rubyrs/src/heap.rs             20
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-
@@ -441,7 +478,35 @@ jobs:
           # the increase via the merge-result count). Pre-existing
           # master bug, not introduced by this PR.
           check crates/rubyrs/src/ast.rs       8
-          check crates/rubyrs/src/lib.rs       1
+          # Bumped 1 → 10 (+9) — net of two waves:
+          #
+          #   (a) +3 from PRs that added pure-Ruby preamble files
+          #       (`preamble/random.rb`, `preamble/securerandom.rb`,
+          #       `preamble/time.rb`). Each adds one
+          #       `.expect("ICE: failed to load X preamble")` on
+          #       the eval. The PRs that landed those never bumped
+          #       this budget; the count went from 1 to 4 silently
+          #       across two PR cycles before either was flagged.
+          #
+          #   (b) +6 from the preamble externalisation series
+          #       (`aceebaf` exceptions, `5072eb4` Object,
+          #       `bb7b24f` Comparable, `ce9ea1e` MatchData,
+          #       `201e7ea` Mutex, `0cacb96` Enumerable). Each
+          #       commit lifted a class definition out of the
+          #       inline raw-string PREAMBLE into its own
+          #       `preamble/*.rb` file, adding one
+          #       `.expect("ICE: failed to load X preamble")` on
+          #       the eval per file. The author (this branch)
+          #       didn't bump per-commit; bumping retroactively
+          #       here.
+          #
+          # All 10 sites are 🟢 ICE-class — preamble Ruby is
+          # author-controlled at compile time (the .rb files
+          # live in-tree, sanity-checked by `prism check`), not
+          # user input. A failed eval there means rubyrs itself
+          # is broken; aborting with a clear `ICE:` message is
+          # correct surface.
+          check crates/rubyrs/src/lib.rs       10
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
@@ -453,7 +518,14 @@ jobs:
           # `last_mut().expect("ICE: just checked")` after the
           # is_empty guard. ICE-class; the guards make the invariant
           # statically true on each access.
-          check crates/rubyrs/src/compiler.rs  6
+          # Bumped 6 → 7 (+1) from a recent feature commit adding
+          # one more ICE-class invariant in the compiler (the
+          # `loop_break_jumps.last_mut().expect("ICE: just
+          # checked")` pattern that pairs with the existing
+          # loop-scope push/pop dance). ICE-class; the
+          # `is_empty()` guard above each `last_mut()` makes the
+          # invariant statically true.
+          check crates/rubyrs/src/compiler.rs  7
           exit "$fail"
 
   perf-budget:

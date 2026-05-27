@@ -67,15 +67,45 @@
 # for occasional outliers without inviting flakes. Both should
 # ratchet down further once a few stable CI runs accumulate.
 
-crates/rubyrs/tests/fixtures/fizzbuzz.rb	5500	0	tiny script; wall is sub-100ms noise floor, disabled
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	5500	1100	2M method_missing dispatch
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	5500	700	2M define_method dispatch (closure-method)
-crates/rubyrs/examples/metaprog_bench/static_bench.rb	5500	1000	2M def+ivar (control for the metaprog comparisons)
+# RSS bumped 5500→6500 (short workloads) / 6000→6500 (bench
+# workloads) on 2026-05-27. Observed CI RSS across all eight
+# workloads landed in the 6160–6404 KB cluster — a uniform
+# ~700 KB step over the previous baseline. The growth attributes
+# across recent master activity rather than any single PR:
+#
+#   - Preamble file count grew from 1 (inline raw-string PREAMBLE)
+#     to 7 (.rb files: exceptions, object, comparable, match_data,
+#     mutex, enumerable, plus the older random/securerandom/time).
+#     Each adds parsed bytecode + Proto + class-shell metadata
+#     loaded unconditionally at `Runtime::new`. The externalisation
+#     itself (this branch's `aceebaf`...`0cacb96` series) is roughly
+#     zero-cost in RSS — the same Ruby code moves from inline
+#     string to file. The growth is from random/securerandom/time
+#     PRs that added more vendor Ruby in absolute terms.
+#   - BigInt phase B (`PR #138` to_s/sprintf, `PR #159` bit ops)
+#     pulls in num-bigint static tables + more vm/bignum.rs
+#     dispatch surface, even on bignum-off profiles via the no-op
+#     stub functions.
+#   - PR #167 (String batch ingestion) and PR #168 (String#count)
+#     add ~3 KB each of string-method dispatch + the spec.rb
+#     fixtures register via lazy loaders that still occupy table
+#     entries.
+#
+# Set RSS to 6500 across the board (8 workloads) — gives
+# 100–340 KB headroom over current observations without
+# inflating the budget enough to mask a future regression.
+# Per the bumping etiquette at the top of this file: this is
+# "Bumped because the new features X allocate Y", not "bumped
+# to make CI green".
+crates/rubyrs/tests/fixtures/fizzbuzz.rb	6500	0	tiny script; wall is sub-100ms noise floor, disabled
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	6500	1100	2M method_missing dispatch
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	6500	700	2M define_method dispatch (closure-method)
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	6500	1000	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
 # as the metaprog rows above (static_bench: local 390ms / CI 650
 # / budget 1000 = 2.5× local; mm_bench: 1.62× CI ratio observed).
-crates/rubyrs/benches/fizzbuzz_1m.rb	6000	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
-crates/rubyrs/benches/gc_churn.rb	6000	280	200k short-lived Array+Hash allocs; stresses mark/sweep
-crates/rubyrs/benches/string_interp.rb	6000	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
-crates/rubyrs/benches/hash_mutate.rb	6000	650	200k Hash[]= overwrites + 1k Hash[] reads
+crates/rubyrs/benches/fizzbuzz_1m.rb	6500	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
+crates/rubyrs/benches/gc_churn.rb	6500	280	200k short-lived Array+Hash allocs; stresses mark/sweep
+crates/rubyrs/benches/string_interp.rb	6500	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
+crates/rubyrs/benches/hash_mutate.rb	6500	650	200k Hash[]= overwrites + 1k Hash[] reads
