@@ -1257,6 +1257,38 @@ fn int_bit_ops_raise_argumenterror_on_bad_arity() {
     }
 }
 
+#[test]
+fn integer_to_s_raises_argumenterror_on_bad_arity() {
+    // Arity guard for `Integer#to_s`. `respond_to?(:to_s)` returns
+    // true on Int (and BigInt under bignum), so 2+-arg shapes must
+    // raise ArgumentError per CRuby, not NoMethodError. Sibling
+    // arity guards already cover bit ops (PR #211) and iter
+    // methods (PR #186). 0-arg / 1-arg are happy paths and tested
+    // by the spec micro-runner.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, given) in [
+        ("5.send(:to_s, 10, 20)", 2),
+        ("5.send(:to_s, 10, 20, 30)", 3),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:to_s, 10, 20)", 2),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:to_s, 10, 20, 30)", 3),
+    ] {
+        let err = rt.eval(script, "int_to_s_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "ArgumentError", "for {:?}", script);
+                assert_eq!(
+                    message,
+                    format!("wrong number of arguments (given {}, expected 0..1)", given),
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught ArgumentError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn int_shift_zero_receiver_never_traps_regardless_of_count() {

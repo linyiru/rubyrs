@@ -1375,6 +1375,21 @@ impl Vm {
         // radices 3/5/6/7/…/36) plus a 1-byte sign accounting.
         // Mirrored by the 0-arg arm so both paths share the
         // protection.
+        // Arity guard for `BigInt#to_s` — sibling to numeric.rs's
+        // guard on the Int recv side. 0-arg goes through the
+        // empty-args branch below; 1-arg goes through the
+        // radix arm; 2+-arg must raise ArgumentError instead of
+        // falling through to NoMethodError.
+        if name == "to_s" && args.len() > 1
+            && matches!(recv, Value::BigInt(_))
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            }));
+        }
         if name == "to_s" && args.len() == 1
             && let Value::BigInt(id) = recv
         {
