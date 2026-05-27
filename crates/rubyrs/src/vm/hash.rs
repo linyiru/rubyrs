@@ -167,6 +167,22 @@ impl Vm {
                             None => default.clone(),
                         })
                     }
+                    // Wrong-arity raises ArgumentError, matching CRuby.
+                    // Previously a `fetch(...)` with 0 or 3+ args
+                    // matched none of the arms in this `match`,
+                    // `hash_collection_call` returned `Ok(None)`, and
+                    // `do_call` surfaced `NoMethodError: undefined
+                    // method 'fetch' for Hash` — divergence ratcheted
+                    // by PR #193's `divergence_hash_fetch_arity`
+                    // fixture (retired in this PR). This catch-all
+                    // sits AFTER the 1-arg and 2-arg arms so they
+                    // still take precedence; only 0-arg and 3+-arg
+                    // shapes reach here.
+                    ("fetch", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 1..2)", many.len()),
+                        }));
+                    }
                     ("include?", [k]) | ("has_key?", [k]) | ("key?", [k]) | ("member?", [k]) => {
                         let h = self.heap.hash(id);
                         let hit = h.iter().any(|(key, _)| key.ruby_eq(k, &self.heap));

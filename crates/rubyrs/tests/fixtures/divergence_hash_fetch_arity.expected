@@ -1,3 +1,0 @@
-fetch():       NoMethodError
-fetch(1,2,3): NoMethodError
-fetch(:nope): KeyError
