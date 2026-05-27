@@ -327,26 +327,19 @@ impl Vm {
                 let mut last_end = 0usize;
                 for m in re.find_iter(&source) {
                     out.push_str(&source[last_end..m.start()]);
-                    g.vm.invoke_block(block, vec![Value::new_str(m.as_str().to_string())])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    // Non-local `return` from the block — same
-                    // `Ok(Some(Value::Nil))` shape as Array#sort's
-                    // comparator arm (and the family of fixes in
-                    // PR #166): marking the primitive as
-                    // "matched" so the outer dispatch loop unwinds
-                    // via `method_return`. Returning `Ok(None)`
-                    // would cause `do_call_block` to fall through
-                    // to NoMethodError even though `method_return`
-                    // is set.
-                    if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        // CRuby semantics: break val from inside a
+                    let r = match g.vm.step_block(block, vec![Value::new_str(m.as_str().to_string())], pre_frames)? {
+                        // Non-local `return` from the block —
+                        // `Ok(Some(Value::Nil))` marks the primitive
+                        // as matched so the outer dispatch loop
+                        // unwinds via `method_return`. `Ok(None)`
+                        // would route to NoMethodError.
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        // CRuby semantics: `break val` from inside a
                         // gsub block returns val as the call's
                         // result (not the partially-built string).
-                        return Ok(Some(r));
-                    }
+                        BlockStep::Break(r) => return Ok(Some(r)),
+                        BlockStep::Value(r) => r,
+                    };
                     let r_str = r.to_display(&g.vm.heap, &g.vm.interner);
                     out.push_str(&r_str);
                     last_end = m.end();
@@ -674,15 +667,11 @@ impl Vm {
                 let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
                 let mut early = None;
                 for v in snapshot {
-                    g.vm.invoke_block(block, vec![v.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(key);
-                        break;
-                    }
+                    let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(k) => k,
+                    };
                     // CRuby's chunk treats `nil` (and `:_separator`)
                     // as a drop-and-break sentinel. `false` is a
                     // normal key — its run shows up in the output.
@@ -1463,14 +1452,11 @@ impl Vm {
                 while low < high {
                     let mid = low + (high - low) / 2;
                     let elem = snapshot[mid].clone();
-                    g.vm.invoke_block(block, vec![elem.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        return Ok(Some(r));
-                    }
+                    let r = match g.vm.step_block(block, vec![elem.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => return Ok(Some(r)),
+                        BlockStep::Value(r) => r,
+                    };
                     match r {
                         Value::Bool(true) => high = mid,
                         Value::Bool(false) | Value::Nil => low = mid + 1,
@@ -1723,29 +1709,21 @@ impl Vm {
                         // positive → prev > curr (swap).
                         let a = copy[j - 1].clone();
                         let b = copy[j].clone();
-                        g.vm.invoke_block(block, vec![a, b])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        // Non-local `return` from inside the
-                        // comparator block: return Some(Nil) so the
-                        // outer dispatch loop sees a primitive result
-                        // and runs its method_return unwind. `Ok(None)`
-                        // would mean "no primitive matched, fall
-                        // through" — which then routes through
-                        // do_call_block looking for another handler
-                        // and ends up at NoMethodError, because this
-                        // arm IS the block-form sort!/sort primitive.
+                        // Non-local `return` from the comparator:
+                        // `Ok(Some(Value::Nil))` marks the primitive
+                        // as matched so the outer dispatch loop
+                        // unwinds via `method_return`. `Ok(None)`
+                        // would route through do_call_block to
+                        // NoMethodError, because this arm IS the
+                        // block-form sort!/sort primitive.
                         // Empirically verified vs CRuby:
                         // `def foo; [3,1,2].sort!{return :x};
                         // :unreached; end; foo` → `:x`.
-                        if g.vm.method_return.is_some() {
-                            return Ok(Some(Value::Nil));
-                        }
-                        let result = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        if g.vm.break_signaled {
-                            g.vm.break_signaled = false;
-                            early = Some(result);
-                            break 'outer;
-                        }
+                        let result = match g.vm.step_block(block, vec![a, b], pre_frames)? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                            BlockStep::Value(r) => r,
+                        };
                         // Non-Integer block result mirrors CRuby's
                         // `comparison of X with 0 failed`
                         // (ArgumentError, NOT TypeError — CRuby
