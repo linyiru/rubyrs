@@ -1705,6 +1705,106 @@ fn sprintf_radix_int_min_does_not_panic() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_times_upto_downto_iterate_with_demote_on_fit() {
+    // Phase B.6: block-form iteration over BigInt operands.
+    // Counter lives as a native num_bigint::BigInt; each
+    // yielded Value is demoted to `Value::Int` when it fits i64
+    // (`(big - 5).upto(big)` yields five BigInts but
+    // `(2**65).times { |i| break if i >= 3 }` yields Int(0..3)
+    // because the in-range counts fit i64 fine).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // BigInt#times: break early — yields Int because the
+        // visited values fit i64.
+        "arr = []\n\
+         (2 ** 65).times { |i| arr << i; break if i >= 3 }\n\
+         puts arr.inspect\n\
+         puts arr[0].class.name\n\
+         # BigInt#upto: small range across the i64 boundary —\n\
+         # all yielded values are BigInt (> i64::MAX).\n\
+         out = []\n\
+         (2 ** 70).upto(2 ** 70 + 3) { |i| out << i.to_s }\n\
+         puts out.inspect\n\
+         # BigInt#downto: same but decreasing.\n\
+         out2 = []\n\
+         (2 ** 70).downto(2 ** 70 - 3) { |i| out2 << i.to_s }\n\
+         puts out2.inspect\n\
+         # Int recv + BigInt stop: start in-range, break early.\n\
+         out3 = []\n\
+         5.upto(2 ** 100) { |i| out3 << i; break if i >= 10 }\n\
+         puts out3.inspect\n\
+         # Negative BigInt#times → 0 iterations (CRuby).\n\
+         calls = 0\n\
+         (-(2 ** 65)).times { |i| calls += 1 }\n\
+         puts \"neg=#{calls}\"\n\
+         # Return value: recv when no break, break-value when break.\n\
+         ret = (2 ** 65).downto(2 ** 65 - 2) { |_| }\n\
+         puts \"ret_class=#{ret.class.name}\"\n\
+         br = (2 ** 65).times { |i| break :early if i >= 1 }\n\
+         puts \"break=#{br}\"\n\
+         # respond_to? gates true for the new methods.\n\
+         b = 2 ** 70\n\
+         puts b.respond_to?(:times)\n\
+         puts b.respond_to?(:upto)\n\
+         puts b.respond_to?(:downto)",
+        "bigint_iter.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "[0, 1, 2, 3]");
+    assert_eq!(lines[1], "Integer"); // demoted
+    assert_eq!(
+        lines[2],
+        "[\"1180591620717411303424\", \"1180591620717411303425\", \"1180591620717411303426\", \"1180591620717411303427\"]"
+    );
+    assert_eq!(
+        lines[3],
+        "[\"1180591620717411303424\", \"1180591620717411303423\", \"1180591620717411303422\", \"1180591620717411303421\"]"
+    );
+    assert_eq!(lines[4], "[5, 6, 7, 8, 9, 10]");
+    assert_eq!(lines[5], "neg=0");
+    assert_eq!(lines[6], "ret_class=Integer");
+    assert_eq!(lines[7], "break=early");
+    assert_eq!(lines[8], "true");
+    assert_eq!(lines[9], "true");
+    assert_eq!(lines[10], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_iter_survives_gc_inside_block() {
+    // GC stress: the yielded BigInt sits in the block-arg slot
+    // (a Ruby stack root) during invocation, but the block may
+    // allocate strings that trigger maybe_gc. Verify the heap
+    // entry stays reachable across collection cycles, with the
+    // BigInt recv pinned via PinGuard so it survives too.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // 6 iterations, each allocating 50 small Strings to
+        // pressure the heap. If the counter BigInt got swept
+        // mid-iteration the to_s call would panic / read garbage.
+        "out = []\n\
+         (2 ** 80).upto(2 ** 80 + 5) do |i|\n\
+           50.times { |k| _ = \"alloc#{k}\".dup }\n\
+           out << i.to_s\n\
+         end\n\
+         puts out.size\n\
+         puts out.first\n\
+         puts out.last",
+        "bigint_iter_gc.rb",
+    ).expect("eval");
+    let lines: Vec<String> = buf.snapshot().trim().split('\n').map(String::from).collect();
+    assert_eq!(lines[0], "6");
+    assert_eq!(lines[1], "1208925819614629174706176"); // 2^80
+    assert_eq!(lines[2], "1208925819614629174706181"); // 2^80 + 5
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_works_as_hash_key_across_allocation_and_gc() {
     // Phase B.7 contract: the Hash collection's internal key
     // lookup uses `ruby_eq`, which for BigInt does value equality

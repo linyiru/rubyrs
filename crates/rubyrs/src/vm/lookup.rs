@@ -463,17 +463,17 @@ impl Vm {
             // unary (`-@`/`+@`/`abs`) + Phase B.3 bit ops (`~`,
             // `& | ^`, `<< >>`) + Phase B.5 `pow(exp, mod)` +
             // Phase B.5 leftover (`bit_length`, `digits`) + Phase
-            // B.7 hash-key surface (`eql?`, `hash`) — arithmetic,
-            // comparison, to_s/inspect, pure predicates,
-            // exponentiation (auto-promote / DoS-capped), unary
-            // sign/magnitude, two's-complement bit ops, modular
-            // exponentiation, two's-complement bit count, base-N
-            // digit decomposition, and the canonical-equality
-            // entry points. Iteration helpers (`times`, `upto`,
-            // `downto`) remain unshipped Phase B groups. The
-            // predicates below only READ the bigint to compute a
-            // Bool/Int, so they fit cleanly in the existing
-            // bigint_primitive shape.
+            // B.6 iteration helpers (`times`, `upto`, `downto`) +
+            // Phase B.7 hash-key surface (`eql?`, `hash`) —
+            // arithmetic, comparison, to_s/inspect, pure
+            // predicates, exponentiation (auto-promote /
+            // DoS-capped), unary sign/magnitude, two's-complement
+            // bit ops, modular exponentiation, two's-complement
+            // bit count, base-N digit decomposition, block-form
+            // iteration, and the canonical-equality entry points.
+            // The predicates below only READ the bigint to
+            // compute a Bool/Int, so they fit cleanly in the
+            // existing bigint_primitive shape.
             #[cfg(feature = "bignum")]
             Value::BigInt(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
@@ -485,6 +485,7 @@ impl Vm {
                 "zero?" | "positive?" | "negative?" |
                 "even?" | "odd?" |
                 "bit_length" | "digits" |
+                "times" | "upto" | "downto" |
                 "eql?" | "hash"
             ),
             Value::Float(_) => matches!(name,

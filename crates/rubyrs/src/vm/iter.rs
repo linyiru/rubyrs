@@ -933,6 +933,108 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Int(n_val)))
             }
+            // BigInt iteration: `times` / `upto` / `downto` with at
+            // least one BigInt operand. Counter lives as a native
+            // `num_bigint::BigInt` on the Rust stack; per-iteration
+            // `bigint_to_value` demotes to `Value::Int` whenever the
+            // current count fits i64 (the common in-range case for
+            // `(big - 5).upto(big)` etc.). The yielded Value's heap
+            // entry stays reachable through the block invocation via
+            // the block-arg slot on the Ruby stack — no per-iteration
+            // pin needed beyond pinning recv / stop / block once at
+            // the start.
+            //
+            // Wall-clock cap is the natural DoS protection for these
+            // (a literal `(2**100).times` would run essentially
+            // forever, exactly as in CRuby; the host's deadline trips
+            // long before any other bound).
+            //
+            // Lives BELOW the Int×Int arms above so pure-Int cases
+            // keep using the optimized i64 fast path.
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(_), "times", []) => {
+                use num_bigint::BigInt;
+                let recv_owned = self.heap.bigint(match recv { Value::BigInt(id) => *id, _ => unreachable!() }).clone();
+                // Negative `recv.times` is 0 iterations in CRuby —
+                // mirrors the Int path (`(-5).times { ... }` → no
+                // calls). For any negative BigInt we'd skip the
+                // loop entirely; bail early to avoid the
+                // alloc/check pattern.
+                if recv_owned.sign() == num_bigint::Sign::Minus {
+                    return Ok(Some(recv.clone()));
+                }
+                let mut g = PinGuard::new(self);
+                g.pin(recv.clone());
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut counter = BigInt::from(0);
+                while counter < recv_owned {
+                    let yield_val = g.vm.bigint_to_value(counter.clone())?;
+                    match g.vm.step_block(block, vec![yield_val], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                    counter += 1;
+                }
+                Some(early.unwrap_or_else(|| recv.clone()))
+            }
+            // `big.upto(stop) { |i| ... }` — counts up from recv to
+            // stop inclusive. Fires when either operand is BigInt;
+            // the Int×Int case is handled by the arm above. CRuby:
+            // returns recv at the end (or the break value).
+            #[cfg(feature = "bignum")]
+            (recv_v @ (Value::Int(_) | Value::BigInt(_)), "upto", [stop_v @ (Value::Int(_) | Value::BigInt(_))])
+                if matches!(recv_v, Value::BigInt(_)) || matches!(stop_v, Value::BigInt(_)) =>
+            {
+                let start = self.as_bigint(recv_v).expect("guarded");
+                let stop = self.as_bigint(stop_v).expect("guarded");
+                let mut g = PinGuard::new(self);
+                g.pin(recv_v.clone());
+                g.pin(stop_v.clone());
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut counter = start;
+                while counter <= stop {
+                    let yield_val = g.vm.bigint_to_value(counter.clone())?;
+                    match g.vm.step_block(block, vec![yield_val], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                    counter += 1;
+                }
+                Some(early.unwrap_or_else(|| recv_v.clone()))
+            }
+            // `big.downto(stop) { |i| ... }` — counts down from recv
+            // to stop inclusive. Same shape as upto with `>=` /
+            // `-=` 1.
+            #[cfg(feature = "bignum")]
+            (recv_v @ (Value::Int(_) | Value::BigInt(_)), "downto", [stop_v @ (Value::Int(_) | Value::BigInt(_))])
+                if matches!(recv_v, Value::BigInt(_)) || matches!(stop_v, Value::BigInt(_)) =>
+            {
+                let start = self.as_bigint(recv_v).expect("guarded");
+                let stop = self.as_bigint(stop_v).expect("guarded");
+                let mut g = PinGuard::new(self);
+                g.pin(recv_v.clone());
+                g.pin(stop_v.clone());
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut counter = start;
+                while counter >= stop {
+                    let yield_val = g.vm.bigint_to_value(counter.clone())?;
+                    match g.vm.step_block(block, vec![yield_val], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
+                    }
+                    counter -= 1;
+                }
+                Some(early.unwrap_or_else(|| recv_v.clone()))
+            }
             // `(b..e).step(n) { |i| ... }` — yields each step value.
             // Returns the receiver Range, matching CRuby.
             (Value::Range(id), "step", [Value::Int(n)]) => {
