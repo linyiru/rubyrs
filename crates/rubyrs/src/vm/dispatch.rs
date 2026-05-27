@@ -1333,12 +1333,15 @@ impl Vm {
             // returning self.
             //
             // CRuby raises NameError on a method not defined on
-            // this class. Mirror that — primitives are exempt
-            // since their method tables aren't user-populated and
-            // a "missing" probe on `String.remove_method(:foo)`
-            // would surface as a confusing error path (same
-            // permissive stance as `instance_method` /
-            // `method_defined?`).
+            // this class, INCLUDING for primitives — verified
+            // against CRuby 3.4 that `String.remove_method(:foo)`
+            // raises. This diverges from the permissive stance
+            // at `instance_method` / `method_defined?` (which DO
+            // skip the user-class fence for primitives because
+            // probing is benign). `remove_method` is a mutation,
+            // not a probe; matching CRuby's strict shape here
+            // avoids quiet divergence on a surface that's
+            // unlikely to be exercised as a feature-detect.
             ("remove_method", args) if !args.is_empty() => {
                 // Per-arg processing: Symbol uses sid directly (no
                 // resolve/intern roundtrip + no max_symbols check —
