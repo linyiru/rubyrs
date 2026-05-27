@@ -817,7 +817,7 @@ impl Vm {
         }
         if let Value::BoundMethod(_) = &recv && name == "bind_call" {
             return Err(self.trap(RubyError::ArgumentError {
-                msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
+                msg: "wrong number of arguments (given 0, expected 1..)".into(),
             }));
         }
         if let Value::UnboundMethod(uid) = &recv && name == "bind_call" && !args.is_empty() {
