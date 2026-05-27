@@ -1000,16 +1000,16 @@ impl Vm {
                 // (`$~`, `$1..$N`, `$&`, `$``, `$'`, `$+`) the
                 // same way `String#match` does.
                 #[cfg(feature = "regex")]
-                if (name == "[]" || name == "slice") && args.len() == 1 {
-                    if let Value::Regex(re) = &args[0] {
-                        return Ok(Some(self.str_bracket_regex(&s, re, 0)?));
-                    }
+                if (name == "[]" || name == "slice") && args.len() == 1
+                    && let Value::Regex(re) = &args[0]
+                {
+                    return Ok(Some(self.str_bracket_regex(&s, re, 0)?));
                 }
                 #[cfg(feature = "regex")]
-                if (name == "[]" || name == "slice") && args.len() == 2 {
-                    if let (Value::Regex(re), Value::Int(n)) = (&args[0], &args[1]) {
-                        return Ok(Some(self.str_bracket_regex(&s, re, *n)?));
-                    }
+                if (name == "[]" || name == "slice") && args.len() == 2
+                    && let (Value::Regex(re), Value::Int(n)) = (&args[0], &args[1])
+                {
+                    return Ok(Some(self.str_bracket_regex(&s, re, *n)?));
                 }
                 if (name == "[]" || name == "slice") && args.len() == 1 {
                     let chars: Vec<char> = s.to_string_lossy().chars().collect();

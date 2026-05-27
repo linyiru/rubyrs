@@ -1,0 +1,1976 @@
+//! `Integer` / `BigInt` arithmetic + dispatch + DoS-cap
+//! enforcement. Largest single embed sub-module; collects the
+//! BigInt phase-A/B work surface.
+//!
+//!   - `bigint_*` — arithmetic, bit ops, shifts, unary, to_s
+//!     radix conversion, DoS caps.
+//!   - `bigint_iter_*` / `bigint_times_upto_downto_*` —
+//!     iteration block surface (Phase B.6).
+//!   - `pow_*` / `bigint_pow_*` — `**` and `Integer#pow(exp[,
+//!     mod])`. Full surface: estimator DoS cap, identity
+//!     short-circuits, Float coercion, parity preservation,
+//!     no-bignum profile error shapes, modular exponentiation.
+//!   - `sprintf_*` — sprintf %d / %x radix through BigInt +
+//!     alt-form zero suppression.
+//!   - `digits_*` — `Integer#digits([base])` BigInt and Int
+//!     paths, estimator log2 correctness, negative-recv
+//!     precedence over arity / base errors.
+//!   - `integer_to_s_*` — Integer#to_s(radix) error class
+//!     consistency between Int and BigInt receivers.
+//!   - `int_min_abs_*` / `int_shift_*` — i64::MIN edge cases.
+//!   - `integer_bit_ops_*` / `bit_length_*` — `&`/`|`/`^`
+//!     TypeError on non-Integer arg; two's-complement
+//!     `Integer#bit_length` on BigInt.
+//!
+//! ResourceExhausted caps cross-cut with `tests/embed/resource_caps.rs`
+//! (the cap machinery itself). Cap-related tests here exercise
+//! cap enforcement specifically *through* a BigInt code path,
+//! so they stay with the rest of the BigInt surface.
+
+use rubyrs::Value;
+
+use super::SharedBuf;
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_respects_max_value_bytes_cap() {
+    // Regression cover for PR #103 cycle 13. BigInt#to_s/#inspect
+    // produce a decimal-digit string that grows arbitrarily with
+    // the magnitude (`(2 ** 1_000_000).to_s` is ~300 KB), so the
+    // bigint_primitive path must enforce Config::max_value_bytes
+    // the same way primitive_call arms do — otherwise a script
+    // could DoS the host by stringifying a huge integer.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        r#"
+        n = 1
+        100.times { n = n * 1_000_000 }   # n has ~600 decimal digits
+        n.to_s
+        "#,
+        "bigint_to_s_size_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted trap from BigInt#to_s exceeding max_value_bytes, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_caps_huge_result() {
+    // Phase B.1: `**` with a huge exponent estimates result bits
+    // and traps ResourceExhausted before allocating GBs. Default
+    // ceiling (no max_value_bytes) is 1 MB; `2 ** 10_000_000`
+    // would need ~1.25 MB so it traps.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "2 ** 10_000_000",
+        "pow_huge.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted trap from 2**10_000_000, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_honors_max_value_bytes() {
+    // The DoS cap respects Config::max_value_bytes when set —
+    // a tight 64-byte cap rejects `2 ** 1000`. The estimator
+    // bounds the binary magnitude (~126 bytes here; the decimal
+    // form would be 302 digits but the cap is on the storable
+    // value, not its rendered string).
+    let cfg = rubyrs::Config { max_value_bytes: Some(64), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "2 ** 1000",
+        "pow_tight_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted under max_value_bytes=64, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_negative_exponent_returns_float() {
+    // CRuby returns Rational `(1/4)` for `2 ** -2`; rubyrs uses
+    // Float because there's no Rational in the subset
+    // (documented SUBSET.md divergence). Pin the Float path here
+    // since diff_cruby can't compare the formats.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts (2 ** -2)", "pow_neg.rb").expect("Float reciprocal path");
+    assert_eq!(buf.snapshot().trim(), "0.25");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_int_int_identity_bases_skip_numeric_u32_clamp() {
+    // 0/±1 bases produce trivial results regardless of exponent
+    // size — numeric.rs's `**` arm short-circuits via parity
+    // BEFORE the `(*b as u64).min(u32::MAX as u64) as u32`
+    // clamp it would otherwise apply. Without those short-
+    // circuits `(-1) ** (u32::MAX + 2)` would clamp to the
+    // u32::MAX exponent (odd) and silently flip sign for an
+    // even input. The inputs here are all Int×Int, so dispatch
+    // is owned by numeric.rs and never reaches
+    // `Vm::try_bigint_pow` — the BigInt-exponent equivalent of
+    // this guarantee lives in
+    // `bigint_pow_identity_bases_with_bigint_exponent` below.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let huge = (u32::MAX as i64) + 1; // 4_294_967_296
+    rt.eval(
+        &format!("puts 1 ** {h}\nputs 0 ** {h}\nputs (-1) ** {h}\nputs (-1) ** ({h} + 1)",
+            h = huge),
+        "pow_identity_huge.rb",
+    ).expect("identity bases must skip the u32 clamp");
+    assert_eq!(buf.snapshot().trim(), "1\n0\n1\n-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_int_receiver_negative_bigint_exponent_returns_float() {
+    // Int receiver + NEGATIVE BigInt exponent had no handler:
+    // numeric.rs only covers Int×Int, and try_bigint_pow's
+    // recv_is_bigint gate skipped Int receivers — so
+    // `2 ** -(2**100)` raised NoMethodError despite
+    // `respond_to?(:**)` being true. With the gate widened to
+    // `recv OR exp is BigInt`, dispatch produces a Float
+    // (which underflows toward 0 for |base|>1 since the BigInt
+    // exponent is past f64 range — the helper coerces it to
+    // -Inf, and `2 ** -Inf` = 0.0).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Build a negative BigInt via subtraction (BigInt unary
+        // `-@` is unshipped Phase B.2).
+        "neg_big = 0 - (2 ** 100)\n\
+         puts (2 ** neg_big).zero?\n\
+         puts (1 ** neg_big)\n\
+         puts ((-1) ** neg_big)",
+        "int_recv_neg_bigint_exp.rb",
+    ).expect("Int recv + negative BigInt exp must not NoMethodError");
+    // 2**-2**100 underflows to 0.0; 1**-big = 1.0 exactly;
+    // (-1)**-big: big = 2^100 is even, so parity → 1.0.
+    assert_eq!(buf.snapshot().trim(), "true\n1.0\n1.0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_bigint_receiver_negative_exponent_returns_float() {
+    // BigInt receiver + negative Int exp must not NoMethodError —
+    // respond_to?(:**) is true for BigInt, so the dispatch path
+    // has to produce *something*. We pick Float (matches the
+    // documented Rational divergence for `Int ** -n`).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    // (2 ** 100) ** -2 → 2**-200 ≈ 6.22e-61: a tiny but non-zero
+    // Float (well above the smallest f64 subnormal at ~5e-324).
+    rt.eval("puts ((2 ** 100) ** -2)", "bigint_pow_neg.rb")
+        .expect("BigInt ** negative-Int must return a Float, not NoMethodError");
+    let out = buf.snapshot();
+    let v: f64 = out.trim().parse().expect("output must parse as Float");
+    assert!(v > 0.0 && v < 1e-50, "expected tiny positive Float ~6e-61, got {}", v);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_bigint_receiver_float_exponent_returns_float() {
+    // BigInt receiver + Float exp must also return a Float, not
+    // NoMethodError. `(2 ** 100) ** 0.5` ≈ 2**50 ≈ 1.126e15.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts ((2 ** 100) ** 0.5)", "bigint_pow_float_exp.rb")
+        .expect("BigInt ** Float must return a Float, not NoMethodError");
+    let out = buf.snapshot();
+    let v: f64 = out.trim().parse().expect("output must parse as Float");
+    let expected = (2.0_f64).powi(50);
+    let rel = ((v - expected) / expected).abs();
+    assert!(rel < 1e-6, "expected ~{}, got {} (rel error {})", expected, v, rel);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn int_min_abs_promotes_to_bigint() {
+    // `i64::MIN.abs` overflows i64 by exactly one (magnitude is
+    // 2^63, one past i64::MAX). numeric.rs's `abs` arm now
+    // declines under `bignum`, bigint_primitive's unary path
+    // materialises the BigInt 2^63 and keeps it as BigInt (since
+    // it doesn't fit i64). Same expectation for `-i64::MIN`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts((-9_223_372_036_854_775_808).abs)\n\
+         puts(-(-9_223_372_036_854_775_808))",
+        "int_min_unary.rb",
+    ).expect("i64::MIN unary must promote, not wrap");
+    assert_eq!(buf.snapshot().trim(), "9223372036854775808\n9223372036854775808");
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn int_min_abs_wraps_without_bignum() {
+    // Without the bignum feature, `i64::MIN.abs` stays as
+    // `i64::MIN` (wrapping_abs) — there's no BigInt fallback. Pin
+    // the historical behaviour so a future no-bignum build can't
+    // silently flip semantics.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts((-9_223_372_036_854_775_808).abs)",
+        "int_min_unary_no_bignum.rb",
+    ).expect("eval must succeed (wraps to i64::MIN)");
+    assert_eq!(buf.snapshot().trim(), "-9223372036854775808");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_unary_plus_returns_same_value_id() {
+    // `+@` on BigInt is a no-op clone — the resulting Value is
+    // a `Value::BigInt(id)` pointing at the SAME heap entry as
+    // the receiver. Numeric `==` would also pass if `+@` silently
+    // re-allocated, so capture both values into a 2-element
+    // Array and assert on the `Value::BigInt` ids directly.
+    let mut rt = rubyrs::Runtime::new();
+    let v = rt.eval(
+        "big = 2 ** 100\n[big, +big]",
+        "bigint_unary_plus.rb",
+    ).expect("+@ on BigInt must produce a Value");
+    let elems = rt.resolve_array(&v).expect("expected Value::Array");
+    assert_eq!(elems.len(), 2);
+    match (&elems[0], &elems[1]) {
+        (Value::BigInt(a), Value::BigInt(b)) => assert_eq!(
+            a, b,
+            "+@ must return a Value::BigInt pointing at the same heap id",
+        ),
+        other => panic!("expected (Value::BigInt, Value::BigInt), got {:?}", other),
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_unary_neg_demotes_when_result_fits_int() {
+    // `-big` where `big` after negation fits i64 must demote to
+    // `Value::Int`. `2 ** 63` is exactly i64::MAX + 1
+    // (9223372036854775808); negating gives i64::MIN exactly,
+    // which fits. Demote-on-fit should produce
+    // `Value::Int(i64::MIN)`. Numeric `==` would silently pass
+    // even if the result stayed `Value::BigInt`, so assert
+    // directly on the Value variant.
+    let mut rt = rubyrs::Runtime::new();
+    let v = rt.eval(
+        "big = 2 ** 63\n-big",
+        "bigint_unary_neg_demote.rb",
+    ).expect("eval must succeed");
+    assert!(
+        matches!(v, Value::Int(i64::MIN)),
+        "expected Value::Int(i64::MIN), got {:?}",
+        v,
+    );
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_method_works_under_no_bignum_profile() {
+    // Both 1-arg and 2-arg `Integer#pow` must work on the no-bignum
+    // profile too — `respond_to?(:pow)` is whitelisted
+    // unconditionally, so dispatch needs to match. 1-arg delegates
+    // to `**` (numeric.rs alias). 2-arg uses an i128 square-and-
+    // multiply since BigInt isn't available.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 5.pow(3)\n\
+         puts 5.pow(3, 7)\n\
+         puts 7.pow(8, 5)\n\
+         puts (-5).pow(3, 7)\n\
+         puts 5.pow(3, -7)",
+        "pow_no_bignum.rb",
+    ).expect("pow must work without bignum");
+    // 5³=125; 125 mod 7 = 6; 7⁸ mod 5 = 1; (-5)³=-125, -125 floor-mod 7 = 1
+    // (since -125 = 7*-18 + 1); 125 floor-mod -7 = -1.
+    assert_eq!(buf.snapshot().trim(), "125\n6\n1\n1\n-1");
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn digits_no_bignum_arity_guard_raises_argument_error() {
+    // Under no-bignum, `bigint_primitive`'s arity guard doesn't
+    // exist — the dispatch.rs Int fast path needs its own guard
+    // so `5.digits(10, 2)` raises ArgumentError matching CRuby
+    // instead of falling through to NoMethodError despite
+    // `respond_to?(:digits)` being true.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [
+        ("5.digits(10, 2)", 2),
+        ("5.digits(10, 2, 3)", 3),
+        ("5.digits(10, 2, 3, 4)", 4),
+    ] {
+        let err = rt.eval(script, "no_bignum_digits_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 0..1)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn digits_int_path_error_semantics_match_bignum_profile() {
+    // Cross-profile parity: the no-bignum Int#digits path
+    // (dispatch.rs) must surface the same error class +
+    // message text as the bignum BigInt path
+    // (Vm::try_integer_digits). Pin the dispatch.rs error arms
+    // so a future refactor that flips one side doesn't silently
+    // diverge.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected_msg) in [
+        ("(-5).digits",     "out of domain"),
+        ("5.digits(-2)",    "negative radix"),
+        ("5.digits(1)",     "invalid radix 1"),
+        ("5.digits(0)",     "invalid radix 0"),
+    ] {
+        let err = rt.eval(script, "no_bignum_digits.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(msg, expected_msg, "wrong message for {:?}", script);
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_radix_bigint_traps_via_pre_alloc_cap() {
+    // `'%b' % (2 ** N)` allocates ~N bytes during
+    // `to_str_radix`. The post-format cap check in `Kernel#sprintf`
+    // / `String#%` only sees the already-allocated result string
+    // and can't unwind a host OOM. Pre-alloc cap in
+    // `format_radix_any` must trap based on `bits()` BEFORE the
+    // alloc runs.
+    //
+    // Set a 64 KB cap large enough for `2 ** 100_000` to exist
+    // as a BigInt (~12.5 KB magnitude) but small enough that
+    // its base-2 sprintf form (~100 KB) trips. Pin the trap.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "'%b' % (2 ** 100_000)",
+        "sprintf_pre_alloc_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_decimal_bigint_traps_via_pre_alloc_cap() {
+    // Companion to `sprintf_radix_bigint_traps_via_pre_alloc_cap`:
+    // `'%d' % big` used to call `to_string()` directly with no
+    // pre-allocation cap, leaving the most common integer
+    // format-spec exposed to the host-OOM scenario the base-N
+    // pre-alloc helper defends against.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    // `(2 ** 1_000_000)` is ~301_030 decimal digits — well above
+    // the 64 KB cap, well below any reasonable host RAM ceiling
+    // (~120 KB of BigInt magnitude). Pre-alloc check must trap
+    // before `to_string()` materialises the 300 KB decimal string.
+    let err = rt.eval(
+        "'%d' % (2 ** 1_000_000)",
+        "sprintf_decimal_pre_alloc_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_cap_does_not_false_trap_decimal_at_exact_length() {
+    // Regression for cycle 10: earlier the cap estimator used
+    // integer `floor(log2(radix))` as the per-digit bit yield,
+    // which over-estimated digit count by ~10% for radix 10.
+    // `(10 ** 100).to_s` is exactly 101 chars ("1" + 100 "0"s);
+    // pre-fix estimate was ceil(333 bits / 3) = 111, so a cap
+    // of 105 would have false-trapped despite the rendered
+    // value fitting. Post-fix estimate is 101, matching reality.
+    let cfg = rubyrs::Config { max_value_bytes: Some(105), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (10 ** 100).to_s",
+        "to_s_cap_tight.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let expected = format!("1{}", "0".repeat(100));
+    assert_eq!(out.trim(), expected);
+}
+
+#[test]
+fn sprintf_alt_form_suppresses_prefix_for_zero_value() {
+    // CRuby suppresses the alt-form prefix when the value is
+    // zero: `'%#x' % 0` → `"0"`, not `"0x0"`. Same for
+    // `'%#o' % 0` (`"0"`, not `"00"`), `'%#b' % 0` (`"0"`,
+    // not `"0b0"`). All literals here take the Int(0) path;
+    // non-zero alt rendering pinned as the negative half of
+    // the contract.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%#o' % 0\n\
+         puts '%#x' % 0\n\
+         puts '%#X' % 0\n\
+         puts '%#b' % 0\n\
+         puts '%#B' % 0\n\
+         puts '%#o' % 7\n\
+         puts '%#x' % 255",
+        "sprintf_alt_zero.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Zero values: no prefix.
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "0");
+    assert_eq!(lines[2], "0");
+    assert_eq!(lines[3], "0");
+    assert_eq!(lines[4], "0");
+    // Non-zero: prefix present.
+    assert_eq!(lines[5], "07");
+    assert_eq!(lines[6], "0xff");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_alt_form_zero_via_bignum_arithmetic_still_suppressed() {
+    // Regression guard for the bignum profile: expressions
+    // that route through the BigInt arithmetic path but reduce
+    // to zero (`(2 ** 100) % (2 ** 100)`) demote to Int(0) per
+    // the canonical-BigInt invariant, so the formatter sees
+    // Int(0) and the alt prefix must still be suppressed.
+    // The BigInt(0) formatting arm itself isn't reachable from
+    // user code (demote-on-fit), but the `b.sign() != NoSign`
+    // guard in `format_radix_any` defends against hand-built
+    // BigInt(0) values from FFI / preamble paths; that guard
+    // is exercised structurally rather than dynamically here.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%#x' % ((2 ** 100) % (2 ** 100))\n\
+         puts '%#o' % ((2 ** 100) % (2 ** 100))\n\
+         puts '%#b' % ((2 ** 100) % (2 ** 100))",
+        "sprintf_alt_bignum_arith_zero.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    assert_eq!(out.trim(), "0\n0\n0");
+}
+
+#[test]
+fn sprintf_alt_form_with_zero_pad_keeps_prefix_before_zeros() {
+    // Regression guard: pre-fix `'%#08x' % 255` produced
+    // `00000xff` (zero-pad inserted before the `0x` prefix);
+    // CRuby produces `0x0000ff` (zeros go between prefix and
+    // digits). Same for `%#08X`, `%#08b`, `%#08B`. Octal's `0`
+    // alt prefix happens to behave identically under
+    // unconditional zero-padding (`'%#08o' % 7` → `00000007`
+    // either way), so no special handling there.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%#08x' % 255\n\
+         puts '%#08X' % 255\n\
+         puts '%#08b' % 7\n\
+         puts '%#08B' % 7\n\
+         puts '%#08o' % 7\n\
+         puts '%#08x' % (2 ** 60)",
+        "sprintf_alt_zero_pad.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0x0000ff");
+    assert_eq!(lines[1], "0X0000FF");
+    assert_eq!(lines[2], "0b000111");
+    assert_eq!(lines[3], "0B000111");
+    assert_eq!(lines[4], "00000007");
+    assert_eq!(lines[5], "0x1000000000000000"); // body > width, no pad
+}
+
+#[test]
+fn sprintf_radix_int_min_does_not_panic() {
+    // Regression guard: `format_radix_int` used to compute the
+    // magnitude of a negative i64 via `(-n) as u64`, which panics
+    // in debug builds for `n == i64::MIN` (-i64::MIN overflows
+    // i64). `'%x' % i64::MIN` is a legitimate Ruby call. Switch
+    // to `unsigned_abs()` so the path stays panic-free; pin all
+    // four base specifiers at the i64::MIN cell.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "imin = -9_223_372_036_854_775_808\n\
+         puts '%x' % imin\n\
+         puts '%X' % imin\n\
+         puts '%o' % imin\n\
+         puts '%b' % imin",
+        "sprintf_imin.rb",
+    ).expect("i64::MIN sprintf must not panic");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Documented divergence: we render `-<unsigned magnitude>`,
+    // CRuby renders the `..f`-prefixed two's-complement form.
+    assert_eq!(lines[0], "-8000000000000000");
+    assert_eq!(lines[1], "-8000000000000000");
+    assert_eq!(lines[2], "-1000000000000000000000");
+    assert_eq!(lines[3], "-1000000000000000000000000000000000000000000000000000000000000000");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_times_upto_downto_iterate_with_demote_on_fit() {
+    // Phase B.6: block-form iteration over BigInt operands.
+    // Counter lives as a native num_bigint::BigInt; each
+    // yielded Value is demoted to `Value::Int` when it fits i64
+    // (`(big - 5).upto(big)` yields five BigInts but
+    // `(2**65).times { |i| break if i >= 3 }` yields Int(0..3)
+    // because the in-range counts fit i64 fine).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // BigInt#times: break early — yields Int because the
+        // visited values fit i64.
+        "arr = []\n\
+         (2 ** 65).times { |i| arr << i; break if i >= 3 }\n\
+         puts arr.inspect\n\
+         puts arr[0].class.name\n\
+         # BigInt#upto: small range across the i64 boundary —\n\
+         # all yielded values are BigInt (> i64::MAX).\n\
+         out = []\n\
+         (2 ** 70).upto(2 ** 70 + 3) { |i| out << i.to_s }\n\
+         puts out.inspect\n\
+         # BigInt#downto: same but decreasing.\n\
+         out2 = []\n\
+         (2 ** 70).downto(2 ** 70 - 3) { |i| out2 << i.to_s }\n\
+         puts out2.inspect\n\
+         # Int recv + BigInt stop: start in-range, break early.\n\
+         out3 = []\n\
+         5.upto(2 ** 100) { |i| out3 << i; break if i >= 10 }\n\
+         puts out3.inspect\n\
+         # Negative BigInt#times → 0 iterations (CRuby).\n\
+         calls = 0\n\
+         (-(2 ** 65)).times { |i| calls += 1 }\n\
+         puts \"neg=#{calls}\"\n\
+         # Return value: recv when no break, break-value when break.\n\
+         ret = (2 ** 65).downto(2 ** 65 - 2) { |_| }\n\
+         puts \"ret_class=#{ret.class.name}\"\n\
+         br = (2 ** 65).times { |i| break :early if i >= 1 }\n\
+         puts \"break=#{br}\"\n\
+         # respond_to? gates true for the new methods.\n\
+         b = 2 ** 70\n\
+         puts b.respond_to?(:times)\n\
+         puts b.respond_to?(:upto)\n\
+         puts b.respond_to?(:downto)",
+        "bigint_iter.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "[0, 1, 2, 3]");
+    assert_eq!(lines[1], "Integer"); // demoted
+    assert_eq!(
+        lines[2],
+        "[\"1180591620717411303424\", \"1180591620717411303425\", \"1180591620717411303426\", \"1180591620717411303427\"]"
+    );
+    assert_eq!(
+        lines[3],
+        "[\"1180591620717411303424\", \"1180591620717411303423\", \"1180591620717411303422\", \"1180591620717411303421\"]"
+    );
+    assert_eq!(lines[4], "[5, 6, 7, 8, 9, 10]");
+    assert_eq!(lines[5], "neg=0");
+    assert_eq!(lines[6], "ret_class=Integer");
+    assert_eq!(lines[7], "break=early");
+    assert_eq!(lines[8], "true");
+    assert_eq!(lines[9], "true");
+    assert_eq!(lines[10], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_iter_arity_and_coerce_errors_match_cruby() {
+    // Phase B.6 review cycle 2: pre-fix wrong-arity / non-Integer
+    // arg calls bypassed the loop arms and fell through to
+    // NoMethodError — diverging from CRuby's ArgumentError /
+    // TypeError. \`respond_to?\` answers true for these methods
+    // (the lookup.rs whitelist gates by name only), so user
+    // code's \`rescue ArgumentError\` keys on the wrong class
+    // without explicit guards.
+    let mut rt = rubyrs::Runtime::new();
+    let big = "(2 ** 70)";
+    for (script, expected_class, expected_msg) in [
+        (
+            format!("{}.times(99) {{ }}", big),
+            "ArgumentError",
+            "wrong number of arguments (given 1, expected 0)",
+        ),
+        (
+            format!("{}.times(1, 2) {{ }}", big),
+            "ArgumentError",
+            "wrong number of arguments (given 2, expected 0)",
+        ),
+        (
+            format!("{}.upto {{ }}", big),
+            "ArgumentError",
+            "wrong number of arguments (given 0, expected 1)",
+        ),
+        (
+            format!("{}.upto(1, 2) {{ }}", big),
+            "ArgumentError",
+            "wrong number of arguments (given 2, expected 1)",
+        ),
+        (
+            format!("{}.upto(3.14) {{ }}", big),
+            "TypeError",
+            "no implicit conversion of Float into Integer",
+        ),
+        (
+            format!("{}.downto(\"x\") {{ }}", big),
+            "TypeError",
+            "no implicit conversion of String into Integer",
+        ),
+        (
+            format!("{}.downto(nil) {{ }}", big),
+            "TypeError",
+            "no implicit conversion of nil into Integer",
+        ),
+    ] {
+        let err = rt.eval(&script, "iter_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            other => panic!("expected Uncaught {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_iter_yield_pinned_across_rest_param_gc_window() {
+    // Regression for PR #174 cycle 1: `invoke_block` builds the
+    // rest-args Array via heap.alloc, which runs maybe_gc with
+    // only the Block pinned — leaving any freshly-allocated
+    // yielded Value reachable only from the local args Vec,
+    // which GC doesn't see. Without the per-iteration
+    // `vm.pinned.push(yield_val)` fix, this would sweep the
+    // yielded BigInt and either panic or read garbage into
+    // the rest-Array.
+    //
+    // Reproducer: BigInt counter (`(big - 5).upto(big)` yields
+    // five separately-allocated BigInts), block with `|*args|`
+    // rest param, allocations inside the block to trigger GC.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // `|*args|` triggers the rest-args allocation path in
+        // invoke_block. The body allocates strings to pressure GC.
+        // The yielded BigInt must survive into the rest-Array so
+        // `args[0].to_s` produces the right value.
+        "out = []\n\
+         (2 ** 80).upto(2 ** 80 + 4) do |*args|\n\
+           50.times { |k| _ = \"alloc#{k}\".dup }\n\
+           out << args[0].to_s\n\
+         end\n\
+         puts out.size\n\
+         puts out.first\n\
+         puts out.last",
+        "bigint_iter_rest_gc.rb",
+    ).expect("eval");
+    let lines: Vec<String> = buf.snapshot().trim().split('\n').map(String::from).collect();
+    assert_eq!(lines[0], "5");
+    assert_eq!(lines[1], "1208925819614629174706176"); // 2^80
+    assert_eq!(lines[2], "1208925819614629174706180"); // 2^80 + 4
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_iter_survives_gc_inside_block() {
+    // GC stress: the yielded BigInt sits in the block-arg slot
+    // (a Ruby stack root) during invocation, but the block may
+    // allocate strings that trigger maybe_gc. Verify the heap
+    // entry stays reachable across collection cycles, with the
+    // BigInt recv pinned via PinGuard so it survives too.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // 6 iterations, each allocating 50 small Strings to
+        // pressure the heap. If the counter BigInt got swept
+        // mid-iteration the to_s call would panic / read garbage.
+        "out = []\n\
+         (2 ** 80).upto(2 ** 80 + 5) do |i|\n\
+           50.times { |k| _ = \"alloc#{k}\".dup }\n\
+           out << i.to_s\n\
+         end\n\
+         puts out.size\n\
+         puts out.first\n\
+         puts out.last",
+        "bigint_iter_gc.rb",
+    ).expect("eval");
+    let lines: Vec<String> = buf.snapshot().trim().split('\n').map(String::from).collect();
+    assert_eq!(lines[0], "6");
+    assert_eq!(lines[1], "1208925819614629174706176"); // 2^80
+    assert_eq!(lines[2], "1208925819614629174706181"); // 2^80 + 5
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_bitwise_not_uses_twos_complement_identity() {
+    // Phase B.3: BigInt bit ops. `~big` is two's-complement
+    // bitwise NOT — equivalent to `-(big + 1)` for any sign.
+    // Numeric.rs's `(Int, "~", [])` arm handles Int receivers
+    // (since `!i64::MIN == i64::MAX` fits without promotion),
+    // but BigInt receivers need bigint_primitive's path.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // - `~(2**100)` = -(2^100 + 1) — stays BigInt.
+        // - `~(-(2**100))` = -(-(2^100) + 1) = 2^100 - 1 — stays BigInt.
+        // - `~(2**63)` = -(2^63 + 1) — one past i64::MIN, stays BigInt.
+        // - `~(2**63 - 1)` = -(2^63) = i64::MIN — demotes to Int via
+        //   bigint_to_value's demote-on-fit. Pins that the demote
+        //   funnel runs for `~` results too (catches a regression
+        //   where the bit-op path bypassed bigint_to_value).
+        // - `~~big == big` round-trip (involution).
+        "puts (~(2 ** 100)).to_s\n\
+         puts (~(-(2 ** 100))).to_s\n\
+         puts (~(2 ** 63)).to_s\n\
+         puts (~(2 ** 63 - 1)).to_s\n\
+         puts (~(2 ** 63 - 1)).class.name\n\
+         puts (~~(2 ** 100)).to_s == (2 ** 100).to_s",
+        "bigint_bitnot.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-1267650600228229401496703205377");
+    assert_eq!(lines[1], "1267650600228229401496703205375");
+    assert_eq!(lines[2], "-9223372036854775809");
+    assert_eq!(lines[3], "-9223372036854775808");
+    assert_eq!(lines[4], "Integer");
+    assert_eq!(lines[5], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_bitwise_and_or_xor_two_complement_semantics() {
+    // Phase B.3b: `&` / `|` / `^` with at least one BigInt operand.
+    // CRuby uses unbounded two's-complement representation for
+    // negatives in bitwise ops. num_bigint's BitAnd/Or/Xor impls
+    // perform the conversion internally so we just route through
+    // them — but pin the expected results to catch any future
+    // regression in either the num_bigint contract or our hook.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Magnitude masks: `(2**100) & 0xff == 0` (low 8 bits of
+        // 2^100 are all 0), demotes to Int.
+        // Sign extension: `(-1) & (2**100) == 2**100` (-1 is
+        // all-ones in two's-complement).
+        // Sign extension: `(-256) & 0xff == 0` (low 8 bits of
+        // two's-complement -256 are clear).
+        // OR with low bit: `(2**100) | 1` lights bit 0 — full
+        // BigInt result.
+        // Self-XOR: cancels to 0 (Int via demote).
+        // Inverse receiver: `5 & (2**100)` — Int recv + BigInt arg,
+        // exercises the recv-or-arg guard path.
+        // Mixed sign: `(-(2**100)) & 0xff == 0` (bit 0..7 of
+        // -(2^100) in two's-complement are 0).
+        "puts ((2 ** 100) & 0xff)\n\
+         puts ((2 ** 100) & 0xff).class.name\n\
+         puts ((-1) & (2 ** 100))\n\
+         puts ((-256) & 0xff)\n\
+         puts ((2 ** 100) | 1)\n\
+         puts ((2 ** 100) ^ (2 ** 100))\n\
+         puts ((2 ** 100) ^ (2 ** 100)).class.name\n\
+         puts (5 & (2 ** 100))\n\
+         puts ((-(2 ** 100)) & 0xff)",
+        "bigint_bitops.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "1267650600228229401496703205376");
+    assert_eq!(lines[3], "0");
+    assert_eq!(lines[4], "1267650600228229401496703205377");
+    assert_eq!(lines[5], "0");
+    assert_eq!(lines[6], "Integer");
+    assert_eq!(lines[7], "0");
+    assert_eq!(lines[8], "0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_left_right_promote_and_collapse() {
+    // Phase B.3c: `<<` / `>>` with BigInt-flavoured operands.
+    // Covers:
+    // - Int recv overflow promote: `1 << 64` was Int 0 pre-fix
+    //   (wrapping_shl clamped to 63), now BigInt 2^64.
+    // - BigInt magnitude: `1 << 100` produces 2^100.
+    // - BigInt recv right-shift: `(2**100) >> 50` = 2^50 (Int demote).
+    // - Right-shift collapse: shifting past bit-length returns 0
+    //   (non-neg) or -1 (neg) via the early-exit, not a giant alloc.
+    // - Negative shift count: `5 << -1 == 5 >> 1 == 2`.
+    // - Demote-on-fit: `(2**100) << -100 == 1`.
+    // - Identity short-circuit: `1 << 0 == 1` returns recv unchanged.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (1 << 64)\n\
+         puts (1 << 64).class.name\n\
+         puts (1 << 100)\n\
+         puts ((2 ** 100) >> 50)\n\
+         puts ((2 ** 100) >> 50).class.name\n\
+         puts ((2 ** 100) >> 1000)\n\
+         puts ((-(2 ** 100)) >> 1000)\n\
+         puts (5 << -1)\n\
+         puts ((2 ** 100) << -100)\n\
+         puts ((2 ** 100) << -100).class.name\n\
+         puts (5 >> 100)\n\
+         puts ((-1) >> 100)",
+        "bigint_shifts.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "18446744073709551616");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "1267650600228229401496703205376");
+    assert_eq!(lines[3], "1125899906842624");
+    assert_eq!(lines[4], "Integer");
+    assert_eq!(lines[5], "0");
+    assert_eq!(lines[6], "-1");
+    assert_eq!(lines[7], "2");
+    assert_eq!(lines[8], "1");
+    assert_eq!(lines[9], "Integer");
+    assert_eq!(lines[10], "0");
+    assert_eq!(lines[11], "-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn int_shift_left_promotes_on_value_overflow_not_just_count_overflow() {
+    // Regression for PR #159 cycle 1: `i64::checked_shl` only
+    // detects shift-count overflow (≥ 64), not value overflow.
+    // Pre-fix, `1 << 63` returned `i64::MIN` (sign bit set,
+    // wrapping into negative space) instead of promoting to
+    // BigInt(2^63). Round-trip check `(a << s) >> s == a`
+    // catches bit-loss exactly so these subtler overflow cases
+    // promote like the count-overflow path already did for
+    // `1 << 64`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // - `1 << 62` is exactly the largest positive i64 (sign
+        //   bit clear) — must stay Int, no false promote.
+        // - `1 << 63` is +2^63 in Ruby (positive Bignum), not
+        //   `i64::MIN`. Must promote.
+        // - `5 << 61` overflows into the sign bit (5 takes 3
+        //   bits, +61 = bit 63 set) — must promote.
+        // - `1 >> -63` == `1 << 63` via direction swap — same
+        //   value-overflow path, must promote.
+        // - `(-1) << 1` == -2 stays Int (sign-preserving, no
+        //   bit-loss).
+        "puts (1 << 62)\n\
+         puts (1 << 62).class.name\n\
+         puts (1 << 63)\n\
+         puts (1 << 63).class.name\n\
+         puts (5 << 61)\n\
+         puts (5 << 61).class.name\n\
+         puts (1 >> -63)\n\
+         puts (1 >> -63).class.name\n\
+         puts ((-1) << 1)\n\
+         puts ((-1) << 1).class.name",
+        "int_shift_value_overflow.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "4611686018427387904");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "9223372036854775808"); // +2^63, NOT i64::MIN
+    assert_eq!(lines[3], "Integer");
+    assert_eq!(lines[4], "11529215046068469760"); // 5 * 2^61
+    assert_eq!(lines[5], "Integer");
+    assert_eq!(lines[6], "9223372036854775808"); // 1 >> -63 == 1 << 63
+    assert_eq!(lines[7], "Integer");
+    assert_eq!(lines[8], "-2");
+    assert_eq!(lines[9], "Integer");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_left_dos_cap_uses_exact_int_bit_length() {
+    // Regression for PR #159 cycle 1: `recv_bits` over-counted
+    // Int receivers as 64 bits, so small-magnitude shifts under a
+    // tight `max_value_bytes` could false-trap even when the
+    // rendered BigInt fit. With exact bit-length for Ints, the
+    // cap estimator matches the actual storage.
+    //
+    // `5 << 1_000_000` produces a ~125 KB BigInt. Pre-fix recv_bits
+    // = 64 → est_bits = 1_000_064 → est_bytes ≈ 125_040. With
+    // a cap of 125_064 bytes (just above the true est) pre-fix
+    // would still trap because the 64-bit Int width over-counted
+    // by ~61 bits. Post-fix recv_bits = bit_length(5) = 3 →
+    // est_bits = 1_000_003 → est_bytes ≈ 125_032, passes.
+    let cfg = rubyrs::Config { max_value_bytes: Some(125_064), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // `class` returns Integer for both Int and Bignum, so check
+        // a deterministic property: bit_length matches the shift.
+        "puts (5 << 1_000_000).bit_length",
+        "shift_dos_exact_bits.rb",
+    ).expect("eval");
+    // `bit_length(5) == 3`, so `(5 << 1_000_000).bit_length == 1_000_003`.
+    // Ruby prints integers without underscores.
+    assert_eq!(buf.snapshot().trim(), "1000003");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_responds_to_bit_op_names_matches_dispatch() {
+    // Regression for PR #159 cycle 2: `Vm::responds_to`'s BigInt
+    // whitelist must include every method `bigint_primitive` can
+    // dispatch — otherwise `big.respond_to?(:<<)` returns false
+    // even though the call succeeds, breaking pure-Ruby code that
+    // gates on respond_to?. Phase B.3 adds `~`, `& | ^`, `<< >>`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "b = 2 ** 100\n\
+         puts b.respond_to?(:~)\n\
+         puts b.respond_to?(:&)\n\
+         puts b.respond_to?(:|)\n\
+         puts b.respond_to?(:^)\n\
+         puts b.respond_to?(:<<)\n\
+         puts b.respond_to?(:>>)",
+        "bigint_responds_to_bit_ops.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    assert_eq!(out.trim(), "true\ntrue\ntrue\ntrue\ntrue\ntrue");
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn int_shift_i64_min_count_does_not_panic_under_no_bignum() {
+    // Regression for the no-bignum `<<` / `>>` arms in
+    // numeric.rs: pre-fix `(-b) as u32` overflowed when
+    // `b == i64::MIN` (debug builds panicked with "attempt to
+    // negate with overflow"; release silently wrapped to a
+    // 63-bit shift via two-step wrap). Pin clamp semantics so
+    // both profiles agree on the result for this corner.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    // `5 << i64::MIN` == `5 >> |i64::MIN|` == `5 >> 63` == 0.
+    // `(-1) << i64::MIN` == `(-1) >> |i64::MIN|` == -1 (sign-ext).
+    // `5 >> i64::MIN` == `5 << |i64::MIN|` clamped to 63 bits;
+    //   `5.wrapping_shl(63)` produces `i64::MIN`-relative bit
+    //   pattern (5 << 63 wraps), but the saturating-shift
+    //   semantics under no-bignum just want no-panic + matching
+    //   the existing wrapping behaviour. Pin the result so
+    //   future refactors don't accidentally change it.
+    rt.eval(
+        "x = -9223372036854775807 - 1\n\
+         puts (5 << x)\n\
+         puts ((-1) << x)",
+        "shift_i64_min_no_bignum.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_bit_ops_raise_typeerror_on_non_integer_arg() {
+    // Phase B.3 follow-up: pre-fix `try_bigint_bit_binop` and
+    // `try_bigint_bit_shift` returned `Ok(None)` when the arg
+    // wasn't an Integer, falling through to NoMethodError. CRuby
+    // raises TypeError "no implicit conversion of X into Integer"
+    // — same shape as the BigInt-arith coerce errors and as the
+    // unified `Integer#to_s(non_integer)` arm. Pin that both
+    // Int and BigInt receivers route through the same TypeError
+    // for every bit-op selector. Covers:
+    // - all 5 bit-op selectors (& | ^ << >>)
+    // - all 4 non-Integer arg types (Float, String, nil, Symbol)
+    // - both Int and BigInt receivers
+    // - the special `Int(0)` recv case (which used to short-circuit
+    //   ahead of the arg-type guard)
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected_arg_type) in [
+        // BigInt recv, every selector × Float arg
+        ("(2 ** 100) & 1.5", "Float"),
+        ("(2 ** 100) | 1.5", "Float"),
+        ("(2 ** 100) ^ 1.5", "Float"),
+        ("(2 ** 100) << 1.5", "Float"),
+        ("(2 ** 100) >> 1.5", "Float"),
+        // Int recv, non-Integer args
+        ("5 & 1.5", "Float"),
+        ("5 << 1.5", "Float"),
+        ("5 >> \"foo\"", "String"),
+        ("5 << nil", "nil"),
+        ("5 << :sym", "Symbol"),
+        // Int(0) recv: regression for the swallow-TypeError fix.
+        ("0 << 1.5", "Float"),
+        ("0 >> :sym", "Symbol"),
+        ("0 << nil", "nil"),
+    ] {
+        let err = rt.eval(script, "bit_op_nonint_arg.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "TypeError", "for {:?}", script);
+                assert_eq!(
+                    message,
+                    format!("no implicit conversion of {} into Integer", expected_arg_type),
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught TypeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn int_shift_zero_receiver_never_traps_regardless_of_count() {
+    // Regression for PR #159 cycle 2: `0 << anything == 0` and
+    // `0 >> anything == 0` in Ruby — should never allocate, never
+    // trap on the DoS cap, never trap on the BigInt-count "shift
+    // exceeds u32::MAX" guard. Pre-fix `0 << 1_000_000` under a
+    // 1024-byte cap would trap because the cap estimator computed
+    // `est_bits = 0 + 1_000_000` → 125 KB which exceeds 1 KB.
+    let cfg = rubyrs::Config { max_value_bytes: Some(1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Tight cap, huge shift counts: all should return 0
+        // without touching the DoS estimator or the BigInt-count
+        // trap.
+        "puts (0 << 1_000_000)\n\
+         puts (0 << (2 ** 100))\n\
+         puts (0 >> 1_000_000)\n\
+         puts (0 >> -(2 ** 100))",
+        "zero_shift.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "0");
+    assert_eq!(lines[2], "0");
+    assert_eq!(lines[3], "0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_left_traps_dos_via_max_value_bytes() {
+    // Left-shift DoS cap: `1 << 1_000_000` would allocate
+    // ~125 KB. With a 64 KB `max_value_bytes`, the pre-cap
+    // estimator must trap before BigInt::shl touches the
+    // allocator. Honours `max_value_bytes` with the same 1 MB
+    // fallback as `try_bigint_pow`.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "1 << 1_000_000",
+        "shift_dos.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_by_bigint_count_left_traps_right_collapses() {
+    // BigInt shift count: by canonical invariant any BigInt is
+    // outside i64, so:
+    // - actual-left-shift by BigInt count → trap (would need
+    //   > 2^63 bits of storage).
+    // - actual-right-shift by BigInt count → collapse to 0 / -1
+    //   without touching num_bigint (avoids the impossible alloc).
+    let mut rt = rubyrs::Runtime::new();
+    // Right-shift by BigInt count: collapses.
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts ((2 ** 100) >> (2 ** 100))\n\
+         puts ((-(2 ** 100)) >> (2 ** 100))",
+        "shift_by_bigint_right.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "-1");
+    // Left-shift by BigInt count: traps regardless of cap.
+    let err = rt.eval(
+        "1 << (2 ** 100)",
+        "shift_by_bigint_left.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {
+    // Two distinct CRuby behaviours for negative integers in
+    // non-decimal bases:
+    //   - `Integer#to_s(radix)` returns `-<magnitude>`:
+    //     `(-256).to_s(16) == "-100"`. We match this exactly.
+    //   - `sprintf '%x' % -256` returns `"..f00"` (CRuby's
+    //     two's-complement infinite-ones notation). We diverge
+    //     here and render `-<magnitude>` instead — documented
+    //     in the sibling
+    //     `sprintf_bigint_radix_negative_uses_minus_magnitude_divergence`
+    //     test and in `format_radix_int`'s source comment.
+    //
+    // This test pins the `to_s` half — Int and BigInt receivers
+    // both produce `-<magnitude>` for negative inputs, matching
+    // CRuby byte-for-byte.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (-256).to_s(16)\n\
+         puts (0 - (2 ** 100)).to_s(16)\n\
+         puts (0 - (2 ** 64)).to_s(2).start_with?(\"-1\")",
+        "bigint_to_s_neg.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-100");
+    // 2^100 in hex = 0x10000000000000000000000000 (1 followed by 25 zeros)
+    assert!(lines[1].starts_with("-1") && lines[1].len() == 27,
+        "expected -10000... (27 chars), got {:?}", lines[1]);
+    assert_eq!(lines[2], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_bigint_radix_negative_uses_minus_magnitude_divergence() {
+    // Documented divergence shared with the Int sprintf path:
+    // CRuby renders `'%x' % -256` as `..f00` (two's-complement
+    // infinite-ones notation), we render `-100`. Same shape for
+    // negative BigInt. Pin our behaviour so a future "fix" that
+    // adds CRuby compat is an opt-in upgrade rather than a silent
+    // regression.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%x' % (0 - 256)\n\
+         puts '%x' % (0 - (2 ** 100))\n\
+         puts '%b' % (0 - (2 ** 16))",
+        "sprintf_bigint_neg.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-100");
+    assert!(lines[1].starts_with("-1") && lines[1].len() == 27);
+    assert!(lines[2].starts_with("-1"));
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_traps_under_max_value_bytes() {
+    // Like the 0-arg to_s arm, the radix form's string output must
+    // be capped against `max_value_bytes` to prevent a hostile
+    // script from DoSing the host via `(2 ** 1_000_000).to_s(2)`.
+    // `(2 ** 10_000).to_s(2)` is exactly 10_001 chars; pin under
+    // a 4 KB cap so the trap fires.
+    let cfg = rubyrs::Config { max_value_bytes: Some(4 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "(2 ** 10_000).to_s(2)",
+        "to_s_radix_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn integer_to_s_non_integer_radix_raises_typeerror_on_int_path() {
+    // Regression for cycle 13: the BigInt arm of `Integer#to_s(radix)`
+    // raised `TypeError` for non-Integer radix, but the Int arm only
+    // matched `Value::Int(radix)` and fell through to `NoMethodError`,
+    // diverging from CRuby and from the BigInt path. Pin parity on
+    // both sides — the unified `Integer#to_s` API should raise the
+    // same `TypeError` regardless of receiver size.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.to_s(\"x\")", "int_to_s_typeerr.rb").unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { class_name, message } => {
+            assert_eq!(class_name, "TypeError");
+            assert_eq!(message, "no implicit conversion of String into Integer");
+        }
+        other => panic!("expected Uncaught TypeError, got {:?}", other),
+    }
+    // `Float` should error the same way (matches BigInt-path coercion).
+    let err = rt.eval("5.to_s(1.0)", "int_to_s_typeerr_float.rb").unwrap_err();
+    assert!(matches!(
+        err.err,
+        rubyrs::RubyError::Uncaught { ref class_name, .. } if class_name == "TypeError"
+    ));
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_to_s_bigint_radix_raises_rangeerror_not_self_referential_typeerror() {
+    // Pre-fix the catch-all `(Value::Int(_), "to_s", [other])` arm
+    // intercepted `5.to_s(2**100)` (BigInt radix) and emitted
+    // TypeError "no implicit conversion of Integer into Integer"
+    // — `type_name_for_coerce` maps BigInt → "Integer" so the
+    // wording was self-referential nonsense. CRuby raises
+    // `RangeError: bignum too big to convert into 'long'` for this
+    // shape (any BigInt is by canonical-BigInt invariant outside
+    // i64, hence outside the 2..=36 radix range, but it IS an
+    // Integer so TypeError is the wrong error class).
+    let mut rt = rubyrs::Runtime::new();
+    for script in ["5.to_s(2 ** 100)", "(2 ** 100).to_s(2 ** 100)"] {
+        let err = rt.eval(script, "to_s_bigint_radix.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "RangeError", "for {:?}", script);
+                assert_eq!(
+                    message, "bignum too big to convert into `long'",
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught RangeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_to_s_non_integer_radix_typeerror_message_matches_bigint_path() {
+    // Cross-check the parity guard above against the BigInt path
+    // so future drift between the two arms is caught immediately.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "(2 ** 100).to_s(\"x\")",
+        "bigint_to_s_typeerr.rb",
+    ).unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { class_name, message } => {
+            assert_eq!(class_name, "TypeError");
+            assert_eq!(message, "no implicit conversion of String into Integer");
+        }
+        other => panic!("expected Uncaught TypeError, got {:?}", other),
+    }
+}
+
+#[test]
+fn digits_negative_recv_takes_precedence_over_arity_and_base_errors() {
+    // CRuby precedence: a negative `Integer#digits` receiver
+    // raises Math::DomainError BEFORE any arity / base validation.
+    // Pre-fix rubyrs checked arity / base type / base sign / base
+    // < 2 first, so each shape surfaced a different error class.
+    // Match CRuby's precedence so user code's `rescue ArgumentError`
+    // catches the negative-recv path regardless of the other args'
+    // shapes. Substitute is ArgumentError "out of domain" (same
+    // convention as other numeric-out-of-domain arms in
+    // Vm::do_call). Runs in both profiles.
+    let mut rt = rubyrs::Runtime::new();
+    for script in [
+        "(-5).digits(10, 2)",     // would have been arity error
+        "(-5).digits(-2)",        // would have been "negative radix"
+        "(-5).digits(\"foo\")",   // would have been TypeError
+        "(-5).digits(1)",         // would have been "invalid radix 1"
+        "(-5).digits",            // pure negative-recv, no other badness
+    ] {
+        let err = rt.eval(script, "digits_precedence.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError (out-of-domain substitute) for {:?}, got {:?}",
+            script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg, "out of domain",
+            "wrong message for {:?} — expected the negative-recv check to fire first",
+            script,
+        );
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_negative_recv_raises_argument_error_substitute() {
+    // CRuby raises `Math::DomainError: out of domain` for
+    // `(-5).digits` (and the same shape for negative BigInt).
+    // The established subset pattern (same convention as other
+    // numeric-out-of-domain arms in Vm::do_call) substitutes
+    // `ArgumentError` because `Math::DomainError` isn't modelled.
+    // Pin the divergence so a future Math::DomainError addition
+    // is an opt-in upgrade rather than a silent regression.
+    let mut rt = rubyrs::Runtime::new();
+    for script in [
+        "(-5).digits",
+        "(0 - (2 ** 100)).digits",
+        "(-1).digits(16)",
+    ] {
+        let err = rt.eval(script, "digits_neg.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(msg, "out of domain", "wrong message for {:?}", script);
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_bigint_radix_survives_stress_gc() {
+    // GC rooting regression guard. For a BigInt radix (e.g. base
+    // = 2 ** 70), each digit produced is itself a heap-backed
+    // `Value::BigInt(id)`. Every `bigint_to_value` call inside
+    // the loop invokes `maybe_gc()`; without PinGuard rooting,
+    // a sweep mid-loop could deallocate already-pushed digits,
+    // leaving dangling ObjIds in the returned Array. Run under
+    // forced GC (`stress_gc: true`) so every alloc triggers a
+    // full mark — pre-fix this test panicked / produced wrong
+    // values; with PinGuard around the loop it stays sound.
+    let cfg = rubyrs::Config { stress_gc: true, ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let v = rt.eval(
+        // (2 ** 200).digits(2 ** 70) — 3 digits, each potentially
+        // BigInt-backed (top digit fits below 2^60 → demotes; the
+        // other two could be BigInts). Verify all elements are
+        // valid Integer values (no dangling refs / no panic).
+        "(2 ** 200).digits(2 ** 70).map { |d| d.bit_length }",
+        "digits_stress_gc.rb",
+    ).expect("BigInt-radix digits must survive STRESS_GC");
+    let elems = rt.resolve_array(&v).expect("expected Value::Array");
+    // Each element is bit_length of a digit; values bounded by
+    // log2(2^70) = 70. Just confirm we have a populated array of
+    // small Ints — exact values are an implementation detail.
+    assert!(!elems.is_empty(), "expected non-empty digits array");
+    for e in &elems {
+        match e {
+            rubyrs::Value::Int(n) => assert!(*n >= 0 && *n <= 70, "bit_length out of range: {}", n),
+            other => panic!("expected Value::Int (bit_length), got {:?}", other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_estimator_uses_log2_base_not_just_bits() {
+    // Tighter estimator (`(recv_bits - 1) / (base.bits() - 1) + 1`)
+    // means a `recv` whose base-2 expansion would exceed the cap
+    // can still succeed in base-10 / base-16 — the actual digit
+    // count for those bases is far smaller. Pin this so a future
+    // refactor that drops the log-2 division and reverts to a
+    // base-independent bound fails immediately.
+    //
+    // `(2 ** 1000).digits` is 302 decimal digits; at 16 B per
+    // Value that's ~4.8 KB, well under an 8 KB cap. The base-2
+    // form of the same recv would estimate 1001 elements
+    // (~16 KB) and would correctly TRAP the 8 KB cap — exactly
+    // the shape the sibling `digits_huge_bigint_in_base_2_traps_under_tight_cap`
+    // test pins. So this test exercises the estimator's
+    // base-awareness rather than its trap path.
+    let cfg = rubyrs::Config { max_value_bytes: Some(8 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let v = rt.eval(
+        "(2 ** 1000).digits.length",
+        "digits_base10_fits.rb",
+    ).expect("base-10 estimate must fit 8 KB cap for 2**1000");
+    match v {
+        rubyrs::Value::Int(n) => {
+            // 2**1000 has 302 decimal digits.
+            assert_eq!(n, 302, "expected 302 decimal digits, got {}", n);
+        }
+        other => panic!("expected Value::Int, got {:?}", other),
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_huge_bigint_in_base_2_traps_under_tight_cap() {
+    // `(2 ** 100_000).digits(2)` would produce a 100_001-element
+    // array (~1.6 MB at 16 B per Value). Under a tight cap, the
+    // helper traps ResourceExhausted before allocating. Pin the
+    // pre-allocation bound so a future refactor that drops the
+    // estimator-trip fails immediately.
+    let cfg = rubyrs::Config { max_value_bytes: Some(16 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "(2 ** 100_000).digits(2)",
+        "digits_huge.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn digits_returns_value_array_with_int_elements() {
+    // Embedding-facing contract: result is `Value::Array` of
+    // `Value::Int` digits (each digit fits i64 since base fits
+    // i64). Lock the public-API shape rather than just the
+    // printed form.
+    let mut rt = rubyrs::Runtime::new();
+    let v = rt.eval("12345.digits", "digits_shape.rb").expect("eval");
+    let elems = rt.resolve_array(&v).expect("expected Value::Array");
+    let nums: Vec<i64> = elems.iter().map(|e| match e {
+        rubyrs::Value::Int(n) => *n,
+        other => panic!("expected Value::Int, got {:?}", other),
+    }).collect();
+    assert_eq!(nums, vec![5, 4, 3, 2, 1]);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bit_length_bigint_two_complement_semantics() {
+    // Embedding-facing contract: `bit_length` on BigInt returns
+    // `Value::Int`. Verify both signs across boundary cases.
+    let mut rt = rubyrs::Runtime::new();
+    let cases: &[(&str, i64)] = &[
+        ("(2 ** 100).bit_length", 101),
+        ("(2 ** 200).bit_length", 201),
+        ("(0 - (2 ** 100)).bit_length", 100),  // bit_length(-2^100) = 100
+        ("(0 - (2 ** 100) - 1).bit_length", 101),  // bit_length(-2^100 - 1) = bit_length(2^100) = 101
+    ];
+    for (script, expected) in cases {
+        let v = rt.eval(script, "bit_length.rb").expect(script);
+        match v {
+            rubyrs::Value::Int(n) => assert_eq!(n, *expected, "{} → {}", script, n),
+            other => panic!("expected Value::Int, got {:?}", other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_arity_guard_fires_for_bigint_receiver() {
+    // numeric.rs's arity guard only catches Int receivers — BigInt
+    // receivers go through bigint_primitive's separate dispatch
+    // path. Mirror the guard there so `big.pow` / `big.pow(1,2,3)`
+    // raise CRuby's exact ArgumentError instead of NoMethodError.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [
+        ("big = 2 ** 100; big.pow", 0),
+        ("big = 2 ** 100; big.pow(1, 2, 3)", 3),
+    ] {
+        let err = rt.eval(script, "bigint_pow_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 1..2)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[test]
+fn pow_one_arg_non_numeric_raises_type_error() {
+    // CRuby: `5.pow("x")` raises `TypeError: String can't be
+    // coerced into Integer`. Pre-fix the 1-arg pow alias
+    // recursed unconditionally to `**`, which (separately) only
+    // surfaces NoMethodError for non-numeric args — so pow's
+    // delegate inherited that wrong error class. Validate the
+    // arg type at the pow boundary and raise TypeError directly.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, class_name) in [
+        ("5.pow(\"x\")", "String"),
+        ("5.pow(nil)", "nil"),
+        ("5.pow(true)", "true"),
+        ("5.pow([1])", "Array"),
+        ("5.pow({a: 1})", "Hash"),
+    ] {
+        let err = rt.eval(script, "pow_typeerr.rb").unwrap_err();
+        assert!(
+            err.err.is("TypeError"),
+            "expected TypeError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::TypeError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("{} can't be coerced into Integer", class_name),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_one_arg_non_numeric_raises_type_error_for_bigint_receiver() {
+    // Same fix on the BigInt receiver path — `(2 ** 100).pow("x")`
+    // routes through `try_bigint_pow_method`'s 1-arg branch, which
+    // mirrors the Int-side guard.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "(2 ** 100).pow(\"x\")",
+        "bigint_pow_typeerr.rb",
+    ).unwrap_err();
+    assert!(err.err.is("TypeError"), "got {:?}", err.err);
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(msg, "String can't be coerced into Integer");
+}
+
+#[test]
+fn pow_arity_zero_or_too_many_args_raise_argument_error() {
+    // CRuby: `5.pow` and `5.pow(1, 2, 3)` raise ArgumentError
+    // ("wrong number of arguments (given N, expected 1..2)").
+    // Without the explicit arity guard those shapes fall through
+    // to NoMethodError despite `respond_to?(:pow)` being true.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, n) in [("5.pow", 0), ("5.pow(1, 2, 3)", 3), ("5.pow(1, 2, 3, 4, 5)", 5)] {
+        let err = rt.eval(script, "pow_arity.rb").unwrap_err();
+        assert!(
+            err.err.is("ArgumentError"),
+            "expected ArgumentError for {:?}, got {:?}", script, err.err,
+        );
+        let msg = match &err.err {
+            rubyrs::RubyError::ArgumentError { msg } => msg.clone(),
+            rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            msg,
+            format!("wrong number of arguments (given {}, expected 1..2)", n),
+            "wrong message for {:?}", script,
+        );
+    }
+}
+
+#[test]
+fn pow_one_arg_accepts_float_exponent() {
+    // `5.pow(1.5)` must mirror `5 ** 1.5` — both routes through
+    // the same `**` arm. Previously the `pow` alias only fired
+    // for `[Int]` exponents, so Float exp NoMethodErrored despite
+    // being supported by `**`. Pin across both profiles.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 5.pow(1.5)\nputs 9.pow(0.5)",
+        "pow_float_exp.rb",
+    ).expect("Int#pow(Float) must work");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    let a: f64 = lines[0].parse().expect("Float output");
+    let b: f64 = lines[1].parse().expect("Float output");
+    // 5^1.5 ≈ 11.180339887; 9^0.5 = 3.0.
+    assert!((a - 11.180_339_887).abs() < 1e-6);
+    assert!((b - 3.0).abs() < 1e-12);
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_no_bignum_two_arg_distinguishes_exp_vs_mod_type_errors() {
+    // CRuby uses two distinct TypeError messages depending on
+    // which arg is non-Integer: "...1st argument is integer" when
+    // the exp is non-Int, "...all arguments are integers" when the
+    // mod is non-Int. The no-bignum 2-arg path must match exactly
+    // (the bignum path already does).
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(1.5, 7)", "exp_float.rb").unwrap_err();
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        other => panic!("expected TypeError, got {:?}", other),
+    };
+    assert!(
+        msg.contains("a 1st argument is integer"),
+        "wrong message for non-Int exp: {}",
+        msg,
+    );
+    let err = rt.eval("5.pow(3, 1.5)", "mod_float.rb").unwrap_err();
+    let msg = match &err.err {
+        rubyrs::RubyError::TypeError { msg } => msg.clone(),
+        rubyrs::RubyError::Uncaught { message, .. } => message.clone(),
+        other => panic!("expected TypeError, got {:?}", other),
+    };
+    assert!(
+        msg.contains("all arguments are integers"),
+        "wrong message for non-Int mod: {}",
+        msg,
+    );
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn pow_no_bignum_error_shapes_match_cruby() {
+    let mut rt = rubyrs::Runtime::new();
+    assert!(
+        rt.eval("5.pow(-1, 7)", "no_bignum_neg_exp.rb").unwrap_err().err.is("RangeError"),
+    );
+    assert!(
+        rt.eval("5.pow(3, 0)", "no_bignum_zero_mod.rb").unwrap_err().err.is("ZeroDivisionError"),
+    );
+    assert!(
+        rt.eval("5.pow(1.5, 7)", "no_bignum_float_exp.rb").unwrap_err().err.is("TypeError"),
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_huge_exponent_skips_dos_cap() {
+    // `2.pow(huge_exp, mod)` must succeed even when `2 ** huge_exp`
+    // would blow far past any reasonable max_value_bytes — modpow
+    // never materialises the intermediate, so the cap on the
+    // pre-modulo `**` path doesn't apply. Pin under a tight 1 KB
+    // cap that `2 ** 100_000` would trip (12.5 KB real magnitude).
+    let cfg = rubyrs::Config { max_value_bytes: Some(1024), ..Default::default() };
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 2.pow(100_000, 1_000_000_007)",
+        "pow_mod_huge.rb",
+    ).expect("modpow must not trip the unmodulated `**` DoS cap");
+    let v: i64 = buf.snapshot().trim().parse().expect("result must be Int");
+    assert!((0..1_000_000_007).contains(&v),
+        "result {} not in [0, mod)", v);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_negative_exponent_raises_range_error() {
+    // CRuby: `5.pow(-1, 7)` raises RangeError. Modular inverse may
+    // not exist and we don't compute it — match by raising rather
+    // than silently producing an unrelated value.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(-1, 7)", "pow_neg_exp_with_mod.rb").unwrap_err();
+    assert!(
+        err.err.is("RangeError"),
+        "expected RangeError, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_zero_modulus_raises_zero_division() {
+    // CRuby: `5.pow(3, 0)` raises ZeroDivisionError ("divided by 0").
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(3, 0)", "pow_zero_mod.rb").unwrap_err();
+    assert!(
+        err.err.is("ZeroDivisionError"),
+        "expected ZeroDivisionError, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_non_integer_args_raise_type_error() {
+    // CRuby: `5.pow(1.5, 7)` raises TypeError. Same for
+    // `5.pow(3, 1.5)`. Pin the type-shape contract.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.pow(1.5, 7)", "pow_float_exp.rb").unwrap_err();
+    assert!(err.err.is("TypeError"), "expected TypeError, got {:?}", err.err);
+    let err = rt.eval("5.pow(3, 1.5)", "pow_float_mod.rb").unwrap_err();
+    assert!(err.err.is("TypeError"), "expected TypeError, got {:?}", err.err);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_mod_result_demotes_when_fits_int() {
+    // The result is always strictly bounded by |mod|. When |mod|
+    // fits i64, the result fits too — `bigint_to_value` should
+    // demote so the embedding-facing `Value` is `Value::Int`, not
+    // `Value::BigInt`. Pins demote-on-fit through the modpow path.
+    let mut rt = rubyrs::Runtime::new();
+    let v = rt.eval(
+        "(2 ** 100).pow(50, 1_000_000_007)",
+        "pow_mod_demote.rb",
+    ).expect("eval must succeed");
+    assert!(
+        matches!(v, Value::Int(_)),
+        "expected Value::Int (mod fits i64), got {:?}", v,
+    );
+}
+
+#[test]
+fn pow_zero_to_negative_exponent_raises_zero_division() {
+    // CRuby: `0 ** -1` raises `ZeroDivisionError: divided by 0`
+    // because the reciprocal of 0 is undefined. Previous rubyrs
+    // routed through `(0_u64 as f64).powf(-1.0) = +Infinity` and
+    // silently returned `Float::INFINITY`, poisoning downstream
+    // arithmetic. Match CRuby and raise instead.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("0 ** -1", "pow_zero_neg.rb").unwrap_err();
+    assert!(
+        err.err.is("ZeroDivisionError"),
+        "expected ZeroDivisionError (direct or Uncaught-wrapped), got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_zero_to_negative_bigint_exponent_raises_zero_division() {
+    // Same divergence fix on the BigInt-flavoured path: when the
+    // exponent is a (negative) BigInt and recv is Int(0), dispatch
+    // goes through try_bigint_pow's |base|≤1 short-circuit. That
+    // arm previously returned `Float::INFINITY` for BigInt-flavoured
+    // operands. Now it raises ZeroDivisionError uniformly with the
+    // Int×Int path.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "neg_big = 0 - (2 ** 100); 0 ** neg_big",
+        "pow_zero_neg_bigint.rb",
+    ).unwrap_err();
+    assert!(
+        err.err.is("ZeroDivisionError"),
+        "expected ZeroDivisionError (direct or Uncaught-wrapped), got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_zero_and_one_exponent_skip_estimator() {
+    // `big ** 0` must always return 1 and `big ** 1` must return
+    // the receiver, regardless of cap. With the previous flow the
+    // estimator added a 32-byte BigInt-header overhead to
+    // est_bytes, so a sub-32-byte cap would trap `big ** 0` even
+    // though no allocation is actually needed. Pin both shapes
+    // under a minimal 16-byte cap.
+    let cfg = rubyrs::Config { max_value_bytes: Some(16), ..Default::default() };
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    // Build a `big` BigInt under a larger cap-free runtime first
+    // would change scope; instead use a small Int receiver where
+    // the demoted result still hits the identity short-circuits.
+    rt.eval(
+        "puts 7 ** 0\nputs 7 ** 1\nputs (-3) ** 0\nputs (-3) ** 1",
+        "pow_exp_identities.rb",
+    ).expect("** 0 and ** 1 must short-circuit before the cap check");
+    assert_eq!(buf.snapshot().trim(), "1\n7\n1\n-3");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_pow2_estimator_avoids_2x_overshoot() {
+    // The DoS estimator must use `(base_bits - 1) * exp + 1` for
+    // power-of-two bases, not `base_bits * exp` — otherwise a
+    // factor-of-2 overestimate falsely rejects allocations that
+    // fit. `2 ** 100_000` produces ~12.5 KB of magnitude; the
+    // tight bound estimates ~12.5 KB and fits under a 16 KB cap.
+    // The old `base_bits * exp` would have estimated ~25 KB and
+    // trapped, even though the real value fits comfortably.
+    let cfg = rubyrs::Config { max_value_bytes: Some(16 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.eval("2 ** 100_000", "pow2_tight_estimate.rb")
+        .expect("tight pow-of-2 estimate must allow values that fit the cap");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_huge_bigint_float_coercion_skips_string_alloc() {
+    // BigInt → f64 must NOT materialise a decimal string for
+    // BigInts past f64 range — Copilot flagged that a script
+    // could trigger an unbounded allocation via `huge ** 0.5`.
+    // The bits()-based pre-check (> 1024 ⇒ ±∞ directly) caps
+    // any intermediate string at ~310 digits. Build a BigInt
+    // far past 2**1024, then exercise the Float and negative-Int
+    // exp paths. Both must produce ±∞ Floats without trapping.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    // 2 ** 5000 ≈ 625 bytes of magnitude, fits the 64 KB cap; its
+    // bits() == 5001 puts it well past the 1024 f64 threshold.
+    rt.eval(
+        "big = 2 ** 5000\n\
+         puts (big ** 0.5).infinite?\n\
+         puts (big ** -1).zero?",
+        "bigint_huge_to_f64.rb",
+    ).expect("must not trap or NoMethodError");
+    // 0.5 of +∞ is still +∞; -1 reciprocal of +∞ is 0.0.
+    assert_eq!(buf.snapshot().trim(), "1\ntrue");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_identity_bases_with_bigint_exponent() {
+    // |base| ≤ 1 must not trap on BigInt exponents — results are
+    // constant-size. Pin `1 ** big`, `0 ** big`, `(-1) ** big`
+    // (even and odd via parity-preserving bit(0)).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "big_even = 2 ** 100\n\
+         big_odd  = big_even + 1\n\
+         puts 1 ** big_even\n\
+         puts 0 ** big_even\n\
+         puts (-1) ** big_even\n\
+         puts (-1) ** big_odd",
+        "pow_bigint_exp_identity.rb",
+    ).expect("identity bases must accept BigInt exponents");
+    assert_eq!(buf.snapshot().trim(), "1\n0\n1\n-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_neg_exponent_negative_base_preserves_parity_via_abs_powf() {
+    // Negative-base + large-magnitude negative-exp must keep
+    // the sign decided by i64 parity rather than relying on
+    // f64-rounded `powf(neg, non-int-as-int)` which can NaN
+    // (or flip sign) on some libm impls. `(-2) ** -3` is a
+    // small enough case to assert exactly: -1/8 = -0.125.
+    // Then `(-2) ** -(2**60 + 1)` (odd huge) — past 2**53
+    // f64-mantissa — must stay non-positive (underflows to
+    // -0.0 or a tiny negative Float).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let odd_huge = (1_i64 << 60) | 1;
+    rt.eval(
+        &format!("puts (-2) ** -3\nv = (-2) ** -{odd}\nputs v <= 0.0\nputs !v.nan?",
+            odd = odd_huge),
+        "pow_neg_base_parity.rb",
+    ).expect("negative-base negative-exp must not NaN");
+    assert_eq!(buf.snapshot().trim(), "-0.125\ntrue\ntrue");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn pow_neg_exponent_minus_one_preserves_parity_beyond_f64_mantissa() {
+    // (-1) ** (-huge_odd) must remain -1.0; casting the i64
+    // exponent through f64 loses parity past 2**53, so the
+    // negative-exp arm has to short-circuit ±1 bases before powf.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let odd = (1_i64 << 60) | 1; // 2**60 + 1: way past f64 mantissa
+    rt.eval(
+        &format!("puts (-1) ** (-{odd})\nputs (-1) ** (-({odd} - 1))", odd = odd),
+        "pow_neg_exp_parity.rb",
+    ).expect("parity must survive f64 cast");
+    assert_eq!(buf.snapshot().trim(), "-1.0\n1.0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_bigint_exponent_traps() {
+    // `2 ** (2**63)` (BigInt exponent) must trap ResourceExhausted
+    // instead of falling through to NoMethodError. The doc comment
+    // promises a clean error.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "big = 2 ** 100; 2 ** big",
+        "pow_bigint_exp.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted for BigInt exponent, got {:?}",
+        err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_pow_oversize_exponent_traps_for_real_bases() {
+    // For bases with |a| > 1, an exponent that doesn't fit u32
+    // must trap (the result would be astronomically large) —
+    // verifies numeric_call declines on u32-overflow so
+    // bigint_primitive can issue the trap.
+    let mut rt = rubyrs::Runtime::new();
+    let huge = (u32::MAX as i64) + 1;
+    let err = rt.eval(
+        &format!("2 ** {}", huge),
+        "pow_oversize_exp.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted for u32-overflow exp, got {:?}",
+        err.err,
+    );
+}
+
