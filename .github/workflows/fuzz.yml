@@ -65,25 +65,43 @@ jobs:
         with:
           tool: cargo-fuzz@0.12
 
-      - name: Restore cargo + fuzz corpus (previous run)
-        # Split restore/save so corpus growth from this run is
-        # actually published for the next run to consume.
-        # `actions/cache@v5` with a fixed key only saves on a
-        # *cache miss* — once the entry exists, future runs
-        # restore-only and discard their corpus deltas. Use the
-        # run-id as the save key (always unique → always saves)
-        # and a stable prefix in `restore-keys` so the previous
-        # run's snapshot still loads on startup.
+      # The cache concerns split cleanly into two:
+      #
+      # 1. Cargo registry + git + the fuzz crate's `target/` dir
+      #    are *content-keyed* on `Cargo.lock` — identical between
+      #    the `parse` and `eval` matrix entries, only invalidate
+      #    when deps actually change. Sharing this cache halves
+      #    storage and avoids each matrix entry duplicating ~500
+      #    MB of build output.
+      #
+      # 2. The per-target corpus is *time-keyed* on `github.run_id`
+      #    so each run's grown corpus is always saved. Scoping
+      #    the path to `corpus/${target}/` (not the whole
+      #    `corpus/` dir) means a matrix entry never carries the
+      #    other target's corpus as ballast.
+      #
+      # Both keep the same restore + save split shape so
+      # subsequent runs can publish their deltas — see the
+      # rationale comment on the save steps below.
+
+      - name: Restore shared cargo deps + fuzz target
         uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             crates/rubyrs/fuzz/target
-            crates/rubyrs/fuzz/corpus
-          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ github.run_id }}
+          key: ${{ runner.os }}-fuzz-deps-${{ hashFiles('crates/rubyrs/fuzz/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-fuzz-${{ matrix.target }}-
+            ${{ runner.os }}-fuzz-deps-
+
+      - name: Restore per-target fuzz corpus
+        uses: actions/cache/restore@v5
+        with:
+          path: crates/rubyrs/fuzz/corpus/${{ matrix.target }}
+          key: ${{ runner.os }}-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-corpus-${{ matrix.target }}-
 
       - name: Seed corpus from existing test fixtures
         # First-run bootstrap: every `.rb` under `tests/diff/` and
@@ -126,12 +144,14 @@ jobs:
             -rss_limit_mb=2048 \
             -timeout=5
 
-      - name: Save fuzz corpus (publish for next run)
-        # `if: always()` so even a fuzzing-discovered crash still
-        # saves the grown corpus — the crashing input itself is a
-        # high-value seed for next time. Matches the restore key
-        # above (run-id) so save can't collide with itself; the
-        # next workflow's `restore-keys` prefix picks it up.
+      - name: Save shared cargo deps + fuzz target
+        # Content-keyed on Cargo.lock. When deps haven't changed,
+        # the key already exists from an earlier run and
+        # `cache/save` no-ops with a "cache already exists" notice
+        # — that's the desired behaviour, the existing entry is
+        # still good. Both matrix entries try to save under the
+        # same key concurrently; GitHub serialises and accepts
+        # the first one.
         if: always()
         uses: actions/cache/save@v5
         with:
@@ -139,8 +159,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             crates/rubyrs/fuzz/target
-            crates/rubyrs/fuzz/corpus
-          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ github.run_id }}
+          key: ${{ runner.os }}-fuzz-deps-${{ hashFiles('crates/rubyrs/fuzz/Cargo.lock') }}
+
+      - name: Save per-target fuzz corpus (publish for next run)
+        # `if: always()` so even a fuzzing-discovered crash still
+        # saves the grown corpus — the crashing input itself is a
+        # high-value seed for next time. The run-id key is unique
+        # per workflow run so this save always succeeds; the next
+        # workflow's `restore-keys` prefix picks it up.
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: crates/rubyrs/fuzz/corpus/${{ matrix.target }}
+          key: ${{ runner.os }}-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
 
       - name: Upload crash artifacts on failure
         # `cargo fuzz` writes minimised crash repros to
