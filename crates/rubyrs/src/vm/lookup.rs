@@ -105,6 +105,12 @@ impl IcStats {
     /// Aggregate hit ratio across both receiver and toplevel
     /// paths. Returns `0.0` when no lookups have been recorded so
     /// callers don't have to special-case division by zero.
+    ///
+    /// When the `ic-stats` cargo feature is OFF, `IcStats` is a
+    /// ZST and this is a stub that always returns `0.0`. The
+    /// stub is `#[inline(always)]` so callers in downstream
+    /// crates can write feature-agnostic code (always-callable
+    /// API) without paying any cost on production builds.
     #[cfg(feature = "ic-stats")]
     pub fn hit_rate(&self) -> f64 {
         let h = self.hits + self.toplevel_hits;
@@ -114,6 +120,11 @@ impl IcStats {
         } else {
             h as f64 / total as f64
         }
+    }
+    #[cfg(not(feature = "ic-stats"))]
+    #[inline(always)]
+    pub fn hit_rate(&self) -> f64 {
+        0.0
     }
 }
 const TOPLEVEL_METHOD_CACHE_KEY: usize = usize::MAX;
