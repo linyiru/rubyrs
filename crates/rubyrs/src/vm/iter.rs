@@ -282,14 +282,29 @@ impl Vm {
         // `then` (and its `yield_self` alias) returns whatever
         // the block returned (Kleisli-style transform).
         if args.is_empty() && matches!(name, "tap" | "then" | "yield_self") {
+            // step_block migration also surfaces a pre-existing
+            // CRuby-parity gap: `1.tap { break :x }` was returning
+            // `1` (the receiver) instead of `:x`. CRuby's break-
+            // value propagation rule applies to every block-taking
+            // method — `tap`/`then` are no exception. Fixed here as
+            // a side effect of going through the helper, which
+            // forces explicit BlockStep::Break handling.
+            //
+            // method_return is left set on the Vm; outer dispatch
+            // unwinds via `Ok(Some(Value::Nil))` per the sort/sort!
+            // / chunk_while / scan precedent locked in by
+            // `nonlocal_return_from_block` fixture.
             let pre_frames = self.frames.len();
             let mut g = PinGuard::new(self);
             g.pin(recv.clone());
             g.pin(Value::Block(block));
-            g.vm.invoke_block(block, vec![recv.clone()])?;
-            g.vm.dispatch_until(pre_frames)?;
-            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-            return Ok(Some(if name == "tap" { recv.clone() } else { r }));
+            match g.vm.step_block(block, vec![recv.clone()], pre_frames)? {
+                BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                BlockStep::Break(r) => return Ok(Some(r)),
+                BlockStep::Value(r) => {
+                    return Ok(Some(if name == "tap" { recv.clone() } else { r }));
+                }
+            }
         }
         // `s.gsub(/pat/) { |m| ... }` / `s.sub(/pat/) { |m| ... }`.
         // For each match the block is invoked with the matched
@@ -354,17 +369,27 @@ impl Vm {
         if let Value::Str(s) = recv
             && name == "each_byte" && args.is_empty()
         {
+            // step_block migration fixes a latent CRuby-parity
+            // bug: `"abc".each_byte { break :x }` was returning
+            // `"abc"` (the receiver) instead of `:x` because the
+            // pre-migration loop dropped the break_signaled check
+            // entirely. Non-local return was masked by the same
+            // gap; step_block's explicit BlockStep variants make
+            // both paths unmissable.
             let bytes: Vec<u8> = s.borrow().clone();
             let mut g = PinGuard::new(self);
             g.pin(recv.clone());
             g.pin(Value::Block(block));
             let pre_frames = g.vm.frames.len();
+            let mut early: Option<Value> = None;
             for b in bytes {
-                g.vm.invoke_block(block, vec![Value::Int(b as i64)])?;
-                g.vm.dispatch_until(pre_frames)?;
-                g.vm.stack.pop();
+                match g.vm.step_block(block, vec![Value::Int(b as i64)], pre_frames)? {
+                    BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                    BlockStep::Break(r) => { early = Some(r); break; }
+                    BlockStep::Value(_) => {}
+                }
             }
-            return Ok(Some(recv.clone()));
+            return Ok(Some(early.unwrap_or_else(|| recv.clone())));
         }
         // `s.scan(/pat/) { |m| ... }` / `s.scan(string) { |m| ... }`
         // — yield each match to the block (capture-group Array if
@@ -386,6 +411,15 @@ impl Vm {
                 #[cfg(feature = "regex")]
                 Value::Regex(re) => {
                     let has_groups = re.captures_len() > 1;
+                    // The pre-migration code did `pop(); if break_signaled
+                    // { early = pop(); }` — TWO pops, with the second one
+                    // happening AFTER the first had already discarded the
+                    // block's return value. So break_signaled captured
+                    // whatever stack residue lived UNDER the block result
+                    // (typically Nil) — `"abcabc".scan(/a/) { break :tag }`
+                    // was returning `nil` instead of `:tag`. step_block
+                    // pops exactly once and classifies, fixing the
+                    // double-pop bug as a side effect.
                     if has_groups {
                         for caps in re.captures_iter(&source_str) {
                             let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
@@ -398,26 +432,50 @@ impl Vm {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             let gid = g.vm.heap.alloc(HeapObj::Array(group_vec));
-                            g.vm.invoke_block(block, vec![Value::Array(gid)])?;
-                            g.vm.dispatch_until(pre_frames)?;
-                            if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
-                            let _ = g.vm.stack.pop();
-                            if g.vm.break_signaled {
-                                g.vm.break_signaled = false;
-                                early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
-                                break;
+                            // Pin the freshly-allocated capture-
+                            // groups Array for the duration of the
+                            // step_block call only. `invoke_block`
+                            // may run `maybe_gc()` before copying
+                            // `args` into the block's locals, and
+                            // `args` at that point is a Rust-local
+                            // `Vec<Value>` — the only root for
+                            // `gid` until invoke_block writes it
+                            // into a frame slot. Without the pin,
+                            // STRESS_GC sweeps `gid` and the block
+                            // sees a use-after-free (stack-overflow
+                            // ICE on the next GC).
+                            //
+                            // Manual push/pop instead of an outer
+                            // `g.pin(...)` so the pin doesn't
+                            // accumulate across iterations (a long
+                            // `scan` would otherwise keep every
+                            // capture Array pinned until the loop
+                            // ends — O(matches) memory pressure).
+                            //
+                            // The `?` short-circuit is moved AFTER
+                            // the pop by binding `step_block(...)`'s
+                            // Result to a local first (`let step_result =
+                            // ...`), then popping, then `match
+                            // step_result?`. Without this dance an
+                            // Err from step_block would skip the pop
+                            // and leave `gid` permanently pinned —
+                            // the historical PinGuard footgun its
+                            // doc-comment warns about (vm.rs:147).
+                            g.vm.pinned.push(Value::Array(gid));
+                            let step_result = g.vm.step_block(block, vec![Value::Array(gid)], pre_frames);
+                            g.vm.pinned.pop();
+                            match step_result? {
+                                BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                                BlockStep::Break(r) => { early = Some(r); break; }
+                                BlockStep::Value(_) => {}
                             }
                         }
                     } else {
                         for m in re.find_iter(&source_str) {
-                            g.vm.invoke_block(block, vec![Value::new_str(m.as_str())])?;
-                            g.vm.dispatch_until(pre_frames)?;
-                            if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
-                            let _ = g.vm.stack.pop();
-                            if g.vm.break_signaled {
-                                g.vm.break_signaled = false;
-                                early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
-                                break;
+                            match g.vm.step_block(block, vec![Value::new_str(m.as_str())], pre_frames)? {
+                                BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                                BlockStep::Break(r) => { early = Some(r); break; }
+                                BlockStep::Value(_) => {}
                             }
                         }
                     }
@@ -431,14 +489,10 @@ impl Vm {
                         let mut i = 0;
                         while i + plen <= bytes.len() {
                             if &bytes[i..i + plen] == pat_bytes {
-                                g.vm.invoke_block(block, vec![Value::new_str_bytes(pat_owned.clone())])?;
-                                g.vm.dispatch_until(pre_frames)?;
-                                if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
-                                let _ = g.vm.stack.pop();
-                                if g.vm.break_signaled {
-                                    g.vm.break_signaled = false;
-                                    early = Some(g.vm.stack.pop().unwrap_or(Value::Nil));
-                                    break;
+                                match g.vm.step_block(block, vec![Value::new_str_bytes(pat_owned.clone())], pre_frames)? {
+                                    BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                                    BlockStep::Break(r) => { early = Some(r); break; }
+                                    BlockStep::Value(_) => {}
                                 }
                                 i += plen;
                             } else {
@@ -870,11 +924,16 @@ impl Vm {
                 g.pin(Value::Block(block));
                 g.pin(k.clone());
                 let pre_frames = g.vm.frames.len();
-                g.vm.invoke_block(block, vec![k.clone()])?;
-                g.vm.dispatch_until(pre_frames)?;
-                if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
-                let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                Some(r)
+                // Single-shot block — the call's result IS the
+                // block's return (whether reached via fall-off,
+                // explicit value, or `break`). step_block's
+                // Value / Break variants both surface that value;
+                // method_return propagates via Ok(Some(Nil)) per
+                // the established pattern.
+                match g.vm.step_block(block, vec![k.clone()], pre_frames)? {
+                    BlockStep::MethodReturn => Some(Value::Nil),
+                    BlockStep::Break(r) | BlockStep::Value(r) => Some(r),
+                }
             }
             (Value::Int(start), "upto", [Value::Int(stop)]) => {
                 // Pin the block — the body may allocate freely
