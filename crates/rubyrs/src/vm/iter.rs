@@ -1127,15 +1127,17 @@ impl Vm {
             // as in CRuby) comes from the two existing runtime caps,
             // neither of which needs special-casing here. They differ
             // in lifecycle:
-            //   - `Config::fuel` — **per-Runtime** (one-shot).
-            //     Decremented per dispatched op inside `step_block`'s
-            //     invoke_block path; every iteration calls the block,
-            //     which runs at least one op (its own return), so fuel
-            //     ticks every iteration regardless of how trivial the
-            //     body is. NOT reset between successive `Runtime::eval`
-            //     calls — a host reusing a Runtime exhausts the budget
-            //     across all evals collectively. Trips with
-            //     `ResourceExhausted: "out of fuel"`.
+            //   - `Config::fuel` — **per-eval**. The host's ceiling
+            //     lives on `Runtime::fuel_budget`; each
+            //     `Runtime::eval` re-anchors `vm.fuel` from that
+            //     ceiling at entry, so a Runtime reused across many
+            //     evals gets a fresh budget per call (symmetric with
+            //     `deadline` below). `vm.fuel` is decremented per
+            //     dispatched op inside `step_block`'s invoke_block
+            //     path; every iteration calls the block, which runs
+            //     at least one op (its own return), so fuel ticks
+            //     every iteration regardless of how trivial the body
+            //     is. Trips with `ResourceExhausted: "out of fuel"`.
             //   - `Config::deadline` — **per-eval**. The stored value
             //     is a `Duration` (not an Instant), so each
             //     `Runtime::eval` recomputes the absolute
