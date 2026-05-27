@@ -19,10 +19,14 @@ shopt -s nullglob
 
 # Resolve paths relative to the script's location, not the
 # caller's CWD — matches the convention used by perf/check.sh,
-# perf/wasm_check.sh, etc.
+# perf/wasm_check.sh, etc. Then `cd` to repo root so a
+# relative `BIN=target/release/rubyrs` override (or other
+# repo-relative path) resolves consistently regardless of the
+# caller's CWD.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BIN="${BIN:-$REPO_ROOT/target/release/rubyrs}"
+cd "$REPO_ROOT"
+BIN="${BIN:-target/release/rubyrs}"
 DIR="$SCRIPT_DIR/ic_stats_workloads"
 
 if [[ ! -x "$BIN" ]]; then
