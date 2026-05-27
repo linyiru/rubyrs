@@ -38,10 +38,14 @@ puts "abcabc".sub(/./)  { |c| break :sub_stop }                          # :sub_
 # unwinds via `break` in the driver). The outer method returns
 # the `return val`.
 def chunk_return
-  # `.to_a` forces iteration in CRuby (chunk is lazy).
-  # rubyrs implements chunk eagerly, but the `.to_a` call is a
-  # no-op-on-already-Array — the return fires from inside the
-  # block during the chunk primitive itself.
+  # `.to_a` forces iteration in CRuby (chunk is lazy), so the
+  # block runs there and `return` unwinds chunk_return.
+  # In rubyrs chunk is eager: the block runs synchronously
+  # inside the `chunk` primitive itself, `return` fires before
+  # `chunk` even returns, the outer dispatch unwinds the method,
+  # and `.to_a` never executes. Both interpreters end up
+  # printing `:chunk_ret` even though the execution order
+  # differs.
   [1, 2, 3].chunk { |x| return :chunk_ret }.to_a
   :unreached
 end
