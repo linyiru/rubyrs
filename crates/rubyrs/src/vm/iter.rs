@@ -668,7 +668,15 @@ impl Vm {
                 let mut early = None;
                 for v in snapshot {
                     let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
-                        BlockStep::MethodReturn => break,
+                        // Return immediately (don't fall through to
+                        // the post-loop `maybe_gc / check_alloc / heap.alloc`
+                        // — a Trap from any of those would clobber the
+                        // in-flight `method_return` state). `Ok(Some(Value::Nil))`
+                        // marks the primitive as matched so the outer
+                        // dispatch loop unwinds via `method_return`.
+                        // Matches the shape used by gsub / bsearch /
+                        // sort below.
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(k) => k,
                     };
