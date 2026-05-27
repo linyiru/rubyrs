@@ -238,6 +238,7 @@ fn run_diff(name: &str) {
 #[test] fn array_first_last_n() { run_diff("array_first_last_n"); }
 #[test] fn range_first_last_n() { run_diff("range_first_last_n"); }
 #[test] fn nonlocal_return_from_block() { run_diff("nonlocal_return_from_block"); }
+#[test] fn block_break_value() { run_diff("block_break_value"); }
 #[test] fn array_tally() { run_diff("array_tally"); }
 #[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }
 #[test] fn float_precision() { run_diff("float_precision"); }
