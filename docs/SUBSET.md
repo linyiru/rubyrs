@@ -690,8 +690,9 @@ Foo.singleton_class.name                         # CRuby: nil;   rubyrs: "Foo"
   instead of CRuby's `nil`.
 - `Object#singleton_class` for non-Class receivers is not implemented
   in this arm and will raise NoMethodError.
-- Why: completes the ERB compile chain (`ERB.new(...).src` runs end-
-  to-end) without pulling the full eigenclass model into the VM.
+- Why: completes the ERB compile chain
+  (`ERB.new(...).src` runs end-to-end) without pulling the full
+  eigenclass model into the VM.
 - Test: `crates/rubyrs/tests/diff/class_singleton_class.rb` (locks
   idempotency, `class is Class`, distinct singletons across classes,
   the ERB-shape `@_init` cache invariant, and `respond_to?` parity).
