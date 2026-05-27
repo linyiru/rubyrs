@@ -623,13 +623,21 @@ impl Vm {
             }
             _ => return Ok(None),
         };
-        // Recv bit-length, with i64 conservatively treated as 64
-        // bits (the exact bit_length would be `64 - leading_zeros`,
-        // but for the right-shift collapse check we just need an
-        // upper bound — over-counting only costs one extra BigInt
-        // allocation that demote-on-fit reclaims).
+        // Recv bit-length — exact for both Int and BigInt. The
+        // earlier conservative `64` for Int over-counted on small
+        // magnitudes, which (after rounding to limbs + 32-byte
+        // header) could false-trap the DoS cap for shifts where
+        // the rendered result actually fit (`5 << shift` with a
+        // tight `max_value_bytes` near `bit_length(5) + shift`
+        // bytes was the canonical bad case). For i64 the exact
+        // bit_length of the magnitude is `64 - unsigned_abs().leading_zeros()`
+        // with the zero-magnitude case clamping to 0 (matches
+        // CRuby's `bit_length(0) == 0`).
         let recv_bits: u64 = match recv {
-            Value::Int(_) => 64,
+            Value::Int(n) => {
+                let mag = n.unsigned_abs();
+                if mag == 0 { 0 } else { 64 - mag.leading_zeros() as u64 }
+            }
             Value::BigInt(id) => self.heap.bigint(*id).bits(),
             _ => unreachable!("guarded above"),
         };
