@@ -1340,10 +1340,26 @@ impl Vm {
             // permissive stance as `instance_method` /
             // `method_defined?`).
             ("remove_method", args) if !args.is_empty() => {
+                // Per-arg processing: Symbol uses sid directly (no
+                // resolve/intern roundtrip + no max_symbols check —
+                // Symbols are already interned). String goes
+                // through `with_str_lossy` so the cap check +
+                // intern run on a borrowed &str (zero-alloc on the
+                // valid-UTF-8 hot path). Mirrors the established
+                // pattern at the `instance_method` String arm.
                 for arg in args {
-                    let raw_owned: String = match arg {
-                        Value::Sym(sid) => self.interner.resolve(*sid).to_string(),
-                        Value::Str(s) => s.to_string_lossy(),
+                    let sid: SymId = match arg {
+                        Value::Sym(sid) => *sid,
+                        Value::Str(s) => s.with_str_lossy(|raw| -> Result<SymId, Trap> {
+                            if let Some(max) = self.max_symbols
+                                && !self.interner.contains(raw)
+                                && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                            Ok(self.interner.intern(raw))
+                        })?,
                         other => {
                             let inspected = other.to_inspect(&self.heap, &self.interner);
                             return Err(self.trap(RubyError::TypeError {
@@ -1351,18 +1367,22 @@ impl Vm {
                             }));
                         }
                     };
-                    if let Some(max) = self.max_symbols
-                        && !self.interner.contains(&raw_owned)
-                        && self.interner.len() >= max {
-                        return Err(self.trap(RubyError::ResourceExhausted {
-                            msg: format!("interner exhausted: {} symbols", max),
-                        }));
-                    }
-                    let sid = self.interner.intern(&raw_owned);
+                    // Unlike `instance_method` / `method_defined?`
+                    // — which are permissive on primitive classes
+                    // so probe-style usage doesn't trip — CRuby
+                    // raises NameError on missing entries even for
+                    // primitives (verified against CRuby 3.4:
+                    // `String.remove_method(:foo)` raises). Probing
+                    // before removal isn't a meaningful use case;
+                    // matching CRuby's strict shape avoids quiet
+                    // divergence on this surface.
                     let present = cls.methods.borrow().contains_key(&sid);
-                    if !present && !is_primitive_class_name(&cls.name) {
+                    if !present {
+                        // Resolve name only on the rare missing
+                        // path. Free for the common case.
+                        let name_for_msg = self.interner.resolve(sid).to_string();
                         return Err(self.trap(RubyError::NameError {
-                            msg: format!("method '{}' not defined in {}", raw_owned, cls.name),
+                            msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
                         }));
                     }
                     cls.methods.borrow_mut().remove(&sid);

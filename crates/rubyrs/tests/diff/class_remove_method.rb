@@ -17,8 +17,9 @@
 #   - String arg: same (CRuby `to_sym`'s it)
 #   - Variadic: accepts multiple symbols in one call
 #   - Missing method on user class raises NameError
-#   - Primitive class is permissive (same stance as
-#     `instance_method` / `method_defined?` arms)
+#   - Primitive class ALSO raises NameError on missing entries
+#     (CRuby parity — DIFFERENT stance from `instance_method` /
+#     `method_defined?` which are permissive there)
 #   - 0-arg shape: no-op, returns receiver
 #   - `respond_to?(:remove_method)` advertises the method
 
@@ -70,6 +71,17 @@ begin
   D.remove_method(:nonexistent)
 rescue NameError
   puts "missing → NameError"
+end
+
+# --- Primitive class also raises NameError on missing entries
+#     (CRuby parity — UNLIKE `instance_method` / `method_defined?`
+#     which are permissive). `remove_method` is an actual
+#     mutation, not a probe; surfacing the missing-entry shape
+#     loudly here matches CRuby and avoids quiet divergence.
+begin
+  String.remove_method(:nonexistent_xyz)
+rescue NameError
+  puts "primitive missing → NameError"
 end
 
 # --- 0-arg shape: no-op, returns receiver ---
