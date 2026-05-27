@@ -2884,6 +2884,15 @@ impl Vm {
                 // (frozen flag, aliasing). `equal?` should reflect
                 // Rc-pointer identity, not content equality.
                 (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b),
+                // BigInt is heap-allocated; `equal?` is ObjId
+                // identity, matching CRuby (where two separately-
+                // allocated Bignums with the same magnitude are
+                // distinct objects). Without this arm BigInt fell
+                // through to the value-equality default, so
+                // `(2**64).equal?(2**64)` (two distinct allocs)
+                // wrongly returned true.
+                #[cfg(feature = "bignum")]
+                (Value::BigInt(a), Value::BigInt(b)) => a == b,
                 // Immediates (Int, Float, Sym, Bool, Nil) — fall
                 // back on ruby_eq (value equality).
                 _ => recv.ruby_eq(&args[0], &self.heap),

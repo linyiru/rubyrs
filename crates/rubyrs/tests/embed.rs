@@ -1705,6 +1705,38 @@ fn sprintf_radix_int_min_does_not_panic() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_equal_q_is_object_identity_not_value_equality() {
+    // Phase B.7: `Object#equal?` is BasicObject identity, not
+    // value equality. For heap-managed types (Array, Hash, Str,
+    // BigInt) two separately-allocated objects with identical
+    // value must NOT be `equal?`. Pre-fix BigInt fell through
+    // to ruby_eq's value-equality default and `(2**64).equal?(2**64)`
+    // wrongly returned true.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Two separate allocs, same value → distinct objects.
+        // `a.equal?(a)` is always true (same alloc).
+        // `==` (value equality) is still true.
+        "a = 2 ** 64\n\
+         b = 2 ** 64\n\
+         puts a.equal?(b)\n\
+         puts a.equal?(a)\n\
+         puts (2 ** 64).equal?(2 ** 64)\n\
+         puts a == b",
+        "bigint_equal.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "false");  // separate allocs
+    assert_eq!(lines[1], "true");   // same alloc
+    assert_eq!(lines[2], "false");  // separate literals
+    assert_eq!(lines[3], "true");   // value equality unchanged
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_bitwise_not_uses_twos_complement_identity() {
     // Phase B.3: BigInt bit ops. `~big` is two's-complement
     // bitwise NOT — equivalent to `-(big + 1)` for any sign.
