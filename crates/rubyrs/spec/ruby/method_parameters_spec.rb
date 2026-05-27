@@ -1,9 +1,9 @@
 # Adapted from ruby/spec core/method/parameters_spec.rb at
-# upstream commit 448cb340 (2026-05). Hand-translated — the
-# six baseline parameter shapes are inlined: empty, req, opt,
-# rest, key/keyreq, keyrest. The `:block` form is skipped on
-# purpose — rubyrs reports `def f(&blk)` as `[[:opt, :blk]]`
-# rather than `[[:block, :blk]]` (divergent, see below).
+# upstream commit 448cb340 (2026-05). Hand-translated — eight
+# it-blocks are inlined covering all parameter shapes:
+# empty, req, opt, rest, key/keyreq, keyrest, block (basic),
+# and a full-mix ordering check (block trails everything).
+# The define_method-form variant is dropped.
 
 describe "Method#parameters" do
   it "returns an empty array for a no-argument method" do
@@ -48,12 +48,22 @@ describe "Method#parameters" do
     assert_eq(ParamsT5.new.method(:f).parameters, [[:keyrest, :opts]])
   end
 
-  # skipped (divergent): it "reports a block param as [:block, name]" do
-  #   `def f(&blk)` reports `[[:opt, :blk]]` in rubyrs instead of
-  #   `[[:block, :blk]]`. The block-form scanner doesn't tag the
-  #   `&`-prefixed param distinctly from a trailing optional
-  #   positional. Tracked as a divergence rather than a missing
-  #   method — the call/yield path itself works, only the
-  #   introspection metadata is mis-labelled.
+  it "reports a block param as [:block, name]" do
+    class ParamsT6
+      def f(&blk); end
+    end
+    assert_eq(ParamsT6.new.method(:f).parameters, [[:block, :blk]])
+  end
+
+  it "places the block param after positional / keyword params" do
+    class ParamsT7
+      def f(a, b = 1, *rest, k:, kk: 1, **kr, &blk); end
+    end
+    assert_eq(
+      ParamsT7.new.method(:f).parameters,
+      [[:req, :a], [:opt, :b], [:rest, :rest], [:keyreq, :k], [:key, :kk], [:keyrest, :kr], [:block, :blk]],
+    )
+  end
+
   # skipped (method-not-implemented): describe "for define_method blocks" do ... end
 end

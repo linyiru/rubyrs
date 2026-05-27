@@ -1139,8 +1139,17 @@ impl Vm {
                         let rest_count = proto.rest_param.is_some() as usize;
                         let kw_count = proto.kw_param_defaults.len();
                         let kw_rest_count = proto.kw_rest_param.is_some() as usize;
+                        // `block_param`'s name is appended to
+                        // `proto.params` by the compiler (so the
+                        // body's locals see `blk` at its slot), but
+                        // it must not count as a positional optional
+                        // for arity/parameters introspection. Without
+                        // this subtraction, `def f(&blk)` returns
+                        // arity -1 and parameters `[[:opt, :blk]]`
+                        // instead of arity 0 and `[[:block, :blk]]`.
+                        let block_count = proto.block_param.is_some() as usize;
                         let positional_total = proto.params.len()
-                            .saturating_sub(rest_count + kw_count + kw_rest_count);
+                            .saturating_sub(rest_count + kw_count + kw_rest_count + block_count);
                         let n_opt_pos = positional_total.saturating_sub(n_req_pos);
                         let n_req_kw = proto.kw_param_defaults.iter().filter(|d| d.is_none()).count();
                         let n_opt_kw = proto.kw_param_defaults.iter().filter(|d| d.is_some()).count();
@@ -1181,6 +1190,9 @@ impl Vm {
                         if let Some(krname) = &proto.kw_rest_param {
                             let n = if krname == "__kw_rest_anon" { None } else { Some(krname.clone()) };
                             params.push(("keyrest", n));
+                        }
+                        if let Some(bname) = &proto.block_param {
+                            params.push(("block", Some(bname.clone())));
                         }
                         (arity, params)
                     }
