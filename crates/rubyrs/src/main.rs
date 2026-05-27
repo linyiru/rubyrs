@@ -160,6 +160,8 @@ fn main() {
         eprintln!("  RUBYRS_DEADLINE_MS=N    trap when wall-clock per eval exceeds N ms");
         eprintln!("  RUBYRS_MAX_SYMBOLS=N    trap when interner grows beyond N symbols");
         eprintln!("  RUBYRS_MAX_VALUE_BYTES=N trap when any single String/Array/Hash exceeds N bytes");
+        #[cfg(feature = "ic-stats")]
+        eprintln!("  RUBYRS_IC_STATS=1       dump per-call-site IC hit/miss counters on exit");
         process::exit(1);
     }
     let path = Path::new(&args[1]);
@@ -265,6 +267,21 @@ fn main() {
             process::exit(1);
         }
     }
+    // `RUBYRS_IC_STATS=1` (only meaningful when built with
+    // `--features ic-stats`): dump the inline-cache hit/miss
+    // counters to stderr before exit. Without the feature, the
+    // counters are ZST/no-op and printing them is a noisy no-op
+    // — guarded behind the env var either way so production
+    // invocations stay silent.
+    #[cfg(feature = "ic-stats")]
+    if env_lookup("RUBYRS_IC_STATS").is_some() {
+        let s = rt.ic_stats();
+        eprintln!(
+            "ic-stats\thits={}\tmisses={}\ttoplevel_hits={}\ttoplevel_misses={}\thit_rate={:.4}",
+            s.hits, s.misses, s.toplevel_hits, s.toplevel_misses, s.hit_rate()
+        );
+    }
+
     // Final checkpoint AFTER the success-path match returns. This
     // closes the gap between `eval_done` and process exit so the
     // breakdown harness's `wall - last_checkpoint` formula

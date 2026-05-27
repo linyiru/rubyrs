@@ -40,6 +40,7 @@ use std::rc::Rc;
 pub use error::{RubyError, Span, Trap, TrapFrame};
 pub use value::Value;
 pub use intern::SymId;
+pub use vm::IcStats;
 
 // `_cext_link_keep_alive` — `#[used]` references that keep cext
 // ABI symbols alive past the linker DCE pass. See the module's
@@ -758,6 +759,15 @@ RUBY_ENGINE = "ruby".freeze
     /// `std::io::sink()` itself when output should be discarded).
     pub fn set_stdout(&mut self, w: Box<dyn Write>) {
         self.vm.stdout = w;
+    }
+
+    /// Snapshot of the per-call-site inline-cache hit / miss
+    /// counters accumulated since this `Runtime` was constructed.
+    /// Returns a meaningful `IcStats` only when rubyrs was built
+    /// with the `ic-stats` cargo feature; without it, `IcStats` is
+    /// a zero-sized type and reads as `Default`.
+    pub fn ic_stats(&self) -> IcStats {
+        self.vm.ic_stats.clone()
     }
 
     /// Register a host function callable from Ruby code with `name(args)`.

@@ -101,6 +101,16 @@ stdlib = []
 # we know which knob to turn next. Zero-cost when off: the `Trace`
 # struct is zero-sized and `at()` is an empty `#[inline(always)]`.
 trace-startup = []
+# `ic-stats` instruments the per-call-site inline cache with hit /
+# miss counters, exposed via the public `Runtime::ic_stats()` API
+# and dumped to stderr by the CLI when `RUBYRS_IC_STATS=1`. Used
+# to validate the 4-way polymorphic IC against real workloads:
+# if a hot dispatch site shows a low hit rate, the call-site is
+# megamorphic past `IC_WAYS` and `next_way` round-robin eviction
+# is thrashing — knob for whether widening IC_WAYS pays off.
+# Zero-cost when off: `IcStats` is a ZST and `record_hit` /
+# `record_miss` compile to nothing.
+ic-stats = []
 
 [dependencies]
 ruby-prism.workspace = true

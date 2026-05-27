@@ -34,6 +34,7 @@ mod util;
 #[cfg(all(feature = "cext", not(target_os = "wasi")))]
 pub(crate) use cext::with_vm_ptr_set;
 pub(crate) use lookup::{class_is_a, flatten_ancestors, CallCache};
+pub use lookup::IcStats;
 pub(crate) use primitive::primitive_call;
 pub(crate) use sprintf::ruby_sprintf;
 pub(crate) use util::{value_cmp_v, value_cmp_v_heap, vec_nil, visibility_from_name};
@@ -450,6 +451,10 @@ pub(crate) struct Vm {
     pub(crate) sym_size: SymId,
     pub(crate) sym_to_s: SymId,
     pub(crate) sym_inspect: SymId,
+    /// Hit/miss counters for the per-call-site IC. ZST + no-op
+    /// when the `ic-stats` cargo feature is off; readable via
+    /// `Runtime::ic_stats()` when on.
+    pub(crate) ic_stats: IcStats,
     /// `Op::Break` sets this; iteration drivers check and consume.
     pub(crate) break_signaled: bool,
     /// `Op::ReturnMethod` sets this with the value to return. Both
@@ -615,6 +620,7 @@ impl Vm {
             sym_size,
             sym_to_s,
             sym_inspect,
+            ic_stats: IcStats::default(),
             break_signaled: false,
             callable_forwarder_proto: None,
             method_compose_forwarder_proto: None,
