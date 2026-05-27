@@ -325,10 +325,17 @@ pub struct Runtime {
 /// at the moment preamble finishes loading. `reset()` rewinds the
 /// Runtime to this exact baseline.
 ///
-/// Cheap to construct (~few hundred SymIds copied into HashSets)
-/// and cheap to apply (~microseconds of Vec/HashMap mutations).
-/// The per-fuzz-iter cost is dwarfed by even a single avoided
-/// preamble re-load.
+/// The snapshot stores the post-preamble **values** of mutable
+/// per-class method tables, top-level constants, and top-level
+/// methods — not just the keys — so that user code that
+/// **redefines** a preamble method or constant (e.g. `class String;
+/// def length; 999; end; end` or `Exception = 1`) is fully
+/// rewound on reset, not just left in place when the key happens
+/// to match. Storing values instead of keys roughly 10×s the
+/// snapshot's memory footprint (~few hundred KB total — still
+/// dwarfed by everything else in a live Runtime) but is the only
+/// way to honour the documented "rewind to exact post-preamble
+/// state" contract.
 struct PostPreambleSnapshot {
     /// `vm.heap.slots.len()` at preamble completion. `reset()`
     /// truncates the heap back to this length.
@@ -338,28 +345,39 @@ struct PostPreambleSnapshot {
     heap_live_count: usize,
     /// `vm.interner.len()` at preamble completion. `reset()`
     /// truncates `interner.vec` and drains stale `interner.map`
-    /// entries.
+    /// entries — but ONLY down to `max(interner_len,
+    /// host_fn_max_sym + 1)` (see the reset implementation), so
+    /// any SymId referenced by `host_fns` registered *after*
+    /// construction stays valid.
     interner_len: usize,
-    /// Class names registered by the preamble. `reset()` keeps
-    /// only these entries in `vm.classes` (Exception, Object,
-    /// Comparable, Mutex, Random, String, Integer, Array, Hash,
-    /// ... — ~40 entries).
-    class_keys: std::collections::HashSet<intern::SymId>,
-    /// Toplevel constants the preamble installed (`Exception`,
-    /// `Object`, `Encoding::UTF_8`, ...). `reset()` keeps only
-    /// these.
-    constant_keys: std::collections::HashSet<intern::SymId>,
-    /// Toplevel methods the preamble defined (e.g. Kernel
-    /// helpers). `reset()` keeps only these.
-    toplevel_method_keys: std::collections::HashSet<intern::SymId>,
-    /// For every preamble class, the method SymIds it had at
-    /// preamble completion. `reset()` removes user-added methods
-    /// on preamble classes (e.g. `class String; def foo; end;
-    /// end` in iter N can't leak into iter N+1).
-    class_method_keys: std::collections::HashMap<
-        intern::SymId,
-        std::collections::HashSet<intern::SymId>,
-    >,
+    /// `vm.classes` HashMap as it was at preamble completion.
+    /// `reset()` clones this and assigns to `vm.classes`,
+    /// preserving every preamble class object identity (Rc clone)
+    /// and erasing any user `class X; end` definitions.
+    classes: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Class>>,
+    /// `vm.constants` as of preamble completion. `reset()` clones
+    /// and replaces. Catches the case where user code redefines a
+    /// preamble constant (e.g. `Exception = 1`) — the snapshot's
+    /// original Class value is restored, not just left.
+    constants: std::collections::HashMap<intern::SymId, value::Value>,
+    /// `vm.toplevel_methods` as of preamble completion.
+    /// Restored by clone-and-replace so a user `def foo; ...` —
+    /// or a redefinition of a preamble-supplied toplevel method —
+    /// fully rewinds.
+    toplevel_methods: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>,
+    /// For every preamble class, the method table snapshot. The
+    /// outer key is the class's name SymId; the inner map is the
+    /// `methods` HashMap as it was at preamble completion. On
+    /// `reset()`, each preserved preamble class has its `methods`
+    /// `RefCell` overwritten with a clone of this map.
+    ///
+    /// Same value-not-key reason: a user `class String; def
+    /// length; 999; end; end` would silently survive a key-only
+    /// snapshot because `length` is a preamble String method —
+    /// the value-snapshot restores the preamble's original
+    /// `Method` so the override is gone post-reset.
+    class_methods:
+        std::collections::HashMap<intern::SymId, std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>>,
 }
 
 /// Per-process slot used by the wizer pre-initialize path. On
@@ -512,24 +530,20 @@ impl PostPreambleSnapshot {
     /// `new_default_impl`; the resulting snapshot is the target
     /// state every subsequent `reset()` rewinds to.
     fn capture(rt: &Runtime) -> Self {
-        let class_method_keys = rt
+        let class_methods = rt
             .vm
             .classes
             .iter()
-            .map(|(name, cls)| {
-                let methods = cls.methods.borrow();
-                let keys = methods.keys().copied().collect();
-                (*name, keys)
-            })
+            .map(|(name, cls)| (*name, cls.methods.borrow().clone()))
             .collect();
         PostPreambleSnapshot {
             heap_slot_count: rt.vm.heap.slots.len(),
             heap_live_count: rt.vm.heap.live_count,
             interner_len: rt.vm.interner.len(),
-            class_keys: rt.vm.classes.keys().copied().collect(),
-            constant_keys: rt.vm.constants.keys().copied().collect(),
-            toplevel_method_keys: rt.vm.toplevel_methods.keys().copied().collect(),
-            class_method_keys,
+            classes: rt.vm.classes.clone(),
+            constants: rt.vm.constants.clone(),
+            toplevel_methods: rt.vm.toplevel_methods.clone(),
+            class_methods,
         }
     }
 }
@@ -722,20 +736,81 @@ impl Runtime {
         // is safer than asserting empty).
         self.vm.heap.free.retain(|&idx| (idx as usize) < snapshot.heap_slot_count);
         self.vm.heap.live_count = snapshot.heap_live_count;
-        // --- Interner: drop user-interned symbols ---
-        self.vm.interner.truncate_to(snapshot.interner_len);
-        // --- Classes / constants / toplevel methods: drop entries
-        //     not in the post-preamble keyset. ---
-        self.vm.classes.retain(|k, _| snapshot.class_keys.contains(k));
-        self.vm.constants.retain(|k, _| snapshot.constant_keys.contains(k));
-        self.vm.toplevel_methods.retain(|k, _| snapshot.toplevel_method_keys.contains(k));
-        // --- Per-class method tables: drop user-added methods on
-        //     preamble classes. The preamble class itself stays;
-        //     only methods absent from the snapshot get removed. ---
+        // --- Interner: drop user-interned symbols, but never
+        //     truncate past any SymId referenced by `host_fns`. ---
+        // `register_fn` interns the function name AFTER
+        // `with_config` returns (i.e. post-snapshot). Those
+        // SymIds are above `snapshot.interner_len`. Naive
+        // truncation back to the snapshot length would leave
+        // `host_fns` keyed by now-invalid SymIds — and the next
+        // user-interned string would silently reuse those IDs,
+        // dispatching to the wrong host fn (or panicking on
+        // `interner.resolve(...)`).
+        //
+        // Compute the post-truncation length as `max(snapshot_len,
+        // max_host_fn_sym + 1)`. User-interned symbols that
+        // happen to fall below this floor get preserved as a
+        // small leak — acceptable trade-off for never corrupting
+        // host-fn dispatch.
+        let host_fn_max = self
+            .vm
+            .host_fns
+            .keys()
+            .map(|sym| sym.0 as usize)
+            .max();
+        let keep_len = match host_fn_max {
+            Some(m) => snapshot.interner_len.max(m + 1),
+            None => snapshot.interner_len,
+        };
+        self.vm.interner.truncate_to(keep_len);
+        // --- Restore classes / constants / toplevel methods by
+        //     value (not just key-filter). User code that
+        //     REDEFINES a preamble class / constant / method
+        //     (`Exception = 1`, `class String; def length; 999;
+        //     end; end`, etc.) overwrites the value in place; a
+        //     key-only `retain` would happily leave the user's
+        //     redefinition because the SymId is still in the
+        //     snapshot's keyset. Clone-and-replace is the only
+        //     way to fully rewind.
+        //
+        // Rc<Class> / Rc<Method> / Value::Str(Rc<...>) all clone
+        // by refcount bump, so the actual cost is HashMap copies
+        // (~hundreds of entries; sub-microsecond).
+        self.vm.classes = snapshot.classes.clone();
+        self.vm.constants = snapshot.constants.clone();
+        self.vm.toplevel_methods = snapshot.toplevel_methods.clone();
+        // --- Per-class method tables: replace each preamble
+        //     class's `methods` RefCell content with the
+        //     snapshot's copy. Catches BOTH user-added methods
+        //     on preamble classes AND user-redefined preamble
+        //     methods (`class String; def length; ...; end; end`
+        //     — `length` is a preamble String method, so a
+        //     key-retain would leave the override in place). ---
         for (cls_name, cls) in &self.vm.classes {
-            if let Some(preamble_methods) = snapshot.class_method_keys.get(cls_name) {
-                cls.methods.borrow_mut().retain(|m, _| preamble_methods.contains(m));
+            if let Some(snap_methods) = snapshot.class_methods.get(cls_name) {
+                *cls.methods.borrow_mut() = snap_methods.clone();
             }
+        }
+        // --- Literal caches keyed by user-time SymIds: clear. ---
+        // `regex_cache` and `bigint_lit_cache` map compile-time-
+        // interned SymIds to compiled regex / parsed BigInt
+        // values. Their keys are the SymIds of the literal
+        // SOURCE TEXT — keys assigned by the user-eval's
+        // compiler. After `reset()`'s interner truncation, the
+        // same SymId values can be reused for entirely different
+        // literal strings in the next eval, which would silently
+        // return the wrong cached value.
+        //
+        // Wholesale-clear instead of trying to filter by key.
+        // The caches re-populate cheaply on the next use (one
+        // `regex::Regex::new` call per pattern).
+        #[cfg(feature = "regex")]
+        {
+            self.vm.regex_cache.clear();
+        }
+        #[cfg(feature = "bignum")]
+        {
+            self.vm.bigint_lit_cache.clear();
         }
         // --- Volatile per-eval state: reset to empty. ---
         self.vm.stack.clear();
@@ -778,13 +853,21 @@ impl Runtime {
         self.vm.method_gen = self.vm.method_gen.wrapping_add(1);
     }
 
-    // Test-only inspectors: let integration tests in
+    // Internal-only inspectors: let integration tests in
     // `tests/embed/reset.rs` assert on `vm.heap.live_count` and
     // `vm.interner.len()` without making those fields part of the
-    // public Runtime API. Gated `#[cfg(any(test, ...))]` so the
-    // integration-test crate (separate compilation unit) can see
-    // them — `#[cfg(test)]` alone would only expose to the inline
-    // test mods, not `tests/`.
+    // stable Runtime API.
+    //
+    // These are `pub fn` rather than `#[cfg(test)]`-gated because
+    // integration tests live in a separate compilation unit from
+    // the lib crate, and `#[cfg(test)]` doesn't apply to that
+    // unit. The `__test_` prefix + `#[doc(hidden)]` is the de-facto
+    // Rust convention for "internal, no stability guarantee — do
+    // not call from production code." If we later want a
+    // hard-enforced gate, a `test-internals` Cargo feature would
+    // work, but it'd require every test invocation to pass
+    // `--features test-internals`, which is more churn than the
+    // current convention is worth.
     #[doc(hidden)]
     pub fn __test_vm_live_count(&self) -> usize {
         self.vm.heap.live_count

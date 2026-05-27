@@ -107,6 +107,60 @@ fn reset_clears_user_methods_added_to_preamble_class() {
 }
 
 #[test]
+fn reset_undoes_redefinition_of_preamble_method() {
+    // Override a method the PREAMBLE Ruby code defined (not a
+    // primitive fast-path one — those bypass user override
+    // entirely, see PR #156's documented divergence). The
+    // preamble's `mutex.rb` defines `Mutex#synchronize` in Ruby,
+    // so it's truly user-overridable.
+    //
+    // A key-only snapshot (the shape this PR's first commit
+    // used) would have left this override in place: `synchronize`
+    // is in the preamble's Mutex method-keyset, so a
+    // `retain(|m| ...)` doesn't remove it. The value-restore
+    // pattern that landed in the C1/C3/C6 fix clones the
+    // preamble's original Method back into place, so the
+    // override is gone after reset.
+    let mut rt = Runtime::new();
+    rt.eval(
+        "class Mutex; def synchronize; 'OVERRIDDEN'; end; end",
+        "override.rb",
+    ).expect("override Mutex#synchronize");
+    let pre = rt
+        .eval("Mutex.new.synchronize { 'block' }", "use.rb")
+        .expect("call override");
+    assert!(
+        matches!(&pre, rubyrs::Value::Str(s) if &*s.borrow() == b"OVERRIDDEN"),
+        "expected user override before reset, got {:?}",
+        pre,
+    );
+    rt.reset();
+    // Post-reset: preamble's original `synchronize` is back.
+    // The preamble's implementation yields to the block and
+    // returns the block's value — `'block'` here.
+    let post = rt
+        .eval("Mutex.new.synchronize { 'block' }", "post.rb")
+        .expect("call restored synchronize");
+    assert!(
+        matches!(&post, rubyrs::Value::Str(s) if &*s.borrow() == b"block"),
+        "expected preamble synchronize (yields 'block') post-reset, got {:?}",
+        post,
+    );
+}
+
+// Note: a `reset_undoes_redefinition_of_preamble_constant` test
+// was attempted but rubyrs's current constant-assignment
+// semantics make it untestable today — `Exception = 1` evaluates
+// without actually updating the constant in `vm.constants`
+// (raises a warning instead, similar to CRuby's
+// "already initialized constant" path; the read post-assignment
+// still returns the Class). When that gap is closed, an analogous
+// test using `Exception = 1` belongs here. The value-restore
+// in `reset()` already handles the case correctly — the snapshot
+// stores the original Value, so when const reassignment starts
+// working, reset will rewind it.
+
+#[test]
 fn reset_preserves_preamble_classes() {
     let mut rt = Runtime::new();
     // Populate user state to ensure reset actually does work.
