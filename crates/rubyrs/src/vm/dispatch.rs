@@ -2110,6 +2110,21 @@ impl Vm {
         // `Tilt::TOPOBJECT.class_eval do def ... end end`, so
         // the inner block-form (intercepted in `do_call_block`)
         // does the actual class context switching.
+        // No-arg, no-block `C.class_eval` / `C.module_eval` would
+        // otherwise fall through to NoMethodError, but
+        // respond_to?(:class_eval) reports true. CRuby raises
+        // ArgumentError "wrong number of arguments (given 0,
+        // expected 1..3)" for the no-arg string-form call;
+        // (block-only form is handled in do_call_block).
+        if (&*name == "class_eval" || &*name == "module_eval")
+            && let Value::Class(cls) = &recv
+            && args.is_empty()
+            && self.lookup_class_singleton_method(cls, name_id).is_none()
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1..3)".into(),
+            }));
+        }
         if (&*name == "class_eval" || &*name == "module_eval")
             && let Value::Class(cls) = &recv
             && !args.is_empty()

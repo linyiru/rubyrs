@@ -1454,6 +1454,12 @@ impl Vm {
         self.ensure_call_caches(cc);
         let depth_before = self.frames.len();
         let stack_before = self.stack.len();
+        // Respect `Config::max_frames`: eval pushes a fresh frame
+        // and could be re-entered recursively from inside the
+        // eval'd source. Without this gate, deep `eval("eval(\"...\"")`
+        // chains would bypass the cap that normal method/block
+        // invocation enforces.
+        self.check_frames()?;
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,

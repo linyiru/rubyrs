@@ -81,6 +81,21 @@ class OverrideClassEval
 end
 puts OverrideClassEval.class_eval("ignored")    # override:ignored
 
+# --- No-arg, no-block class_eval/module_eval raises ArgumentError
+#     (not NoMethodError) since respond_to? advertises the method.
+class NoArgs
+end
+begin
+  NoArgs.class_eval
+rescue ArgumentError
+  puts "class_eval() → ArgumentError"
+end
+begin
+  NoArgs.module_eval
+rescue ArgumentError
+  puts "module_eval() → ArgumentError"
+end
+
 # --- Non-String source arg raises TypeError (not NoMethodError) ---
 class BadSrcArg
 end
