@@ -2894,10 +2894,11 @@ fn int_shift_zero_receiver_never_traps_regardless_of_count() {
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_shift_left_traps_dos_via_max_value_bytes() {
-    // Left-shift DoS cap: `1 << 100_000_000` would allocate
-    // ~12.5 MB. Pre-cap estimator must trap before BigInt::shl
-    // touches the allocator. Honours `max_value_bytes` with the
-    // same 1 MB fallback as `try_bigint_pow`.
+    // Left-shift DoS cap: `1 << 1_000_000` would allocate
+    // ~125 KB. With a 64 KB `max_value_bytes`, the pre-cap
+    // estimator must trap before BigInt::shl touches the
+    // allocator. Honours `max_value_bytes` with the same 1 MB
+    // fallback as `try_bigint_pow`.
     let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
     let mut rt = rubyrs::Runtime::with_config(cfg);
     let err = rt.eval(
