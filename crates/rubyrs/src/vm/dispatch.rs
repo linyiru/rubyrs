@@ -1213,8 +1213,14 @@ impl Vm {
         // bare Instance path). Routed via a follow-up if a cext
         // surfaces the need; tracked as a comment so a future
         // reader doesn't think the bare-allocate is an oversight.
-        let allocate_id = self.interner.intern("allocate");
-        if name_id == allocate_id
+        // String-compare on the already-resolved `name` instead of
+        // interning "allocate" each call (PR #181 review round 3
+        // Copilot comment #1). Avoids both the per-call hash lookup
+        // on a hot dispatch path and the latent edge case where
+        // unconditional `intern()` could grow the symbol table
+        // outside the existing `Config::max_symbols` accounting
+        // points.
+        if &*name == "allocate"
             && let Value::Class(cls) = &recv {
             if !args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
@@ -1239,8 +1245,19 @@ impl Vm {
                 || cls.name == "Class"
                 || is_primitive_class_name(&cls.name)
             {
+                // Anonymous Module / Class shells have an empty
+                // `cls.name`; without a fallback the message would
+                // read "allocator undefined for " (trailing space,
+                // no class hint). Pick "Module" vs "Class" by the
+                // `is_module` flag so the surface is actionable
+                // (PR #181 review round 3 Copilot comment #2).
+                let display = if cls.name.is_empty() {
+                    if cls.is_module { "Module" } else { "Class" }
+                } else {
+                    &cls.name
+                };
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!("allocator undefined for {}", cls.name),
+                    msg: format!("allocator undefined for {}", display),
                 }));
             }
             let obj = self.alloc_default_instance(cls)?;
