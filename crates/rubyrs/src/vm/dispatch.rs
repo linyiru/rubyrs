@@ -1181,6 +1181,112 @@ impl Vm {
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
+        // `Class#allocate` user-singleton override — CRuby allows
+        // `def self.allocate` to replace the built-in allocator (used
+        // by Marshal / dup / ORM hydration hooks). Mirrors the
+        // `def self.new` pre-check at line 1053. Must fire BEFORE the
+        // builtin allocate arm below or the user override is silently
+        // shadowed; do_call_block has the same precedence (its
+        // generic singleton check at ~4601 runs before its allocate
+        // arm). PR #181 follow-up: code-review caught the asymmetry.
+        if &*name == "allocate"
+            && let Value::Class(cls) = &recv
+            && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+            return self.invoke_method(m, recv.clone(), args);
+        }
+        // `Class#allocate` — bare-instance allocator without calling
+        // `initialize`. Used by frameworks for unmarshalling / dup /
+        // clone / ORM hydration, and by the TRY_RUNS pass-7 probe's
+        // `ERB.new` stub (layer #4). Sits before the `new` arm so the
+        // class-receiver path is uniform.
+        //
+        // Semantics:
+        //   - User classes (`Value::Class` not in the primitive
+        //     whitelist): allocate a fresh `HeapObj::Instance` with
+        //     the class pointer set, empty ivars, no singleton class.
+        //     No `initialize` call.
+        //   - Primitive class shells fall into two groups:
+        //       * "Truly disallowed" in CRuby — Integer / Float /
+        //         Symbol / Regexp / Proc / Method / UnboundMethod /
+        //         TrueClass / FalseClass / NilClass / Kernel. CRuby
+        //         raises TypeError; rubyrs matches byte-for-byte.
+        //       * "Allowed in CRuby" — String / Array / Hash / Range.
+        //         CRuby produces a bare instance of the builtin
+        //         (empty string / array / hash / Range struct); rubyrs
+        //         currently raises TypeError because the heap model
+        //         unboxes those values and we don't yet route through
+        //         a TypedData allocator. Documented as a KNOWN GAP
+        //         below; the comment used to claim CRuby parity here
+        //         which was wrong (PR #181 review round 4 Copilot
+        //         comment #2).
+        //     Either way: zero Instance slot to populate, so the
+        //     bare-allocator path can't run for any primitive shell.
+        //   - Zero args; any positional arg raises ArgumentError
+        //     with the standard "wrong number of arguments" shape.
+        //
+        // KNOWN GAP: `cext_alloc_func` (set by
+        // `rb_define_alloc_func`) is currently NOT routed through
+        // this arm. The `new` arm below DOES route through it (so a
+        // cext `Foo.new` produces a TypedData-wrapped Object), but
+        // `Foo.allocate` here falls back to the default bare
+        // Instance. For a cext whose initialize-after-allocate
+        // relies on the alloc_func having wrapped its C struct, the
+        // separation of allocate-vs-new becomes visible. No caller
+        // surfaced today (pass-7 probe layer #4 only needs the
+        // bare Instance path). Routed via a follow-up if a cext
+        // surfaces the need; tracked as a comment so a future
+        // reader doesn't think the bare-allocate is an oversight.
+        // String-compare on the already-resolved `name` instead of
+        // interning "allocate" each call (PR #181 review round 3
+        // Copilot comment #1). Avoids both the per-call hash lookup
+        // on a hot dispatch path and the latent edge case where
+        // unconditional `intern()` could grow the symbol table
+        // outside the existing `Config::max_symbols` accounting
+        // points.
+        if &*name == "allocate"
+            && let Value::Class(cls) = &recv {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                }));
+            }
+            // Module / Class shells are NOT user classes — a real
+            // CRuby raises NoMethodError ("undefined method
+            // 'allocate' for ...Module/Class...") on Module-flavored
+            // receivers; we approximate with the same TypeError
+            // surface as the primitive shells so the call site sees
+            // a clean failure instead of a bogus bare-Instance whose
+            // `class` says Module but which can't behave like one
+            // (PR #181 review #1 — Copilot flagged this gap).
+            // KNOWN GAP: `Class.allocate` itself in CRuby DOES
+            // succeed (returns a new anonymous Class). We block it
+            // here for safety until a proper Class/Module allocator
+            // lands; the only caller surfaced today (ERB stub) wants
+            // an Instance, not a Class.
+            if cls.is_module
+                || cls.name == "Module"
+                || cls.name == "Class"
+                || is_primitive_class_name(&cls.name)
+            {
+                // Anonymous Module / Class shells have an empty
+                // `cls.name`; without a fallback the message would
+                // read "allocator undefined for " (trailing space,
+                // no class hint). Pick "Module" vs "Class" by the
+                // `is_module` flag so the surface is actionable
+                // (PR #181 review round 3 Copilot comment #2).
+                let display = if cls.name.is_empty() {
+                    if cls.is_module { "Module" } else { "Class" }
+                } else {
+                    &cls.name
+                };
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("allocator undefined for {}", display),
+                }));
+            }
+            let obj = self.alloc_default_instance(cls)?;
+            self.stack.push(obj);
+            return Ok(());
+        }
         if name_id == new_id
             && let Value::Class(cls) = &recv {
                 // L3-F: cext-registered allocator path. When the class
@@ -1202,18 +1308,12 @@ impl Vm {
                 for a in &args { g.pin(a.clone()); }
                 // Default Instance allocator — used by every branch of
                 // the cext-selection cascade below that doesn't go
-                // through `rb_define_alloc_func`. Extracted so the
-                // three call sites (cext non-wasi else arm, cext wasi
-                // fallback, no-cext arm) can't drift out of sync.
+                // through `rb_define_alloc_func`. Delegates to
+                // `Vm::alloc_default_instance` so this path and the
+                // `Class#allocate` arm above can't drift on
+                // GC/rooting/allocation behavior (PR #181 review #2).
                 let alloc_instance = |g: &mut PinGuard, cls: &Rc<Class>| -> Result<Value, Trap> {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
-                        class: cls.clone(),
-                        ivars: HashMap::new(),
-                        singleton_class: None,
-                    }));
-                    Ok(Value::Object(id))
+                    g.vm.alloc_default_instance(cls)
                 };
                 // Allocator selection. With `cext`, the class may carry
                 // an `rb_define_alloc_func`-registered allocator that
@@ -4517,22 +4617,63 @@ impl Vm {
             return self.invoke_method_with_block(m, target_self, args, Some(block));
         }
 
+        // `Class#allocate` (block form) — CRuby silently ignores
+        // a block passed to `allocate`. Without this arm,
+        // `Box.allocate { ... }` (or `Box.send(:allocate) { ... }`,
+        // which routes here through `do_call_block`) falls through
+        // to method_missing/NoMethodError instead of allocating
+        // (PR #181 review round 4 Copilot comment #1). Mirrors
+        // do_call's allocate arm — same arity / primitive shell /
+        // Module-Class fences, same shared allocator helper, with
+        // the block discarded.
+        //
+        // Precedence: this arm sits AFTER the generic
+        // `lookup_class_singleton_method` check at line 4601, so
+        // a user-defined `def self.allocate` wins. do_call has the
+        // matching precedence via its dedicated `allocate`
+        // user-singleton arm at line 1184 (fix landed in the same
+        // PR's code-review round). The two paths are now
+        // symmetric: user override wins in both no-block and
+        // block forms.
+        if &*name == "allocate"
+            && let Value::Class(cls) = &recv {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                }));
+            }
+            if cls.is_module
+                || cls.name == "Module"
+                || cls.name == "Class"
+                || is_primitive_class_name(&cls.name)
+            {
+                let display = if cls.name.is_empty() {
+                    if cls.is_module { "Module" } else { "Class" }
+                } else {
+                    &cls.name
+                };
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("allocator undefined for {}", display),
+                }));
+            }
+            let obj = self.alloc_default_instance(cls)?;
+            self.stack.push(obj);
+            return Ok(());
+        }
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {
                 // Pin args during the alloc window — see the matching
                 // comment in `do_call`'s new-branch for the rationale.
-                let id = {
+                // Route through `Vm::alloc_default_instance` so the
+                // block-call `new` path can't drift from the
+                // no-block `new` arm or `Class#allocate` (PR #181
+                // review round 2).
+                let obj = {
                     let mut g = PinGuard::new(self);
                     for a in &args { g.pin(a.clone()); }
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    g.vm.heap.alloc(HeapObj::Instance(Instance {
-                        class: cls.clone(), ivars: HashMap::new(),
-                        singleton_class: None,
-                    }))
+                    g.vm.alloc_default_instance(cls)?
                 };
-                let obj = Value::Object(id);
                 let init_id = self.interner.intern("initialize");
                 if let Some(m) = self.lookup_method_uncached(cls, init_id) {
                     self.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
@@ -4621,6 +4762,44 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
 }
 
 impl Vm {
+    /// Default Instance allocator — `maybe_gc` + `check_alloc` +
+    /// `heap.alloc(HeapObj::Instance { class, empty ivars, no
+    /// singleton })` → `Value::Object`. Shared by `Class#allocate`
+    /// and the default branch of `Class.new`'s allocator cascade
+    /// so the two paths can't drift on GC/rooting/allocation
+    /// behavior (PR #181 review #2 — Copilot flagged duplication
+    /// between the two arms).
+    ///
+    /// Note: the `new` arm calls this through `g.vm` while inside
+    /// a `PinGuard`; callers without a PinGuard call it directly
+    /// on `&mut self`. Either is safe — this method does NOT pin
+    /// its result, so any caller that needs to keep the new
+    /// Instance alive across a later `maybe_gc` must pin
+    /// (`PinGuard::pin`) before that point.
+    ///
+    /// Sites that intentionally do NOT use this helper:
+    /// - `raise.rs` exception construction (lines 41/63/108/373)
+    ///   skips `check_alloc` so a raise during budget exhaustion
+    ///   does not re-trap — exception normalization must succeed
+    ///   even under OOM-like conditions.
+    /// - `match_data.rs:34` (regex MatchData) is a hot path where
+    ///   the Instance lives immediately next to a heap-allocated
+    ///   capture Array; threading them through this helper would
+    ///   trigger an extra `maybe_gc` between two heap.alloc calls
+    ///   and sweep the unpinned capture Array.
+    /// These exemptions are intentional; flagged by PR #181
+    /// code-review #3.
+    pub(crate) fn alloc_default_instance(&mut self, cls: &Rc<Class>) -> Result<Value, Trap> {
+        self.maybe_gc();
+        self.check_alloc()?;
+        let id = self.heap.alloc(HeapObj::Instance(Instance {
+            class: cls.clone(),
+            ivars: HashMap::new(),
+            singleton_class: None,
+        }));
+        Ok(Value::Object(id))
+    }
+
     /// Does an instance of the primitive class `class_name`
     /// respond to method `sid`? Builds a sentinel `Value` of
     /// the matching shape and consults the per-primitive

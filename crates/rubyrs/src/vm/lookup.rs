@@ -612,6 +612,26 @@ impl Vm {
                 ) {
                     return true;
                 }
+                // `Class#allocate` — fence on Modules only.
+                // CRuby: `Module.respond_to?(:allocate)` → false,
+                // `Module.new.respond_to?(:allocate)` → false,
+                // `Integer.respond_to?(:allocate)` → true,
+                // `Class.respond_to?(:allocate)` → true (CRuby
+                // allows Class.allocate to produce an anonymous
+                // Class — rubyrs treats that as a KNOWN GAP but
+                // mirrors CRuby's respond_to surface here so
+                // feature-detection idioms agree on truthiness).
+                // Without this fence the whitelist returned true
+                // on Module receivers where dispatch raises
+                // TypeError, breaking `m.respond_to?(:allocate)
+                // ? m.allocate : …` on module references.
+                // PR #181 code-review #2.
+                if name == "allocate"
+                    && !cls.is_module
+                    && cls.name != "Module"
+                {
+                    return true;
+                }
                 self.lookup_class_singleton_method(cls, name_id).is_some()
             },
             Value::Object(id) => {
