@@ -1705,6 +1705,414 @@ fn sprintf_radix_int_min_does_not_panic() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_bitwise_not_uses_twos_complement_identity() {
+    // Phase B.3: BigInt bit ops. `~big` is two's-complement
+    // bitwise NOT — equivalent to `-(big + 1)` for any sign.
+    // Numeric.rs's `(Int, "~", [])` arm handles Int receivers
+    // (since `!i64::MIN == i64::MAX` fits without promotion),
+    // but BigInt receivers need bigint_primitive's path.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // - `~(2**100)` = -(2^100 + 1) — stays BigInt.
+        // - `~(-(2**100))` = -(-(2^100) + 1) = 2^100 - 1 — stays BigInt.
+        // - `~(2**63)` = -(2^63 + 1) — one past i64::MIN, stays BigInt.
+        // - `~(2**63 - 1)` = -(2^63) = i64::MIN — demotes to Int via
+        //   bigint_to_value's demote-on-fit. Pins that the demote
+        //   funnel runs for `~` results too (catches a regression
+        //   where the bit-op path bypassed bigint_to_value).
+        // - `~~big == big` round-trip (involution).
+        "puts (~(2 ** 100)).to_s\n\
+         puts (~(-(2 ** 100))).to_s\n\
+         puts (~(2 ** 63)).to_s\n\
+         puts (~(2 ** 63 - 1)).to_s\n\
+         puts (~(2 ** 63 - 1)).class.name\n\
+         puts (~~(2 ** 100)).to_s == (2 ** 100).to_s",
+        "bigint_bitnot.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-1267650600228229401496703205377");
+    assert_eq!(lines[1], "1267650600228229401496703205375");
+    assert_eq!(lines[2], "-9223372036854775809");
+    assert_eq!(lines[3], "-9223372036854775808");
+    assert_eq!(lines[4], "Integer");
+    assert_eq!(lines[5], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_bitwise_and_or_xor_two_complement_semantics() {
+    // Phase B.3b: `&` / `|` / `^` with at least one BigInt operand.
+    // CRuby uses unbounded two's-complement representation for
+    // negatives in bitwise ops. num_bigint's BitAnd/Or/Xor impls
+    // perform the conversion internally so we just route through
+    // them — but pin the expected results to catch any future
+    // regression in either the num_bigint contract or our hook.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Magnitude masks: `(2**100) & 0xff == 0` (low 8 bits of
+        // 2^100 are all 0), demotes to Int.
+        // Sign extension: `(-1) & (2**100) == 2**100` (-1 is
+        // all-ones in two's-complement).
+        // Sign extension: `(-256) & 0xff == 0` (low 8 bits of
+        // two's-complement -256 are clear).
+        // OR with low bit: `(2**100) | 1` lights bit 0 — full
+        // BigInt result.
+        // Self-XOR: cancels to 0 (Int via demote).
+        // Inverse receiver: `5 & (2**100)` — Int recv + BigInt arg,
+        // exercises the recv-or-arg guard path.
+        // Mixed sign: `(-(2**100)) & 0xff == 0` (bit 0..7 of
+        // -(2^100) in two's-complement are 0).
+        "puts ((2 ** 100) & 0xff)\n\
+         puts ((2 ** 100) & 0xff).class.name\n\
+         puts ((-1) & (2 ** 100))\n\
+         puts ((-256) & 0xff)\n\
+         puts ((2 ** 100) | 1)\n\
+         puts ((2 ** 100) ^ (2 ** 100))\n\
+         puts ((2 ** 100) ^ (2 ** 100)).class.name\n\
+         puts (5 & (2 ** 100))\n\
+         puts ((-(2 ** 100)) & 0xff)",
+        "bigint_bitops.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "1267650600228229401496703205376");
+    assert_eq!(lines[3], "0");
+    assert_eq!(lines[4], "1267650600228229401496703205377");
+    assert_eq!(lines[5], "0");
+    assert_eq!(lines[6], "Integer");
+    assert_eq!(lines[7], "0");
+    assert_eq!(lines[8], "0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_left_right_promote_and_collapse() {
+    // Phase B.3c: `<<` / `>>` with BigInt-flavoured operands.
+    // Covers:
+    // - Int recv overflow promote: `1 << 64` was Int 0 pre-fix
+    //   (wrapping_shl clamped to 63), now BigInt 2^64.
+    // - BigInt magnitude: `1 << 100` produces 2^100.
+    // - BigInt recv right-shift: `(2**100) >> 50` = 2^50 (Int demote).
+    // - Right-shift collapse: shifting past bit-length returns 0
+    //   (non-neg) or -1 (neg) via the early-exit, not a giant alloc.
+    // - Negative shift count: `5 << -1 == 5 >> 1 == 2`.
+    // - Demote-on-fit: `(2**100) << -100 == 1`.
+    // - Identity short-circuit: `1 << 0 == 1` returns recv unchanged.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (1 << 64)\n\
+         puts (1 << 64).class.name\n\
+         puts (1 << 100)\n\
+         puts ((2 ** 100) >> 50)\n\
+         puts ((2 ** 100) >> 50).class.name\n\
+         puts ((2 ** 100) >> 1000)\n\
+         puts ((-(2 ** 100)) >> 1000)\n\
+         puts (5 << -1)\n\
+         puts ((2 ** 100) << -100)\n\
+         puts ((2 ** 100) << -100).class.name\n\
+         puts (5 >> 100)\n\
+         puts ((-1) >> 100)",
+        "bigint_shifts.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "18446744073709551616");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "1267650600228229401496703205376");
+    assert_eq!(lines[3], "1125899906842624");
+    assert_eq!(lines[4], "Integer");
+    assert_eq!(lines[5], "0");
+    assert_eq!(lines[6], "-1");
+    assert_eq!(lines[7], "2");
+    assert_eq!(lines[8], "1");
+    assert_eq!(lines[9], "Integer");
+    assert_eq!(lines[10], "0");
+    assert_eq!(lines[11], "-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn int_shift_left_promotes_on_value_overflow_not_just_count_overflow() {
+    // Regression for PR #159 cycle 1: `i64::checked_shl` only
+    // detects shift-count overflow (≥ 64), not value overflow.
+    // Pre-fix, `1 << 63` returned `i64::MIN` (sign bit set,
+    // wrapping into negative space) instead of promoting to
+    // BigInt(2^63). Round-trip check `(a << s) >> s == a`
+    // catches bit-loss exactly so these subtler overflow cases
+    // promote like the count-overflow path already did for
+    // `1 << 64`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // - `1 << 62` is exactly the largest positive i64 (sign
+        //   bit clear) — must stay Int, no false promote.
+        // - `1 << 63` is +2^63 in Ruby (positive Bignum), not
+        //   `i64::MIN`. Must promote.
+        // - `5 << 61` overflows into the sign bit (5 takes 3
+        //   bits, +61 = bit 63 set) — must promote.
+        // - `1 >> -63` == `1 << 63` via direction swap — same
+        //   value-overflow path, must promote.
+        // - `(-1) << 1` == -2 stays Int (sign-preserving, no
+        //   bit-loss).
+        "puts (1 << 62)\n\
+         puts (1 << 62).class.name\n\
+         puts (1 << 63)\n\
+         puts (1 << 63).class.name\n\
+         puts (5 << 61)\n\
+         puts (5 << 61).class.name\n\
+         puts (1 >> -63)\n\
+         puts (1 >> -63).class.name\n\
+         puts ((-1) << 1)\n\
+         puts ((-1) << 1).class.name",
+        "int_shift_value_overflow.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "4611686018427387904");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "9223372036854775808"); // +2^63, NOT i64::MIN
+    assert_eq!(lines[3], "Integer");
+    assert_eq!(lines[4], "11529215046068469760"); // 5 * 2^61
+    assert_eq!(lines[5], "Integer");
+    assert_eq!(lines[6], "9223372036854775808"); // 1 >> -63 == 1 << 63
+    assert_eq!(lines[7], "Integer");
+    assert_eq!(lines[8], "-2");
+    assert_eq!(lines[9], "Integer");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_left_dos_cap_uses_exact_int_bit_length() {
+    // Regression for PR #159 cycle 1: `recv_bits` over-counted
+    // Int receivers as 64 bits, so small-magnitude shifts under a
+    // tight `max_value_bytes` could false-trap even when the
+    // rendered BigInt fit. With exact bit-length for Ints, the
+    // cap estimator matches the actual storage.
+    //
+    // `5 << 1_000_000` produces a ~125 KB BigInt. Pre-fix recv_bits
+    // = 64 → est_bits = 1_000_064 → est_bytes ≈ 125_040. With
+    // a cap of 125_064 bytes (just above the true est) pre-fix
+    // would still trap because the 64-bit Int width over-counted
+    // by ~61 bits. Post-fix recv_bits = bit_length(5) = 3 →
+    // est_bits = 1_000_003 → est_bytes ≈ 125_032, passes.
+    let cfg = rubyrs::Config { max_value_bytes: Some(125_064), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // `class` returns Integer for both Int and Bignum, so check
+        // a deterministic property: bit_length matches the shift.
+        "puts (5 << 1_000_000).bit_length",
+        "shift_dos_exact_bits.rb",
+    ).expect("eval");
+    // `bit_length(5) == 3`, so `(5 << 1_000_000).bit_length == 1_000_003`.
+    // Ruby prints integers without underscores.
+    assert_eq!(buf.snapshot().trim(), "1000003");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_responds_to_bit_op_names_matches_dispatch() {
+    // Regression for PR #159 cycle 2: `Vm::responds_to`'s BigInt
+    // whitelist must include every method `bigint_primitive` can
+    // dispatch — otherwise `big.respond_to?(:<<)` returns false
+    // even though the call succeeds, breaking pure-Ruby code that
+    // gates on respond_to?. Phase B.3 adds `~`, `& | ^`, `<< >>`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "b = 2 ** 100\n\
+         puts b.respond_to?(:~)\n\
+         puts b.respond_to?(:&)\n\
+         puts b.respond_to?(:|)\n\
+         puts b.respond_to?(:^)\n\
+         puts b.respond_to?(:<<)\n\
+         puts b.respond_to?(:>>)",
+        "bigint_responds_to_bit_ops.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    assert_eq!(out.trim(), "true\ntrue\ntrue\ntrue\ntrue\ntrue");
+}
+
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn int_shift_i64_min_count_does_not_panic_under_no_bignum() {
+    // Regression for the no-bignum `<<` / `>>` arms in
+    // numeric.rs: pre-fix `(-b) as u32` overflowed when
+    // `b == i64::MIN` (debug builds panicked with "attempt to
+    // negate with overflow"; release silently wrapped to a
+    // 63-bit shift via two-step wrap). Pin clamp semantics so
+    // both profiles agree on the result for this corner.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    // `5 << i64::MIN` == `5 >> |i64::MIN|` == `5 >> 63` == 0.
+    // `(-1) << i64::MIN` == `(-1) >> |i64::MIN|` == -1 (sign-ext).
+    // `5 >> i64::MIN` == `5 << |i64::MIN|` clamped to 63 bits;
+    //   `5.wrapping_shl(63)` produces `i64::MIN`-relative bit
+    //   pattern (5 << 63 wraps), but the saturating-shift
+    //   semantics under no-bignum just want no-panic + matching
+    //   the existing wrapping behaviour. Pin the result so
+    //   future refactors don't accidentally change it.
+    rt.eval(
+        "x = -9223372036854775807 - 1\n\
+         puts (5 << x)\n\
+         puts ((-1) << x)",
+        "shift_i64_min_no_bignum.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_bit_ops_raise_typeerror_on_non_integer_arg() {
+    // Phase B.3 follow-up: pre-fix `try_bigint_bit_binop` and
+    // `try_bigint_bit_shift` returned `Ok(None)` when the arg
+    // wasn't an Integer, falling through to NoMethodError. CRuby
+    // raises TypeError "no implicit conversion of X into Integer"
+    // — same shape as the BigInt-arith coerce errors and as the
+    // unified `Integer#to_s(non_integer)` arm. Pin that both
+    // Int and BigInt receivers route through the same TypeError
+    // for every bit-op selector. Covers:
+    // - all 5 bit-op selectors (& | ^ << >>)
+    // - all 4 non-Integer arg types (Float, String, nil, Symbol)
+    // - both Int and BigInt receivers
+    // - the special `Int(0)` recv case (which used to short-circuit
+    //   ahead of the arg-type guard)
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected_arg_type) in [
+        // BigInt recv, every selector × Float arg
+        ("(2 ** 100) & 1.5", "Float"),
+        ("(2 ** 100) | 1.5", "Float"),
+        ("(2 ** 100) ^ 1.5", "Float"),
+        ("(2 ** 100) << 1.5", "Float"),
+        ("(2 ** 100) >> 1.5", "Float"),
+        // Int recv, non-Integer args
+        ("5 & 1.5", "Float"),
+        ("5 << 1.5", "Float"),
+        ("5 >> \"foo\"", "String"),
+        ("5 << nil", "nil"),
+        ("5 << :sym", "Symbol"),
+        // Int(0) recv: regression for the swallow-TypeError fix.
+        ("0 << 1.5", "Float"),
+        ("0 >> :sym", "Symbol"),
+        ("0 << nil", "nil"),
+    ] {
+        let err = rt.eval(script, "bit_op_nonint_arg.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "TypeError", "for {:?}", script);
+                assert_eq!(
+                    message,
+                    format!("no implicit conversion of {} into Integer", expected_arg_type),
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught TypeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn int_shift_zero_receiver_never_traps_regardless_of_count() {
+    // Regression for PR #159 cycle 2: `0 << anything == 0` and
+    // `0 >> anything == 0` in Ruby — should never allocate, never
+    // trap on the DoS cap, never trap on the BigInt-count "shift
+    // exceeds u32::MAX" guard. Pre-fix `0 << 1_000_000` under a
+    // 1024-byte cap would trap because the cap estimator computed
+    // `est_bits = 0 + 1_000_000` → 125 KB which exceeds 1 KB.
+    let cfg = rubyrs::Config { max_value_bytes: Some(1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Tight cap, huge shift counts: all should return 0
+        // without touching the DoS estimator or the BigInt-count
+        // trap.
+        "puts (0 << 1_000_000)\n\
+         puts (0 << (2 ** 100))\n\
+         puts (0 >> 1_000_000)\n\
+         puts (0 >> -(2 ** 100))",
+        "zero_shift.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "0");
+    assert_eq!(lines[2], "0");
+    assert_eq!(lines[3], "0");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_left_traps_dos_via_max_value_bytes() {
+    // Left-shift DoS cap: `1 << 1_000_000` would allocate
+    // ~125 KB. With a 64 KB `max_value_bytes`, the pre-cap
+    // estimator must trap before BigInt::shl touches the
+    // allocator. Honours `max_value_bytes` with the same 1 MB
+    // fallback as `try_bigint_pow`.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "1 << 1_000_000",
+        "shift_dos.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_by_bigint_count_left_traps_right_collapses() {
+    // BigInt shift count: by canonical invariant any BigInt is
+    // outside i64, so:
+    // - actual-left-shift by BigInt count → trap (would need
+    //   > 2^63 bits of storage).
+    // - actual-right-shift by BigInt count → collapse to 0 / -1
+    //   without touching num_bigint (avoids the impossible alloc).
+    let mut rt = rubyrs::Runtime::new();
+    // Right-shift by BigInt count: collapses.
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts ((2 ** 100) >> (2 ** 100))\n\
+         puts ((-(2 ** 100)) >> (2 ** 100))",
+        "shift_by_bigint_right.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "-1");
+    // Left-shift by BigInt count: traps regardless of cap.
+    let err = rt.eval(
+        "1 << (2 ** 100)",
+        "shift_by_bigint_left.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {
     // Two distinct CRuby behaviours for negative integers in
     // non-decimal bases:

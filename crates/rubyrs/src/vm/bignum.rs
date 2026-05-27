@@ -478,6 +478,22 @@ impl Vm {
                     match name {
                         "-@" => -b,
                         "abs" => -b, // sign == Minus from check above
+                        // `~big` two's-complement bitwise NOT.
+                        // Identity: `~b == -(b + 1)`. num_bigint
+                        // impls `Not` for both owned and borrowed
+                        // BigInt (the `&BigInt` form returns a fresh
+                        // owned BigInt without consuming the
+                        // reference) — same shape as the `-b` arms
+                        // above, no clone needed. The two's-
+                        // complement conversion happens internally.
+                        // `bigint_to_value` demotes-on-fit so
+                        // `~(2**63) == -(2**63 + 1)` stays BigInt
+                        // (just past i64::MIN) but `~(2**63 - 1) ==
+                        // -(2**63)` demotes to Int(i64::MIN). The
+                        // Int receiver `~n` path is unchanged in
+                        // numeric.rs because `!i64::MIN == i64::MAX`
+                        // fits without promotion.
+                        "~" => !b,
                         _ => return Ok(None),
                     }
                 };
@@ -499,6 +515,251 @@ impl Vm {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Bitwise binary ops `&` / `|` / `^` on Integer operands with
+    /// at least one BigInt. num_bigint's `BitAnd` / `BitOr` /
+    /// `BitXor` impls perform unbounded two's-complement
+    /// conversion for negatives before applying the op and convert
+    /// back — so `(-1) & 0xff == 0xff` and `(-256) & 0xff == 0`
+    /// match CRuby without any sign-extension bookkeeping on our
+    /// side.
+    ///
+    /// Returns:
+    /// - `Some(v)` for Integer × Integer — result funnelled
+    ///   through `bigint_to_value` for demote-on-fit (e.g.
+    ///   `(2**100) & 0xff` demotes to Int).
+    /// - `Ok(None)` when the receiver is not an Integer (caller
+    ///   falls through; not our concern).
+    /// - `Err(TypeError)` when the receiver IS an Integer but the
+    ///   arg is not — CRuby raises "no implicit conversion of X
+    ///   into Integer" here, not NoMethodError. Pre-fix the helper
+    ///   returned Ok(None) for non-Integer args and the
+    ///   fall-through landed at NoMethodError, diverging from both
+    ///   CRuby and from the sibling bignum arithmetic paths which
+    ///   raise TypeError on the same shape.
+    ///
+    /// Fires for both `(BigInt, op, [_])` and `(Int, op, [BigInt])`
+    /// shapes — the recv-or-arg-is-BigInt guard in
+    /// `bigint_primitive` is what gates entry. Int × Int is owned
+    /// by numeric.rs's existing `(Int, op, [Int])` bit-op arm and
+    /// never reaches here, EXCEPT when arg is non-Integer (Float,
+    /// String, …) — that case falls through to this helper so the
+    /// TypeError raise applies uniformly across Int and BigInt
+    /// receivers.
+    pub(crate) fn try_bigint_bit_binop(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        arg: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        if !matches!(recv, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        // Arg-type guard: non-Integer raises TypeError matching
+        // CRuby's coerce-error wording (sibling to the unified
+        // `Integer#to_s(non_integer)` arm in numeric.rs).
+        if !matches!(arg, Value::Int(_) | Value::BigInt(_)) {
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    crate::vm::numeric::type_name_for_coerce(arg),
+                ),
+            }));
+        }
+        let result = {
+            // Borrow scope: both sides borrowed as Cow<BigInt>
+            // (Int wraps via owned `BigInt::from(n)`, BigInt is
+            // borrowed from the heap with no clone). Drop before
+            // calling bigint_to_value (&mut self).
+            let ax = match self.as_bigint_ref(recv) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            let bx = match self.as_bigint_ref(arg) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            // Owned-by-ref op — num_bigint defines `&BigInt op
+            // &BigInt`, so no clone of either operand. The result
+            // is a fresh owned BigInt that outlives the borrow.
+            match name {
+                "&" => &*ax & &*bx,
+                "|" => &*ax | &*bx,
+                "^" => &*ax ^ &*bx,
+                _ => return Ok(None),
+            }
+        };
+        Ok(Some(self.bigint_to_value(result)?))
+    }
+
+    /// Bitwise shifts `<<` / `>>` with BigInt promotion.
+    ///
+    /// CRuby semantics (two's-complement, arbitrary precision):
+    /// - `recv << n` where `n < 0` means `recv >> (-n)` (direction
+    ///   swap), and vice versa for `>>`. Magnitude-only after the
+    ///   swap.
+    /// - Right-shifting any value by ≥ its bit-length collapses
+    ///   to 0 (non-negative recv) or -1 (negative recv,
+    ///   sign-extended two's-complement).
+    /// - Left-shifts can produce arbitrarily large results; cap
+    ///   via `max_value_bytes` (same convention as `**`).
+    /// - BigInt shift count is allowed but by the canonical-
+    ///   BigInt invariant any `Value::BigInt` arg is outside i64,
+    ///   so any actual-left-shift by a BigInt count traps (would
+    ///   need > 2^63 bits); actual-right-shift collapses to 0/-1.
+    ///
+    /// Fires for both `(BigInt, op, [_])` and `(Int, op, [_])` —
+    /// the Int×Int overflow path (`1 << 64`) returns None from
+    /// numeric.rs's arm so we can promote here. The cond hook in
+    /// `bigint_primitive` lives ahead of the recv-or-arg-is-BigInt
+    /// guard so the Int×Int overflow path isn't filtered out.
+    pub(crate) fn try_bigint_bit_shift(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        arg: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        let left = match name { "<<" => true, ">>" => false, _ => return Ok(None) };
+        if !matches!(recv, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        // Arg-type guard FIRST so we don't accidentally accept
+        // `0 << 1.5` as `0`. Pre-fix the `Value::Int(0)` recv
+        // shortcut below ran ahead of this check and swallowed the
+        // TypeError that a non-Integer arg should raise. Raises
+        // TypeError directly (same shape as `try_bigint_bit_binop`)
+        // rather than Ok(None)+NoMethodError-fallthrough — CRuby
+        // raises "no implicit conversion of X into Integer" here.
+        if !matches!(arg, Value::Int(_) | Value::BigInt(_)) {
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    crate::vm::numeric::type_name_for_coerce(arg),
+                ),
+            }));
+        }
+        // Zero receiver: `0 << anything == 0` and `0 >> anything ==
+        // 0` regardless of count sign or magnitude. Short-circuit
+        // ahead of the BigInt-count trap and the DoS cap estimator
+        // so `0 << 1_000_000` (or `0 << (2**100)`) doesn't
+        // false-trap under a tight `max_value_bytes`. The canonical-
+        // BigInt invariant means `Value::BigInt(_)` can never be
+        // zero (any in-i64 magnitude demotes), so this check only
+        // fires for `Value::Int(0)`. Lives AFTER the arg-type guard
+        // so non-Integer args are still rejected.
+        if matches!(recv, Value::Int(0)) {
+            return Ok(Some(Value::Int(0)));
+        }
+        // Resolve shift magnitude + actual direction.
+        // - Int arg: direction may flip if negative; magnitude
+        //   stored as u64. `i64::MIN` negation overflows, so handle
+        //   it explicitly as `1u64 << 63`.
+        // - BigInt arg: magnitude is by invariant > i64::MAX. If
+        //   the actual direction is left we trap immediately
+        //   (would need > 2^63 bits); if right, collapse via
+        //   `bit_shift_collapse`.
+        let (shift_mag, actual_left): (u64, bool) = match arg {
+            Value::Int(n) => {
+                if *n == 0 { return Ok(Some(recv.clone())); }
+                if *n > 0 { (*n as u64, left) }
+                else if *n == i64::MIN { (1u64 << 63, !left) }
+                else { ((-n) as u64, !left) }
+            }
+            Value::BigInt(id) => {
+                let sign = self.heap.bigint(*id).sign();
+                let actual_left = if sign == num_bigint::Sign::Minus { !left } else { left };
+                if actual_left {
+                    // Shift count is a Bignum, so by the canonical-
+                    // BigInt invariant its magnitude > i64::MAX.
+                    // Actual-left-shift by that count would need
+                    // ≥ 2^63 bits of storage — well past any sane
+                    // `max_value_bytes`. Frame the trap around the
+                    // would-be result size rather than the count's
+                    // u32::MAX boundary so it reads in the same
+                    // shape as the DoS-cap trap below.
+                    return Err(self.trap(RubyError::ResourceExhausted {
+                        msg: "integer shift result exceeds max representable size (Bignum shift count)".to_string(),
+                    }));
+                }
+                return Ok(Some(self.bit_shift_collapse(recv)));
+            }
+            _ => return Ok(None),
+        };
+        // Recv bit-length — exact for both Int and BigInt. The
+        // earlier conservative `64` for Int over-counted on small
+        // magnitudes, which (after rounding to limbs + 32-byte
+        // header) could false-trap the DoS cap for shifts where
+        // the rendered result actually fit (`5 << shift` with a
+        // tight `max_value_bytes` near `bit_length(5) + shift`
+        // bytes was the canonical bad case). For i64 the exact
+        // bit_length of the magnitude is `64 - unsigned_abs().leading_zeros()`
+        // with the zero-magnitude case clamping to 0 (matches
+        // CRuby's `bit_length(0) == 0`).
+        let recv_bits: u64 = match recv {
+            Value::Int(n) => {
+                let mag = n.unsigned_abs();
+                if mag == 0 { 0 } else { 64 - mag.leading_zeros() as u64 }
+            }
+            Value::BigInt(id) => self.heap.bigint(*id).bits(),
+            _ => unreachable!("guarded above"),
+        };
+        // Right-shift by ≥ recv_bits: collapse to 0 / -1 without
+        // touching num_bigint (avoids large-shift allocation).
+        if !actual_left && shift_mag >= recv_bits {
+            return Ok(Some(self.bit_shift_collapse(recv)));
+        }
+        // Left-shift DoS cap. Estimate the result's storage from
+        // est_bits = recv_bits + shift_mag, rounded up to u64 limbs
+        // plus the same 32-byte allocator header used by
+        // `try_bigint_pow`'s estimator. Honour `max_value_bytes`
+        // with the same 1 MB fallback as the other bignum guards.
+        if actual_left {
+            const BIGINT_HEADER_BYTES: u64 = 32;
+            let est_bits = recv_bits.saturating_add(shift_mag);
+            let est_limbs = est_bits.saturating_add(63) / 64;
+            let est_bytes = est_limbs.saturating_mul(8).saturating_add(BIGINT_HEADER_BYTES);
+            let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
+            if est_bytes > cap {
+                return Err(self.trap(RubyError::ResourceExhausted {
+                    msg: format!(
+                        "integer shift result ~{} bytes > cap {}",
+                        est_bytes, cap,
+                    ),
+                }));
+            }
+        }
+        // Apply the shift in the borrow scope, then drop before
+        // demote-on-fit. usize::try_from is mostly a no-op on
+        // 64-bit; on 32-bit it would trap on shift counts > 4 GB
+        // which the cap above already excludes for any sane
+        // max_value_bytes.
+        let result = {
+            let r = match self.as_bigint_ref(recv) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            let usz: usize = match usize::try_from(shift_mag) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Err(self.trap(RubyError::ResourceExhausted {
+                        msg: format!("integer shift count {} exceeds usize::MAX", shift_mag),
+                    }));
+                }
+            };
+            if actual_left { (&*r) << usz } else { (&*r) >> usz }
+        };
+        Ok(Some(self.bigint_to_value(result)?))
+    }
+
+    /// Collapse result for a right-shift that consumes all bits.
+    /// Non-negative recv → 0; negative recv → -1 (two's-complement
+    /// sign extension). Used by the early-exit in
+    /// `try_bigint_bit_shift` to avoid allocating a giant BigInt
+    /// just to immediately shift it down to a constant.
+    fn bit_shift_collapse(&self, recv: &Value) -> Value {
+        let neg = match recv {
+            Value::Int(n) => *n < 0,
+            Value::BigInt(id) => self.heap.bigint(*id).sign() == num_bigint::Sign::Minus,
+            _ => false,
+        };
+        Value::Int(if neg { -1 } else { 0 })
     }
 
     /// `Integer#pow(exp[, mod])`. 1-arg form is exactly `recv ** exp`
@@ -878,9 +1139,36 @@ impl Vm {
         {
             return Ok(Some(v));
         }
-        // Cond 2 — see entry-conditions doc above.
-        if args.is_empty() && matches!(name, "-@" | "+@" | "abs")
+        // Cond 2 — see entry-conditions doc above. `~` joins the
+        // arity-0 unary group: numeric.rs's `(Int, "~", [])` arm
+        // handles Int receivers (no promotion — `!i64::MIN` fits
+        // in i64), but BigInt receivers need the two's-complement
+        // `-(b + 1)` form via try_bigint_unary.
+        if args.is_empty() && matches!(name, "-@" | "+@" | "abs" | "~")
             && let Some(v) = self.try_bigint_unary(recv, name)?
+        {
+            return Ok(Some(v));
+        }
+        // Bitwise binary `&` / `|` / `^` on Integer × Integer where
+        // at least one operand is BigInt. numeric.rs's `(Int, op,
+        // [Int])` arm handles the pure Int × Int case; this fires
+        // for the mixed shapes (`big & 0xff`, `5 & (2**100)`,
+        // `big & big`). Sits ahead of the recv-or-arg guard below
+        // because the Int-recv-with-BigInt-arg shape is exactly
+        // what the guard is gating in.
+        if args.len() == 1 && matches!(name, "&" | "|" | "^")
+            && let Some(v) = self.try_bigint_bit_binop(recv, name, &args[0])?
+        {
+            return Ok(Some(v));
+        }
+        // Bitwise shifts `<<` / `>>`. Fires for any Integer recv +
+        // any Integer arg, including the Int×Int overflow path
+        // (`1 << 64`) that numeric.rs declined under bignum. Sits
+        // ahead of the recv-or-arg guard for the same reason as
+        // `**`: the Int×Int-with-overflow shape isn't gated by
+        // recv-or-arg-is-BigInt and needs an explicit path.
+        if args.len() == 1 && matches!(name, "<<" | ">>")
+            && let Some(v) = self.try_bigint_bit_shift(recv, name, &args[0])?
         {
             return Ok(Some(v));
         }

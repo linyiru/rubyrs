@@ -335,21 +335,23 @@ impl Vm {
                 "digits" | "bit_length" | "[]"
             ),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
-            // unary (`-@`/`+@`/`abs`) + Phase B.5 `pow(exp, mod)` +
+            // unary (`-@`/`+@`/`abs`) + Phase B.3 bit ops (`~`,
+            // `& | ^`, `<< >>`) + Phase B.5 `pow(exp, mod)` +
             // Phase B.5 leftover (`bit_length`, `digits`) —
             // arithmetic, comparison, to_s/inspect, pure predicates,
             // exponentiation (auto-promote / DoS-capped), unary
-            // sign/magnitude, modular exponentiation, two's-
-            // complement bit count, and base-N digit decomposition.
-            // Bit ops and iteration helpers (`times`, `upto`,
-            // `downto`) remain unshipped Phase B groups. The
-            // predicates below only READ the bigint to compute a
-            // Bool/Int, so they fit cleanly in the existing
-            // bigint_primitive shape.
+            // sign/magnitude, two's-complement bit ops, modular
+            // exponentiation, two's-complement bit count, and
+            // base-N digit decomposition. Iteration helpers
+            // (`times`, `upto`, `downto`) remain unshipped Phase B
+            // groups. The predicates below only READ the bigint to
+            // compute a Bool/Int, so they fit cleanly in the
+            // existing bigint_primitive shape.
             #[cfg(feature = "bignum")]
             Value::BigInt(_) => matches!(name,
                 "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
-                "-@" | "+@" | "abs" |
+                "-@" | "+@" | "abs" | "~" |
+                "&" | "|" | "^" | "<<" | ">>" |
                 "<" | "<=" | ">" | ">=" |
                 "to_s" | "inspect" |
                 "to_i" | "to_f" |
