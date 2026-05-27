@@ -10,7 +10,7 @@ captured 2026-05.
 | Date | IC_WAYS | Notable |
 |---|---:|---|
 | PR #175 | 4 | First baseline; cliff at 5 shapes (hit rate 0.4998) |
-| PR #178 | **5** | Widened on the strength of the cliff measurement; workload 03 bumped to 6 shapes to keep measuring the new cliff |
+| PR #185 | **5** | Widened on the strength of the cliff measurement; workload 03 bumped to 6 shapes to keep measuring the new cliff |
 
 Regenerate with:
 
