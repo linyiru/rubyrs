@@ -1134,6 +1134,35 @@ fn int_shift_i64_min_count_does_not_panic_under_no_bignum() {
     assert_eq!(lines[1], "-1");
 }
 
+#[cfg(not(feature = "bignum"))]
+#[test]
+fn int_bit_ops_raise_typeerror_on_non_integer_arg_no_bignum() {
+    // Sibling guard to `integer_bit_ops_raise_typeerror_on_non_integer_arg`
+    // (bignum-on profile) — under no-bignum the BigInt-side
+    // helpers don't exist, so without the Int-side coerce arm
+    // in numeric.rs `3 & 3.4` would fall through to
+    // NoMethodError instead of CRuby's TypeError. Pin the
+    // Int-side guard added in B.6 bit-ops spec batch (sibling
+    // to PR #186's iter-method guards).
+    let mut rt = rubyrs::Runtime::new();
+    for script in [
+        "3 & 3.4", "3 | 3.4", "3 ^ 3.4", "3 << 3.4", "3 >> 3.4",
+        "3 & nil", "3 << \"4\"", "3 >> :sym",
+    ] {
+        let err = rt.eval(script, "int_bit_op_typeerr.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "TypeError", "for {:?}", script);
+                assert!(
+                    message.starts_with("no implicit conversion of "),
+                    "for {:?} got message: {:?}", script, message
+                );
+            }
+            other => panic!("expected Uncaught TypeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn integer_bit_ops_raise_typeerror_on_non_integer_arg() {

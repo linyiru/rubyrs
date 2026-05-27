@@ -486,6 +486,26 @@ pub(crate) fn numeric_call(
             }
             _ => None,
         },
+        // Int-side coerce guard for bit ops (sibling to the
+        // BigInt-side guard in try_bigint_bit_binop /
+        // try_bigint_bit_shift, and to the times/upto/downto
+        // guards landed in PR #186). Under bignum, this is dead
+        // code — Int×non-Int routes through bigint_primitive's
+        // hooks which raise TypeError directly. Under no-bignum,
+        // those hooks don't exist; without this guard
+        // `3 & 3.4` falls through to NoMethodError instead of
+        // CRuby's TypeError ('no implicit conversion of Float
+        // into Integer'). Limited to non-Int args because the
+        // Int×Int happy path is the broad arm above.
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>", [other]) => {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
         // 2-arg form `pow(exp, mod)` — under `bignum`, declined here
         // so bigint_primitive's modpow path handles it (full
         // Integer×Integer×Integer coverage including BigInt).
