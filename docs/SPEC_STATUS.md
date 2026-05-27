@@ -12,17 +12,17 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 78 |
-| Examples in corpus | 375 |
-| Skipped `it` traces | 132 |
+| Files | 84 |
+| Examples in corpus | 391 |
+| Skipped `it` traces | 141 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
 | `divergent` | 6 |
-| `fixture` | 46 |
-| `method-not-implemented` | 68 |
+| `fixture` | 48 |
+| `method-not-implemented` | 75 |
 | `mock` | 12 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -40,7 +40,7 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 13 | 30 | 29 |
+| Hash | 19 | 46 | 38 |
 | Integer | 20 | 160 | 19 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
@@ -75,12 +75,18 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_compact_spec.rb` | Hash#compact | `core/hash/compact_spec.rb` | 2 | 4 |
 | `hash_each_pair_spec.rb` | Hash#each_pair | `core/hash/each_pair_spec.rb + shared/each.rb` | 3 | 2 |
 | `hash_empty_spec.rb` | Hash#empty? | `core/hash/empty_spec.rb` | 2 | 0 |
+| `hash_except_spec.rb` | Hash#except | `core/hash/except_spec.rb` | 3 | 1 |
 | `hash_fetch_spec.rb` | Hash#fetch | `core/hash/fetch_spec.rb` | 5 | 1 |
+| `hash_group_by_spec.rb` | Hash#group_by | `core/enumerable/group_by_spec.rb + core/hash/group_by_spec.rb` | 2 | 2 |
 | `hash_invert_spec.rb` | Hash#invert | `core/hash/invert_spec.rb` | 3 | 4 |
 | `hash_keys_spec.rb` | Hash#keys | `core/hash/keys_spec.rb` | 2 | 0 |
+| `hash_max_by_spec.rb` | Hash#max_by | `core/enumerable/max_by_spec.rb` | 3 | 2 |
 | `hash_merge_spec.rb` | Hash#merge | `core/hash/merge_spec.rb` | 1 | 6 |
+| `hash_min_by_spec.rb` | Hash#min_by | `core/enumerable/min_by_spec.rb` | 3 | 2 |
 | `hash_select_spec.rb` | Hash#select | `core/hash/select_spec.rb + shared/select.rb` | 2 | 2 |
 | `hash_size_spec.rb` | Hash#size | `core/hash/size_spec.rb` | 3 | 0 |
+| `hash_slice_spec.rb` | Hash#slice | `core/hash/slice_spec.rb` | 3 | 1 |
+| `hash_store_spec.rb` | Hash#store | `core/hash/store_spec.rb` | 2 | 1 |
 | `hash_to_a_spec.rb` | Hash#to_a | `core/hash/to_a_spec.rb` | 1 | 1 |
 | `hash_transform_keys_spec.rb` | Hash#transform_keys | `core/hash/transform_keys_spec.rb` | 3 | 5 |
 | `hash_transform_values_spec.rb` | Hash#transform_values | `core/hash/transform_values_spec.rb` | 2 | 4 |
