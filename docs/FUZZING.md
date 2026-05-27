@@ -178,9 +178,12 @@ sees the connection.
 
 ## Known limits + future work
 
-Three concrete gaps the current harness leaves on the table.
-Each is in scope for a follow-up PR; none is a blocker for the
-initial soak workload paying for itself.
+One concrete gap remains on the table. The earlier two items in
+this list — the preamble-fuel coupling ICE (#3 below) and the
+preamble-rebuilt-every-iteration cost (#2 below) — were closed
+by PR #204 and PR #212 + the adoption PR respectively; the
+sections are kept inline as historical anchors for the
+follow-up tracking.
 
 ### 1. Filesystem sandbox covers `require` only
 
