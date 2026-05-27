@@ -574,7 +574,7 @@ impl Vm {
             Value::Range(_) => matches!(name,
                 "begin" | "end" | "first" | "last" | "min" | "max" |
                 "size" | "length" | "count" |
-                "exclude_end?" | "include?" | "cover?" | "step" | "to_a" |
+                "exclude_end?" | "include?" | "member?" | "cover?" | "step" | "to_a" |
                 "sum" | "inject" | "reduce" |
                 "each" | "map" | "select" | "filter" |
                 "reject" | "find" | "detect" |
