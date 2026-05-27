@@ -30,6 +30,13 @@ libfuzzer-sys = "0.4"
 # `libloading` + the `rubyrs-cext` crate would bloat the fuzz
 # binary and slow each iteration with no signal gain.
 rubyrs = { path = "..", default-features = false, features = ["regex", "bignum"] }
+# `tempfile` powers the sandbox-cwd helper in `src/lib.rs`. The
+# alternative — `std::env::temp_dir().join(format!("...-{pid}"))`
+# + `create_dir_all` — leaves a TOCTOU window where a pre-created
+# symlink at the predicted path can redirect the cwd. Not a real
+# threat on GitHub's single-user runners, but `tempfile` makes
+# the construction safe-by-default for one line of dep.
+tempfile = "3"
 
 [[bin]]
 name = "parse"
