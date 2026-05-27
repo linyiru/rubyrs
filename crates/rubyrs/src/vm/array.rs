@@ -58,6 +58,16 @@ impl Vm {
                         })
                     }
                     ("<=>", [_]) => Some(Value::Nil),
+                    // Wrong arity (0 or 2+ args) — CRuby raises
+                    // ArgumentError here. The catch-all in the
+                    // outer dispatcher would otherwise surface
+                    // NoMethodError, which mis-reports a real
+                    // caller bug as a missing method.
+                    ("<=>", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 1)", many.len()),
+                        }));
+                    }
                     ("freeze" | "frozen?", many) => {
                         return Err(self.trap(crate::error::RubyError::ArgumentError {
                             msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),
