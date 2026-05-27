@@ -24,9 +24,12 @@
 #   `Value::ruby_eq` (heap.rs), which has no BigInt×Float match
 #   arm at all — the comparison falls through to the catch-all
 #   `_ => false`, so `(2**64) === (2**64).to_f` returns false
-#   instead of CRuby's true. The BinOp `==` path doesn't have
-#   this gap (PR #230 added `bigint_equals_float_lossless`);
-#   the follow-up is wiring that same helper into `ruby_eq`.
+#   instead of CRuby's true. (The BigInt arms in ruby_eq cover
+#   BigInt×BigInt and BigInt↔Int; grep heap.rs for
+#   `Value::BigInt`-binding arms inside `ruby_eq`.) The BinOp `==`
+#   path doesn't have this gap (PR #230 added
+#   `bigint_equals_float_lossless`); the follow-up is wiring that
+#   same helper into `ruby_eq`.
 
 describe "Integer#===" do
   it "fixnum: returns true if self has the same Integer value as other" do
@@ -83,10 +86,10 @@ describe "Integer#===" do
   # skipped (divergent): "bignum: returns true when comparing
   # with a Float of the same numeric value" — `(2**64) ===
   # (2**64).to_f` should be true (2^64 is exact in f64) but
-  # rubyrs's ruby_eq has no BigInt×Float arm (heap.rs:965-975
-  # covers BigInt×BigInt and BigInt↔Int only), so the
-  # comparison falls through to `_ => false`. The BinOp == path
-  # was fixed in PR #230 via bigint_equals_float_lossless;
+  # rubyrs's ruby_eq has no BigInt×Float arm (the BigInt arms
+  # in heap.rs cover BigInt×BigInt and BigInt↔Int only), so
+  # the comparison falls through to `_ => false`. The BinOp ==
+  # path was fixed in PR #230 via bigint_equals_float_lossless;
   # extending that to ruby_eq is the follow-up. Without it,
   # this assertion fails.
   #

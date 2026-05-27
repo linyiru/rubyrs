@@ -907,11 +907,15 @@ impl Vm {
             Some(v) => v,
             None => return Ok(None),
         };
+        use num_traits::Zero;
         let masked = &*ax & &*bx;
         let result = match name {
             "allbits?" => masked == *bx,
-            "anybits?" => masked != num_bigint::BigInt::from(0),
-            "nobits?"  => masked == num_bigint::BigInt::from(0),
+            // `is_zero()` from num_traits avoids the
+            // `BigInt::from(0)` allocation that the literal
+            // comparison would do on every call.
+            "anybits?" => !masked.is_zero(),
+            "nobits?"  => masked.is_zero(),
             _ => return Ok(None),
         };
         Ok(Some(Value::Bool(result)))
