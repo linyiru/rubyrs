@@ -345,11 +345,32 @@ struct PostPreambleSnapshot {
     heap_live_count: usize,
     /// `vm.interner.len()` at preamble completion. `reset()`
     /// truncates `interner.vec` and drains stale `interner.map`
-    /// entries — but ONLY down to `max(interner_len,
-    /// host_fn_max_sym + 1)` (see the reset implementation), so
-    /// any SymId referenced by `host_fns` registered *after*
-    /// construction stays valid.
+    /// entries — but never past any SymId still referenced by
+    /// long-lived tables (`host_fns`, `cext_class_methods`,
+    /// `cext_instance_methods`). See the reset implementation
+    /// for the floor calculation.
     interner_len: usize,
+    /// `vm.call_caches.len()` at preamble completion. `reset()`
+    /// truncates `call_caches` back to this length so the user-
+    /// eval's call-site cache slots are dropped along with the
+    /// user code that addressed them. Pairs with the
+    /// `cache_counter` restoration below.
+    call_caches_len: usize,
+    /// `vm.cache_counter` at preamble completion. The compiler
+    /// casts this counter to `u16` when emitting `Op::Call*`
+    /// cache-site ids, so a long-lived Runtime that runs many
+    /// reset+eval cycles would eventually wrap u16 and start
+    /// aliasing unrelated call sites onto the same cache slot —
+    /// returning the wrong cached `Method`. Restoring to the
+    /// post-preamble value caps the counter at a known-safe
+    /// baseline.
+    cache_counter: u32,
+    /// `vm.load_path` as of preamble completion (currently
+    /// `None` — `$LOAD_PATH` is materialised lazily on first
+    /// user access). `reset()` restores this so a stale `ObjId`
+    /// produced by user `$LOAD_PATH << ...` can't outlive the
+    /// heap truncation that just dropped its target slot.
+    load_path: Option<value::ObjId>,
     /// `vm.classes` HashMap as it was at preamble completion.
     /// `reset()` clones this and assigns to `vm.classes`,
     /// preserving every preamble class object identity (Rc clone)
@@ -365,19 +386,35 @@ struct PostPreambleSnapshot {
     /// or a redefinition of a preamble-supplied toplevel method —
     /// fully rewinds.
     toplevel_methods: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>,
-    /// For every preamble class, the method table snapshot. The
-    /// outer key is the class's name SymId; the inner map is the
-    /// `methods` HashMap as it was at preamble completion. On
-    /// `reset()`, each preserved preamble class has its `methods`
-    /// `RefCell` overwritten with a clone of this map.
+    /// For every preamble class, a snapshot of EVERY mutable
+    /// `RefCell` field on the Class struct. Restored by
+    /// clone-and-replace into the live `Class`'s RefCells.
     ///
-    /// Same value-not-key reason: a user `class String; def
-    /// length; 999; end; end` would silently survive a key-only
-    /// snapshot because `length` is a preamble String method —
-    /// the value-snapshot restores the preamble's original
-    /// `Method` so the override is gone post-reset.
-    class_methods:
-        std::collections::HashMap<intern::SymId, std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>>,
+    /// `methods` alone wasn't enough — user code can also
+    /// mutate `singleton_methods` (via `def self.x`), `ivars`
+    /// (via `@x =` in a class body), `includes` (via
+    /// `include Mod`), `prepends`, `singleton_prepends`,
+    /// `class_vars` (`@@x`), and even `superclass` (effectively
+    /// no-op in CRuby but possible in principle). Each one of
+    /// those would leak across resets if left out of the
+    /// snapshot, so capture them all.
+    class_states: std::collections::HashMap<intern::SymId, ClassStateSnapshot>,
+}
+
+/// Per-Class snapshot covering every `RefCell` field on `Class`
+/// that user code can mutate. `cext_alloc_func` is intentionally
+/// omitted — it's set by host C code via `rb_define_alloc_func`,
+/// not by user Ruby, and clearing it across resets would break
+/// hosts that rely on the registration surviving.
+struct ClassStateSnapshot {
+    ivars: std::collections::HashMap<intern::SymId, value::Value>,
+    methods: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>,
+    singleton_methods: std::collections::HashMap<intern::SymId, std::rc::Rc<value::Method>>,
+    superclass: Option<std::rc::Rc<value::Class>>,
+    includes: Vec<std::rc::Rc<value::Class>>,
+    prepends: Vec<std::rc::Rc<value::Class>>,
+    singleton_prepends: Vec<std::rc::Rc<value::Class>>,
+    class_vars: std::collections::HashMap<intern::SymId, value::Value>,
 }
 
 /// Per-process slot used by the wizer pre-initialize path. On
@@ -530,21 +567,54 @@ impl PostPreambleSnapshot {
     /// `new_default_impl`; the resulting snapshot is the target
     /// state every subsequent `reset()` rewinds to.
     fn capture(rt: &Runtime) -> Self {
-        let class_methods = rt
+        let class_states = rt
             .vm
             .classes
             .iter()
-            .map(|(name, cls)| (*name, cls.methods.borrow().clone()))
+            .map(|(name, cls)| (*name, ClassStateSnapshot::capture(cls)))
             .collect();
         PostPreambleSnapshot {
             heap_slot_count: rt.vm.heap.slots.len(),
             heap_live_count: rt.vm.heap.live_count,
             interner_len: rt.vm.interner.len(),
+            call_caches_len: rt.vm.call_caches.len(),
+            cache_counter: rt.vm.cache_counter,
+            load_path: rt.vm.load_path,
             classes: rt.vm.classes.clone(),
             constants: rt.vm.constants.clone(),
             toplevel_methods: rt.vm.toplevel_methods.clone(),
-            class_methods,
+            class_states,
         }
+    }
+}
+
+impl ClassStateSnapshot {
+    fn capture(cls: &value::Class) -> Self {
+        ClassStateSnapshot {
+            ivars: cls.ivars.borrow().clone(),
+            methods: cls.methods.borrow().clone(),
+            singleton_methods: cls.singleton_methods.borrow().clone(),
+            superclass: cls.superclass.borrow().clone(),
+            includes: cls.includes.borrow().clone(),
+            prepends: cls.prepends.borrow().clone(),
+            singleton_prepends: cls.singleton_prepends.borrow().clone(),
+            class_vars: cls.class_vars.borrow().clone(),
+        }
+    }
+
+    /// Restore every captured field into the live `Class`'s
+    /// `RefCell`s. Borrow-mut'ing each field independently is
+    /// fine — the snapshot's borrows have all been dropped by
+    /// the time `capture` returned, and `Drop` won't reborrow.
+    fn restore_into(&self, cls: &value::Class) {
+        *cls.ivars.borrow_mut() = self.ivars.clone();
+        *cls.methods.borrow_mut() = self.methods.clone();
+        *cls.singleton_methods.borrow_mut() = self.singleton_methods.clone();
+        *cls.superclass.borrow_mut() = self.superclass.clone();
+        *cls.includes.borrow_mut() = self.includes.clone();
+        *cls.prepends.borrow_mut() = self.prepends.clone();
+        *cls.singleton_prepends.borrow_mut() = self.singleton_prepends.clone();
+        *cls.class_vars.borrow_mut() = self.class_vars.clone();
     }
 }
 
@@ -737,28 +807,43 @@ impl Runtime {
         self.vm.heap.free.retain(|&idx| (idx as usize) < snapshot.heap_slot_count);
         self.vm.heap.live_count = snapshot.heap_live_count;
         // --- Interner: drop user-interned symbols, but never
-        //     truncate past any SymId referenced by `host_fns`. ---
-        // `register_fn` interns the function name AFTER
-        // `with_config` returns (i.e. post-snapshot). Those
-        // SymIds are above `snapshot.interner_len`. Naive
+        //     truncate past any SymId referenced by long-lived
+        //     tables. ---
+        // `host_fns`, `cext_class_methods`, and
+        // `cext_instance_methods` are all `HashMap` keyed by
+        // SymId (host_fns) or by SymId inside per-class inner
+        // maps (the two cext tables). Registration interns the
+        // method name AFTER `with_config` returns, so those
+        // SymIds sit above `snapshot.interner_len`. Naive
         // truncation back to the snapshot length would leave
-        // `host_fns` keyed by now-invalid SymIds — and the next
-        // user-interned string would silently reuse those IDs,
-        // dispatching to the wrong host fn (or panicking on
+        // those maps keyed by now-invalid SymIds, and the next
+        // user-interned string would silently reuse those IDs
+        // and dispatch to the wrong fn / method (or panic on
         // `interner.resolve(...)`).
         //
-        // Compute the post-truncation length as `max(snapshot_len,
-        // max_host_fn_sym + 1)`. User-interned symbols that
+        // Walk every long-lived table to find the max referenced
+        // SymId; truncate to `max(snapshot.interner_len,
+        // max_long_lived_sym + 1)`. User-interned symbols that
         // happen to fall below this floor get preserved as a
         // small leak — acceptable trade-off for never corrupting
-        // host-fn dispatch.
-        let host_fn_max = self
+        // dispatch.
+        let mut long_lived_max: Option<usize> = self
             .vm
             .host_fns
             .keys()
             .map(|sym| sym.0 as usize)
             .max();
-        let keep_len = match host_fn_max {
+        for inner in self.vm.cext_class_methods.values() {
+            if let Some(m) = inner.keys().map(|sym| sym.0 as usize).max() {
+                long_lived_max = Some(long_lived_max.map_or(m, |c| c.max(m)));
+            }
+        }
+        for inner in self.vm.cext_instance_methods.values() {
+            if let Some(m) = inner.keys().map(|sym| sym.0 as usize).max() {
+                long_lived_max = Some(long_lived_max.map_or(m, |c| c.max(m)));
+            }
+        }
+        let keep_len = match long_lived_max {
             Some(m) => snapshot.interner_len.max(m + 1),
             None => snapshot.interner_len,
         };
@@ -779,16 +864,19 @@ impl Runtime {
         self.vm.classes = snapshot.classes.clone();
         self.vm.constants = snapshot.constants.clone();
         self.vm.toplevel_methods = snapshot.toplevel_methods.clone();
-        // --- Per-class method tables: replace each preamble
-        //     class's `methods` RefCell content with the
-        //     snapshot's copy. Catches BOTH user-added methods
-        //     on preamble classes AND user-redefined preamble
-        //     methods (`class String; def length; ...; end; end`
-        //     — `length` is a preamble String method, so a
-        //     key-retain would leave the override in place). ---
+        // --- Per-class state: replace EVERY mutable RefCell
+        //     field on each preamble Class with the snapshot's
+        //     captured value. ---
+        // `methods` alone wasn't enough — user code can also
+        // mutate `singleton_methods` (`def self.x`), `ivars`
+        // (`@x = ...` in a class body), `includes`
+        // (`include Mod`), `prepends`, `singleton_prepends`,
+        // `class_vars` (`@@x`), and `superclass`. Each one
+        // would leak across resets if the snapshot only
+        // covered methods.
         for (cls_name, cls) in &self.vm.classes {
-            if let Some(snap_methods) = snapshot.class_methods.get(cls_name) {
-                *cls.methods.borrow_mut() = snap_methods.clone();
+            if let Some(snap) = snapshot.class_states.get(cls_name) {
+                snap.restore_into(cls);
             }
         }
         // --- Literal caches keyed by user-time SymIds: clear. ---
@@ -845,7 +933,30 @@ impl Runtime {
         // too so a `reset()` between user evals leaves no trail.
         self.vm.op_counter = 0;
         self.vm.deadline_at = None;
+        // --- `load_path` ($LOAD_PATH cache) ---
+        // Restored to the post-preamble value (currently `None`;
+        // `$LOAD_PATH` is materialised lazily on first user
+        // access). If a user `$LOAD_PATH << ...` produced an
+        // `ObjId` pointing past the heap high-water, the heap
+        // truncation above just dropped that slot — leaving
+        // `vm.load_path` as a stale `Some(id)` would let the
+        // next `$LOAD_PATH` access return an out-of-range index.
+        self.vm.load_path = snapshot.load_path;
+        // --- Call-cache state ---
+        // Truncate `call_caches` back to its post-preamble length
+        // and restore `cache_counter` so the compiler's next
+        // `Op::Call*` emission picks up from the same baseline
+        // id space. Without this, every reset+eval cycle leaves
+        // a few stale `Rc<Method>`s in `call_caches` past the
+        // truncation point (memory-leak shape, harmless to
+        // dispatch since they're never indexed after the
+        // counter restore) AND `cache_counter` would advance
+        // unbounded — `cache_counter as u16` would eventually
+        // wrap and start aliasing unrelated call sites.
+        self.vm.call_caches.truncate(snapshot.call_caches_len);
+        self.vm.cache_counter = snapshot.cache_counter;
         // Bump `method_gen` so any stale `CallCache` entries
+        // (within the surviving range — see truncate above)
         // pointing at user-defined methods removed above
         // invalidate on next lookup. `CallCache` re-checks
         // `method_gen` per hit; no need to clear the slots

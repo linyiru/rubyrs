@@ -148,6 +148,65 @@ fn reset_undoes_redefinition_of_preamble_method() {
     );
 }
 
+#[test]
+fn reset_clears_user_singleton_method_on_preamble_class() {
+    // `def self.foo` inside a class body installs into the
+    // class's `singleton_methods` RefCell, not `methods`. A
+    // snapshot that only restored `methods` would leak this
+    // singleton across resets. Pins the expanded
+    // `ClassStateSnapshot` (lib.rs) actually restores
+    // `singleton_methods` too.
+    let mut rt = Runtime::new();
+    rt.eval(
+        "class Mutex; def self.echo; 'leaked'; end; end",
+        "augment.rb",
+    ).expect("define singleton");
+    // Pre-reset: singleton callable.
+    let pre = rt.eval("Mutex.echo", "use.rb").expect("call singleton");
+    assert!(
+        matches!(&pre, rubyrs::Value::Str(s) if &*s.borrow() == b"leaked"),
+        "expected 'leaked' before reset, got {:?}", pre,
+    );
+    rt.reset();
+    // Post-reset: singleton gone — NoMethodError on Mutex
+    // because `echo` was never a preamble Mutex singleton.
+    let err = rt.eval("Mutex.echo", "post.rb").expect_err("singleton gone");
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "NoMethodError"),
+        "expected NoMethodError post-reset, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn reset_clears_user_class_ivar_on_preamble_class() {
+    // `@foo = bar` in a class body sets the class-instance ivar
+    // via the `ivars` RefCell, not the regular instance heap.
+    // Same reset-leak concern as singleton_methods.
+    let mut rt = Runtime::new();
+    rt.eval(
+        "class Mutex; @stash = 'leaked'; end",
+        "store.rb",
+    ).expect("set class ivar");
+    // Pre-reset: ivar readable via `instance_variable_get`.
+    let pre = rt
+        .eval("Mutex.instance_variable_get(:@stash)", "read.rb")
+        .expect("read class ivar pre-reset");
+    assert!(
+        matches!(&pre, rubyrs::Value::Str(s) if &*s.borrow() == b"leaked"),
+        "expected 'leaked' before reset, got {:?}", pre,
+    );
+    rt.reset();
+    // Post-reset: ivar wiped — `instance_variable_get` returns
+    // nil for an unset ivar (matching CRuby semantics).
+    let post = rt
+        .eval("Mutex.instance_variable_get(:@stash)", "post.rb")
+        .expect("read class ivar post-reset");
+    assert!(
+        matches!(post, rubyrs::Value::Nil),
+        "expected nil (cleared ivar) post-reset, got {:?}", post,
+    );
+}
+
 // Note: a `reset_undoes_redefinition_of_preamble_constant` test
 // was attempted but rubyrs's current constant-assignment
 // semantics make it untestable today — `Exception = 1` evaluates
@@ -294,9 +353,14 @@ trait RuntimeInternals {
     fn vm_interner_len(&self) -> usize;
 }
 
-// Note: these accessors live in the public Runtime impl gated
-// behind `#[cfg(test)]` so the production API stays unchanged.
-// See lib.rs for the implementations.
+// Note: these accessors are `pub fn` on `Runtime` with the
+// `__test_` prefix + `#[doc(hidden)]`. They aren't gated behind
+// `#[cfg(test)]` because Cargo's `cfg(test)` doesn't reach the
+// lib when integration tests build against it as a normal
+// dependency — see the doc-comment on the impls in `lib.rs` for
+// the full rationale and why a real `test-internals` Cargo
+// feature would cost more in build/CI plumbing than the de-facto
+// `__test_` + `#[doc(hidden)]` convention does.
 impl RuntimeInternals for Runtime {
     fn vm_live_count(&self) -> usize {
         Runtime::__test_vm_live_count(self)
