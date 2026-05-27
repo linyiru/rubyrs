@@ -67,6 +67,40 @@ fn hot_loop_drives_ic_hit_rate_high() {
 }
 
 #[test]
+fn hot_toplevel_loop_counts_fast_path_hits() {
+    // 1000 calls to a user-defined toplevel `def helper` go
+    // through `do_call(no_recv)`'s `lookup_toplevel_method_cache_hit`
+    // fast path — distinct from the receiver-IC path covered
+    // above. Without explicit instrumentation on the fast path,
+    // these hits would silently bypass the counter and
+    // `toplevel_hits` would stay at 0. Pin this contract so a
+    // future dispatch refactor that splits the fast path can't
+    // re-introduce the under-reporting bug.
+    let mut rt = Runtime::new();
+    let src = r#"
+        def helper
+            42
+        end
+        total = 0
+        i = 0
+        while i < 1000
+            total += helper
+            i += 1
+        end
+        total
+    "#;
+    let val = rt.eval(src, "<hot_toplevel>").expect("eval should succeed");
+    assert!(matches!(val, rubyrs::Value::Int(_)));
+
+    let stats = rt.ic_stats();
+    assert!(
+        stats.toplevel_hits >= 999,
+        "fast-path toplevel hits must be counted; got toplevel_hits={} toplevel_misses={}",
+        stats.toplevel_hits, stats.toplevel_misses,
+    );
+}
+
+#[test]
 fn default_icstats_is_zero() {
     // `IcStats::default()` must report zeros across the board —
     // any other code path that touches the counters (e.g. a

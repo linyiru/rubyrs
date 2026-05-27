@@ -228,7 +228,15 @@ impl Vm {
         m
     }
 
-    pub(crate) fn lookup_toplevel_method_cache_hit(&self, cache_id: u16) -> Option<Rc<Method>> {
+    /// Fast-path hit lookup for the toplevel cache. Sister to
+    /// `lookup_toplevel_method_cached`'s hot loop, but used by
+    /// `do_call(no_recv)` before the full uncached fallback path
+    /// would run. Takes `&mut self` purely so the `ic-stats`
+    /// counter increment can land here — without that, the fast
+    /// path would silently bypass the IC accounting and the
+    /// `hit_rate()` aggregate would systematically under-report
+    /// for hot toplevel call sites.
+    pub(crate) fn lookup_toplevel_method_cache_hit(&mut self, cache_id: u16) -> Option<Rc<Method>> {
         let idx = cache_id as usize;
         if idx >= self.call_caches.len() {
             return None;
@@ -237,6 +245,7 @@ impl Vm {
         let cur_gen = self.method_gen;
         for w in &cc.ways {
             if w.class_ptr == TOPLEVEL_METHOD_CACHE_KEY && w.generation == cur_gen {
+                self.ic_stats.record_toplevel_hit();
                 return w.method.clone();
             }
         }
