@@ -1,2 +1,0 @@
-first(bignum): NoMethodError
-last(bignum): NoMethodError

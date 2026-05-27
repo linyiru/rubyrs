@@ -319,6 +319,22 @@ impl Vm {
                         let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
                     }
+                    // BigInt count → RangeError. CRuby's wording:
+                    // `bignum too big to convert into 'long'`. The
+                    // `Value::Int(n)` arm above already caps at
+                    // `usize::MAX` for in-range "n bigger than len",
+                    // so the rationale for raising here is strictly
+                    // "value won't fit a C long" — matches
+                    // bignum.rs:1361's identical guard for
+                    // `Integer#to_s(big_radix)`. Divergence ratcheted
+                    // by `tests/fixtures/divergence_array_first_bignum.rb`
+                    // (PR #193); this arm retires the ratchet.
+                    #[cfg(feature = "bignum")]
+                    ("first", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
                     ("dig", keys) if !keys.is_empty() => {
                         let mut cur = Value::Array(id);
                         for key in keys {
@@ -351,6 +367,14 @@ impl Vm {
                         g.vm.maybe_gc();
                         let nid = g.vm.heap.alloc(HeapObj::Array(out));
                         Some(Value::Array(nid))
+                    }
+                    // BigInt count → RangeError. Same shape as the
+                    // `first` arm above; see the rationale there.
+                    #[cfg(feature = "bignum")]
+                    ("last", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
                     }
                     ("empty?", []) => Some(Value::Bool(self.heap.array(id).is_empty())),
                     ("include?", [needle]) => {
