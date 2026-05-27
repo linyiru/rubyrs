@@ -581,8 +581,24 @@ pub(crate) fn numeric_call(
             let bits = 64 - magnitude.leading_zeros();
             Some(Value::Int(bits as i64))
         }
-        (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => Some(Value::Int(a.wrapping_add(1))),
-        (Value::Int(a), "pred", []) => Some(Value::Int(a.wrapping_sub(1))),
+        // `succ` / `next` / `pred` — with bignum on, decline at
+        // the i64 boundary so bigint_primitive's unary arm
+        // promotes (`i64::MAX.succ` → BigInt(2^63),
+        // `i64::MIN.pred` → BigInt(-(2^63 + 1))). Without
+        // bignum, keep the historical wrapping behaviour. Same
+        // promote-on-overflow pattern as `-@`/`abs`/`~` use.
+        (Value::Int(a), "succ", []) | (Value::Int(a), "next", []) => {
+            #[cfg(feature = "bignum")]
+            { if *a == i64::MAX { None } else { Some(Value::Int(a + 1)) } }
+            #[cfg(not(feature = "bignum"))]
+            { Some(Value::Int(a.wrapping_add(1))) }
+        }
+        (Value::Int(a), "pred", []) => {
+            #[cfg(feature = "bignum")]
+            { if *a == i64::MIN { None } else { Some(Value::Int(a - 1)) } }
+            #[cfg(not(feature = "bignum"))]
+            { Some(Value::Int(a.wrapping_sub(1))) }
+        }
         (Value::Int(a), "to_f", []) => Some(Value::Float(*a as f64)),
         // `Integer#chr` — single-byte binary String for the 0..255
         // range. CRuby supports `chr(Encoding)` to widen the range

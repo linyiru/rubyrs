@@ -12,12 +12,11 @@
 # - Bignum-context cases gated with `bignum_it`; under no-bignum
 #   the `2**1000` literals saturate via `i64::saturating_pow` to
 #   `i64::MAX` (bit_length 63), masking the spec intent.
-# - skipped (fixture): the bignum cases use `.succ` / `.pred` on
-#   `(1 << 100)` which is a `Value::BigInt` — those methods are
-#   currently Int-only in rubyrs (see vm/lookup.rs's responds_to
-#   table). The succ/pred lines are commented out below pending
-#   the same Phase B-style ".succ on BigInt" widening as the
-#   existing iter helpers.
+# - The `.succ` / `.pred` lines on BigInt receivers (originally
+#   commented out as subset-skipped) are uncommented after the
+#   B.6 follow-up that added succ/next/pred to bigint_primitive
+#   (see tests/embed/numeric.rs::
+#   `bigint_succ_pred_promote_at_i64_boundary_and_demote_back`).
 
 describe "Integer#bit_length" do
   it "returns the position of the leftmost bit of a positive number (fixnum)" do
@@ -74,8 +73,8 @@ describe "Integer#bit_length" do
     assert_eq((2**10000+1).bit_length, 10001)
 
     assert_eq((1 << 100).bit_length, 101)
-    # skipped (subset): assert_eq((1 << 100).succ.bit_length, 101)
-    # skipped (subset): assert_eq((1 << 100).pred.bit_length, 100)
+    assert_eq((1 << 100).succ.bit_length, 101)
+    assert_eq((1 << 100).pred.bit_length, 100)
     assert_eq((1 << 10000).bit_length, 10001)
   end
 
@@ -89,8 +88,8 @@ describe "Integer#bit_length" do
     assert_eq((-2**1000+1).bit_length, 1000)
 
     assert_eq(((-1 << 100)-1).bit_length, 101)
-    # skipped (subset): assert_eq(((-1 << 100)-1).succ.bit_length, 100)
-    # skipped (subset): assert_eq(((-1 << 100)-1).pred.bit_length, 101)
+    assert_eq(((-1 << 100)-1).succ.bit_length, 100)
+    assert_eq(((-1 << 100)-1).pred.bit_length, 101)
     assert_eq(((-1 << 10000)-1).bit_length, 10001)
   end
 end

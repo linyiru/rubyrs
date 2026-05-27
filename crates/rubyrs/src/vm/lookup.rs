@@ -498,6 +498,7 @@ impl Vm {
                 "even?" | "odd?" |
                 "bit_length" | "digits" |
                 "times" | "upto" | "downto" |
+                "succ" | "next" | "pred" |
                 "eql?" | "hash"
             ),
             Value::Float(_) => matches!(name,

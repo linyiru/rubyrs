@@ -566,6 +566,15 @@ impl Vm {
                         // numeric.rs because `!i64::MIN == i64::MAX`
                         // fits without promotion.
                         "~" => !b,
+                        // `succ` / `next` / `pred` on BigInt — `b + 1`
+                        // / `b - 1` through the demote-on-fit funnel.
+                        // `(2**63).pred == 2**63 - 1 == i64::MAX` is
+                        // the canonical demote case (BigInt(2^63) is
+                        // one past i64::MAX; subtracting 1 lands on
+                        // i64::MAX). `(-2**63 - 1).succ == i64::MIN`
+                        // is the symmetric demote.
+                        "succ" | "next" => b + 1,
+                        "pred" => b - 1,
                         _ => return Ok(None),
                     }
                 };
@@ -576,12 +585,35 @@ impl Vm {
                 // exactly one (the magnitude is 2^63, one past
                 // i64::MAX). Promote via BigInt — bigint_to_value
                 // will keep it as BigInt since it doesn't fit.
+                // `pred` lands one past on the negative side
+                // (i64::MIN - 1 = -(2^63 + 1)).
                 match name {
                     "abs" | "-@" => {
                         let promoted = -BigInt::from(i64::MIN);
                         Ok(Some(self.bigint_to_value(promoted)?))
                     }
+                    "pred" => {
+                        let promoted = BigInt::from(i64::MIN) - 1;
+                        Ok(Some(self.bigint_to_value(promoted)?))
+                    }
                     "+@" => Ok(Some(Value::Int(i64::MIN))),
+                    _ => Ok(None),
+                }
+            }
+            Value::Int(n) if *n == i64::MAX => {
+                // Symmetric to the i64::MIN arm above for the
+                // succ/next path: i64::MAX + 1 = 2^63, which lands
+                // exactly on the smallest BigInt magnitude.
+                // Other unary ops on i64::MAX don't overflow
+                // (`-i64::MAX == -9223372036854775807` fits,
+                // `i64::MAX.abs() == i64::MAX` fits), so numeric.rs
+                // handles them without our help — only succ/next
+                // need the promote.
+                match name {
+                    "succ" | "next" => {
+                        let promoted = BigInt::from(i64::MAX) + 1;
+                        Ok(Some(self.bigint_to_value(promoted)?))
+                    }
                     _ => Ok(None),
                 }
             }
@@ -1215,8 +1247,13 @@ impl Vm {
         // arity-0 unary group: numeric.rs's `(Int, "~", [])` arm
         // handles Int receivers (no promotion — `!i64::MIN` fits
         // in i64), but BigInt receivers need the two's-complement
-        // `-(b + 1)` form via try_bigint_unary.
-        if args.is_empty() && matches!(name, "-@" | "+@" | "abs" | "~")
+        // `-(b + 1)` form via try_bigint_unary. `succ`/`next`/`pred`
+        // join the same group: numeric.rs handles the in-range Int
+        // path but declines at the i64::MAX/MIN boundaries so this
+        // hook promotes (i64::MAX.succ → BigInt(2^63),
+        // i64::MIN.pred → BigInt(-(2^63+1))), plus the BigInt-recv
+        // case for any BigInt.succ / BigInt.pred call.
+        if args.is_empty() && matches!(name, "-@" | "+@" | "abs" | "~" | "succ" | "next" | "pred")
             && let Some(v) = self.try_bigint_unary(recv, name)?
         {
             return Ok(Some(v));

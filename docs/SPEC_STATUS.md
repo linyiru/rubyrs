@@ -14,7 +14,7 @@ count below is also the passing count.
 |---|---|
 | Files | 55 |
 | Examples in corpus | 222 |
-| Skipped `it` traces | 84 |
+| Skipped `it` traces | 80 |
 
 ### Skipped traces by category
 
@@ -24,7 +24,6 @@ count below is also the passing count.
 | `fixture` | 32 |
 | `method-not-implemented` | 37 |
 | `mock` | 10 |
-| `subset` | 4 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
 `DROP_PATTERNS` (`fixture` / `mock` / `method-not-implemented` plus the
@@ -42,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 12 | 42 | 45 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 7 | 16 | 7 |
-| Integer | 9 | 38 | 11 |
+| Integer | 9 | 38 | 7 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -76,7 +75,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_values_spec.rb` | Hash#values | `core/hash/values_spec.rb` | 1 | 0 |
 | `instance_eval_spec.rb` | BasicObject#instance_eval | `core/basicobject/instance_eval_spec.rb` | 4 | 0 |
 | `integer_abs_spec.rb` | Integer#abs | `core/integer/abs_spec.rb + shared/abs.rb` | 1 | 1 |
-| `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 4 |
+| `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 0 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
 | `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
