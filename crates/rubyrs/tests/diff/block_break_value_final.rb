@@ -45,9 +45,10 @@ def chunk_return
   # In rubyrs chunk is eager: the block runs synchronously
   # inside the `chunk` primitive itself, `return` fires before
   # `chunk` even returns, the outer dispatch unwinds the method,
-  # and `.to_a` never executes. Both interpreters end up
-  # printing `:chunk_ret` even though the execution order
-  # differs.
+  # and `.to_a` never executes. Both interpreters return the
+  # Symbol `:chunk_ret` from chunk_return; `puts` strips the
+  # leading colon when printing it, so the actual stdout line
+  # is `chunk_ret` (matches the inline expected-output below).
   [1, 2, 3].chunk { |x| return :chunk_ret }.to_a
   :unreached
 end

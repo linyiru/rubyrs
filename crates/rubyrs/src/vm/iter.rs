@@ -656,8 +656,15 @@ impl Vm {
             }
             // `chunk { |x| key }` groups consecutive elements
             // sharing the same key. Returns
-            // `[[key, [vals...]], ...]`. nil/false key drops the
-            // run from the output (matching CRuby's "skip" rule).
+            // `[[key, [vals...]], ...]`. `nil` key drops the
+            // element AND ends the current group (so equal keys
+            // on either side of a `nil` land in separate groups,
+            // see the `separator_just_hit` flag below). `false`
+            // is a normal key — its run shows up in the output.
+            // CRuby also recognises the `:_separator` Symbol as a
+            // separator and `:_alone` as "this element gets its
+            // own group" — neither is modelled here (documented
+            // Tier 1 divergence).
             (Value::Array(id), "chunk", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
@@ -718,11 +725,10 @@ impl Vm {
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(k) => k,
                     };
-                    // CRuby's chunk treats `nil` (and `:_separator`)
-                    // as a drop-and-break sentinel. `false` is a
-                    // normal key — its run shows up in the output.
-                    // `:_alone` would also be special but is rare;
-                    // we don't model it (documented divergence).
+                    // `nil` key: drop this element AND end the
+                    // current group. See the chunk-arm header
+                    // comment for the documented divergence vs
+                    // CRuby's `:_separator` / `:_alone` symbols.
                     if matches!(key, Value::Nil) {
                         separator_just_hit = true;
                         continue;
