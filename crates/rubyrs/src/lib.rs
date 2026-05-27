@@ -469,6 +469,18 @@ struct PostPreambleSnapshot {
     /// those would leak across resets if left out of the
     /// snapshot, so capture them all.
     class_states: std::collections::HashMap<intern::SymId, ClassStateSnapshot>,
+    /// `vm.sources` (filename → source-text) as of preamble
+    /// completion. Restored by clone-and-replace, so
+    /// `Method#source_location` on preamble-defined methods
+    /// (`Exception#message`, etc.) and trap backtraces through
+    /// preamble frames keep resolving their line numbers across
+    /// `reset()`. Without this, a long-lived Runtime with a
+    /// fuzz/per-request reset loop loses preamble source-text
+    /// on the first reset and source_location lookups silently
+    /// fall back to line 0 from there on. The HashMap values are
+    /// `Rc<str>` so the clone is a cheap reference-count bump,
+    /// not a string copy.
+    sources: std::collections::HashMap<std::rc::Rc<str>, std::rc::Rc<str>>,
 }
 
 /// Per-Class snapshot covering every `RefCell` field on `Class`
@@ -664,6 +676,7 @@ impl PostPreambleSnapshot {
             constants: rt.vm.constants.clone(),
             toplevel_methods: rt.vm.toplevel_methods.clone(),
             class_states,
+            sources: rt.vm.sources.clone(),
         }
     }
 }
@@ -1014,17 +1027,17 @@ impl Runtime {
             self.vm.loaded_stdlib_stubs.clear();
         }
         // `vm.sources` is the filename → source-text map used by
-        // `Method#source_location` and trap backtraces.
-        // User-supplied filenames accumulate as user evals run;
-        // a stale entry can return the wrong source-text for
-        // line-number resolution if the same filename string is
-        // reused by a later eval with different content (or by
-        // a preamble Method whose name lookup happens to clash).
-        // The Vm struct's own doc-comment for this field
-        // describes it as "can clear between evals". Clear here
-        // unconditionally — the file-source cache is a
-        // user-eval-time concern, not a preamble one.
-        self.vm.sources.clear();
+        // `Method#source_location` and trap backtraces. Restore
+        // to the post-preamble snapshot — every preamble fragment
+        // (`<rubyrs:preamble:exceptions>`, `<rubyrs:preamble:enumerable>`,
+        // etc.) keeps its source entry, so source_location and
+        // backtrace line resolution on preamble-defined methods
+        // (`Exception#message`, `Enumerable#each_with_index`, ...)
+        // still works after `reset()`. User-supplied filenames
+        // accumulated during user evals are dropped by the
+        // clone-and-replace; the snapshot's Rc<str> values make
+        // this a refcount bump, not a string copy.
+        self.vm.sources = snapshot.sources.clone();
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave

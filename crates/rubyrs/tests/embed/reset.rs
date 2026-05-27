@@ -107,6 +107,50 @@ fn reset_clears_user_methods_added_to_preamble_class() {
 }
 
 #[test]
+fn reset_preserves_preamble_source_locations() {
+    // `Method#source_location` on preamble-defined methods
+    // (e.g. `Exception#message`, defined in
+    // `<rubyrs:preamble:exceptions>`) must keep resolving to its
+    // real `[filename, line]` after `reset()`. Pre-fix, reset()
+    // called `vm.sources.clear()`, dropping every preamble
+    // filename→source-text entry; source_location then fell
+    // back to line 0 (dispatch.rs:1036), giving fuzz / per-
+    // request hosts increasingly degraded backtraces from the
+    // first reset onward.
+    let mut rt = Runtime::new();
+    // Source-location query helper: returns the line number for
+    // `Exception#message`, or panics if the lookup doesn't yield
+    // a `[filename, Int(line)]` shape.
+    let line_of_message = |rt: &mut Runtime, tag: &'static str| -> i64 {
+        let v = rt
+            .eval(
+                "Exception.instance_method(:message).source_location",
+                tag,
+            )
+            .unwrap_or_else(|e| panic!("{} eval failed: {:?}", tag, e));
+        let arr = rt
+            .resolve_array(&v)
+            .unwrap_or_else(|| panic!("{} expected Array, got {:?}", tag, v));
+        match arr.get(1) {
+            Some(rubyrs::Value::Int(n)) => *n,
+            other => panic!("{} expected Array with Int line at [1], got {:?}", tag, other),
+        }
+    };
+    let before = line_of_message(&mut rt, "before.rb");
+    assert!(
+        before > 0,
+        "preamble source_location line must be > 0 before reset, got {}",
+        before,
+    );
+    rt.reset();
+    let after = line_of_message(&mut rt, "after.rb");
+    assert_eq!(
+        before, after,
+        "preamble source_location line must survive reset (pre-fix dropped to 0)",
+    );
+}
+
+#[test]
 fn eval_after_reset_gets_fresh_fuel_budget() {
     // Specific eval-reset-eval shape of the broader "fuel is
     // per-eval" contract — companion to
