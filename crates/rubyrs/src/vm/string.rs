@@ -630,8 +630,10 @@ impl Vm {
                 // bytes (0x00..=0x1F, 0x7F) as `\xNN` (uppercase);
                 // escapes `#` ONLY when followed by `{` / `@` / `$`
                 // (the interpolation triggers — round-trip parity);
-                // non-ASCII codepoints become `\uHHHH` (BMP) or
-                // `\u{HHHHH}` (above BMP), uppercase hex.
+                // non-ASCII codepoints become `\uHHHH` (BMP, fixed
+                // 4 digits) or `\u{H...}` (above BMP, 5-6
+                // uppercase hex digits — Unicode scalar values
+                // top out at U+10FFFF).
                 //
                 // Motivating use: MRI lib/erb/compiler.rb:312
                 // (`add_put_cmd`) writes template-content chunks
@@ -735,8 +737,17 @@ impl Vm {
                                     i += n;
                                 }
                                 Some((cp, n)) => {
-                                    // Worst case `\u{HHHHHH}` = 10 bytes.
-                                    ensure_room!(out, 10);
+                                    // Output width is exact: 4
+                                    // overhead bytes (\u{ and })
+                                    // plus the hex-digit count. cp
+                                    // is in 0x10000..=0x10FFFF here,
+                                    // so 5 or 6 digits. Compute the
+                                    // precise projection so a tight
+                                    // max_value_bytes can't false-
+                                    // trap codepoints that would
+                                    // actually fit.
+                                    let hex_digits = if cp <= 0xFFFFF { 5 } else { 6 };
+                                    ensure_room!(out, 4 + hex_digits);
                                     let _ = write!(out, "\\u{{{:X}}}", cp);
                                     i += n;
                                 }

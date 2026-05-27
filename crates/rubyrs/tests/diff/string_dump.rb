@@ -5,7 +5,9 @@
 #   \a \b \t \n \v \f \r \e  — the lettered short forms
 #   \" \\                    — quote / backslash
 #   \xNN                     — other bytes 0x00..=0x1F and 0x7F
-#   \uHHHH / \u{HHHHH}       — non-ASCII codepoints
+#   \uHHHH                   — BMP codepoints (fixed 4 digits)
+#   \u{H...}                 — above-BMP codepoints
+#                              (5-6 digits; Unicode tops at U+10FFFF)
 #   \#                       — only before `{` / `@` / `$`
 #   verbatim                 — printable ASCII 0x20..=0x7E
 #                              (except `"` `\` `#`-before-trigger)
