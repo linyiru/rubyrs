@@ -68,13 +68,18 @@ DROP_PATTERNS = [
     # runnable String specs in future batches — exactly the
     # over-fit hazard reviewer feedback flagged.
     # Count-form variants of head/tail accessors. rubyrs ships
-    # only the zero-arg form for `Array#first`/`#last`/`#min`/
-    # `#max`/`#pop`/`#shift`. `\(\s*[^)\s]` matches any non-empty
-    # argument list (literal number, negative literal, identifier,
-    # expression) — so `[1].first(-1)` and `[].first(bignum_value)`
-    # both get dropped.
-    (r"\.first\(\s*[^)\s]", "method-not-implemented"),
-    (r"\.last\(\s*[^)\s]", "method-not-implemented"),
+    # only the zero-arg form for `Array#min`/`#max`/`#pop`/`#shift`.
+    # `\(\s*[^)\s]` matches any non-empty argument list (literal
+    # number, negative literal, identifier, expression) — so
+    # `[1].min(-1)` and `[].pop(bignum_value)` both get dropped.
+    #
+    # `Array#first(n)` / `#last(n)` are NOT in this list — PR #140
+    # implemented the count form (cap-to-length, ArgumentError on
+    # negative, block-ignored). The remaining incompatibility is
+    # bignum_value → CRuby raises RangeError, rubyrs caps to length;
+    # that single block is skipped per-file rather than via a
+    # blanket polish rule, since the cap-to-length behaviour is
+    # right for every other count case.
     (r"\.min\(\s*[^)\s]", "method-not-implemented"),
     (r"\.max\(\s*[^)\s]", "method-not-implemented"),
     (r"\.pop\(\s*[^)\s]", "method-not-implemented"),
