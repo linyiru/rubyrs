@@ -36,6 +36,44 @@ pub(crate) const INT_HASH_TAG: u8 = 0x49; // 'I'
 /// `5.eql?(5.0) == false`.
 pub(crate) const FLOAT_HASH_TAG: u8 = 0x46; // 'F'
 
+/// FNV-1a 64-bit hash. Used by `Integer#hash` / `Float#hash` for
+/// a deterministic, cross-rustc-stable digest of the tagged
+/// input bytes.
+///
+/// Why not `std::collections::hash_map::DefaultHasher`: the
+/// stdlib doc explicitly marks DefaultHasher's algorithm as
+/// "subject to change" — i.e., the absolute u64 it returns for
+/// a given input is allowed to differ between rustc versions.
+/// Rubyrs's `Integer#hash` / `Float#hash` advertise within-
+/// process stability (matching CRuby's per-VM-seeded behaviour),
+/// but a host snapshotting hash values across builds would
+/// silently break on a toolchain bump if the algorithm were
+/// allowed to drift.
+///
+/// FNV-1a is intentionally simple, well-specified, and stable
+/// across implementations — the algorithm is fixed forever, so
+/// the bytes-in / u64-out mapping is reproducible regardless of
+/// rustc version. Collision resistance is weak (no surprise
+/// for a non-crypto hash), but Rubyrs's internal `Hash` lookup
+/// uses linear-scan `ruby_eq` rather than the user-facing
+/// `#hash`, so the only consumers of this digest are pure-Ruby
+/// callers — for whom stability matters far more than collision
+/// quality.
+///
+/// Constants from <http://www.isthe.com/chongo/tech/comp/fnv/>:
+/// - offset basis: 0xcbf29ce484222325
+/// - prime: 0x100000001b3
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET_BASIS;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 /// Try the Int / Float / mixed-numeric arms. Returns
 /// `Ok(Some(v))` on a handled call, `Ok(None)` if the receiver
 /// or method shape doesn't match and `primitive_call` should
@@ -202,31 +240,30 @@ pub(crate) fn numeric_call(
         // keys use a per-VM random seed for collision resistance;
         // rubyrs's Hash impl is currently a linear-scan Vec under
         // ruby_eq (no actual hashing for key lookup), so this
-        // method exists purely for the user-facing protocol — pure-
-        // Ruby code that calls `n.hash` for its own bookkeeping
-        // needs a stable integer. Use Rust's DefaultHasher for
-        // within-process stability (good enough for the protocol;
-        // the lack of cross-process or cross-VM stability matches
-        // CRuby's behaviour). Returns an i64 — sign bit of the u64
-        // hash is fine as long as `5.hash == 5.hash` holds, which
-        // it does because DefaultHasher is deterministic for
-        // identical input within a process.
+        // method exists purely for the user-facing protocol —
+        // pure-Ruby code that calls `n.hash` for its own
+        // bookkeeping needs a stable integer.
+        //
+        // Hashed via [`fnv1a_64`] rather than stdlib's
+        // DefaultHasher because the latter is documented as
+        // "subject to change" across rustc versions — switching
+        // to FNV-1a makes the digest reproducible across
+        // toolchain bumps (within-process stability was always
+        // required; cross-rustc stability comes free now).
+        //
+        // Returns an i64 — sign bit of the u64 is fine as long as
+        // `a.eql?(b) ⇒ a.hash == b.hash`, which holds because
+        // FNV-1a is purely deterministic.
         //
         // Same shadow-avoidance rationale as `eql?` above.
         (Value::Int(a), "hash", []) => {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            // Tag the input as "Integer" so future cross-type
-            // collisions (e.g. if Float#hash also lands) don't
-            // share hashes by accident. Same tag used by the
-            // BigInt arm in bignum.rs so a small Int and a
-            // (hypothetical non-canonical) BigInt with the same
-            // value hash the same — the canonical-BigInt invariant
-            // makes that impossible in practice, but the tag
-            // alignment future-proofs the protocol.
-            INT_HASH_TAG.hash(&mut h);
-            a.hash(&mut h);
-            Some(Value::Int(h.finish() as i64))
+            // Tag the input as "Integer" so the hash domain stays
+            // disjoint from Float's (see FLOAT_HASH_TAG). Same tag
+            // used by the BigInt arm in bignum.rs.
+            let mut bytes = [0u8; 9];
+            bytes[0] = INT_HASH_TAG;
+            bytes[1..9].copy_from_slice(&a.to_le_bytes());
+            Some(Value::Int(fnv1a_64(&bytes) as i64))
         }
         // `Integer#pow(exp)` — 1-arg form is an alias for `**` for
         // numeric exponents (Int / Float / BigInt under bignum).
@@ -578,20 +615,21 @@ pub(crate) fn numeric_call(
                 _ => false,
             }))
         }
-        // `Float#hash` — within-process-stable i64. Uses a
-        // distinct tag from Integer (`'F'` vs `'I'`) so
+        // `Float#hash` — cross-rustc-stable i64 via [`fnv1a_64`].
+        // Uses a distinct tag from Integer (`'F'` vs `'I'`) so
         // `5.0.hash != 5.hash` — required by the
         // `a.eql?(b) ⇒ a.hash == b.hash` invariant given
         // `5.eql?(5.0) == false`. Hashes the f64 bit pattern
         // (via `to_bits()`) because f64 doesn't implement `Hash`
         // (NaN != NaN under `==`); bit-pattern hashing makes
-        // distinct NaN payloads hash distinctly.
+        // distinct NaN payloads hash distinctly. See the
+        // `Integer#hash` arm above for the FNV-1a vs
+        // DefaultHasher rationale.
         (Value::Float(a), "hash", []) => {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            FLOAT_HASH_TAG.hash(&mut h);
-            a.to_bits().hash(&mut h);
-            Some(Value::Int(h.finish() as i64))
+            let mut bytes = [0u8; 9];
+            bytes[0] = FLOAT_HASH_TAG;
+            bytes[1..9].copy_from_slice(&a.to_bits().to_le_bytes());
+            Some(Value::Int(fnv1a_64(&bytes) as i64))
         }
         // Float × Float
         (Value::Float(a), op, [Value::Float(b)]) => match op {
