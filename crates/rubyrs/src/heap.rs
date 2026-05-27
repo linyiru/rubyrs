@@ -606,13 +606,12 @@ impl Value {
     /// safepoint. Immediates (`Int` / `Float` / `Bool` / `Nil` /
     /// `Sym`) and Rc-shared variants (`Str` / `Class` / `Regex`)
     /// return `false` — pinning them adds GC scan work without
-    /// improving safety. The list mirrors the `mark` walk in
-    /// `vm/gc.rs` and the variants stored as `HeapObj` slots.
+    /// improving safety.
     ///
-    /// Keep this list aligned with `Vm::mark` whenever a new heap-
-    /// slot `Value` variant is introduced; both have to agree on
-    /// "is this slot in the heap" or pin-protection silently
-    /// rots.
+    /// Keep this list aligned with `Heap::visit_value` (heap.rs:521)
+    /// whenever a new heap-slot `Value` variant is introduced; both
+    /// have to agree on "is this slot in the heap" or pin-protection
+    /// silently rots.
     pub(crate) fn is_gc_heap_ref(&self) -> bool {
         match self {
             Value::Array(_)
