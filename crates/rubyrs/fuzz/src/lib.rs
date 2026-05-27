@@ -37,6 +37,12 @@ thread_local! {
 /// balance — tight gives parser + AST→IR more mutation surface per
 /// CPU second, loose lets dispatch / GC / method lookup run for
 /// longer per iteration.
+///
+/// `Copy` because the struct is three POD fields (~24 bytes) and
+/// `run_with_caps` takes `Caps` by value at every iteration — the
+/// implicit move-on-call is cheap and lets the helper signature
+/// stay value-typed without callers reaching for `&` / `.clone()`.
+#[derive(Copy, Clone)]
 pub struct Caps {
     pub fuel: u64,
     pub max_frames: usize,
