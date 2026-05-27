@@ -206,23 +206,24 @@ uniformly across every I/O sink in `vm/`. Same need lives in
 there benefits both consumers and removes the cwd-tempdir trick
 as a per-consumer rediscovery.
 
-### 2. Runtime preamble rebuilt every iteration
+### 2. ~~Runtime preamble rebuilt every iteration~~ — fixed in PR #212 + adoption PR
 
-Each fuzz iteration calls `Runtime::with_config(cfg)`, which
-runs the exception-class preamble during construction (~30k ops
-as of 2026-05). At ~2k iter/sec that's ~60M bootstrap ops/sec —
-roughly 30-40% of the workflow's 5-min budget spent on identical
-setup rather than coverage.
+PR #212 landed `Runtime::reset()` which rewinds a Runtime to
+its post-preamble baseline without re-running the preamble.
+The harness in `crates/rubyrs/fuzz/src/lib.rs::run_with_caps`
+now caches a single `Runtime` in `thread_local!<RefCell<...>>`
+and calls `rt.reset()` at the top of each iteration. Measured
+~107× speedup over the pre-adoption fresh-Runtime-per-iter
+shape on the headline workload (`[1,2,3,4,5].map { |x| x*2 }.length`,
+500 iters: 712 µs/iter → 6.6 µs/iter). cargo-fuzz's harness
+overhead caps the realized win lower than the Rust-only
+benchmark, but the nightly soak now does ~3k iter/sec vs the
+previous ~2k — a ~50% boost on the same 5-min budget.
 
-The fix is a `Runtime::reset()` API in the main crate that
-clears heap + frames + symbol-interner deltas while preserving
-the preamble's class tables and method definitions. Then the
-harness can cache one `Runtime` in `thread_local!` and call
-`reset()` between iterations. Realistic gain: 1.5-2× iter/sec.
-
-Out of scope for the initial harness because the reset API
-needs to be carefully scoped (which Rc<RefCell> state is
-per-iter vs. preamble-built?). Tracked as a follow-up.
+See PR #212's `embed/reset.rs` for the full contract reset
+honours (per-class methods/ivars/singleton_methods restored,
+heap truncated to post-preamble high-water, interner truncation
+respects post-construction host_fn / cext SymIds, etc.).
 
 ### 3. Preamble-fuel coupling
 

@@ -839,22 +839,23 @@ impl Runtime {
         let Some(snapshot) = self.post_preamble.as_ref() else {
             return;
         };
-        // Defensive: reset() should only be called between
-        // `eval` invocations, never from inside one. The `&mut
-        // self` signature prevents the common path (you can't
-        // hold `&mut Runtime` and call reset from a host fn
-        // that already received one), but a future API change
-        // could expose `&mut Runtime` to a callback that reaches
-        // for reset. If that ever happens, wiping `vm.frames`
-        // and `vm.stack` mid-execution would silently corrupt
-        // the active call stack. Catch it in debug builds — the
-        // fuzz crate's release profile re-enables
-        // debug-assertions, so this fires in nightly fuzz too.
-        debug_assert!(
-            self.vm.frames.is_empty(),
-            "Runtime::reset called with {} frames still active",
-            self.vm.frames.len(),
-        );
+        // (Earlier this method had a
+        // `debug_assert!(self.vm.frames.is_empty(), ...)` on the
+        // theory that reset() should never be called
+        // mid-execution. The fuzz harness's adoption of reset
+        // immediately tripped it: a *trapped* eval — fuel
+        // exhausted, raise bubbled out, deadline hit — leaves
+        // frames on the stack by design, and `Runtime::eval`
+        // clears them at the start of the NEXT call. Calling
+        // `reset()` between a trap and the next eval is the
+        // canonical fuzz / per-request pattern; the assertion
+        // was too tight.
+        //
+        // The actual concern the assertion was guarding against
+        // — calling reset mid-dispatch from a host fn — is
+        // ruled out at the type level by `&mut self`: you can't
+        // hold a `&mut Runtime` borrow inside a host_fn AND
+        // call `reset` on the same Runtime simultaneously.)
         // --- Heap: truncate user-allocated slots ---
         // `Vec::truncate` is O(removed) and drops the HeapObj enum
         // variants (including their Rc<...> inner data), releasing

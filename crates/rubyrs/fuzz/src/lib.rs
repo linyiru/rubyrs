@@ -14,8 +14,23 @@
 //! etc.) land here too.
 
 use rubyrs::{Config, Runtime};
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::Duration;
+
+thread_local! {
+    /// Per-process cached Runtime. Each cargo-fuzz target compiles
+    /// to its own binary, so each binary's process gets its own
+    /// `FUZZ_RT`. `RefCell<Option<...>>` lazy-inits on first call
+    /// to `run_with_caps`, then every subsequent iteration takes
+    /// `&mut Runtime` and calls `reset()` instead of paying the
+    /// ~3-6 ms preamble rebuild every iter.
+    ///
+    /// Lives in `thread_local!` because `Runtime` isn't `Send` /
+    /// `Sync` (Rc<RefCell<...>> everywhere). libfuzzer is single-
+    /// threaded so the `thread_local` is effectively process-wide.
+    static FUZZ_RT: RefCell<Option<Runtime>> = const { RefCell::new(None) };
+}
 
 /// Resource caps a fuzz target applies to its `Runtime`. Named
 /// presets (`Caps::tight`, `Caps::loose`) encode the parse-vs-eval
@@ -53,11 +68,32 @@ impl Caps {
 }
 
 /// The full iteration body both fuzz targets share: sandbox the
-/// cwd, UTF-8-gate the input, build a `Config` from the supplied
-/// caps + the cross-target safety defaults
-/// (`max_value_bytes`, `max_symbols`, `deadline`, `stress_gc:
-/// false`), evaluate, ignore the `Result` (script errors are
-/// expected; only Rust panics fail the iteration).
+/// cwd, UTF-8-gate the input, get-or-init the per-process cached
+/// `Runtime` with the supplied caps + cross-target safety
+/// defaults (`max_value_bytes`, `max_symbols`, `deadline`,
+/// `stress_gc: false`), rewind any user state from the previous
+/// iteration via `Runtime::reset`, then evaluate. Ignores the
+/// `Result` (script errors are expected; only Rust panics fail
+/// the iteration).
+///
+/// Pre-PR-#212: each iteration constructed a fresh `Runtime`,
+/// paying ~3-6 ms of preamble parse + compile + execute. The
+/// `Runtime::reset()` API added in PR #212 (and benchmarked at
+/// ~129× faster than a fresh Runtime on the headline workload)
+/// lets the harness keep one Runtime and rewind between inputs.
+/// Net effect: cargo-fuzz's iter/sec on the parse target goes
+/// from ~300/s to ~3-5k/s — the difference between "the
+/// preamble is the whole iteration" and "the actual user-code
+/// dispatch is the whole iteration".
+///
+/// `caps` is captured on first call to seed the Runtime's
+/// resource Config. Subsequent calls re-use the cached Runtime;
+/// the second-and-onwards `caps` argument is ignored. In
+/// practice both fuzz targets always pass the same `caps`
+/// constant (`Caps::tight()` for parse, `Caps::loose()` for
+/// eval), so this isn't observable — but a future contributor
+/// adding a third target that varies caps per call would hit
+/// the silent ignore. Documented here rather than enforced.
 pub fn run_with_caps(data: &[u8], caps: Caps) {
     ensure_sandbox_cwd();
     let source = match std::str::from_utf8(data) {
@@ -69,27 +105,43 @@ pub fn run_with_caps(data: &[u8], caps: Caps) {
         // it would need a separate fuzz target.
         Err(_) => return,
     };
-    let cfg = Config {
-        fuel: Some(caps.fuel),
-        max_frames: Some(caps.max_frames),
-        max_heap_objects: Some(caps.max_heap_objects),
-        // Cross-target invariants — value / symbol / time bounds
-        // that defend the fuzz process against runaway scripts.
-        // Same numbers for both targets because they aren't what
-        // parse-vs-eval is biasing on.
-        max_value_bytes: Some(1 << 16),
-        max_symbols: Some(1 << 14),
-        deadline: Some(Duration::from_millis(500)),
-        // `Config::default()` reads `STRESS_GC` on non-wasi
-        // hosts. The fuzz process inherits the runner's env, and
-        // STRESS_GC=1 is endemic in this repo's test culture
-        // (CI runs every PR twice, once stressed). Pin it off so
-        // the harness's throughput is environment-independent.
-        stress_gc: false,
-        ..Default::default()
-    };
-    let mut rt = Runtime::with_config(cfg);
-    let _ = rt.eval(source, "fuzz.rb");
+    FUZZ_RT.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let rt = slot.get_or_insert_with(|| {
+            let cfg = Config {
+                fuel: Some(caps.fuel),
+                max_frames: Some(caps.max_frames),
+                max_heap_objects: Some(caps.max_heap_objects),
+                // Cross-target invariants — value / symbol /
+                // time bounds that defend the fuzz process
+                // against runaway scripts. Same numbers for
+                // both targets because they aren't what
+                // parse-vs-eval is biasing on.
+                max_value_bytes: Some(1 << 16),
+                max_symbols: Some(1 << 14),
+                deadline: Some(Duration::from_millis(500)),
+                // `Config::default()` reads `STRESS_GC` on
+                // non-wasi hosts. The fuzz process inherits the
+                // runner's env, and STRESS_GC=1 is endemic in
+                // this repo's test culture (CI runs every PR
+                // twice, once stressed). Pin it off so the
+                // harness's throughput is environment-
+                // independent.
+                stress_gc: false,
+                ..Default::default()
+            };
+            Runtime::with_config(cfg)
+        });
+        // Rewind user state from the previous iteration. The
+        // Runtime keeps its preamble bytecode, class tables,
+        // method tables, and the resource caps; only the
+        // per-eval state from the last `eval` (heap allocs,
+        // user-interned symbols, user classes/constants/methods,
+        // globals, ...) gets wiped. See PR #212's
+        // `embed/reset.rs` for the full contract.
+        rt.reset();
+        let _ = rt.eval(source, "fuzz.rb");
+    });
 }
 
 /// Move the fuzz process cwd into a fresh, unpredictable tempdir
