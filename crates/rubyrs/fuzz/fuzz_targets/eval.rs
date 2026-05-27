@@ -22,6 +22,9 @@ use rubyrs::{Config, Runtime};
 fuzz_target!(|data: &[u8]| {
     let source = match std::str::from_utf8(data) {
         Ok(s) => s,
+        // Same UTF-8 gate as `parse.rs` — `Runtime::eval` takes
+        // `&str`. See that file's note on `# encoding:` magic
+        // comments for the deeper context.
         Err(_) => return,
     };
 

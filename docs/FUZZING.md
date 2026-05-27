@@ -11,8 +11,8 @@ against their branch in under a minute.
 
 | Target | What it stresses | Misses |
 |---|---|---|
-| `parse` | `prism` parse + `ast.rs` AST→IR translation. Eval traps on the first opcode (`fuel = Some(0)`). | Anything past op #1 in the VM. |
-| `eval`  | Full VM dispatch, GC, method lookup, primitive registry, ops. | Cross-iteration state (each input gets a fresh `Runtime`). |
+| `parse` | `prism` parse + `ast.rs` AST→IR translation. Tight fuel (50k ops) biases corpus selection toward parser surface. | Deep VM dispatch — eval body runs but is rate-limited. |
+| `eval`  | Full VM dispatch, GC, method lookup, primitive registry, ops. 10× the parse fuel budget. | Cross-iteration state (each input gets a fresh `Runtime`). |
 
 A future `diff` target will run both rubyrs and CRuby and compare
 stdout — same shape as `tests/diff_cruby.rs` but with random
@@ -61,9 +61,11 @@ cargo +nightly fuzz run eval -- -max_total_time=60
 
 A crash drops a minimised input under
 `crates/rubyrs/fuzz/artifacts/<target>/crash-<hash>`. Replay it
-without further fuzzing:
+without further fuzzing (run from inside `crates/rubyrs/fuzz/` so
+the relative `artifacts/...` path resolves):
 
 ```sh
+cd crates/rubyrs/fuzz
 cargo +nightly fuzz run parse artifacts/parse/crash-abc123
 ```
 

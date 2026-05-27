@@ -25,8 +25,11 @@ use rubyrs::{Config, Runtime};
 fuzz_target!(|data: &[u8]| {
     let source = match std::str::from_utf8(data) {
         Ok(s) => s,
-        // Non-UTF-8 inputs aren't Ruby source. Skipping focuses
-        // the corpus signal on the parser / translator surface.
+        // `Runtime::eval` takes `&str` (UTF-8); skip non-UTF-8
+        // bytes here. (Real Ruby files may declare a non-UTF-8
+        // source encoding via `# encoding: ...` magic comments,
+        // but rubyrs's embed API doesn't expose that path — a
+        // separate fuzz target would be needed to cover it.)
         Err(_) => return,
     };
 
