@@ -583,9 +583,25 @@ impl Vm {
                 // Snapshot the resolved Method at capture time so
                 // `bm.call` survives a subsequent `remove_method`
                 // (CRuby parity, matches the `instance_method` arm).
-                let snapshot = match self.class_of(&recv) {
-                    Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
-                    _ => None,
+                //
+                // Use the DISPATCH class (`heap.class_of`) for
+                // Object receivers — that's the class chain that
+                // a regular `recv.foo` would walk, and it
+                // honours singleton methods (`def obj.foo; ...`).
+                // `Vm::class_of` reports the *real* class for
+                // script-visible `obj.class`, which skips the
+                // eigenclass; using that here would snapshot the
+                // real-class body and silently invoke it instead
+                // of the singleton override.
+                let snapshot = match &recv {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_uncached(&cls, *bound_name_id)
+                    }
+                    _ => match self.class_of(&recv) {
+                        Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
+                        _ => None,
+                    },
                 };
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(recv.clone());
@@ -741,10 +757,13 @@ impl Vm {
             //     that include the module. Verified against 3.4:
             //     `module M; def foo; end; end;
             //      M.instance_method(:foo).bind_call(Object.new)`
-            //     succeeds and runs `foo`. The receiver's class
-            //     needs `foo` defined SOMEWHERE on its chain
-            //     either way — that's checked when the inner
-            //     `do_call` invokes the captured name_id.
+            //     succeeds and runs `foo`. Note the captured
+            //     method is invoked directly via `invoke_method`
+            //     on the resolved Method (snapshot-preferred,
+            //     `cap_class`-chain fallback) — no name-based
+            //     lookup on the receiver's class chain happens,
+            //     so the receiver doesn't need to have `foo`
+            //     defined on its class.
             //     `Class.instance_method(:foo).bind_call(obj)`
             //     stays strict — `obj.is_a?(cls)` required.
             if cap_class.name.as_str() != "Kernel"
@@ -2262,9 +2281,20 @@ impl Vm {
                 && let Value::Sym(bound_name_id) = &args[0] {
                     // Snapshot the Method at capture time so the
                     // BoundMethod survives a later remove_method.
-                    let snapshot = match self.class_of(&self_val) {
-                        Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
-                        _ => None,
+                    // Use `heap.class_of` for Object self so a
+                    // singleton method on `self` is captured
+                    // (matches dispatch); `Vm::class_of` would
+                    // skip the eigenclass and snapshot the real
+                    // class's body instead.
+                    let snapshot = match &self_val {
+                        Value::Object(id) => {
+                            let cls = self.heap.class_of(*id);
+                            self.lookup_method_uncached(&cls, *bound_name_id)
+                        }
+                        _ => match self.class_of(&self_val) {
+                            Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
+                            _ => None,
+                        },
                     };
                     self.maybe_gc(); // allow: gc-rooting — BoundMethod holds `recv: self_val.clone()` (cloned from `frames.last().self_val`, which stays rooted via `self.frames` for the whole alloc window) and a primitive `SymId`; no unrooted slot at risk.
                     self.check_alloc()?;

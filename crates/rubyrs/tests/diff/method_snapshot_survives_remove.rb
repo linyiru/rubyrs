@@ -56,3 +56,29 @@ d = D.new
 um4 = D.instance_method(:qux)
 D.class_eval { remove_method(:qux) }
 puts um4.bind_call(d)                        # d-qux
+
+# --- (5) Singleton method capture: `obj.method(:foo)` must
+#     snapshot from the dispatch class (singleton chain), NOT
+#     the script-visible `obj.class`. Otherwise the snapshot
+#     points at the real class's body and `bm.call` invokes
+#     the wrong implementation.
+class E
+  def beep; "class-beep"; end
+end
+e = E.new
+def e.beep; "singleton-beep"; end
+bm5 = e.method(:beep)
+puts bm5.call                                # singleton-beep
+
+# --- (6) Implicit-self `method(:foo)` also snapshots from the
+#     dispatch class — same singleton-respecting rule.
+class F
+  def boop; "class-boop"; end
+  def capture_self
+    method(:boop)
+  end
+end
+f = F.new
+def f.boop; "singleton-boop"; end
+bm6 = f.capture_self
+puts bm6.call                                # singleton-boop
