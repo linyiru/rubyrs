@@ -77,11 +77,13 @@ with an empty `corpus/<target>/`, mirror that:
 
 ```sh
 mkdir -p crates/rubyrs/fuzz/corpus/parse crates/rubyrs/fuzz/corpus/eval
-cp crates/rubyrs/tests/diff/*.rb crates/rubyrs/fuzz/corpus/parse/
-cp crates/rubyrs/tests/diff/*.rb crates/rubyrs/fuzz/corpus/eval/
+cp crates/rubyrs/tests/diff/*.rb     crates/rubyrs/fuzz/corpus/parse/
+cp crates/rubyrs/tests/fixtures/*.rb crates/rubyrs/fuzz/corpus/parse/
+cp crates/rubyrs/tests/diff/*.rb     crates/rubyrs/fuzz/corpus/eval/
+cp crates/rubyrs/tests/fixtures/*.rb crates/rubyrs/fuzz/corpus/eval/
 ```
 
-Every entry in `tests/diff/` is real Ruby that rubyrs already
+Every entry in `tests/diff/` and `tests/fixtures/` is real Ruby that rubyrs already
 handles, so it's the highest-signal starting point we have.
 
 ## When a fuzz finding lands
