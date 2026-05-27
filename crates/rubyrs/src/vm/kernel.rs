@@ -1433,6 +1433,11 @@ impl Vm {
         source: &str,
         filename: &str,
     ) -> Result<Value, Trap> {
+        // Fast-fail BEFORE any parse / AST / compile work when
+        // the frame cap is already exhausted. CPU-bound parse of
+        // a large untrusted eval string shouldn't run just to
+        // fail at the frame push at the bottom.
+        self.check_frames()?;
         let parse_result = ruby_prism::parse(source.as_bytes());
         let mut parse_errors = parse_result.errors().peekable();
         if parse_errors.peek().is_some() {
@@ -1448,23 +1453,6 @@ impl Vm {
                 msg: ast_errors.join("; "),
             }));
         }
-        // Avoid clobbering a previously-registered source under the
-        // same filename. Without this, repeated `eval("1")` calls
-        // (default filename "(eval)") would each overwrite the
-        // prior source entry, breaking `Method#source_location` /
-        // backtrace line resolution for any method compiled from
-        // an earlier eval that shared the filename. We uniquify
-        // by appending an incrementing suffix only when a
-        // collision is detected — user-supplied unique filenames
-        // (tilt's per-template paths) pass through unchanged.
-        // Pre-check `Config::max_frames` BEFORE any source
-        // registration or compile work. If the cap is already
-        // exhausted the eval can't push its frame anyway, so
-        // doing the heavy parse → compile_proto → sources insert
-        // dance just to fail at the frame push leaves the proto
-        // table and (unique) source entry orphaned. Cheap fast-
-        // fail when the cap is full.
-        self.check_frames()?;
         // Cap-aware compile: `compile_proto` interns method names,
         // locals, constants, and other symbols from the eval'd
         // source. Unlike top-level / require source (which is host-
@@ -1484,8 +1472,21 @@ impl Vm {
                 msg: format!("interner exhausted before eval: {} symbols", max),
             }));
         }
+        // Avoid clobbering a previously-registered source ONLY for
+        // our default labels (`(eval)`, `(class_eval)`). User-
+        // supplied filenames pass through unchanged so `__FILE__`
+        // / `Method#source_location` keep returning the caller's
+        // name across repeated evals — a `:N` suffix would leak
+        // into observable metadata (`eval("__FILE__", nil, "foo.rb")`
+        // called twice should both see "foo.rb", not "foo.rb:2").
+        // For our defaults, repeated bare evals do clobber under a
+        // single key without the suffix; this dedupes the
+        // source-table for backtrace fidelity on the common case
+        // (default-filename evals) while keeping the explicit-
+        // filename contract intact.
+        let is_default_label = filename == "(eval)" || filename == "(class_eval)";
         let mut effective_filename: String = filename.to_string();
-        if self.sources.contains_key(effective_filename.as_str()) {
+        if is_default_label && self.sources.contains_key(effective_filename.as_str()) {
             let mut n: u64 = 2;
             loop {
                 let candidate = format!("{}:{}", filename, n);
