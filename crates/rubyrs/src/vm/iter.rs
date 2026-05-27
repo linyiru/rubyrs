@@ -758,7 +758,16 @@ impl Vm {
                 let mut early = None;
                 for (k, v) in snapshot {
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                    match g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames)? {
+                    // Scoped pin: step_block's args→locals copy can
+                    // call maybe_gc (block with rest param has to
+                    // alloc a rest Array), and pair_id is only
+                    // reachable via this Rust-local Vec until then.
+                    // Push/pop around the single call so we don't
+                    // accumulate pins across iterations.
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}

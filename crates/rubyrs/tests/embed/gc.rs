@@ -319,3 +319,35 @@ fn scan_captures_pin_gid_under_stress_gc() {
         );
     }
 }
+
+#[test]
+fn hash_each_pin_pair_id_under_stress_gc() {
+    // Regression: Hash#each / #each_pair allocs a fresh `[k, v]`
+    // pair Array per iteration and yields it to the block. The
+    // pair_id ObjId was only referenced from a Rust-local arg
+    // Vec when passed to step_block. With a rest-param block
+    // (`|*args|`), step_block's args→locals copy allocs a rest
+    // Array — that hits maybe_gc, and under STRESS_GC the
+    // unrooted pair_id gets swept before the block body reads
+    // it. Surfaced by /code-review on PR #178 (same family as
+    // the scan-captures gid fix, e3b90a5).
+    //
+    // Fix uses the scoped `pinned.push/pop` pattern around the
+    // single step_block call (NOT outer PinGuard accumulation —
+    // that would be O(entries) memory growth).
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        { a: 1, b: 2, c: 3 }.each { |*args| puts args.inspect }
+    "#, "hash_each_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    assert_eq!(
+        out.lines().count(),
+        3,
+        "expected 3 lines from 3 pairs, got: {out}"
+    );
+}
