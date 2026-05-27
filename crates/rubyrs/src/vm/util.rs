@@ -19,6 +19,21 @@ use crate::value::{Value, Visibility};
 pub(crate) fn value_cmp_v(a: &Value, b: &Value, interner: &Interner) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
+        // Int×Float / Float×Int — route through the lossless
+        // helper so e.g. `[2**62 + 1, (2**62).to_f].min_by(&:itself)`
+        // matches the direct `(2**62 + 1) < (2**62).to_f` result.
+        // BigInt×Float can't be handled here (helper needs heap
+        // access; `value_cmp_v` is the heap-less aggregator
+        // entrypoint used by `_by` family). Callers that have a
+        // Heap should prefer `value_cmp_v_heap`, which covers
+        // BigInt×Float — tracked as a follow-up for `_by`.
+        (Value::Int(x), Value::Float(y)) => {
+            crate::vm::numeric::int_cmp_float_lossless(*x, *y)
+        }
+        (Value::Float(x), Value::Int(y)) => {
+            crate::vm::numeric::int_cmp_float_lossless(*y, *x).map(|o| o.reverse())
+        }
         (Value::Str(x), Value::Str(y)) => Some(x.borrow().cmp(&*y.borrow())),
         (Value::Sym(x), Value::Sym(y)) => {
             let sx = interner.resolve(*x);

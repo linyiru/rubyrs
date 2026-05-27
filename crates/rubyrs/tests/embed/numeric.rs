@@ -1406,6 +1406,7 @@ fn int_cmp_float_is_lossless() {
     ]);
 }
 
+#[cfg(feature = "bignum")]
 #[test]
 fn aggregate_cmp_int_float_is_lossless() {
     // Sibling pin to int_cmp_float_is_lossless / bigint_cmp_float_is_lossless,
@@ -1415,6 +1416,8 @@ fn aggregate_cmp_int_float_is_lossless() {
     // all, returning nil), so the direct operator and the
     // aggregate path diverged after the previous PRs in this
     // series. Both routes now use the same lossless helpers.
+    // Gated on bignum because half the assertions use 2**64
+    // literals which saturate to i64::MAX under no-bignum.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
@@ -1434,6 +1437,35 @@ fn aggregate_cmp_int_float_is_lossless() {
     assert_eq!(lines, vec![
         "1", "0", "-1", "-1",   // Int × Float (both directions)
         "1", "0", "-1",         // BigInt × Float (both directions)
+    ]);
+}
+
+#[test]
+fn by_aggregators_cmp_int_float_is_lossless() {
+    // Sibling to aggregate_cmp_int_float_is_lossless but for the
+    // `_by` family (`min_by`, `max_by`, `sort_by`), which uses
+    // the heap-less `value_cmp_v` aggregator. Pre-fix Int×Float
+    // keys returned `None` (incomparable) and bubbled up as
+    // NoMethodError; now routes through int_cmp_float_lossless.
+    // BigInt×Float still out of scope here (value_cmp_v has no
+    // heap access; tracked as a follow-up).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts ([1, 2, 3].min_by { |x| x == 2 ? 1.5 : x }).inspect    # 1\n\
+         puts ([1, 2, 3].max_by { |x| x == 2 ? 1.5 : x }).inspect    # 3\n\
+         puts ([3, 1, 2.5].sort_by { |x| x }).inspect                # [1, 2.5, 3]\n\
+         puts ([2**62 + 1, 2**62 - 1].min_by { |x| x.to_f }).inspect # 4611686018427387903 (both keys round to 2**62; min_by returns first)",
+        "by_cmp.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "1",
+        "3",
+        "[1, 2.5, 3]",
+        "4611686018427387905",  // first element of [2**62+1, 2**62-1]
     ]);
 }
 
