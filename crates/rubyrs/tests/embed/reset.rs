@@ -118,10 +118,14 @@ fn reset_preserves_preamble_source_locations() {
     // request hosts increasingly degraded backtraces from the
     // first reset onward.
     let mut rt = Runtime::new();
-    // Source-location query helper: returns the line number for
-    // `Exception#message`, or panics if the lookup doesn't yield
-    // a `[filename, Int(line)]` shape.
-    let line_of_message = |rt: &mut Runtime, tag: &'static str| -> i64 {
+    // Source-location query helper: returns `(filename, line)`
+    // for `Exception#message`, or panics if the lookup doesn't
+    // yield a `[Str(filename), Int(line)]` shape. Both elements
+    // are checked — a regression that returns line 23 from a
+    // *different* file (e.g., a `"".source_location`-style
+    // shortcut that synthesises a path) would slip past a
+    // line-only assertion.
+    let source_location_of_message = |rt: &mut Runtime, tag: &'static str| -> (String, i64) {
         let v = rt
             .eval(
                 "Exception.instance_method(:message).source_location",
@@ -131,22 +135,33 @@ fn reset_preserves_preamble_source_locations() {
         let arr = rt
             .resolve_array(&v)
             .unwrap_or_else(|| panic!("{} expected Array, got {:?}", tag, v));
-        match arr.get(1) {
+        let filename = match arr.first() {
+            Some(rubyrs::Value::Str(s)) => String::from_utf8(s.borrow().to_vec())
+                .unwrap_or_else(|_| panic!("{} filename was not valid UTF-8", tag)),
+            other => panic!("{} expected Str filename at [0], got {:?}", tag, other),
+        };
+        let line = match arr.get(1) {
             Some(rubyrs::Value::Int(n)) => *n,
-            other => panic!("{} expected Array with Int line at [1], got {:?}", tag, other),
-        }
+            other => panic!("{} expected Int line at [1], got {:?}", tag, other),
+        };
+        (filename, line)
     };
-    let before = line_of_message(&mut rt, "before.rb");
+    let before = source_location_of_message(&mut rt, "before.rb");
     assert!(
-        before > 0,
+        before.0.starts_with("<rubyrs:preamble:"),
+        "preamble source_location filename must start with `<rubyrs:preamble:` before reset, got {:?}",
+        before.0,
+    );
+    assert!(
+        before.1 > 0,
         "preamble source_location line must be > 0 before reset, got {}",
-        before,
+        before.1,
     );
     rt.reset();
-    let after = line_of_message(&mut rt, "after.rb");
+    let after = source_location_of_message(&mut rt, "after.rb");
     assert_eq!(
         before, after,
-        "preamble source_location line must survive reset (pre-fix dropped to 0)",
+        "preamble source_location (filename, line) must survive reset (pre-fix dropped to line 0)",
     );
 }
 
