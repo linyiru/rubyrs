@@ -36,8 +36,13 @@ What we're hunting:
 - Memory-safety UB caught by AddressSanitizer (libfuzzer-sys
   ships with ASan on by default): use-after-free, heap / stack
   buffer overruns, double free. Most reachable through the
-  `unsafe` blocks in `vm/gc.rs`, `vm/dispatch.rs`, and the
-  cext FFI surface.
+  `unsafe` blocks in `vm/gc.rs` and `vm/dispatch.rs`. The cext
+  FFI's `unsafe` surface is **not** in scope — the fuzz crate
+  builds rubyrs with `default-features = false`, so the `cext`
+  module isn't even compiled into these binaries. Fuzzing that
+  boundary would need a separate target with `--features cext`
+  (and a corpus shape that crosses the FFI, not raw Ruby
+  source).
 
 ASan does **not** model Rust's aliasing rules (Stacked / Tree
 Borrows). Those live in the [Miri CI job](../.github/workflows/ci.yml)
@@ -138,10 +143,17 @@ sees the connection.
 - **Not a coverage tool.** libFuzzer's coverage-guided mutations
   do bias toward unexplored branches, but the corpus growth
   isn't a substitute for `cargo llvm-cov`.
-- **Not a security audit.** AddressSanitizer catches a useful
-  subset of UB. It doesn't model the host-embedder boundary or
-  the cext FFI's `unsafe` blocks (those run with their own
-  policy under [ADR 0009](adr/0009-cext-panic-policy.md)).
+- **Not a security audit.** Two layers of "not covered":
+  AddressSanitizer catches a useful but bounded subset of UB —
+  it doesn't model Rust's aliasing rules (Miri's job) or the
+  host-embedder boundary. *On top of that*, this harness
+  configures the fuzz binary with `default-features = false`,
+  so the `cext` module isn't compiled in at all; the cext FFI's
+  `unsafe` blocks aren't reachable from these binaries even
+  before ASan's scope question comes up. Those run under their
+  own policy ([ADR 0009](adr/0009-cext-panic-policy.md)) and
+  would need a separate `--features cext` fuzz target to
+  exercise.
 - **Not a per-PR gate.** Soak-only by design. Reviewers
   shouldn't wait for a fuzz pass before merging; the panic-budget
   + diff_cruby + miri jobs already guard PRs at the
