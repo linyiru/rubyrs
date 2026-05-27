@@ -1457,6 +1457,14 @@ impl Vm {
         // by appending an incrementing suffix only when a
         // collision is detected — user-supplied unique filenames
         // (tilt's per-template paths) pass through unchanged.
+        // Pre-check `Config::max_frames` BEFORE any source
+        // registration or compile work. If the cap is already
+        // exhausted the eval can't push its frame anyway, so
+        // doing the heavy parse → compile_proto → sources insert
+        // dance just to fail at the frame push leaves the proto
+        // table and (unique) source entry orphaned. Cheap fast-
+        // fail when the cap is full.
+        self.check_frames()?;
         // Cap-aware compile: `compile_proto` interns method names,
         // locals, constants, and other symbols from the eval'd
         // source. Unlike top-level / require source (which is host-
@@ -1509,12 +1517,11 @@ impl Vm {
         self.ensure_call_caches(cc);
         let depth_before = self.frames.len();
         let stack_before = self.stack.len();
-        // Respect `Config::max_frames`: eval pushes a fresh frame
-        // and could be re-entered recursively from inside the
-        // eval'd source. Without this gate, deep `eval("eval(\"...\"")`
-        // chains would bypass the cap that normal method/block
-        // invocation enforces.
-        self.check_frames()?;
+        // `check_frames()` was already called at the top of
+        // `eval_string` (before source registration / compile) so
+        // the cap-rejected path leaves no VM state behind. The
+        // frame stack hasn't grown since then — we haven't pushed
+        // a frame yet — so we don't need a second check here.
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
