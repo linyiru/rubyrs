@@ -596,3 +596,48 @@ fn array_group_by_pin_snapshot_under_receiver_mutation() {
         "group_by output corrupted (first inner Array did not survive): {out}"
     );
 }
+
+#[test]
+fn array_chunk_while_pin_snapshot_under_receiver_mutation() {
+    // Regression: Array#chunk_while clones the receiver into a
+    // Rust-local `snapshot: Vec<Value>` and iterates pairs of
+    // adjacent elements. If the block mutates the receiver mid-
+    // iteration (`arr.shift` / `slice!` / etc.), the snapshot's
+    // original heap-Value elements lose their transitive root
+    // through the pinned receiver — they live only in the snapshot
+    // Vec (and later in `current_chunk`), which scan_roots can't
+    // see. The explicit `maybe_gc()` at the chunk-flush boundary
+    // (or inside step_block) sweeps them; subsequent reads ICE at
+    // `heap.rs:180` with `use-after-free ObjId(N)`. Same family as
+    // the chunk driver's defensive snapshot pin and the group_by
+    // snapshot pin already in this file.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # `nested` holds four inner Arrays (heap slots). The block
+        # drains the receiver on the first pair, then the snapshot
+        # is the sole live reference to the inner Arrays. Returning
+        # `true` keeps them in `current_chunk`, where the next
+        # iteration's step_block-triggered maybe_gc would sweep
+        # them without the defensive pin.
+        nested = [[1, 2], [3, 4], [5, 6], [7, 8]]
+        result = nested.chunk_while { |a, b|
+          nested.shift while nested.length > 0
+          true
+        }
+        puts result.inspect
+    "#, "chunk_while_mut.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // Soft assertion focused on GC safety (same rationale as the
+    // group_by mutation test): assert the eval didn't ICE and the
+    // first inner Array survived. Do not lock in the exact output
+    // — CRuby's behaviour under concurrent mutation is unspecified.
+    assert!(
+        out.starts_with("[[[1, 2]"),
+        "chunk_while output corrupted (first inner Array did not survive): {out}"
+    );
+}

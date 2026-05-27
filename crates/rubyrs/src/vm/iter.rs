@@ -1649,6 +1649,30 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                // Defensive pin of every heap-slot element. If the
+                // block mutates the receiver mid-iteration (`shift`
+                // / `slice!` / etc.), the snapshot's heap-Value
+                // elements lose their transitive root through the
+                // pinned receiver. They're then reachable only via
+                // the Rust-local `snapshot` Vec (and, after the
+                // first chunk flushes, via `current_chunk`) which
+                // scan_roots can't see. The next `maybe_gc()` —
+                // either inside `step_block` or at the chunk-flush
+                // alloc below — would sweep them. Same family as
+                // the chunk / group_by defensive snapshot pins
+                // earlier in this file. Narrowed via
+                // `is_gc_heap_ref` so immediate / Rc-shared
+                // variants don't grow the pinned-roots set.
+                //
+                // Once snapshot elements are pinned, `current_chunk`'s
+                // `pair[1].clone()` pushes point at the same ObjIds
+                // and inherit the pin; no separate per-element
+                // current_chunk pin is needed.
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() {
+                        g.pin(v.clone());
+                    }
+                }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
