@@ -41,7 +41,7 @@ categories = ["compilers", "wasm", "command-line-utilities"]
 # stdlib / mri-compat tiers as well — they require larger surgery
 # and are explicitly out of scope for this PoC.)
 [features]
-default = ["cext", "regex", "bignum"]
+default = ["cext", "regex", "bignum", "std-sink"]
 cext = ["dep:rubyrs-cext", "dep:libloading"]
 # `bignum` is the third tier boundary (PoC Phase A per ADR 0018's
 # BigInt placement decision). With this feature off:
@@ -93,6 +93,16 @@ regex = ["dep:regex"]
 # place Tier 1 core grows a Tier 3 surface; the default build
 # stays minimal per ADR 0017.
 stdlib = []
+# `std-sink` enables the `StdSink` adapter that bridges
+# `std::io::Write` to the `OutputSink` trait. Default-on
+# because the facade crate's `Runtime::set_stdout` public API
+# accepts `Box<dyn std::io::Write>` (a `std::*` type by
+# definition); without this feature, that adapter is absent
+# and embedders must construct `OutputSink` impls directly.
+# When `rubyrs-core` (ADR 0018 Phase 1) ships, this feature
+# moves to the facade crate and `rubyrs-core` becomes
+# `#![no_std]` with `OutputSink` only.
+std-sink = []
 # `trace-startup` instruments the CLI binary's `main()` with phase
 # timestamps (entry → args → env → runtime → eval → done) printed to
 # stderr as `trace-startup\t<label>\t<microseconds>us`. Used by

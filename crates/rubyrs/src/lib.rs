@@ -22,16 +22,28 @@
 //! See [`docs/SUBSET.md`](https://github.com/linyiru/rubyrs/blob/master/docs/SUBSET.md)
 //! for the Ruby semantics this runtime does and does not support.
 
+// Pre-stage the `no_std + alloc` shape for ADR 0018 Phase 1.
+// `extern crate alloc;` in a `std` project is harmless
+// (`alloc` is already linked) but lets new modules use
+// `alloc::*` paths today so the Phase 1 migration is a
+// mechanical move, not a rewrite.
+extern crate alloc;
+
 mod ast;
 mod bytecode;
 mod compiler;
 mod error;
 mod heap;
 mod intern;
+mod output;
 #[cfg(feature = "stdlib")]
 mod stdlib_vendor;
 mod value;
 mod vm;
+
+pub use output::{NullSink, OutputError, OutputSink};
+#[cfg(feature = "std-sink")]
+pub use output::StdSink;
 
 use std::io::Write;
 use std::path::Path;

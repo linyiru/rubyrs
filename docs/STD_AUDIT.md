@@ -196,7 +196,7 @@ Recommended sequencing within the Phase 1 PR (or PR chain):
 
 ## Open questions to resolve before Phase 1 lands
 
-1. **`Write` trait abstraction for the no_std core**: do we vendor a minimal `OutputSink` trait, or do we add a `[dependencies]` on a no_std-compatible IO crate? Recommend the former — single trait, ~20 lines, no dep.
+1. ~~**`Write` trait abstraction for the no_std core**~~ RESOLVED 2026-05-27 — vendor a minimal `OutputSink` trait. Trait + adapter + `NullSink` + 6 unit tests landed at `crates/rubyrs/src/output.rs`; ADR 0021 documents the design. Phase 1's job is `git mv output.rs crates/rubyrs-core/src/output.rs` + migrate `Vm::stdout`'s type to `Box<dyn OutputSink>`.
 2. ~~**`std::sync::Arc` sites**~~ RESOLVED — see "Audit-required sites" section above.
 3. **`lib.rs:1029`'s `std::fs::read_to_string`**: should `Runtime::eval_file` itself be available in Tier 1 (today's reality) or move to a host-fn / Tier 3 `_io` battery surface? Recommend keeping in the facade for Phase 1; revisit when `_io` battery lands.
 4. **`vm/cext.rs:920`'s `use std::path::Path`**: stays in the cext crate (which is itself Tier 4); just verify the import isn't visible from `rubyrs-core`.
