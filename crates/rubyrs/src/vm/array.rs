@@ -98,10 +98,17 @@ impl Vm {
                         if hits.is_empty() {
                             Some(Value::Nil)
                         } else {
+                            // CRuby returns the LAST matched element
+                            // in array order. Since `==` can hold
+                            // across distinct objects (e.g.
+                            // `1 == 1.0`), this is the highest-index
+                            // hit BEFORE removal — not whatever the
+                            // last `remove` call happens to return.
+                            let last_idx = *hits.last().unwrap();
+                            let last = self.heap.array(id)[last_idx].clone();
                             let a = self.heap.array_mut(id);
-                            let mut last: Value = Value::Nil;
                             for &i in hits.iter().rev() {
-                                last = a.remove(i);
+                                a.remove(i);
                             }
                             Some(last)
                         }

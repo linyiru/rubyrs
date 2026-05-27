@@ -31,6 +31,17 @@ a = [1, 2, 3, 2, 4, 2]
 puts a.delete(2).inspect                # 2
 puts a.inspect                          # [1, 3, 4]
 
+# --- Distinct values, all `==` to the arg: returns the LAST in
+#     array order (not the first / not arbitrary). `1 == 1.0`
+#     holds in CRuby, so both match and we must surface `1.0`.
+a = [1, 1.0]
+puts a.delete(1).inspect                # 1.0
+puts a.inspect                          # []
+
+a = [1.0, 1]
+puts a.delete(1).inspect                # 1
+puts a.inspect                          # []
+
 # --- Not found: returns nil, array unchanged ---
 a = [1, 2, 3]
 puts a.delete(99).inspect               # nil
