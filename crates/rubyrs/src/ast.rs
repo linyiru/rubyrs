@@ -2586,6 +2586,43 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
+            // `class << self; private; def secret; ...; end; ...` —
+            // bare visibility modifier (`private` / `public` /
+            // `protected`) at body top level. Translates as a
+            // regular method call (Expr::Call with name="private"
+            // and implicit receiver). At runtime self is the
+            // surrounding class (= `class_stack.last()` —
+            // singleton-class body shares the outer class's
+            // class_stack entry), and do_call's
+            // `visibility_from_name` arm at ~line 2417 mutates
+            // `class_visibility_stack.last_mut()` accordingly.
+            // Subsequent `def`s in the same body read that stack
+            // when DefSingletonMethod runs, so the modifier flows
+            // correctly to following method definitions.
+            //
+            // Scope: only the bare-receiver form. The args form
+            // (`private :foo, :bar`) retroactively flips named
+            // methods' visibility on the OUTER class — but
+            // sinatra/base.rb:1690 uses the bare form, and the
+            // args form's interaction with singleton methods is
+            // a separate question we don't need to answer here.
+            //
+            // Motivating call site: sinatra/base.rb:1690's
+            // `class << self; ...; private; ...; end` — bare
+            // `private` precedes a block of helper methods that
+            // sinatra hides from external callers.
+            // (TRY_RUNS pass 9.7 layer #14.)
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && call.arguments().map_or(true, |a| a.arguments().iter().count() == 0)
+                && matches!(cid_to_string(call.name()).as_str(),
+                    "private" | "public" | "protected"
+                )
+            {
+                out.push(tr(ctx, bn));
+                continue;
+            }
             // `class << self; <stmt> if cond` / `class << self;
             // <stmt> unless cond` — and structurally-equivalent
             // block forms `if cond; <stmt>; end` / `unless cond;
