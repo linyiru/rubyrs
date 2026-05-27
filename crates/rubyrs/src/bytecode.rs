@@ -266,7 +266,9 @@ pub(crate) enum Op {
     /// `PushClassVisibilityPublic` via the body's ensure
     /// clause (see Push docs for unwind details). Underflow is
     /// a translator-level invariant breakage and triggers
-    /// `debug_assert!` in the handler (PR #233 code-review #2).
+    /// unconditional `assert!` in the handler — fires in both
+    /// debug and release builds so an unbalanced Pop surfaces
+    /// during CI's `cargo test --release` (PR #233 round 3 #2).
     PopClassVisibility,
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured

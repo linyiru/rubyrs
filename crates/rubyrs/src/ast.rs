@@ -339,14 +339,18 @@ pub(crate) enum Expr {
     /// class's own singleton methods.
     SingletonChainPrepend(Box<SExpr>),
     /// Push a new `Visibility::Public` entry onto the runtime
-    /// class_visibility_stack. Emitted by the `class << self`
-    /// body translator at body start so bare `private`/`public`/
-    /// `protected` mutations inside don't leak into the
-    /// enclosing class body. Pairs with `PopClassVisibility`.
+    /// class_visibility_stack. Emitted by the SingletonClassNode
+    /// translator at body start for EVERY `class << <expr>`
+    /// shape (receiver-independent — `class << self`,
+    /// `class << obj`, `class << Const`) so bare `private` /
+    /// `public` / `protected` mutations inside don't leak into
+    /// the enclosing class body. Pairs with `PopClassVisibility`.
     PushClassVisibilityPublic,
     /// Pop one entry from class_visibility_stack. Pair with
     /// `PushClassVisibilityPublic` at the boundary of a
-    /// `class << self` body.
+    /// `class << <expr>` body — emitted in the body's
+    /// `Begin { ensure: [...] }` so the pop runs on both
+    /// normal exit and exception unwind.
     PopClassVisibility,
     ArrayLit(Vec<SExpr>),
     HashLit(Vec<(SExpr, SExpr)>),
