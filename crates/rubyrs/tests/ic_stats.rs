@@ -26,7 +26,14 @@ fn hot_loop_drives_ic_hit_rate_high() {
     // through `lookup_method_cached`. Single class shape means
     // the 4-way IC sees no eviction; after the first miss every
     // subsequent lookup should hit.
+    //
+    // Snapshot before/after the workload eval so the assertion
+    // is on the DELTA, not on aggregate counters that also
+    // include any preamble/setup dispatches Runtime did at
+    // construct time. Keeps the test stable as the preamble
+    // evolves.
     let mut rt = Runtime::new();
+    let before = rt.ic_stats();
     let src = r#"
         class Foo
             def ping
@@ -45,24 +52,24 @@ fn hot_loop_drives_ic_hit_rate_high() {
     let val = rt.eval(src, "<hot_loop>").expect("eval should succeed");
     // Sanity: the loop body must have actually run.
     assert!(matches!(val, rubyrs::Value::Int(_)), "expected Int result, got {val:?}");
+    let after = rt.ic_stats();
 
-    let stats = rt.ic_stats();
-    let total = stats.hits + stats.misses;
+    let hits = after.hits - before.hits;
+    let misses = after.misses - before.misses;
+    let total = hits + misses;
     assert!(
         total >= 1000,
-        "expected ≥1000 receiver lookups for a 1000-iter loop calling f.ping; got hits={} misses={}",
-        stats.hits, stats.misses,
+        "expected ≥1000 receiver lookups during the 1000-iter loop calling f.ping; got delta hits={hits} misses={misses}",
     );
-    // After the first miss the IC should keep hitting. We allow
-    // for a small fixed number of misses (the first dispatch at
-    // each emitted call site + a couple of preamble dispatches);
-    // a hit rate above 99% is the actual interesting signal —
-    // 1000 single-class-shape calls should saturate the IC.
-    let hit_rate = stats.hit_rate();
+    // After the first miss the IC should keep hitting. A hit
+    // rate above 99% on the workload-delta alone is the
+    // interesting signal — 1000 single-class-shape calls should
+    // saturate the 4-way IC after the very first dispatch.
+    let hit_rate = hits as f64 / total as f64;
     assert!(
         hit_rate > 0.99,
-        "hot mono-shape loop should have hit_rate > 0.99; got {hit_rate:.4} (hits={} misses={} toplevel_hits={} toplevel_misses={})",
-        stats.hits, stats.misses, stats.toplevel_hits, stats.toplevel_misses,
+        "hot mono-shape loop delta should have hit_rate > 0.99; got {hit_rate:.4} (Δ hits={hits} misses={misses}; aggregate hits={} misses={} toplevel_hits={} toplevel_misses={})",
+        after.hits, after.misses, after.toplevel_hits, after.toplevel_misses,
     );
 }
 
@@ -76,7 +83,12 @@ fn hot_toplevel_loop_counts_fast_path_hits() {
     // `toplevel_hits` would stay at 0. Pin this contract so a
     // future dispatch refactor that splits the fast path can't
     // re-introduce the under-reporting bug.
+    //
+    // Same delta-snapshot pattern as `hot_loop_drives_ic_hit_rate_high`
+    // so the assertion isolates the workload from any
+    // preamble-time toplevel lookups.
     let mut rt = Runtime::new();
+    let before = rt.ic_stats();
     let src = r#"
         def helper
             42
@@ -91,12 +103,13 @@ fn hot_toplevel_loop_counts_fast_path_hits() {
     "#;
     let val = rt.eval(src, "<hot_toplevel>").expect("eval should succeed");
     assert!(matches!(val, rubyrs::Value::Int(_)));
+    let after = rt.ic_stats();
 
-    let stats = rt.ic_stats();
+    let delta_hits = after.toplevel_hits - before.toplevel_hits;
+    let delta_misses = after.toplevel_misses - before.toplevel_misses;
     assert!(
-        stats.toplevel_hits >= 999,
-        "fast-path toplevel hits must be counted; got toplevel_hits={} toplevel_misses={}",
-        stats.toplevel_hits, stats.toplevel_misses,
+        delta_hits >= 999,
+        "fast-path toplevel hits must be counted; got Δ toplevel_hits={delta_hits} Δ toplevel_misses={delta_misses}",
     );
 }
 
