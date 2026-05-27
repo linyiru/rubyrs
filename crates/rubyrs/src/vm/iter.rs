@@ -150,15 +150,11 @@ impl Vm {
         let mut find_val = Value::Nil;
         let mut bool_acc = mode.bool_init();
         for v in snapshot {
-            g.vm.invoke_block(block,vec![v.clone()])?;
-            g.vm.dispatch_until(pre_frames)?;
-            if g.vm.method_return.is_some() { break; }
-            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-            if g.vm.break_signaled {
-                g.vm.break_signaled = false;
-                early = Some(r);
-                break;
-            }
+            let r = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                BlockStep::MethodReturn => break,
+                BlockStep::Break(r) => { early = Some(r); break; }
+                BlockStep::Value(r) => r,
+            };
             let truthy = r.is_truthy();
             match mode {
                 IterMode::Select => if truthy { g.vm.heap.array_mut(acc_id.unwrap()).push(v); }
@@ -198,15 +194,11 @@ impl Vm {
         let mut find_val = Value::Nil;
         let mut bool_acc = mode.bool_init();
         for (k, v) in snapshot {
-            g.vm.invoke_block(block,vec![k.clone(), v.clone()])?;
-            g.vm.dispatch_until(pre_frames)?;
-            if g.vm.method_return.is_some() { break; }
-            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-            if g.vm.break_signaled {
-                g.vm.break_signaled = false;
-                early = Some(r);
-                break;
-            }
+            let r = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+                BlockStep::MethodReturn => break,
+                BlockStep::Break(r) => { early = Some(r); break; }
+                BlockStep::Value(r) => r,
+            };
             let truthy = r.is_truthy();
             match mode {
                 IterMode::Select => if truthy { g.vm.heap.hash_mut(acc_id.unwrap()).push((k, v)); }
@@ -259,15 +251,11 @@ impl Vm {
         let end_inc = if excl { ei - 1 } else { ei };
         let mut i = bi;
         while i <= end_inc {
-            g.vm.invoke_block(block,vec![Value::Int(i)])?;
-            g.vm.dispatch_until(pre_frames)?;
-            if g.vm.method_return.is_some() { break; }
-            let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-            if g.vm.break_signaled {
-                g.vm.break_signaled = false;
-                early = Some(r);
-                break;
-            }
+            let r = match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                BlockStep::MethodReturn => break,
+                BlockStep::Break(r) => { early = Some(r); break; }
+                BlockStep::Value(r) => r,
+            };
             let truthy = r.is_truthy();
             match mode {
                 IterMode::Select => if truthy { g.vm.heap.array_mut(acc_id.unwrap()).push(Value::Int(i)); }
