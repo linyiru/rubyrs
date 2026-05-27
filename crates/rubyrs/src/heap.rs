@@ -55,8 +55,26 @@ pub(crate) enum HeapObj {
     /// `Method#unbind` result. `class` is the receiver's class
     /// at unbind time; `bind(obj)` checks `obj.is_a?(class)`
     /// before reconstituting a BoundMethod. `Rc<Class>` is not
-    /// a heap reference, so this variant carries no GC obligation.
-    UnboundMethod { class: std::rc::Rc<crate::value::Class>, name_id: crate::intern::SymId },
+    /// a heap reference, so this variant carries no GC
+    /// obligation.
+    ///
+    /// `method` is an optional snapshot of the resolved `Method`
+    /// captured AT THE TIME the UnboundMethod was constructed.
+    /// It exists so `bind` / `bind_call` survive a subsequent
+    /// `remove_method` that strips the entry from the captured
+    /// class's methods table between capture and call. Tilt-2.7.0
+    /// uses exactly this pattern in `compile_template_method`
+    /// (lib/tilt/template.rb:489-490): `instance_method(name)`
+    /// to capture, then `remove_method(name)` to clean up,
+    /// then `bind_call` on the captured handle to invoke. When
+    /// the snapshot is present, bind/bind_call use it directly
+    /// (no class-chain re-lookup); otherwise they fall back to
+    /// the live `lookup_method_uncached(class, name_id)` path.
+    UnboundMethod {
+        class: std::rc::Rc<crate::value::Class>,
+        name_id: crate::intern::SymId,
+        method: Option<std::rc::Rc<crate::value::Method>>,
+    },
     /// `Method#curry` / `Proc#curry` partial-application state.
     /// `underlying` is the callable (BoundMethod or Block) being
     /// curried; `gathered` are args accumulated so far; once
@@ -324,7 +342,7 @@ impl Heap {
         else { panic!("ICE: heap slot is not a BoundMethod") }
     }
     pub(crate) fn unbound_method(&self, id: ObjId) -> (std::rc::Rc<crate::value::Class>, crate::intern::SymId) {
-        if let HeapObj::UnboundMethod { class, name_id } = self.get(id) { (class.clone(), *name_id) }
+        if let HeapObj::UnboundMethod { class, name_id, .. } = self.get(id) { (class.clone(), *name_id) }
         else { panic!("ICE: heap slot is not an UnboundMethod") }
     }
     pub(crate) fn curried_proc(&self, id: ObjId) -> (&Value, &Vec<Value>, u16) {

@@ -183,6 +183,7 @@ fn run_diff(name: &str) {
 #[test] fn thread_current() { run_diff("thread_current"); }
 #[test] fn eval_basics() { run_diff("eval_basics"); }
 #[test] fn instance_method_string() { run_diff("instance_method_string"); }
+#[test] fn unbound_method_bind_call() { run_diff("unbound_method_bind_call"); }
 #[test] fn class_remove_method() { run_diff("class_remove_method"); }
 #[cfg(feature = "bignum")]
 #[test] fn bignum_phase_a() { run_diff("bignum_phase_a"); }
