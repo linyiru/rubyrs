@@ -18,6 +18,93 @@ use crate::value::{ObjId, Value};
 
 use super::{value_cmp_v, PinGuard, Vm};
 
+/// Outcome of a single `block.call(args)` step inside an
+/// iterator driver. Returned by `Vm::step_block`.
+///
+/// The variants encode the three control-flow regimes that
+/// affect what a driver should do NEXT:
+///
+/// - `Value(v)` — block ran to completion and returned `v`
+///   (whether `next` was used or the block fell off the end).
+///   The driver normally feeds `v` into its accumulator /
+///   selector / transform and continues to the next item.
+///
+/// - `MethodReturn` — non-local `return` from inside the block
+///   bubbled `method_return` up. The driver must stop iterating
+///   and return immediately; the enclosing dispatch loop will
+///   consume `self.method_return` and unwind frames. Drivers
+///   that allocate an intermediate (an in-progress map / select
+///   / inject accumulator) discard it — the method's return
+///   value comes from `method_return`, not the accumulator.
+///
+/// - `Break(v)` — structured `break v` from inside the block.
+///   The break is already "caught" here (`break_signaled` is
+///   cleared), so the driver decides how to use `v`. CRuby's
+///   universal contract is "break value short-circuits the
+///   enumerator and becomes the method's result" — even for
+///   predicate methods like `any?` / `all?` / `find`.
+///   `[1,2,3].any? { break :tag }` returns `:tag`, NOT `false`
+///   (verified against CRuby; see iter_array_filter's existing
+///   `early = Some(r)` / `early.unwrap_or(Value::Bool(bool_acc))`
+///   shape at line 152/170). So the driver almost always wants
+///   `BlockStep::Break(r) => { early = Some(r); break; }` and
+///   then returns `early.unwrap_or(<method-default>)`. What
+///   *does* vary across methods is the short-circuit on
+///   *truthy/falsy block result* (the `BlockStep::Value` arm),
+///   NOT how break is handled.
+///
+/// Why not also a `Next` variant: `next` from a block returns
+/// the block normally (with the `next`-supplied value, or nil),
+/// no separate signal. From the driver's perspective `next` is
+/// just `Value(...)`.
+pub(crate) enum BlockStep {
+    Value(Value),
+    MethodReturn,
+    Break(Value),
+}
+
+impl Vm {
+    /// One synchronous block invocation: push the call frame,
+    /// run the dispatch loop until it returns to `pre_frames`,
+    /// then classify the outcome into a `BlockStep`. Encapsulates
+    /// the PIN-INVOKE-DISPATCH-CHECK boilerplate that every
+    /// iterator driver has had to spell out individually.
+    ///
+    /// Callers are responsible for the **outer** PinGuard
+    /// (pinning the receiver, the block, args, and any in-flight
+    /// accumulator). This helper does NOT pin — its only job is
+    /// to drive one block call to completion and report what
+    /// happened. Drivers run the helper in a loop, threading
+    /// their own accumulator and per-iteration args through.
+    ///
+    /// `pre_frames` is the frame count snapshot the driver took
+    /// BEFORE the loop started — passed in rather than read here
+    /// because the standard convention pins it once before the
+    /// loop, not once per iteration.
+    ///
+    /// See issue #151 for the migration rationale.
+    pub(crate) fn step_block(
+        &mut self,
+        block: ObjId,
+        args: Vec<Value>,
+        pre_frames: usize,
+    ) -> Result<BlockStep, Trap> {
+        self.invoke_block(block, args)?;
+        self.dispatch_until(pre_frames)?;
+        if self.method_return.is_some() {
+            // `method_return` itself stays set — the caller's
+            // outer dispatch loop reads it on its way out.
+            return Ok(BlockStep::MethodReturn);
+        }
+        let r = self.stack.pop().unwrap_or(Value::Nil);
+        if self.break_signaled {
+            self.break_signaled = false;
+            return Ok(BlockStep::Break(r));
+        }
+        Ok(BlockStep::Value(r))
+    }
+}
+
 
 /// Which Enumerable predicate-iterator a call dispatches to.
 /// `NoneM` is named with a trailing M because `None` collides with
@@ -396,6 +483,11 @@ impl Vm {
                 return self.range_collection_call(*id, name, args);
             }
             (Value::Array(id), "each", []) => {
+                // Pilot migration to `step_block` per #151.
+                // The driver only cares about: did break fire?
+                // (use the break value). Otherwise continues to
+                // the next element. method_return propagates up
+                // by leaving `method_return` set on the Vm.
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
@@ -403,14 +495,10 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for v in snapshot {
-                    g.vm.invoke_block(block,vec![v])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match g.vm.step_block(block, vec![v], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}  // each ignores per-iter result
                     }
                 }
                 Some(early.unwrap_or(Value::Array(*id)))
@@ -1611,6 +1699,12 @@ impl Vm {
                 Some(Value::Array(nid))
             }
             (Value::Array(id), "inject", []) | (Value::Array(id), "reduce", []) => {
+                // Pilot migration to `step_block` per #151.
+                // Empty-array short-circuit + accumulator =
+                // structurally different from `each` above; if
+                // the helper signature works here it should
+                // work for the rest of the inject / reduce /
+                // each_with_object family.
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
                 let mut g = PinGuard::new(self);
@@ -1620,20 +1714,18 @@ impl Vm {
                 let mut acc = snapshot[0].clone();
                 let mut early = None;
                 for v in &snapshot[1..] {
-                    g.vm.invoke_block(block,vec![acc.clone(), v.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match g.vm.step_block(block, vec![acc.clone(), v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => { acc = r; }
                     }
-                    acc = r;
                 }
                 Some(early.unwrap_or(acc))
             }
             (Value::Array(id), "inject", [init]) | (Value::Array(id), "reduce", [init]) => {
+                // Pilot migration. The `init` variant shares the
+                // accumulator pattern with the no-arg form above
+                // — different only in the initial-acc source.
                 let snapshot: Vec<Value> = self.heap.array(*id).clone();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
@@ -1642,16 +1734,11 @@ impl Vm {
                 let mut acc = init.clone();
                 let mut early = None;
                 for v in &snapshot {
-                    g.vm.invoke_block(block,vec![acc.clone(), v.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match g.vm.step_block(block, vec![acc.clone(), v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => { acc = r; }
                     }
-                    acc = r;
                 }
                 Some(early.unwrap_or(acc))
             }
