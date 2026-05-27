@@ -1,7 +1,8 @@
 # Adapted from ruby/spec core/method/arity_spec.rb at upstream
-# commit 448cb340 (2026-05). Hand-translated — the four
-# baseline arity shapes are inlined: zero, fixed-positional,
-# splat (`-1`), one required + one optional (`-(n+1)` shape).
+# commit 448cb340 (2026-05). Hand-translated — six it-blocks
+# are inlined: zero, fixed-positional, splat (`-1`), one
+# required + one optional (`-(n+1)` shape), block-only
+# (arity 0), and "block param does not count toward arity".
 # Mock-based shape tests + define_method-form blocks dropped.
 
 describe "Method#arity" do
