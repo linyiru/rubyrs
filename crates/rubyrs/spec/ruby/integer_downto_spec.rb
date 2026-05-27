@@ -24,7 +24,7 @@ describe "Integer#downto [stop] when self and stop are Integers" do
 
   # skipped (divergent): Float endpoint — see sibling spec.
   #
-  # it "yields while decreasing self until it less than ceil for a Float endpoint" do
+  # it "yields while decreasing self until it is less than ceil for a Float endpoint" do
   #   result = []
   #   9.downto(1.3) {|i| result << i}
   #   3.downto(-1.3) {|i| result << i}

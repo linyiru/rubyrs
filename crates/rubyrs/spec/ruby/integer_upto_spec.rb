@@ -10,10 +10,11 @@
 #   CRuby's #upto/#downto compare endpoints rather than coerce,
 #   so non-numeric goes through Comparable and raises
 #   ArgumentError). Out of B.6 scope.
-# - skipped (method-not-implemented): Float endpoint
-#   (`9.upto(13.3)`). rubyrs raises TypeError; CRuby walks
-#   while self <= stop with Comparable. Requires Float-comparison
-#   path on the Int side of #upto. Out of B.6 scope.
+# - skipped (divergent): Float endpoint (`9.upto(13.3)`). rubyrs
+#   raises TypeError via the [other] coerce arm; CRuby walks
+#   while self <=> stop with Comparable up to floor of stop.
+#   Implementing parity would need a Float-comparison branch on
+#   the Int side of #upto. Out of B.6 scope.
 # - skipped (method-not-implemented): the no-block Enumerator
 #   surface and `Enumerator#size` assertions. Same rationale as
 #   integer_times_spec.
@@ -31,7 +32,7 @@ describe "Integer#upto [stop] when self and stop are Integers" do
     assert_eq(result, [5])
   end
 
-  it "yields while increasing self until it is less than stop" do
+  it "yields each value from self up to and including stop" do
     result = []
     2.upto(5) { |x| result << x }
     assert_eq(result, [2, 3, 4, 5])
