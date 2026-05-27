@@ -343,7 +343,8 @@ pub(crate) fn numeric_call(
         // matches `[Int]` (1-arg); under bignum, bigint_primitive
         // also early-returns when `args.len() != 1`. Without this
         // guard the 0-arg and 2+-arg shapes escape on both profiles.
-        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>", args_slice)
+        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>"
+            | "allbits?" | "anybits?" | "nobits?", args_slice)
             if args_slice.len() != 1 =>
         {
             return Err(RubyError::ArgumentError {
@@ -353,6 +354,21 @@ pub(crate) fn numeric_call(
                 ),
             });
         }
+        // Bit-mask predicates — Int × Int happy path. CRuby
+        // semantics (two's-complement masking, works for negatives):
+        //   allbits?(m): (i & m) == m  — every set bit of m is set in i
+        //   anybits?(m): (i & m) != 0  — at least one set bit overlaps
+        //   nobits?(m):  (i & m) == 0  — no set bits overlap
+        // Lives BEFORE the broad `(Int, op, [Int])` arm below — that
+        // arm's inner-op match returns None for unknown ops but the
+        // outer arm already commits, so any predicate placed AFTER
+        // it would be unreachable. Mixed Int×BigInt / BigInt×_
+        // shapes route through bigint_primitive's
+        // `try_bigint_bit_predicate`. Non-Integer arg / bad arity
+        // share the unified guards above.
+        (Value::Int(a), "allbits?", [Value::Int(m)]) => Some(Value::Bool((a & m) == *m)),
+        (Value::Int(a), "anybits?", [Value::Int(m)]) => Some(Value::Bool((a & m) != 0)),
+        (Value::Int(a), "nobits?",  [Value::Int(m)]) => Some(Value::Bool((a & m) == 0)),
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
@@ -544,7 +560,8 @@ pub(crate) fn numeric_call(
         // a future refactor that moves this arm above the Int×Int
         // happy-path arm must not silently capture `3 & 4`.
         #[cfg(not(feature = "bignum"))]
-        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>", [other])
+        (Value::Int(_), "&" | "|" | "^" | "<<" | ">>"
+            | "allbits?" | "anybits?" | "nobits?", [other])
             if !matches!(other, Value::Int(_)) =>
         {
             return Err(RubyError::TypeError {
