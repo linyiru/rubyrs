@@ -1705,6 +1705,132 @@ fn sprintf_radix_int_min_does_not_panic() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_works_as_hash_key_across_allocation_and_gc() {
+    // Phase B.7 contract: the Hash collection's internal key
+    // lookup uses `ruby_eq`, which for BigInt does value equality
+    // via num_bigint. Two separately-allocated BigInts with the
+    // same magnitude must therefore behave as the same key —
+    // covering insert / lookup / size accounting / collision
+    // semantics, plus survival across a GC stress that reallocates
+    // every intermediate.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Insert via one allocation, look up via a fresh
+        // allocation of the same magnitude — must hit.
+        // Inserting the same key value a second time must NOT
+        // grow the hash (overwrite, not duplicate).
+        // Different-magnitude BigInts → distinct keys.
+        // Mixed-magnitude paths (`2**63 * 2` and `2**64`) compute
+        // the same value via different code paths and must hit
+        // the same slot.
+        // GC stress: alloc enough Strings to push a mark-sweep
+        // cycle, then re-look-up the BigInt key — must still hit.
+        "h = {}\n\
+         h[2 ** 100] = :first\n\
+         puts h[2 ** 100]\n\
+         puts h.size\n\
+         h[2 ** 100] = :second\n\
+         puts h.size\n\
+         puts h[2 ** 100]\n\
+         h[2 ** 64] = :sixty_four\n\
+         puts h[2 ** 63 * 2]\n\
+         puts h.size\n\
+         h[2 ** 200] = :two_hundred\n\
+         puts h[2 ** 200]\n\
+         puts h.size\n\
+         # GC stress between insert and lookup\n\
+         1000.times { |i| _ = \"alloc#{i}\".dup }\n\
+         puts h[2 ** 100]\n\
+         puts h[2 ** 200]",
+        "bigint_hash_keys.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "first");      // lookup via separate alloc
+    assert_eq!(lines[1], "1");          // single key
+    assert_eq!(lines[2], "1");          // overwrite, not grow
+    assert_eq!(lines[3], "second");     // value updated
+    assert_eq!(lines[4], "sixty_four"); // 2^63*2 finds 2^64
+    assert_eq!(lines[5], "2");          // 2^100 + 2^64
+    assert_eq!(lines[6], "two_hundred");
+    assert_eq!(lines[7], "3");
+    assert_eq!(lines[8], "second");     // last write was :second;
+                                        // survives 1000 String allocs
+    assert_eq!(lines[9], "two_hundred");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_hash_equality_is_order_insensitive_with_bigint_keys() {
+    // Phase B.7: `Hash#==` does order-insensitive comparison via
+    // ruby_eq on both keys AND values, so two hashes built in
+    // different orders with the same {BigInt → Value} mapping
+    // must compare equal. Pre-existing behavior; pin it so the
+    // BigInt-key path stays correct as the collection evolves.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "h1 = {}\n\
+         h1[2 ** 100] = :a\n\
+         h1[2 ** 200] = :b\n\
+         h2 = {}\n\
+         h2[2 ** 200] = :b\n\
+         h2[2 ** 100] = :a\n\
+         puts h1 == h2\n\
+         # Differing values on equal keys → not equal\n\
+         h3 = {}\n\
+         h3[2 ** 100] = :a\n\
+         h3[2 ** 200] = :different\n\
+         puts h1 == h3\n\
+         # Differing keys → not equal\n\
+         h4 = {}\n\
+         h4[2 ** 100] = :a\n\
+         h4[2 ** 201] = :b\n\
+         puts h1 == h4",
+        "bigint_hash_eq.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "true");   // same mapping, different order
+    assert_eq!(lines[1], "false");  // differing values
+    assert_eq!(lines[2], "false");  // differing keys
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn array_include_p_handles_bigint_value_equality() {
+    // Phase B.7: `Array#include?(needle)` uses ruby_eq, which
+    // for BigInt does value equality. A `needle` allocated
+    // separately from the array's stored BigInt must still hit.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "arr = [2 ** 100, 5, 2 ** 64]\n\
+         puts arr.include?(2 ** 100)\n\
+         puts arr.include?(2 ** 64)\n\
+         puts arr.include?(2 ** 63 * 2)\n\
+         puts arr.include?(2 ** 101)\n\
+         puts arr.include?(5)\n\
+         # uniq dedups via ==\n\
+         puts [2 ** 100, 2 ** 100, 2 ** 100].uniq.size",
+        "bigint_array_include.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "true");
+    assert_eq!(lines[1], "true");
+    assert_eq!(lines[2], "true");   // 2^63*2 == 2^64 via different path
+    assert_eq!(lines[3], "false");
+    assert_eq!(lines[4], "true");
+    assert_eq!(lines[5], "1");      // all three BigInts coalesce
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn integer_hash_is_within_process_stable_and_distinguishes_value() {
     // Phase B.7: `Integer#hash` returns a within-process-stable
     // i64 that satisfies `a.eql?(b) ⇒ a.hash == b.hash`. Pre-fix
