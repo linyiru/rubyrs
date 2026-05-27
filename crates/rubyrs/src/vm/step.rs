@@ -1303,6 +1303,91 @@ impl Vm {
                     self.toplevel_methods.get(&old_id).cloned()
                 };
                 let m = match existing {
+                    Some(m) => Some(m),
+                    None => {
+                        // Built-in `Class` method fallback: when
+                        // `old_id` isn't a user-defined singleton
+                        // method, check whether the surrounding
+                        // class advertises it via its primitive
+                        // method set (`new` / `name` / `to_s` /
+                        // `ancestors` / ... — the same set
+                        // lookup.rs's `Value::Class(_)` respond_to
+                        // whitelist exposes). If so, synthesise a
+                        // forwarder Method whose body is
+                        // `LoadSelf; LoadLocal(0); ApplyCall(old_id);
+                        // Return` — same shape as Op::AliasMethod's
+                        // primitive forwarder. Mirrors the
+                        // "msgpack-ruby `alias_method :to_msgpack_ext,
+                        // :name`" pattern (PR #182 era) but for
+                        // singleton/class methods. Motivating case:
+                        // sinatra/base.rb:1659 `class << self;
+                        // alias new! new unless method_defined?
+                        // :new!; end` — `:new` is `Class#new`, not
+                        // a user singleton, so the original lookup
+                        // returned None and the alias raised
+                        // NameError at load time.
+                        // PR #218 (if-modifier) closed the guard
+                        // surface; this PR closes the alias-to-
+                        // builtin surface uncovered behind it.
+                        //
+                        // Surface boundary: this fallback only fires
+                        // when `class_stack.last()` is Some (a class
+                        // body context is active). The arm's outer
+                        // comment notes "toplevel `class << X` is
+                        // legal but rarely used"; that path falls
+                        // through `existing` to `toplevel_methods`
+                        // for user-defined names but cannot reach
+                        // the synth-forwarder fallback here. Aliasing
+                        // a built-in Class method (e.g. `alias new!
+                        // new`) at TOPLEVEL `class << X; ...; end`
+                        // therefore still raises NameError. The
+                        // motivating case (sinatra/base.rb:1659) is
+                        // nested, so the asymmetry doesn't surface
+                        // — flagged for a future symmetric fix if
+                        // someone needs it. PR #229 code-review #3.
+                        let cls_ref = self.class_stack.last().cloned();
+                        if let Some(cls) = &cls_ref
+                            && self.responds_to(&Value::Class(cls.clone()), old_id) {
+                            // Module fence on Class-only builtins.
+                            // `responds_to(Value::Class(_), :new)`
+                            // returns true unconditionally (lookup.rs
+                            // whitelists `:new` without an `is_module`
+                            // gate — unlike `:allocate`, which IS
+                            // module-fenced post PR #181). Without
+                            // this fence `module M; class << self;
+                            // alias mnew new; end; end` would synth a
+                            // forwarder that, at call time, dispatches
+                            // `Class#new` on the Module and silently
+                            // produces an instance. CRuby raises
+                            // NameError at the alias because `:new`
+                            // isn't a method on a Module's singleton
+                            // class. Mirror CRuby's NameError-at-load
+                            // by refusing to synth a forwarder for
+                            // `:new` on Module receivers. (No other
+                            // built-in Class methods in the whitelist
+                            // diverge this way — `:name`, `:to_s`,
+                            // `:ancestors`, etc. work on Modules in
+                            // CRuby. PR #229 code-review #1.)
+                            if cls.is_module
+                                && self.interner.resolve(old_id).as_ref() == "new"
+                            {
+                                return Err(self.trap(RubyError::NameError {
+                                    msg: format!(
+                                        "undefined method `new' for class `{}'",
+                                        if cls.name.is_empty() { "Module" } else { &cls.name }
+                                    ),
+                                }));
+                            }
+                            let synth = self.synth_primitive_forwarder(cls, old_id);
+                            cls.singleton_methods.borrow_mut().insert(new_id, synth);
+                            self.method_gen = self.method_gen.wrapping_add(1);
+                            self.stack.push(Value::Nil);
+                            return Ok(true);
+                        }
+                        None
+                    }
+                };
+                let m = match m {
                     Some(m) => m,
                     None => {
                         let name = self.interner.resolve(old_id).to_string();
