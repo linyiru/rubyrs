@@ -53,8 +53,11 @@ struct SpecSummary {
     /// Upstream source path from the `# Adapted from ruby/spec
     /// <path>` provenance line, if present.
     upstream: Option<String>,
-    /// Number of `it "..." do` blocks (= passing examples,
-    /// since tests/ruby_spec.rs gates all-pass).
+    /// Number of `it "..." do` blocks present in the file.
+    /// Examples are gated to all-pass separately by
+    /// `tests/ruby_spec.rs`; this count is "examples in the
+    /// corpus", and matches the passing count only when that
+    /// test is also green (full `cargo test -p rubyrs` / CI).
     examples: usize,
     /// `# skipped (<category>):` traces, bucketed by category.
     skipped: BTreeMap<String, usize>,
@@ -65,22 +68,26 @@ fn summarize_file(path: &Path) -> SpecSummary {
         .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     let file = path.file_name().unwrap().to_string_lossy().into_owned();
 
+    let lines: Vec<&str> = src.lines().collect();
     let mut describe = None;
     let mut upstream = None;
     let mut examples = 0;
     let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
 
-    for line in src.lines() {
-        let trimmed = line.trim_start();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
 
-        // `it "..." do` — count of passing examples.
-        // Match must be at statement start (not e.g. `# it ...`
-        // inside a skip trace, which is the next branch).
+        // `it "x" do` / `it 'x' do`. The corpus uses exactly this
+        // shape (string + ` do`); `it` without a string, `fit`,
+        // `xit`, etc. don't appear. We don't try to validate that
+        // here — if a stray form ever lands, the `tests/ruby_spec.rs`
+        // runner already counts in lockstep with this counter
+        // (both follow the `it "..." do` convention) and would
+        // diverge first.
         if trimmed.starts_with("it ") && trimmed.contains(" do") {
-            // Cheap shape check: `it "x" do` or `it 'x' do`.
-            // Anything weirder (it without a string, fit/xit)
-            // isn't used in our corpus — flag if it ever appears.
             examples += 1;
+            i += 1;
             continue;
         }
 
@@ -90,41 +97,59 @@ fn summarize_file(path: &Path) -> SpecSummary {
                 let cat = rest[..end].to_string();
                 *skipped.entry(cat).or_insert(0) += 1;
             }
+            i += 1;
             continue;
         }
 
         // First `describe "Foo#bar" do`.
         if describe.is_none() && trimmed.starts_with("describe ") {
-            // Extract the first quoted string on the line, if any.
             describe = first_quoted(trimmed);
+            i += 1;
             continue;
         }
 
-        // First `# Adapted from ruby/spec <path>` line.
+        // First `# Adapted from ruby/spec <path>` line, possibly
+        // continued onto subsequent comment lines. Two continuation
+        // shapes appear in the corpus:
+        //   `# Adapted from ruby/spec a.rb +\n# shared/b.rb at ...`
+        //   `# Adapted from ruby/spec a.rb\n# + core/x/b.rb at ...`
+        // Greedily fold comment lines into one buffer until we hit
+        // a non-comment line or a ` at ` terminator.
         if upstream.is_none()
             && let Some(rest) = trimmed.strip_prefix("# Adapted from ruby/spec ")
         {
-            // Our headers continue with " at <date>" or " at"
-            // on the next line. Strip those + a trailing period
-            // or comma so the path comes out clean.
-            let mut path_part = rest.trim();
-            if let Some(idx) = path_part.find(" at ") {
-                path_part = &path_part[..idx];
+            let mut buf = rest.trim().to_string();
+            let mut j = i + 1;
+            while !buf.contains(" at ") && j < lines.len() {
+                let next = lines[j].trim_start();
+                if let Some(more) = next.strip_prefix("# ") {
+                    let more = more.trim();
+                    if more.is_empty() {
+                        break;
+                    }
+                    buf.push(' ');
+                    buf.push_str(more);
+                    j += 1;
+                } else {
+                    break;
+                }
             }
-            // Headers like `method_equal_spec.rb`'s also continue
-            // a multi-file upstream onto the next comment line
-            // with a trailing ` +`; trim that too so the column
-            // doesn't show a dangling plus.
-            let path_part = path_part
+            // Cut at the ` at ` terminator (date / version note).
+            if let Some(idx) = buf.find(" at ") {
+                buf.truncate(idx);
+            }
+            let cleaned = buf
                 .trim_end_matches(" at")
                 .trim_end_matches('.')
                 .trim_end_matches(',')
                 .trim_end_matches('+')
-                .trim();
-            if !path_part.is_empty() {
-                upstream = Some(path_part.to_string());
+                .trim()
+                .to_string();
+            if !cleaned.is_empty() {
+                upstream = Some(cleaned);
             }
         }
+        i += 1;
     }
 
     SpecSummary { file, describe, upstream, examples, skipped }
@@ -151,10 +176,11 @@ fn first_quoted(s: &str) -> Option<String> {
     None
 }
 
-/// Group label for a spec file. Prefers the describe string when
-/// it cleanly names a class (`Foo#bar` / `Foo.bar` / `Foo::Bar`
-/// with an uppercase first char); otherwise falls back to a
-/// filename-prefix lookup table.
+/// Group label for a spec file. Tries the filename-prefix
+/// lookup table first (deterministic, and our corpus filenames
+/// are well-organised), then falls back to the describe string
+/// head when it starts uppercase, then finally to a capitalised
+/// filename prefix.
 fn group_of(s: &SpecSummary) -> String {
     // Filename mapping wins over describe — describe strings
     // sometimes name a related class (e.g. unbound_method specs
@@ -239,7 +265,7 @@ fn render_markdown(summaries: &[SpecSummary]) -> String {
     out.push_str("| Metric | Count |\n");
     out.push_str("|---|---|\n");
     out.push_str(&format!("| Files | {} |\n", total_files));
-    out.push_str(&format!("| Passing examples | {} |\n", total_examples));
+    out.push_str(&format!("| Examples in corpus | {} |\n", total_examples));
     out.push_str(&format!("| Skipped `it` traces | {} |\n", total_skipped));
     out.push('\n');
 

@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 35 |
-| Passing examples | 146 |
+| Examples in corpus | 146 |
 | Skipped `it` traces | 60 |
 
 ### Skipped traces by category
@@ -66,12 +66,12 @@ Categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
 | `method_call_spec.rb` | Method#call | `core/method/call_spec.rb (+ shared/call.rb)` | 6 | 0 |
 | `method_compose_spec.rb` | Method#<< | `core/method/compose_spec.rb` | 6 | 0 |
 | `method_curry_spec.rb` | Method#curry | `core/method/curry_spec.rb` | 5 | 0 |
-| `method_equal_spec.rb` | Method#== | `core/method/equal_value_spec.rb` | 5 | 0 |
+| `method_equal_spec.rb` | Method#== | `core/method/equal_value_spec.rb + shared/eql.rb` | 5 | 0 |
 | `method_missing_spec.rb` | BasicObject#method_missing | `core/basicobject/method_missing_spec.rb` | 4 | 0 |
 | `method_owner_spec.rb` | Method#owner | `core/method/owner_spec.rb` | 4 | 0 |
 | `method_receiver_spec.rb` | Method#receiver | `core/method/receiver_spec.rb` | 4 | 0 |
 | `method_to_proc_spec.rb` | Method#to_proc | `core/method/to_proc_spec.rb` | 7 | 0 |
-| `singleton_method_spec.rb` | def obj.name | `core/basicobject/singleton_method_spec.rb` | 7 | 0 |
+| `singleton_method_spec.rb` | def obj.name | `core/basicobject/singleton_method_spec.rb + core/kernel/define_singleton_method_spec.rb` | 7 | 0 |
 | `string_empty_spec.rb` | String#empty? | `core/string/empty_spec.rb` | 5 | 0 |
 | `string_gsub_spec.rb` | String#gsub with pattern and replacement | `core/string/gsub_spec.rb` | 9 | 0 |
 | `string_include_spec.rb` | String#include? with String | `core/string/include_spec.rb` | 8 | 0 |
