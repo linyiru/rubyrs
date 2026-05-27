@@ -2592,7 +2592,8 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // <stmt>; end` — at body top level wrapping a single
             // supported inner stmt. The recogniser admits ANY
             // `IfNode` / `UnlessNode` with exactly one statement
-            // and no else/consequent: the modifier and one-stmt
+            // and no `subsequent` / `else_clause` (Prism's
+            // names for the else/elsif tail): the modifier and one-stmt
             // block forms compile identically (modifier is just
             // sugar), so handling both is safe and gives a
             // slightly broader green path. Tightening to truly
