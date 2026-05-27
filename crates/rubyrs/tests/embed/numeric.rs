@@ -1257,6 +1257,45 @@ fn int_bit_ops_raise_argumenterror_on_bad_arity() {
     }
 }
 
+#[test]
+fn integer_to_s_raises_argumenterror_on_bad_arity() {
+    // Arity guards for `Integer#to_s` / `Integer#inspect`.
+    // `respond_to?` returns true for both selectors on Int (and
+    // BigInt under bignum), so wrong-arity shapes must raise
+    // ArgumentError per CRuby, not NoMethodError. `to_s` accepts
+    // 0..1 args; `inspect` accepts exactly 0. Sibling arity
+    // guards already cover bit ops (PR #211) and iter methods
+    // (PR #186). Happy paths are tested by the spec micro-runner.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, given, expected_range) in [
+        ("5.send(:to_s, 10, 20)", 2, "0..1"),
+        ("5.send(:to_s, 10, 20, 30)", 3, "0..1"),
+        ("5.send(:inspect, 1)", 1, "0"),
+        ("5.send(:inspect, 1, 2)", 2, "0"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:to_s, 10, 20)", 2, "0..1"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:to_s, 10, 20, 30)", 3, "0..1"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:inspect, 1)", 1, "0"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).send(:inspect, 1, 2)", 2, "0"),
+    ] {
+        let err = rt.eval(script, "int_to_s_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "ArgumentError", "for {:?}", script);
+                assert_eq!(
+                    message,
+                    format!("wrong number of arguments (given {}, expected {})", given, expected_range),
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught ArgumentError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn int_shift_zero_receiver_never_traps_regardless_of_count() {

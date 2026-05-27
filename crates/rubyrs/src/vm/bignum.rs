@@ -1375,6 +1375,33 @@ impl Vm {
         // radices 3/5/6/7/…/36) plus a 1-byte sign accounting.
         // Mirrored by the 0-arg arm so both paths share the
         // protection.
+        // Arity guards for `BigInt#to_s` and `BigInt#inspect` —
+        // sibling to numeric.rs's guards on the Int recv side.
+        // `to_s` accepts 0..1 (0-arg via the empty-args branch
+        // below, 1-arg via the radix arm); `inspect` accepts
+        // exactly 0. Without these guards 2+-arg / any-arg
+        // `inspect` falls through to NoMethodError despite
+        // `respond_to?` returning true.
+        if name == "to_s" && args.len() > 1
+            && matches!(recv, Value::BigInt(_))
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            }));
+        }
+        if name == "inspect" && !args.is_empty()
+            && matches!(recv, Value::BigInt(_))
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
+                    args.len(),
+                ),
+            }));
+        }
         if name == "to_s" && args.len() == 1
             && let Value::BigInt(id) = recv
         {
