@@ -41,12 +41,13 @@ WithCvar.add("a")
 WithCvar.add("b")
 puts "stats=#{WithCvar.stats.inspect}"
 
-## KNOWN GAP: subclass reach of cvars defined in a parent's
-## `class << self` body doesn't yet propagate in rubyrs — the
-## cvar is keyed on the parent's singleton class and lookup
-## through `Child.bump` doesn't walk back up. Pre-dates this
-## PR (cvar storage / lookup, not the AST whitelist). Not
-## exercised here so the fixture stays byte-aligned with
+## KNOWN GAP: rubyrs's Tier-1 class variable model is per-class
+## (no hierarchy walk on read or write — see `Op::LoadCvar` /
+## `StoreCvar`). A subclass that reads a cvar set by its parent
+## sees nil instead of walking up the chain — CRuby's cvars
+## are hierarchy-keyed, so the same code works there. Pre-
+## dates this PR (cvar storage / lookup, not the AST whitelist).
+## Not exercised here so the fixture stays byte-aligned with
 ## CRuby; flagged for a separate follow-up.
 
 ## Interleaving with the layer-#11 const form (PR #209) plus

@@ -2564,10 +2564,17 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // the form. CRuby places class variables on the
             // enclosing class hierarchy regardless of whether the
             // write happens inside `class << self` (cvars are
-            // hierarchy-keyed, NOT singleton-class-scoped), so
-            // there's no scope divergence introduced here —
-            // routing through the regular CvarWrite matches
-            // CRuby's actual cvar semantics.
+            // hierarchy-keyed in CRuby, NOT singleton-class-
+            // scoped). rubyrs's Tier-1 cvar model is per-class
+            // (no hierarchy walk — see `Op::LoadCvar` /
+            // `StoreCvar`); admitting this arm doesn't change
+            // that pre-existing divergence either way. So the
+            // write goes to the same table whether the write
+            // syntactically appears at class-body top level or
+            // inside `class << self`; what this arm fixes is
+            // strictly the parse-time admission, not any
+            // semantic alignment with CRuby's hierarchy-walking
+            // cvar lookup.
             //
             // Motivating call site: sinatra/base.rb:1292's
             // `class << self; ...; @@mutex = Mutex.new; def
