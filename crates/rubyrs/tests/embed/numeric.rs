@@ -1378,7 +1378,18 @@ fn int_cmp_float_is_lossless() {
          # Float-exact happy paths (under 2^53 — must still work)\n\
          puts (1 == 1.0)                                # true\n\
          puts (5 < 5.5)                                 # true\n\
-         puts ((-3) == -3.0)                            # true",
+         puts ((-3) == -3.0)                            # true\n\
+         # i64::MIN boundary — i64::MIN.to_f = -2^63 is exact;\n\
+         # the lower-bound check in int_cmp_float_lossless uses\n\
+         # `<` (not `<=`) so equal-to-i64::MIN cases fall into\n\
+         # the integer-compare branch rather than the sign-only\n\
+         # short-circuit.\n\
+         puts ((-9223372036854775808) <=> (-9223372036854775808).to_f).inspect  # 0\n\
+         puts ((-9223372036854775808) <=> -1e30).inspect                        # 1 (f more neg)\n\
+         puts ((-9223372036854775808) <=> -(2.0 ** 63 + 2048)).inspect          # 1 (next ulp below i64::MIN)\n\
+         # Frac-sign disambiguation at zero\n\
+         puts (0 <=> (-0.5)).inspect                                           # 1\n\
+         puts (0 <=> 0.5).inspect                                              # -1",
         "int_cmp_float.rb",
     ).expect("eval");
     let out = buf.snapshot();
@@ -1390,6 +1401,8 @@ fn int_cmp_float_is_lossless() {
         "true",                                 // Float × Int direction
         "false", "false", "false", "false",    // NaN ordering
         "true", "true", "true",                // Float-exact happy paths
+        "0", "1", "1",                         // i64::MIN boundary
+        "1", "-1",                              // frac-sign disambig at 0
     ]);
 }
 

@@ -776,23 +776,14 @@ pub(crate) fn numeric_call(
         // collapses both sides onto the same Float bit pattern
         // when |i| > 2^53).
         (Value::Float(a), op, [Value::Int(b)]) => {
-            // For comparisons: invert the helper's Int-vs-Float
-            // ordering to match Float-vs-Int direction.
-            if matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "<=>") {
-                let cmp = int_cmp_float_lossless(*b, *a).map(|o| o.reverse());
-                return Ok(match op {
-                    "==" => Some(Value::Bool(cmp == Some(std::cmp::Ordering::Equal))),
-                    "!=" => Some(Value::Bool(cmp != Some(std::cmp::Ordering::Equal))),
-                    "<"  => Some(Value::Bool(cmp == Some(std::cmp::Ordering::Less))),
-                    "<=" => Some(Value::Bool(matches!(cmp, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)))),
-                    ">"  => Some(Value::Bool(cmp == Some(std::cmp::Ordering::Greater))),
-                    ">=" => Some(Value::Bool(matches!(cmp, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)))),
-                    "<=>" => Some(match cmp {
-                        Some(o) => Value::Int(o as i64),
-                        None => Value::Nil,
-                    }),
-                    _ => unreachable!(),
-                });
+            // Comparison ops: route through the lossless helper,
+            // inverting the Ordering because the helper takes
+            // (int, float) but the operator is float-vs-int.
+            if let Some(v) = cmp_op_to_value(
+                op,
+                int_cmp_float_lossless(*b, *a).map(|o| o.reverse()),
+            ) {
+                return Ok(Some(v));
             }
             let b = *b as f64;
             match op {
@@ -807,21 +798,11 @@ pub(crate) fn numeric_call(
         }
         (Value::Int(a), op, [Value::Float(b)]) => {
             // Comparison ops: lossless path (see Float×Int arm).
-            if matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "<=>") {
-                let cmp = int_cmp_float_lossless(*a, *b);
-                return Ok(match op {
-                    "==" => Some(Value::Bool(cmp == Some(std::cmp::Ordering::Equal))),
-                    "!=" => Some(Value::Bool(cmp != Some(std::cmp::Ordering::Equal))),
-                    "<"  => Some(Value::Bool(cmp == Some(std::cmp::Ordering::Less))),
-                    "<=" => Some(Value::Bool(matches!(cmp, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)))),
-                    ">"  => Some(Value::Bool(cmp == Some(std::cmp::Ordering::Greater))),
-                    ">=" => Some(Value::Bool(matches!(cmp, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)))),
-                    "<=>" => Some(match cmp {
-                        Some(o) => Value::Int(o as i64),
-                        None => Value::Nil,
-                    }),
-                    _ => unreachable!(),
-                });
+            if let Some(v) = cmp_op_to_value(
+                op,
+                int_cmp_float_lossless(*a, *b),
+            ) {
+                return Ok(Some(v));
             }
             let a = *a as f64;
             match op {
@@ -944,9 +925,18 @@ pub(crate) fn int_cmp_float_lossless(i: i64, f: f64) -> Option<std::cmp::Orderin
         return Some(Ordering::Greater);
     }
     // |f| past i64 range — i sits inside [i64::MIN, i64::MAX] so
-    // ordering is decided by sign of f. Note: `i64::MAX as f64`
-    // rounds UP to 2^63 (since 2^63 - 1 isn't exactly representable
-    // as f64), so the upper bound check uses `>=` against 2^63.
+    // ordering is decided by sign of f. The two bounds are
+    // asymmetric in f64 representability:
+    //   - `i64::MAX as f64 = 2^63` (rounds UP, since 2^63 - 1 isn't
+    //     exactly representable); so the upper bound check uses
+    //     `>=` against 2^63 — any `trunc >= 2^63` is strictly
+    //     greater than i64::MAX = 2^63 - 1.
+    //   - `i64::MIN as f64 = -2^63` (exactly representable, as a
+    //     power of 2); so the lower bound uses `<` (not `<=`).
+    //     At `trunc == -2^63.0` the value fits as i64::MIN and
+    //     must fall into the integer-compare branch below — a
+    //     future `<=` here would wrongly report `Greater` for
+    //     `i64::MIN <=> i64::MIN.to_f` (which is exactly 0).
     let trunc = f.trunc();
     if trunc < (i64::MIN as f64) {
         // f more negative than any i64 → i > f.
@@ -974,6 +964,31 @@ pub(crate) fn int_cmp_float_lossless(i: i64, f: f64) -> Option<std::cmp::Orderin
         // i == trunc, f = trunc + (-frac) < trunc → i > f
         Some(Ordering::Greater)
     }
+}
+
+/// Translate an `Option<Ordering>` (typically from a lossless
+/// numeric compare) into the right `Value` for a Ruby comparison
+/// operator. Returns `None` for unknown ops (so the caller can
+/// fall through to its non-comparison arms).
+///
+/// `cmp == None` means NaN — CRuby parity: every ordering op
+/// (and the equality ops) return `false`; `<=>` returns `nil`.
+fn cmp_op_to_value(op: &str, cmp: Option<std::cmp::Ordering>) -> Option<Value> {
+    use std::cmp::Ordering;
+    let v = match op {
+        "==" => Value::Bool(cmp == Some(Ordering::Equal)),
+        "!=" => Value::Bool(cmp != Some(Ordering::Equal)),
+        "<"  => Value::Bool(cmp == Some(Ordering::Less)),
+        "<=" => Value::Bool(matches!(cmp, Some(Ordering::Less | Ordering::Equal))),
+        ">"  => Value::Bool(cmp == Some(Ordering::Greater)),
+        ">=" => Value::Bool(matches!(cmp, Some(Ordering::Greater | Ordering::Equal))),
+        "<=>" => match cmp {
+            Some(o) => Value::Int(o as i64),
+            None => Value::Nil,
+        },
+        _ => return None,
+    };
+    Some(v)
 }
 
 pub(crate) fn type_name_for_coerce(v: &Value) -> &'static str {
