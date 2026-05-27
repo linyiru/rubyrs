@@ -968,10 +968,15 @@ impl Runtime {
         //
         // Rc<Class> / Rc<Method> / Value::Str(Rc<...>) all clone
         // by refcount bump, so the actual cost is HashMap copies
-        // (~hundreds of entries; sub-microsecond).
-        self.vm.classes = snapshot.classes.clone();
-        self.vm.constants = snapshot.constants.clone();
-        self.vm.toplevel_methods = snapshot.toplevel_methods.clone();
+        // (~hundreds of entries; sub-microsecond). `clone_from`
+        // (not `= ...clone()`) reuses the existing map's
+        // allocation across resets — matches the pattern
+        // `ClassStateSnapshot::restore_into` already uses for the
+        // per-class RefCells, and shaves allocator churn off the
+        // fuzz / per-request hot path.
+        self.vm.classes.clone_from(&snapshot.classes);
+        self.vm.constants.clone_from(&snapshot.constants);
+        self.vm.toplevel_methods.clone_from(&snapshot.toplevel_methods);
         // --- Per-class state: replace EVERY mutable RefCell
         //     field on each preamble Class with the snapshot's
         //     captured value. ---
@@ -1037,7 +1042,7 @@ impl Runtime {
         // accumulated during user evals are dropped by the
         // clone-and-replace; the snapshot's Rc<str> values make
         // this a refcount bump, not a string copy.
-        self.vm.sources = snapshot.sources.clone();
+        self.vm.sources.clone_from(&snapshot.sources);
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
