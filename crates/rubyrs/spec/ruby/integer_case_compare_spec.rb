@@ -83,11 +83,6 @@ describe "Integer#===" do
     # as equal — matching the BinOp `==` semantics PR #230 pinned.
     assert_eq(bn === bn.to_f, true)
   end
-  #
-  # bignum_it "bignum: returns true when comparing with a Float of the same numeric value" do
-  #   bn = 2**64
-  #   assert_eq(bn === bn.to_f, true)
-  # end
 
   # skipped (mock): "calls 'other == self' if the given argument
   # is not an Integer" + "returns the result of 'other == self'
