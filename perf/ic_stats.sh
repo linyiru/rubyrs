@@ -96,14 +96,22 @@ for f in "${workloads[@]}"; do
         exit 1
     fi
     # Parse `ic-stats\thits=N\tmisses=N\ttoplevel_hits=N\ttoplevel_misses=N\thit_rate=R`
-    # in one read+strip pass — five `awk | cut` invocations per
-    # row would dominate the script's wall time on a battery
-    # this small.
-    IFS=$'\t' read -r _ hits_kv misses_kv th_kv tm_kv rate_kv <<<"$line"
-    hits=${hits_kv#hits=}
-    misses=${misses_kv#misses=}
-    th=${th_kv#toplevel_hits=}
-    tm=${tm_kv#toplevel_misses=}
-    rate=${rate_kv#hit_rate=}
+    # into an array so an unexpected number of fields fails fast
+    # rather than silently folding extras into the last variable.
+    # Without `-a`, a future 7th counter (e.g. `evictions=N`) on
+    # the ic-stats line would land inside `rate_kv` and put a
+    # literal tab inside the TSV row, breaking downstream
+    # consumers with no diagnostic.
+    IFS=$'\t' read -r -a fields <<<"$line"
+    expected_fields=6  # `ic-stats` tag + 5 KV pairs
+    if [[ ${#fields[@]} -ne $expected_fields ]]; then
+        echo "ic_stats: parsed ${#fields[@]} fields from \`$name\` ic-stats line, expected $expected_fields — has the binary added a new IcStats counter? Full line: $line" >&2
+        exit 1
+    fi
+    hits=${fields[1]#hits=}
+    misses=${fields[2]#misses=}
+    th=${fields[3]#toplevel_hits=}
+    tm=${fields[4]#toplevel_misses=}
+    rate=${fields[5]#hit_rate=}
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$hits" "$misses" "$th" "$tm" "$rate"
 done
