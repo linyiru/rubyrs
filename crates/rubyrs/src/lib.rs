@@ -1618,8 +1618,15 @@ RUBY_ENGINE = "ruby".freeze
         // release builds skip so a regression won't crash a host.
         let pinned_before = self.vm.pinned.len();
         let result = self.vm.run(entry);
-        // Clear the deadline after eval so subsequent calls don't
-        // inherit a (now-stale) Instant.
+        // Clear both per-eval working counters after run so the
+        // between-evals state matches the documented contract:
+        // `vm.fuel` and `vm.deadline_at` are anchored at eval
+        // entry, undefined-meaning at eval exit. Without the
+        // fuel clear, a future telemetry hook or debug accessor
+        // peeking between evals would see whatever drained
+        // value `check_fuel` left behind and misread it as
+        // "almost exhausted".
+        self.vm.fuel = None;
         self.vm.deadline_at = None;
         debug_assert_eq!(
             self.vm.pinned.len(), pinned_before,
@@ -1804,5 +1811,34 @@ mod caps_guard_tests {
             assert!(_guard.rt.fuel_budget.is_none());
         }
         assert_eq!(rt.fuel_budget, Some(999));
+    }
+
+    /// After `eval` returns, both per-eval working counters
+    /// (`vm.fuel` and `vm.deadline_at`) must be cleared to None.
+    /// Pins the post-eval cleanup contract — peeking at either
+    /// field between evals MUST NOT show the drained value the
+    /// prior eval left behind. Symmetric: the cleanup applies
+    /// whether the eval succeeded, trapped, or ran unbounded.
+    #[test]
+    fn eval_clears_per_eval_working_counters_post_run() {
+        // Bounded fuel + bounded deadline → both should clear.
+        let mut rt = Runtime::with_config(Config {
+            fuel: Some(10_000),
+            deadline: Some(std::time::Duration::from_millis(500)),
+            ..Default::default()
+        });
+        // Eval that traps on fuel — drains vm.fuel toward 0.
+        let _ = rt.eval("i = 0; while true; i = i + 1; end", "spin.rb").unwrap_err();
+        assert!(rt.vm.fuel.is_none(), "vm.fuel must be cleared post-eval, got {:?}", rt.vm.fuel);
+        assert!(rt.vm.deadline_at.is_none(), "vm.deadline_at must be cleared post-eval");
+        // Successful eval — same cleanup applies.
+        let _ = rt.eval("1 + 1", "ok.rb").unwrap();
+        assert!(rt.vm.fuel.is_none(), "vm.fuel must be cleared after a successful eval too");
+        assert!(rt.vm.deadline_at.is_none(), "vm.deadline_at must be cleared after a successful eval too");
+        // Unbounded (no caps configured) — cleanup still runs.
+        let mut rt2 = Runtime::new();
+        rt2.eval("nil", "nop.rb").unwrap();
+        assert!(rt2.vm.fuel.is_none());
+        assert!(rt2.vm.deadline_at.is_none());
     }
 }
