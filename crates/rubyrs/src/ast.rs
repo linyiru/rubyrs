@@ -2157,8 +2157,27 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         } else {
             "?".to_string()
         };
+        // Superclass can be either a bare constant (`class C < P`)
+        // or a constant path (`class C < Foo::Bar`). The compiler's
+        // class-def path (compiler.rs ~line 1036-1044) already handles
+        // both shapes — it sniffs `::` via `build_const_chain` and
+        // emits `LoadConstChain` for path forms or `LoadConst` for
+        // bare names. Without flattening here, a constant-path
+        // superclass returned `None` (because `as_constant_read_node`
+        // rejects `ConstantPathNode`), so DefClass popped Nil and the
+        // child silently lost its inheritance link — observable as
+        // "undefined method `m' for Object" on any child instance.
+        // Surfaced as TRY_RUNS pass-7 layer #6 (the `alias secure?
+        // ssl?` bug) but the same root cause: nested-via-path
+        // superclass dropped at AST translation time.
         let superclass = n.superclass().and_then(|s| {
-            s.as_constant_read_node().map(|cr| cid_to_string(cr.name()))
+            if let Some(cr) = s.as_constant_read_node() {
+                Some(cid_to_string(cr.name()))
+            } else if s.as_constant_path_node().is_some() {
+                flatten_constant_path(&s)
+            } else {
+                None
+            }
         });
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
