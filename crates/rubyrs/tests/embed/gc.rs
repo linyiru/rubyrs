@@ -319,3 +319,71 @@ fn scan_captures_pin_gid_under_stress_gc() {
         );
     }
 }
+
+#[test]
+fn hash_each_pin_pair_id_under_stress_gc() {
+    // Regression: Hash#each / #each_pair allocs a fresh `[k, v]`
+    // pair Array per iteration and yields it to the block. The
+    // pair_id ObjId was only referenced from a Rust-local arg
+    // Vec when passed to step_block. With a rest-param block
+    // (`|*args|`), step_block's args→locals copy allocs a rest
+    // Array — that hits maybe_gc, and under STRESS_GC the
+    // unrooted pair_id gets swept before the block body reads
+    // it. Surfaced by /code-review on PR #178 (same family as
+    // the scan-captures gid fix, e3b90a5).
+    //
+    // Fix uses the scoped `pinned.push/pop` pattern around the
+    // single step_block call (NOT outer PinGuard accumulation —
+    // that would be O(entries) memory growth).
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        { a: 1, b: 2, c: 3 }.each { |*args| puts args.inspect }
+    "#, "hash_each_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // Content assertion (not just line count): catches a
+    // silent-corruption variant where pair_id's slot is freed
+    // and recycled to another same-shape Array — the line count
+    // would still be 3 but the printed pairs would be wrong.
+    assert_eq!(
+        out, "[[:a, 1]]\n[[:b, 2]]\n[[:c, 3]]\n",
+        "pair contents corrupted (likely pair_id swept mid-iter), got: {out}"
+    );
+}
+
+#[test]
+fn hash_each_with_index_pin_pair_id_under_stress_gc() {
+    // Shape lock-in (not a regression test for the pre-fix
+    // shape). Hash#each_with_index pinned pair_id via the outer
+    // PinGuard (`g.pin(Value::Array(pair_id))`) on master, so
+    // pair_id was already rooted — this test would have passed
+    // against master too. What changed in PR #183 is the pin
+    // *lifetime*: scoped `pinned.push/pop` releases per-iter
+    // (O(1) memory) instead of accumulating in PinGuard's slot
+    // list (O(entries)). The test still serves a purpose: it
+    // locks in that the new scoped shape preserves the pin
+    // contract, so a future refactor that drops the push/pop
+    // entirely would be caught (block body would see freed
+    // pair_id memory and crash / print garbage).
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        { a: 1, b: 2, c: 3 }.each_with_index { |*args| puts args.inspect }
+    "#, "hash_ewi_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // Content assertion: see hash_each_pin_pair_id_... for
+    // rationale. Block receives `(pair, idx)` so the rest-Array
+    // is `[[k, v], i]`.
+    assert_eq!(
+        out, "[[:a, 1], 0]\n[[:b, 2], 1]\n[[:c, 3], 2]\n",
+        "pair or index corrupted, got: {out}"
+    );
+}
