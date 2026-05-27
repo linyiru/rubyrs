@@ -143,8 +143,10 @@ begin
 rescue ArgumentError
   puts "eval(>4 args) → ArgumentError"
 end
+class ArityOrderCheck
+end
 begin
-  ArityCheck.class_eval(123, "file", 1, :extra)
+  ArityOrderCheck.class_eval(123, "file", 1, :extra)
 rescue ArgumentError
   puts "class_eval(>3 args) bad-src → ArgumentError"
 end
