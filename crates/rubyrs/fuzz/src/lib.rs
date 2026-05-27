@@ -67,10 +67,12 @@ impl Caps {
     }
 }
 
-/// Build the Config the cached Runtime is constructed with AND
-/// re-applied on every iteration. Factored out so construction
-/// and the per-iter refresh use byte-identical values — drift
-/// would let `caps` go stale or silently grow incompatible.
+/// Build the Config used to construct the cached Runtime.
+/// Called once per fuzz process via `get_or_insert_with`; the
+/// per-iter `apply_config` refresh that used to call this on
+/// every iteration was removed once `Runtime::reset` started
+/// restoring `vm.fuel` (lib.rs, same PR), making the refresh
+/// redundant.
 fn build_cfg(caps: &Caps) -> Config {
     Config {
         fuel: Some(caps.fuel),
@@ -96,23 +98,9 @@ fn build_cfg(caps: &Caps) -> Config {
 /// The full iteration body both fuzz targets share: sandbox the
 /// cwd, UTF-8-gate the input, get-or-init the per-process cached
 /// `Runtime`, rewind any user state from the previous iteration
-/// via `Runtime::reset`, **re-apply the Config so `fuel` (and
-/// every other resource budget) refills to the per-iter
-/// target**, then evaluate. Ignores the `Result` (script errors
-/// are expected; only Rust panics fail the iteration).
-///
-/// The `apply_config` refresh is load-bearing: `Runtime::reset`
-/// is explicitly documented as preserving resource caps across
-/// resets (a host configuring a tight sandbox stays in that
-/// sandbox across calls — see PR #212's doc-comment). But
-/// `fuel` is consumed monotonically by `vm.check_fuel` and is
-/// NOT per-eval — across many cached-Runtime iterations the
-/// counter exhausts, and every subsequent iter immediately
-/// traps with `ResourceExhausted: "out of fuel"` while
-/// libfuzzer reports them as "iterations" that ran. Without
-/// the refresh the harness's `iter/sec` number looks healthy
-/// but most iters are no-ops doing zero VM coverage. Caught on
-/// PR #222 by Copilot's first review.
+/// via `Runtime::reset`, then evaluate. Ignores the `Result`
+/// (script errors are expected; only Rust panics fail the
+/// iteration).
 ///
 /// Pre-PR-#212: each iteration constructed a fresh `Runtime`,
 /// paying ~3-6 ms of preamble parse + compile + execute. The
@@ -124,15 +112,23 @@ fn build_cfg(caps: &Caps) -> Config {
 /// libfuzzer's coverage-instrumented + ASan iteration becomes
 /// the dominant cost.
 ///
-/// `caps` is read on every call: once to seed the Runtime on
-/// first construction (the closure passed to
-/// `get_or_insert_with`) and again for the per-iter
-/// `apply_config` refresh that runs BEFORE eval. In practice
-/// both targets always pass the same constant (`Caps::tight()`
-/// for parse, `Caps::loose()` for eval), so the distinction is
-/// invisible. A future target that varies caps per call would
-/// see the cap change apply on the SAME iter (apply_config runs
-/// pre-eval) — no one-iteration delay.
+/// An earlier revision of this harness called
+/// `rt.apply_config(build_cfg(&caps))` after every `reset()` to
+/// refill `fuel`, because `reset()` originally didn't restore
+/// it — fuel decremented monotonically across the cached
+/// Runtime's lifetime, and after a few iters every eval
+/// immediately trapped with `out of fuel` while libfuzzer
+/// reported them as healthy iterations. That gap was closed at
+/// the source: `Runtime::reset` now snapshots and restores
+/// `vm.fuel` (same PR, lib.rs), so the per-iter refresh is
+/// redundant. The harness body shrinks back to
+/// `reset() + eval()`.
+///
+/// `caps` is read once per process to seed the Runtime; both
+/// targets pass the same constant (`Caps::tight()` for parse,
+/// `Caps::loose()` for eval), so subsequent calls' `caps`
+/// argument is unused. A future target that wants per-iter
+/// cap variation can re-introduce a Config-rebuild path.
 pub fn run_with_caps(data: &[u8], caps: Caps) {
     ensure_sandbox_cwd();
     let source = match std::str::from_utf8(data) {
@@ -147,19 +143,17 @@ pub fn run_with_caps(data: &[u8], caps: Caps) {
     FUZZ_RT.with(|cell| {
         let mut slot = cell.borrow_mut();
         let rt = slot.get_or_insert_with(|| Runtime::with_config(build_cfg(&caps)));
-        // Rewind user state from the previous iteration. The
-        // Runtime keeps its preamble bytecode, class tables,
-        // method tables, and the resource caps; only the
-        // per-eval state from the last `eval` (heap allocs,
-        // user-interned symbols, user classes/constants/methods,
-        // globals, ...) gets wiped. See PR #212's
-        // `embed/reset.rs` for the full contract.
+        // Rewind user state from the previous iteration AND
+        // restore resource caps (including `vm.fuel`) to the
+        // post-preamble baseline. The Runtime keeps its
+        // preamble bytecode, class tables, method tables,
+        // host_fns, and the resource caps' configured ceiling
+        // values; only the per-eval state from the last `eval`
+        // (heap allocs, user-interned symbols, user
+        // classes/constants/methods, globals, fuel consumed,
+        // ...) gets wiped. See PR #212's `embed/reset.rs` for
+        // the full contract.
         rt.reset();
-        // Refill `fuel` (and re-stamp every other resource cap)
-        // before each user eval. Without this, the cached
-        // Runtime exhausts fuel after a few iters and the rest
-        // of the soak runs as no-ops. See the doc-comment above.
-        rt.apply_config(build_cfg(&caps));
         let _ = rt.eval(source, "fuzz.rb");
     });
 }
