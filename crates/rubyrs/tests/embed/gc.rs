@@ -537,8 +537,8 @@ fn array_group_by_pin_snapshot_under_receiver_mutation() {
     // (`heap.alloc(HeapObj::Array(vec![v]))`) fires maybe_gc and
     // sweeps the still-pending snapshot elements; subsequent
     // iterations read freed slots. Same family as the chunk
-    // defensive pin (PR #187) and the group_by key pin fix in
-    // PR #200.
+    // driver's defensive snapshot pin and the group_by key pin
+    // earlier in this same file.
     //
     // Without the defensive `for v in &snapshot { ... }` pin
     // loop, the reproducer ICEs at `heap.rs:180` with
