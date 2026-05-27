@@ -33,6 +33,7 @@ use super::PinGuard;
 ///   - `char::is_whitespace` covers VT but is Unicode-aware
 ///     (e.g. NBSP `\u{00A0}`), which CRuby does NOT strip;
 ///     using it would over-strip.
+///
 /// Enumerate the byte set explicitly to match CRuby exactly.
 /// Divergence pinned by `tests/fixtures/divergence_string_strip_nul.rb`
 /// (PR #193) is the gap this predicate closes.
