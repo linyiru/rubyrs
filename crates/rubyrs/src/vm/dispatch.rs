@@ -580,6 +580,13 @@ impl Vm {
         // slot, panicking later in `class_of`.
         if name == "method" && args.len() == 1
             && let Value::Sym(bound_name_id) = &args[0] {
+                // Snapshot the resolved Method at capture time so
+                // `bm.call` survives a subsequent `remove_method`
+                // (CRuby parity, matches the `instance_method` arm).
+                let snapshot = match self.class_of(&recv) {
+                    Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
+                    _ => None,
+                };
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(recv.clone());
                 g.vm.maybe_gc();
@@ -587,6 +594,7 @@ impl Vm {
                 let id = g.vm.heap.alloc(HeapObj::BoundMethod {
                     recv: recv.clone(),
                     name_id: *bound_name_id,
+                    method: snapshot,
                 });
                 g.vm.stack.push(Value::BoundMethod(id));
                 return Ok(CallableOutcome::Handled);
@@ -603,8 +611,15 @@ impl Vm {
         // `class_of` is the closest approximation and roundtrips
         // through `bind` correctly for the common shapes.
         if let Value::BoundMethod(bid) = &recv && name == "unbind" && args.is_empty() {
-            let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
-                HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+            // Inherit the snapshot the BoundMethod was carrying;
+            // if it has none (legacy values constructed before
+            // the snapshot field, or `method` capture sites that
+            // synthesise a transient BM), look up live from the
+            // receiver's class. The resulting UnboundMethod
+            // survives a subsequent `remove_method` on either
+            // side of the round-trip.
+            let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod { recv, name_id, method } => (recv.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
             };
             let cls = match self.class_of(&bm_recv) {
@@ -613,9 +628,14 @@ impl Vm {
                     msg: "cannot unbind method on a value without a class".into(),
                 })),
             };
+            let snapshot = bm_method.or_else(|| self.lookup_method_uncached(&cls, bm_name_id));
             self.maybe_gc();
             self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::UnboundMethod { class: cls, name_id: bm_name_id, method: None });
+            let id = self.heap.alloc(HeapObj::UnboundMethod {
+                class: cls,
+                name_id: bm_name_id,
+                method: snapshot,
+            });
             self.stack.push(Value::UnboundMethod(id));
             return Ok(CallableOutcome::Handled);
         }
@@ -623,8 +643,10 @@ impl Vm {
         // that `obj` is_a? the captured class. Raises TypeError on
         // mismatch, matching CRuby.
         if let Value::UnboundMethod(uid) = &recv && name == "bind" && args.len() == 1 {
-            let (cap_class, cap_name_id) = match self.heap.get(*uid) {
-                HeapObj::UnboundMethod { class, name_id, .. } => (class.clone(), *name_id),
+            let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
+                HeapObj::UnboundMethod { class, name_id, method } => {
+                    (class.clone(), *name_id, method.clone())
+                }
                 _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
             };
             let mut args = args;
@@ -667,7 +689,14 @@ impl Vm {
             g.pin(target.clone());
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
-            let id = g.vm.heap.alloc(HeapObj::BoundMethod { recv: target, name_id: cap_name_id });
+            // Propagate the snapshot from the UnboundMethod —
+            // a later `bm.call` after a `remove_method` on the
+            // captured class still invokes the original body.
+            let id = g.vm.heap.alloc(HeapObj::BoundMethod {
+                recv: target,
+                name_id: cap_name_id,
+                method: cap_method,
+            });
             g.vm.stack.push(Value::BoundMethod(id));
             return Ok(CallableOutcome::Handled);
         }
@@ -1128,10 +1157,21 @@ impl Vm {
             }
         if let Value::BoundMethod(bid) = &recv
             && matches!(name, "call" | "[]" | "()") {
-                let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
-                    HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+                let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
+                    HeapObj::BoundMethod { recv, name_id, method } => {
+                        (recv.clone(), *name_id, method.clone())
+                    }
                     _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
                 };
+                // Snapshot fast path: invoke the captured Method
+                // directly so a `remove_method` on the captured
+                // class between capture and call doesn't break
+                // `bm.call` (CRuby parity, matches the bind_call
+                // path).
+                if let Some(m) = bm_method {
+                    self.invoke_method(m, bm_recv, args)?;
+                    return Ok(CallableOutcome::Handled);
+                }
                 let argc = args.len();
                 self.stack.push(bm_recv);
                 for a in args {
@@ -2220,11 +2260,18 @@ impl Vm {
             let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
             if &*name == "method" && args.len() == 1
                 && let Value::Sym(bound_name_id) = &args[0] {
+                    // Snapshot the Method at capture time so the
+                    // BoundMethod survives a later remove_method.
+                    let snapshot = match self.class_of(&self_val) {
+                        Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
+                        _ => None,
+                    };
                     self.maybe_gc(); // allow: gc-rooting — BoundMethod holds `recv: self_val.clone()` (cloned from `frames.last().self_val`, which stays rooted via `self.frames` for the whole alloc window) and a primitive `SymId`; no unrooted slot at risk.
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::BoundMethod {
                         recv: self_val.clone(),
                         name_id: *bound_name_id,
+                        method: snapshot,
                     });
                     self.stack.push(Value::BoundMethod(id));
                     return Ok(());
@@ -4797,10 +4844,19 @@ impl Vm {
         // method receives the block argument.
         if let Some(Value::BoundMethod(bid)) = &recv
             && matches!(&*name, "call" | "[]" | "()") {
-            let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
-                HeapObj::BoundMethod { recv, name_id } => (recv.clone(), *name_id),
+            let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod { recv, name_id, method } => {
+                    (recv.clone(), *name_id, method.clone())
+                }
                 _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
             };
+            // Snapshot fast path — invoke directly with the
+            // attached block, matching the no-block BoundMethod#call
+            // arm's parity with capture-then-remove-then-call.
+            if let Some(m) = bm_method {
+                self.invoke_method_with_block(m, bm_recv, args, Some(block))?;
+                return Ok(());
+            }
             // do_call_block entry expects stack layout
             // `recv, block, args...` (drain last `argc` for args,
             // then pop block, then pop recv). Push in that order.
