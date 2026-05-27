@@ -1031,17 +1031,9 @@ impl Runtime {
             self.vm.loaded_features.clear();
             self.vm.loaded_stdlib_stubs.clear();
         }
-        // `vm.sources` is the filename → source-text map used by
-        // `Method#source_location` and trap backtraces. Restore
-        // to the post-preamble snapshot — every preamble fragment
-        // (`<rubyrs:preamble:exceptions>`, `<rubyrs:preamble:enumerable>`,
-        // etc.) keeps its source entry, so source_location and
-        // backtrace line resolution on preamble-defined methods
-        // (`Exception#message`, `Enumerable#each_with_index`, ...)
-        // still works after `reset()`. User-supplied filenames
-        // accumulated during user evals are dropped by the
-        // clone-and-replace; the snapshot's Rc<str> values make
-        // this a refcount bump, not a string copy.
+        // Restore preamble filename→source-text so `Method#source_location`
+        // and trap backtraces on preamble methods keep resolving
+        // after reset; see `PostPreambleSnapshot::sources`.
         self.vm.sources.clone_from(&snapshot.sources);
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
