@@ -202,17 +202,27 @@ pub(crate) fn numeric_call(
                 msg: "bignum too big to convert into `long'".to_string(),
             });
         }
-        // Arity guard for `Integer#to_s` — `respond_to?(:to_s)`
-        // returns true on Int, so `5.send(:to_s, 10, 20)` and
-        // `5.send(:to_s, 10, 20, 30)` must raise ArgumentError
-        // (CRuby behavior) instead of NoMethodError. The 0-arg
-        // and 1-arg arms above cover the happy paths; this fires
-        // for 2+ args. Mirrored in bignum.rs's bigint_primitive
-        // to_s arm so BigInt recv has the same arity guard.
+        // Arity guards for `Integer#to_s` and `Integer#inspect` —
+        // `respond_to?` returns true for both selectors, so
+        // `5.send(:to_s, 10, 20)` / `5.send(:inspect, 1)` must
+        // raise ArgumentError (CRuby behavior) instead of
+        // NoMethodError. `to_s` accepts 0..1 args (the 1-arg
+        // radix arm sits above; the 0-arg base-10 arm is below
+        // at the unified `(to_s | inspect, [])` arm); `inspect`
+        // accepts exactly 0. Mirrored in bignum.rs's
+        // bigint_primitive so BigInt recv has the same guards.
         (Value::Int(_), "to_s", args) if args.len() > 1 => {
             return Err(RubyError::ArgumentError {
                 msg: format!(
                     "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            });
+        }
+        (Value::Int(_), "inspect", args) if !args.is_empty() => {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
                     args.len(),
                 ),
             });
