@@ -104,6 +104,44 @@ use crate::error::RubyError;
 #[cfg(feature = "bignum")]
 use crate::vm::PinGuard;
 
+/// CRuby-parity lossless equality between a BigInt and a Float.
+/// Returns true iff `bigint` and `float` represent the same exact
+/// integer value.
+///
+/// Without this, demoting the BigInt to f64 collapses values like
+/// `2**64` and `2**64 + 1` onto the same Float bit pattern (the
+/// gap between consecutive f64s at that magnitude is 2), making
+/// `(2**64 + 1) == (2**64).to_f` wrongly return true. CRuby's
+/// `rb_big_eq` short-circuits on NaN / infinity / non-integral
+/// floats and otherwise compares against a losslessly-constructed
+/// BigInt; mirror that.
+#[cfg(feature = "bignum")]
+fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool {
+    use num_traits::FromPrimitive;
+    // NaN, +inf, -inf: never equal to a finite integer.
+    if !float.is_finite() {
+        return false;
+    }
+    // Float with a fractional part: never equal to an integer.
+    // For huge floats whose magnitude exceeds 2^53 the fractional
+    // bits are zero, so `f.fract() != 0.0` correctly bottoms out
+    // for small fractional floats (1.5, 0.1, …) without
+    // false-rejecting big integral floats.
+    if float.fract() != 0.0 {
+        return false;
+    }
+    // Integral finite float → exact BigInt conversion. `from_f64`
+    // truncates toward zero, but the integral-float guard above
+    // means there's nothing to truncate.
+    match num_bigint::BigInt::from_f64(float) {
+        Some(rhs) => *bigint == rhs,
+        // from_f64 returns None only for NaN/inf (filtered above)
+        // and pathologically-huge floats. Treat the latter as not
+        // equal — they exceed any representable BigInt anyway.
+        None => false,
+    }
+}
+
 /// Dispatch helper: tries Int/BigInt arithmetic or comparison
 /// for the `Op::BinOp` cold path (operands include at least one
 /// BigInt, or are non-Int shapes that this method declines).
@@ -137,6 +175,38 @@ impl Vm {
             // raised NoMethodError because primitive_call's Float
             // arms only handle Int/Float rhs.
             if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+                // Eq/Ne take a separate lossless path — `(2**64 + 1)
+                // == (2**64).to_f` must return false (CRuby), but
+                // demoting both sides to f64 collapses them onto the
+                // same Float bit pattern. Compare the BigInt against
+                // a BigInt converted FROM the float (exact when the
+                // float is integral; pre-rejected when fractional).
+                // Lt/Le/Gt/Ge have the same precision-loss issue —
+                // tracked as a follow-up; the demote path below
+                // preserves their existing (buggy) behavior.
+                if matches!(kind, BinOpKind::Eq | BinOpKind::Ne) {
+                    // The outer "at least one is BigInt" guard plus
+                    // this "at least one is Float" guard mean exactly
+                    // one of {a, b} is a BigInt and the other is a
+                    // Float — Float×Int and Int×Float already
+                    // declined above (neither side is BigInt).
+                    let (big_id, float_v) = match (a, b) {
+                        (Value::BigInt(id), Value::Float(f))
+                        | (Value::Float(f), Value::BigInt(id)) => (*id, *f),
+                        _ => unreachable!("BigInt × Float invariant"),
+                    };
+                    let eq = bigint_equals_float_lossless(
+                        self.heap.bigint(big_id),
+                        float_v,
+                    );
+                    let result = match kind {
+                        BinOpKind::Eq => eq,
+                        BinOpKind::Ne => !eq,
+                        _ => unreachable!(),
+                    };
+                    return Ok(Some(Value::Bool(result)));
+                }
+
                 let to_f = |v: &Value| -> Option<f64> {
                     match v {
                         Value::Float(f) => Some(*f),
@@ -159,8 +229,8 @@ impl Vm {
                     BinOpKind::Le => Value::Bool(af <= bf),
                     BinOpKind::Gt => Value::Bool(af > bf),
                     BinOpKind::Ge => Value::Bool(af >= bf),
-                    BinOpKind::Eq => Value::Bool(af == bf),
-                    BinOpKind::Ne => Value::Bool(af != bf),
+                    // Eq/Ne handled above via the lossless path.
+                    BinOpKind::Eq | BinOpKind::Ne => unreachable!(),
                 };
                 return Ok(Some(result));
             }

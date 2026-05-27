@@ -1298,6 +1298,50 @@ fn integer_to_s_raises_argumenterror_on_bad_arity() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_eq_float_is_lossless() {
+    // Pin the BigInt × Float `==` lossless path
+    // (bigint_equals_float_lossless in bignum.rs). Pre-fix the arm
+    // demoted BigInt to f64 for the compare, so values within the
+    // same Float "gap" (e.g. 2**64 vs 2**64+1, gap of 2 at that
+    // magnitude) wrongly compared equal.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Each puts produces one line; the closing block pins
+        // the exact 14-line transcript so a regression in any
+        // single arm fails loudly with the wrong line.
+        "nan = 0.0 / 0.0\n\
+         inf = 1.0 / 0.0\n\
+         puts (2**64) == (2**64).to_f         # true (Float-exact)\n\
+         puts (2**64 + 1) == (2**64).to_f     # false (precision)\n\
+         puts (2**64) == (2**64 + 1).to_f     # true (RHS rounds down to 2**64 via ties-to-even)\n\
+         puts (2**64).to_f == (2**64 + 1)     # false (Float side is 2**64, not 2**64+1)\n\
+         puts (2**64) == nan                  # false (NaN)\n\
+         puts (2**64) == inf                  # false (+inf)\n\
+         puts (2**64) == -inf                 # false (-inf)\n\
+         puts (2**64) == 1.5                  # false (fractional)\n\
+         puts (2**64) == 0.0                  # false (sign-only diff)\n\
+         puts (-(2**64)) == -(2**64).to_f     # true (negative exact)\n\
+         puts (2**100) == (2**100).to_f       # true (2^100 exact in f64)\n\
+         puts (2**64 + 1) != (2**64).to_f     # true (negation)\n\
+         puts (2**64) != (2**64).to_f         # false (negation)\n\
+         puts nan != (2**64)                  # true (NaN ne)",
+        "bigint_eq_float.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "true", "false", "true", "false",   // 2**64 ± 1 cases (note: (2**64+1).to_f rounds to 2**64)
+        "false", "false", "false",          // NaN / ±inf
+        "false", "false",                   // fractional / zero
+        "true", "true",                     // negative-exact / 2^100-exact
+        "true", "false", "true",            // != cases
+    ]);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn int_shift_zero_receiver_never_traps_regardless_of_count() {
     // Regression for PR #159 cycle 2: `0 << anything == 0` and
     // `0 >> anything == 0` in Ruby — should never allocate, never

@@ -65,7 +65,7 @@ cext = ["dep:rubyrs-cext", "dep:libloading"]
 # so BigInt lives in Tier 1 (will move to `rubyrs-core` in
 # Phase 1 of ADR 0018). The default keeps it on so CLI / embed
 # behaviour matches CRuby for arithmetic.
-bignum = ["dep:num-bigint", "dep:num-integer"]
+bignum = ["dep:num-bigint", "dep:num-integer", "dep:num-traits"]
 # `regex` is the second tier boundary (PoC for ADR 0015 / spec'd
 # by ADR 0017). With this feature off:
 #   - the `regex` crate dependency disappears (~300 KB save)
@@ -136,6 +136,12 @@ num-bigint = { version = "0.4", optional = true }
 # Already a transitive dep of num-bigint (re-pinned here so we
 # can name it directly). Gated on `bignum` to match.
 num-integer = { version = "0.1", optional = true, default-features = false }
+# Brings `num_traits::FromPrimitive::from_f64` into scope so the
+# BigInt × Float `==` arm can do lossless conversion (truncates
+# integral f64 → exact BigInt; bottoms out for NaN/inf). Already
+# a transitive dep of num-bigint (re-pinned here so we can name
+# it directly). Gated on `bignum` to match.
+num-traits = { version = "0.2", optional = true }
 # Optional via the `cext` feature. With cext off, neither dep is
 # pulled into the build.
 rubyrs-cext = { path = "../rubyrs-cext", version = "0.1.0", optional = true }

@@ -13,14 +13,14 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 84 |
-| Examples in corpus | 391 |
-| Skipped `it` traces | 141 |
+| Examples in corpus | 392 |
+| Skipped `it` traces | 140 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 6 |
+| `divergent` | 5 |
 | `fixture` | 48 |
 | `method-not-implemented` | 75 |
 | `mock` | 12 |
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 19 | 46 | 38 |
-| Integer | 20 | 160 | 19 |
+| Integer | 20 | 161 | 18 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -101,7 +101,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
 | `integer_downto_spec.rb` | Integer#downto [stop] when self and stop are Integers | `core/integer/downto_spec.rb` | 3 | 3 |
 | `integer_eql_spec.rb` | Integer#eql? | `core/integer/eql_spec.rb` | 10 | 1 |
-| `integer_equal_value_spec.rb` | Integer#== | `core/integer/equal_value_spec.rb + core/integer/shared/equal.rb` | 9 | 2 |
+| `integer_equal_value_spec.rb` | Integer#== | `core/integer/equal_value_spec.rb + core/integer/shared/equal.rb` | 10 | 1 |
 | `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
 | `integer_left_shift_spec.rb` | Integer#<< | `core/integer/left_shift_spec.rb` | 26 | 0 |
 | `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |

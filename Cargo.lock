@@ -1293,6 +1293,7 @@ dependencies = [
  "libloading",
  "num-bigint",
  "num-integer",
+ "num-traits",
  "regex",
  "ruby-prism",
  "rubyrs-cext",
