@@ -2594,7 +2594,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // even silently emitting nil would do the wrong thing
             // (the body's intended target receiver is lost).
             if recv_is_self {
-                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, and `prepend Mod` (single Module arg, with `self` receiver) are supported in the spike subset";
+                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), and constant assignment (`FOO = expr`) are supported in the spike subset";
                 out.push(sp(bn, Expr::Call {
                     receiver: None,
                     name: "raise".into(),
