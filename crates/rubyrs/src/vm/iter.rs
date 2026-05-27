@@ -2540,7 +2540,15 @@ impl Vm {
                     if pinned_k { g.vm.pinned.push(k.clone()); }
                     if pinned_v { g.vm.pinned.push(v.clone()); }
                     g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
+                    // `check_alloc?` early-return would leak the
+                    // manual k/v pins because `PinGuard` only
+                    // tracks `g.pin` calls. Unwind explicitly on
+                    // Err so the pinned stack stays balanced.
+                    if let Err(e) = g.vm.check_alloc() {
+                        if pinned_v { g.vm.pinned.pop(); }
+                        if pinned_k { g.vm.pinned.pop(); }
+                        return Err(e);
+                    }
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
@@ -2577,7 +2585,15 @@ impl Vm {
                     if pinned_k { g.vm.pinned.push(k.clone()); }
                     if pinned_v { g.vm.pinned.push(v.clone()); }
                     g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
+                    // Same `check_alloc` unwind discipline as
+                    // `Hash#count` above — manual pins must be
+                    // popped before bubbling the Err so the
+                    // pinned stack stays balanced.
+                    if let Err(e) = g.vm.check_alloc() {
+                        if pinned_v { g.vm.pinned.pop(); }
+                        if pinned_k { g.vm.pinned.pop(); }
+                        return Err(e);
+                    }
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id), seed.clone()], pre_frames);
