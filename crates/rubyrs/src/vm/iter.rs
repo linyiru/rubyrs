@@ -663,6 +663,20 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                // Defensive pin of every element. Without this,
+                // if the block mutates the receiver mid-iteration
+                // (`arr.clear` / `shift` / `slice!`), elements held
+                // only in the Rust-local `snapshot` / `groups` Vecs
+                // are no longer reachable through the pinned
+                // receiver and a subsequent step_block-triggered
+                // maybe_gc would sweep them. CRuby disallows
+                // concurrent mutation entirely; we instead keep the
+                // elements alive defensively so the primitive
+                // completes without ICE'ing. Matches the sort
+                // driver's `for v in &copy { g.pin(v.clone()); }`
+                // pattern (iter.rs:1713). Pre-existing gap surfaced
+                // by Copilot review on PR #187.
+                for v in &snapshot { g.pin(v.clone()); }
                 let pre_frames = g.vm.frames.len();
                 let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
                 let mut early = None;
