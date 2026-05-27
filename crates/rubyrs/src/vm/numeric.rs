@@ -17,6 +17,25 @@ pub(crate) fn integer_to_s_value(n: i64) -> Value {
     Value::new_str(n.to_string())
 }
 
+/// Tag byte mixed into `Integer#hash` so all Integer-flavoured
+/// receivers (Int, BigInt) share a hash-domain prefix distinct
+/// from any other type that implements `#hash`. The tag alone
+/// does NOT guarantee cross-receiver collisions (Int hashes
+/// the i64 via `Hasher::write_i64`, BigInt hashes a
+/// `Vec<u8>` from `to_signed_bytes_le`, which feeds different
+/// byte sequences to the hasher); the canonical-BigInt
+/// invariant prevents `Int(n)` and `BigInt(n)` from both
+/// existing for any single `n`, so the cross-type collision
+/// case is unreachable in practice. The tag exists to keep
+/// the Integer hash domain disjoint from the Float hash domain
+/// (see [`FLOAT_HASH_TAG`]).
+pub(crate) const INT_HASH_TAG: u8 = 0x49; // 'I'
+/// Tag byte mixed into `Float#hash`. Distinct from
+/// [`INT_HASH_TAG`] so `5.hash != 5.0.hash` — required for the
+/// `a.eql?(b) ⇒ a.hash == b.hash` invariant given that
+/// `5.eql?(5.0) == false`.
+pub(crate) const FLOAT_HASH_TAG: u8 = 0x46; // 'F'
+
 /// Try the Int / Float / mixed-numeric arms. Returns
 /// `Ok(Some(v))` on a handled call, `Ok(None)` if the receiver
 /// or method shape doesn't match and `primitive_call` should
@@ -152,6 +171,62 @@ pub(crate) fn numeric_call(
                     type_name_for_coerce(other),
                 ),
             });
+        }
+        // `Integer#eql?(other)` — type-strict equality.
+        // - Int.eql?(Int) → magnitude equality
+        // - Int.eql?(Float) → always false (`5.eql?(5.0) == false`),
+        //   even though `5 == 5.0`. This is the whole point of
+        //   `eql?` vs `==`.
+        // - Int.eql?(BigInt) → always false. The canonical-BigInt
+        //   invariant guarantees any `Value::BigInt` is outside
+        //   i64, so no Int and BigInt can share a value.
+        // - Anything else → false. Hash's internal key lookup
+        //   doesn't go through user-facing `eql?` (it uses ruby_eq
+        //   directly), but exposing the method matters for pure-
+        //   Ruby code that gates on `respond_to?(:eql?)` or
+        //   delegates to it.
+        //
+        // Lives BEFORE the broad `(Int, op, [Int])` coercion arm
+        // because that arm's inner-op match would otherwise shadow
+        // this (None-fallthrough inside the inner match doesn't
+        // surface to the outer pattern walk — same lesson as the
+        // `to_s(radix)` / `pow(exp)` / `Integer#[]` arms above).
+        (Value::Int(a), "eql?", [other]) => {
+            Some(Value::Bool(match other {
+                Value::Int(b) => a == b,
+                _ => false,
+            }))
+        }
+        // `Integer#hash` — within-process stable hash for Hash key
+        // matching at the language level. CRuby's internal Hash
+        // keys use a per-VM random seed for collision resistance;
+        // rubyrs's Hash impl is currently a linear-scan Vec under
+        // ruby_eq (no actual hashing for key lookup), so this
+        // method exists purely for the user-facing protocol — pure-
+        // Ruby code that calls `n.hash` for its own bookkeeping
+        // needs a stable integer. Use Rust's DefaultHasher for
+        // within-process stability (good enough for the protocol;
+        // the lack of cross-process or cross-VM stability matches
+        // CRuby's behaviour). Returns an i64 — sign bit of the u64
+        // hash is fine as long as `5.hash == 5.hash` holds, which
+        // it does because DefaultHasher is deterministic for
+        // identical input within a process.
+        //
+        // Same shadow-avoidance rationale as `eql?` above.
+        (Value::Int(a), "hash", []) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            // Tag the input as "Integer" so future cross-type
+            // collisions (e.g. if Float#hash also lands) don't
+            // share hashes by accident. Same tag used by the
+            // BigInt arm in bignum.rs so a small Int and a
+            // (hypothetical non-canonical) BigInt with the same
+            // value hash the same — the canonical-BigInt invariant
+            // makes that impossible in practice, but the tag
+            // alignment future-proofs the protocol.
+            INT_HASH_TAG.hash(&mut h);
+            a.hash(&mut h);
+            Some(Value::Int(h.finish() as i64))
         }
         // `Integer#pow(exp)` — 1-arg form is an alias for `**` for
         // numeric exponents (Int / Float / BigInt under bignum).
@@ -491,6 +566,33 @@ pub(crate) fn numeric_call(
             Some(Value::new_str_bytes(vec![n as u8]))
         }
 
+        // `Float#eql?(other)` — type-strict equality. Only true
+        // when `other` is also a Float and `==` agrees (so
+        // `NaN.eql?(NaN)` is false, matching CRuby). Lives BEFORE
+        // the broad `(Float, op, [Float])` arm so its inner-op
+        // match's `_ => None` fallthrough doesn't shadow this
+        // (same lesson as the Int#eql? placement above).
+        (Value::Float(a), "eql?", [other]) => {
+            Some(Value::Bool(match other {
+                Value::Float(b) => a == b,
+                _ => false,
+            }))
+        }
+        // `Float#hash` — within-process-stable i64. Uses a
+        // distinct tag from Integer (`'F'` vs `'I'`) so
+        // `5.0.hash != 5.hash` — required by the
+        // `a.eql?(b) ⇒ a.hash == b.hash` invariant given
+        // `5.eql?(5.0) == false`. Hashes the f64 bit pattern
+        // (via `to_bits()`) because f64 doesn't implement `Hash`
+        // (NaN != NaN under `==`); bit-pattern hashing makes
+        // distinct NaN payloads hash distinctly.
+        (Value::Float(a), "hash", []) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            FLOAT_HASH_TAG.hash(&mut h);
+            a.to_bits().hash(&mut h);
+            Some(Value::Int(h.finish() as i64))
+        }
         // Float × Float
         (Value::Float(a), op, [Value::Float(b)]) => match op {
             "+" => Some(Value::Float(a + b)),

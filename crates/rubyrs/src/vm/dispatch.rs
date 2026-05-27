@@ -2910,12 +2910,100 @@ impl Vm {
                 // (frozen flag, aliasing). `equal?` should reflect
                 // Rc-pointer identity, not content equality.
                 (Value::Str(a), Value::Str(b)) => Rc::ptr_eq(a, b),
+                // BigInt is heap-allocated; `equal?` is ObjId
+                // identity, matching CRuby (where two separately-
+                // allocated Bignums with the same magnitude are
+                // distinct objects). Without this arm BigInt fell
+                // through to the value-equality default, so
+                // `(2**64).equal?(2**64)` (two distinct allocs)
+                // wrongly returned true.
+                #[cfg(feature = "bignum")]
+                (Value::BigInt(a), Value::BigInt(b)) => a == b,
+                // Other heap-allocated variants — `equal?` is
+                // ObjId / Rc-pointer identity. Pre-fix these fell
+                // through to ruby_eq, which has no arms for them
+                // and returned false even for self-comparison
+                // (`m = obj.method(:foo); m.equal?(m)` was false).
+                // Mirrors the BigInt/Array/Hash arms above.
+                (Value::BoundMethod(a), Value::BoundMethod(b)) => a == b,
+                (Value::UnboundMethod(a), Value::UnboundMethod(b)) => a == b,
+                (Value::CurriedProc(a), Value::CurriedProc(b)) => a == b,
+                #[cfg(feature = "regex")]
+                (Value::Regex(a), Value::Regex(b)) => Rc::ptr_eq(a, b),
                 // Immediates (Int, Float, Sym, Bool, Nil) — fall
                 // back on ruby_eq (value equality).
                 _ => recv.ruby_eq(&args[0], &self.heap),
             };
             self.stack.push(Value::Bool(same));
             return Ok(());
+        }
+        // Universal `Object#eql?` fallback. Per-type type-strict
+        // numeric overrides (`Integer#eql?`, `Float#eql?`,
+        // `BigInt#eql?`) live in `primitive_call` arms above and
+        // would have fired before reaching here. By the time
+        // control gets here no per-type arm matched, so delegate
+        // to `ruby_eq`:
+        //  - String / Array / Hash / Range: value equality
+        //    (matches CRuby's Array#eql? / Hash#eql? overrides
+        //    that compare elementwise). Minor divergence at the
+        //    nested-numeric leaf where CRuby's element-wise eql?
+        //    distinguishes `[5].eql?([5.0])` from `[5] == [5.0]`;
+        //    we use the `==`-flavoured ruby_eq for elements, so
+        //    both come out true. Acceptable for now — the common
+        //    cases (same-shape containers, same-string lookups)
+        //    all match CRuby.
+        //  - Object / BoundMethod / UnboundMethod / CurriedProc /
+        //    Block / BigInt: ObjId identity via ruby_eq's
+        //    per-variant arms (matches CRuby's Kernel#eql?
+        //    default, which is identity for user objects).
+        //  - Class: Rc::ptr_eq via ruby_eq.
+        //  - Sym / Bool / Nil: identity == value equality for
+        //    immediates.
+        // Universal `respond_to?(:eql?)` already returns true via
+        // the universal whitelist.
+        if &*name == "eql?" {
+            // Arity guard fires regardless of receiver — CRuby
+            // raises ArgumentError before doing any per-type
+            // dispatch. Primitive_call's per-type arms above only
+            // match exact 1-arg shape, so we know arity must
+            // mismatch if control reaches this `eql?` block with
+            // != 1 arg.
+            if args.len() != 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len(),
+                    ),
+                }));
+            }
+            let same = recv.ruby_eq(&args[0], &self.heap);
+            self.stack.push(Value::Bool(same));
+            return Ok(());
+        }
+        // Universal `hash` arity guard — fires only after
+        // per-type arms in primitive_call have rejected the
+        // wrong-arity call. The per-type arms (Int/Float/BigInt
+        // /String) only match the exact 0-arg shape, so arity
+        // mismatch reaches here. We don't dispatch hash itself
+        // universally (not every receiver supports it), but we
+        // DO raise ArgumentError for receivers that do —
+        // identified by `responds_to(:hash)`. Without the
+        // `responds_to` check, this would also fire on
+        // `obj.hash(:x)` where obj doesn't support hash at all
+        // (CRuby: NoMethodError for the missing method, not
+        // ArgumentError for arity). Use the existing whitelist
+        // to make the distinction.
+        if &*name == "hash" && !args.is_empty() {
+            let name_id = self.interner.intern("hash");
+            if self.responds_to(&recv, name_id) {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len(),
+                    ),
+                }));
+            }
+            // Falls through to NoMethodError below.
         }
         // `Method#==` / `UnboundMethod#==` — intercept before the
         // universal `==` fallback (which has no arm for these and

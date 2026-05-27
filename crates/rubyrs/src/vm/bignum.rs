@@ -1387,6 +1387,47 @@ impl Vm {
         {
             return Ok(Some(v));
         }
+        // `Integer#eql?(other)` on BigInt receiver — type-strict
+        // equality. Only true when `other` is also a BigInt AND the
+        // two magnitudes match (separately-allocated BigInts of
+        // equal value pass). The canonical-BigInt invariant
+        // guarantees Int and BigInt can't share a value, so
+        // `(2**64).eql?(some_int)` is always false. Mirrors
+        // numeric.rs's Int-receiver arm.
+        if args.len() == 1 && name == "eql?"
+            && let Value::BigInt(id) = recv
+        {
+            let same = match &args[0] {
+                Value::BigInt(other_id) => {
+                    *id == *other_id || self.heap.bigint(*id) == self.heap.bigint(*other_id)
+                }
+                _ => false,
+            };
+            return Ok(Some(Value::Bool(same)));
+        }
+        // `Integer#hash` on BigInt receiver — same domain tag as
+        // numeric.rs's Int arm so two separately-allocated BigInts
+        // with the same magnitude hash to the same i64. Hashes the
+        // canonical (sign, magnitude-bytes-LE) pair so positive
+        // and negative same-magnitude don't collide. The Hash
+        // collection itself uses linear scan via ruby_eq (no
+        // hashing) but this method exists for the user-facing
+        // protocol and for pure-Ruby code that does its own
+        // bookkeeping.
+        if args.is_empty() && name == "hash"
+            && let Value::BigInt(id) = recv
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            crate::vm::numeric::INT_HASH_TAG.hash(&mut h);
+            let b = self.heap.bigint(*id);
+            // `to_signed_bytes_le` returns the two's-complement
+            // representation, so positive and negative are
+            // distinguished and same-value pairs across allocs
+            // hash identically.
+            b.to_signed_bytes_le().hash(&mut h);
+            return Ok(Some(Value::Int(h.finish() as i64)));
+        }
         // `<=>` — universal three-way comparison. Not in BinOpKind
         // (it returns Int not Bool, so the BinOp machinery doesn't
         // model it), so we handle it here for Int/BigInt operands.
