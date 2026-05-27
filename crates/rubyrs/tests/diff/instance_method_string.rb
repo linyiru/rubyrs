@@ -81,4 +81,5 @@ end
 module CompiledLike
   def render; "rendered"; end
 end
+puts CompiledLike.instance_method(:render).class   # UnboundMethod
 puts CompiledLike.instance_method("render").class  # UnboundMethod
