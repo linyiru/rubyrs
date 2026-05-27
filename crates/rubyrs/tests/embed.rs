@@ -2582,6 +2582,50 @@ fn bigint_to_s_radix_traps_under_max_value_bytes() {
 }
 
 #[test]
+fn integer_to_s_non_integer_radix_raises_typeerror_on_int_path() {
+    // Regression for cycle 13: the BigInt arm of `Integer#to_s(radix)`
+    // raised `TypeError` for non-Integer radix, but the Int arm only
+    // matched `Value::Int(radix)` and fell through to `NoMethodError`,
+    // diverging from CRuby and from the BigInt path. Pin parity on
+    // both sides — the unified `Integer#to_s` API should raise the
+    // same `TypeError` regardless of receiver size.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.to_s(\"x\")", "int_to_s_typeerr.rb").unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { class_name, message } => {
+            assert_eq!(class_name, "TypeError");
+            assert_eq!(message, "no implicit conversion of String into Integer");
+        }
+        other => panic!("expected Uncaught TypeError, got {:?}", other),
+    }
+    // `Float` should error the same way (matches BigInt-path coercion).
+    let err = rt.eval("5.to_s(1.0)", "int_to_s_typeerr_float.rb").unwrap_err();
+    assert!(matches!(
+        err.err,
+        rubyrs::RubyError::Uncaught { ref class_name, .. } if class_name == "TypeError"
+    ));
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_to_s_non_integer_radix_typeerror_message_matches_bigint_path() {
+    // Cross-check the parity guard above against the BigInt path
+    // so future drift between the two arms is caught immediately.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "(2 ** 100).to_s(\"x\")",
+        "bigint_to_s_typeerr.rb",
+    ).unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { class_name, message } => {
+            assert_eq!(class_name, "TypeError");
+            assert_eq!(message, "no implicit conversion of String into Integer");
+        }
+        other => panic!("expected Uncaught TypeError, got {:?}", other),
+    }
+}
+
+#[test]
 fn digits_negative_recv_takes_precedence_over_arity_and_base_errors() {
     // CRuby precedence: a negative `Integer#digits` receiver
     // raises Math::DomainError BEFORE any arity / base validation.

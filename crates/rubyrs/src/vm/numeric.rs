@@ -113,6 +113,23 @@ pub(crate) fn numeric_call(
                 String::from_utf8(buf).expect("ASCII digits + sign"),
             ))
         }
+        // `Integer#to_s(non_integer)` — radix must be Integer.
+        // Without this arm `5.to_s("x")` would fall through to
+        // `NoMethodError`, diverging from the BigInt path (which
+        // raises `TypeError` with the same wording) and from
+        // CRuby. Mirrors `bigint_primitive`'s non-Int radix arm
+        // so the unified Integer#to_s API stays consistent across
+        // Int vs BigInt receivers. Lives BEFORE the broad
+        // `(Int, op, [Int])` coercion arm for the same shadow
+        // reason as the 1-arg `to_s` above.
+        (Value::Int(_), "to_s", [other]) => {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
         // `Integer#pow(exp)` — 1-arg form is an alias for `**` for
         // numeric exponents (Int / Float / BigInt under bignum).
         // Sits BEFORE the broader `(Int, op, [Int])` arm because
