@@ -6,8 +6,6 @@
 #   X failed"). Both gaps surfaced as `divergent` in earlier
 #   batches and are now closed — pinned by
 #   tests/embed/numeric.rs::int_iter_arity_and_coerce_errors_match_cruby.
-#   Implementing parity would need a Float-comparison branch on
-#   the Int side of #upto. Out of B.6 scope.
 # - skipped (method-not-implemented): the no-block Enumerator
 #   surface and `Enumerator#size` assertions. Same rationale as
 #   integer_times_spec.

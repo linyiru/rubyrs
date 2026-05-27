@@ -1060,8 +1060,13 @@ impl Vm {
             // Float endpoint — CRuby `1.upto(13.3)` yields up to
             // floor(13.3) == 13. NaN floor-cast produces 0; if
             // start > 0 the loop yields nothing (matches CRuby).
-            // Infinity saturates to i64::MAX via `as i64` — the
-            // wall-clock deadline cap catches the runaway.
+            // Infinity / large-finite saturate to i64::MAX via
+            // `as i64`, so `5.upto(Float::INFINITY)` runs to
+            // i64::MAX iterations. CRuby has the same runaway
+            // (its loop doesn't special-case Infinity either);
+            // hosts that need bounded execution should set
+            // `Config::fuel` or `Config::deadline` (both opt-in
+            // — a default Config doesn't trap this).
             (Value::Int(start), "upto", [Value::Float(stop_f)]) => {
                 let start = *start;
                 let stop = stop_f.floor() as i64;

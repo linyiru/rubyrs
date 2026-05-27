@@ -1,7 +1,9 @@
 # Adapted from ruby/spec core/integer/downto_spec.rb at upstream
 # commit 448cb340 (2026-05). Hand-polished — same conventions
-# and divergences as integer_upto_spec.rb (sibling). See that
-# file's header for the documented gaps.
+# as integer_upto_spec.rb (sibling): Float endpoint accepted
+# (yields down to ceil); non-numeric raises ArgumentError.
+# Both behaviors pinned by
+# tests/embed/numeric.rs::int_iter_arity_and_coerce_errors_match_cruby.
 
 describe "Integer#downto [stop] when self and stop are Integers" do
   it "does not yield when stop is greater than self" do

@@ -705,11 +705,27 @@ fn bigint_iter_arity_and_coerce_errors_match_cruby() {
             "ArgumentError",
             "wrong number of arguments (given 2, expected 1)",
         ),
-        // Float endpoint for BigInt receiver: still TypeError —
-        // the Float arm only covers Int receivers; BigInt × Float
-        // hasn't been wired up (out of B.6 scope). Sibling case
-        // for non-numeric arg shifted to ArgumentError to match
-        // the Int-recv side.
+        // Float endpoint for BigInt receiver — the Int Float arm
+        // is not extended to BigInt receivers (BigInt iteration
+        // beyond i64 isn't wired through `f.floor() as i64`).
+        // The general non-numeric arm catches it and raises
+        // ArgumentError "comparison of Integer with Float failed",
+        // which matches CRuby for the BigInt-vs-Float case (both
+        // bottom out in `<=>` for the loop bound). Pin the
+        // boundary so a future refactor that widens the Int Float
+        // arm to BigInt (or returns TypeError instead) trips this.
+        (
+            format!("{}.upto(3.14) {{ }}", big),
+            "ArgumentError",
+            "comparison of Integer with Float failed",
+        ),
+        (
+            format!("{}.downto(3.14) {{ }}", big),
+            "ArgumentError",
+            "comparison of Integer with Float failed",
+        ),
+        // Sibling case for non-numeric arg shifted to ArgumentError
+        // to match the Int-recv side.
         (
             format!("{}.downto(\"x\") {{ }}", big),
             "ArgumentError",
