@@ -1350,9 +1350,10 @@ fn bigint_case_compare_float_is_lossless_via_ruby_eq() {
          # Array#include? — uses ruby_eq too\n\
          puts [2**64, 5].include?((2**64).to_f)      # true\n\
          puts [2**64 + 1, 5].include?((2**64).to_f)  # false (precision preserved)\n\
-         # Int × Float precision via ruby_eq — sibling fix to the\n\
-         # BigInt path (cycle 3 review on PR #248). Demote-to-f64\n\
-         # was the same bug, just on the Int side.\n\
+         # Int × Float precision via ruby_eq — sibling to the\n\
+         # BigInt path above. The demote-to-f64 bug existed on\n\
+         # both Int and BigInt sides of ruby_eq; both arms now\n\
+         # route through their respective lossless helpers.\n\
          puts ((2**62 + 1) === (2**62).to_f)         # false (|i| > 2^53)\n\
          puts ((2**62) === (2**62).to_f)             # true (exact)\n\
          puts [2**62 + 1].include?((2**62).to_f)     # false",
