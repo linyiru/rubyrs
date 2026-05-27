@@ -270,13 +270,22 @@ impl Vm {
                         // on the dup don't propagate, but mutations
                         // on shared nested Arrays/Hashes/Strings do.
                         //
-                        // Default-block carries over (`h.dup` keeps
-                        // `default_proc`). Pin receiver + block
-                        // across alloc — same GC-rooting concern as
-                        // `merge` since the receiver `id` is a Rust-
-                        // local from `do_call`'s recv-pop.
+                        // Both `default_proc` (block form) and the
+                        // scalar default (set via `Hash.new(val)`)
+                        // carry over — missing-key lookup consults
+                        // `hash_default_value` first, so dropping it
+                        // would silently change semantics on the dup.
+                        // Pin receiver + block (when present) across
+                        // alloc — same GC-rooting concern as `merge`
+                        // since the receiver `id` is a Rust-local
+                        // from `do_call`'s recv-pop. The scalar
+                        // default Value is captured by-value before
+                        // the alloc, so it doesn't need an extra
+                        // pin (heap-ObjId children of it are
+                        // reachable through the receiver pin).
                         let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         let default_block = self.heap.hash_default_block(id);
+                        let default_value = self.heap.hash_default_value(id);
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         if let Some(bid) = default_block {
@@ -286,6 +295,9 @@ impl Vm {
                         let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
+                        }
+                        if default_value.is_some() {
+                            g.vm.heap.hash_set_default_value(nid, default_value);
                         }
                         Some(Value::Hash(nid))
                     }
