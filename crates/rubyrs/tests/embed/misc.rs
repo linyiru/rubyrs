@@ -576,3 +576,33 @@ fn array_spaceship_self_referential_does_not_overflow_stack() {
     ).expect("self-spaceship should return Int, not overflow");
     assert!(matches!(v, Value::Int(0)), "expected Int(0), got {:?}", v);
 }
+
+#[test]
+fn array_spaceship_deep_nesting_does_not_overflow_stack() {
+    // Non-cyclic deeply nested Arrays previously bottomed out
+    // in `value_cmp_v_heap`'s recursion with a Rust-level
+    // `stack overflow, aborting` (uncatchable process abort) —
+    // the same-ObjId short-circuit only catches direct self-
+    // cycles, not legitimate deep nesting. The `ARRAY_CMP_MAX_DEPTH`
+    // ceiling now soft-fails to nil rather than aborting, so the
+    // Ruby caller can observe + react to the limit. Crash was
+    // empirically reproducible at ~100K nesting; the ceiling sits
+    // well below that.
+    let mut rt = Runtime::new();
+    let v = rt.eval(
+        r#"
+        def deep(n)
+          a = []
+          i = 0
+          while i < n
+            a = [a]
+            i = i + 1
+          end
+          a
+        end
+        deep(100000) <=> deep(100000)
+        "#,
+        "spaceship_deep.rb",
+    ).expect("deep-nested spaceship should soft-fail to nil, not abort");
+    assert!(matches!(v, Value::Nil), "expected Nil (depth ceiling tripped), got {:?}", v);
+}

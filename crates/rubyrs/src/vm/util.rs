@@ -37,11 +37,35 @@ pub(crate) fn value_cmp_v(a: &Value, b: &Value, interner: &Interner) -> Option<s
 /// surface NoMethodError. The extra `heap` parameter is the only
 /// difference from `value_cmp_v` — call sites that have a `Heap`
 /// in scope should prefer this one.
+/// Recursion-depth ceiling for the Array×Array arm. Sized to
+/// keep the worst-case nested-Array walk well within Rust's
+/// default 8 MiB thread stack: empirically the dispatch frame
+/// for `value_cmp_v_heap` is ~1 KiB, and crashes were observed
+/// at ~100K nesting (PR #219 review). 2_000 is two orders of
+/// magnitude smaller than that crash threshold and two orders
+/// of magnitude larger than any realistic spec fixture. Past
+/// the ceiling we return `None` rather than aborting; the
+/// caller surfaces this as nil (`Array#<=>`) or NoMethodError
+/// (`Array#sort` / `min` / `max`) — a soft failure that's
+/// catchable, vs the previous Rust-level `stack overflow,
+/// aborting` (uncatchable process abort).
+const ARRAY_CMP_MAX_DEPTH: usize = 2_000;
+
 pub(crate) fn value_cmp_v_heap(
     a: &Value,
     b: &Value,
     interner: &Interner,
     heap: &crate::heap::Heap,
+) -> Option<std::cmp::Ordering> {
+    value_cmp_v_heap_inner(a, b, interner, heap, 0)
+}
+
+fn value_cmp_v_heap_inner(
+    a: &Value,
+    b: &Value,
+    interner: &Interner,
+    heap: &crate::heap::Heap,
+    depth: usize,
 ) -> Option<std::cmp::Ordering> {
     #[cfg(feature = "bignum")]
     {
@@ -87,15 +111,24 @@ pub(crate) fn value_cmp_v_heap(
         // per-thread recursion-tracking table to detect arbitrary
         // mutual cycles; rubyrs catches the common direct case
         // here. Deeper mutual cycles (`a << b; b << a; a <=> b`)
-        // remain a gap.
+        // remain a gap — bounded by the depth ceiling below
+        // rather than abort'ed.
         if *xa == *xb {
             return Some(std::cmp::Ordering::Equal);
+        }
+        // Depth ceiling against non-cyclic deep nesting (PR #219
+        // review). Beyond this we return None rather than letting
+        // Rust abort with `stack overflow, aborting`. Soft-fails
+        // to nil at the Array#<=> caller — catchable from Ruby,
+        // vs the previous uncatchable process abort.
+        if depth >= ARRAY_CMP_MAX_DEPTH {
+            return None;
         }
         let av = heap.array(*xa);
         let bv = heap.array(*xb);
         let common = av.len().min(bv.len());
         for i in 0..common {
-            match value_cmp_v_heap(&av[i], &bv[i], interner, heap) {
+            match value_cmp_v_heap_inner(&av[i], &bv[i], interner, heap, depth + 1) {
                 Some(std::cmp::Ordering::Equal) => continue,
                 Some(ord) => return Some(ord),
                 None => return None,
