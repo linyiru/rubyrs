@@ -1407,6 +1407,43 @@ impl Vm {
                 self.stack.push(v);
                 Ok(true)
             }
+            // `Class#<` / `<=` / `>` / `>=` — subclass relation. CRuby:
+            //   A <  B → true if A is a STRICT descendant of B
+            //                 (B appears in A's ancestor chain, A != B)
+            //   A <= B → A == B OR A < B
+            //   A >  B → B <  A
+            //   A >= B → B <= A
+            // Unrelated classes return nil (not false!). Wrong-type
+            // arg (not a Class/Module) → TypeError. Used by Class#<
+            // family in user code; also reachable through tilt
+            // fixtures that assert `Subclass < Parent`.
+            ("<" | "<=" | ">" | ">=", [arg]) => {
+                let Value::Class(other) = arg else {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: "compared with non class/module".to_string(),
+                    }));
+                };
+                let same = std::rc::Rc::ptr_eq(&cls, other);
+                let self_is_desc = !same && super::class_is_a(&cls, other);
+                let other_is_desc = !same && super::class_is_a(other, &cls);
+                let result = match name {
+                    "<"  => if self_is_desc { Value::Bool(true) }
+                            else if same || other_is_desc { Value::Bool(false) }
+                            else { Value::Nil },
+                    "<=" => if same || self_is_desc { Value::Bool(true) }
+                            else if other_is_desc { Value::Bool(false) }
+                            else { Value::Nil },
+                    ">"  => if other_is_desc { Value::Bool(true) }
+                            else if same || self_is_desc { Value::Bool(false) }
+                            else { Value::Nil },
+                    ">=" => if same || other_is_desc { Value::Bool(true) }
+                            else if self_is_desc { Value::Bool(false) }
+                            else { Value::Nil },
+                    _ => unreachable!(),
+                };
+                self.stack.push(result);
+                Ok(true)
+            }
             // Tier 1 stub — return receiver itself.
             // See docs/SUBSET.md for the metaclass divergence.
             ("singleton_class", []) => {
