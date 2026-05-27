@@ -2586,6 +2586,90 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
+            // `class << self; <stmt> if cond` / `class << self;
+            // <stmt> unless cond` — modifier-form If/Unless at body
+            // top level wrapping a single supported inner stmt.
+            // Recognised inner shapes: bare-call (CallNode, e.g.
+            // `ruby2_keywords(:use)`) and the `alias new old` form
+            // (AliasMethodNode). Both are wrapped as
+            // `Expr::If { cond, then: [<inner>], else: [Nil] }`.
+            // The condition is translated via the regular `tr()`
+            // path (so `respond_to?(...)` / `method_defined? :foo`
+            // dispatch through their usual builtins).
+            //
+            // Motivating call sites (TRY_RUNS pass 9.5 layers
+            // #13 / #15):
+            //   - `ruby2_keywords(:use) if respond_to?(:ruby2_keywords, true)`
+            //   - `alias new! new unless method_defined? :new!`
+            // The Ruby 2.7 guard pattern: try the call only when
+            // the receiver advertises support. rubyrs's
+            // `respond_to?(:ruby2_keywords)` returns false on
+            // Class shells (no whitelist entry), so the if-true
+            // branch is skipped and the body loads cleanly.
+            //
+            // Scope deliberately narrow: only CallNode and
+            // AliasMethodNode inner statements are admitted; other
+            // shapes (def / attr_* / const-write / cvar-write
+            // wrapped in if/unless) fall through to
+            // NotImplementedError because sinatra/base.rb doesn't
+            // surface them and the inner-form recogniser can be
+            // widened on demand.
+            if recv_is_self {
+                let modifier_if = bn.as_if_node()
+                    .and_then(|if_n| {
+                        let stmts = if_n.statements()?;
+                        let body_iter = stmts.body();
+                        if body_iter.iter().count() != 1 { return None; }
+                        if if_n.subsequent().is_some() { return None; }
+                        let inner = body_iter.iter().next()?;
+                        Some((if_n.predicate(), inner, false))
+                    });
+                let modifier_unless = bn.as_unless_node()
+                    .and_then(|un_n| {
+                        let stmts = un_n.statements()?;
+                        let body_iter = stmts.body();
+                        if body_iter.iter().count() != 1 { return None; }
+                        if un_n.else_clause().is_some() { return None; }
+                        let inner = body_iter.iter().next()?;
+                        Some((un_n.predicate(), inner, true))
+                    });
+                if let Some((cond_node, inner, negated)) = modifier_if.or(modifier_unless) {
+                    // Translate the inner stmt only if it's one of
+                    // the admitted shapes; otherwise fall through.
+                    let inner_expr: Option<SExpr> = if let Some(alias_node) = inner.as_alias_method_node()
+                        && let (Some(new_sym), Some(old_sym)) = (
+                            alias_node.new_name().as_symbol_node(),
+                            alias_node.old_name().as_symbol_node(),
+                        )
+                    {
+                        let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
+                        let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
+                        Some(sp(&inner, Expr::AliasSingletonMethod(new_name, old_name)))
+                    } else if inner.as_call_node().is_some() {
+                        Some(tr(ctx, &inner))
+                    } else {
+                        None
+                    };
+                    if let Some(inner_expr) = inner_expr {
+                        let raw_cond = tr(ctx, &cond_node);
+                        let cond = if negated {
+                            sp(&cond_node, Expr::Call {
+                                receiver: Some(Box::new(raw_cond)),
+                                name: "!".into(),
+                                args: vec![],
+                            })
+                        } else {
+                            raw_cond
+                        };
+                        out.push(sp(bn, Expr::If {
+                            cond: Box::new(cond),
+                            then_body: vec![inner_expr],
+                            else_body: vec![sp(bn, Expr::Nil)],
+                        }));
+                        continue;
+                    }
+                }
+            }
             // `class << self` body: any remaining unsupported form
             // compiles to a runtime `raise NotImplementedError`
             // rather than a parse-time SyntaxError. The raise fires

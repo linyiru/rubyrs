@@ -133,6 +133,7 @@ fn run_diff(name: &str) {
 #[test] fn bare_class_methods() { run_diff("bare_class_methods"); }
 #[test] fn class_self_const() { run_diff("class_self_const"); }
 #[test] fn class_self_cvar() { run_diff("class_self_cvar"); }
+#[test] fn class_self_if_modifier() { run_diff("class_self_if_modifier"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }
