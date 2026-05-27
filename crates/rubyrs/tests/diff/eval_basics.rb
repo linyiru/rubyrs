@@ -63,6 +63,25 @@ Marker.class_eval(<<~RUBY, "custom.rb", 1)
 RUBY
 puts Marker.new.label                           # marked
 
+# --- defined?(eval) reports method (Kernel#eval mirror) ---
+puts defined?(eval)                             # method
+
+# --- respond_to?(:class_eval) / :module_eval lights up ---
+class WhiteListed
+end
+puts WhiteListed.respond_to?(:class_eval)       # true
+puts WhiteListed.respond_to?(:module_eval)      # true
+
+# --- Wrong arity raises ArgumentError (1..3 supported) ---
+class ArityCheck
+end
+begin
+  ArityCheck.class_eval("1", "file", 1, "extra")
+  puts "no raise"
+rescue ArgumentError
+  puts "class_eval(>3 args) → ArgumentError"
+end
+
 # --- module_eval is an alias for class_eval (string form) ---
 class ModEvalTarget
 end

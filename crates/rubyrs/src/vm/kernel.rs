@@ -181,6 +181,7 @@ impl Vm {
                         "puts" | "p" | "pp" | "print" | "require" |
                         "sprintf" | "format" | "__time_now_raw" |
                         "Integer" | "Float" | "String" | "Array" |
+                        "eval" |
                         "__defined_ivar?" | "__defined_method?" | "__defined_const?"
                     );
                     let host_hit = self.host_fns.contains_key(sid);
@@ -1407,10 +1408,33 @@ impl Vm {
         let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(filename);
         let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source);
         self.sources.insert(filename_rc.clone(), source_rc);
+        // Cap-aware compile: `compile_proto` interns method names,
+        // locals, constants, and other symbols from the eval'd
+        // source. Unlike top-level / require source (which is host-
+        // loaded under embedder control), eval'd strings can be
+        // dynamically constructed by Ruby code — `eval("def m#{i};
+        // end")` in a loop would grow the interner past any
+        // configured cap. Snapshot the cap; post-check after
+        // compile. Documented best-effort: the interner may briefly
+        // grow past the cap before the trap fires (we don't roll
+        // back interns).
+        let cap_at_entry = self.max_symbols;
+        if let Some(max) = cap_at_entry
+            && self.interner.len() >= max {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!("interner exhausted before eval: {} symbols", max),
+            }));
+        }
         let entry = crate::compiler::compile_proto(
             "<eval>".into(), vec![], &[prog], filename_rc,
             &mut self.protos, &mut self.interner, &mut self.cache_counter,
         );
+        if let Some(max) = cap_at_entry
+            && self.interner.len() > max {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!("eval grew interner past cap: {} symbols", max),
+            }));
+        }
         let cc = self.cache_counter as usize;
         self.ensure_call_caches(cc);
         let depth_before = self.frames.len();

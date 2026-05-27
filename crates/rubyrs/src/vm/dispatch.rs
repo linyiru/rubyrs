@@ -2115,6 +2115,17 @@ impl Vm {
             && !args.is_empty()
             && matches!(args[0], Value::Str(_))
         {
+            // CRuby's class_eval(string [, file, line]) signature:
+            // 1..3 args. Extra args silently dropped would mask
+            // caller bugs.
+            if args.len() > 3 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..3)",
+                        args.len()
+                    ),
+                }));
+            }
             let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
             let filename = match args.get(1) {
                 Some(Value::Str(f)) => f.to_string_lossy(),
@@ -4766,6 +4777,19 @@ impl Vm {
             // switching. Documented in docs/SUBSET.md.
             if is_class_eval && matches!(r, Value::Class(_))
                 && !args.is_empty() && matches!(args[0], Value::Str(_)) {
+                // Same arity guard as the non-block path
+                // (`do_call`'s class_eval arm). Block + string-arg
+                // form is unusual (CRuby ignores the block silently
+                // when string is provided) but we still validate
+                // arity so callers don't accidentally pass extras.
+                if args.len() > 3 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..3)",
+                            args.len()
+                        ),
+                    }));
+                }
                 let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
                 let filename = match args.get(1) {
                     Some(Value::Str(f)) => f.to_string_lossy(),
