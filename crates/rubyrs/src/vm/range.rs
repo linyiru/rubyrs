@@ -81,12 +81,58 @@ impl Vm {
                         ("begin", []) | ("first", []) | ("min", []) => return Ok(Some(b.clone())),
                         ("end", []) | ("last", []) | ("max", []) => return Ok(Some(e.clone())),
                         ("first", [Value::Int(n)]) => {
-                            // Endless (1..) supports first(n);
-                            // beginless (..n) doesn't (no anchor
-                            // for "first").
+                            // Three reachable cases in this partial-
+                            // range branch:
+                            //   1. Truly beginless `(..e)`:
+                            //      `b == Value::Nil` → CRuby raises
+                            //      `RangeError: cannot get the first
+                            //      element of beginless range`,
+                            //      regardless of n's sign. The
+                            //      beginless check has to come BEFORE
+                            //      the negative-n guard so
+                            //      `(..5).first(-1)` produces
+                            //      RangeError, not ArgumentError.
+                            //   2. Endless `(b..)` with Int begin:
+                            //      walk Ints from `bi`. Negative n is
+                            //      ArgumentError per CRuby (and per
+                            //      #140's Array policy).
+                            //   3. Non-Int begin (BigInt, etc.) with
+                            //      missing/non-Int end: not
+                            //      implemented here; return
+                            //      NoMethodError via `Ok(None)`.
+                            //      Implementing BigInt iteration is
+                            //      tracked in #143 follow-ups; until
+                            //      then, an honest NoMethodError is
+                            //      preferable to a misleading
+                            //      "beginless range" RangeError.
+                            //
+                            // Case 1 first.
+                            if matches!(&b, Value::Nil) {
+                                return Err(self.trap(RubyError::RangeError {
+                                    msg: "cannot get the first element of beginless range".into(),
+                                }));
+                            }
+                            // Then negative-n. Past this point we know
+                            // begin is non-Nil; either Int (case 2)
+                            // or non-Int non-Nil (case 3).
+                            if *n < 0 {
+                                return Err(self.trap(RubyError::ArgumentError {
+                                    msg: "negative array size (or size too big)".into(),
+                                }));
+                            }
                             if let Some(bi) = begin_int {
-                                let n = (*n).max(0);
-                                let mut out: Vec<Value> = Vec::with_capacity(n as usize);
+                                // `usize::try_from(*n).unwrap_or(MAX)`
+                                // is the wasm32-safe shape from #140:
+                                // i64 → usize would truncate large
+                                // positives on a 32-bit usize host.
+                                // Capacity is bounded by `n` so very
+                                // large requests still try to alloc
+                                // the full vec — that's a memory
+                                // cost the caller asked for, matching
+                                // the existing endless `step`/`to_a`
+                                // patterns.
+                                let n = usize::try_from(*n).unwrap_or(usize::MAX);
+                                let mut out: Vec<Value> = Vec::with_capacity(n);
                                 let mut v = bi;
                                 for _ in 0..n {
                                     out.push(Value::Int(v));
@@ -96,6 +142,12 @@ impl Vm {
                                 let nid = self.heap.alloc(HeapObj::Array(out));
                                 return Ok(Some(Value::Array(nid)));
                             }
+                            // Case 3: non-Int non-Nil begin (e.g.
+                            // BigInt-bounded range). Fall through to
+                            // the outer `_ => return Ok(None)` which
+                            // produces NoMethodError. This matches
+                            // the pre-#146 behaviour for the same
+                            // inputs.
                             return Ok(None);
                         }
                         ("cover?", [Value::Int(v)]) => {
@@ -157,6 +209,84 @@ impl Vm {
                 match (name, args) {
                     ("begin", []) | ("first", []) | ("min", []) => Some(b.clone()),
                     ("end", []) | ("last", []) => Some(e.clone()),
+                    // `(b..e).first(n)` / `(b..e).last(n)` — materialise
+                    // the slice as a fresh Array. Both refuse negative
+                    // `n` with ArgumentError, matching CRuby's
+                    // `Array#first/last(n)` policy that #140 mirrored.
+                    // For first/last on the empty range (b > e) the
+                    // `count == 0` short-circuit returns []. CRuby
+                    // uses slightly different wording for the two
+                    // sides ("negative array size (or size too big)"
+                    // for first vs "negative array size" for last);
+                    // matching that exactly so a diff_cruby fixture
+                    // can lock both error paths.
+                    //
+                    // Tracked in #143 alongside the endless-range
+                    // negative-n fix above.
+                    ("first", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size (or size too big)".into(),
+                            }));
+                        }
+                        // Cap `n` at `count` so a request bigger than
+                        // the range size doesn't try to alloc Vec for
+                        // billions of elements. `count` is already
+                        // computed safely (saturating) above.
+                        let n_taken = (*n).min(count);
+                        let n_safe = usize::try_from(n_taken).unwrap_or(usize::MAX);
+                        let mut elems: Vec<Value> = Vec::with_capacity(n_safe);
+                        let mut v = bi;
+                        for _ in 0..n_safe {
+                            elems.push(Value::Int(v));
+                            v = v.saturating_add(1);
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(nid))
+                    }
+                    ("last", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        // Same `count`-capping rationale as `first(n)`
+                        // above. The slice starts at
+                        // `bi + (count - n_taken)` and walks `n_taken`
+                        // ints upward.
+                        //
+                        // Earlier shape computed `start` as
+                        // `end_inc.saturating_sub(n_taken).saturating_add(1)`,
+                        // which had an off-by-one at the i64::MIN
+                        // boundary: with `bi == ei == i64::MIN` and
+                        // `n_taken == 1`, `i64::MIN - 1` saturates to
+                        // `i64::MIN`, the `+ 1` then gives `i64::MIN + 1`,
+                        // and the result was `[i64::MIN + 1]` instead
+                        // of `[i64::MIN]`. The `bi + (count - n_taken)`
+                        // form is safe: `count - n_taken ≥ 0` by the
+                        // `n_taken = n.min(count)` cap, and
+                        // `bi + (count - n_taken) ≤ bi + count = ei + (1 or 0)`,
+                        // which fits in i64 as long as `ei` itself
+                        // does. `saturating_add` is paranoia in case
+                        // a future change pushes the bound.
+                        let n_taken = (*n).min(count);
+                        let n_safe = usize::try_from(n_taken).unwrap_or(usize::MAX);
+                        let mut elems: Vec<Value> = Vec::with_capacity(n_safe);
+                        if count == 0 {
+                            let nid = self.heap.alloc(HeapObj::Array(elems));
+                            return Ok(Some(Value::Array(nid)));
+                        }
+                        let start = bi.saturating_add(count.saturating_sub(n_taken));
+                        let mut v = start;
+                        for _ in 0..n_safe {
+                            elems.push(Value::Int(v));
+                            v = v.saturating_add(1);
+                        }
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(elems));
+                        Some(Value::Array(nid))
+                    }
                     ("max", []) => Some(if excl {
                         // ei - 1 overflows when ei == i64::MIN
                         // (e.g. `(-2**63...-2**63).max`); treat as

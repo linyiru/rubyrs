@@ -3276,3 +3276,52 @@ fn array_first_last_non_int_n_raises_no_method_error_today() {
     assert_no_method("[1,2,3].first('2')");
     assert_no_method("[1,2,3].last('2')");
 }
+
+#[test]
+fn range_first_last_non_int_n_raises_no_method_error_today() {
+    // Companion to `array_first_last_non_int_n_raises_no_method_error_today`.
+    // Pin the current rubyrs divergence from CRuby on
+    // `Range#first(n)` / `Range#last(n)` when `n` isn't an
+    // `Int`.
+    //
+    // CRuby behaviour (2026-05):
+    //   - `(1..5).first(2.0)` returns `[1, 2]` — Float's
+    //     `to_int` coerces to 2.
+    //   - `(1..5).last(:x)`   raises `TypeError: no implicit
+    //     conversion of Symbol into Integer`.
+    //
+    // rubyrs behaviour: both raise NoMethodError because the
+    // match arms in `vm/range.rs` only bind `Value::Int(n)`.
+    // Float / Sym / String fall past the `(n)` arms to the
+    // generic NoMethodError catch-all.
+    //
+    // This test mirrors the Array sibling rather than being a
+    // diff_cruby fixture, for the same reason: a diff_cruby
+    // fixture would fail the harness because CRuby's output
+    // disagrees with rubyrs's. The embed test creates a
+    // breadcrumb so a future contributor who wires `to_int`
+    // coercion (or adds a Float / BigInt arm) gets a failing
+    // test and is forced to re-classify Range#first(n) /
+    // Range#last(n) intentionally.
+
+    fn assert_no_method(src: &str) {
+        let mut rt = Runtime::new();
+        let err = rt.eval(src, "non_int_n.rb")
+            .expect_err("expected error");
+        assert!(
+            err.err.is("NoMethodError"),
+            "expected NoMethodError for `{src}`, got {:?}",
+            err.err,
+        );
+    }
+
+    assert_no_method("(1..5).first(2.0)");
+    assert_no_method("(1..5).last(2.0)");
+    assert_no_method("(1..5).first(:x)");
+    assert_no_method("(1..5).last(:x)");
+    assert_no_method("(1..5).first('2')");
+    assert_no_method("(1..5).last('2')");
+    // Endless range too — the endless first(n) arm also only
+    // matches Value::Int(n).
+    assert_no_method("(1..).first(2.0)");
+}
