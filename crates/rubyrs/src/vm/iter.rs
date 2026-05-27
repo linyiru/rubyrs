@@ -1649,6 +1649,30 @@ impl Vm {
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                // Defensive pin of every heap-slot element. If the
+                // block mutates the receiver mid-iteration (`shift`
+                // / `slice!` / etc.), the snapshot's heap-Value
+                // elements lose their transitive root through the
+                // pinned receiver. They're then reachable only via
+                // the Rust-local `snapshot` Vec (and, after the
+                // first chunk flushes, via `current_chunk`) which
+                // scan_roots can't see. The next `maybe_gc()` —
+                // either inside `step_block` or at the chunk-flush
+                // alloc below — would sweep them. Same family as
+                // the chunk / group_by defensive snapshot pins
+                // earlier in this file. Narrowed via
+                // `is_gc_heap_ref` so immediate / Rc-shared
+                // variants don't grow the pinned-roots set.
+                //
+                // Once snapshot elements are pinned, `current_chunk`'s
+                // `pair[1].clone()` pushes point at the same ObjIds
+                // and inherit the pin; no separate per-element
+                // current_chunk pin is needed.
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() {
+                        g.pin(v.clone());
+                    }
+                }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
@@ -2064,8 +2088,14 @@ impl Vm {
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
-                    g.pin(key.clone());
-                    g.pin(v.clone());
+                    // Narrowed via `is_gc_heap_ref`: only pin
+                    // GC-managed heap variants. `maybe_gc` clones
+                    // every `vm.pinned` entry into the marking
+                    // root set; blanket-pinning every key+v even
+                    // when they're immediates / Rc-shared variants
+                    // adds O(n) GC scan work for no safety benefit.
+                    if key.is_gc_heap_ref() { g.pin(key.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
                     pairs.push((key, v));
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
@@ -2326,11 +2356,14 @@ impl Vm {
                         BlockStep::Value(r) => r,
                     };
                     // Pin each accumulated triple component so the
-                    // next iter's invoke_block (which may GC) can't
-                    // sweep them.
-                    g.pin(key.clone());
-                    g.pin(k.clone());
-                    g.pin(v.clone());
+                    // next iter's step_block (which may GC) can't
+                    // sweep them. Narrowed via `is_gc_heap_ref` to
+                    // skip immediate / Rc-shared variants — those
+                    // aren't GC-managed and pinning them only adds
+                    // GC scan work.
+                    if key.is_gc_heap_ref() { g.pin(key.clone()); }
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
                     keyed.push((key, k, v));
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
@@ -2390,8 +2423,12 @@ impl Vm {
                     };
                     let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     let pair = Value::Array(pid);
+                    // `pair` is always a fresh heap Array → always
+                    // needs pinning. `group` is block-returned and
+                    // may be immediate / Rc-shared; narrow via
+                    // `is_gc_heap_ref` to skip the GC scan cost.
                     g.pin(pair.clone());
-                    g.pin(group.clone());
+                    if group.is_gc_heap_ref() { g.pin(group.clone()); }
                     let pos = buckets.iter().position(|(gk, _)| gk.ruby_eql(&group, &g.vm.heap));
                     match pos {
                         Some(p) => buckets[p].1.push(pair),
