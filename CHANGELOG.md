@@ -6,42 +6,73 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
-### Changed
-- **Wasm cold start optimised via `wizer` pre-init.** Adds a wizer
-  layer to the perf-gate build pipeline (raw .wasm → wasm-opt -Oz
-  → wizer → wasm-opt -Oz → wasmtime compile → .cwasm) and an
-  exported `wizer.initialize` function that pre-builds a default
-  Runtime (class registrations + preamble bytecode load). At
-  invocation time `main()` consumes the snapshotted Runtime via
-  `rubyrs::take_wizer_runtime()` and applies the host Config on
-  top. Local M-series cold start drops ~0.5 ms (7.6 → 7.2 ms,
-  ~5% relative at sub-10 ms scale). The wizer layer is OPTIONAL
-  in `perf/wasm_check.sh` (falls back gracefully when wizer
-  isn't installed); CI installs the v11.0.3 release tarball
-  with sha256 verification.
-- **Wasi env-var bypass.** Switched `crates/rubyrs/src/main.rs` to
-  read `wasi_snapshot_preview1::environ_get` directly via FFI
-  instead of `std::env::vars()`. The Rust std path reads from
-  wasi-libc's `__environ` global, which wizer snapshots BEFORE
-  the C runtime populates it with the user-provided env — so
-  `env::vars()` returns empty on wizer'd builds even when
-  `wasmtime run --env=KEY=VAL` is used. The direct syscall
-  hits the wasi import fresh on each `_start`, making env
-  propagation work identically pre- and post-wizer. Defensive
-  even on non-wizer'd builds; same behaviour, different
-  read path.
-- **Wasm perf gate now measures AOT-precompiled `.cwasm`** instead
-  of raw `.wasm` + per-run JIT. `perf/wasm_check.sh`'s build prelude
-  runs `wasm-opt -Oz` (optional; install `binaryen` to enable the
-  ~21% size pass) → `wasmtime compile` → measures via `wasmtime run
-  --allow-precompiled`. `startup_floor.rb` budget tightened
-  300 ms → 100 ms now that JIT cost is eliminated up front. The
-  ~7 ms cwasm cold start beats raw-`.wasm` (12.7 ms) and CRuby
-  (~78 ms) on the same Mac. Build artifacts live in a per-invocation
-  `mktemp -d` (cleaned via trap on EXIT/INT/TERM); `.cwasm` is host-
-  arch + wasmtime-version specific so it's NOT a shipping artifact.
-  Raw-`.wasm` numbers in README and BENCHMARKS.md kept alongside
-  the new cwasm column for shipping-shape clarity.
+### Release highlights
+
+The first tagged release of rubyrs — an embeddable Ruby 3.4
+interpreter built for safe evaluation of untrusted scripts inside
+a host process. Headlines:
+
+- **Substantial Ruby 3.4 Tier 1 surface**: numerics (Int / Float /
+  BigInt), strings, arrays, hashes, ranges, blocks, exceptions,
+  classes / modules / mixins / `singleton_class`, regex, exceptions
+  + `rescue` hierarchy walk, `method_missing` / `define_method` /
+  `attr_accessor`. 229+ `diff_cruby` fixtures lock byte-identical
+  stdout against MRI; embed tests cover the host-facing API. See
+  the `### Added` section below for the complete inventory.
+- **Untrusted-input safety model** (ADR 0008): every workload gets
+  a configurable cap on fuel (instruction count), heap object
+  count, frame depth, wall-clock deadline, interner size, and
+  per-value byte size. Caps default to "unlimited" for trusted
+  embed; `Config::fuel = Some(N)` / friends are the opt-in. A
+  cap trap surfaces as `ResourceExhausted` — deliberately
+  `< Exception` (not `< StandardError`) so a bare `rescue` can't
+  swallow it.
+- **Deterministic-by-default capabilities** (ADR 0017): `Time.now` /
+  `Random.new` / `SecureRandom.seed=` / `ENV` / `$$` /
+  `Runtime::set_stdout` are all explicitly host-injected via
+  `Config`. With no injection, scripts get a `RuntimeError`
+  pointing at the missing capability — no silent leak of the
+  host's wall clock, entropy, env, or pid. The CLI binary
+  `rubyrs` wires every capability through; library embedders
+  inherit nothing by default.
+- **CRuby C-extension compatibility** (Spike L0–L3): real
+  `rb_funcallv` + handle-translation bridge via `dlopen`.
+  msgpack-ruby, flori_json, and bcrypt all load and round-trip
+  against their published gem source unchanged. ADR 0009 +
+  ADR 0013 document the panic / aliasing policy.
+- **Wasm cold start < 10 ms**: `wasm32-wasip1` build with
+  `wizer` pre-init + `wasm-opt -Oz` + AOT-precompiled `.cwasm`
+  starts in ~7 ms on Apple Silicon (vs CRuby's ~78 ms). The
+  wasi env-var bypass + raw `environ_get` syscall keeps
+  `wasmtime run --env=KEY=VAL` working post-wizer.
+- **Performance vs CRuby's interpreter**: 1M-fizzbuzz at
+  0.44 s (~2.3× of `ruby --disable-gems`) and ~5× lighter
+  peak RSS, both on the same M-series Mac. Bench corpus and
+  baselines live in `perf/` with a CI ratchet so regressions
+  surface in the PR that introduced them.
+- **Embeddable API** (`Runtime` / `Config` / `register_fn` /
+  `set_stdout` / `eval` / `format_trap`): host fns can be
+  registered as Ruby toplevel methods, stdout routes to any
+  `impl Write`, traps cross the embedding boundary as
+  `RubyError` variants whose `is(class_name)` / `is_a(class_name)`
+  predicates lift the script's exception class name into a
+  Rust-side check (with hierarchy walk against the built-in
+  Tier 1 exception tree).
+- **ADR-driven architecture**: 17+ Architecture Decision
+  Records in `docs/adr/` documenting design choices
+  (worktree migration, untrusted-input caps, cext panic policy,
+  Tier 1 deterministic boundary, BigInt placement, …).
+  The interpreter is split into a 20-file `vm/*.rs` module
+  set, each mirroring a CRuby compilation unit
+  (`string.c` → `vm/string.rs`, etc.) — see `ARCHITECTURE.md`.
+- **CI ratchets**: per-file panic budget (no `.unwrap()` /
+  `.expect()` / `panic!` regression allowed silently),
+  per-workload peak-RSS budget, miri smoke for the cext
+  re-entrance aliasing pattern, `wasm32-wasip1` build green,
+  `-D warnings` clippy enforced.
+
+The detailed log below is append-order within each section. For
+breaking-change semantics, see the `### Changed` entries.
 
 ### Added
 - **`String#unpack1(fmt)` — first-element shorthand for
@@ -912,6 +943,42 @@ won't be fixed until we have a clear use case demanding parity.
 - `CHANGELOG.md` and `CONTRIBUTING.md`
 
 ### Changed
+- **Wasm cold start optimised via `wizer` pre-init.** Adds a wizer
+  layer to the perf-gate build pipeline (raw .wasm → wasm-opt -Oz
+  → wizer → wasm-opt -Oz → wasmtime compile → .cwasm) and an
+  exported `wizer.initialize` function that pre-builds a default
+  Runtime (class registrations + preamble bytecode load). At
+  invocation time `main()` consumes the snapshotted Runtime via
+  `rubyrs::take_wizer_runtime()` and applies the host Config on
+  top. Local M-series cold start drops ~0.5 ms (7.6 → 7.2 ms,
+  ~5% relative at sub-10 ms scale). The wizer layer is OPTIONAL
+  in `perf/wasm_check.sh` (falls back gracefully when wizer
+  isn't installed); CI installs the v11.0.3 release tarball
+  with sha256 verification.
+- **Wasi env-var bypass.** Switched `crates/rubyrs/src/main.rs` to
+  read `wasi_snapshot_preview1::environ_get` directly via FFI
+  instead of `std::env::vars()`. The Rust std path reads from
+  wasi-libc's `__environ` global, which wizer snapshots BEFORE
+  the C runtime populates it with the user-provided env — so
+  `env::vars()` returns empty on wizer'd builds even when
+  `wasmtime run --env=KEY=VAL` is used. The direct syscall
+  hits the wasi import fresh on each `_start`, making env
+  propagation work identically pre- and post-wizer. Defensive
+  even on non-wizer'd builds; same behaviour, different
+  read path.
+- **Wasm perf gate now measures AOT-precompiled `.cwasm`** instead
+  of raw `.wasm` + per-run JIT. `perf/wasm_check.sh`'s build prelude
+  runs `wasm-opt -Oz` (optional; install `binaryen` to enable the
+  ~21% size pass) → `wasmtime compile` → measures via `wasmtime run
+  --allow-precompiled`. `startup_floor.rb` budget tightened
+  300 ms → 100 ms now that JIT cost is eliminated up front. The
+  ~7 ms cwasm cold start beats raw-`.wasm` (12.7 ms) and CRuby
+  (~78 ms) on the same Mac. Build artifacts live in a per-invocation
+  `mktemp -d` (cleaned via trap on EXIT/INT/TERM); `.cwasm` is host-
+  arch + wasmtime-version specific so it's NOT a shipping artifact.
+  Raw-`.wasm` numbers in README and BENCHMARKS.md kept alongside
+  the new cwasm column for shipping-shape clarity.
+
 - **`Regexp` / `/pattern/` literals are now opt-in via the
   `regex` Cargo feature** ([ADR 0017](docs/adr/0017-tier1-boundary.md)
   Rule 3, PoC #2). The default `cargo install rubyrs` no
