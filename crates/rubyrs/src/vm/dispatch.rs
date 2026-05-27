@@ -1780,6 +1780,13 @@ impl Vm {
             // (applied below); the rest of the names apply to
             // all `Value::Class` receivers.
             //
+            // `class_eval` / `module_eval` added so a bare call
+            // inside a class body (`class C; class_eval(...); end`)
+            // reaches the receiver-form dispatch instead of falling
+            // through to NoMethodError, mirroring how
+            // `self.class_eval(...)` and `respond_to?(:class_eval)`
+            // already work.
+            //
             // (A future refactor could lift this list to a
             // shared `pub(crate) const &[&str]` consumed by
             // both sites — out of scope for this PR but tracked
@@ -1795,6 +1802,7 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
+                    | "class_eval" | "module_eval"
                 );
                 // `allocate` gets the same Module fence as
                 // lookup.rs's respond_to gate so bare `allocate`

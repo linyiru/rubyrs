@@ -609,6 +609,12 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
+                    // Bridge keeping the bare-call shape (inside a
+                    // class body, e.g. `class C; class_eval(...); end`)
+                    // working — the no-recv dispatch in dispatch.rs
+                    // forwards these names to receiver-form dispatch
+                    // when `self` is a Class. Keep this list in lockstep
+                    // with the bridge whitelist there.
                     | "class_eval" | "module_eval"
                 ) {
                     return true;

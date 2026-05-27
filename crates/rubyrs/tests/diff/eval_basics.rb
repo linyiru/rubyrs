@@ -160,6 +160,20 @@ rescue ArgumentError
   puts "class_eval(>3 args) → ArgumentError"
 end
 
+# --- Bare `class_eval(...)` inside a class body (no explicit
+#     receiver) reaches the receiver-form dispatch via the
+#     no-recv → receiver-form bridge. ---
+class BareCall
+  class_eval(<<~RUBY)
+    BareCall.class_eval do
+      def echo
+        "bare-call"
+      end
+    end
+  RUBY
+end
+puts BareCall.new.echo                          # bare-call
+
 # --- module_eval is an alias for class_eval (string form) ---
 class ModEvalTarget
 end
