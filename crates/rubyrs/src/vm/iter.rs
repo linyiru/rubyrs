@@ -1047,23 +1047,27 @@ impl Vm {
             //
             // DoS protection for unbounded counters (a literal
             // `(2**100).times` would run essentially forever, exactly
-            // as in CRuby) comes from the two existing per-`eval`
-            // caps, neither of which needs special-casing here:
-            //   - `Config::fuel` — decremented per dispatched op
-            //     inside `step_block`'s invoke_block path. Every
-            //     iteration calls the block, which runs at least one
-            //     op (its own return), so fuel ticks every iteration
-            //     regardless of how trivial the body is. Trips with
+            // as in CRuby) comes from the two existing runtime caps,
+            // neither of which needs special-casing here. They differ
+            // in lifecycle:
+            //   - `Config::fuel` — **per-Runtime** (one-shot).
+            //     Decremented per dispatched op inside `step_block`'s
+            //     invoke_block path; every iteration calls the block,
+            //     which runs at least one op (its own return), so fuel
+            //     ticks every iteration regardless of how trivial the
+            //     body is. NOT reset between successive `Runtime::eval`
+            //     calls — a host reusing a Runtime exhausts the budget
+            //     across all evals collectively. Trips with
             //     `ResourceExhausted: "out of fuel"`.
-            //   - `Config::deadline` — wall-clock cap, checked every
-            //     1024 ops by `vm/gc.rs::check_fuel`. The deadline
-            //     check is unconditional (runs on every op
-            //     regardless of whether `Config::fuel` is set); it
-            //     shares the same `check_fuel` function as the fuel
-            //     decrement only because both fire on the same op
-            //     cadence (and bundling lets `Instant::now()` —
-            //     which is a syscall on most platforms — amortise
-            //     to once per 1024 ops). Trips with
+            //   - `Config::deadline` — **per-eval**. The stored value
+            //     is a `Duration` (not an Instant), so each
+            //     `Runtime::eval` recomputes the absolute
+            //     `Instant::now() + duration` at entry; the budget
+            //     restarts every call. The check itself lives in
+            //     `vm/gc.rs::check_fuel` and runs unconditionally
+            //     every 1024 ops (sharing the function with fuel only
+            //     for cadence reasons — one `Instant::now()` syscall
+            //     per 1024 ops). Trips with
             //     `ResourceExhausted: "wall-clock deadline exceeded"`.
             // A host that configures NEITHER cap accepts unbounded
             // CPU consumption as a documented trade-off (consistent

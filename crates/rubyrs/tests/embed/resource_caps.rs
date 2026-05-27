@@ -450,15 +450,23 @@ fn integer_iter_loops_trap_under_fuel_cap() {
     // Without fuel, ops never decrement; with fuel set, the
     // loop trips after a bounded number of iterations regardless
     // of the receiver's magnitude.
+    // Each script has a fail-fast break at iteration 1_000_000.
+    // The break is well above the fuel-trip horizon (10_000 fuel
+    // ÷ ~5 ops per iteration ≈ 2_000 iterations max), so it's
+    // dead code when fuel works correctly. If the fuel guard
+    // ever regresses, the test still terminates within a few
+    // seconds instead of hanging the test suite indefinitely —
+    // CI fails fast with an assertion miss rather than a
+    // wall-clock timeout.
     for script in [
         // BigInt-recv iter arms (Phase B.6)
-        "(2 ** 100).times { }",
-        "(2 ** 80).upto(2 ** 100) { }",
-        "(2 ** 100).downto(0) { }",
+        "i = 0; (2 ** 100).times { i += 1; break if i > 1_000_000 }",
+        "i = 0; (2 ** 80).upto(2 ** 100) { i += 1; break if i > 1_000_000 }",
+        "i = 0; (2 ** 100).downto(0) { i += 1; break if i > 1_000_000 }",
         // Int-recv iter arms with very large bounds
-        "0.upto(1_000_000_000_000) { }",
-        "1_000_000_000_000.downto(0) { }",
-        "1_000_000.times { sleep_loop = 1 }",
+        "i = 0; 0.upto(1_000_000_000_000) { i += 1; break if i > 1_000_000 }",
+        "i = 0; 1_000_000_000_000.downto(0) { i += 1; break if i > 1_000_000 }",
+        "i = 0; 10_000_000.times { i += 1; break if i > 1_000_000 }",
     ] {
         let mut rt = Runtime::with_config(Config {
             fuel: Some(10_000),
