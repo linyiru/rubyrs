@@ -1911,6 +1911,34 @@ fn integer_eql_q_is_type_strict_equality() {
 }
 
 #[test]
+fn float_eql_and_hash_are_type_strict_siblings_to_integer() {
+    // Phase B.7 review: shipping `eql?`/`hash` only on Integer
+    // made the canonical `5.eql?(5.0) == false` case
+    // unexercisable from the Float side. Add the sibling methods
+    // with a distinct hash tag so `5.hash != 5.0.hash` —
+    // required by the `a.eql?(b) ⇒ a.hash == b.hash` invariant.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 5.0.eql?(5.0)\n\
+         puts 5.0.eql?(5)\n\
+         puts 5.eql?(5.0)\n\
+         puts 5.0.eql?(6.0)\n\
+         puts 5.0.eql?(\"5\")\n\
+         puts 5.0.hash == 5.0.hash\n\
+         puts 5.0.hash == 5.hash\n\
+         puts 5.0.respond_to?(:eql?)\n\
+         puts 5.0.respond_to?(:hash)",
+        "float_eql_hash.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "true\nfalse\nfalse\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue"
+    );
+}
+
+#[test]
 fn equal_q_handles_sibling_heap_variants_via_identity() {
     // Phase B.7 drive-by: `Object#equal?` mirrored its BigInt arm
     // pattern for the four other heap-allocated variants that

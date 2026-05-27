@@ -494,6 +494,7 @@ impl Vm {
                 "to_i" | "to_f" | "abs" |
                 "zero?" | "positive?" | "negative?" |
                 "nan?" | "infinite?" | "finite?" |
+                "eql?" | "hash" |
                 "floor" | "ceil" | "round" | "truncate" |
                 "-@" | "+@"
             ),

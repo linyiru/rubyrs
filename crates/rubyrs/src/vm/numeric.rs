@@ -18,10 +18,23 @@ pub(crate) fn integer_to_s_value(n: i64) -> Value {
 }
 
 /// Tag byte mixed into `Integer#hash` so all Integer-flavoured
-/// receivers (Int, BigInt) share a hash domain distinct from any
-/// other type that may later implement `#hash`. Shared between
-/// numeric.rs's Int arm and bignum.rs's BigInt arm.
+/// receivers (Int, BigInt) share a hash-domain prefix distinct
+/// from any other type that implements `#hash`. The tag alone
+/// does NOT guarantee cross-receiver collisions (Int hashes
+/// the i64 via `Hasher::write_i64`, BigInt hashes a
+/// `Vec<u8>` from `to_signed_bytes_le`, which feeds different
+/// byte sequences to the hasher); the canonical-BigInt
+/// invariant prevents `Int(n)` and `BigInt(n)` from both
+/// existing for any single `n`, so the cross-type collision
+/// case is unreachable in practice. The tag exists to keep
+/// the Integer hash domain disjoint from the Float hash domain
+/// (see [`FLOAT_HASH_TAG`]).
 pub(crate) const INT_HASH_TAG: u8 = 0x49; // 'I'
+/// Tag byte mixed into `Float#hash`. Distinct from
+/// [`INT_HASH_TAG`] so `5.hash != 5.0.hash` — required for the
+/// `a.eql?(b) ⇒ a.hash == b.hash` invariant given that
+/// `5.eql?(5.0) == false`.
+pub(crate) const FLOAT_HASH_TAG: u8 = 0x46; // 'F'
 
 /// Try the Int / Float / mixed-numeric arms. Returns
 /// `Ok(Some(v))` on a handled call, `Ok(None)` if the receiver
@@ -553,6 +566,33 @@ pub(crate) fn numeric_call(
             Some(Value::new_str_bytes(vec![n as u8]))
         }
 
+        // `Float#eql?(other)` — type-strict equality. Only true
+        // when `other` is also a Float and `==` agrees (so
+        // `NaN.eql?(NaN)` is false, matching CRuby). Lives BEFORE
+        // the broad `(Float, op, [Float])` arm so its inner-op
+        // match's `_ => None` fallthrough doesn't shadow this
+        // (same lesson as the Int#eql? placement above).
+        (Value::Float(a), "eql?", [other]) => {
+            Some(Value::Bool(match other {
+                Value::Float(b) => a == b,
+                _ => false,
+            }))
+        }
+        // `Float#hash` — within-process-stable i64. Uses a
+        // distinct tag from Integer (`'F'` vs `'I'`) so
+        // `5.0.hash != 5.hash` — required by the
+        // `a.eql?(b) ⇒ a.hash == b.hash` invariant given
+        // `5.eql?(5.0) == false`. Hashes the f64 bit pattern
+        // (via `to_bits()`) because f64 doesn't implement `Hash`
+        // (NaN != NaN under `==`); bit-pattern hashing makes
+        // distinct NaN payloads hash distinctly.
+        (Value::Float(a), "hash", []) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            FLOAT_HASH_TAG.hash(&mut h);
+            a.to_bits().hash(&mut h);
+            Some(Value::Int(h.finish() as i64))
+        }
         // Float × Float
         (Value::Float(a), op, [Value::Float(b)]) => match op {
             "+" => Some(Value::Float(a + b)),
