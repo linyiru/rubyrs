@@ -72,7 +72,7 @@ surface.
 | # | File / line | Symbol | Category | Notes |
 |---|---|---|---|---|
 | 7 | `sinatra/base.rb:260` | `Rack::CommonLogger`, `Rack::NullLogger`, `Rack::Head`, `Rack::MethodOverride`, `Rack::Lint`, `Rack::ConditionalGet`, `Rack::Static`, `Rack::Builder` | Project shape | Sinatra defines middleware subclasses of these — embedder must stub each before the require. Same shape as the pass-7 `Rack::Request` row. |
-| 8 | `sinatra/base.rb:265` | bare `superclass` call inside class body | **Real bug** | `class Bar < Foo; superclass.class_eval { ... }; end` raises `NoMethodError: undefined method 'superclass' for Class`, even though `self.superclass` works inside the same body. Bare-call resolution inside a class body apparently routes builtin Class methods through a different path than user `def self.x` methods (the same body resolves user-defined class methods with no `self.` prefix correctly). Minimal repro is 4 lines. |
+| 8 | `sinatra/base.rb:265` | bare `superclass` call inside class body | **Real bug** | `class Bar < Foo; superclass.class_eval { ... }; end` raises `NoMethodError: undefined method 'superclass' for Class`, even though `self.superclass` works inside the same body. Bare-call resolution inside a class body apparently routes built-in Class methods through a different path than user `def self.x` methods (the same body resolves user-defined class methods with no `self.` prefix correctly). Minimal repro is 4 lines. |
 
 ### Minimal repro for layer #8
 
