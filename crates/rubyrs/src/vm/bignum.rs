@@ -185,9 +185,15 @@ impl Vm {
                 // same Float bit pattern. Compare the BigInt against
                 // a BigInt converted FROM the float (exact when the
                 // float is integral; pre-rejected when fractional).
-                // Lt/Le/Gt/Ge have the same precision-loss issue —
-                // tracked as a follow-up; the demote path below
-                // preserves their existing (buggy) behavior.
+                //
+                // TODO(bigint-cmp-float-precision): Lt/Le/Gt/Ge have
+                // the same precision-loss issue — `(2**64 + 1) >
+                // (2**64).to_f` currently returns false because both
+                // sides collapse to the same f64. The demote path
+                // below preserves the buggy behavior. Fix involves
+                // trickier semantics (NaN: CRuby raises ArgumentError
+                // for `<=>` but returns false for `<`); deferred to
+                // a follow-up. Grep this tag.
                 if matches!(kind, BinOpKind::Eq | BinOpKind::Ne) {
                     // The outer "at least one is BigInt" guard plus
                     // this "at least one is Float" guard mean exactly

@@ -1315,7 +1315,7 @@ fn bigint_eq_float_is_lossless() {
          inf = 1.0 / 0.0\n\
          puts (2**64) == (2**64).to_f         # true (Float-exact)\n\
          puts (2**64 + 1) == (2**64).to_f     # false (precision)\n\
-         puts (2**64) == (2**64 + 1).to_f     # true (RHS rounds down to 2**64 via ties-to-even)\n\
+         puts (2**64) == (2**64 + 1).to_f     # true (RHS: 2**64+1 is exactly halfway between two f64s with gap 2; round-to-nearest-even picks the even-mantissa neighbor → 2**64)\n\
          puts (2**64).to_f == (2**64 + 1)     # false (Float side is 2**64, not 2**64+1)\n\
          puts (2**64) == nan                  # false (NaN)\n\
          puts (2**64) == inf                  # false (+inf)\n\
