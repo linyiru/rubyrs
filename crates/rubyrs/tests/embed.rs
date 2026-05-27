@@ -2837,6 +2837,31 @@ fn bigint_shift_left_dos_cap_uses_exact_int_bit_length() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_responds_to_bit_op_names_matches_dispatch() {
+    // Regression for PR #159 cycle 2: `Vm::responds_to`'s BigInt
+    // whitelist must include every method `bigint_primitive` can
+    // dispatch — otherwise `big.respond_to?(:<<)` returns false
+    // even though the call succeeds, breaking pure-Ruby code that
+    // gates on respond_to?. Phase B.3 adds `~`, `& | ^`, `<< >>`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "b = 2 ** 100\n\
+         puts b.respond_to?(:~)\n\
+         puts b.respond_to?(:&)\n\
+         puts b.respond_to?(:|)\n\
+         puts b.respond_to?(:^)\n\
+         puts b.respond_to?(:<<)\n\
+         puts b.respond_to?(:>>)",
+        "bigint_responds_to_bit_ops.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    assert_eq!(out.trim(), "true\ntrue\ntrue\ntrue\ntrue\ntrue");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn int_shift_zero_receiver_never_traps_regardless_of_count() {
     // Regression for PR #159 cycle 2: `0 << anything == 0` and
     // `0 >> anything == 0` in Ruby — should never allocate, never
