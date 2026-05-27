@@ -1937,6 +1937,30 @@ impl Vm {
         self.stack.push(Value::Class(m));
         return Ok(ClassOutcome::Handled);
     }
+    // `Module#define_method(:name)` called WITHOUT a block (and
+    // not via the 2-arg Proc form — rubyrs Tier-1 doesn't yet
+    // support `define_method(:foo, proc { … })`). CRuby raises
+    // `ArgumentError ("tried to create Proc object without a
+    // block")`; the block-form path lives in `do_call_block`'s
+    // intrinsic arm. Without this gate, the no-block call would
+    // fall through to NoMethodError, which doesn't match CRuby
+    // and means `define_method` shows up in `respond_to?` /
+    // bridge whitelists but raises the wrong error class.
+    // (PR #245 Copilot round 2 #2.)
+    if &*name == "define_method"
+        && let Value::Class(cls) = &recv
+    {
+        // Same precedence rule as the block-form arm — user
+        // override wins.
+        if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+            let recv_val = Value::Class(cls.clone());
+            self.invoke_method(m, recv_val, args)?;
+            return Ok(ClassOutcome::Handled);
+        }
+        return Err(self.trap(RubyError::ArgumentError {
+            msg: "tried to create Proc object without a block".into(),
+        }));
+    }
     if name_id == new_id
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "Hash"
@@ -2461,6 +2485,20 @@ impl Vm {
                     | "deprecate_constant"
                     | "singleton_class"
                     | "class_eval" | "module_eval"
+                    // `define_method` joins the bridge so bare
+                    // `define_method(:foo)` inside a class body
+                    // (no_recv, NO block) is forwarded to the
+                    // Value::Class(cls) recv form, where
+                    // `try_dispatch_class_intrinsics` raises the
+                    // CRuby-shape `ArgumentError ("tried to create
+                    // Proc object without a block")`. The block
+                    // form (`define_method(:foo) { … }`) has its
+                    // own no_recv handling in `do_call_block` and
+                    // does NOT need this bridge. Keeps the
+                    // do_call bridge whitelist in lockstep with
+                    // lookup.rs's respond_to whitelist (PR #245
+                    // Copilot round 2 #1).
+                    | "define_method"
                 );
                 // `allocate` gets the same Module fence as
                 // lookup.rs's respond_to gate so bare `allocate`

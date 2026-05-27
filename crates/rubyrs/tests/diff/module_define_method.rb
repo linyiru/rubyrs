@@ -122,3 +122,35 @@ class DefReturn
   RESULT = result
 end
 puts "def-return=#{DefReturn::RESULT.inspect}"
+
+## No-block call shapes raise `ArgumentError ("tried to create
+## Proc object without a block")` — matches CRuby. Pre-fix the
+## explicit-receiver no-block call fell through to
+## NoMethodError; bare no-block inside a class body did the
+## same. (PR #245 Copilot round 2 #2.)
+class NoBlock; end
+err = begin
+  NoBlock.define_method(:x)
+  "DID-NOT-RAISE"
+rescue ArgumentError => e
+  "ArgumentError: #{e.message}"
+end
+puts "explicit-no-block=#{err}"
+
+err = begin
+  NoBlock.define_method(:x, &nil)
+  "DID-NOT-RAISE"
+rescue ArgumentError => e
+  "ArgumentError: #{e.message}"
+end
+puts "explicit-nil-block=#{err}"
+
+class BareNoBlock
+  err = begin
+    define_method(:y)
+    "DID-NOT-RAISE"
+  rescue ArgumentError => e
+    "ArgumentError: #{e.message}"
+  end
+  puts "bare-no-block=#{err}"
+end
