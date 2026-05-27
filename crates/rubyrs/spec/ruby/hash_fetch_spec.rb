@@ -10,9 +10,20 @@
 
 describe "Hash#fetch" do
   it "formats the object with #inspect in the KeyError message" do
-    assert_raises("KeyError") do
+    # The description's point is the MESSAGE shape, not just the
+    # class — `assert_raises` covers the class, but we also need
+    # to inspect the message text. spec_helper.rb doesn't have a
+    # message-matcher, so capture the exception with a bare
+    # rescue and assert on `e.message` directly. Mirrors CRuby's
+    # `key not found: "foo"` wording (verified manually).
+    raised = false
+    begin
       {}.fetch('foo')
+    rescue KeyError => e
+      raised = true
+      assert_eq(e.message, 'key not found: "foo"')
     end
+    assert_eq(raised, true)
   end
 
   it "returns the value for key" do
