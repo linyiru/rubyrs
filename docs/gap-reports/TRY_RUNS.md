@@ -40,6 +40,95 @@ cargo build --release -p rubyrs
 RUBYRS_FUEL=2000000 ./target/release/rubyrs <path/to/file.rb>
 ```
 
+## Results — 2026-05-27 (eighth pass), rubyrs at `c1605c04`
+
+Eighth pass after the pass-7 Cat H + Cat I gaps were all closed:
+PR #144 (`instance_variable_get`/`set`), PR #169 (`alias` nested-
+via-path superclass), PR #176 (`Regexp#freeze`/`frozen?`), and
+PR #181 (`Class#allocate`) all landed on master between pass-7
+and this re-probe. The probe driver is unchanged in shape (same
+embedder stubs for Rack / Gem::Version / ERB), so this is a
+true apples-to-apples re-run.
+
+### What this pass shows
+
+**The pass-7 wall is gone.** The probe now executes past pass-7's
+line 64 stop point and lands at `sinatra/base.rb:260` — a 4×
+linear advance through `<class:Sinatra>` body. New layers
+surface in the section that runs after `class Request <
+Rack::Request` finishes loading: middleware definitions
+(`class CommonLogger < Rack::CommonLogger`), more
+embedder-shape Rack constants, and one new Cat I bug.
+
+The 4 layers pass-7 documented as Cat H / Cat I (`instance_
+variable_get`, `Class#allocate`, `Regexp#freeze`, nested-alias)
+are now silent — the probe walks past every one of them
+without trace. This is the expected outcome of those PRs but
+worth pinning explicitly: zero regressions on the closed
+surface.
+
+### Stacked blockers found this pass
+
+| # | File / line | Symbol | Category | Notes |
+|---|---|---|---|---|
+| 7 | `sinatra/base.rb:260` | `Rack::CommonLogger`, `Rack::NullLogger`, `Rack::Head`, `Rack::MethodOverride`, `Rack::Lint`, `Rack::ConditionalGet`, `Rack::Static`, `Rack::Builder` | Project shape | Sinatra defines middleware subclasses of these — embedder must stub each before the require. Same shape as the pass-7 `Rack::Request` row. |
+| 8 | `sinatra/base.rb:265` | bare `superclass` call inside class body | **Real bug** | `class Bar < Foo; superclass.class_eval { ... }; end` raises `NoMethodError: undefined method 'superclass' for Class`, even though `self.superclass` works inside the same body. Bare-call resolution inside a class body apparently routes builtin Class methods through a different path than user `def self.x` methods (the same body resolves user-defined class methods with no `self.` prefix correctly). Minimal repro is 4 lines. |
+
+### Minimal repro for layer #8
+
+```ruby
+class Foo; end
+class Bar < Foo
+  superclass.class_eval do      # NoMethodError: undefined method `superclass' for Class
+    def hi; "from-Foo"; end
+  end
+end
+```
+
+`self.superclass.class_eval` works. User `def self.greet` is also
+reachable as a bare call from a subclass body (verified). The
+divergence is specific to **built-in `Class` methods** invoked
+bare from inside a class body whose implicit receiver is the
+class itself — likely a small fix in the bare-call dispatch
+path (the same one PR #169 closed for `alias` in nested
+contexts, possibly the same code site).
+
+### What this tells us
+
+**Pass-8 found 2 fresh layers** vs pass-7's 6 layers, even
+though we now execute through ~4× as many lines of base.rb.
+The shape that remains is roughly stable: 1 batch of
+embedder-shape Cat F middleware constants, then 1 real bug.
+This is consistent with the pass-7 prediction ("each base.rb
+section likely exposing 2-3 more layers down the same shape").
+
+If sinatra hosting ever becomes a roadmap item (it currently
+isn't, per [ROADMAP.md](../ROADMAP.md)), this pass suggests
+~4-6 more rounds of probe-fix-probe would carry the require
+chain through the rest of base.rb — comparable in scope to
+the pass-5–7 wave for `tilt/string.rb`.
+
+### Cumulative category histogram (sinatra/base.rb body, this pass)
+
+| Category | This pass | Notes |
+|---|---:|---|
+| Cat B (require) | 0 | Still handled by PR #135 fallback |
+| Cat F (project shape) | 1 batch | Rack middleware constants (8 classes in one row, sinatra/base.rb:260) |
+| Cat H (real built-in / runtime gap) | 0 | All pass-7 Cat H items closed; none surfaced this pass |
+| Cat I (real bug) | 1 | Bare `superclass` inside class body (row 8) |
+
+### Concrete next moves the data suggests
+
+1. **Fix layer #8** — bare-call to built-in `Class` methods from
+   inside a class body. Minimal repro above; expected scope is
+   small (single dispatch arm or bare-call resolver). Closes the
+   only Cat H / Cat I gap this pass surfaced. Tier 1.
+2. **Continue iterating** if further pass-8+ probes are desired —
+   the next stop after layer #8 will be inside one of the eight
+   middleware class bodies the embedder is required to stub.
+
+---
+
 ## Results — 2026-05-26 late (seventh pass), rubyrs at `2fd14d7`
 
 Seventh pass after PR #135 (`require` fallback for embedder-pre-
