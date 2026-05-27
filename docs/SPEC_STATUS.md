@@ -30,8 +30,9 @@ Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
 hook-form `before-not-lifted` / `after-not-supported`). Specs may also
 introduce manually-authored categories — e.g. `divergent` marks a block
 rubyrs runs but with intentionally-different observable behavior.
-Find blocks unlocked by a future feature with e.g. `git grep "# skipped
-(method-not-implemented)"`.
+
+Find blocks unlocked by a future feature with e.g.
+`git grep "# skipped (method-not-implemented)"`.
 
 ## By class
 
