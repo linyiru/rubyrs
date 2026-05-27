@@ -385,6 +385,16 @@ impl Vm {
             (Value::Array(id), "first" | "last", _) => {
                 return self.array_collection_call(*id, name, args);
             }
+            // Same shape for `Range#first / #last` (and arity-1
+            // forms). PR #146 added the arity-1 arms only to the
+            // non-block dispatcher (`range_collection_call`),
+            // reopening the gap PR #140 closed for Array.
+            // `(1..5).first(2) { ... }` would otherwise fall
+            // through to NoMethodError; CRuby silently ignores
+            // the block.
+            (Value::Range(id), "first" | "last", _) => {
+                return self.range_collection_call(*id, name, args);
+            }
             (Value::Array(id), "each", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));

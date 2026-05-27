@@ -89,3 +89,13 @@ puts (..5).last.inspect                    # 5
 puts (1..5).first.inspect                  # 1
 puts (1..5).last.inspect                   # 5
 puts (1..).first.inspect                   # 1
+
+# Block attached — CRuby silently discards (first/last don't
+# yield). Without a delegating arm in vm/iter.rs's block-aware
+# dispatcher, these would NoMethodError as #146 originally
+# shipped. Same pattern as the Array fix in #140.
+puts((1..5).first(2) { puts "should-never-run" }.inspect)  # [1, 2]
+puts((1..5).last(2)  { puts "should-never-run" }.inspect)  # [4, 5]
+puts((1..5).first    { puts "should-never-run" }.inspect)  # 1
+puts((1..5).last     { puts "should-never-run" }.inspect)  # 5
+puts((1..).first(3)  { puts "should-never-run" }.inspect)  # [1, 2, 3]
