@@ -232,7 +232,7 @@ impl Vm {
                 let resolved = self.interner.resolve(*id).clone();
                 if !is_valid_ivar_name(&resolved) {
                     return Err(self.trap(RubyError::NameError {
-                        msg: format!("`{}' is not allowed as an instance variable name", resolved),
+                        msg: format!("'{}' is not allowed as an instance variable name", resolved),
                     }));
                 }
                 Ok(*id)
@@ -241,7 +241,7 @@ impl Vm {
                 let raw = s.to_string_lossy();
                 if !is_valid_ivar_name(&raw) {
                     return Err(self.trap(RubyError::NameError {
-                        msg: format!("`{}' is not allowed as an instance variable name", raw),
+                        msg: format!("'{}' is not allowed as an instance variable name", raw),
                     }));
                 }
                 if let Some(max) = self.max_symbols
@@ -2593,9 +2593,10 @@ impl Vm {
                     return Ok(());
                 }
                 _ => {
+                    let cls = crate::vm::numeric::type_name_for_coerce(&recv);
                     let inspected = recv.to_inspect(&self.heap, &self.interner);
                     return Err(self.trap(RubyError::FrozenError {
-                        msg: format!("can't modify frozen {}", inspected),
+                        msg: format!("can't modify frozen {}: {}", cls, inspected),
                     }));
                 }
             }

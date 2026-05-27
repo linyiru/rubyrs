@@ -38,19 +38,20 @@ b.instance_variable_set(:@newcomer, "hello")
 puts "newcomer=#{b.instance_variable_get(:@newcomer)}"
 
 ## Name validation: a Symbol/String without `@` prefix is
-## rejected with NameError (CRuby raises
-## `NameError: '<name>' is not allowed as an instance variable name`).
+## rejected with NameError. Pin class + message so a change to
+## CRuby's text format (or a divergence on rubyrs's side) trips
+## the diff.
 begin
   b.instance_variable_get(:foo)
   puts "no-prefix-get=NOT-RAISED"
 rescue NameError => e
-  puts "no-prefix-get=#{e.class}"
+  puts "no-prefix-get=#{e.class}: #{e.message}"
 end
 begin
   b.instance_variable_set(:foo, 1)
   puts "no-prefix-set=NOT-RAISED"
 rescue NameError => e
-  puts "no-prefix-set=#{e.class}"
+  puts "no-prefix-set=#{e.class}: #{e.message}"
 end
 
 ## Type validation: non-Symbol-non-String args raise TypeError
@@ -89,7 +90,7 @@ end
     b.instance_variable_get(bad)
     puts "bad-name-get(#{bad})=NOT-RAISED"
   rescue NameError => e
-    puts "bad-name-get(#{bad})=#{e.class}"
+    puts "bad-name-get(#{bad})=#{e.class}: #{e.message}"
   end
 end
 
@@ -126,7 +127,7 @@ begin
   42.instance_variable_set(:@x, 1)
   puts "int-set=NOT-RAISED"
 rescue FrozenError => e
-  puts "int-set=#{e.class}"
+  puts "int-set=#{e.class}: #{e.message}"
 end
 
 ## Wrong-arity: CRuby raises ArgumentError with the standard
