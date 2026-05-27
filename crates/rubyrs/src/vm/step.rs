@@ -1756,7 +1756,7 @@ impl Vm {
                         self.stack.push(v);
                     } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b_val), self.max_value_bytes).map_err(|e| self.trap(e))? {
                         self.stack.push(v);
-                    } else if let Some(v) = self.sym_primitive(&a, kind.name(), std::slice::from_ref(&b_val)) {
+                    } else if let Some(v) = self.sym_primitive(&a, kind.name(), std::slice::from_ref(&b_val))? {
                         self.stack.push(v);
                     } else {
                         self.stack.push(a);
