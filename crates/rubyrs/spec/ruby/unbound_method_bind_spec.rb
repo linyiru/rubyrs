@@ -1,10 +1,8 @@
 # Adapted from ruby/spec core/unboundmethod/bind_spec.rb at
 # upstream commit 448cb340 (2026-05). Hand-translated — the
 # basic "bind returns a callable Method on the new receiver"
-# shape is inlined. The TypeError-on-incompatible-class block
-# is dropped — rubyrs's bind currently soft-fails (returns nil
-# on the dispatch result) rather than raising TypeError, a
-# divergence noted in the skip trace below.
+# shape is inlined, plus the "raises TypeError on incompatible
+# receiver" assertion.
 
 describe "UnboundMethod#bind" do
   it "returns a Method bound to the given receiver" do
@@ -33,12 +31,24 @@ describe "UnboundMethod#bind" do
     assert_eq(u.bind(UBindT3Sub.new).call, :base)
   end
 
-  # skipped (divergent): it "raises TypeError when receiver is incompatible" do
-  #   CRuby raises TypeError when binding an UnboundMethod to a
-  #   receiver whose class isn't `<= owner`. rubyrs currently
-  #   returns nil on the dispatch result rather than raising;
-  #   tracked as a divergent gap.
+  it "raises TypeError when receiver is incompatible" do
+    class UBindT4Lhs
+      def f; :ok; end
+    end
+    class UBindT4Rhs
+    end
+    u = UBindT4Lhs.instance_method(:f)
+    raised = false
+    begin
+      u.bind(UBindT4Rhs.new)
+    rescue TypeError
+      raised = true
+    end
+    assert_eq(raised, true)
+  end
+
   # skipped (method-not-implemented): describe "UnboundMethod#bind_call" do ... end
-  #   bind_call is implemented (PR #205) but covered in its own
-  #   spec file rather than inlined here.
+  #   `UnboundMethod#bind_call` is not in the subset; calling
+  #   `u.bind_call(recv, *args)` raises NoMethodError. Tracked
+  #   for a future batch alongside the `Method#bind_call` gap.
 end

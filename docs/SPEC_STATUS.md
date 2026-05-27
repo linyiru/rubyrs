@@ -13,16 +13,16 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 90 |
-| Examples in corpus | 413 |
-| Skipped `it` traces | 147 |
+| Examples in corpus | 416 |
+| Skipped `it` traces | 144 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 8 |
+| `divergent` | 7 |
 | `fixture` | 48 |
-| `method-not-implemented` | 79 |
+| `method-not-implemented` | 77 |
 | `mock` | 12 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -42,10 +42,10 @@ Find blocks unlocked by a future feature with e.g.
 | BasicObject | 3 | 15 | 0 |
 | Hash | 19 | 46 | 38 |
 | Integer | 20 | 161 | 18 |
-| Method | 11 | 51 | 5 |
+| Method | 11 | 53 | 3 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
-| UnboundMethod | 3 | 13 | 2 |
+| UnboundMethod | 3 | 14 | 1 |
 
 ## Files
 
@@ -121,9 +121,9 @@ Find blocks unlocked by a future feature with e.g.
 | `method_owner_spec.rb` | Method#owner | `core/method/owner_spec.rb` | 4 | 0 |
 | `method_parameters_spec.rb` | Method#parameters | `core/method/parameters_spec.rb` | 6 | 2 |
 | `method_receiver_spec.rb` | Method#receiver | `core/method/receiver_spec.rb` | 4 | 0 |
-| `method_source_location_spec.rb` | Method#source_location | `core/method/source_location_spec.rb` | 1 | 1 |
+| `method_source_location_spec.rb` | Method#source_location | `core/method/source_location_spec.rb` | 2 | 0 |
 | `method_to_proc_spec.rb` | Method#to_proc | `core/method/to_proc_spec.rb` | 7 | 0 |
-| `method_unbind_spec.rb` | Method#unbind | `core/method/unbind_spec.rb` | 3 | 1 |
+| `method_unbind_spec.rb` | Method#unbind | `core/method/unbind_spec.rb` | 4 | 0 |
 | `singleton_method_spec.rb` | def obj.name | `core/basicobject/singleton_method_spec.rb + core/kernel/define_singleton_method_spec.rb` | 7 | 0 |
 | `string_chars_spec.rb` | String#chars | `core/string/chars_spec.rb + shared/chars.rb` | 2 | 3 |
 | `string_empty_spec.rb` | String#empty? | `core/string/empty_spec.rb` | 5 | 0 |
@@ -139,6 +139,6 @@ Find blocks unlocked by a future feature with e.g.
 | `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 2 | 6 |
 | `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 8 | 0 |
 | `unbound_method_arity_spec.rb` | UnboundMethod#arity | `core/unboundmethod/arity_spec.rb` | 4 | 0 |
-| `unbound_method_bind_spec.rb` | UnboundMethod#bind | `core/unboundmethod/bind_spec.rb` | 3 | 2 |
+| `unbound_method_bind_spec.rb` | UnboundMethod#bind | `core/unboundmethod/bind_spec.rb` | 4 | 1 |
 | `unbound_method_equal_spec.rb` | Class#instance_method / Method#unbind | `core/unboundmethod/equal_value_spec.rb` | 6 | 0 |
 

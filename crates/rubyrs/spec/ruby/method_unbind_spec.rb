@@ -28,8 +28,10 @@ describe "Method#unbind" do
     assert_eq(UnbT3.new.method(:f).unbind.arity, 2)
   end
 
-  # skipped (method-not-implemented): it "preserves the owner Module" do
-  #   `UnboundMethod#owner` works, but pinning identity across
-  #   the unbind round-trip needs `Module#==` semantics already
-  #   exercised in method_owner_spec.rb; out of subset here.
+  it "preserves the owner Module across unbind" do
+    class UnbT4
+      def f; end
+    end
+    assert_eq(UnbT4.new.method(:f).unbind.owner == UnbT4, true)
+  end
 end
