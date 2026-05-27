@@ -2201,11 +2201,16 @@ impl Vm {
                 }));
             }
             let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
-            let filename = match args.get(1) {
-                Some(Value::Str(f)) => f.to_string_lossy(),
-                _ => "(class_eval)".to_string(),
+            // Track whether the filename is our synthetic default
+            // or caller-supplied. Only the synthetic case opts
+            // into the source-table collision-suffix dedupe; an
+            // explicit user filename should stay verbatim across
+            // repeated calls so `__FILE__` is stable.
+            let (filename, synthetic) = match args.get(1) {
+                Some(Value::Str(f)) => (f.to_string_lossy(), false),
+                _ => ("(class_eval)".to_string(), true),
             };
-            let v = self.eval_string(&src, &filename)?;
+            let v = self.eval_string(&src, &filename, synthetic)?;
             if self.suppress_call_result_push {
                 self.suppress_call_result_push = false;
             } else {

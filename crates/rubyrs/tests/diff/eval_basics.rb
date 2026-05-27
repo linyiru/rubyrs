@@ -82,6 +82,18 @@ end
 puts OverrideClassEval.class_eval("ignored")    # override:ignored
 
 # --- No-arg, no-block class_eval/module_eval raises ArgumentError
+#     User explicitly passing the literal default label `(eval)`
+#     / `(class_eval)` as a filename should NOT trigger the
+#     source-table suffix uniquify — `__FILE__` must stay stable
+#     across repeated calls. The synthetic-vs-explicit
+#     distinction is what eval_string's `synthetic` flag tracks.
+puts eval("__FILE__", nil, "(eval)")            # (eval)
+puts eval("__FILE__", nil, "(eval)")            # (eval) — NOT (eval):2
+class ExplicitDefault
+end
+puts ExplicitDefault.class_eval("__FILE__", "(class_eval)")   # (class_eval)
+puts ExplicitDefault.class_eval("__FILE__", "(class_eval)")   # (class_eval) — NOT (class_eval):2
+
 #     (not NoMethodError) since respond_to? advertises the method.
 class NoArgs
 end

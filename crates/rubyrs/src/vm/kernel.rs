@@ -778,13 +778,13 @@ impl Vm {
                 }
                 [Value::Str(src)] => {
                     let owned = src.to_string_lossy();
-                    Some(self.eval_string(&owned, "(eval)"))
+                    Some(self.eval_string(&owned, "(eval)", /*synthetic=*/true))
                 }
                 // Common 2-arg shape: `eval(src, binding)` — drop
                 // binding silently per the documented divergence.
                 [Value::Str(src), _binding] => {
                     let owned = src.to_string_lossy();
-                    Some(self.eval_string(&owned, "(eval)"))
+                    Some(self.eval_string(&owned, "(eval)", /*synthetic=*/true))
                 }
                 // 3-arg / 4-arg with filename: validate file arg
                 // type FIRST (CRuby raises TypeError, not
@@ -820,7 +820,10 @@ impl Vm {
                 | [Value::Str(src), _binding, Value::Str(file), _] => {
                     let owned = src.to_string_lossy();
                     let fname = file.to_string_lossy();
-                    Some(self.eval_string(&owned, &fname))
+                    // `synthetic=false`: caller supplied the
+                    // filename explicitly. Pass through to keep
+                    // `__FILE__` stable across repeated evals.
+                    Some(self.eval_string(&owned, &fname, /*synthetic=*/false))
                 }
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
@@ -1428,10 +1431,18 @@ impl Vm {
     ///   block-form `class_eval do def ... end end`, so its
     ///   defs land correctly via the existing block-form path
     ///   in `dispatch.rs`. Documented in docs/SUBSET.md.
+    /// `synthetic` distinguishes our own default labels (`(eval)` /
+    /// `(class_eval)`) from caller-supplied filenames. Only the
+    /// synthetic case opts into the `:N` collision-suffix dedupe;
+    /// explicit user filenames pass through unchanged so `__FILE__`
+    /// stays stable across repeated evals — including the edge case
+    /// where the caller deliberately passes the literal default
+    /// string as a filename.
     pub(crate) fn eval_string(
         &mut self,
         source: &str,
         filename: &str,
+        synthetic: bool,
     ) -> Result<Value, Trap> {
         // Fast-fail BEFORE any parse / AST / compile work when
         // the frame cap is already exhausted. CPU-bound parse of
@@ -1473,22 +1484,25 @@ impl Vm {
             }));
         }
         // Avoid clobbering a previously-registered source ONLY for
-        // our default labels (`(eval)`, `(class_eval)`): on
-        // collision, append an incrementing `:N` suffix to the
-        // source-table key so the prior entry is preserved for
-        // backtraces / `Method#source_location`. User-supplied
-        // filenames pass through unchanged so `__FILE__` keeps
-        // returning the caller's name across repeated evals — a
-        // `:N` suffix would leak into observable metadata
-        // (`eval("__FILE__", nil, "foo.rb")` called twice should
-        // both see "foo.rb", not "foo.rb:2"). The trade-off:
-        // explicit-filename collisions clobber the source-table
-        // entry (matching CRuby's actual behavior); the suffix
-        // dedupe applies only to the common ephemeral case of
-        // repeated bare `eval(...)` / `cls.class_eval(str)` calls.
-        let is_default_label = filename == "(eval)" || filename == "(class_eval)";
+        // synthetic default labels: on collision, append an
+        // incrementing `:N` suffix to the source-table key so the
+        // prior entry is preserved for backtraces /
+        // `Method#source_location`. User-supplied filenames
+        // (`synthetic = false`) pass through unchanged so
+        // `__FILE__` keeps returning the caller's name across
+        // repeated evals — a `:N` suffix would leak into
+        // observable metadata (`eval("__FILE__", nil, "foo.rb")`
+        // called twice should both see "foo.rb", not "foo.rb:2",
+        // and the same holds for the rare case where the caller
+        // explicitly passes the literal default label as a
+        // filename). The trade-off: explicit-filename collisions
+        // clobber the source-table entry (matching CRuby's actual
+        // behavior); the suffix dedupe applies only to the common
+        // ephemeral case of repeated bare `eval(...)` /
+        // `cls.class_eval(str)` calls where we ourselves chose
+        // the default label.
         let mut effective_filename: String = filename.to_string();
-        if is_default_label && self.sources.contains_key(effective_filename.as_str()) {
+        if synthetic && self.sources.contains_key(effective_filename.as_str()) {
             let mut n: u64 = 2;
             loop {
                 let candidate = format!("{}:{}", filename, n);
