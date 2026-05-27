@@ -4074,7 +4074,7 @@ impl Vm {
                 let key_sym = self.interner.intern(kw_name);
                 let key_val = Value::Sym(key_sym);
                 let found = kw_hash.as_ref().and_then(|h| {
-                    h.iter().find(|(k, _)| k.ruby_eq(&key_val, &self.heap))
+                    h.iter().find(|(k, _)| k.ruby_eql(&key_val, &self.heap))
                         .map(|(_, v)| v.clone())
                 });
                 match (found, default) {
@@ -4101,7 +4101,7 @@ impl Vm {
                 .collect();
             let leftover: Vec<(Value, Value)> = match &kw_hash {
                 Some(h) => h.iter()
-                    .filter(|(k, _)| !known_keys.iter().any(|kk| kk.ruby_eq(k, &self.heap)))
+                    .filter(|(k, _)| !known_keys.iter().any(|kk| kk.ruby_eql(k, &self.heap)))
                     .cloned()
                     .collect(),
                 None => Vec::new(),

@@ -143,18 +143,14 @@ fn env_cap_typo_warns_on_stderr() {
 // fix PR deletes the ratchet fixture and un-skips the matching
 // `# skipped (divergent):` trace in `spec/ruby/*.rb`. Surfaced from
 // the spec-ingestion arc in PR #167 / #158 / #188.
-// `divergence_array_first_bignum` removed when this PR fixed
-// the gap (vm/array.rs now raises RangeError for BigInt count
-// in Array#first / #last). Spec block un-skipped in
-// array_first_spec.rb.
-// `divergence_string_strip_nul` removed when an earlier PR
-// fixed the gap (vm/string.rs now strips NUL bytes alongside
-// CRuby's whitespace set). Spec blocks un-skipped in
-// string_strip_spec.rb / string_lstrip_spec.rb / string_rstrip_spec.rb.
-#[test] fn divergence_hash_eql_keys() { run_fixture("divergence_hash_eql_keys"); }
-// `divergence_hash_fetch_arity` removed when this PR fixed the
-// gap (vm/hash.rs now raises ArgumentError on wrong arity).
-// Spec block un-skipped in hash_fetch_spec.rb.
+//
+// All four original ratchets have been retired through the workflow:
+//   - `divergence_string_strip_nul`     → PR #197 (vm/string.rs strips NUL)
+//   - `divergence_hash_fetch_arity`     → PR #199 (vm/hash.rs ArgumentError)
+//   - `divergence_array_first_bignum`   → PR #202 (vm/array.rs RangeError)
+//   - `divergence_hash_eql_keys`        → this PR (heap.rs ruby_eql)
+// Leaving this comment block as the documented entry point for any
+// future divergence pinned with the same workflow.
 // `break`/`next` through an `ensure` body inside a `while` loop is
 // implemented with full Ruby semantics (run the ensure body, then
 // complete the structured transfer). The defensive `NotImplementedError`
