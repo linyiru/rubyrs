@@ -68,13 +68,27 @@ DROP_PATTERNS = [
     # runnable String specs in future batches — exactly the
     # over-fit hazard reviewer feedback flagged.
     # Count-form variants of head/tail accessors. rubyrs ships
-    # only the zero-arg form for `Array#first`/`#last`/`#min`/
-    # `#max`/`#pop`/`#shift`. `\(\s*[^)\s]` matches any non-empty
-    # argument list (literal number, negative literal, identifier,
-    # expression) — so `[1].first(-1)` and `[].first(bignum_value)`
-    # both get dropped.
-    (r"\.first\(\s*[^)\s]", "method-not-implemented"),
-    (r"\.last\(\s*[^)\s]", "method-not-implemented"),
+    # only the zero-arg form for `Array#min`/`#max`/`#pop`/`#shift`.
+    # `\(\s*[^)\s]` matches any non-empty argument list (literal
+    # number, negative literal, identifier, expression) — so
+    # `[1].min(-1)` and `[].pop(bignum_value)` both get dropped.
+    #
+    # `Array#first(n)` / `#last(n)` were also in this list pre-#140;
+    # removed once PR #140 shipped (cap-to-length, ArgumentError on
+    # negative, block-ignored). The two upstream incompatibilities
+    # — bignum_value (NoMethodError vs CRuby's RangeError; no
+    # BigInt arm) and `.replace`-based independence check (no
+    # Array#replace) — are skipped per-file rather than via a
+    # blanket polish rule.
+    #
+    # CAVEAT: these regexes match the LEFT-HAND TEXT of `.first(`
+    # / `.last(`, not the receiver type — `(1..5).first(2)` and
+    # `[1,2].first(2)` are indistinguishable to polish. Ingesting
+    # `core/range/first_spec.rb` or `core/enumerable/first_spec.rb`
+    # in the future means `Range#first(n)` / `Enumerable#first(n)`
+    # blocks would slip through; verify those count forms are
+    # implemented before adding the corresponding ingestion PR,
+    # or re-add a narrower rule scoped via assert_eq's LHS.
     (r"\.min\(\s*[^)\s]", "method-not-implemented"),
     (r"\.max\(\s*[^)\s]", "method-not-implemented"),
     (r"\.pop\(\s*[^)\s]", "method-not-implemented"),

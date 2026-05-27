@@ -3,15 +3,21 @@
 # `rubyrs-spec-extract` v0.4 + `scripts/polish.py`.
 #
 # polish.py dropped `it` blocks containing fixture refs,
-# unimplemented Array method FORMS (e.g. multi-arg `Array#push`,
-# count-form `first(n)` / `last(n)` / `pop(n)` / `shift(n)`,
-# block-form `min { ... }` / `max { ... }` / `sort { ... }`),
-# or `mock`/`should_receive`; each drop leaves a
-# `# skipped (<category>): ...` trace inline. See
-# crates/rubyrs-spec-extract/scripts/polish.py DROP_PATTERNS
-# for the full set. Regenerate by re-running the extractor
-# + polish pipeline documented in
-# crates/rubyrs-spec-extract/README.md.
+# unimplemented Array method FORMS, or `mock`/`should_receive`;
+# each drop leaves a `# skipped (<category>): ...` trace inline.
+# See crates/rubyrs-spec-extract/scripts/polish.py DROP_PATTERNS
+# for the full set.
+#
+# Re-extracted post-PR #140 — `Array#last(n)` is now in subset
+# (cap-to-length, ArgumentError on negative, block-ignored).
+#
+# Five upstream `it` blocks remain skipped — 4 via polish.py
+# DROP_PATTERNS (one fixture-recursive, two mock-machinery,
+# one fixture-subclass) plus 1 hand-added skip because the
+# blanket polish rule was too coarse to handle it:
+#   - .replace-based "independent" check: `Array#replace` not
+#     in subset yet (would unlock when shipped).
+# SPEC_STATUS.md is authoritative for the exact counts.
 
 describe "Array#last" do
   it "returns the last element" do
@@ -22,27 +28,49 @@ describe "Array#last" do
     assert_eq([].last, nil)
   end
 
-  # skipped (method-not-implemented): it "returns the last count elements if given a count" do
+  it "returns the last count elements if given a count" do
+    assert_eq([1, 2, 3, 4, 5, 9].last(3), [4, 5, 9])
+  end
 
-  # skipped (method-not-implemented): it "returns an empty array when passed a count on an empty array" do
+  it "returns an empty array when passed a count on an empty array" do
+    assert_eq([].last(0), [])
+    assert_eq([].last(1), [])
+  end
 
-  # skipped (method-not-implemented): it "returns an empty array when count == 0" do
+  it "returns an empty array when count == 0" do
+    assert_eq([1, 2, 3, 4, 5].last(0), [])
+  end
 
-  # skipped (method-not-implemented): it "returns an array containing the last element when passed count == 1" do
+  it "returns an array containing the last element when passed count == 1" do
+    assert_eq([1, 2, 3, 4, 5].last(1), [5])
+  end
 
-  # skipped (method-not-implemented): it "raises an ArgumentError when count is negative" do
+  it "raises an ArgumentError when count is negative" do
+    assert_raises("ArgumentError") do
+      [1, 2].last(-1)
+    end
+  end
 
-  # skipped (method-not-implemented): it "returns the entire array when count > length" do
+  it "returns the entire array when count > length" do
+    assert_eq([1, 2, 3, 4, 5, 9].last(10), [1, 2, 3, 4, 5, 9])
+  end
 
   # skipped (method-not-implemented): it "returns an array which is independent to the original when passed count" do
+  #   Uses `ary.last(0).replace([1,2])` — Array#replace not in
+  #   subset yet. Unlock when `Array#replace` ships.
 
   # skipped (fixture): it "properly handles recursive arrays" do
-
   # skipped (mock): it "tries to convert the passed argument to an Integer using #to_int" do
-
   # skipped (mock): it "raises a TypeError if the passed argument is not numeric" do
-
   # skipped (fixture): it "does not return subclass instance on Array subclasses" do
 
-  # skipped (method-not-implemented): it "is not destructive" do
+  it "is not destructive" do
+    a = [1, 2, 3]
+    a.last
+    assert_eq(a, [1, 2, 3])
+    a.last(2)
+    assert_eq(a, [1, 2, 3])
+    a.last(3)
+    assert_eq(a, [1, 2, 3])
+  end
 end

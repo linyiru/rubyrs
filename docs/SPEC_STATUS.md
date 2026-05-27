@@ -13,26 +13,32 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 35 |
-| Examples in corpus | 146 |
-| Skipped `it` traces | 60 |
+| Examples in corpus | 160 |
+| Skipped `it` traces | 46 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
+| `divergent` | 1 |
 | `fixture` | 19 |
-| `method-not-implemented` | 33 |
+| `method-not-implemented` | 18 |
 | `mock` | 8 |
 
-Categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
-`DROP_PATTERNS`. Find blocks unlocked by a future feature with e.g.
+Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
+`DROP_PATTERNS` (`fixture` / `mock` / `method-not-implemented` plus the
+hook-form `before-not-lifted` / `after-not-supported`). Specs may also
+introduce manually-authored categories — e.g. `divergent` marks a block
+rubyrs runs but with intentionally-different observable behavior.
+
+Find blocks unlocked by a future feature with e.g.
 `git grep "# skipped (method-not-implemented)"`.
 
 ## By class
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 12 | 27 | 60 |
+| Array | 12 | 41 | 46 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 1 | 2 | 0 |
 | Integer | 1 | 7 | 0 |
@@ -49,9 +55,9 @@ Categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
 | `array_compact_spec.rb` | Array#compact | `core/array/compact_spec.rb` | 5 | 0 |
 | `array_count_spec.rb` | Array#count | `core/array/count_spec.rb` | 3 | 0 |
 | `array_empty_spec.rb` | Array#empty? | `core/array/empty_spec.rb` | 1 | 0 |
-| `array_first_spec.rb` | Array#first | `core/array/first_spec.rb` | 2 | 13 |
+| `array_first_spec.rb` | Array#first | `core/array/first_spec.rb` | 9 | 6 |
 | `array_include_spec.rb` | Array#include? | `core/array/include_spec.rb + shared/index.rb` | 1 | 2 |
-| `array_last_spec.rb` | Array#last | `core/array/last_spec.rb` | 2 | 12 |
+| `array_last_spec.rb` | Array#last | `core/array/last_spec.rb` | 9 | 5 |
 | `array_length_spec.rb` | Array#length | `core/array/length_spec.rb + shared/length.rb` | 1 | 1 |
 | `array_pop_spec.rb` | Array#pop | `core/array/pop_spec.rb` | 2 | 14 |
 | `array_reverse_spec.rb` | Array#reverse | `core/array/reverse_spec.rb` | 2 | 4 |
