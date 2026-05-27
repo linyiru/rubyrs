@@ -42,6 +42,10 @@ fuzz_target!(|data: &[u8]| {
         max_frames: Some(128),
         max_heap_objects: Some(4096),
         deadline: Some(std::time::Duration::from_millis(500)),
+        // See parse.rs comment — pin stress_gc off so the
+        // harness doesn't inherit STRESS_GC=1 from the runner
+        // env via `Config::default()`.
+        stress_gc: false,
         ..Default::default()
     };
 

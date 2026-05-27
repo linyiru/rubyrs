@@ -47,6 +47,12 @@ fuzz_target!(|data: &[u8]| {
         max_frames: Some(64),
         max_heap_objects: Some(1024),
         deadline: Some(std::time::Duration::from_millis(500)),
+        // `Config::default()` reads the `STRESS_GC` env var on
+        // non-wasi hosts (lib.rs:194). If the runner or a dev's
+        // shell has `STRESS_GC=1` set, every Runtime built via
+        // `..Default::default()` inherits stress mode and exec/s
+        // collapses to ~1/4 of expected. Pin it off here.
+        stress_gc: false,
         ..Default::default()
     };
 
