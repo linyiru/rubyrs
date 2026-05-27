@@ -433,20 +433,32 @@ impl Vm {
                             g.vm.check_alloc()?;
                             let gid = g.vm.heap.alloc(HeapObj::Array(group_vec));
                             // Pin the freshly-allocated capture-
-                            // groups Array. `invoke_block` may run
-                            // `maybe_gc()` before copying `args`
-                            // into the block's locals, and `args`
-                            // at that point is a Rust-local
+                            // groups Array for the duration of the
+                            // step_block call only. `invoke_block`
+                            // may run `maybe_gc()` before copying
+                            // `args` into the block's locals, and
+                            // `args` at that point is a Rust-local
                             // `Vec<Value>` — the only root for
                             // `gid` until invoke_block writes it
-                            // into a frame slot. Without this pin,
-                            // STRESS_GC sweeps `gid` mid-call and
-                            // the block sees a use-after-free (or
-                            // stack-overflow ICE on further GC).
-                            // Same shape Hash#each_with_index uses
-                            // for its per-iter pair_id allocation.
-                            g.pin(Value::Array(gid));
-                            match g.vm.step_block(block, vec![Value::Array(gid)], pre_frames)? {
+                            // into a frame slot. Without the pin,
+                            // STRESS_GC sweeps `gid` and the block
+                            // sees a use-after-free (stack-overflow
+                            // ICE on the next GC).
+                            //
+                            // Manual push/pop instead of an outer
+                            // `g.pin(...)` so the pin doesn't
+                            // accumulate across iterations (a long
+                            // `scan` would otherwise keep every
+                            // capture Array pinned until the loop
+                            // ends — O(matches) memory pressure).
+                            // The `?` short-circuit is moved AFTER
+                            // the pop via `step_block.into()` →
+                            // separate let binding, so an Err from
+                            // step_block still runs the pop.
+                            g.vm.pinned.push(Value::Array(gid));
+                            let step_result = g.vm.step_block(block, vec![Value::Array(gid)], pre_frames);
+                            g.vm.pinned.pop();
+                            match step_result? {
                                 BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                                 BlockStep::Break(r) => { early = Some(r); break; }
                                 BlockStep::Value(_) => {}
