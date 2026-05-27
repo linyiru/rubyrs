@@ -21,6 +21,8 @@ describe "Hash#max_by" do
     assert_eq(seen, [[:a, 1], [:b, 2]])
   end
 
-  # skipped (method-not-implemented): n-arg form `max_by(n)` returns Array
-  # skipped (method-not-implemented): returns Enumerator without block
+  # skipped (method-not-implemented): it "returns an Enumerator if called without a block" do
+  #   The Enumerator-from-no-block surface is out of subset.
+  # skipped (method-not-implemented): it "returns an array of n elements if argument is given" do
+  #   The n-arg form `max_by(n)` is out of subset.
 end

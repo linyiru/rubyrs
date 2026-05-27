@@ -17,6 +17,8 @@ describe "Hash#store" do
     assert_eq(h, { a: 2 })
   end
 
-  # skipped (fixture): it "raises a FrozenError if called on a frozen instance" do
-  #   rubyrs doesn't model the frozen bit at Value level.
+  # skipped (method-not-implemented): it "raises a FrozenError if called on a frozen instance" do
+  #   rubyrs doesn't model the frozen bit at Value level —
+  #   `Object#freeze` is a no-op, `frozen?` returns false, so
+  #   FrozenError can't be raised here.
 end

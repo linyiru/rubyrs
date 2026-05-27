@@ -21,8 +21,8 @@ count below is also the passing count.
 | Category | Count |
 |---|---|
 | `divergent` | 6 |
-| `fixture` | 49 |
-| `method-not-implemented` | 74 |
+| `fixture` | 48 |
+| `method-not-implemented` | 75 |
 | `mock` | 12 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
