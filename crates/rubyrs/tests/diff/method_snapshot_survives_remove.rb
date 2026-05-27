@@ -82,6 +82,20 @@ class G
 end
 g1 = G.new
 def g1.boop; "singleton-boop"; end
+# --- Introspection paths (arity, source_location, owner) also
+#     prefer the snapshot. Without it, asking for arity AFTER
+#     remove_method would return -1 (the variadic "method not
+#     found" fallback) and source_location would return nil
+#     even though bm.call still works.
+class H
+  def kweep(x, y); x + y; end
+end
+um_h = H.instance_method(:kweep)
+H.class_eval { remove_method(:kweep) }
+puts um_h.arity                              # 2
+puts um_h.source_location.is_a?(Array)       # true
+puts um_h.owner == H                         # true
+
 um7 = g1.method(:boop).unbind
 # Positive: binding back to the ORIGINAL instance succeeds.
 # Without an eigenclass-aware target_class derivation in bind /

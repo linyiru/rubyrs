@@ -1006,20 +1006,27 @@ impl Vm {
         // synthesised protos for forwarders / preamble eval).
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
             && name == "source_location" && args.is_empty() {
-                let (class, m_name_id) = match &recv {
+                // Prefer the snapshot Method so introspection
+                // survives a subsequent `remove_method` between
+                // capture and the source_location query.
+                let (class, m_name_id, snapshot) = match &recv {
                     Value::BoundMethod(bid) => {
-                        let (r, n) = self.heap.bound_method(*bid);
+                        let (r, n, snap) = self.heap.bound_method_full(*bid);
                         let r = r.clone();
+                        let snap = snap.clone();
                         let cls = match self.class_of(&r) {
                             Value::Class(c) => c,
                             _ => { self.stack.push(Value::Nil); return Ok(CallableOutcome::Handled); }
                         };
-                        (cls, n)
+                        (cls, n, snap)
                     }
-                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        (cls, n, snap)
+                    }
                     _ => unreachable!(),
                 };
-                let m = match self.lookup_method_uncached(&class, m_name_id) {
+                let m = match snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id)) {
                     Some(m) => m,
                     None => { self.stack.push(Value::Nil); return Ok(CallableOutcome::Handled); }
                 };
@@ -1062,24 +1069,30 @@ impl Vm {
                         _ => unreachable!(),
                     };
                 }
-                // owner: resolve Method through lookup; prefer its
-                // defining_class.upgrade() over the captured class.
-                let (cap_class, m_name_id) = match &recv {
+                // owner: resolve Method through snapshot (or live
+                // lookup as fallback) and prefer its
+                // `defining_class.upgrade()` over the captured
+                // class.
+                let (cap_class, m_name_id, snapshot) = match &recv {
                     Value::BoundMethod(bid) => {
-                        let (r, n) = self.heap.bound_method(*bid);
+                        let (r, n, snap) = self.heap.bound_method_full(*bid);
                         let r = r.clone();
+                        let snap = snap.clone();
                         let cls = match self.class_of(&r) {
                             Value::Class(c) => c,
                             _ => return Err(self.trap(RubyError::TypeError {
                                 msg: "Method receiver has no resolvable class".into(),
                             })),
                         };
-                        (cls, n)
+                        (cls, n, snap)
                     }
-                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        (cls, n, snap)
+                    }
                     _ => unreachable!(),
                 };
-                let owner = match self.lookup_method_uncached(&cap_class, m_name_id) {
+                let owner = match snapshot.or_else(|| self.lookup_method_uncached(&cap_class, m_name_id)) {
                     Some(m) => m.defining_class.as_ref()
                         .and_then(|w| w.upgrade())
                         .unwrap_or_else(|| cap_class.clone()),
@@ -1096,11 +1109,11 @@ impl Vm {
         // UnboundMethod.
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
             && matches!(name, "arity" | "parameters") && args.is_empty() {
-                let (class, m_name_id) = match &recv {
+                let (class, m_name_id, snapshot) = match &recv {
                     Value::BoundMethod(bid) => {
-                        let (bm_recv, nid) = {
-                            let (r, n) = self.heap.bound_method(*bid);
-                            (r.clone(), n)
+                        let (bm_recv, nid, snap) = {
+                            let (r, n, snap) = self.heap.bound_method_full(*bid);
+                            (r.clone(), n, snap.clone())
                         };
                         let cls = match self.class_of(&bm_recv) {
                             Value::Class(c) => c,
@@ -1108,12 +1121,17 @@ impl Vm {
                                 msg: "Method receiver has no resolvable class".into(),
                             })),
                         };
-                        (cls, nid)
+                        (cls, nid, snap)
                     }
-                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid),
+                    Value::UnboundMethod(uid) => {
+                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                        (cls, n, snap)
+                    }
                     _ => unreachable!(),
                 };
-                let m_opt = self.lookup_method_uncached(&class, m_name_id);
+                // Prefer the snapshot Method — survives a later
+                // remove_method that strips the live entry.
+                let m_opt = snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id));
                 let (arity, params_info) = match m_opt {
                     Some(m) => {
                         let proto = &self.protos[m.proto_idx];

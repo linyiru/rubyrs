@@ -355,8 +355,26 @@ impl Heap {
         if let HeapObj::BoundMethod { recv, name_id, .. } = self.get(id) { (recv, *name_id) }
         else { panic!("ICE: heap slot is not a BoundMethod") }
     }
+    /// Extended accessor that also returns the snapshot Method
+    /// (Some at instance_method / Object#method / bind capture
+    /// time, None for `unbind`'d legacy values). Callers that
+    /// drive introspection (arity / parameters / source_location
+    /// / owner) should prefer the snapshot so the captured
+    /// metadata survives a subsequent `remove_method`.
+    pub(crate) fn bound_method_full(&self, id: ObjId) -> (&Value, crate::intern::SymId, &Option<std::rc::Rc<crate::value::Method>>) {
+        if let HeapObj::BoundMethod { recv, name_id, method } = self.get(id) { (recv, *name_id, method) }
+        else { panic!("ICE: heap slot is not a BoundMethod") }
+    }
     pub(crate) fn unbound_method(&self, id: ObjId) -> (std::rc::Rc<crate::value::Class>, crate::intern::SymId) {
         if let HeapObj::UnboundMethod { class, name_id, .. } = self.get(id) { (class.clone(), *name_id) }
+        else { panic!("ICE: heap slot is not an UnboundMethod") }
+    }
+    /// Same shape as `bound_method_full` for UnboundMethod —
+    /// introspection paths prefer the snapshot when present.
+    pub(crate) fn unbound_method_full(&self, id: ObjId) -> (std::rc::Rc<crate::value::Class>, crate::intern::SymId, Option<std::rc::Rc<crate::value::Method>>) {
+        if let HeapObj::UnboundMethod { class, name_id, method } = self.get(id) {
+            (class.clone(), *name_id, method.clone())
+        }
         else { panic!("ICE: heap slot is not an UnboundMethod") }
     }
     pub(crate) fn curried_proc(&self, id: ObjId) -> (&Value, &Vec<Value>, u16) {
