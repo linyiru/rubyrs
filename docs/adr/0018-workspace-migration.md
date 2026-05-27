@@ -244,6 +244,44 @@ plan in the BigInt thread can proceed in **parallel with Phase
   PR carries it through to `crates/rubyrs-core/src/` via the
   same `git mv` it applies to everything else.
 
+**Phase B status — complete (2026-05-26).** All seven Phase B
+groups shipped; the BigInt surface now covers every
+`Integer`-protocol method that pure-Ruby code can reasonably
+call on out-of-i64 values. Lifecycle by PR:
+
+| Group | Surface | PR |
+|---|---|---|
+| B.1 | Base arithmetic, comparison, to_s/inspect, predicates, auto-promote/demote | — (pre-A) |
+| B.2 | `-@` / `+@` / `abs` with i64::MIN promote | #121 |
+| B.3 | `~` / `& \| ^` / `<< >>` two's-complement bit ops + DoS cap | #159 |
+| B.4 | `to_s(radix)` + sprintf `%d/%b/%o/%x` + shared cap estimator | #138 |
+| B.5 | `pow(exp[, mod])` + `bit_length` + `digits` | #123, #129 |
+| B.6 | `times` / `upto` / `downto` block iteration | #174 |
+| B.7 | `eql?` / `hash` / `Object#equal?` BigInt arm | #171 |
+
+Two invariants the Phase B work codified, must be preserved by
+any future change:
+
+1. **Canonical-BigInt invariant.** Every `Value::BigInt(id)`
+   that reaches dispatch has magnitude strictly outside
+   `i64::MIN..=i64::MAX`. The sole funnel is `bigint_to_value`,
+   which demotes-on-fit; every arm that produces a BigInt
+   result MUST route through it. Debug-asserts in
+   `try_bigint_unary`'s `+@` / `abs` identity short-circuits
+   catch FFI bypasses.
+2. **DoS-cap convention.** Pre-allocation estimators in every
+   arm that can produce arbitrarily large output
+   (`try_bigint_pow`, `try_bigint_bit_shift`,
+   `check_bigint_to_s_cap`, `format_radix_any`, the `%d % big`
+   path in `vm::sprintf`) trap **before** the alloc when the
+   estimated byte cost (limbs + 32-byte header) exceeds
+   `Config::max_value_bytes` (fallback 1 MB, same as
+   `try_bigint_pow`'s original).
+
+Implementation invariants and call-graph diagrams live in
+`crates/rubyrs/src/vm/bignum.rs`'s module doc — keep it
+synchronised with this section.
+
 ## Consequences
 
 ### What gets easier
