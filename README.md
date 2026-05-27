@@ -82,6 +82,46 @@ step plus `wizer` pre-initialization (preamble snapshot)
 
 If you need Rails, Sinatra, Bundler, or gems — use CRuby.
 
+### What works with `require`
+
+By design, rubyrs is **not a Ruby gem host**. The `require`
+mechanism resolves these shapes:
+
+- `require "/abs/path.rb"` — absolute paths to user `.rb` files
+- `require "relative/path"` — relative to caller's source dir
+- `require "name"` with `$LOAD_PATH << dir` set by the script
+- `require "pathname"` / `set` / `stringio` / `strscan` —
+  the four vendored stdlib modules with real implementations
+- `require "uri"` / `json` / `yaml` / `csv` / `logger` /
+  ~25 other stdlib names — these **succeed silently** as
+  lenient "feature-present" stubs; method calls on the
+  resulting modules raise `NoMethodError`. With
+  `--features stdlib` the vendored modules above behave
+  CRuby-compatibly; everything else stays stub-shaped.
+
+What deliberately does NOT work (all are documented Tier 2 /
+Tier 3 deferrals — see [docs/SUBSET.md](docs/SUBSET.md) line
+"`require / load / autoload`"):
+
+- **`autoload :Foo, "foo"`** — accepts the call as a silent
+  no-op for arity-compat; does not register a real lazy
+  load. Referencing `Foo` later still raises `NameError`.
+- **`Kernel#load`** — not implemented at all
+- **Auto-populated `$LOAD_PATH`** — empty by default.
+  Embedders set it via `Config::load_paths` or script-side
+  `$LOAD_PATH.unshift(dir)`. CRuby auto-fills stdlib + gem
+  paths; rubyrs does not.
+- **Real stdlib coverage beyond the four vendored modules**
+  — `URI.parse`, `JSON.parse`, `YAML.load`, etc. are all
+  Tier 3 batteries (per [ADR 0019](docs/adr/0019-tier2-tier3-boundary.md)),
+  none shipped today.
+
+The shape is `Lua-in-Rust + Ruby grammar + sandbox`, not
+`CRuby with fewer features`. ADR 0017 codifies the boundary
+intentionally — embedders building sandboxed DSL hosts
+benefit from the deterministic-by-default behaviour these
+omissions guarantee.
+
 ## Build
 
 ```bash
