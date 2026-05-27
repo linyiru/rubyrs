@@ -46,4 +46,24 @@ impl Interner {
     pub(crate) fn contains(&self, s: &str) -> bool {
         self.map.contains_key(s)
     }
+
+    /// Discard every symbol with id `>= keep_len`, leaving the
+    /// interner in the state it was at when `len() == keep_len`.
+    /// Powers `Runtime::reset` — user-interned symbols from a
+    /// prior eval are dropped so the next eval starts from the
+    /// post-preamble baseline.
+    ///
+    /// Any SymId held by user code with `id.0 >= keep_len` is
+    /// invalid after this call. The Runtime API caller is
+    /// responsible for not retaining stale SymIds across reset
+    /// (fuzz / per-request embedders discard user code on
+    /// reset, so this isn't observable to them).
+    pub(crate) fn truncate_to(&mut self, keep_len: usize) {
+        if keep_len >= self.vec.len() {
+            return;
+        }
+        for stale in self.vec.drain(keep_len..) {
+            self.map.remove(&*stale);
+        }
+    }
 }

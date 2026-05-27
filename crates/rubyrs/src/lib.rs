@@ -87,8 +87,8 @@ pub struct Config {
     /// **`n` is the cap on the total post-construction live count, not
     /// a per-script-call budget.** The exception-class preamble that
     /// `Runtime::with_config` loads at construction time allocates ~50
-    /// HeapObj::Class slots (Exception hierarchy + Object + Comparable
-    /// + ...). Those slots count against `n`. A host that sets
+    /// HeapObj::Class slots (Exception hierarchy, Object, Comparable,
+    /// etc.). Those slots count against `n`. A host that sets
     /// `max_heap_objects: Some(60)` gives user code roughly 10 fresh
     /// allocations before the cap bites, not 60. Set `n` accordingly —
     /// in practice `Some(256)` is a sensible floor for a sandbox that
@@ -294,6 +294,13 @@ impl<'a> HostCtx<'a> {
 /// A self-contained rubyrs runtime. State (class definitions, top-level
 /// methods, registered host functions, GC heap) persists across calls to
 /// [`Runtime::eval`].
+///
+/// Embedders that want per-call isolation without paying the preamble
+/// load cost on every Runtime construction (~3–6 ms) can construct one
+/// Runtime and call [`Runtime::reset`] between evals — that wipes
+/// user-introduced state (globals, user classes / constants / methods,
+/// heap allocations, interned-at-eval symbols) but keeps everything the
+/// preamble set up.
 pub struct Runtime {
     vm: vm::Vm,
     /// Per-`eval` wall-clock budget (P2-14a). Retained as a
@@ -301,6 +308,58 @@ pub struct Runtime {
     /// each `eval` call and stored on `Vm.deadline_at`. `None` means
     /// unlimited.
     deadline: Option<std::time::Duration>,
+    /// Snapshot of post-preamble state, captured by `with_config`
+    /// (and the wizer-path constructor) once `load_preamble`
+    /// completes and resource caps have been restored. `reset()`
+    /// uses this snapshot to identify which heap slots / interned
+    /// symbols / classes / constants / methods were preamble-
+    /// originated (preserve) vs added by user `eval()` (clear).
+    ///
+    /// `None` only during the brief window inside `with_config`
+    /// before the snapshot is taken; `Some(_)` for the rest of
+    /// the Runtime's lifetime. `reset()` is a no-op when None.
+    post_preamble: Option<PostPreambleSnapshot>,
+}
+
+/// Captures the boundary between "preamble state" and "user state"
+/// at the moment preamble finishes loading. `reset()` rewinds the
+/// Runtime to this exact baseline.
+///
+/// Cheap to construct (~few hundred SymIds copied into HashSets)
+/// and cheap to apply (~microseconds of Vec/HashMap mutations).
+/// The per-fuzz-iter cost is dwarfed by even a single avoided
+/// preamble re-load.
+struct PostPreambleSnapshot {
+    /// `vm.heap.slots.len()` at preamble completion. `reset()`
+    /// truncates the heap back to this length.
+    heap_slot_count: usize,
+    /// `vm.heap.live_count` at preamble completion. `reset()`
+    /// restores live_count to this value.
+    heap_live_count: usize,
+    /// `vm.interner.len()` at preamble completion. `reset()`
+    /// truncates `interner.vec` and drains stale `interner.map`
+    /// entries.
+    interner_len: usize,
+    /// Class names registered by the preamble. `reset()` keeps
+    /// only these entries in `vm.classes` (Exception, Object,
+    /// Comparable, Mutex, Random, String, Integer, Array, Hash,
+    /// ... — ~40 entries).
+    class_keys: std::collections::HashSet<intern::SymId>,
+    /// Toplevel constants the preamble installed (`Exception`,
+    /// `Object`, `Encoding::UTF_8`, ...). `reset()` keeps only
+    /// these.
+    constant_keys: std::collections::HashSet<intern::SymId>,
+    /// Toplevel methods the preamble defined (e.g. Kernel
+    /// helpers). `reset()` keeps only these.
+    toplevel_method_keys: std::collections::HashSet<intern::SymId>,
+    /// For every preamble class, the method SymIds it had at
+    /// preamble completion. `reset()` removes user-added methods
+    /// on preamble classes (e.g. `class String; def foo; end;
+    /// end` in iter N can't leak into iter N+1).
+    class_method_keys: std::collections::HashMap<
+        intern::SymId,
+        std::collections::HashSet<intern::SymId>,
+    >,
 }
 
 /// Per-process slot used by the wizer pre-initialize path. On
@@ -447,6 +506,34 @@ impl Drop for CapsGuard<'_> {
     }
 }
 
+impl PostPreambleSnapshot {
+    /// Capture the post-preamble baseline from a freshly-constructed
+    /// Runtime. Called once at the end of `with_config` /
+    /// `new_default_impl`; the resulting snapshot is the target
+    /// state every subsequent `reset()` rewinds to.
+    fn capture(rt: &Runtime) -> Self {
+        let class_method_keys = rt
+            .vm
+            .classes
+            .iter()
+            .map(|(name, cls)| {
+                let methods = cls.methods.borrow();
+                let keys = methods.keys().copied().collect();
+                (*name, keys)
+            })
+            .collect();
+        PostPreambleSnapshot {
+            heap_slot_count: rt.vm.heap.slots.len(),
+            heap_live_count: rt.vm.heap.live_count,
+            interner_len: rt.vm.interner.len(),
+            class_keys: rt.vm.classes.keys().copied().collect(),
+            constant_keys: rt.vm.constants.keys().copied().collect(),
+            toplevel_method_keys: rt.vm.toplevel_methods.keys().copied().collect(),
+            class_method_keys,
+        }
+    }
+}
+
 impl Runtime {
     pub fn new() -> Self {
         Self::with_config(Config::default())
@@ -484,6 +571,7 @@ impl Runtime {
             guard.rt.load_preamble();
             // guard drops here; caps restored.
         }
+        rt.post_preamble = Some(PostPreambleSnapshot::capture(&rt));
         rt
     }
 
@@ -505,7 +593,7 @@ impl Runtime {
 
         let interner = intern::Interner::new();
         let vm = vm::Vm::new(vec![], interner);
-        Runtime { vm, deadline: None }
+        Runtime { vm, deadline: None, post_preamble: None }
     }
 
     /// Wizer-able default Runtime: skeleton + preamble, no host
@@ -520,6 +608,7 @@ impl Runtime {
     fn new_default_impl() -> Self {
         let mut rt = Self::build_skeleton();
         rt.load_preamble();
+        rt.post_preamble = Some(PostPreambleSnapshot::capture(&rt));
         rt
     }
 
@@ -553,6 +642,153 @@ impl Runtime {
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
         self.vm.time_now = cfg.time_now;
         self.deadline = cfg.deadline;
+    }
+
+    /// Rewind the Runtime to its post-preamble state — every class,
+    /// constant, method, heap slot, and interned symbol introduced
+    /// by user `eval()` calls is discarded; everything the preamble
+    /// set up is preserved.
+    ///
+    /// Intended for embedders that want per-call isolation without
+    /// paying ~3–6 ms of preamble re-load per Runtime. Construct
+    /// once via [`Runtime::with_config`], then call `reset()` between
+    /// inputs:
+    ///
+    /// ```no_run
+    /// # use rubyrs::{Config, Runtime};
+    /// let mut rt = Runtime::with_config(Config::default());
+    /// for input in ["1+1", "puts :hi", "[1,2,3].map { |x| x*2 }"] {
+    ///     rt.reset();
+    ///     let _ = rt.eval(input, "fuzz.rb");
+    /// }
+    /// ```
+    ///
+    /// What's preserved:
+    /// - Class hierarchy + method tables created by the preamble
+    ///   (Exception, StandardError, Object, Comparable, String,
+    ///   Integer, Array, Hash, ...).
+    /// - Toplevel methods / constants the preamble installed.
+    /// - Compiled bytecode (`vm.protos`) and host-registered
+    ///   functions (`vm.host_fns`).
+    /// - Resource caps (`Config::fuel`, `max_frames`, ...) and host
+    ///   state (`env`, `pid`, `time_now`, `stress_gc`, `stdout`).
+    /// - Pre-interned hot SymIds (`sym_to_s`, etc.) and the literal
+    ///   caches (`regex_cache`, `bigint_lit_cache`) — those keys
+    ///   were interned by the compiler, not by user code.
+    ///
+    /// What's cleared:
+    /// - Heap slots allocated after the preamble (user instances,
+    ///   Arrays, Hashes, ...).
+    /// - Interner entries past the preamble high-water (user
+    ///   `String#to_sym`, user method-name interning, ...).
+    /// - User-defined classes, constants, toplevel methods.
+    /// - User-added methods on preamble classes (e.g. `class
+    ///   String; def foo; ...; end; end` does NOT leak into the
+    ///   next eval).
+    /// - Globals (`$gvars`), toplevel cvars (`@@x`), `$~` /
+    ///   `last_match`, lazily-built `ENV` hash, `loaded_features`.
+    /// - Control-flow signals from a possibly-trapped prior eval:
+    ///   `break_signaled`, `method_return`, `pending_loop_transfer`,
+    ///   `class_stack`, residual `stack` / `frames` / `pinned`.
+    ///
+    /// **Important:** any `ObjId` or `SymId` value the host
+    /// captured from a prior `eval()` is invalid after `reset()` —
+    /// it points into truncated storage. Hosts that retain such
+    /// values across resets are responsible for not dereferencing
+    /// them (the fuzz / per-request use case discards user code
+    /// between resets, so this is a non-concern for them).
+    ///
+    /// **No-op** if the Runtime hasn't completed `with_config`'s
+    /// construction yet (no snapshot was taken). Cheap to call
+    /// repeatedly; per-reset cost is dominated by the heap +
+    /// interner truncations, both `O(removed_entries)`.
+    pub fn reset(&mut self) {
+        let Some(snapshot) = self.post_preamble.as_ref() else {
+            return;
+        };
+        // --- Heap: truncate user-allocated slots ---
+        // `Vec::truncate` is O(removed) and drops the HeapObj enum
+        // variants (including their Rc<...> inner data), releasing
+        // their ref counts. Any preamble-allocated slots beyond
+        // the high-water mark would also be released — by
+        // definition there are none, since the snapshot captures
+        // `slots.len()` immediately after preamble.
+        self.vm.heap.slots.truncate(snapshot.heap_slot_count);
+        self.vm.heap.marks.truncate(snapshot.heap_slot_count);
+        // `free` is the GC-reclaimed-slot index list. Any entries
+        // beyond the high-water are now out of range; entries
+        // below are still valid preamble-era slots that were
+        // freed pre-snapshot (none exist in practice, but clearing
+        // is safer than asserting empty).
+        self.vm.heap.free.retain(|&idx| (idx as usize) < snapshot.heap_slot_count);
+        self.vm.heap.live_count = snapshot.heap_live_count;
+        // --- Interner: drop user-interned symbols ---
+        self.vm.interner.truncate_to(snapshot.interner_len);
+        // --- Classes / constants / toplevel methods: drop entries
+        //     not in the post-preamble keyset. ---
+        self.vm.classes.retain(|k, _| snapshot.class_keys.contains(k));
+        self.vm.constants.retain(|k, _| snapshot.constant_keys.contains(k));
+        self.vm.toplevel_methods.retain(|k, _| snapshot.toplevel_method_keys.contains(k));
+        // --- Per-class method tables: drop user-added methods on
+        //     preamble classes. The preamble class itself stays;
+        //     only methods absent from the snapshot get removed. ---
+        for (cls_name, cls) in &self.vm.classes {
+            if let Some(preamble_methods) = snapshot.class_method_keys.get(cls_name) {
+                cls.methods.borrow_mut().retain(|m, _| preamble_methods.contains(m));
+            }
+        }
+        // --- Volatile per-eval state: reset to empty. ---
+        self.vm.stack.clear();
+        self.vm.frames.clear();
+        self.vm.pinned.clear();
+        self.vm.globals.clear();
+        self.vm.toplevel_cvars.clear();
+        self.vm.class_stack.clear();
+        self.vm.class_visibility_stack.clear();
+        #[cfg(feature = "regex")]
+        {
+            self.vm.last_match = None;
+        }
+        self.vm.env_hash = None;
+        self.vm.loaded_features.clear();
+        self.vm.loaded_stdlib_stubs.clear();
+        // Control-flow signals from a possibly-trapped prior eval.
+        // Without these, a user script that broke out of a loop
+        // (Op::Break) and then trapped would leave
+        // `break_signaled = true`; the next eval's iterators would
+        // see a stale break signal.
+        self.vm.break_signaled = false;
+        self.vm.method_return = None;
+        self.vm.pending_loop_transfer = None;
+        self.vm.suppress_call_result_push = false;
+        self.vm.bypass_visibility_once = false;
+        // `op_counter` is per-eval; `deadline_at` is set per-eval.
+        // Both reset by `eval()`'s preamble anyway, but clear here
+        // too so a `reset()` between user evals leaves no trail.
+        self.vm.op_counter = 0;
+        self.vm.deadline_at = None;
+        // Bump `method_gen` so any stale `CallCache` entries
+        // pointing at user-defined methods removed above
+        // invalidate on next lookup. `CallCache` re-checks
+        // `method_gen` per hit; no need to clear the slots
+        // themselves.
+        self.vm.method_gen = self.vm.method_gen.wrapping_add(1);
+    }
+
+    // Test-only inspectors: let integration tests in
+    // `tests/embed/reset.rs` assert on `vm.heap.live_count` and
+    // `vm.interner.len()` without making those fields part of the
+    // public Runtime API. Gated `#[cfg(any(test, ...))]` so the
+    // integration-test crate (separate compilation unit) can see
+    // them — `#[cfg(test)]` alone would only expose to the inline
+    // test mods, not `tests/`.
+    #[doc(hidden)]
+    pub fn __test_vm_live_count(&self) -> usize {
+        self.vm.heap.live_count
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_interner_len(&self) -> usize {
+        self.vm.interner.len()
     }
 
     /// Bootstrap the built-in Ruby class hierarchy (currently just
