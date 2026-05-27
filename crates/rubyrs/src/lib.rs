@@ -87,8 +87,8 @@ pub struct Config {
     /// **`n` is the cap on the total post-construction live count, not
     /// a per-script-call budget.** The exception-class preamble that
     /// `Runtime::with_config` loads at construction time allocates ~50
-    /// HeapObj::Class slots (Exception hierarchy + Object + Comparable
-    /// + ...). Those slots count against `n`. A host that sets
+    /// HeapObj::Class slots (Exception hierarchy, Object, Comparable,
+    /// etc.). Those slots count against `n`. A host that sets
     /// `max_heap_objects: Some(60)` gives user code roughly 10 fresh
     /// allocations before the cap bites, not 60. Set `n` accordingly —
     /// in practice `Some(256)` is a sensible floor for a sandbox that
