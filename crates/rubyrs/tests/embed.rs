@@ -1705,6 +1705,43 @@ fn sprintf_radix_int_min_does_not_panic() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn integer_hash_is_within_process_stable_and_distinguishes_value() {
+    // Phase B.7: `Integer#hash` returns a within-process-stable
+    // i64 that satisfies `a.eql?(b) ⇒ a.hash == b.hash`. Pre-fix
+    // every Integer receiver raised NoMethodError on `.hash`.
+    //
+    // The Hash collection itself uses linear scan via ruby_eq, so
+    // this method isn't on the internal lookup path — it exists
+    // for the user-facing protocol (pure-Ruby code calling
+    // `n.hash` for its own bookkeeping). Stability is per-process
+    // (DefaultHasher), matching CRuby's per-VM-seeded behaviour.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // Same value → same hash (the key invariant).
+        // Different value → almost-certainly different hash.
+        // Sign matters: `n` and `-n` distinct hashes.
+        // Cross-allocation BigInt stability.
+        "puts 5.hash == 5.hash\n\
+         puts 5.hash == 6.hash\n\
+         puts (2 ** 100).hash == (2 ** 100).hash\n\
+         puts (2 ** 100).hash == (2 ** 100 + 1).hash\n\
+         puts (2 ** 100).hash == (-(2 ** 100)).hash\n\
+         puts 5.hash.class.name\n\
+         puts (2 ** 100).hash.class.name\n\
+         puts 5.respond_to?(:hash)\n\
+         puts (2 ** 100).respond_to?(:hash)",
+        "integer_hash.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "true\nfalse\ntrue\nfalse\nfalse\nInteger\nInteger\ntrue\ntrue"
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn integer_eql_q_is_type_strict_equality() {
     // Phase B.7: `Integer#eql?` is value equality restricted to
     // matching numeric class. CRuby uses this (not `==`) for Hash

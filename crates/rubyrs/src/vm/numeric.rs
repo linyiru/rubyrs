@@ -17,6 +17,12 @@ pub(crate) fn integer_to_s_value(n: i64) -> Value {
     Value::new_str(n.to_string())
 }
 
+/// Tag byte mixed into `Integer#hash` so all Integer-flavoured
+/// receivers (Int, BigInt) share a hash domain distinct from any
+/// other type that may later implement `#hash`. Shared between
+/// numeric.rs's Int arm and bignum.rs's BigInt arm.
+pub(crate) const INT_HASH_TAG: u8 = 0x49; // 'I'
+
 /// Try the Int / Float / mixed-numeric arms. Returns
 /// `Ok(Some(v))` on a handled call, `Ok(None)` if the receiver
 /// or method shape doesn't match and `primitive_call` should
@@ -177,6 +183,37 @@ pub(crate) fn numeric_call(
                 Value::Int(b) => a == b,
                 _ => false,
             }))
+        }
+        // `Integer#hash` — within-process stable hash for Hash key
+        // matching at the language level. CRuby's internal Hash
+        // keys use a per-VM random seed for collision resistance;
+        // rubyrs's Hash impl is currently a linear-scan Vec under
+        // ruby_eq (no actual hashing for key lookup), so this
+        // method exists purely for the user-facing protocol — pure-
+        // Ruby code that calls `n.hash` for its own bookkeeping
+        // needs a stable integer. Use Rust's DefaultHasher for
+        // within-process stability (good enough for the protocol;
+        // the lack of cross-process or cross-VM stability matches
+        // CRuby's behaviour). Returns an i64 — sign bit of the u64
+        // hash is fine as long as `5.hash == 5.hash` holds, which
+        // it does because DefaultHasher is deterministic for
+        // identical input within a process.
+        //
+        // Same shadow-avoidance rationale as `eql?` above.
+        (Value::Int(a), "hash", []) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            // Tag the input as "Integer" so future cross-type
+            // collisions (e.g. if Float#hash also lands) don't
+            // share hashes by accident. Same tag used by the
+            // BigInt arm in bignum.rs so a small Int and a
+            // (hypothetical non-canonical) BigInt with the same
+            // value hash the same — the canonical-BigInt invariant
+            // makes that impossible in practice, but the tag
+            // alignment future-proofs the protocol.
+            INT_HASH_TAG.hash(&mut h);
+            a.hash(&mut h);
+            Some(Value::Int(h.finish() as i64))
         }
         // `Integer#pow(exp)` — 1-arg form is an alias for `**` for
         // numeric exponents (Int / Float / BigInt under bignum).
