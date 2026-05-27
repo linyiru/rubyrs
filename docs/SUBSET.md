@@ -697,6 +697,41 @@ Foo.singleton_class.name                         # CRuby: nil;   rubyrs: "Foo"
   idempotency, `class is Class`, distinct singletons across classes,
   the ERB-shape `@_init` cache invariant, and `respond_to?` parity).
 
+### `Kernel#eval` / `Class#class_eval(string)` skip caller scope
+
+```ruby
+x = 99
+puts eval("x")                 # CRuby: 99; rubyrs: NameError
+```
+
+- `Kernel#eval(string)` parses, compiles, and runs the source at
+  top level. Returns the final expression's value (matches CRuby).
+- `Kernel#eval` accepts up to 4 args matching CRuby's signature
+  (`eval(src, binding, file, line)`), but the `binding` arg is
+  silently ignored — rubyrs doesn't model `Binding`, so eval'd
+  code sees only top-level scope, not the caller's locals.
+  `file` is wired through to source registration so backtraces
+  and `Method#source_location` for methods defined inside the
+  eval'd source resolve.
+- `Class#class_eval(string [, file, line])` (and `module_eval`
+  alias) does NOT switch to the receiver class's class-body
+  context. Bare `Foo.class_eval("def bar; end")` lands `bar` at
+  top level, not on `Foo`. The block-form
+  `Foo.class_eval { def bar; end }` continues to work as in
+  CRuby (intercepted separately and routed through the existing
+  `invoke_block_with_self` machinery — `bar` lands on `Foo`).
+- Why: completes the tilt full-render chain (tilt's
+  `eval_compiled_method` calls `Object.class_eval(method_source)`
+  where `method_source` is itself a `Tilt::TOPOBJECT.class_eval
+  do def ... end end` block, so the inner block-form handles the
+  actual class context switching — top-level eval is enough).
+  Implementing real class-body switching requires plumbing
+  `class_stack` and `class_visibility_stack` for the duration of
+  the eval; deferred until a non-self-wrapping consumer needs it.
+- Test: `crates/rubyrs/tests/diff/eval_basics.rb` (locks Kernel#eval
+  shapes, the tilt-shape `class_eval(string)` with self-wrap,
+  the file+line signature, and `module_eval` alias parity).
+
 ## Deferred to outer tiers
 
 Features whose absence is a tier-assignment decision per

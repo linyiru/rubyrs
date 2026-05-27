@@ -2100,6 +2100,35 @@ impl Vm {
 
         let recv = recv.expect("ICE: receiver missing");
 
+        // `cls.class_eval(source_string [, file, line])` — runtime
+        // parse + compile + run of a Ruby source string. Tier 1
+        // divergence (documented in docs/SUBSET.md): does NOT
+        // switch to the receiver class's class-body context, so
+        // `Foo.class_eval("def bar; end")` lands `bar` at top
+        // level. Tilt's tilt-2.7.0 `eval_compiled_method` self-
+        // wraps its source in a nested block-form
+        // `Tilt::TOPOBJECT.class_eval do def ... end end`, so
+        // the inner block-form (intercepted in `do_call_block`)
+        // does the actual class context switching.
+        if (&*name == "class_eval" || &*name == "module_eval")
+            && matches!(recv, Value::Class(_))
+            && !args.is_empty()
+            && matches!(args[0], Value::Str(_))
+        {
+            let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
+            let filename = match args.get(1) {
+                Some(Value::Str(f)) => f.to_string_lossy(),
+                _ => "(class_eval)".to_string(),
+            };
+            let v = self.eval_string(&src, &filename)?;
+            if self.suppress_call_result_push {
+                self.suppress_call_result_push = false;
+            } else {
+                self.stack.push(v);
+            }
+            return Ok(());
+        }
+
         // `Object#send(:name, args...)` / `__send__(:name, args...)`
         // — dynamic dispatch. Resolve the first arg as the target
         // method name and re-enter `do_call` with `recv` pushed
@@ -4723,6 +4752,31 @@ impl Vm {
                 // common DSL shape `cls.class_eval { |k| ... }`.
                 let block_args = vec![r.clone()];
                 self.invoke_block_with_self(block, r.clone(), is_class_eval, block_args)?;
+                return Ok(());
+            }
+            // String-arg form: `cls.class_eval(source [, file, line])`
+            // — parse + compile + run the source. Tier 1 divergence:
+            // does NOT switch to the receiver class's class-body
+            // context (so bare `Foo.class_eval("def bar; end")`
+            // lands `bar` at top level instead of on Foo). Tilt's
+            // tilt-2.7.0 `eval_compiled_method` path self-wraps its
+            // source in a nested `Tilt::TOPOBJECT.class_eval do
+            // def __tilt_xxx; end end`, so the inner block-form
+            // (intercepted above) does the actual class context
+            // switching. Documented in docs/SUBSET.md.
+            if is_class_eval && matches!(r, Value::Class(_))
+                && !args.is_empty() && matches!(args[0], Value::Str(_)) {
+                let src = if let Value::Str(s) = &args[0] { s.to_string_lossy() } else { unreachable!() };
+                let filename = match args.get(1) {
+                    Some(Value::Str(f)) => f.to_string_lossy(),
+                    _ => "(class_eval)".to_string(),
+                };
+                let v = self.eval_string(&src, &filename)?;
+                if !self.suppress_call_result_push {
+                    self.stack.push(v);
+                } else {
+                    self.suppress_call_result_push = false;
+                }
                 return Ok(());
             }
         }

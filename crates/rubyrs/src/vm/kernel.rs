@@ -53,6 +53,7 @@ impl Vm {
                 | "__defined_ivar?"
                 | "__defined_method?"
                 | "__defined_const?"
+                | "eval"
         )
     }
 
@@ -737,6 +738,53 @@ impl Vm {
             "require_relative" => Some(Err(self.trap(RubyError::RuntimeError {
                 msg: "require_relative: file I/O not available on wasm32-wasi".into(),
             }))),
+            // `Kernel#eval(string [, _binding, _file, _line])` —
+            // parse + compile + run the source string at top
+            // level. Returns the final expression's value.
+            //
+            // Tier 1 divergences (documented in docs/SUBSET.md):
+            //   - `Binding` is not modeled — any 2nd-arg binding
+            //     is silently ignored; eval'd code sees only top-
+            //     level scope, not the caller's locals.
+            //   - The optional `file` / `line` args are accepted
+            //     for signature compatibility but only `file` is
+            //     wired through to source-registration (used by
+            //     backtraces / `Method#source_location`).
+            "eval" => match args {
+                [Value::Str(src)] => {
+                    let owned = src.to_string_lossy();
+                    Some(self.eval_string(&owned, "(eval)"))
+                }
+                // Common 2-arg shape: `eval(src, binding)` — drop
+                // binding silently per the documented divergence.
+                [Value::Str(src), _binding] => {
+                    let owned = src.to_string_lossy();
+                    Some(self.eval_string(&owned, "(eval)"))
+                }
+                // 3-arg / 4-arg with filename: use it for source
+                // registration so backtraces point at the right
+                // place (tilt passes its template path here).
+                [Value::Str(src), _binding, Value::Str(file)]
+                | [Value::Str(src), _binding, Value::Str(file), _] => {
+                    let owned = src.to_string_lossy();
+                    let fname = file.to_string_lossy();
+                    Some(self.eval_string(&owned, &fname))
+                }
+                [other, ..] if !matches!(other, Value::Str(_)) => {
+                    Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name()
+                        ),
+                    })))
+                }
+                _ => Some(Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..4)",
+                        args.len()
+                    ),
+                }))),
+            },
             _ => None,
         }
     }
@@ -1129,7 +1177,7 @@ impl Vm {
                 msg: ast_errors.join("; "),
             }));
         }
-        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(canon.to_string_lossy().into_owned());
+        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(canon.to_string_lossy());
         // Register the loaded source so `Method#source_location` and
         // any other Vm-side byte-offset → line/col resolver can find
         // it. `Runtime::eval` does the same for top-level scripts; we
@@ -1307,6 +1355,141 @@ impl Vm {
         // returns the load-status Bool.
         let _ = self.stack.pop();
         Ok(Value::Bool(true))
+    }
+
+    /// `Kernel#eval(string)` / `Class#class_eval(string, ...)`
+    /// — runtime parse + compile + run of a Ruby source string.
+    /// Returns the final expression's value (matching CRuby's
+    /// `eval`).
+    ///
+    /// Unlike `compile_and_run_source` (which is `require`-
+    /// flavoured), this:
+    ///   - skips `loaded_features` tracking — eval'd strings
+    ///     aren't files;
+    ///   - returns the top-of-stack expression value instead of
+    ///     `Bool(true)`;
+    ///   - is NOT wasi-gated (no filesystem dependency).
+    ///
+    /// Source is registered in `self.sources` so backtraces and
+    /// `Method#source_location` for methods defined inside the
+    /// eval'd source resolve.
+    ///
+    /// Tier 1 divergence (consumer of this helper):
+    ///   `Class#class_eval(string)` is wired to call this as
+    ///   if it were a top-level eval — it does NOT switch the
+    ///   class-body context to the receiver class. That means
+    ///   bare `Foo.class_eval("def bar; end")` lands `bar` at
+    ///   top level, not on `Foo`. The motivating consumer
+    ///   (tilt-2.7.0) self-wraps the string in a NESTED
+    ///   block-form `class_eval do def ... end end`, so its
+    ///   defs land correctly via the existing block-form path
+    ///   in `dispatch.rs`. Documented in docs/SUBSET.md.
+    pub(crate) fn eval_string(
+        &mut self,
+        source: &str,
+        filename: &str,
+    ) -> Result<Value, Trap> {
+        let parse_result = ruby_prism::parse(source.as_bytes());
+        let mut parse_errors = parse_result.errors().peekable();
+        if parse_errors.peek().is_some() {
+            let msg = crate::error::format_prism_errors(source, parse_errors);
+            return Err(self.trap(RubyError::SyntaxError { msg }));
+        }
+        let (prog, ast_errors) = crate::ast::tr_with_errors_on_source(
+            &parse_result.node(),
+            parse_result.source(),
+        );
+        if !ast_errors.is_empty() {
+            return Err(self.trap(RubyError::SyntaxError {
+                msg: ast_errors.join("; "),
+            }));
+        }
+        let filename_rc: std::rc::Rc<str> = std::rc::Rc::from(filename);
+        let source_rc: std::rc::Rc<str> = std::rc::Rc::from(source);
+        self.sources.insert(filename_rc.clone(), source_rc);
+        let entry = crate::compiler::compile_proto(
+            "<eval>".into(), vec![], &[prog], filename_rc,
+            &mut self.protos, &mut self.interner, &mut self.cache_counter,
+        );
+        let cc = self.cache_counter as usize;
+        self.ensure_call_caches(cc);
+        let depth_before = self.frames.len();
+        let stack_before = self.stack.len();
+        self.frames.push(super::Frame {
+            proto_idx: entry,
+            ip: 0,
+            locals: std::rc::Rc::new(std::cell::RefCell::new(
+                super::vec_nil(self.protos[entry].n_locals as usize)
+            )),
+            self_val: Value::Nil,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: None,
+            is_block: false,
+            n_given_positional: 0,
+            rescues: vec![],
+            loop_rescue_depths: vec![], loop_stack_depths: vec![],
+        });
+        // Same dispatch-loop shape as compile_and_run_source;
+        // a non-local `return` defined INSIDE the eval'd string
+        // should unwind locally, but a `return` escaping the
+        // eval'd top level pops back into the caller's frame.
+        loop {
+            if let Err(trap) = self.dispatch_until(depth_before) {
+                return Err(trap);
+            }
+            if self.method_return.is_none() {
+                break;
+            }
+            let val = self.take_method_return().unwrap();
+            while let Some(f) = self.frames.last() {
+                if !f.is_block { break; }
+                if self.frames.len() <= depth_before + 1 {
+                    break;
+                }
+                let f = self.frames.pop().unwrap();
+                self.stack.truncate(f.base_sp);
+                if f.is_class_body {
+                    let _cls = self.class_stack.pop()
+                        .expect("ICE: class_stack empty unwinding through class_eval (eval_string)");
+                    self.class_visibility_stack.pop();
+                }
+            }
+            if self.frames.len() <= depth_before + 1 {
+                self.method_return = Some(val);
+                break;
+            }
+            let f = self.frames.pop().unwrap();
+            self.stack.truncate(f.base_sp);
+            if f.is_class_body {
+                let cls = self.class_stack.pop()
+                    .expect("ICE: class_stack empty on method-return (eval_string)");
+                self.class_visibility_stack.pop();
+                self.stack.push(Value::Class(cls));
+            } else if let Some(r) = f.swap_return {
+                self.stack.push(r);
+            } else {
+                self.stack.push(val);
+            }
+        }
+        // Method-return escaping out of the eval — let outer
+        // dispatch finish the unwind.
+        if self.method_return.is_some() {
+            self.suppress_call_result_push = true;
+            return Ok(Value::Nil);
+        }
+        // Outer-rescue-unwound-past-us — stack already truncated
+        // by the rescue handler; suppress the result push.
+        if self.stack.len() != stack_before + 1 {
+            self.suppress_call_result_push = true;
+            return Ok(Value::Nil);
+        }
+        // Normal completion: the eval'd source's last expression
+        // sits on top of the operand stack. Pop and return it
+        // (CRuby semantics: `eval("1+2")` → 3).
+        Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
 
 }
