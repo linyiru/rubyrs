@@ -62,6 +62,39 @@ pub(crate) fn string_call(
         (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => {
             Some(Value::Int(a.with_str_lossy(|s| s.chars().count()) as i64))
         }
+        // `String#count(sel, ...)` — count chars matching every
+        // selector (multi-arg = intersection). Each selector
+        // supports CRuby's tr-style mini-syntax: `^X` negates,
+        // `a-z` expands a range. Matches CRuby spec for the
+        // shapes ERB (`content.count("\n")` for line offsets)
+        // and similar consumers use. Empty selector matches no
+        // chars; multi-arg intersection means a char must match
+        // EVERY selector to count.
+        //
+        // Motivating use: MRI lib/erb/compiler.rb:312 — counts
+        // newlines in template content to keep line offsets
+        // accurate in the compiled output.
+        (Value::Str(a), "count", sels) if !sels.is_empty() => {
+            let mut parsed_sels: Vec<(std::collections::HashSet<char>, bool)> =
+                Vec::with_capacity(sels.len());
+            for sel in sels {
+                let s = match sel {
+                    Value::Str(s) => s.to_string_lossy(),
+                    _ => return Ok(None), // Type-error path: let
+                                          // generic dispatch handle.
+                };
+                parsed_sels.push(parse_count_selector(&s));
+            }
+            let total: i64 = a.with_str_lossy(|input| {
+                input.chars().filter(|c| {
+                    parsed_sels.iter().all(|(set, negate)| {
+                        let in_set = set.contains(c);
+                        if *negate { !in_set } else { in_set }
+                    })
+                }).count() as i64
+            });
+            Some(Value::Int(total))
+        }
         // `String#hash` — Integer hash derived from the byte
         // contents. CRuby guarantees: equal strings hash equal
         // (we satisfy this — same byte slice hashes identically
@@ -1283,6 +1316,47 @@ impl Vm {
 /// iteration. CRuby's full spec covers a few more edge cases
 /// (bracketed-string forms, all-non-alnum) which we don't reach
 /// in the subset; those return the input unchanged.
+/// Parse a `String#count` / `#tr` style selector into a
+/// (char-set, negate) pair. Supports CRuby's mini-syntax:
+/// - leading `^` (first char only) → negate the set
+/// - `a-z` → expand range inclusive (only when neither end is
+///   `^` itself; `^-` and `-^` stay literal)
+/// - everything else → literal char
+///
+/// CRuby's tr-syntax has a few finer corners (backslash escapes
+/// inside the selector, octal forms) that real-world consumers
+/// rarely hit; we omit those here. Add as motivating cases
+/// appear.
+pub(crate) fn parse_count_selector(sel: &str) -> (std::collections::HashSet<char>, bool) {
+    let mut negate = false;
+    let mut chars: Vec<char> = sel.chars().collect();
+    if chars.first() == Some(&'^') && chars.len() > 1 {
+        negate = true;
+        chars.remove(0);
+    }
+    let mut set = std::collections::HashSet::new();
+    let mut i = 0;
+    while i < chars.len() {
+        // `a-z` range: middle `-` flanked by literals.
+        if i + 2 < chars.len() && chars[i + 1] == '-' {
+            let start = chars[i] as u32;
+            let end = chars[i + 2] as u32;
+            if start <= end {
+                for cp in start..=end {
+                    if let Some(c) = char::from_u32(cp) {
+                        set.insert(c);
+                    }
+                }
+                i += 3;
+                continue;
+            }
+        }
+        set.insert(chars[i]);
+        i += 1;
+    }
+    (set, negate)
+}
+
 pub(crate) fn str_succ(s: &str) -> String {
     if s.is_empty() {
         return String::new();
