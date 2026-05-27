@@ -51,35 +51,44 @@ exercise an aliasing violation will not crash here, only there.
 
 ## Running locally
 
-You need a nightly toolchain (the rest of the project pins
-stable 1.95 — the fuzz sub-crate detaches from the workspace so
-the nightly install doesn't bleed into normal builds) and
-`cargo-fuzz`:
+You need the pinned nightly toolchain (the rest of the project
+pins stable 1.95 — the fuzz sub-crate detaches from the workspace
+so the nightly install doesn't bleed into normal builds) and
+`cargo-fuzz`. The fuzz crate's `rust-toolchain.toml` pins a
+specific nightly date; once you `cd` into the sub-crate, rustup
+auto-installs that exact version. Bumping the pin is a
+deliberate commit (see `crates/rubyrs/fuzz/rust-toolchain.toml`).
 
 ```sh
-rustup toolchain install nightly
-cargo +nightly install cargo-fuzz
+# Triggers rustup to install the date pinned in
+# crates/rubyrs/fuzz/rust-toolchain.toml — no `+nightly` needed
+# from here on, the file does the channel selection.
+cd crates/rubyrs/fuzz
+rustup show
+cargo install cargo-fuzz --locked
 ```
 
-Then from the repo root:
+Then from inside `crates/rubyrs/fuzz/`:
 
 ```sh
 # 1 min smoke. Replace 60 with 300+ to actually soak.
-cd crates/rubyrs/fuzz
-cargo +nightly fuzz run parse -- -max_total_time=60
+cargo fuzz run parse -- -max_total_time=60
 
 # Same for the full-VM target.
-cargo +nightly fuzz run eval -- -max_total_time=60
+cargo fuzz run eval -- -max_total_time=60
 ```
+
+> Don't add `+nightly` to those commands. Doing so overrides the
+> `rust-toolchain.toml` pin and reintroduces the upstream-nightly
+> flakiness the pin exists to prevent. The toolchain file is
+> sufficient; rustup walks up from cwd and finds it.
 
 A crash drops a minimised input under
 `crates/rubyrs/fuzz/artifacts/<target>/crash-<hash>`. Replay it
-without further fuzzing (run from inside `crates/rubyrs/fuzz/` so
-the relative `artifacts/...` path resolves):
+without further fuzzing (still inside `crates/rubyrs/fuzz/`):
 
 ```sh
-cd crates/rubyrs/fuzz
-cargo +nightly fuzz run parse artifacts/parse/crash-abc123
+cargo fuzz run parse artifacts/parse/crash-abc123
 ```
 
 ## Seeding the corpus

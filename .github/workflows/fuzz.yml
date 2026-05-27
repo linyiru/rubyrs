@@ -40,13 +40,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install nightly toolchain
+      - name: Install pinned nightly toolchain
         # libfuzzer-sys needs nightly's `-Z sanitizer=address` and
         # the unstable `#[no_main]` rules cargo-fuzz wires in. The
         # parent workspace pins stable 1.95; the fuzz sub-crate
         # detaches via its own empty `[workspace]` so this nightly
         # install only affects the fuzz invocation.
-        uses: dtolnay/rust-toolchain@nightly
+        #
+        # Install the *same* version `crates/rubyrs/fuzz/rust-toolchain.toml`
+        # pins. Asking for plain `nightly` would silently win over
+        # the file's pin because rustup honours explicit toolchain
+        # selection on the command line ahead of the toolchain
+        # file. To keep the pin honest, the version here MUST
+        # match `crates/rubyrs/fuzz/rust-toolchain.toml`. Bump
+        # them together.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-24
 
       - name: Install cargo-fuzz
         # Cached install — `cargo install` would otherwise rebuild
@@ -105,7 +115,11 @@ jobs:
         # upload path catches both.
         run: |
           cd crates/rubyrs/fuzz
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
+          # No `+nightly` — rustup picks up the pinned channel from
+          # `rust-toolchain.toml` in cwd. Forcing the channel here
+          # would override the pin and reintroduce upstream-nightly
+          # flakiness.
+          cargo fuzz run ${{ matrix.target }} -- \
             -max_total_time=${{ github.event.inputs.duration_seconds || '300' }} \
             -rss_limit_mb=2048 \
             -timeout=5
