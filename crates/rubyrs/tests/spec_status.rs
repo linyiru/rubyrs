@@ -67,7 +67,10 @@ fn summarize_file(path: &Path) -> SpecSummary {
     let src = fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     let file = path.file_name().unwrap().to_string_lossy().into_owned();
+    summarize_src(file, &src)
+}
 
+fn summarize_src(file: String, src: &str) -> SpecSummary {
     let lines: Vec<&str> = src.lines().collect();
     let mut describe = None;
     let mut upstream = None;
@@ -91,12 +94,17 @@ fn summarize_file(path: &Path) -> SpecSummary {
             continue;
         }
 
-        // `# skipped (<category>): ...`
-        if let Some(rest) = trimmed.strip_prefix("# skipped (") {
-            if let Some(end) = rest.find(')') {
-                let cat = rest[..end].to_string();
-                *skipped.entry(cat).or_insert(0) += 1;
-            }
+        // `# skipped (<category>): ...`. The trailing `:` is
+        // load-bearing — `polish.py` emits exactly that shape,
+        // and we require it here so stray prose comments like
+        // `# skipped (mock) for now, revisit later` don't slip
+        // into the skipped-by-category table.
+        if let Some(rest) = trimmed.strip_prefix("# skipped (")
+            && let Some(end) = rest.find(')')
+            && rest[end + 1..].starts_with(':')
+        {
+            let cat = rest[..end].to_string();
+            *skipped.entry(cat).or_insert(0) += 1;
             i += 1;
             continue;
         }
@@ -364,4 +372,55 @@ fn spec_status_is_up_to_date() {
             on_disk_head, gen_head
         );
     }
+}
+
+#[test]
+fn skipped_counter_requires_colon_after_category() {
+    // polish.py's documented shape is `# skipped (<cat>): <it line>`.
+    // A stray comment that drops the `:` (e.g. a TODO-style note)
+    // must NOT increment the skipped-by-category counter, or the
+    // SPEC_STATUS.md numbers would drift from the polish convention.
+    let src = "\
+describe \"Foo\" do
+  # skipped (mock): it \"calls observer\" do
+  # skipped (mock) for now, revisit later
+  # skipped (fixture): it \"uses MyArray\" do
+  it \"works\" do
+    assert_eq(1, 1)
+  end
+end
+";
+    let s = summarize_src("synthetic_spec.rb".into(), src);
+    assert_eq!(s.examples, 1, "one `it` block");
+    assert_eq!(s.skipped.get("mock").copied(), Some(1), "only the `:`-form mock counts");
+    assert_eq!(s.skipped.get("fixture").copied(), Some(1));
+}
+
+#[test]
+fn upstream_folds_multi_line_continuations() {
+    // Trailing `+` on first line, then continuation on next.
+    let src = "\
+# Adapted from ruby/spec core/method/equal_value_spec.rb +
+# shared/eql.rb at 2026-05 (subset).
+describe \"Method#==\" do
+end
+";
+    let s = summarize_src("method_equal_spec.rb".into(), src);
+    assert_eq!(
+        s.upstream.as_deref(),
+        Some("core/method/equal_value_spec.rb + shared/eql.rb"),
+    );
+
+    // Leading `+ ` on the continuation line.
+    let src2 = "\
+# Adapted from ruby/spec core/basicobject/singleton_method_spec.rb
+# + core/kernel/define_singleton_method_spec.rb at 2026-05.
+describe \"def obj.name\" do
+end
+";
+    let s2 = summarize_src("singleton_method_spec.rb".into(), src2);
+    assert_eq!(
+        s2.upstream.as_deref(),
+        Some("core/basicobject/singleton_method_spec.rb + core/kernel/define_singleton_method_spec.rb"),
+    );
 }
