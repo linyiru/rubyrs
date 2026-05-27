@@ -8,7 +8,12 @@ describe "Hash#to_a" do
     h = { a: 1, 1 => :a, 3 => :b, b: 5 }
     pairs = []
 
-    h.each_pair do |key, value|
+    # Description says "as each()"; use `#each` directly so the
+    # test exercises the same iterator the description names.
+    # `#each_pair` is an alias of `#each` for Hash in CRuby and
+    # rubyrs, but matching the description's verb makes a future
+    # failure read straight.
+    h.each do |key, value|
       pairs << [key, value]
     end
 
