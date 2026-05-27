@@ -2556,6 +2556,36 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
+            // `class << self; @@cvar = expr; ...` — class variable
+            // assignment inside the singleton class body. Same
+            // shape as the CWN arm above: the toplevel
+            // `Expr::CvarWrite` path already exists; we just
+            // admit it here so the spike-subset doesn't reject
+            // the form. CRuby places class variables on the
+            // enclosing class hierarchy regardless of whether the
+            // write happens inside `class << self` (cvars are
+            // hierarchy-keyed in CRuby, NOT singleton-class-
+            // scoped). rubyrs's Tier-1 cvar model is per-class
+            // (no hierarchy walk — see `Op::LoadCvar` /
+            // `StoreCvar`); admitting this arm doesn't change
+            // that pre-existing divergence either way. So the
+            // write goes to the same table whether the write
+            // syntactically appears at class-body top level or
+            // inside `class << self`; what this arm fixes is
+            // strictly the parse-time admission, not any
+            // semantic alignment with CRuby's hierarchy-walking
+            // cvar lookup.
+            //
+            // Motivating call site: sinatra/base.rb:1292's
+            // `class << self; ...; @@mutex = Mutex.new; def
+            // synchronize(&block); @@mutex.synchronize(&block);
+            // ...; end; end` — cvar assigned once then read from
+            // singleton methods defined in the same body.
+            // (TRY_RUNS pass 9.5 layer #12.)
+            if recv_is_self && bn.as_class_variable_write_node().is_some() {
+                out.push(tr(ctx, bn));
+                continue;
+            }
             // `class << self` body: any remaining unsupported form
             // compiles to a runtime `raise NotImplementedError`
             // rather than a parse-time SyntaxError. The raise fires
@@ -2594,7 +2624,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // even silently emitting nil would do the wrong thing
             // (the body's intended target receiver is lost).
             if recv_is_self {
-                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), and constant assignment (`FOO = expr`) are supported in the spike subset";
+                let msg = "class << self body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, `alias`, `prepend Mod` (single Module arg, with `self` receiver), constant assignment (`FOO = expr`), and class variable assignment (`@@cvar = expr`) are supported in the spike subset";
                 out.push(sp(bn, Expr::Call {
                     receiver: None,
                     name: "raise".into(),
