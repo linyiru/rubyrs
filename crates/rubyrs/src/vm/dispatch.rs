@@ -4626,6 +4626,15 @@ impl Vm {
         // do_call's allocate arm — same arity / primitive shell /
         // Module-Class fences, same shared allocator helper, with
         // the block discarded.
+        //
+        // Precedence: this arm sits AFTER the generic
+        // `lookup_class_singleton_method` check at line 4601, so
+        // a user-defined `def self.allocate` wins. do_call has the
+        // matching precedence via its dedicated `allocate`
+        // user-singleton arm at line 1184 (fix landed in the same
+        // PR's code-review round). The two paths are now
+        // symmetric: user override wins in both no-block and
+        // block forms.
         if &*name == "allocate"
             && let Value::Class(cls) = &recv {
             if !args.is_empty() {
@@ -4767,6 +4776,19 @@ impl Vm {
     /// its result, so any caller that needs to keep the new
     /// Instance alive across a later `maybe_gc` must pin
     /// (`PinGuard::pin`) before that point.
+    ///
+    /// Sites that intentionally do NOT use this helper:
+    /// - `raise.rs` exception construction (lines 41/63/108/373)
+    ///   skips `check_alloc` so a raise during budget exhaustion
+    ///   does not re-trap — exception normalization must succeed
+    ///   even under OOM-like conditions.
+    /// - `match_data.rs:34` (regex MatchData) is a hot path where
+    ///   the Instance lives immediately next to a heap-allocated
+    ///   capture Array; threading them through this helper would
+    ///   trigger an extra `maybe_gc` between two heap.alloc calls
+    ///   and sweep the unpinned capture Array.
+    /// These exemptions are intentional; flagged by PR #181
+    /// code-review #3.
     pub(crate) fn alloc_default_instance(&mut self, cls: &Rc<Class>) -> Result<Value, Trap> {
         self.maybe_gc();
         self.check_alloc()?;
