@@ -65,21 +65,23 @@ jobs:
         with:
           tool: cargo-fuzz@0.12
 
-      - name: Cache cargo + fuzz corpus
-        # Persist the per-target corpus across runs. cargo-fuzz
-        # writes new "interesting" inputs into `fuzz/corpus/<target>/`;
-        # restoring last run's corpus means each iteration starts
-        # from the discovered surface area, not from scratch. The
-        # `restore-keys` falls back to any prior run on this OS so
-        # a first-time run on a new toolchain still benefits.
-        uses: actions/cache@v5
+      - name: Restore cargo + fuzz corpus (previous run)
+        # Split restore/save so corpus growth from this run is
+        # actually published for the next run to consume.
+        # `actions/cache@v5` with a fixed key only saves on a
+        # *cache miss* — once the entry exists, future runs
+        # restore-only and discard their corpus deltas. Use the
+        # run-id as the save key (always unique → always saves)
+        # and a stable prefix in `restore-keys` so the previous
+        # run's snapshot still loads on startup.
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             crates/rubyrs/fuzz/target
             crates/rubyrs/fuzz/corpus
-          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('crates/rubyrs/fuzz/Cargo.toml', 'crates/rubyrs/fuzz/fuzz_targets/**') }}
+          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-fuzz-${{ matrix.target }}-
 
@@ -123,6 +125,22 @@ jobs:
             -max_total_time=${{ github.event.inputs.duration_seconds || '300' }} \
             -rss_limit_mb=2048 \
             -timeout=5
+
+      - name: Save fuzz corpus (publish for next run)
+        # `if: always()` so even a fuzzing-discovered crash still
+        # saves the grown corpus — the crashing input itself is a
+        # high-value seed for next time. Matches the restore key
+        # above (run-id) so save can't collide with itself; the
+        # next workflow's `restore-keys` prefix picks it up.
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/rubyrs/fuzz/target
+            crates/rubyrs/fuzz/corpus
+          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ github.run_id }}
 
       - name: Upload crash artifacts on failure
         # `cargo fuzz` writes minimised crash repros to
