@@ -12,18 +12,18 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 91 |
-| Examples in corpus | 447 |
-| Skipped `it` traces | 140 |
+| Files | 95 |
+| Examples in corpus | 470 |
+| Skipped `it` traces | 145 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 1 |
+| `divergent` | 2 |
 | `fixture` | 48 |
 | `method-not-implemented` | 78 |
-| `mock` | 13 |
+| `mock` | 17 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
 `DROP_PATTERNS` (`fixture` / `mock` / `method-not-implemented` plus the
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 19 | 46 | 38 |
-| Integer | 21 | 188 | 16 |
+| Integer | 25 | 211 | 21 |
 | Method | 11 | 57 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -93,10 +93,13 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_values_spec.rb` | Hash#values | `core/hash/values_spec.rb` | 1 | 0 |
 | `instance_eval_spec.rb` | BasicObject#instance_eval | `core/basicobject/instance_eval_spec.rb` | 4 | 0 |
 | `integer_abs_spec.rb` | Integer#abs | `core/integer/abs_spec.rb + shared/abs.rb` | 1 | 1 |
+| `integer_allbits_spec.rb` | Integer#allbits? | `core/integer/allbits_spec.rb` | 5 | 1 |
+| `integer_anybits_spec.rb` | Integer#anybits? | `core/integer/anybits_spec.rb` | 5 | 1 |
 | `integer_bit_and_spec.rb` | Integer#& | `core/integer/bit_and_spec.rb` | 11 | 0 |
 | `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 0 |
 | `integer_bit_or_spec.rb` | Integer#\| | `core/integer/bit_or_spec.rb` | 10 | 0 |
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
+| `integer_case_compare_spec.rb` | Integer#=== | `core/integer/case_compare_spec.rb + core/integer/shared/equal.rb` | 8 | 2 |
 | `integer_comparison_spec.rb` | Integer#<=> | `core/integer/comparison_spec.rb` | 23 | 2 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
@@ -105,6 +108,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_equal_value_spec.rb` | Integer#== | `core/integer/equal_value_spec.rb + core/integer/shared/equal.rb` | 10 | 1 |
 | `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
 | `integer_left_shift_spec.rb` | Integer#<< | `core/integer/left_shift_spec.rb` | 26 | 0 |
+| `integer_nobits_spec.rb` | Integer#nobits? | `core/integer/nobits_spec.rb` | 5 | 1 |
 | `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |
 | `integer_pow_spec.rb` | Integer#pow | `core/integer/pow_spec.rb` | 7 | 0 |
 | `integer_right_shift_spec.rb` | Integer#>> | `core/integer/right_shift_spec.rb` | 26 | 0 |
