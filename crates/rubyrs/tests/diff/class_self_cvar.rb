@@ -6,13 +6,20 @@
 ##
 ## CRuby places class variables on the enclosing class
 ## hierarchy regardless of whether the write happens inside
-## `class << self` — cvars are hierarchy-keyed, not
-## singleton-class-scoped. So routing the write through the
-## existing toplevel `Expr::CvarWrite` matches CRuby's actual
-## cvar semantics. No scope divergence introduced here (unlike
-## the layer-#11 constant case, where the spike-scope flat
-## table happens to satisfy bare reads but external accesses
-## diverge).
+## `class << self` — cvars are hierarchy-keyed in CRuby, not
+## singleton-class-scoped. rubyrs's Tier-1 cvar model is
+## per-class with no hierarchy walk (pre-existing divergence
+## from CRuby — see Op::LoadCvar/StoreCvar). What this PR's
+## arm fixes is strictly the PLACEMENT side: the write
+## syntactically appearing inside `class << self` lands in
+## the same table it would if syntactically at class-body top
+## level. The full CRuby cvar semantic (hierarchy lookup) is
+## out of scope and the subclass-reach KNOWN GAP below
+## captures the remaining divergence. Unlike the layer-#11
+## constant case (PR #209) — where the spike-scope flat
+## constants table introduces a NEW cross-scope divergence on
+## `Class::CONST` reads — this PR doesn't add a new divergence
+## point; it preserves the existing one.
 
 class WithCvar
   class << self
