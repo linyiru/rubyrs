@@ -432,12 +432,15 @@ fn preamble_fits_under_tight_resource_caps() {
 #[test]
 fn integer_iter_loops_trap_under_fuel_cap() {
     // A.3 — DoS guard for the BigInt iter surface. Pre-this-test,
-    // `(2**100).times { }` / `0.upto(10**18) { }` would run
-    // essentially forever on a host that hadn't configured fuel
-    // or deadline. They CAN'T silently hang anymore — the
-    // existing `Config::fuel` mechanism (decremented per
-    // dispatched op) trips inside the block-invocation dispatch
-    // loop, raising `ResourceExhausted: "out of fuel"`.
+    // `(2**100).times { }` / `0.upto(10**18) { }` will run
+    // essentially forever on a host that hasn't configured fuel
+    // OR deadline (the runtime's "explicit opt-in" cap model —
+    // no implicit DoS protection, same as the rest of the
+    // resource caps). When EITHER cap IS set, the loop trips:
+    // this test pins the fuel-trip path via the existing
+    // `Config::fuel` mechanism (decremented per dispatched op),
+    // which trips inside the block-invocation dispatch loop and
+    // raises `ResourceExhausted: "out of fuel"`.
     //
     // This test pins that behaviour across all three iter
     // methods (times / upto / downto) for both Int recv (the
