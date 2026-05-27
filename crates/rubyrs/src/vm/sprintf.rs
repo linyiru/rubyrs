@@ -363,10 +363,19 @@ fn format_radix_any(
         // BigInt formats (a `%X` of a near-cap value would push
         // us past the cap during formatting). All `to_str_radix`
         // output is ASCII, so byte-level uppercase is safe.
+        //
+        // Sign + prefix are prepended in-place via `String::insert*`
+        // for the same peak-memory reason: `format!("{sign}{prefix}{mag}")`
+        // would allocate a second ~`est`-byte String while `mag`
+        // is still live, doubling the resident footprint past the
+        // cap we just validated. Insertion at offset 0 IS O(n)
+        // (memmove of `mag`), but stays within the single
+        // ~`est`-byte allocation.
         let mut mag = b.magnitude().to_str_radix(radix);
         if upper { mag.make_ascii_uppercase(); }
-        let sign = if b.sign() == Sign::Minus { "-" } else { "" };
-        return Ok(format!("{sign}{prefix}{mag}"));
+        if !prefix.is_empty() { mag.insert_str(0, prefix); }
+        if b.sign() == Sign::Minus { mag.insert(0, '-'); }
+        return Ok(mag);
     }
     Ok(format_radix_int(coerce_int(arg)?, radix, upper, alt))
 }
