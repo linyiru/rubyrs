@@ -295,21 +295,66 @@ pub(crate) fn numeric_call(
                     }
                 }
             }
-            // Bitwise. Ruby uses arbitrary-precision Integer; we
-            // truncate to i64. `<<` on a negative shift count is
-            // CRuby's right-shift (and vice versa) — we mirror with
-            // a sign check rather than panicking on negative shifts.
+            // Bitwise. Ruby uses arbitrary-precision Integer.
+            // With `bignum` on, `<<` / `>>` overflow paths return
+            // None so bigint_primitive's `try_bigint_bit_shift` can
+            // promote to BigInt (mirrors the `**` overflow pattern).
+            // Without `bignum` we truncate to i64 — historical
+            // wrapping behaviour. Negative shift counts swap
+            // direction (CRuby: `5 << -1 == 5 >> 1`).
             "&" => Some(Value::Int(a & b)),
             "|" => Some(Value::Int(a | b)),
             "^" => Some(Value::Int(a ^ b)),
-            "<<" => Some(Value::Int(
-                if *b >= 0 { a.wrapping_shl((*b as u32).min(63)) }
-                else { a.wrapping_shr(((-b) as u32).min(63)) }
-            )),
-            ">>" => Some(Value::Int(
-                if *b >= 0 { a.wrapping_shr((*b as u32).min(63)) }
-                else { a.wrapping_shl(((-b) as u32).min(63)) }
-            )),
+            "<<" => {
+                #[cfg(feature = "bignum")]
+                {
+                    if *b >= 0 {
+                        // Left-shift: only safe if shift count fits
+                        // u32 AND `a << shift` doesn't lose bits.
+                        // `checked_shl` returns None on either case;
+                        // bigint_primitive then promotes.
+                        u32::try_from(*b).ok()
+                            .and_then(|s| a.checked_shl(s))
+                            .map(Value::Int)
+                    } else {
+                        // Right-shift via negative count: result
+                        // always fits i64. Clamp huge magnitudes to
+                        // the sign-bit shift (CRuby: `5 >> 100 == 0`,
+                        // `(-1) >> 100 == -1`). `i64::MIN` negation
+                        // overflows so handle it explicitly.
+                        let mag = if *b == i64::MIN { 63 } else { (-b).min(63) as u32 };
+                        Some(Value::Int(a.wrapping_shr(mag)))
+                    }
+                }
+                #[cfg(not(feature = "bignum"))]
+                { Some(Value::Int(
+                    if *b >= 0 { a.wrapping_shl((*b as u32).min(63)) }
+                    else { a.wrapping_shr(((-b) as u32).min(63)) }
+                )) }
+            }
+            ">>" => {
+                #[cfg(feature = "bignum")]
+                {
+                    if *b >= 0 {
+                        // Right-shift: always fits i64. Clamp as
+                        // above for the saturating-shift semantics.
+                        let mag = if *b >= 64 { 63 } else { *b as u32 };
+                        Some(Value::Int(a.wrapping_shr(mag)))
+                    } else {
+                        // Left-shift via negative count: overflow
+                        // path declines for bigint_primitive promote.
+                        if *b == i64::MIN { return Ok(None); }
+                        u32::try_from(-b).ok()
+                            .and_then(|s| a.checked_shl(s))
+                            .map(Value::Int)
+                    }
+                }
+                #[cfg(not(feature = "bignum"))]
+                { Some(Value::Int(
+                    if *b >= 0 { a.wrapping_shr((*b as u32).min(63)) }
+                    else { a.wrapping_shl(((-b) as u32).min(63)) }
+                )) }
+            }
             _ => None,
         },
         // 2-arg form `pow(exp, mod)` — under `bignum`, declined here

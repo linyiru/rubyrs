@@ -2710,6 +2710,106 @@ fn bigint_bitwise_and_or_xor_two_complement_semantics() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_shift_left_right_promote_and_collapse() {
+    // Phase B.3c: `<<` / `>>` with BigInt-flavoured operands.
+    // Covers:
+    // - Int recv overflow promote: `1 << 64` was Int 0 pre-fix
+    //   (wrapping_shl clamped to 63), now BigInt 2^64.
+    // - BigInt magnitude: `1 << 100` produces 2^100.
+    // - BigInt recv right-shift: `(2**100) >> 50` = 2^50 (Int demote).
+    // - Right-shift collapse: shifting past bit-length returns 0
+    //   (non-neg) or -1 (neg) via the early-exit, not a giant alloc.
+    // - Negative shift count: `5 << -1 == 5 >> 1 == 2`.
+    // - Demote-on-fit: `(2**100) << -100 == 1`.
+    // - Identity short-circuit: `1 << 0 == 1` returns recv unchanged.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (1 << 64)\n\
+         puts (1 << 64).class.name\n\
+         puts (1 << 100)\n\
+         puts ((2 ** 100) >> 50)\n\
+         puts ((2 ** 100) >> 50).class.name\n\
+         puts ((2 ** 100) >> 1000)\n\
+         puts ((-(2 ** 100)) >> 1000)\n\
+         puts (5 << -1)\n\
+         puts ((2 ** 100) << -100)\n\
+         puts ((2 ** 100) << -100).class.name\n\
+         puts (5 >> 100)\n\
+         puts ((-1) >> 100)",
+        "bigint_shifts.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "18446744073709551616");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "1267650600228229401496703205376");
+    assert_eq!(lines[3], "1125899906842624");
+    assert_eq!(lines[4], "Integer");
+    assert_eq!(lines[5], "0");
+    assert_eq!(lines[6], "-1");
+    assert_eq!(lines[7], "2");
+    assert_eq!(lines[8], "1");
+    assert_eq!(lines[9], "Integer");
+    assert_eq!(lines[10], "0");
+    assert_eq!(lines[11], "-1");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_left_traps_dos_via_max_value_bytes() {
+    // Left-shift DoS cap: `1 << 100_000_000` would allocate
+    // ~12.5 MB. Pre-cap estimator must trap before BigInt::shl
+    // touches the allocator. Honours `max_value_bytes` with the
+    // same 1 MB fallback as `try_bigint_pow`.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "1 << 1_000_000",
+        "shift_dos.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_by_bigint_count_left_traps_right_collapses() {
+    // BigInt shift count: by canonical invariant any BigInt is
+    // outside i64, so:
+    // - actual-left-shift by BigInt count → trap (would need
+    //   > 2^63 bits of storage).
+    // - actual-right-shift by BigInt count → collapse to 0 / -1
+    //   without touching num_bigint (avoids the impossible alloc).
+    let mut rt = rubyrs::Runtime::new();
+    // Right-shift by BigInt count: collapses.
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts ((2 ** 100) >> (2 ** 100))\n\
+         puts ((-(2 ** 100)) >> (2 ** 100))",
+        "shift_by_bigint_right.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "-1");
+    // Left-shift by BigInt count: traps regardless of cap.
+    let err = rt.eval(
+        "1 << (2 ** 100)",
+        "shift_by_bigint_left.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {
     // Two distinct CRuby behaviours for negative integers in
     // non-decimal bases:
