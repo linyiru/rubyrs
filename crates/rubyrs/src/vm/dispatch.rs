@@ -3712,9 +3712,10 @@ impl Vm {
         // lib/erb/compiler.rb:147 pattern) raises NoMethodError
         // because the fallthrough never sees Method as a valid
         // receiver. Re-shape the stack as
-        // `bm_recv, args..., block` and recursively dispatch
-        // through `do_call_block` so the underlying method
-        // receives the block argument.
+        // `bm_recv, block, args...` (the order do_call_block
+        // expects — see the push sequence below) and recursively
+        // dispatch through `do_call_block` so the underlying
+        // method receives the block argument.
         if let Some(Value::BoundMethod(bid)) = &recv
             && matches!(&*name, "call" | "[]" | "()") {
             let (bm_recv, bm_name_id) = match self.heap.get(*bid) {
