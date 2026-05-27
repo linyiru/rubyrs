@@ -132,6 +132,61 @@ impl Vm {
                             Some(last)
                         }
                     }
+                    // `Array#replace(other)` — clear self and copy in
+                    // other's contents. Returns self. CRuby raises
+                    // TypeError when `other` isn't an Array (and the
+                    // receiver isn't an Array subclass with `to_ary`);
+                    // rubyrs ships the strict-Array shape and matches
+                    // CRuby's TypeError message wording byte-for-byte
+                    // for non-Array args. Same byte-cap pattern push
+                    // / unshift use, sized at the OTHER's length
+                    // because the new content is what determines the
+                    // post-replace size.
+                    //
+                    // Self-replace (`a.replace(a)`) clones `b` into
+                    // `tmp` BEFORE the truncate so the source view
+                    // outlives the in-place clear; otherwise the
+                    // `array_mut(a).clear()` would empty the
+                    // borrow-via-id we'd read from next.
+                    //
+                    // Spec un-skip: array_first_spec.rb's "returns an
+                    // array which is independent to the original
+                    // when passed count" + the analogous block in
+                    // array_last_spec.rb (PRs #133/#158 deferred
+                    // them as `# skipped (method-not-implemented):`).
+                    ("replace", [Value::Array(other_id)]) => {
+                        let new_len = self.heap.array(*other_id).len();
+                        if let Some(max) = self.max_value_bytes
+                            && new_len.saturating_mul(std::mem::size_of::<Value>()) > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("Array.replace would exceed {max} bytes"),
+                                }));
+                            }
+                        // Snapshot the source contents first so the
+                        // self-replace case (a.replace(a)) doesn't
+                        // read from a buffer we then truncate.
+                        let snapshot: Vec<Value> = self.heap.array(*other_id).clone();
+                        let a = self.heap.array_mut(id);
+                        a.clear();
+                        a.extend(snapshot);
+                        Some(Value::Array(id))
+                    }
+                    ("replace", [other]) => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Array",
+                                other.type_name(),
+                            ),
+                        }));
+                    }
+                    ("replace", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 1)",
+                                many.len()
+                            ),
+                        }));
+                    }
                     // `Array#unshift(v)` / `prepend(v)` — insert at
                     // front, return receiver. Variadic in CRuby
                     // (`unshift(a, b, c)` inserts all at once in
