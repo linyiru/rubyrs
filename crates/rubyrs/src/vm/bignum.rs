@@ -149,6 +149,13 @@ fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool
 /// CRuby-parity lossless three-way comparison between a BigInt
 /// and a Float.
 ///
+/// Scope: BigInt × Float only. Int × Float (Fixnum range) still
+/// demotes the Int to f64 in numeric.rs's Int×Float arm, so
+/// e.g. `(2**62 + 1) <=> (2**62).to_f` currently returns 0
+/// instead of CRuby's 1 — fixing that would require an Int-side
+/// lossless path with i64-vs-f64 mantissa-bit reasoning, tracked
+/// as a follow-up.
+///
 /// Returns:
 /// - `None` for NaN (CRuby's `bigint <=> nan` returns `nil`;
 ///   `bigint < nan` / `> nan` / `<= nan` / `>= nan` all return
@@ -189,16 +196,11 @@ fn bigint_cmp_float_lossless(
     //   f = 2.7 → trunc=2,  frac=+0.7 → if bigint==2 then bigint < f
     //   f = -2.7 → trunc=-2, frac=-0.7 → if bigint==-2 then bigint > f
     //   f = 2.0 → trunc=2,  frac=0     → if bigint==2 then equal
-    let trunc = num_bigint::BigInt::from_f64(float)
-        // Defensive: from_f64 returns None only for NaN/±inf
-        // (filtered above). A future num-bigint version that
-        // narrowed the range would land here; "not comparable"
-        // is the safe default.
-        .map(|t| t);
-    let trunc = match trunc {
-        Some(t) => t,
-        None => return None,
-    };
+    // Defensive: from_f64 returns None only for NaN/±inf
+    // (filtered above). A future num-bigint version that narrowed
+    // the range would land here; "not comparable" is the safe
+    // default.
+    let trunc = num_bigint::BigInt::from_f64(float)?;
     let cmp = bigint.cmp(&trunc);
     if cmp != Ordering::Equal {
         return Some(cmp);
