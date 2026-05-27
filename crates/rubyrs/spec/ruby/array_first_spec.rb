@@ -54,10 +54,16 @@ describe "Array#first" do
   end
 
   # skipped (divergent): it "raises a RangeError when count is a Bignum" do
-  #   rubyrs caps the count to receiver length (see
-  #   crates/rubyrs/tests/diff/array_first_last_n.rb:34) rather
-  #   than raising RangeError; behavior divergence, not
-  #   unimplemented form.
+  #   CRuby raises RangeError for `[].first(bignum_value)`.
+  #   rubyrs's `Array#first(n)` arm only matches `Value::Int(n)`
+  #   (see crates/rubyrs/src/vm/array.rs), so a true BigInt arg
+  #   falls through to NoMethodError — i.e. divergent error
+  #   class, not divergent control flow. (The i64-fitting large
+  #   literal in crates/rubyrs/tests/diff/array_first_last_n.rb:34
+  #   exercises the cap-to-length path for `Value::Int`, NOT the
+  #   Bignum dispatch path.)
+  #   Unlock when rubyrs grows a BigInt arm that raises
+  #   RangeError to match.
 
   it "returns the entire array when count > length" do
     assert_eq([1, 2, 3, 4, 5, 9].first(10), [1, 2, 3, 4, 5, 9])
