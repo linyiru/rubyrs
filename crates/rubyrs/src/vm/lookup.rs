@@ -99,6 +99,17 @@ impl Vm {
         name_id: SymId,
         cache_id: u16,
     ) -> Option<Rc<Method>> {
+        // Callers must gate this with `Vm::is_builtin_name` before invoking,
+        // because the slot key (`TOPLEVEL_METHOD_CACHE_KEY`) is the only
+        // signal `lookup_toplevel_method_cache_hit` uses — if a builtin
+        // name's user `def` ever lands in this slot, the cache-hit fast
+        // path in `do_call` will return it and silently shadow the
+        // builtin. The debug assert below catches a future caller that
+        // forgets the gate.
+        debug_assert!(
+            !Self::is_builtin_name(self.interner.resolve(name_id)),
+            "lookup_toplevel_method_cached called for a name in is_builtin_name; the toplevel cache must not be populated for builtins"
+        );
         let idx = cache_id as usize;
         if idx < self.call_caches.len() {
             let cc = &self.call_caches[idx];
@@ -1085,5 +1096,19 @@ mod tests {
         // Cache now stale, walks the chain, finds nothing.
         let after = vm.lookup_method_cached(&cls, name, 0);
         assert!(after.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "is_builtin_name")]
+    fn lookup_toplevel_method_cached_rejects_builtin_name() {
+        // Defends the cache-hit fast path in `do_call`: the cache key
+        // alone can't tell a builtin name from a user toplevel def, so
+        // the populator must never store a builtin under that slot.
+        // If a future caller of this function forgets the
+        // `is_builtin_name` gate, the debug assert here fires in tests.
+        let (mut vm, _) = mk_vm();
+        vm.ensure_call_caches(1);
+        let name = vm.interner.intern("sprintf");
+        let _ = vm.lookup_toplevel_method_cached(name, 0);
     }
 }
