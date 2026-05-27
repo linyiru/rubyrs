@@ -157,19 +157,26 @@ the injected value:
 - `vm.rs:390-402, 423` — comments + types referencing the injected values
 - `vm/step.rs:693, 956` — comments referencing the injected values (`env`, `pid`)
 
-### Audit-required sites (no clear classification yet)
+### Audit-required sites — RESOLVED 2026-05-27
 
-- `std::sync::Arc` (3 sites — exact locations need a per-site grep): single-threaded VM should not need `Arc`. Suspect dead code, cext-thread-callback boundary, or a `Send`-bound API contract. **Action**: investigate before Phase 1; classify each as `tier-1-replaceable` (probably actually `Rc`), `tier-2-host-io` (genuinely cross-thread cext callback), or remove.
-- `std::panic` (1 site): cext panic catch — ADR 0009 territory. Should stay in `rubyrs-cext` crate, not `rubyrs-core`. **Action**: confirm location in Phase 1; if it's in `rubyrs/src/`, move to cext crate.
+- **`std::sync::Arc` (4 sites total)** — investigated, all legitimate:
+  - `vm.rs:404`, `lib.rs:190`, `main.rs:223` — `Config::time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>`. The `Send + Sync` bound is required for the public `Config` API to be `Send` (an embedder may construct Config in one thread, hand it to a Runtime on another). **Tag: `tier-2-host-io`** (legitimately public API surface). NOT dead code; keep as `Arc`.
+  - `vm/iter.rs:2582` `Arc::new(Mutex::new(...))` — test-only code (inside `#[cfg(test)]` block); the test fixture's `Sink` adapter needs `Arc` so the test thread can read the captured buffer after `eval`. **Tag: `tier-2-host-io` (test-only)**. Keep.
+- **`std::panic` (1 site at `lib.rs:1670`)** — `use std::panic::{catch_unwind, AssertUnwindSafe}` is inside `#[cfg(test)] mod caps_guard_tests` testing `CapsGuard`'s drop-safety. Test-only, never reaches the production path. **Tag: `tier-2-host-io` (test-only)**. Keep.
+- **`STRESS_GC` env read at `lib.rs:206`** — RESOLVED by removing the env read from `Config::default()` (commit `<this PR>`). The library API no longer leaks host env into a public field. Subprocess-based tests (diff_cruby, cext_*) still pick up `STRESS_GC` via the CLI's explicit `main.rs::env_lookup` read.
 
 ## Phase 1 migration order
 
 Recommended sequencing within the Phase 1 PR (or PR chain):
 
-1. **Test-time cleanup first** (separate PR before Phase 1):
-   - Move `lib.rs:206`'s `STRESS_GC` env read to a typed `Config` field or `cfg!(test)`.
-   - Audit `std::sync::Arc` usage; either replace with `Rc` or move to a thread-touching crate.
-   - Confirm `std::panic` lives in `rubyrs-cext` not `rubyrs/src/`.
+1. ✅ **Test-time cleanup** — DONE in pre-Phase-1 cleanup PR:
+   - `lib.rs:206`'s `STRESS_GC` env read removed from
+     `Config::default()`; library API no longer leaks env
+   - `std::sync::Arc` audited — all 4 sites legitimate
+     (`Config::time_now` public Send+Sync bound; test-only
+     Mutex wrapper)
+   - `std::panic` confirmed test-only (`#[cfg(test)]`
+     block in `lib.rs`); no production-path usage
 
 2. **Phase 1 PR — mass `tier-1-replaceable` sweep**:
    - `sed`-replace ~230 `std::` sites to `core::` / `alloc::` equivalents. Single mechanical commit per category (Rc, RefCell, Cell, cmp::Ordering, mem::*, ffi::*).
@@ -190,7 +197,7 @@ Recommended sequencing within the Phase 1 PR (or PR chain):
 ## Open questions to resolve before Phase 1 lands
 
 1. **`Write` trait abstraction for the no_std core**: do we vendor a minimal `OutputSink` trait, or do we add a `[dependencies]` on a no_std-compatible IO crate? Recommend the former — single trait, ~20 lines, no dep.
-2. **`std::sync::Arc` sites** (3): need per-site investigation as noted.
+2. ~~**`std::sync::Arc` sites**~~ RESOLVED — see "Audit-required sites" section above.
 3. **`lib.rs:1029`'s `std::fs::read_to_string`**: should `Runtime::eval_file` itself be available in Tier 1 (today's reality) or move to a host-fn / Tier 3 `_io` battery surface? Recommend keeping in the facade for Phase 1; revisit when `_io` battery lands.
 4. **`vm/cext.rs:920`'s `use std::path::Path`**: stays in the cext crate (which is itself Tier 4); just verify the import isn't visible from `rubyrs-core`.
 

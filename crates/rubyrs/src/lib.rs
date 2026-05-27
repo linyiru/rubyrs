@@ -191,23 +191,28 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// Default Config. `stress_gc` auto-enables from the `STRESS_GC`
-    /// env var on non-wasi hosts so `STRESS_GC=1 cargo test` flips
-    /// every `Runtime::new()`-using test into stress mode — the
-    /// previous behavior, lost when `Vm::new` stopped reading the
-    /// env var to satisfy wizer's no-imports rule. The wizer path
-    /// does NOT go through `Config::default()` (it calls
-    /// `Runtime::new_default_impl` directly), so this env read can't
-    /// pollute the snapshot. The CLI binary explicitly reads
-    /// `STRESS_GC` again from main.rs for the same flag — both reads
-    /// agree, harmless.
+    /// Default Config. `stress_gc` is always `false` here — the
+    /// public library API must not read host-process env vars
+    /// (ADR 0017 Rule 1's "deterministic from script inputs"
+    /// guarantee). Library embedders set `stress_gc` explicitly
+    /// if they want it; the CLI binary `rubyrs` reads its own
+    /// `STRESS_GC` env in `main.rs::env_lookup` and constructs
+    /// Config with the bool already set, never going through
+    /// this `default()`.
+    ///
+    /// Previous behavior: `Config::default()` auto-read
+    /// `STRESS_GC` so `STRESS_GC=1 cargo test --lib` flipped
+    /// every in-process `Runtime::new()` to stress mode.
+    /// Removed in the pre-Phase-1 audit cleanup (STD_AUDIT.md
+    /// open question #2): library default leaked host env into
+    /// a public API field. Subprocess-based tests (diff_cruby,
+    /// cext_typeddata, cext_instance_method) still pick up
+    /// `STRESS_GC` via the CLI's explicit env read — that's
+    /// the supported "STRESS_GC=1 cargo test" path going
+    /// forward.
     fn default() -> Self {
-        #[cfg(not(target_os = "wasi"))]
-        let stress_gc = std::env::var("STRESS_GC").is_ok();
-        #[cfg(target_os = "wasi")]
-        let stress_gc = false;
         Self {
-            stress_gc,
+            stress_gc: false,
             fuel: None,
             max_heap_objects: None,
             max_frames: None,
