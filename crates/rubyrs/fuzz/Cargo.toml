@@ -1,0 +1,75 @@
+[package]
+name = "rubyrs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+# Detach from the parent workspace — `cargo fuzz` builds this crate
+# with the nightly toolchain (libfuzzer-sys needs `-Z sanitizer`),
+# while the rest of the workspace pins stable 1.95 via
+# `rust-toolchain.toml`. Letting cargo resolve them together
+# would either fail (nightly features in stable build) or
+# silently downgrade. Empty `[workspace]` makes this crate its
+# own little workspace.
+[workspace]
+# Match the root workspace's resolver so a future second
+# fuzz-target dep with conflicting features unifies the same way
+# under nightly as it does under stable elsewhere in the repo.
+# Today the sub-workspace has one member so resolver choice is
+# observably inert; pinning it explicitly removes the silent
+# divergence risk before it bites.
+resolver = "3"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# `default-features = false` drops the `cext` feature: dlopen-loading
+# C extensions isn't part of the script-input attack surface (user
+# input is `*.rb` text, not native code) and pulling in
+# `libloading` + the `rubyrs-cext` crate would bloat the fuzz
+# binary and slow each iteration with no signal gain.
+rubyrs = { path = "..", default-features = false, features = ["regex", "bignum"] }
+# `tempfile` powers the sandbox-cwd helper in `src/lib.rs`. The
+# alternative — `std::env::temp_dir().join(format!("...-{pid}"))`
+# + `create_dir_all` — leaves a TOCTOU window where a pre-created
+# symlink at the predicted path can redirect the cwd. Not a real
+# threat on GitHub's single-user runners, but `tempfile` makes
+# the construction safe-by-default for one line of dep.
+tempfile = "3"
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eval"
+path = "fuzz_targets/eval.rs"
+test = false
+doc = false
+bench = false
+
+# Optimised build for the fuzz binaries — libfuzzer needs the
+# instrumentation that the cargo-fuzz wrapper passes via RUSTFLAGS,
+# but we still want release-mode codegen so iterations per second
+# stay high. cargo-fuzz's default `dev` profile would otherwise leave
+# us at ~50 exec/s; release-mode lands closer to ~2k exec/s on the
+# parse target.
+#
+# `debug-assertions` + `overflow-checks` are turned back ON despite
+# release codegen, because the harness explicitly hunts the bug
+# classes those guards expose: `debug_assert!` invariants inside
+# `vm/`, and signed-integer arithmetic overflow in primitive ops /
+# index math. Without these, fuzz would only ever catch ICEs and
+# UAF-style memory errors via ASan, missing the larger surface of
+# "the script tickled a wraparound that the VM never noticed."
+# Trade-off: ~5-15% slower per iteration on arithmetic-heavy
+# corpora; over the workflow's 5-min budget that's ~200 iters out
+# of ~2400, well worth the coverage delta.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true

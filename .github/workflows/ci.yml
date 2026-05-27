@@ -37,7 +37,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: GC rooting lint (issue #90)
@@ -148,7 +148,7 @@ jobs:
             ~/.cargo/git
             target
             /opt/wasi-sdk-24.0-x86_64-linux
-          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-wasm-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-wasm-
 
       - name: Install wasi-sdk 24
@@ -582,7 +582,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-
 
       - name: Build (release)
@@ -624,7 +624,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-miri-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-miri-
 
       - name: Miri setup
