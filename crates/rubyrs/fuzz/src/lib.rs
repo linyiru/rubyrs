@@ -14,14 +14,35 @@
 //! etc.) land here too.
 
 use rubyrs::{Config, Runtime};
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::Duration;
+
+thread_local! {
+    /// Per-process cached Runtime. Each cargo-fuzz target compiles
+    /// to its own binary, so each binary's process gets its own
+    /// `FUZZ_RT`. `RefCell<Option<...>>` lazy-inits on first call
+    /// to `run_with_caps`, then every subsequent iteration takes
+    /// `&mut Runtime` and calls `reset()` instead of paying the
+    /// ~3-6 ms preamble rebuild every iter.
+    ///
+    /// Lives in `thread_local!` because `Runtime` isn't `Send` /
+    /// `Sync` (Rc<RefCell<...>> everywhere). libfuzzer is single-
+    /// threaded so the `thread_local` is effectively process-wide.
+    static FUZZ_RT: RefCell<Option<Runtime>> = const { RefCell::new(None) };
+}
 
 /// Resource caps a fuzz target applies to its `Runtime`. Named
 /// presets (`Caps::tight`, `Caps::loose`) encode the parse-vs-eval
 /// balance — tight gives parser + AST→IR more mutation surface per
 /// CPU second, loose lets dispatch / GC / method lookup run for
 /// longer per iteration.
+///
+/// `Copy` because the struct is three POD fields (~24 bytes) and
+/// `run_with_caps` takes `Caps` by value at every iteration — the
+/// implicit move-on-call is cheap and lets the helper signature
+/// stay value-typed without callers reaching for `&` / `.clone()`.
+#[derive(Copy, Clone)]
 pub struct Caps {
     pub fuel: u64,
     pub max_frames: usize,
@@ -52,24 +73,14 @@ impl Caps {
     }
 }
 
-/// The full iteration body both fuzz targets share: sandbox the
-/// cwd, UTF-8-gate the input, build a `Config` from the supplied
-/// caps + the cross-target safety defaults
-/// (`max_value_bytes`, `max_symbols`, `deadline`, `stress_gc:
-/// false`), evaluate, ignore the `Result` (script errors are
-/// expected; only Rust panics fail the iteration).
-pub fn run_with_caps(data: &[u8], caps: Caps) {
-    ensure_sandbox_cwd();
-    let source = match std::str::from_utf8(data) {
-        Ok(s) => s,
-        // `Runtime::eval` takes `&str` (UTF-8); skip non-UTF-8
-        // bytes here. Ruby files CAN declare other source
-        // encodings via `# encoding: ...` magic comments, but
-        // rubyrs's embed API doesn't expose that path — covering
-        // it would need a separate fuzz target.
-        Err(_) => return,
-    };
-    let cfg = Config {
+/// Build the Config used to construct the cached Runtime.
+/// Called once per fuzz process via `get_or_insert_with`; the
+/// per-iter `apply_config` refresh that used to call this on
+/// every iteration was removed once `Runtime::reset` started
+/// restoring `vm.fuel` (lib.rs, same PR), making the refresh
+/// redundant.
+fn build_cfg(caps: &Caps) -> Config {
+    Config {
         fuel: Some(caps.fuel),
         max_frames: Some(caps.max_frames),
         max_heap_objects: Some(caps.max_heap_objects),
@@ -87,9 +98,70 @@ pub fn run_with_caps(data: &[u8], caps: Caps) {
         // the harness's throughput is environment-independent.
         stress_gc: false,
         ..Default::default()
+    }
+}
+
+/// The full iteration body both fuzz targets share: sandbox the
+/// cwd, UTF-8-gate the input, get-or-init the per-process cached
+/// `Runtime`, rewind any user state from the previous iteration
+/// via `Runtime::reset`, then evaluate. Ignores the `Result`
+/// (script errors are expected; only Rust panics fail the
+/// iteration).
+///
+/// Pre-PR-#212: each iteration constructed a fresh `Runtime`,
+/// paying ~3-6 ms of preamble parse + compile + execute. The
+/// `Runtime::reset()` API added in PR #212 (benchmarked at
+/// ~107× faster than a fresh Runtime on the headline workload)
+/// lets the harness keep one Runtime and rewind between inputs.
+/// Net effect: cargo-fuzz's iter/sec on the parse target goes
+/// from ~2k/s to ~3k/s after the constant-work overhead of
+/// libfuzzer's coverage-instrumented + ASan iteration becomes
+/// the dominant cost.
+///
+/// An earlier revision of this harness called
+/// `rt.apply_config(build_cfg(&caps))` after every `reset()` to
+/// refill `fuel`, because `reset()` originally didn't restore
+/// it — fuel decremented monotonically across the cached
+/// Runtime's lifetime, and after a few iters every eval
+/// immediately trapped with `out of fuel` while libfuzzer
+/// reported them as healthy iterations. That gap was closed at
+/// the source: `Runtime::reset` now snapshots and restores
+/// `vm.fuel` (same PR, lib.rs), so the per-iter refresh is
+/// redundant. The harness body shrinks back to
+/// `reset() + eval()`.
+///
+/// `caps` is read once per process to seed the Runtime; both
+/// targets pass the same constant (`Caps::tight()` for parse,
+/// `Caps::loose()` for eval), so subsequent calls' `caps`
+/// argument is unused. A future target that wants per-iter
+/// cap variation can re-introduce a Config-rebuild path.
+pub fn run_with_caps(data: &[u8], caps: Caps) {
+    ensure_sandbox_cwd();
+    let source = match std::str::from_utf8(data) {
+        Ok(s) => s,
+        // `Runtime::eval` takes `&str` (UTF-8); skip non-UTF-8
+        // bytes here. Ruby files CAN declare other source
+        // encodings via `# encoding: ...` magic comments, but
+        // rubyrs's embed API doesn't expose that path — covering
+        // it would need a separate fuzz target.
+        Err(_) => return,
     };
-    let mut rt = Runtime::with_config(cfg);
-    let _ = rt.eval(source, "fuzz.rb");
+    FUZZ_RT.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let rt = slot.get_or_insert_with(|| Runtime::with_config(build_cfg(&caps)));
+        // Rewind user state from the previous iteration AND
+        // restore resource caps (including `vm.fuel`) to the
+        // post-preamble baseline. The Runtime keeps its
+        // preamble bytecode, class tables, method tables,
+        // host_fns, and the resource caps' configured ceiling
+        // values; only the per-eval state from the last `eval`
+        // (heap allocs, user-interned symbols, user
+        // classes/constants/methods, globals, fuel consumed,
+        // ...) gets wiped. See PR #212's `embed/reset.rs` for
+        // the full contract.
+        rt.reset();
+        let _ = rt.eval(source, "fuzz.rb");
+    });
 }
 
 /// Move the fuzz process cwd into a fresh, unpredictable tempdir

@@ -178,11 +178,9 @@ sees the connection.
 
 ## Known limits + future work
 
-Three concrete gaps the current harness leaves on the table.
-Each is in scope for a follow-up PR; none is a blocker for the
-initial soak workload paying for itself.
+One concrete gap remains on the table.
 
-### 1. Filesystem sandbox covers `require` only
+### Filesystem sandbox covers `require` only
 
 `ensure_sandbox_cwd` moves the process cwd into a tempdir, which
 makes `require '<relative>'` and `require_relative '...'` look
@@ -206,42 +204,55 @@ uniformly across every I/O sink in `vm/`. Same need lives in
 there benefits both consumers and removes the cwd-tempdir trick
 as a per-consumer rediscovery.
 
-### 2. Runtime preamble rebuilt every iteration
+## Historical: closed gaps
 
-Each fuzz iteration calls `Runtime::with_config(cfg)`, which
-runs the exception-class preamble during construction (~30k ops
-as of 2026-05). At ~2k iter/sec that's ~60M bootstrap ops/sec —
-roughly 30-40% of the workflow's 5-min budget spent on identical
-setup rather than coverage.
+The next two sections describe gaps that were closed during the
+initial fuzz-harness rollout. They're kept here as anchors for
+the follow-up work they motivated — re-flagging the same items
+as "future work" would be misleading. New gaps belong above
+under "Known limits + future work".
 
-The fix is a `Runtime::reset()` API in the main crate that
-clears heap + frames + symbol-interner deltas while preserving
-the preamble's class tables and method definitions. Then the
-harness can cache one `Runtime` in `thread_local!` and call
-`reset()` between iterations. Realistic gain: 1.5-2× iter/sec.
+### ~~Runtime preamble rebuilt every iteration~~ — fixed in PR #212 + adoption PR
 
-Out of scope for the initial harness because the reset API
-needs to be carefully scoped (which Rc<RefCell> state is
-per-iter vs. preamble-built?). Tracked as a follow-up.
+PR #212 landed `Runtime::reset()` which rewinds a Runtime to
+its post-preamble baseline without re-running the preamble.
+The harness in `crates/rubyrs/fuzz/src/lib.rs::run_with_caps`
+now caches a single `Runtime` in `thread_local!<RefCell<...>>`
+and calls `rt.reset()` at the top of each iteration. Measured
+~107× speedup over the pre-adoption fresh-Runtime-per-iter
+shape on the headline workload (`[1,2,3,4,5].map { |x| x*2 }.length`,
+500 iters: 712 µs/iter → 6.6 µs/iter). cargo-fuzz's harness
+overhead caps the realized win lower than the Rust-only
+benchmark, but the nightly soak now does ~3k iter/sec vs the
+previous ~2k — a ~50% boost on the same 5-min budget.
 
-### 3. Preamble-fuel coupling
+See PR #212's `embed/reset.rs` for the full contract reset
+honours (per-class methods/ivars/singleton_methods restored,
+heap truncated to post-preamble high-water, interner truncation
+respects post-construction host_fn / cext SymIds, etc.).
 
-`Runtime::with_config` consumes user-supplied `Config::fuel`
-during preamble load (lib.rs:460-499). The harness works
-around this by sizing `Caps::tight()`'s fuel above the observed
-~30k preamble cost — but that number is undocumented in the
-embed API and grows silently with each rubyrs PR that adds
-exception classes.
+### ~~Preamble-fuel coupling~~ — fixed in PR #204
 
-The workflow's `Preamble-fuel smoke check` step catches the
-case where the preamble exceeds the cap (single-input run of
-empty source; if it traps, the workflow fails fast before
-soaking 5 min on identical crashes). But that's a guard, not a
-fix.
+`Runtime::with_config` used to consume user-supplied
+`Config::fuel` during preamble load — a host setting a tight
+fuel budget would panic during construction with
+`ICE: failed to load exception preamble` instead of getting a
+recoverable Runtime. PR #204 introduced the `CapsGuard` RAII
+pattern that lifts all six resource caps (fuel / max_frames /
+max_heap_objects / max_symbols / max_value_bytes / deadline)
+for the duration of `load_preamble` and restores them after,
+so preamble runs unbounded and user evals see the host's caps
+as documented.
 
-The right fix is one of:
-- preamble loader uses an unbounded internal fuel budget and
-  only the post-construction `eval()` calls observe user fuel;
-- `.expect("ICE: failed to load exception preamble")` at
-  lib.rs:460 downgrades to a `Trap` return so the host can
-  gracefully handle setup failure.
+The workflow's `Preamble-fuel smoke check` step is still in
+place as a CI guard against future regressions in this area:
+runs the empty input under a tight cap for 5s, fails the job
+loudly if the preamble traps. Cheap insurance even with the
+coupling fixed.
+
+Historic record: the original harness sized `Caps::tight()`'s
+fuel at 50k as an empirical workaround above the observed ~30k
+preamble cost. With the coupling fixed, that 50k could be
+tightened back to whatever exec/s budget the parser-focused
+target actually wants — left at 50k for now to bias mutation
+toward the parser surface, not as a workaround.

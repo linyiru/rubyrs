@@ -714,16 +714,24 @@ impl Vm {
     /// an incremental cache on each register-site would be
     /// cheaper — flagged as future work in PR #212's review.
     pub(crate) fn long_lived_sym_id_max(&self) -> Option<usize> {
+        #[allow(unused_mut)]
         let mut max: Option<usize> = self
             .host_fns
             .keys()
             .map(|sym| sym.0 as usize)
             .max();
+        // Both cext tables are themselves `#[cfg(feature = "cext")]`
+        // (instance methods additionally `not(target_os = "wasi")`);
+        // gate the walks the same way so this helper compiles
+        // under `--no-default-features` — the fuzz crate
+        // disables `cext` to keep the binary lean.
+        #[cfg(feature = "cext")]
         for inner in self.cext_class_methods.values() {
             if let Some(m) = inner.keys().map(|sym| sym.0 as usize).max() {
                 max = Some(max.map_or(m, |c| c.max(m)));
             }
         }
+        #[cfg(all(feature = "cext", not(target_os = "wasi")))]
         for inner in self.cext_instance_methods.values() {
             if let Some(m) = inner.keys().map(|sym| sym.0 as usize).max() {
                 max = Some(max.map_or(m, |c| c.max(m)));
