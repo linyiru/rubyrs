@@ -47,8 +47,14 @@ fi
 # handle: a successful workload run, a crashed workload, and a
 # binary built without `--features ic-stats` (no `ic-stats` line
 # in stderr at all). The tmpfile is cleared in-loop and removed
-# on exit.
-stderr_file="$(mktemp)"
+# on exit. Explicit `${TMPDIR:-/tmp}/<prefix>.XXXXXX` template
+# matches the sibling-script convention (perf/wasm_check.sh:137)
+# so BSD/GNU mktemp parity is held and a read-only TMPDIR
+# surfaces a clear diagnostic rather than a silent failure.
+stderr_file="$(mktemp "${TMPDIR:-/tmp}/rubyrs-ic-stats.XXXXXX")" || {
+    echo "ic_stats: mktemp failed (TMPDIR=${TMPDIR:-/tmp}); cannot capture per-workload stderr" >&2
+    exit 2
+}
 trap 'rm -f "$stderr_file"' EXIT
 
 printf 'workload\thits\tmisses\ttoplevel_hits\ttoplevel_misses\thit_rate\n'
