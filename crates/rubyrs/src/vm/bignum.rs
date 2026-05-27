@@ -1195,7 +1195,7 @@ pub(crate) fn bignum_digits_upper_bound(bits: u64, radix: u32) -> u64 {
     const SCALE: u128 = 64;
     let log2_scaled = bignum_log2_per_digit_scaled(radix) as u128;
     let scaled_bits = (bits as u128).saturating_mul(SCALE);
-    let digits_est = (scaled_bits + log2_scaled - 1) / log2_scaled;
+    let digits_est = scaled_bits.div_ceil(log2_scaled);
     let digits_est_u64 = if digits_est > u64::MAX as u128 {
         u64::MAX
     } else {
