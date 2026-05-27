@@ -1342,6 +1342,133 @@ fn bigint_eq_float_is_lossless() {
     ]);
 }
 
+#[test]
+fn int_cmp_float_is_lossless() {
+    // Sibling to bigint_cmp_float_is_lossless. The Int×Float
+    // arm in numeric.rs pre-fix demoted the i64 to f64 for the
+    // compare; for |i| > 2^53 the cast loses bits, so e.g.
+    // `(2**62 + 1) > (2**62).to_f` returned false. Runs on
+    // BOTH profiles because the helper is pure i64+f64 (no
+    // BigInt required).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "nan = 0.0 / 0.0\n\
+         inf = 1.0 / 0.0\n\
+         # <=> (Int × Float, both directions)\n\
+         puts ((2**62 + 1) <=> (2**62).to_f).inspect    # 1\n\
+         puts ((2**62) <=> (2**62).to_f).inspect        # 0\n\
+         puts ((2**62 - 1) <=> (2**62).to_f).inspect    # -1\n\
+         puts ((2**62).to_f <=> (2**62 + 1)).inspect    # -1 (Float × Int reverses)\n\
+         puts (1 <=> nan).inspect                       # nil\n\
+         puts (1 <=> inf).inspect                       # -1\n\
+         puts (1 <=> -inf).inspect                      # 1\n\
+         # Ordering operators\n\
+         puts ((2**62 + 1) > (2**62).to_f)              # true\n\
+         puts ((2**62 + 1) < (2**62).to_f)              # false\n\
+         puts ((2**62 + 1) <= (2**62).to_f)             # false\n\
+         puts ((2**62 + 1) >= (2**62).to_f)             # true\n\
+         puts ((2**62).to_f < (2**62 + 1))              # true (Float × Int direction)\n\
+         # NaN: all four ordering ops are false (CRuby parity)\n\
+         puts (1 < nan)                                 # false\n\
+         puts (1 > nan)                                 # false\n\
+         puts (1 <= nan)                                # false\n\
+         puts (1 >= nan)                                # false\n\
+         # Float-exact happy paths (under 2^53 — must still work)\n\
+         puts (1 == 1.0)                                # true\n\
+         puts (5 < 5.5)                                 # true\n\
+         puts ((-3) == -3.0)                            # true\n\
+         # i64::MIN boundary — i64::MIN.to_f = -2^63 is exact;\n\
+         # the lower-bound check in int_cmp_float_lossless uses\n\
+         # `<` (not `<=`) so equal-to-i64::MIN cases fall into\n\
+         # the integer-compare branch rather than the sign-only\n\
+         # short-circuit.\n\
+         puts ((-9223372036854775808) <=> (-9223372036854775808).to_f).inspect  # 0\n\
+         puts ((-9223372036854775808) <=> -1e30).inspect                        # 1 (f more neg)\n\
+         puts ((-9223372036854775808) <=> -(2.0 ** 63 + 2048)).inspect          # 1 (next ulp below i64::MIN)\n\
+         # Frac-sign disambiguation at zero\n\
+         puts (0 <=> (-0.5)).inspect                                           # 1\n\
+         puts (0 <=> 0.5).inspect                                              # -1",
+        "int_cmp_float.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "1", "0", "-1", "-1",                  // <=> precision + symmetric
+        "nil", "-1", "1",                      // <=> NaN/±inf
+        "true", "false", "false", "true",      // Lt/Le/Gt/Ge precision
+        "true",                                 // Float × Int direction
+        "false", "false", "false", "false",    // NaN ordering
+        "true", "true", "true",                // Float-exact happy paths
+        "0", "1", "1",                         // i64::MIN boundary
+        "1", "-1",                              // frac-sign disambig at 0
+    ]);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn aggregate_cmp_int_float_is_lossless() {
+    // Sibling pin to int_cmp_float_is_lossless / bigint_cmp_float_is_lossless,
+    // but for the aggregator path in vm/util.rs::value_cmp_v_heap_inner.
+    // Used by Array#<=>, Array#sort, Array#min/max — pre-cycle-1
+    // it still demoted Int→f64 (and had no BigInt×Float arm at
+    // all, returning nil), so the direct operator and the
+    // aggregate path diverged after the previous PRs in this
+    // series. Both routes now use the same lossless helpers.
+    // Gated on bignum because half the assertions use 2**64
+    // literals which saturate to i64::MAX under no-bignum.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts ([2**62 + 1] <=> [(2**62).to_f]).inspect    # 1\n\
+         puts ([2**62] <=> [(2**62).to_f]).inspect        # 0\n\
+         puts ([2**62 - 1] <=> [(2**62).to_f]).inspect    # -1\n\
+         puts ([(2**62).to_f] <=> [2**62 + 1]).inspect    # -1\n\
+         # BigInt × Float (pre-fix returned nil — no arm at all)\n\
+         puts ([2**64 + 1] <=> [(2**64).to_f]).inspect    # 1\n\
+         puts ([2**64] <=> [(2**64).to_f]).inspect        # 0\n\
+         puts ([(2**64).to_f] <=> [2**64 + 1]).inspect    # -1",
+        "agg_cmp_int_float.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "1", "0", "-1", "-1",   // Int × Float (both directions)
+        "1", "0", "-1",         // BigInt × Float (both directions)
+    ]);
+}
+
+#[test]
+fn by_aggregators_cmp_int_float_is_lossless() {
+    // Sibling to aggregate_cmp_int_float_is_lossless but for the
+    // `_by` family (`min_by`, `max_by`, `sort_by`), which uses
+    // the heap-less `value_cmp_v` aggregator. Pre-fix Int×Float
+    // keys returned `None` (incomparable) and bubbled up as
+    // NoMethodError; now routes through int_cmp_float_lossless.
+    // BigInt×Float still out of scope here (value_cmp_v has no
+    // heap access; tracked as a follow-up).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts ([1, 2, 3].min_by { |x| x == 2 ? 1.5 : x }).inspect    # 1\n\
+         puts ([1, 2, 3].max_by { |x| x == 2 ? 1.5 : x }).inspect    # 3\n\
+         puts ([3, 1, 2.5].sort_by { |x| x }).inspect                # [1, 2.5, 3]\n\
+         puts ([2**62 + 1, 2**62 - 1].min_by { |x| x.to_f }).inspect # 4611686018427387903 (both keys round to 2**62; min_by returns first)",
+        "by_cmp.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "1",
+        "3",
+        "[1, 2.5, 3]",
+        "4611686018427387905",  // first element of [2**62+1, 2**62-1]
+    ]);
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_cmp_float_is_lossless() {

@@ -769,8 +769,22 @@ pub(crate) fn numeric_call(
                 Some(Value::Int(((a / p).trunc() * p) as i64))
             }
         }
-        // Mixed Int/Float — CRuby's "Float wins" coercion.
+        // Mixed Int/Float — CRuby's "Float wins" coercion for
+        // arithmetic. Comparison ops route through
+        // `int_cmp_float_lossless` so e.g. `(2**62 + 1) > (2**62).to_f`
+        // returns true instead of false (the demote-to-f64 path
+        // collapses both sides onto the same Float bit pattern
+        // when |i| > 2^53).
         (Value::Float(a), op, [Value::Int(b)]) => {
+            // Comparison ops: route through the lossless helper,
+            // inverting the Ordering because the helper takes
+            // (int, float) but the operator is float-vs-int.
+            if let Some(v) = cmp_op_to_value(
+                op,
+                int_cmp_float_lossless(*b, *a).map(|o| o.reverse()),
+            ) {
+                return Ok(Some(v));
+            }
             let b = *b as f64;
             match op {
                 "+" => Some(Value::Float(a + b)),
@@ -778,21 +792,18 @@ pub(crate) fn numeric_call(
                 "*" => Some(Value::Float(a * b)),
                 "/" => Some(Value::Float(a / b)),
                 "%" => Some(Value::Float(a % b)),
-                "==" => Some(Value::Bool(*a == b)),
-                "!=" => Some(Value::Bool(*a != b)),
-                "<"  => Some(Value::Bool(*a < b)),
-                "<=" => Some(Value::Bool(*a <= b)),
-                ">"  => Some(Value::Bool(*a > b)),
-                ">=" => Some(Value::Bool(*a >= b)),
-                "<=>" => Some(match a.partial_cmp(&b) {
-                    Some(o) => Value::Int(o as i64),
-                    None => Value::Nil,
-                }),
                 "**" => Some(Value::Float(a.powf(b))),
                 _ => None,
             }
         }
         (Value::Int(a), op, [Value::Float(b)]) => {
+            // Comparison ops: lossless path (see Float×Int arm).
+            if let Some(v) = cmp_op_to_value(
+                op,
+                int_cmp_float_lossless(*a, *b),
+            ) {
+                return Ok(Some(v));
+            }
             let a = *a as f64;
             match op {
                 "+" => Some(Value::Float(a + b)),
@@ -800,16 +811,6 @@ pub(crate) fn numeric_call(
                 "*" => Some(Value::Float(a * b)),
                 "/" => Some(Value::Float(a / b)),
                 "%" => Some(Value::Float(a % b)),
-                "==" => Some(Value::Bool(a == *b)),
-                "!=" => Some(Value::Bool(a != *b)),
-                "<"  => Some(Value::Bool(a < *b)),
-                "<=" => Some(Value::Bool(a <= *b)),
-                ">"  => Some(Value::Bool(a > *b)),
-                ">=" => Some(Value::Bool(a >= *b)),
-                "<=>" => Some(match a.partial_cmp(b) {
-                    Some(o) => Value::Int(o as i64),
-                    None => Value::Nil,
-                }),
                 "**" => Some(Value::Float(a.powf(*b))),
                 _ => None,
             }
@@ -894,6 +895,100 @@ fn try_int_shl_lossless(a: i64, shift: i64) -> Option<i64> {
     // same amount doesn't reconstruct the input. `0 << anything ==
     // 0` round-trips trivially.
     if (result >> s) == a { Some(result) } else { None }
+}
+
+/// CRuby-parity lossless three-way comparison between an Int
+/// (i64) and a Float (f64). Sibling to bignum.rs's
+/// `bigint_cmp_float_lossless` — see that file for the BigInt
+/// path's design notes.
+///
+/// Without this, demoting the i64 to f64 collapses values within
+/// the same Float ULP onto the same bit pattern: f64 has 53-bit
+/// precision, so for `|i| > 2^53` the cast loses bits. E.g.
+/// `(2**62 + 1) <=> (2**62).to_f` rounded both sides to 2^62
+/// and wrongly returned 0; CRuby returns 1.
+///
+/// Returns:
+/// - `None` for NaN (CRuby: `i <=> nan` is nil, `i < nan` /
+///   `> nan` / `<= nan` / `>= nan` are all false).
+/// - `Some(Less)` if `i < f`, `Some(Equal)` if equal,
+///   `Some(Greater)` if `i > f`.
+pub(crate) fn int_cmp_float_lossless(i: i64, f: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if f.is_nan() {
+        return None;
+    }
+    if f == f64::INFINITY {
+        return Some(Ordering::Less);
+    }
+    if f == f64::NEG_INFINITY {
+        return Some(Ordering::Greater);
+    }
+    // |f| past i64 range — i sits inside [i64::MIN, i64::MAX] so
+    // ordering is decided by sign of f. The two bounds are
+    // asymmetric in f64 representability:
+    //   - `i64::MAX as f64 = 2^63` (rounds UP, since 2^63 - 1 isn't
+    //     exactly representable); so the upper bound check uses
+    //     `>=` against 2^63 — any `trunc >= 2^63` is strictly
+    //     greater than i64::MAX = 2^63 - 1.
+    //   - `i64::MIN as f64 = -2^63` (exactly representable, as a
+    //     power of 2); so the lower bound uses `<` (not `<=`).
+    //     At `trunc == -2^63.0` the value fits as i64::MIN and
+    //     must fall into the integer-compare branch below — a
+    //     future `<=` here would wrongly report `Greater` for
+    //     `i64::MIN <=> i64::MIN.to_f` (which is exactly 0).
+    let trunc = f.trunc();
+    if trunc < (i64::MIN as f64) {
+        // f more negative than any i64 → i > f.
+        return Some(Ordering::Greater);
+    }
+    if trunc >= (i64::MAX as f64) {
+        // f.trunc() >= 2^63 > i64::MAX ≥ i → i < f.
+        return Some(Ordering::Less);
+    }
+    // trunc fits in i64. Compare against the integer part; the
+    // fractional sign then disambiguates the tie (mirrors the
+    // BigInt path).
+    let f_int = trunc as i64;
+    let cmp = i.cmp(&f_int);
+    if cmp != Ordering::Equal {
+        return Some(cmp);
+    }
+    let frac = f - trunc;
+    if frac == 0.0 {
+        Some(Ordering::Equal)
+    } else if frac > 0.0 {
+        // i == trunc, f = trunc + (+frac) > trunc → i < f
+        Some(Ordering::Less)
+    } else {
+        // i == trunc, f = trunc + (-frac) < trunc → i > f
+        Some(Ordering::Greater)
+    }
+}
+
+/// Translate an `Option<Ordering>` (typically from a lossless
+/// numeric compare) into the right `Value` for a Ruby comparison
+/// operator. Returns `None` for unknown ops (so the caller can
+/// fall through to its non-comparison arms).
+///
+/// `cmp == None` means NaN — CRuby parity: every ordering op
+/// (and the equality ops) return `false`; `<=>` returns `nil`.
+fn cmp_op_to_value(op: &str, cmp: Option<std::cmp::Ordering>) -> Option<Value> {
+    use std::cmp::Ordering;
+    let v = match op {
+        "==" => Value::Bool(cmp == Some(Ordering::Equal)),
+        "!=" => Value::Bool(cmp != Some(Ordering::Equal)),
+        "<"  => Value::Bool(cmp == Some(Ordering::Less)),
+        "<=" => Value::Bool(matches!(cmp, Some(Ordering::Less | Ordering::Equal))),
+        ">"  => Value::Bool(cmp == Some(Ordering::Greater)),
+        ">=" => Value::Bool(matches!(cmp, Some(Ordering::Greater | Ordering::Equal))),
+        "<=>" => match cmp {
+            Some(o) => Value::Int(o as i64),
+            None => Value::Nil,
+        },
+        _ => return None,
+    };
+    Some(v)
 }
 
 pub(crate) fn type_name_for_coerce(v: &Value) -> &'static str {

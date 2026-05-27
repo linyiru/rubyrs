@@ -174,7 +174,7 @@ fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool
 /// — finite floats convert losslessly via `from_f64` (truncates
 /// toward zero) and the fractional sign disambiguates the tie.
 #[cfg(feature = "bignum")]
-fn bigint_cmp_float_lossless(
+pub(crate) fn bigint_cmp_float_lossless(
     bigint: &num_bigint::BigInt,
     float: f64,
 ) -> Option<std::cmp::Ordering> {
