@@ -432,6 +432,20 @@ impl Vm {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             let gid = g.vm.heap.alloc(HeapObj::Array(group_vec));
+                            // Pin the freshly-allocated capture-
+                            // groups Array. `invoke_block` may run
+                            // `maybe_gc()` before copying `args`
+                            // into the block's locals, and `args`
+                            // at that point is a Rust-local
+                            // `Vec<Value>` — the only root for
+                            // `gid` until invoke_block writes it
+                            // into a frame slot. Without this pin,
+                            // STRESS_GC sweeps `gid` mid-call and
+                            // the block sees a use-after-free (or
+                            // stack-overflow ICE on further GC).
+                            // Same shape Hash#each_with_index uses
+                            // for its per-iter pair_id allocation.
+                            g.pin(Value::Array(gid));
                             match g.vm.step_block(block, vec![Value::Array(gid)], pre_frames)? {
                                 BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                                 BlockStep::Break(r) => { early = Some(r); break; }
