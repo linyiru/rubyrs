@@ -2518,6 +2518,13 @@ impl Vm {
             // but the per-iter pair is the `[k, v]` Array (yielded
             // identically to `each` so two-param `|k, v|` blocks
             // auto-splat).
+            //
+            // GC discipline: `snapshot` is a Rust-local Vec; if the
+            // block mutates the receiver hash (e.g. `h.delete(k)`),
+            // the only remaining root for `k`/`v` is `snapshot`,
+            // which GC doesn't walk. Push heap-ref k/v onto
+            // `vm.pinned` before the maybe_gc / alloc / step_block
+            // window, pop after — same scope as the pair_id push.
             (Value::Hash(id), "count", []) => {
                 let id = *id;
                 let mut g = PinGuard::new(self);
@@ -2528,12 +2535,18 @@ impl Vm {
                 let mut n: i64 = 0;
                 let mut early = None;
                 for (k, v) in snapshot {
+                    let pinned_k = k.is_gc_heap_ref();
+                    let pinned_v = v.is_gc_heap_ref();
+                    if pinned_k { g.vm.pinned.push(k.clone()); }
+                    if pinned_v { g.vm.pinned.push(v.clone()); }
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
+                    if pinned_v { g.vm.pinned.pop(); }
+                    if pinned_k { g.vm.pinned.pop(); }
                     let r = match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
@@ -2546,7 +2559,8 @@ impl Vm {
             // `h.each_with_object(memo) { |(k, v), memo| ... }`.
             // Mirrors `Array#each_with_object` but yields a pair
             // Array. Block return is ignored; `memo` is the
-            // observable result.
+            // observable result. Same snapshot-vs-hash-mutation
+            // GC discipline as `Hash#count` above.
             (Value::Hash(id), "each_with_object", [seed]) => {
                 let id = *id;
                 let seed = seed.clone();
@@ -2558,12 +2572,18 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
+                    let pinned_k = k.is_gc_heap_ref();
+                    let pinned_v = v.is_gc_heap_ref();
+                    if pinned_k { g.vm.pinned.push(k.clone()); }
+                    if pinned_v { g.vm.pinned.push(v.clone()); }
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step_result = g.vm.step_block(block, vec![Value::Array(pair_id), seed.clone()], pre_frames);
                     g.vm.pinned.pop();
+                    if pinned_v { g.vm.pinned.pop(); }
+                    if pinned_k { g.vm.pinned.pop(); }
                     match step_result? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
