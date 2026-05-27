@@ -544,17 +544,21 @@ impl Vm {
             //
             // Whitelist contract: this set is exactly lookup.rs's
             // `Value::Class(_)` primitive-method respond_to set
-            // (vm/lookup.rs:590-624). Keep both in lockstep —
-            // `respond_to?(:foo)` true should mean a bare call
-            // to `foo` from inside a class body resolves
-            // identically to `self.foo`.
+            // (see the `Value::Class(cls) =>` arm of
+            // `Vm::responds_to`, around the `"allocate"` gate).
+            // Keep both in lockstep — `respond_to?(:foo)` true
+            // should mean a bare call to `foo` from inside a
+            // class body resolves identically to `self.foo`.
+            // `allocate` has the same Module fence as respond_to
+            // (applied below); the rest of the names apply to
+            // all `Value::Class` receivers.
             //
             // (A future refactor could lift this list to a
             // shared `pub(crate) const &[&str]` consumed by
             // both sites — out of scope for this PR but tracked
             // as a follow-up by Copilot review #1.)
-            if matches!(&self_val, Value::Class(_))
-                && matches!(&*name,
+            if let Value::Class(cls) = &self_val {
+                let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
                     | "method_defined?" | "instance_method" | "undef_method"
                     | "superclass" | "ancestors" | "include?"
@@ -564,12 +568,26 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
-                    | "allocate"
-                ) {
-                let argc = args.len();
-                self.stack.push(self_val.clone());
-                for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, cache_id);
+                );
+                // `allocate` gets the same Module fence as
+                // lookup.rs's respond_to gate so bare `allocate`
+                // inside a `module Foo; ... end` body falls
+                // through to NoMethodError instead of bridging
+                // into the dedicated arm and raising TypeError.
+                // True lockstep with respond_to: if
+                // `m.respond_to?(:allocate)` is false (Modules,
+                // the global `Module` shell), bare `allocate`
+                // shouldn't dispatch. PR #196 Copilot round 2 #1.
+                let allocate_allowed =
+                    &*name == "allocate"
+                        && !cls.is_module
+                        && cls.name != "Module";
+                if in_set || allocate_allowed {
+                    let argc = args.len();
+                    self.stack.push(self_val.clone());
+                    for a in args { self.stack.push(a); }
+                    return self.do_call(name_id, argc, /*no_recv=*/false, cache_id);
+                }
             }
             // `__dir__` — returns the directory of the source
             // file the call lexically appears in. CRuby's

@@ -9,9 +9,26 @@
 ## CRuby parity: every name in this fixture works as a bare call
 ## inside `class Bar < Foo; ... end` because `self` IS the class.
 ## The bridge whitelist mirrors lookup.rs's `Value::Class(_)`
-## respond_to set (vm/lookup.rs:590-624). This fixture pins the
-## **whole set** including `allocate` (which routes through a
-## dedicated arm with stricter fences via bridge re-entry).
+## respond_to set. This fixture pins the **non-mutating subset**
+## of that whitelist plus the special `allocate` case (bridge
+## re-entry through the dedicated arm with stricter fences):
+##   - identity: `name` / `to_s` / `inspect`
+##   - hierarchy: `superclass` / `ancestors` / `include?`
+##   - introspection: `method_defined?` / `instance_method` /
+##     `instance_methods` / `public_instance_methods` /
+##     `private_instance_methods` / `protected_instance_methods`
+##   - constants: `constants`
+##   - meta: `singleton_class`
+##   - allocator: `allocate` (bare-form + user-singleton-override)
+##   - construction: `new`
+## Whitelisted names NOT covered here are deliberate skips:
+## `undef_method` and the constant-management quartet (`autoload`
+## / `private_constant` / `public_constant` / `deprecate_constant`)
+## are mutating — they'd either change subsequent assertions in
+## the same body or have side-effects the byte-for-byte diff
+## harness doesn't tolerate cleanly. Their bare-call dispatch is
+## still pinned via the lockstep respond_to surface; the bridge
+## forwarding is exercised whenever the receiver-form arm is hit.
 
 module Mod; def from_mod; "M"; end; end
 class Foo
@@ -62,6 +79,12 @@ class Bar < Foo
   ## allows it and produces a bare instance whose class is the
   ## current class.
   puts "bare-allocate-class=#{allocate.class.name}"
+
+  ## `new` — bare form, the canonical bridge case (msgpack-
+  ## ruby's timestamp.rb does `def self.from_msgpack_ext(...);
+  ## new(...); end`). Class has an `initialize` via inheritance
+  ## from Object's default, so `new` with no args works.
+  puts "bare-new-class=#{new.class.name}"
 end
 
 ## Bare `allocate` also honors `def self.allocate` overrides
@@ -76,3 +99,18 @@ end
 
 puts "after-class-body=#{Bar.new.hi}"
 puts "after-class-body-from-mod=#{Bar.new.from_mod}"
+
+## Module fence on bare `allocate`: a bare `allocate` from
+## inside a `module Foo; ... end` body must NOT dispatch (CRuby
+## raises NameError / "no such method or local variable",
+## rubyrs raises NoMethodError — both raise, neither succeeds).
+## This pins the lookup.rs respond_to fence's match in the
+## bridge (PR #196 Copilot review round 2 #1).
+module ModAllocFence
+  begin
+    allocate
+    puts "module-allocate=DID-NOT-RAISE"
+  rescue StandardError => e
+    puts "module-allocate=raised:#{!e.message.empty?}"
+  end
+end
