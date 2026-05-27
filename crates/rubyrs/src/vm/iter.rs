@@ -327,26 +327,19 @@ impl Vm {
                 let mut last_end = 0usize;
                 for m in re.find_iter(&source) {
                     out.push_str(&source[last_end..m.start()]);
-                    g.vm.invoke_block(block, vec![Value::new_str(m.as_str().to_string())])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    // Non-local `return` from the block — same
-                    // `Ok(Some(Value::Nil))` shape as Array#sort's
-                    // comparator arm (and the family of fixes in
-                    // PR #166): marking the primitive as
-                    // "matched" so the outer dispatch loop unwinds
-                    // via `method_return`. Returning `Ok(None)`
-                    // would cause `do_call_block` to fall through
-                    // to NoMethodError even though `method_return`
-                    // is set.
-                    if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        // CRuby semantics: break val from inside a
+                    let r = match g.vm.step_block(block, vec![Value::new_str(m.as_str().to_string())], pre_frames)? {
+                        // Non-local `return` from the block —
+                        // `Ok(Some(Value::Nil))` marks the primitive
+                        // as matched so the outer dispatch loop
+                        // unwinds via `method_return`. `Ok(None)`
+                        // would route to NoMethodError.
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        // CRuby semantics: `break val` from inside a
                         // gsub block returns val as the call's
                         // result (not the partially-built string).
-                        return Ok(Some(r));
-                    }
+                        BlockStep::Break(r) => return Ok(Some(r)),
+                        BlockStep::Value(r) => r,
+                    };
                     let r_str = r.to_display(&g.vm.heap, &g.vm.interner);
                     out.push_str(&r_str);
                     last_end = m.end();
@@ -663,40 +656,124 @@ impl Vm {
             }
             // `chunk { |x| key }` groups consecutive elements
             // sharing the same key. Returns
-            // `[[key, [vals...]], ...]`. nil/false key drops the
-            // run from the output (matching CRuby's "skip" rule).
+            // `[[key, [vals...]], ...]`. `nil` key drops the
+            // element AND ends the current group (so equal keys
+            // on either side of a `nil` land in separate groups,
+            // see the `separator_just_hit` flag below). `false`
+            // is a normal key — its run shows up in the output.
+            // CRuby also recognises the `:_separator` Symbol as a
+            // separator and `:_alone` as "this element gets its
+            // own group" — neither is modelled here (documented
+            // Tier 1 divergence).
             (Value::Array(id), "chunk", []) => {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Array(*id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
+                // Defensive pin of every heap-slot element. Without
+                // this, if the block mutates the receiver mid-
+                // iteration (`arr.shift` / `slice!` / etc.),
+                // elements held only in the Rust-local `snapshot` /
+                // `groups` Vecs are no longer reachable through the
+                // pinned receiver and a subsequent step_block-
+                // triggered maybe_gc would sweep them. CRuby
+                // disallows concurrent mutation entirely; we
+                // instead keep the elements alive defensively so
+                // the primitive completes without ICE'ing.
+                //
+                // Narrowed to GC-tracked heap variants via
+                // `Value::is_gc_heap_ref` — immediates
+                // (Int/Float/Bool/Nil/Sym) and Rc-shared variants
+                // (Str/Class/Regex) aren't GC-managed. `maybe_gc`
+                // clones every `vm.pinned` entry into the marking
+                // root set (vm/gc.rs:113-115), so blanket pinning
+                // would add O(n) GC scan work for large arrays.
+                //
+                // The sort driver (iter.rs:1713) uses a blanket pin
+                // of the same shape; left as-is pending its own
+                // perf pass to keep this PR scoped to chunk.
+                // Pre-existing gap surfaced by Copilot review on
+                // PR #187.
+                for v in &snapshot {
+                    if v.is_gc_heap_ref() {
+                        g.pin(v.clone());
+                    }
+                }
                 let pre_frames = g.vm.frames.len();
                 let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
                 let mut early = None;
+                // True when the previous yielded key was the
+                // separator sentinel (`nil`). CRuby's chunk treats
+                // `nil` as "drop this element AND end the current
+                // group" — without resetting this state, a sequence
+                // like `[1, nil-key, 1]` would merge the two 1s
+                // into a single group across the separator, which
+                // violates the "consecutive elements" rule.
+                // Surfaced by Copilot review on PR #187.
+                let mut separator_just_hit = false;
                 for v in snapshot {
-                    g.vm.invoke_block(block, vec![v.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let key = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(key);
-                        break;
-                    }
-                    // CRuby's chunk treats `nil` (and `:_separator`)
-                    // as a drop-and-break sentinel. `false` is a
-                    // normal key — its run shows up in the output.
-                    // `:_alone` would also be special but is rare;
-                    // we don't model it (documented divergence).
+                    let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
+                        // Return immediately (don't fall through to
+                        // the post-loop `maybe_gc / check_alloc / heap.alloc`
+                        // — a Trap from any of those would clobber the
+                        // in-flight `method_return` state). `Ok(Some(Value::Nil))`
+                        // marks the primitive as matched so the outer
+                        // dispatch loop unwinds via `method_return`.
+                        // Matches the shape used by gsub / bsearch /
+                        // sort below.
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(k) => k,
+                    };
+                    // `nil` key: drop this element AND end the
+                    // current group. See the chunk-arm header
+                    // comment for the documented divergence vs
+                    // CRuby's `:_separator` / `:_alone` symbols.
                     if matches!(key, Value::Nil) {
+                        separator_just_hit = true;
                         continue;
                     }
-                    let same_as_last = groups.last()
+                    // Skip the merge-into-previous-group check if a
+                    // separator was just hit — even when the new
+                    // key equals the previous group's key, they
+                    // must be split into two groups.
+                    let same_as_last = !separator_just_hit
+                        && groups.last()
                         .map(|(k, _)| k.ruby_eq(&key, &g.vm.heap))
                         .unwrap_or(false);
+                    separator_just_hit = false;
                     if same_as_last {
                         groups.last_mut().unwrap().1.push(v);
                     } else {
+                        // Pin block-returned `key` for the rest of
+                        // the primitive — but only when it's a
+                        // GC-tracked heap reference. `groups` is a
+                        // Rust-local Vec, not part of scan_roots;
+                        // if `key` is a heap-slot Value (Array /
+                        // Hash / Object / Range / Block /
+                        // BoundMethod / UnboundMethod / CurriedProc
+                        // / BigInt returned by the block), the next
+                        // iteration's step_block can fire maybe_gc
+                        // and sweep it, leaving `groups.last()` /
+                        // `ruby_eq` / post-loop materialization
+                        // reading freed memory. Immediate variants
+                        // (Int / Float / Bool / Nil / Sym) and Rc-
+                        // shared variants (Str / Class / Regex) are
+                        // not GC-managed and don't need pinning;
+                        // pinning them would just grow the pinned
+                        // root set + GC scan budget. `v` itself is
+                        // safe regardless (transitively rooted via
+                        // the pinned source Array), so only `key`
+                        // needs the check.
+                        //
+                        // O(distinct_heap_keys) pin growth —
+                        // bounded by the output size, which is the
+                        // natural cost ceiling for this primitive.
+                        // Pre-existing gap surfaced by Copilot
+                        // review on PR #187.
+                        if key.is_gc_heap_ref() {
+                            g.pin(key.clone());
+                        }
                         groups.push((key, vec![v]));
                     }
                 }
@@ -1536,14 +1613,11 @@ impl Vm {
                 while low < high {
                     let mid = low + (high - low) / 2;
                     let elem = snapshot[mid].clone();
-                    g.vm.invoke_block(block, vec![elem.clone()])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { return Ok(Some(Value::Nil)); }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        return Ok(Some(r));
-                    }
+                    let r = match g.vm.step_block(block, vec![elem.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                        BlockStep::Break(r) => return Ok(Some(r)),
+                        BlockStep::Value(r) => r,
+                    };
                     match r {
                         Value::Bool(true) => high = mid,
                         Value::Bool(false) | Value::Nil => low = mid + 1,
@@ -1796,29 +1870,21 @@ impl Vm {
                         // positive → prev > curr (swap).
                         let a = copy[j - 1].clone();
                         let b = copy[j].clone();
-                        g.vm.invoke_block(block, vec![a, b])?;
-                        g.vm.dispatch_until(pre_frames)?;
-                        // Non-local `return` from inside the
-                        // comparator block: return Some(Nil) so the
-                        // outer dispatch loop sees a primitive result
-                        // and runs its method_return unwind. `Ok(None)`
-                        // would mean "no primitive matched, fall
-                        // through" — which then routes through
-                        // do_call_block looking for another handler
-                        // and ends up at NoMethodError, because this
-                        // arm IS the block-form sort!/sort primitive.
+                        // Non-local `return` from the comparator:
+                        // `Ok(Some(Value::Nil))` marks the primitive
+                        // as matched so the outer dispatch loop
+                        // unwinds via `method_return`. `Ok(None)`
+                        // would route through do_call_block to
+                        // NoMethodError, because this arm IS the
+                        // block-form sort!/sort primitive.
                         // Empirically verified vs CRuby:
                         // `def foo; [3,1,2].sort!{return :x};
                         // :unreached; end; foo` → `:x`.
-                        if g.vm.method_return.is_some() {
-                            return Ok(Some(Value::Nil));
-                        }
-                        let result = g.vm.stack.pop().unwrap_or(Value::Nil);
-                        if g.vm.break_signaled {
-                            g.vm.break_signaled = false;
-                            early = Some(result);
-                            break 'outer;
-                        }
+                        let result = match g.vm.step_block(block, vec![a, b], pre_frames)? {
+                            BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
+                            BlockStep::Break(r) => { early = Some(r); break 'outer; }
+                            BlockStep::Value(r) => r,
+                        };
                         // Non-Integer block result mirrors CRuby's
                         // `comparison of X with 0 failed`
                         // (ArgumentError, NOT TypeError — CRuby

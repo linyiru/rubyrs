@@ -387,3 +387,101 @@ fn hash_each_with_index_pin_pair_id_under_stress_gc() {
         "pair or index corrupted, got: {out}"
     );
 }
+
+#[test]
+fn array_chunk_pin_heap_keys_under_stress_gc() {
+    // Regression: Array#chunk accumulates block-returned keys in
+    // a Rust-local `Vec<(Value, Vec<Value>)>`. If the block
+    // returns a GC-tracked heap-slot Value (Array / Hash /
+    // Object / Range / Block / BoundMethod / UnboundMethod /
+    // CurriedProc / BigInt), the previous iteration's key is
+    // only reachable via this Rust-local Vec — not via
+    // scan_roots. Next iteration's step_block can fire
+    // maybe_gc, sweep the key, and the post-iter
+    // `groups.last() / ruby_eq` then reads freed memory.
+    // (`Value::Str` is `Rc<RStr>` — not a GC heap slot — so
+    // string keys don't need pinning; immediates like
+    // Int/Sym/Bool/Nil/Float likewise.) Surfaced by Copilot
+    // review on PR #187.
+    //
+    // The fixture forces both conditions: STRESS_GC (alloc-time
+    // sweeps) + block returning a fresh heap Array each call.
+    // Without the `g.pin(key.clone())` fix, this would ICE on
+    // the second iteration's `ruby_eq` reading a dead Array
+    // slot.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # Block returns a fresh Array each call — heap-managed
+        # key. With 4 distinct elements we get 4 distinct keys
+        # accumulating in `groups`. Under STRESS_GC each key
+        # alloc + each step_block call triggers a sweep; the
+        # previously-stored keys must survive.
+        puts [1, 2, 3, 4].chunk { |x| [x] }.inspect
+    "#, "chunk_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // rubyrs prints the chunk result directly (eager
+    // implementation). In CRuby `Array#chunk` returns an
+    // Enumerator and you'd need `chunk(...).to_a` to materialize
+    // this same shape — once enumerated, both produce
+    // `[[[1], [1]], [[2], [2]], [[3], [3]], [[4], [4]]]` (each
+    // group has one element since each key is unique).
+    assert_eq!(
+        out, "[[[1], [1]], [[2], [2]], [[3], [3]], [[4], [4]]]\n",
+        "chunk output corrupted (likely a key was swept), got: {out}"
+    );
+}
+
+#[test]
+fn array_chunk_pin_snapshot_under_receiver_mutation() {
+    // Regression: Array#chunk clones the receiver into a Rust-
+    // local `snapshot: Vec<Value>` and iterates it. If the block
+    // mutates the receiver mid-iteration (`arr.clear` / `shift`
+    // / `slice!`), the original elements are no longer reachable
+    // through the pinned receiver Array — they live only in the
+    // Rust-local `snapshot` / `groups` Vecs, which scan_roots
+    // can't see. Next iteration's step_block can fire maybe_gc
+    // and sweep those Value slots, leaving the block body
+    // operating on freed memory. Same family as the sort
+    // driver's `for v in &copy { g.pin(v.clone()); }` defensive
+    // pin (iter.rs:1713). Surfaced by Copilot review on PR #187.
+    //
+    // CRuby disallows concurrent mutation entirely (raises
+    // RuntimeError); rubyrs keeps the elements alive defensively
+    // so the primitive completes without ICE'ing, matching the
+    // sort precedent.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # `nested` holds three inner Arrays (heap slots). On
+        # iteration 1, the block shifts all elements off the
+        # receiver. After that the inner Arrays `[3, 4]` /
+        # `[5, 6]` are reachable ONLY via the Rust-local
+        # snapshot Vec inside the chunk primitive. Under
+        # STRESS_GC, the next step_block's maybe_gc would sweep
+        # those slots without the defensive `for v in &snapshot
+        # { g.pin(v.clone()); }` line.
+        nested = [[1, 2], [3, 4], [5, 6]]
+        result = nested.chunk { |inner|
+          # Drain receiver on first iteration, leaving snapshot
+          # as the sole live reference to inner Arrays.
+          nested.shift while nested.length > 0
+          inner.first
+        }
+        puts result.inspect
+    "#, "chunk_mut.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // Each element keyed by its first; all distinct → 3 groups.
+    assert_eq!(
+        out, "[[1, [[1, 2]]], [3, [[3, 4]]], [5, [[5, 6]]]]\n",
+        "chunk corrupted (likely snapshot element swept after receiver mutation), got: {out}"
+    );
+}

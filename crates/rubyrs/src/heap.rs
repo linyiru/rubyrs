@@ -597,6 +597,54 @@ impl Value {
     pub(crate) fn is_truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
     }
+
+    /// True when this `Value` carries an `ObjId` into the GC heap
+    /// (i.e. mark/sweep is the lifetime authority for the payload).
+    ///
+    /// Useful for callers that hold a `Value` only via Rust locals
+    /// and must decide whether to pin it before a potential GC
+    /// safepoint. Immediates (`Int` / `Float` / `Bool` / `Nil` /
+    /// `Sym`) and Rc-shared variants (`Str` / `Class` / `Regex`)
+    /// return `false` — pinning them adds GC scan work without
+    /// improving safety.
+    ///
+    /// Keep this list aligned with `Heap::visit_value` (heap.rs:521)
+    /// whenever a new heap-slot `Value` variant is introduced; both
+    /// have to agree on "is this slot in the heap" or pin-protection
+    /// silently rots.
+    ///
+    /// Implementation note: both arms enumerate every variant
+    /// explicitly (no `_ => ...` catch-all) so adding a new `Value`
+    /// case is a compile error here, forcing the author to make a
+    /// conscious decision about GC-trackability rather than silently
+    /// defaulting to `false` (which would regress chunk / group_by /
+    /// min_by / … key pins for the new variant).
+    pub(crate) fn is_gc_heap_ref(&self) -> bool {
+        match self {
+            Value::Array(_)
+            | Value::Hash(_)
+            | Value::Object(_)
+            | Value::Range(_)
+            | Value::Block(_)
+            | Value::BoundMethod(_)
+            | Value::UnboundMethod(_)
+            | Value::CurriedProc(_) => true,
+            #[cfg(feature = "bignum")]
+            Value::BigInt(_) => true,
+            // Explicitly enumerate the non-heap variants so that
+            // adding a new `Value` case forces an explicit decision
+            // here rather than silently defaulting to `false`.
+            Value::Int(_)
+            | Value::Float(_)
+            | Value::Str(_)
+            | Value::Sym(_)
+            | Value::Bool(_)
+            | Value::Nil
+            | Value::Class(_) => false,
+            #[cfg(feature = "regex")]
+            Value::Regex(_) => false,
+        }
+    }
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "Integer",
