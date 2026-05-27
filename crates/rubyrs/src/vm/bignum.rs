@@ -87,9 +87,11 @@
 //!     fans out to the above plus per-method arms for `to_s` /
 //!     `inspect` / predicates / `<=>` / `eql?` / `hash` (B.4 + B.7
 //!     `eql?` / `hash`).
-//!   - `bignum_log2_per_digit_scaled` / `bignum_digits_upper_bound`
-//!     / `check_bigint_to_s_cap` — shared cap estimator for the
-//!     `to_s` and sprintf base-N paths (B.4).
+//!   - `check_bigint_to_s_cap` / `bignum_log2_per_digit_scaled` /
+//!     `bignum_digits_upper_bound` — shared cap estimator for the
+//!     `to_s` and sprintf base-N paths (B.4). Listed in file order;
+//!     the `Vm::` method comes first because it's the call-site,
+//!     the two free fns below are its helpers.
 //!   - `bigint_to_value` / `as_bigint` / `as_bigint_ref` /
 //!     `bigint_arith` — the lowest-level arithmetic surface.
 //!     `bignum` only.
