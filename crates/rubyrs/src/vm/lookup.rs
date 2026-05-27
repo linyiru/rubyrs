@@ -382,7 +382,7 @@ impl Vm {
                 "match?" | "match" | "scan" | "index" | "rindex" |
                 "[]" | "slice" |
                 "<<" | "concat" | "prepend" | "replace" |
-                "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" |
+                "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
                 "hash"
             ),
             Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name"),
