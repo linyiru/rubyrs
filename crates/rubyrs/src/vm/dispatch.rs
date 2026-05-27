@@ -1937,39 +1937,52 @@ impl Vm {
         self.stack.push(Value::Class(m));
         return Ok(ClassOutcome::Handled);
     }
-    // `Module#define_method(:name)` called WITHOUT a block, in
-    // the 1-arg "name only" shape. CRuby raises `ArgumentError
-    // ("tried to create Proc object without a block")`; the
-    // block-form path lives in `do_call_block`'s intrinsic arm.
-    // Without this gate the no-block call would fall through to
-    // NoMethodError, which doesn't match CRuby and means
-    // `define_method` shows up in `respond_to?` / bridge
-    // whitelists but raises the wrong error class.
-    //
-    // Gated on `args.len() <= 1` (CRuby's arity for
-    // `define_method` is 1..2): the 2-arg Proc/UnboundMethod
-    // form (`define_method(:foo, proc { … })`) is NOT yet
-    // supported in rubyrs Tier-1 — it falls through to standard
-    // dispatch and surfaces as NoMethodError so a caller that
-    // hits the unsupported shape gets a clear "not implemented"
-    // signal rather than a misleading ArgumentError. A future
-    // PR landing the 2-arg form should widen this gate and add
-    // the install arm below it.
-    // (PR #245 Copilot round 2 #2 + round 4 #1.)
+    // `Module#define_method` no-block path. The block-form
+    // intrinsic lives in `do_call_block`; this arm handles the
+    // no-block shapes that CRuby validates here, ordered to
+    // match CRuby's actual validation sequence (arity first,
+    // then missing-block). The 2-arg Proc/UnboundMethod form
+    // (`define_method(:foo, proc { … })`) is NOT yet supported
+    // in rubyrs Tier-1 — it falls through to standard dispatch
+    // and surfaces as NoMethodError so a caller that hits the
+    // unsupported shape gets a clear "not implemented" signal.
+    // A future PR landing the 2-arg form should swap that
+    // fall-through for the install arm.
+    // (PR #245 Copilot round 2 #2 + round 4 #1 + round 5 #1.)
     if &*name == "define_method"
-        && args.len() <= 1
         && let Value::Class(cls) = &recv
     {
         // Same precedence rule as the block-form arm — user
-        // override wins.
+        // override wins regardless of arity (let the override
+        // own its own validation).
         if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
             let recv_val = Value::Class(cls.clone());
             self.invoke_method(m, recv_val, args)?;
             return Ok(ClassOutcome::Handled);
         }
-        return Err(self.trap(RubyError::ArgumentError {
-            msg: "tried to create Proc object without a block".into(),
-        }));
+        // CRuby validates arity before the missing-block check:
+        //   0 args      → ArgumentError "wrong number of arguments
+        //                 (given 0, expected 1..2)"
+        //   1 arg, none → ArgumentError "tried to create Proc
+        //                 object without a block"
+        //   2 args      → Proc/UnboundMethod install form, NOT yet
+        //                 supported — fall through to standard
+        //                 dispatch (NoMethodError) so the
+        //                 "not implemented" signal is clear.
+        //   3+ args     → ArgumentError "wrong number of arguments
+        //                 (given N, expected 1..2)"
+        match args.len() {
+            0 => return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1..2)".into(),
+            })),
+            1 => return Err(self.trap(RubyError::ArgumentError {
+                msg: "tried to create Proc object without a block".into(),
+            })),
+            2 => { /* fall through */ }
+            n => return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+            })),
+        }
     }
     if name_id == new_id
         && let Value::Class(cls) = &recv

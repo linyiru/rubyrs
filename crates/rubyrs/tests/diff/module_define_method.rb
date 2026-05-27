@@ -154,3 +154,17 @@ class BareNoBlock
   end
   puts "bare-no-block=#{err}"
 end
+
+## CRuby validates `define_method` arity BEFORE the
+## missing-block check (PR #245 Copilot round 5 #1). Pin the
+## per-arity error messages so a future refactor doesn't
+## collapse the two error classes.
+##   - 0 args      → "wrong number of arguments (given 0, expected 1..2)"
+##   - 1 arg/none  → "tried to create Proc object without a block"
+##   - 2 args      → 2-arg Proc form not supported; NoMethodError
+##   - 3+ args     → "wrong number of arguments (given N, expected 1..2)"
+class Arity; end
+err = begin; Arity.define_method; "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
+puts "arity-0=#{err}"
+err = begin; Arity.define_method(:x, :y, :z); "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
+puts "arity-3=#{err}"
