@@ -15,6 +15,7 @@
 
 def sprintf(fmt, x); "USER_SPRINTF" end
 def format(fmt, x); "USER_FORMAT" end
+def __time_now_raw; "USER_TIME_RAW" end
 
 # Call twice each so the second call exercises the cache path
 # (cache_hit on the first `if no_recv` block in do_call).
@@ -22,3 +23,10 @@ p sprintf("%d", 5)
 p sprintf("%d", 5)
 p format("%d", 5)
 p format("%d", 5)
+
+# `__time_now_raw` returns a non-deterministic wall-clock pair, so we
+# can't compare its value directly; compare its class instead. Builtin
+# returns Array (`[secs, nanos]`); a user `def` returning a String
+# would flip the class to String and fail this test.
+p __time_now_raw.class
+p __time_now_raw.class
