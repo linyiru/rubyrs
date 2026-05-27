@@ -525,13 +525,32 @@ impl Vm {
             //   - `class Symbol; if method_defined?(:name); ...`
             //     in symbol.rb (bare `method_defined?` inside an
             //     `if`/`else` at class-body top level)
+            // Sinatra surfaced more (TRY_RUNS pass 8 layer #8):
+            //   - `class Bar < Foo; superclass.class_eval { ... }`
+            //     (bare `superclass` inside class body)
             // Push self_val + the original args back onto the
             // stack and re-enter `do_call` with `no_recv=false`
             // so the receiver-form dispatch takes over. The
-            // whitelist matches lookup.rs's `Value::Class(_)`
-            // primitive-method set — keep both in lockstep.
+            // whitelist mirrors lookup.rs's `Value::Class(_)`
+            // primitive-method set (vm/lookup.rs:590-624) so
+            // `respond_to?` answers true for exactly the same
+            // bare-callable names — keep both in lockstep.
+            // (`allocate` is omitted from this set because it
+            // has a dedicated arm above with stricter fences;
+            // bare `allocate` from inside a class body that
+            // routed here would skip those fences.)
             if matches!(&self_val, Value::Class(_))
-                && matches!(&*name, "new" | "name" | "method_defined?" | "instance_method" | "undef_method") {
+                && matches!(&*name,
+                    "new" | "name" | "to_s" | "inspect"
+                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "superclass" | "ancestors" | "include?"
+                    | "instance_methods" | "public_instance_methods"
+                    | "private_instance_methods" | "protected_instance_methods"
+                    | "constants"
+                    | "autoload" | "private_constant" | "public_constant"
+                    | "deprecate_constant"
+                    | "singleton_class"
+                ) {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 for a in args { self.stack.push(a); }

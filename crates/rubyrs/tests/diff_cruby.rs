@@ -130,6 +130,7 @@ fn run_diff(name: &str) {
 #[test] fn inheritance_constant_path() { run_diff("inheritance_constant_path"); }
 #[test] fn regex_freeze() { run_diff("regex_freeze"); }
 #[test] fn class_allocate() { run_diff("class_allocate"); }
+#[test] fn bare_class_methods() { run_diff("bare_class_methods"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }
