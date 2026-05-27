@@ -22,6 +22,16 @@ impl Vm {
         // here would let the toplevel fast path cache a user `def`
         // and silently shadow the builtin, which diverges from
         // master's "builtin always wins" dispatch order.
+        //
+        // There is also a *third* hand-maintained mirror of this set
+        // inside the `"__defined_method?"` arm below (the
+        // `let is_builtin = matches!(&*name, ...)` local). It is
+        // pre-existing, already drifts from this list for several
+        // names (`require_relative`, `__method__`, `__callee__`,
+        // `block_given?`), and is out of scope for the PR that
+        // introduced this gate — but maintainers updating
+        // `builtin_call` should be aware that *three* places need to
+        // change together, not two.
         matches!(
             name,
             "puts"
