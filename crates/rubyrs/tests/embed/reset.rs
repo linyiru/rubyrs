@@ -178,6 +178,44 @@ fn reset_restores_heap_next_gc_to_preamble_baseline() {
 }
 
 #[test]
+fn reset_truncates_protos_to_preamble_baseline() {
+    // Without this, every user `eval()` appends compiled
+    // bytecode to `vm.protos` and the Vec grows monotonically
+    // across resets. Pin: protos.len() returns to the
+    // post-preamble baseline after reset.
+    let mut rt = Runtime::new();
+    let baseline = rt.vm_protos_len();
+    // Each `eval` compiles new protos (every `def` is one,
+    // every block another). A handful of methods adds enough
+    // entries to make the check meaningful.
+    rt.eval(
+        "def a; 1; end; def b; 2; end; def c; 3; end; [1,2,3].each { |x| x * 2 }",
+        "compile.rb",
+    ).expect("compile bytecode");
+    assert!(
+        rt.vm_protos_len() > baseline,
+        "user eval should have grown protos past baseline {}; got {}",
+        baseline, rt.vm_protos_len(),
+    );
+    rt.reset();
+    assert_eq!(
+        rt.vm_protos_len(), baseline,
+        "reset must truncate protos to baseline {}",
+        baseline,
+    );
+    // And running multiple cycles must keep protos bounded —
+    // a fuzz harness shape.
+    for _ in 0..20 {
+        rt.eval("def x; 1; end", "tmp.rb").expect("compile");
+        rt.reset();
+    }
+    assert_eq!(
+        rt.vm_protos_len(), baseline,
+        "after 20 cycles, protos must still be at baseline",
+    );
+}
+
+#[test]
 fn reset_keeps_method_gen_bounded_across_cycles() {
     // Pre-fix: `reset()` did `method_gen.wrapping_add(1)`,
     // growing the counter unbounded; at ~10k resets/sec the
@@ -409,6 +447,7 @@ trait RuntimeInternals {
     fn vm_interner_len(&self) -> usize;
     fn vm_heap_next_gc(&self) -> usize;
     fn vm_method_gen(&self) -> u32;
+    fn vm_protos_len(&self) -> usize;
 }
 
 // Note: these accessors are `pub fn` on `Runtime` with the
@@ -428,6 +467,9 @@ impl RuntimeInternals for Runtime {
     }
     fn vm_method_gen(&self) -> u32 {
         Runtime::__test_vm_method_gen(self)
+    }
+    fn vm_protos_len(&self) -> usize {
+        Runtime::__test_vm_protos_len(self)
     }
     fn vm_interner_len(&self) -> usize {
         Runtime::__test_vm_interner_len(self)

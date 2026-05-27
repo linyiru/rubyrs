@@ -394,6 +394,24 @@ struct PostPreambleSnapshot {
     /// produced by user `$LOAD_PATH << ...` can't outlive the
     /// heap truncation that just dropped its target slot.
     load_path: Option<value::ObjId>,
+    /// `vm.protos.len()` at preamble completion. `reset()`
+    /// truncates `vm.protos` back to this length.
+    ///
+    /// Without this, every user `eval()` pushes its compiled
+    /// bytecode onto `vm.protos`; reset() drops the references
+    /// to those protos (via class / toplevel_methods / cache
+    /// restoration) but the Vec entries themselves remain.
+    /// At ~5 KB of bytecode per eval × 10k resets/sec, the
+    /// orphaned protos accumulate at ~50 MB/sec — a real memory
+    /// leak in fuzz harnesses or per-request HTTP embedders.
+    ///
+    /// Truncation also forces the two cached forwarder proto
+    /// indices (`callable_forwarder_proto`,
+    /// `method_compose_forwarder_proto`) to be cleared on reset
+    /// — they point into the just-truncated post-preamble
+    /// range and would be invalid after truncate. See the
+    /// reset implementation for the clear.
+    protos_len: usize,
     /// `vm.classes` HashMap as it was at preamble completion.
     /// `reset()` clones this and assigns to `vm.classes`,
     /// preserving every preamble class object identity (Rc clone)
@@ -605,6 +623,7 @@ impl PostPreambleSnapshot {
             cache_counter: rt.vm.cache_counter,
             method_gen: rt.vm.method_gen,
             load_path: rt.vm.load_path,
+            protos_len: rt.vm.protos.len(),
             classes: rt.vm.classes.clone(),
             constants: rt.vm.constants.clone(),
             toplevel_methods: rt.vm.toplevel_methods.clone(),
@@ -981,6 +1000,30 @@ impl Runtime {
         // wrap and start aliasing unrelated call sites.
         self.vm.call_caches.truncate(snapshot.call_caches_len);
         self.vm.cache_counter = snapshot.cache_counter;
+        // --- Compiled bytecode (protos) ---
+        // Truncate `vm.protos` back to the post-preamble length.
+        // Every user `eval()` appends compiled `Proto` entries
+        // here; without this, the Vec grows monotonically
+        // across resets (~5 KB per eval × N resets = real memory
+        // leak in fuzz / per-request embedders).
+        //
+        // Surviving protos are exactly the preamble ones; any
+        // class method / toplevel_method / CallCache entry that
+        // pointed past `protos_len` was already removed by the
+        // restoration steps above, so no live reference now
+        // points past the truncate point.
+        self.vm.protos.truncate(snapshot.protos_len);
+        // The two cached forwarder proto indices are
+        // `Option<usize>` pointing INTO `vm.protos` at lazily-
+        // emitted forwarder bytecode. If either pointed past
+        // the snapshot's `protos_len` (i.e. was emitted during
+        // user eval), it's now dangling. Clearing forces a
+        // rebuild on next use — and on the next user eval the
+        // forwarder will land at a valid post-truncate index.
+        // Preamble doesn't emit either forwarder, so clearing
+        // unconditionally is the right baseline.
+        self.vm.callable_forwarder_proto = None;
+        self.vm.method_compose_forwarder_proto = None;
         // Set `method_gen` to `snapshot.method_gen + 1`. Two
         // properties at once:
         //
@@ -1036,6 +1079,10 @@ impl Runtime {
     #[doc(hidden)]
     pub fn __test_vm_method_gen(&self) -> u32 {
         self.vm.method_gen
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_protos_len(&self) -> usize {
+        self.vm.protos.len()
     }
 
     /// Bootstrap the built-in Ruby class hierarchy (currently just
