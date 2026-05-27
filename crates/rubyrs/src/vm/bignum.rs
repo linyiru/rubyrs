@@ -116,7 +116,7 @@ use crate::vm::PinGuard;
 /// floats and otherwise compares against a losslessly-constructed
 /// BigInt; mirror that.
 #[cfg(feature = "bignum")]
-fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool {
+pub(crate) fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool {
     use num_traits::FromPrimitive;
     // NaN, +inf, -inf: never equal to a finite integer.
     if !float.is_finite() {

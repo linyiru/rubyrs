@@ -13,14 +13,14 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 102 |
-| Examples in corpus | 494 |
-| Skipped `it` traces | 149 |
+| Examples in corpus | 495 |
+| Skipped `it` traces | 148 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 2 |
+| `divergent` | 1 |
 | `fixture` | 48 |
 | `method-not-implemented` | 82 |
 | `mock` | 17 |
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 24 | 62 | 43 |
-| Integer | 25 | 211 | 21 |
+| Integer | 25 | 212 | 20 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -104,7 +104,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 0 |
 | `integer_bit_or_spec.rb` | Integer#\| | `core/integer/bit_or_spec.rb` | 10 | 0 |
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
-| `integer_case_compare_spec.rb` | Integer#=== | `core/integer/case_compare_spec.rb + core/integer/shared/equal.rb` | 8 | 2 |
+| `integer_case_compare_spec.rb` | Integer#=== | `core/integer/case_compare_spec.rb + core/integer/shared/equal.rb` | 9 | 1 |
 | `integer_comparison_spec.rb` | Integer#<=> | `core/integer/comparison_spec.rb` | 23 | 2 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |

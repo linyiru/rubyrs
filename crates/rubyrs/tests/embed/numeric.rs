@@ -1319,6 +1319,48 @@ fn integer_to_s_raises_argumenterror_on_bad_arity() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_case_compare_float_is_lossless_via_ruby_eq() {
+    // Pin the `ruby_eq` (heap.rs) BigInt × Float lossless path.
+    // Used by `===` (case/when), Array#include?, Hash key lookup,
+    // and Object#== fallback. Pre-fix this PR, ruby_eq had no
+    // BigInt × Float arm — comparisons fell through to the
+    // catch-all `_ => false`. Now routes through the same
+    // `bigint_equals_float_lossless` helper as the BinOp `==`
+    // path, so `===` returns the right answer in both directions
+    // and Array#include? finds float-shaped duplicates of BigInt
+    // members.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "nan = 0.0 / 0.0\n\
+         inf = 1.0 / 0.0\n\
+         # === — both directions\n\
+         puts ((2**64) === (2**64).to_f)             # true (exact)\n\
+         puts ((2**64 + 1) === (2**64).to_f)         # false (precision)\n\
+         puts ((2**64).to_f === (2**64))             # true (symmetric)\n\
+         puts ((2**64) === 1.5)                      # false (fractional)\n\
+         puts ((2**64) === nan)                      # false\n\
+         puts ((2**64) === inf)                      # false\n\
+         puts ((2**64) === -inf)                     # false\n\
+         puts ((-(2**64)) === -(2**64).to_f)         # true (negative exact)\n\
+         # Array#include? — uses ruby_eq too\n\
+         puts [2**64, 5].include?((2**64).to_f)      # true\n\
+         puts [2**64 + 1, 5].include?((2**64).to_f)  # false (precision preserved)",
+        "bigint_eq_float_ruby_eq.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "true", "false", "true", "false",   // === precision + symmetric + fractional
+        "false", "false", "false",          // NaN / ±inf
+        "true",                              // negative exact
+        "true", "false",                     // Array#include? precision
+    ]);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_eq_float_is_lossless() {
     // Pin the BigInt × Float `==` lossless path
     // (bigint_equals_float_lossless in bignum.rs). Pre-fix the arm

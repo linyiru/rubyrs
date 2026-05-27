@@ -32,6 +32,8 @@ mod step;
 mod string;
 mod util;
 #[cfg(all(feature = "cext", not(target_os = "wasi")))]
+#[cfg(feature = "bignum")]
+pub(crate) use bignum::bigint_equals_float_lossless;
 pub(crate) use cext::with_vm_ptr_set;
 pub(crate) use lookup::{class_is_a, flatten_ancestors, CallCache};
 pub use lookup::IcStats;
