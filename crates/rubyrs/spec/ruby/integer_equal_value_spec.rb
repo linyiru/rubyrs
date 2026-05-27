@@ -93,7 +93,13 @@ describe "Integer#==" do
   # Float on the compare and the precision-loss assertion fails.
   # The (2**64) == (2**64).to_f leg is already covered above
   # under "returns true when comparing with a Float of the same
-  # numeric value".
+  # numeric value", but that exact-Float case passes for the wrong
+  # reason on rubyrs (both sides collapse to the same Float bits).
+  #
+  # TODO(bignum-eq-float-precision): when the BigInt==Float arm is
+  # fixed to compare losslessly, uncomment this block — it is the
+  # only assertion that distinguishes the demote-to-Float bug from
+  # a correct implementation. Grep for the TODO tag above.
   #
   # bignum_it "bignum: does not lose precision when comparing with a Float" do
   #   assert_eq((2**64 + 1) == (2**64).to_f, false)
