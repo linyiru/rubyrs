@@ -573,6 +573,36 @@ pub(crate) fn string_call(
         (Value::Regex(re), "to_s", []) => Some(Value::new_str(format!("(?-mix:{})", re.as_str()))),
         #[cfg(feature = "regex")]
         (Value::Regex(re), "inspect", []) => Some(Value::new_str(format!("/{}/", re.as_str()))),
+        // `Regexp#freeze` / `frozen?` — Regexp values are immutable
+        // by construction (no mutating instance methods exist), so
+        // freezing has nothing to enforce. CRuby still defines the
+        // method for compatibility, so user code's `/pat/.freeze`
+        // (a common idiom in constant tables like sinatra/base.rb's
+        // `HEADER_PARAM = /.../.freeze`) doesn't trip on a missing
+        // method. Distinct from `String#freeze`, which rubyrs
+        // implements with real frozen-flag tracking — strings have
+        // mutators that need enforcement; regexes don't. Returns
+        // the receiver to support chaining `/pat/.freeze.match?(s)`.
+        // `frozen?` returns true to match the immutable surface.
+        // Both arms surfaced as TRY_RUNS pass-7 layer #5 — closing
+        // it lets sinatra/base.rb:32's `HEADER_PARAM` constant
+        // initialiser execute.
+        #[cfg(feature = "regex")]
+        (Value::Regex(_), "freeze", []) => Some(recv.clone()),
+        #[cfg(feature = "regex")]
+        (Value::Regex(_), "frozen?", []) => Some(Value::Bool(true)),
+        // Wrong-arity arms: CRuby's `Regexp#freeze` / `frozen?`
+        // take zero args; any positional arg raises ArgumentError
+        // with the standard "wrong number of arguments" shape.
+        // Without these, the dispatcher would fall through to
+        // NoMethodError ("undefined method 'freeze' for Regexp"),
+        // diverging from CRuby on the error class.
+        #[cfg(feature = "regex")]
+        (Value::Regex(_), "freeze" | "frozen?", many) if !many.is_empty() => {
+            return Err(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),
+            });
+        }
         // String#inspect — wrap in double quotes, escape `\`,
         // `"`, and common control characters. Matches CRuby for
         // printable ASCII + the standard escape set; exotic

@@ -607,7 +607,17 @@ impl Vm {
             }
             Value::Block(_) => matches!(name, "call" | "[]" | "()" | "curry" | ">>" | "<<"),
             #[cfg(feature = "regex")]
-            Value::Regex(_) => matches!(name, "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"),
+            Value::Regex(_) => matches!(name,
+                "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"
+                // `freeze` / `frozen?` are compatibility shims:
+                // Regexp is immutable by construction so freezing
+                // is a no-op, but real Ruby code calls `.freeze`
+                // on regex literals (e.g. `HEADER_PARAM =
+                // /.../.freeze` in sinatra/base.rb:32) and
+                // `respond_to?(:freeze)` must agree with the
+                // primitive arm in vm/string.rs.
+                | "freeze" | "frozen?"
+            ),
             Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "arity" | "parameters" | "==" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "hash" | "source_location"),
             Value::UnboundMethod(_) => matches!(name, "bind" | "arity" | "parameters" | "==" | "owner" | "hash" | "source_location"),
             Value::CurriedProc(_) => matches!(name, "call" | "[]" | "()"),
