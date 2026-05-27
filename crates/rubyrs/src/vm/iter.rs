@@ -867,40 +867,46 @@ impl Vm {
                 Some(r)
             }
             (Value::Int(start), "upto", [Value::Int(stop)]) => {
+                // Pin the block — the body may allocate freely
+                // (e.g. `1.upto(10) { (1..1000).to_a }`), and GC
+                // would otherwise sweep the block ObjId mid-loop.
+                // Same fix shape Int#times already used; Int#upto
+                // and Int#downto were missing it (pre-existing GC
+                // bug — STRESS_GC reproduces the
+                // "ICE: heap slot is not a Block" panic at
+                // heap.rs without these pins). Empirically
+                // verified pre-fix / post-fix on this branch.
                 let start = *start;
                 let stop = *stop;
-                let pre_frames = self.frames.len();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 let mut i = start;
                 while i <= stop {
-                    self.invoke_block(block,vec![Value::Int(i)])?;
-                    self.dispatch_until(pre_frames)?;
-                    if self.method_return.is_some() { break; }
-                    let r = self.stack.pop().unwrap_or(Value::Nil);
-                    if self.break_signaled {
-                        self.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
                     }
                     i += 1;
                 }
                 Some(early.unwrap_or(Value::Int(start)))
             }
             (Value::Int(start), "downto", [Value::Int(stop)]) => {
+                // Same pin rationale as Int#upto above.
                 let start = *start;
                 let stop = *stop;
-                let pre_frames = self.frames.len();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Block(block));
+                let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 let mut i = start;
                 while i >= stop {
-                    self.invoke_block(block,vec![Value::Int(i)])?;
-                    self.dispatch_until(pre_frames)?;
-                    if self.method_return.is_some() { break; }
-                    let r = self.stack.pop().unwrap_or(Value::Nil);
-                    if self.break_signaled {
-                        self.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
                     }
                     i -= 1;
                 }
@@ -921,14 +927,10 @@ impl Vm {
                 let mut early = None;
                 let n_val = *n;
                 for i in 0..n_val {
-                    g.vm.invoke_block(block, vec![Value::Int(i)])?;
-                    g.vm.dispatch_until(pre_frames)?;
-                    if g.vm.method_return.is_some() { break; }
-                    let r = g.vm.stack.pop().unwrap_or(Value::Nil);
-                    if g.vm.break_signaled {
-                        g.vm.break_signaled = false;
-                        early = Some(r);
-                        break;
+                    match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(_) => {}
                     }
                 }
                 Some(early.unwrap_or(Value::Int(n_val)))
