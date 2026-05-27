@@ -1,74 +1,67 @@
-use std::cell::RefCell;
-
 use ruby_prism::Node;
 
 use crate::error::Span;
 
-// AST translation collects unsupported-node messages here instead of
-// panicking. `tr_with_errors` clears + drains; bare `tr` (kept for
-// the recursive internal API) still walks the whole tree, leaving a
-// `Expr::Nil` placeholder wherever it bailed. The caller is
-// responsible for checking the collected errors and surfacing a
-// SyntaxError Trap before any compile/exec happens.
-thread_local! {
-    static AST_ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    /// Source bytes for the in-flight translation. Set by
-    /// `tr_with_errors_on_source`'s guard before `tr` runs;
-    /// cleared on guard drop. Read by `Expr::SourceLine`'s
-    /// arm to compute line numbers from Prism `Location`
-    /// start pointers (count of `\n` in the prefix). Storing
-    /// the slice as a raw `(ptr, len)` pair avoids the
-    /// lifetime gymnastics of `RefCell<Option<&'static [u8]>>`;
-    /// the guard ensures the slice outlives every read.
-    static AST_SOURCE: std::cell::Cell<Option<(*const u8, usize)>> = const { std::cell::Cell::new(None) };
+/// Per-translation context threaded through `tr` and helpers.
+///
+/// Holds the two pieces of state that the AST→SExpr translation
+/// pass needs across recursion:
+///   - `errors`: an accumulating Vec of unsupported-node /
+///     SyntaxError-shape messages. `tr` and friends `push` here
+///     instead of panicking; the public `tr_with_errors` /
+///     `tr_with_errors_on_source` entry points drain it into
+///     their return tuple.
+///   - `source`: optional source bytes for the in-flight
+///     translation. `Some(_)` when the caller is
+///     `tr_with_errors_on_source`; `None` for test harnesses
+///     that compile snippets without source access (line
+///     numbers degrade to 0 — same stub value the previous
+///     no-SourceGuard branch returned).
+///
+/// Replaces the previous `AST_ERRORS` / `AST_SOURCE` thread-
+/// locals + `SourceGuard` RAII. Threading the context
+/// explicitly makes the data flow visible at call sites (no
+/// more "where does this error pop out of"); it also lets
+/// future multi-threaded compilation work without TLS reset
+/// gymnastics, and lets test harnesses build an isolated ctx
+/// per case without stale-slot risk.
+pub(crate) struct TranslationCtx<'src> {
+    pub(crate) errors: Vec<String>,
+    pub(crate) source: Option<&'src [u8]>,
 }
 
-/// RAII guard for the AST_SOURCE thread-local. Held across the
-/// `tr` call so the SourceLine arm can derive line numbers
-/// from `Location` start pointers without threading `source`
-/// through every `tr` recursion. Drop clears the slot so
-/// subsequent translations on the same thread don't see stale
-/// pointers.
-pub(crate) struct SourceGuard;
-
-impl SourceGuard {
-    pub(crate) fn new(source: &[u8]) -> Self {
-        AST_SOURCE.with(|c| c.set(Some((source.as_ptr(), source.len()))));
-        Self
-    }
-}
-
-impl Drop for SourceGuard {
-    fn drop(&mut self) {
-        AST_SOURCE.with(|c| c.set(None));
-    }
-}
-
-/// Number of `\n` bytes in the source prefix ending at
-/// `loc_start_ptr` — i.e., the 1-based line number of the
-/// position the Prism Location's start pointer points at.
-/// Returns 0 when the SourceGuard isn't set (callers that
-/// invoke `tr` without `tr_with_errors_on_source`) — same
-/// stub value the previous SourceLine implementation
-/// returned.
-#[inline]
-fn line_of(loc_start_ptr: *const u8) -> i64 {
-    AST_SOURCE.with(|c| match c.get() {
-        Some((base, len)) => {
-            // SAFETY: `loc_start_ptr` came from Prism's parse
-            // of the same source the guard was constructed
-            // from, so it lies within [base, base+len].
-            // Pointer arithmetic stays within the allocation.
-            let offset = unsafe { loc_start_ptr.offset_from(base) };
-            if offset < 0 || (offset as usize) > len {
-                return 0;
-            }
-            let prefix = unsafe { std::slice::from_raw_parts(base, offset as usize) };
-            // 1-based line numbers: count newlines + 1.
-            (prefix.iter().filter(|&&b| b == b'\n').count() + 1) as i64
+impl<'src> TranslationCtx<'src> {
+    pub(crate) fn new(source: Option<&'src [u8]>) -> Self {
+        Self {
+            errors: Vec::new(),
+            source,
         }
-        None => 0,
-    })
+    }
+
+    /// Number of `\n` bytes in the source prefix ending at
+    /// `loc_start_ptr` — i.e., the 1-based line number of the
+    /// position the Prism Location's start pointer points at.
+    /// Returns 0 when `source` is None (callers that invoke
+    /// `tr` without `tr_with_errors_on_source`) — same stub
+    /// value the previous SourceLine implementation returned.
+    #[inline]
+    pub(crate) fn line_of(&self, loc_start_ptr: *const u8) -> i64 {
+        let source = match self.source {
+            Some(s) => s,
+            None => return 0,
+        };
+        // SAFETY: `loc_start_ptr` came from Prism's parse of the
+        // same source `self.source` borrows, so it lies within
+        // [source.as_ptr(), source.as_ptr() + source.len()].
+        // Pointer arithmetic stays within the allocation.
+        let offset = unsafe { loc_start_ptr.offset_from(source.as_ptr()) };
+        if offset < 0 || (offset as usize) > source.len() {
+            return 0;
+        }
+        let prefix = unsafe { std::slice::from_raw_parts(source.as_ptr(), offset as usize) };
+        // 1-based line numbers: count newlines + 1.
+        (prefix.iter().filter(|&&b| b == b'\n').count() + 1) as i64
+    }
 }
 
 /// Translate a Prism root node, returning the SExpr plus any
@@ -76,23 +69,31 @@ fn line_of(loc_start_ptr: *const u8) -> i64 {
 /// means the whole tree was within the supported subset. If `errs`
 /// is non-empty the returned SExpr may contain `Expr::Nil`
 /// placeholders where translation failed — don't compile it.
+///
+/// The no-source variant is `#[cfg(test)]` only — every
+/// non-test caller (`Runtime::eval`, `load_ruby_source_from_canon`)
+/// has source bytes on hand and uses `tr_with_errors_on_source`
+/// to get real line numbers. Keeping this variant for the test
+/// harness avoids forcing every snippet test to pass a dummy
+/// `b""` source.
+#[cfg(test)]
 pub(crate) fn tr_with_errors(node: &Node<'_>) -> (SExpr, Vec<String>) {
-    AST_ERRORS.with(|cell| cell.borrow_mut().clear());
-    let prog = tr(node);
-    let errs = AST_ERRORS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-    (prog, errs)
+    let mut ctx = TranslationCtx::new(None);
+    let prog = tr(&mut ctx, node);
+    (prog, ctx.errors)
 }
 
 /// Same as `tr_with_errors` but also threads the source bytes
-/// through `AST_SOURCE` so `Expr::SourceLine` resolves real
+/// through `ctx.source` so `Expr::SourceLine` resolves real
 /// line numbers. Callers that have the source on hand
 /// (`Runtime::eval`, `kernel::load_ruby_source_from_canon`)
 /// use this variant. The non-source variant is kept for
 /// test harnesses that compile snippets without source
 /// access.
 pub(crate) fn tr_with_errors_on_source(node: &Node<'_>, source: &[u8]) -> (SExpr, Vec<String>) {
-    let _guard = SourceGuard::new(source);
-    tr_with_errors(node)
+    let mut ctx = TranslationCtx::new(Some(source));
+    let prog = tr(&mut ctx, node);
+    (prog, ctx.errors)
 }
 
 // ---------- IR ----------
@@ -548,18 +549,23 @@ fn sp(node: &Node<'_>, e: Expr) -> SExpr {
 /// `.merge(opts)` against the accumulated hash. The final
 /// expression has shape `{...}.merge(opts).merge({...})...`
 /// — same Hash that CRuby would build for the same source.
-fn tr_kwhash(parent: &Node<'_>, kh_anchor: &Node<'_>, kh: &ruby_prism::KeywordHashNode<'_>) -> SExpr {
+fn tr_kwhash(
+    ctx: &mut TranslationCtx<'_>,
+    parent: &Node<'_>,
+    kh_anchor: &Node<'_>,
+    kh: &ruby_prism::KeywordHashNode<'_>,
+) -> SExpr {
     let mut chunks: Vec<SExpr> = Vec::new();
     let mut buf: Vec<(SExpr, SExpr)> = Vec::new();
     for el in kh.elements().iter() {
         if let Some(an) = el.as_assoc_node() {
-            buf.push((tr(&an.key()), tr(&an.value())));
+            buf.push((tr(ctx, &an.key()), tr(ctx, &an.value())));
         } else if let Some(spn) = el.as_assoc_splat_node()
             && let Some(inner) = spn.value() {
                 if !buf.is_empty() {
                     chunks.push(sp(kh_anchor, Expr::HashLit(std::mem::take(&mut buf))));
                 }
-                chunks.push(tr(&inner));
+                chunks.push(tr(ctx, &inner));
             }
     }
     if !buf.is_empty() {
@@ -577,10 +583,10 @@ fn tr_kwhash(parent: &Node<'_>, kh_anchor: &Node<'_>, kh: &ruby_prism::KeywordHa
     }))
 }
 
-pub(crate) fn tr(node: &Node<'_>) -> SExpr {
+pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
     let span = node_span(node);
     if let Some(n) = node.as_program_node() {
-        let stmts: Vec<SExpr> = n.statements().body().iter().map(|c| tr(&c)).collect();
+        let stmts: Vec<SExpr> = n.statements().body().iter().map(|c| tr(ctx, &c)).collect();
         return if stmts.len() == 1 {
             stmts.into_iter().next().unwrap()
         } else {
@@ -588,7 +594,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
     }
     if let Some(n) = node.as_statements_node() {
-        let stmts: Vec<SExpr> = n.body().iter().map(|c| tr(&c)).collect();
+        let stmts: Vec<SExpr> = n.body().iter().map(|c| tr(ctx, &c)).collect();
         return Spanned::new(span, seq_inner(stmts));
     }
     if let Some(n) = node.as_integer_node() {
@@ -709,18 +715,16 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             // ADR 0017 Rule 3: regex moves to the `regex` Cargo
             // feature. Without it, `/pattern/` literals reject at
             // AST-translation time with a clear pointer at the
-            // feature flag. AST_ERRORS is the standard channel for
+            // feature flag. ctx.errors is the standard channel for
             // unsupported nodes; the bare `Expr::Nil` placeholder
             // keeps downstream compilation walking even though the
             // collected error will trap before any compiled body
             // runs.
-            AST_ERRORS.with(|cell| {
-                cell.borrow_mut().push(
+            ctx.errors.push(
                     "/pattern/ regex literal: rubyrs was built without the \
                      `regex` Cargo feature; rebuild with --features regex to \
                      enable Regexp support (ADR 0017 Rule 3 / Tier 2)".to_string(),
                 );
-            });
             return sp(node, Expr::Nil);
         }
     }
@@ -728,14 +732,14 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let parts: Vec<SExpr> = n.parts().iter().map(|p| {
             if let Some(es) = p.as_embedded_statements_node() {
                 let stmts: Vec<SExpr> = es.statements()
-                    .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                    .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
                     .unwrap_or_default();
                 if stmts.len() == 1 { stmts.into_iter().next().unwrap() }
                 else { Spanned::new(node_span(&p), seq_inner(stmts)) }
             } else if let Some(ev) = p.as_embedded_variable_node() {
-                tr(&ev.variable())
+                tr(ctx, &ev.variable())
             } else {
-                tr(&p)
+                tr(ctx, &p)
             }
         }).collect();
         return sp(node, Expr::InterpolatedStr(parts));
@@ -751,27 +755,25 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             let parts: Vec<SExpr> = _n.parts().iter().map(|p| {
                 if let Some(es) = p.as_embedded_statements_node() {
                     let stmts: Vec<SExpr> = es.statements()
-                        .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                        .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
                         .unwrap_or_default();
                     if stmts.len() == 1 { stmts.into_iter().next().unwrap() }
                     else { Spanned::new(node_span(&p), seq_inner(stmts)) }
                 } else if let Some(ev) = p.as_embedded_variable_node() {
-                    tr(&ev.variable())
+                    tr(ctx, &ev.variable())
                 } else {
-                    tr(&p)
+                    tr(ctx, &p)
                 }
             }).collect();
             return sp(node, Expr::InterpolatedRegex(parts));
         }
         #[cfg(not(feature = "regex"))]
         {
-            AST_ERRORS.with(|cell| {
-                cell.borrow_mut().push(
+            ctx.errors.push(
                     "/#{...}/ interpolated regex literal: rubyrs was built without the \
                      `regex` Cargo feature; rebuild with --features regex to \
                      enable Regexp support (ADR 0017 Rule 3 / Tier 2)".to_string(),
                 );
-            });
             return sp(node, Expr::Nil);
         }
     }
@@ -803,13 +805,13 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return sp(node, Expr::LVarRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_local_variable_write_node() {
-        return sp(node, Expr::LVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+        return sp(node, Expr::LVarWrite(cid_to_string(n.name()), Box::new(tr(ctx, &n.value()))));
     }
     if let Some(n) = node.as_instance_variable_read_node() {
         return sp(node, Expr::IVarRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_instance_variable_write_node() {
-        return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+        return sp(node, Expr::IVarWrite(cid_to_string(n.name()), Box::new(tr(ctx, &n.value()))));
     }
     // `@@foo` read / `@@foo = expr` write — class variables.
     // Tier 1 stores them per-class without hierarchy walk; see
@@ -841,7 +843,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // value through a zero-length slice is well-defined.
         let line = {
             let s = loc.as_slice();
-            line_of(s.as_ptr())
+            ctx.line_of(s.as_ptr())
         };
         return sp(node, Expr::SourceLine(line));
     }
@@ -849,7 +851,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return sp(node, Expr::CvarRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_class_variable_write_node() {
-        return sp(node, Expr::CvarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+        return sp(node, Expr::CvarWrite(cid_to_string(n.name()), Box::new(tr(ctx, &n.value()))));
     }
     // `@@x += y` etc. — desugar to `@@x = @@x + y` (or whichever
     // binary op). Same shape we use for the local-variable op-
@@ -858,7 +860,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let name = cid_to_string(n.name());
         let op = cid_to_string(n.binary_operator());
         let read = sp(node, Expr::CvarRead(name.clone()));
-        let rhs = tr(&n.value());
+        let rhs = tr(ctx, &n.value());
         let combined = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
@@ -871,7 +873,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_class_variable_or_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::CvarRead(name.clone()));
-        let rhs = tr(&n.value());
+        let rhs = tr(ctx, &n.value());
         let or_expr = sp(node, Expr::Or(Box::new(read), Box::new(rhs)));
         return sp(node, Expr::CvarWrite(name, Box::new(or_expr)));
     }
@@ -879,7 +881,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_class_variable_and_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::CvarRead(name.clone()));
-        let rhs = tr(&n.value());
+        let rhs = tr(ctx, &n.value());
         let and_expr = sp(node, Expr::And(Box::new(read), Box::new(rhs)));
         return sp(node, Expr::CvarWrite(name, Box::new(and_expr)));
     }
@@ -891,7 +893,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return sp(node, Expr::GVarRead(cid_to_string(n.name())));
     }
     if let Some(n) = node.as_global_variable_write_node() {
-        return sp(node, Expr::GVarWrite(cid_to_string(n.name()), Box::new(tr(&n.value()))));
+        return sp(node, Expr::GVarWrite(cid_to_string(n.name()), Box::new(tr(ctx, &n.value()))));
     }
     // `$1`, `$2`, ..., `$10`, `$11`, ... (Prism's
     // NumberedReferenceReadNode) — numbered capture references
@@ -923,7 +925,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // divergence from CRuby (CRuby warns "already initialized" and
     // reassigns); see `Vm::constants` for the precedence rationale.
     if let Some(n) = node.as_constant_write_node() {
-        return sp(node, Expr::ConstWrite(cid_to_string(n.name()), false, Box::new(tr(&n.value()))));
+        return sp(node, Expr::ConstWrite(cid_to_string(n.name()), false, Box::new(tr(ctx, &n.value()))));
     }
     // `Foo::Bar = expr` — ConstantPathWriteNode. Same spike-scope
     // model as ConstantPathNode read: flatten the LHS path into a
@@ -949,7 +951,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // target is a ConstantPathNode; flatten via the same helper
         // the read path uses.
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
-            return sp(node, Expr::ConstWrite(joined, absolute, Box::new(tr(&n.value()))));
+            return sp(node, Expr::ConstWrite(joined, absolute, Box::new(tr(ctx, &n.value()))));
         }
         // Dynamic-path fallback (rare): use the trailing name only,
         // matching the ConstantPathNode read fallback at line ~415.
@@ -960,7 +962,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // (would create a spurious `OuterModule::X` when this
         // appears inside `module OuterModule`).
         if let Some(name_id) = target.name() {
-            return sp(node, Expr::ConstWrite(cid_to_string(name_id), true, Box::new(tr(&n.value()))));
+            return sp(node, Expr::ConstWrite(cid_to_string(name_id), true, Box::new(tr(ctx, &n.value()))));
         }
     }
     // Op-assign desugaring: `a += b` is translated to
@@ -978,7 +980,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let rhs = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(&n.value())],
+            args: vec![tr(ctx, &n.value())],
         });
         return sp(node, Expr::LVarWrite(name, Box::new(rhs)));
     }
@@ -989,7 +991,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let rhs = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(&n.value())],
+            args: vec![tr(ctx, &n.value())],
         });
         return sp(node, Expr::IVarWrite(name, Box::new(rhs)));
     }
@@ -1000,34 +1002,34 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     if let Some(n) = node.as_local_variable_or_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::LVarRead(name.clone()));
-        let write = sp(node, Expr::LVarWrite(name, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::LVarWrite(name, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::Or(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_local_variable_and_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::LVarRead(name.clone()));
-        let write = sp(node, Expr::LVarWrite(name, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::LVarWrite(name, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_instance_variable_or_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::IVarRead(name.clone()));
-        let write = sp(node, Expr::IVarWrite(name, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::IVarWrite(name, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::Or(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_instance_variable_and_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::IVarRead(name.clone()));
-        let write = sp(node, Expr::IVarWrite(name, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::IVarWrite(name, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_index_or_write_node() {
         // `recv[idx] ||= val` → `recv[idx] || (recv[idx] = val)`.
-        let recv = n.receiver().map(|r| tr(&r)).expect(
+        let recv = n.receiver().map(|r| tr(ctx, &r)).expect(
             "IndexOrWriteNode without receiver is unrepresentable",
         );
         let idx_args: Vec<SExpr> = n.arguments()
-            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .map(|a| a.arguments().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         let read = sp(node, Expr::Call {
             receiver: Some(Box::new(recv.clone())),
@@ -1035,7 +1037,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             args: idx_args.clone(),
         });
         let mut write_args = idx_args;
-        write_args.push(tr(&n.value()));
+        write_args.push(tr(ctx, &n.value()));
         let write = sp(node, Expr::Call {
             receiver: Some(Box::new(recv)),
             name: "[]=".into(),
@@ -1045,11 +1047,11 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_index_and_write_node() {
         // `recv[idx] &&= val` → `recv[idx] && (recv[idx] = val)`.
-        let recv = n.receiver().map(|r| tr(&r)).expect(
+        let recv = n.receiver().map(|r| tr(ctx, &r)).expect(
             "IndexAndWriteNode without receiver is unrepresentable",
         );
         let idx_args: Vec<SExpr> = n.arguments()
-            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .map(|a| a.arguments().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         let read = sp(node, Expr::Call {
             receiver: Some(Box::new(recv.clone())),
@@ -1057,7 +1059,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             args: idx_args.clone(),
         });
         let mut write_args = idx_args;
-        write_args.push(tr(&n.value()));
+        write_args.push(tr(ctx, &n.value()));
         let write = sp(node, Expr::Call {
             receiver: Some(Box::new(recv)),
             name: "[]=".into(),
@@ -1072,12 +1074,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // and write calls. Block arg is not supported here
         // (`m[i, &b] += ...` is exotic; pass through as
         // unsupported).
-        let recv = n.receiver().map(|r| tr(&r)).expect(
+        let recv = n.receiver().map(|r| tr(ctx, &r)).expect(
             "IndexOperatorWriteNode without receiver is unrepresentable in our subset",
         );
         let idx_args: Vec<SExpr> = n
             .arguments()
-            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .map(|a| a.arguments().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         let op = cid_to_string(n.binary_operator());
         let read = sp(node, Expr::Call {
@@ -1088,7 +1090,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let new_val = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(&n.value())],
+            args: vec![tr(ctx, &n.value())],
         });
         let mut write_args = idx_args;
         write_args.push(new_val);
@@ -1108,20 +1110,20 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let rhs = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(&n.value())],
+            args: vec![tr(ctx, &n.value())],
         });
         return sp(node, Expr::GVarWrite(name, Box::new(rhs)));
     }
     if let Some(n) = node.as_global_variable_or_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::GVarRead(name.clone()));
-        let write = sp(node, Expr::GVarWrite(name, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::GVarWrite(name, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::Or(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_global_variable_and_write_node() {
         let name = cid_to_string(n.name());
         let read = sp(node, Expr::GVarRead(name.clone()));
-        let write = sp(node, Expr::GVarWrite(name, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::GVarWrite(name, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
     // Constant op-writes — CRuby diverges by operator:
@@ -1142,7 +1144,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let rhs = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(&n.value())],
+            args: vec![tr(ctx, &n.value())],
         });
         return sp(node, Expr::ConstWrite(name, false, Box::new(rhs)));
     }
@@ -1151,7 +1153,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // Silent-nil read — `UNSET ||= default` is CRuby's
         // canonical lazy-init idiom.
         let read = sp(node, Expr::ConstReadOrNil(name.clone()));
-        let write = sp(node, Expr::ConstWrite(name, false, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::ConstWrite(name, false, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::Or(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_constant_and_write_node() {
@@ -1160,7 +1162,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // NameError, matching CRuby (no lazy-init special-case
         // for the and-form).
         let read = sp(node, Expr::ConstRead(name.clone()));
-        let write = sp(node, Expr::ConstWrite(name, false, Box::new(tr(&n.value()))));
+        let write = sp(node, Expr::ConstWrite(name, false, Box::new(tr(ctx, &n.value()))));
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
     // ConstantPath op-writes — `Foo::Bar += 1`. Target is a
@@ -1184,12 +1186,12 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // Strict read — matches the bare `FOO += 1` arm above:
         // CRuby raises NameError before the operator runs on an
         // undefined constant.
-        let make = |name: String, abs: bool| {
+        let mut make = |name: String, abs: bool| {
             let read = sp(node, Expr::ConstRead(name.clone()));
             let rhs = sp(node, Expr::Call {
                 receiver: Some(Box::new(read)),
                 name: op.clone(),
-                args: vec![tr(&n.value())],
+                args: vec![tr(ctx, &n.value())],
             });
             sp(node, Expr::ConstWrite(name, abs, Box::new(rhs)))
         };
@@ -1205,9 +1207,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let absolute = is_constant_path_absolute(&target.as_node());
         // See ConstantPathOperatorWriteNode arm for the `abs`
         // override rationale on the dynamic-head fallback.
-        let make = |name: String, abs: bool| {
+        let mut make = |name: String, abs: bool| {
             let read = sp(node, Expr::ConstReadOrNil(name.clone()));
-            let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(&n.value()))));
+            let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(ctx, &n.value()))));
             sp(node, Expr::Or(Box::new(read), Box::new(write)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
@@ -1223,9 +1225,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // Strict read — matches the bare `FOO &&= ...` arm above:
         // CRuby has no lazy-init shortcut for `&&=`; undefined
         // constants raise NameError on the read.
-        let make = |name: String, abs: bool| {
+        let mut make = |name: String, abs: bool| {
             let read = sp(node, Expr::ConstRead(name.clone()));
-            let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(&n.value()))));
+            let write = sp(node, Expr::ConstWrite(name, abs, Box::new(tr(ctx, &n.value()))));
             sp(node, Expr::And(Box::new(read), Box::new(write)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
@@ -1243,19 +1245,26 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // with no array literal in source, they're packed into
         // an ArrayNode at the `value` slot.
         let mut targets: Vec<MultiWriteTarget> = Vec::new();
-        let push_positional = |targets: &mut Vec<MultiWriteTarget>, tgt: &Node<'_>| {
+        // Nested fn (not closure) so we don't keep a mutable
+        // borrow of `ctx.errors` alive across the splat/rest
+        // arms below, which also push errors directly.
+        fn push_positional(
+            ctx: &mut TranslationCtx<'_>,
+            targets: &mut Vec<MultiWriteTarget>,
+            tgt: &Node<'_>,
+        ) {
             if let Some(lvt) = tgt.as_local_variable_target_node() {
                 targets.push(MultiWriteTarget::Local(cid_to_string(lvt.name())));
             } else if let Some(ivt) = tgt.as_instance_variable_target_node() {
                 targets.push(MultiWriteTarget::Ivar(cid_to_string(ivt.name())));
             } else {
-                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                ctx.errors.push(
                     format!("unsupported multi-write target: {:?}", tgt)
-                ));
+                );
             }
-        };
+        }
         for tgt in n.lefts().iter() {
-            push_positional(&mut targets, &tgt);
+            push_positional(ctx, &mut targets, &tgt);
         }
         if let Some(rest) = n.rest() {
             if let Some(splat) = rest.as_splat_node() {
@@ -1271,9 +1280,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                                 cid_to_string(ivt.name()),
                             ));
                         } else {
-                            AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                            ctx.errors.push(
                                 format!("unsupported splat target: {:?}", expr)
-                            ));
+                            );
                         }
                     }
                 }
@@ -1282,22 +1291,22 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 // mark the trailing comma. Treat as anonymous splat.
                 targets.push(MultiWriteTarget::SplatLocal(None));
             } else {
-                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                ctx.errors.push(
                     format!("unsupported multi-write rest: {:?}", rest)
-                ));
+                );
             }
         }
         for tgt in n.rights().iter() {
-            push_positional(&mut targets, &tgt);
+            push_positional(ctx, &mut targets, &tgt);
         }
-        let value = tr(&n.value());
+        let value = tr(ctx, &n.value());
         return sp(node, Expr::MultiWrite {
             targets,
             value: Box::new(value),
         });
     }
     if let Some(n) = node.as_call_node() {
-        let receiver = n.receiver().map(|r| Box::new(tr(&r)));
+        let receiver = n.receiver().map(|r| Box::new(tr(ctx, &r)));
         let name = cid_to_string(n.name());
         // Detect single-splat call `foo(*arr)` — args is a
         // single SplatNode wrapping an Array-shaped expression.
@@ -1320,7 +1329,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     return sp(node, Expr::Apply {
                         receiver,
                         name,
-                        splat: Box::new(tr(&splat_expr)),
+                        splat: Box::new(tr(ctx, &splat_expr)),
                     });
                 }
         // Detect any splat anywhere in the args; if present and
@@ -1345,13 +1354,13 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                         if !buf.is_empty() {
                             chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                         }
-                        chunks.push(tr(&inner));
+                        chunks.push(tr(ctx, &inner));
                     } else if let Some(kh) = cn.as_keyword_hash_node() {
                     // Trailing kwarg-hash retains its sugar shape;
                     // **opts merges via tr_kwhash's `.merge` chain.
-                    buf.push(tr_kwhash(node, cn, &kh));
+                    buf.push(tr_kwhash(ctx, node, cn, &kh));
                 } else {
-                    buf.push(tr(cn));
+                    buf.push(tr(ctx, cn));
                 }
             }
             if !buf.is_empty() {
@@ -1380,9 +1389,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // but always normalize to a HashLit Expr.
         let args: Vec<SExpr> = arg_nodes.iter().map(|c| {
             if let Some(kh) = c.as_keyword_hash_node() {
-                tr_kwhash(node, c, &kh)
+                tr_kwhash(ctx, node, c, &kh)
             } else {
-                tr(c)
+                tr(ctx, c)
             }
         }).collect();
         if let Some(bnode) = n.block() {
@@ -1428,8 +1437,8 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 let block_body: Vec<SExpr> = match bn.body() {
                     Some(b) => {
                         if let Some(stmts) = b.as_statements_node() {
-                            stmts.body().iter().map(|c| tr(&c)).collect()
-                        } else { vec![tr(&b)] }
+                            stmts.body().iter().map(|c| tr(ctx, &c)).collect()
+                        } else { vec![tr(ctx, &b)] }
                     }
                     None => vec![],
                 };
@@ -1462,7 +1471,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     // requires the value to respond to `to_proc` —
                     // for our subset we only accept Value::Block
                     // directly (no implicit coercion).
-                    let block_arg = tr(&expr);
+                    let block_arg = tr(ctx, &expr);
                     return sp(node, Expr::CallWithBlockArg {
                         receiver, name, args, block_arg: Box::new(block_arg),
                     });
@@ -1482,7 +1491,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // `x, y = some_method` where the method used `return a, b`.
     // Motivating case: MRI's `lib/erb/compiler.rb:466`
     // (`return enc, frozen` consumed by `*magic_comment` splat).
-    fn collect_multi_return_value(args: Option<ruby_prism::ArgumentsNode<'_>>, span_node: &Node<'_>) -> Option<Box<SExpr>> {
+    fn collect_multi_return_value(ctx: &mut TranslationCtx<'_>, args: Option<ruby_prism::ArgumentsNode<'_>>, span_node: &Node<'_>) -> Option<Box<SExpr>> {
         let a = args?;
         let arg_nodes: Vec<_> = a.arguments().iter().collect();
         match arg_nodes.len() {
@@ -1500,14 +1509,14 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 let only = &arg_nodes[0];
                 if let Some(sn) = only.as_splat_node()
                     && let Some(inner) = sn.expression() {
-                    let inner_expr = tr(&inner);
+                    let inner_expr = tr(ctx, &inner);
                     return Some(Box::new(sp(span_node, Expr::Call {
                         receiver: None,
                         name: "Array".into(),
                         args: vec![inner_expr],
                     })));
                 }
-                Some(Box::new(tr(only)))
+                Some(Box::new(tr(ctx, only)))
             }
             // 2+ args: build an Array. With splats, mirror the
             // `[a, *b, c]` handling in the array-literal arm —
@@ -1516,7 +1525,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             _ => {
                 let has_splat = arg_nodes.iter().any(|c| c.as_splat_node().is_some());
                 if !has_splat {
-                    let elems: Vec<SExpr> = arg_nodes.iter().map(|n| tr(n)).collect();
+                    let elems: Vec<SExpr> = arg_nodes.iter().map(|n| tr(ctx, n)).collect();
                     return Some(Box::new(sp(span_node, Expr::ArrayLit(elems))));
                 }
                 let mut chunks: Vec<SExpr> = Vec::new();
@@ -1535,14 +1544,14 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                         // the wrap, scalars/nil would push bare values
                         // and `Array#+` would TypeError on the non-
                         // Array RHS.
-                        let inner_expr = tr(&inner);
+                        let inner_expr = tr(ctx, &inner);
                         chunks.push(sp(span_node, Expr::Call {
                             receiver: None,
                             name: "Array".into(),
                             args: vec![inner_expr],
                         }));
                     } else {
-                        buf.push(tr(n));
+                        buf.push(tr(ctx, n));
                     }
                 }
                 if !buf.is_empty() {
@@ -1560,15 +1569,15 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         }
     }
     if let Some(n) = node.as_return_node() {
-        let val = collect_multi_return_value(n.arguments(), node);
+        let val = collect_multi_return_value(ctx, n.arguments(), node);
         return sp(node, Expr::Return(val));
     }
     if let Some(n) = node.as_next_node() {
-        let val = collect_multi_return_value(n.arguments(), node);
+        let val = collect_multi_return_value(ctx, n.arguments(), node);
         return sp(node, Expr::Next(val));
     }
     if let Some(n) = node.as_break_node() {
-        let val = collect_multi_return_value(n.arguments(), node);
+        let val = collect_multi_return_value(ctx, n.arguments(), node);
         return sp(node, Expr::Break(val));
     }
     // `defined?(expr)` — returns a string describing the kind
@@ -1684,8 +1693,8 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
-                    stmts.body().iter().map(|c| tr(&c)).collect()
-                } else { vec![tr(&b)] }
+                    stmts.body().iter().map(|c| tr(ctx, &c)).collect()
+                } else { vec![tr(ctx, &b)] }
             }
             None => vec![],
         };
@@ -1693,21 +1702,21 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     }
     if let Some(n) = node.as_yield_node() {
         let args: Vec<SExpr> = n.arguments()
-            .map(|a| a.arguments().iter().map(|c| tr(&c)).collect())
+            .map(|a| a.arguments().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         return sp(node, Expr::Yield(args));
     }
     if let Some(n) = node.as_if_node() {
-        let cond = Box::new(tr(&n.predicate()));
+        let cond = Box::new(tr(ctx, &n.predicate()));
         let then_body: Vec<SExpr> = n.statements()
-            .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+            .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         let else_body: Vec<SExpr> = match n.subsequent() {
             Some(sub) => {
                 if let Some(en) = sub.as_else_node() {
-                    en.statements().map(|s| s.body().iter().map(|c| tr(&c)).collect()).unwrap_or_default()
+                    en.statements().map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect()).unwrap_or_default()
                 } else {
-                    vec![tr(&sub)]
+                    vec![tr(ctx, &sub)]
                 }
             }
             None => vec![],
@@ -1745,9 +1754,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     if !buf.is_empty() {
                         chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                     }
-                    chunks.push(tr(&inner));
+                    chunks.push(tr(ctx, &inner));
                 } else {
-                    buf.push(tr(c));
+                    buf.push(tr(ctx, c));
                 }
             }
             if !buf.is_empty() {
@@ -1762,19 +1771,19 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             }));
             return sp(node, Expr::SuperApply(Box::new(acc)));
         }
-        let args: Vec<SExpr> = arg_nodes.iter().map(tr).collect();
+        let args: Vec<SExpr> = arg_nodes.iter().map(|n| tr(ctx, n)).collect();
         return sp(node, Expr::Super(Some(args)));
     }
     if let Some(n) = node.as_or_node() {
-        return sp(node, Expr::Or(Box::new(tr(&n.left())), Box::new(tr(&n.right()))));
+        return sp(node, Expr::Or(Box::new(tr(ctx, &n.left())), Box::new(tr(ctx, &n.right()))));
     }
     if let Some(n) = node.as_and_node() {
-        return sp(node, Expr::And(Box::new(tr(&n.left())), Box::new(tr(&n.right()))));
+        return sp(node, Expr::And(Box::new(tr(ctx, &n.left())), Box::new(tr(ctx, &n.right()))));
     }
     if let Some(n) = node.as_while_node() {
-        let cond = Box::new(tr(&n.predicate()));
+        let cond = Box::new(tr(ctx, &n.predicate()));
         let body: Vec<SExpr> = n.statements()
-            .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+            .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         // `begin … end while cond` — Prism marks this with the
         // `begin_modifier` flag. Body runs once before the first
@@ -1794,10 +1803,10 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // RescueClause (empty `classes` list, which our Begin compiler
     // already treats as "filter on StandardError").
     if let Some(n) = node.as_rescue_modifier_node() {
-        let body = vec![tr(&n.expression())];
+        let body = vec![tr(ctx, &n.expression())];
         let rescue = vec![RescueClause {
             classes: vec![],
-            body: vec![tr(&n.rescue_expression())],
+            body: vec![tr(ctx, &n.rescue_expression())],
             var: None,
         }];
         return sp(node, Expr::Begin { body, rescue, ensure: None });
@@ -1813,11 +1822,11 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // The predicate is re-evaluated per condition, which is fine
     // for side-effect-free predicates (the common case).
     if let Some(n) = node.as_case_node() {
-        let predicate = n.predicate().map(|p| tr(&p));
+        let predicate = n.predicate().map(|p| tr(ctx, &p));
         let conditions: Vec<_> = n.conditions().iter().collect();
         let else_body: Vec<SExpr> = match n.else_clause() {
             Some(en) => en.statements()
-                .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
                 .unwrap_or_default(),
             None => vec![],
         };
@@ -1846,7 +1855,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     let cn: &Node<'_> = &c;
                     if let Some(sn) = cn.as_splat_node()
                         && let Some(inner) = sn.expression() {
-                            let arr = tr(&inner);
+                            let arr = tr(ctx, &inner);
                             let sp_name = "__sp_v".to_string();
                             let body_expr = match &predicate {
                                 Some(pred) => sp(cn, Expr::Call {
@@ -1864,11 +1873,11 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                                 block_body: vec![body_expr],
                             }), true);
                         }
-                    (tr(cn), false)
+                    (tr(ctx, cn), false)
                 })
                 .collect();
             let when_body: Vec<SExpr> = when.statements()
-                .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
                 .unwrap_or_default();
             // Combine multiple `when a, b, c` conditions with
             // short-circuit `||`. Each `expr` becomes
@@ -1914,13 +1923,13 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         return acc.into_iter().next().unwrap();
     }
     if let Some(n) = node.as_unless_node() {
-        let cond = Box::new(tr(&n.predicate()));
+        let cond = Box::new(tr(ctx, &n.predicate()));
         let then_body: Vec<SExpr> = n.statements()
-            .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+            .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         let else_body: Vec<SExpr> = match n.else_clause() {
             Some(en) => en.statements()
-                .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
                 .unwrap_or_default(),
             None => vec![],
         };
@@ -1932,14 +1941,14 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // negation as a Call to `!` on the original cond — the
     // Unary-Bang primitive arm handles all value types.
     if let Some(n) = node.as_until_node() {
-        let raw_cond = tr(&n.predicate());
+        let raw_cond = tr(ctx, &n.predicate());
         let cond = Box::new(sp(node, Expr::Call {
             receiver: Some(Box::new(raw_cond)),
             name: "!".into(),
             args: vec![],
         }));
         let body: Vec<SExpr> = n.statements()
-            .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+            .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         // `begin … end until cond` — same begin-modifier flag.
         // Translates to a negated-cond do-while via the post flag.
@@ -1978,20 +1987,20 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     kw_params.push((cid_to_string(rk.name()), None));
                 } else if let Some(ok) = kw.as_optional_keyword_parameter_node() {
                     let name = cid_to_string(ok.name());
-                    let val = tr(&ok.value());
+                    let val = tr(ctx, &ok.value());
                     // Same literal-only restriction as positional
                     // defaults: anything else needs a per-callsite
                     // prologue we don't generate. Surface as a
-                    // SyntaxError via AST_ERRORS.
+                    // SyntaxError via ctx.errors.
                     match &val.node {
                         Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StrLit(_) | Expr::SymbolLit(_)
                         | Expr::BoolLit(_) | Expr::Nil => {
                             kw_params.push((name, Some(val)));
                         }
                         _ => {
-                            AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                            ctx.errors.push(
                                 format!("default value for keyword parameter `{}` must be a literal", name)
-                            ));
+                            );
                             kw_params.push((name, Some(sp(&kw, Expr::Nil))));
                         }
                     }
@@ -2013,15 +2022,15 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     // before the body, so the default can reference
                     // earlier params, call methods, look up
                     // constants, etc.
-                    defaults.push(Some(tr(&op.value())));
+                    defaults.push(Some(tr(ctx, &op.value())));
                 }
             }
         }
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
-                    stmts.body().iter().map(|c| tr(&c)).collect()
-                } else { vec![tr(&b)] }
+                    stmts.body().iter().map(|c| tr(ctx, &c)).collect()
+                } else { vec![tr(ctx, &b)] }
             }
             None => vec![],
         };
@@ -2032,7 +2041,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // class-level singleton — master `844530f`'s path) from
         // any other expression (instance-level singleton on a
         // Value::Object) at compile time.
-        let receiver = n.receiver().map(|r| Box::new(tr(&r)));
+        let receiver = n.receiver().map(|r| Box::new(tr(ctx, &r)));
         return sp(node, Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body });
     }
     if let Some(n) = node.as_range_node() {
@@ -2040,8 +2049,8 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // we treat the missing endpoint as `nil` which will fail at runtime
         // when something tries to iterate. For our subset, both ends should
         // be present.
-        let begin = n.left().map(|c| tr(&c)).unwrap_or_else(|| sp(node, Expr::Nil));
-        let end = n.right().map(|c| tr(&c)).unwrap_or_else(|| sp(node, Expr::Nil));
+        let begin = n.left().map(|c| tr(ctx, &c)).unwrap_or_else(|| sp(node, Expr::Nil));
+        let end = n.right().map(|c| tr(ctx, &c)).unwrap_or_else(|| sp(node, Expr::Nil));
         return sp(node, Expr::RangeLit {
             begin: Box::new(begin),
             end: Box::new(end),
@@ -2057,7 +2066,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let raw_elems: Vec<_> = n.elements().iter().collect();
         let has_splat = raw_elems.iter().any(|e| e.as_splat_node().is_some());
         if !has_splat {
-            let elems: Vec<SExpr> = raw_elems.iter().map(|e| tr(e)).collect();
+            let elems: Vec<SExpr> = raw_elems.iter().map(|e| tr(ctx, e)).collect();
             return sp(node, Expr::ArrayLit(elems));
         }
         // Walk the elements building (group of consecutive non-splats
@@ -2073,9 +2082,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     if !buf.is_empty() {
                         chunks.push(sp(node, Expr::ArrayLit(std::mem::take(&mut buf))));
                     }
-                    chunks.push(tr(&inner));
+                    chunks.push(tr(ctx, &inner));
                 } else {
-                buf.push(tr(en));
+                buf.push(tr(ctx, en));
             }
         }
         if !buf.is_empty() {
@@ -2098,7 +2107,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let has_splat = n.elements().iter().any(|e| e.as_assoc_splat_node().is_some());
         if !has_splat {
             let pairs: Vec<(SExpr, SExpr)> = n.elements().iter().filter_map(|e| {
-                e.as_assoc_node().map(|a| (tr(&a.key()), tr(&a.value())))
+                e.as_assoc_node().map(|a| (tr(ctx, &a.key()), tr(ctx, &a.value())))
             }).collect();
             return sp(node, Expr::HashLit(pairs));
         }
@@ -2106,13 +2115,13 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let mut buf: Vec<(SExpr, SExpr)> = Vec::new();
         for el in n.elements().iter() {
             if let Some(an) = el.as_assoc_node() {
-                buf.push((tr(&an.key()), tr(&an.value())));
+                buf.push((tr(ctx, &an.key()), tr(ctx, &an.value())));
             } else if let Some(spn) = el.as_assoc_splat_node()
                 && let Some(inner) = spn.value() {
                     if !buf.is_empty() {
                         chunks.push(sp(node, Expr::HashLit(std::mem::take(&mut buf))));
                     }
-                    chunks.push(tr(&inner));
+                    chunks.push(tr(ctx, &inner));
                 }
         }
         if !buf.is_empty() {
@@ -2154,8 +2163,8 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
-                    stmts.body().iter().map(|c| tr(&c)).collect()
-                } else { vec![tr(&b)] }
+                    stmts.body().iter().map(|c| tr(ctx, &c)).collect()
+                } else { vec![tr(ctx, &b)] }
             }
             None => vec![],
         };
@@ -2184,8 +2193,8 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
-                    stmts.body().iter().map(|c| tr(&c)).collect()
-                } else { vec![tr(&b)] }
+                    stmts.body().iter().map(|c| tr(ctx, &c)).collect()
+                } else { vec![tr(ctx, &b)] }
             }
             None => vec![],
         };
@@ -2225,7 +2234,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
     // `Op::AliasMethod`) handles it. Both operands are parsed as
     // `SymbolNode` by Prism; non-Symbol shapes here are exotic
     // (dynamic dispatch via `alias` is uncommon) and fall
-    // through to the AST_ERRORS trail.
+    // through to the ctx.errors trail.
     //
     // NOT THIS ARM: `alias $new $old` (global-variable aliasing)
     // is `AliasGlobalVariableNode` — a distinct Prism node, not
@@ -2260,7 +2269,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         });
     }
     if let Some(n) = node.as_singleton_class_node() {
-        let recv_expr = tr(&n.expression());
+        let recv_expr = tr(ctx, &n.expression());
         let body_nodes: Vec<_> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
@@ -2333,13 +2342,13 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         };
         for bn in &body_nodes {
             if bn.as_def_node().is_some() {
-                let translated = tr(bn);
+                let translated = tr(ctx, bn);
                 if let Some(s) = mk_singleton_def(bn, translated.node) {
                     out.push(s);
                 } else {
-                    AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                    ctx.errors.push(
                         "class << X: internal — def translated unexpectedly".into()
-                    ));
+                    );
                     out.push(sp(bn, Expr::Nil));
                 }
                 continue;
@@ -2379,9 +2388,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                     let expected = call.arguments().map(|a| a.arguments().iter().count()).unwrap_or(0);
                     if sym_names.len() != expected { all_sym_args = false; }
                     if !all_sym_args {
-                        AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                        ctx.errors.push(
                             "class << X body: attr_* with non-symbol args is not supported".into()
-                        ));
+                        );
                         out.push(sp(bn, Expr::Nil));
                         continue;
                     }
@@ -2452,9 +2461,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
             // the non-self receiver guard above — separate from
             // the general "only def / attr_* / alias" message.
             if bn.as_alias_method_node().is_some() && !recv_is_self {
-                AST_ERRORS.with(|cell| cell.borrow_mut().push(
+                ctx.errors.push(
                     "class << <non-self>: `alias` is only supported when the receiver is `self` (inside a class body)".into()
-                ));
+                );
                 out.push(sp(bn, Expr::Nil));
                 continue;
             }
@@ -2481,7 +2490,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 && let Some(args) = call.arguments()
                 && args.arguments().iter().count() == 1
             {
-                let src = tr(&args.arguments().iter().next().unwrap());
+                let src = tr(ctx, &args.arguments().iter().next().unwrap());
                 out.push(sp(bn, Expr::SingletonChainPrepend(Box::new(src))));
                 continue;
             }
@@ -2534,9 +2543,9 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
                 }));
                 continue;
             }
-            AST_ERRORS.with(|cell| cell.borrow_mut().push(
+            ctx.errors.push(
                 "class << <non-self> body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` are supported in the spike subset".into()
-            ));
+            );
             out.push(sp(bn, Expr::Nil));
         }
         // Pin the trailing value to nil so the synthetic receiver
@@ -2562,17 +2571,17 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         // `(expr)` — just unwrap to the inner expression / statements.
         if let Some(body) = n.body() {
             if let Some(stmts) = body.as_statements_node() {
-                let v: Vec<SExpr> = stmts.body().iter().map(|c| tr(&c)).collect();
+                let v: Vec<SExpr> = stmts.body().iter().map(|c| tr(ctx, &c)).collect();
                 return if v.len() == 1 { v.into_iter().next().unwrap() }
                        else { Spanned::new(span, seq_inner(v)) };
             }
-            return tr(&body);
+            return tr(ctx, &body);
         }
         return sp(node, Expr::Nil);
     }
     if let Some(n) = node.as_begin_node() {
         let body: Vec<SExpr> = n.statements()
-            .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+            .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
         // Prism chains rescue clauses via `subsequent()`. Walk the
         // chain and flatten to a Vec so the compiler can emit one
@@ -2581,7 +2590,7 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         let mut cur = n.rescue_clause();
         while let Some(rc) = cur {
             let body: Vec<SExpr> = rc.statements()
-                .map(|s| s.body().iter().map(|c| tr(&c)).collect())
+                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
                 .unwrap_or_default();
             let var = rc.reference().and_then(|r| {
                 r.as_local_variable_target_node().map(|lvt| cid_to_string(lvt.name()))
@@ -2612,16 +2621,16 @@ pub(crate) fn tr(node: &Node<'_>) -> SExpr {
         }
         let ensure = n.ensure_clause().map(|ec| {
             ec.statements()
-                .map(|s| s.body().iter().map(|c| tr(&c)).collect::<Vec<SExpr>>())
+                .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect::<Vec<SExpr>>())
                 .unwrap_or_default()
         });
         return sp(node, Expr::Begin { body, rescue, ensure });
     }
     // Unsupported Prism node — record the message and return a
-    // placeholder. The eval entry point checks `AST_ERRORS` after
+    // placeholder. The eval entry point checks `ctx.errors` after
     // tr returns and surfaces a SyntaxError Trap, so the
     // placeholder never reaches the compiler in practice.
-    AST_ERRORS.with(|cell| cell.borrow_mut().push(format!("unsupported node: {:?}", node)));
+    ctx.errors.push(format!("unsupported node: {:?}", node));
     sp(node, Expr::Nil)
 }
 
