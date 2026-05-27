@@ -521,7 +521,7 @@ impl Vm {
                 "freeze" | "frozen?" |
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "unshift" | "prepend" |
-                "shift" | "pop" | "reverse_each" |
+                "shift" | "pop" | "delete" | "reverse_each" |
                 "first" | "last" | "empty?" | "include?" |
                 "count" | "sum" | "min" | "max" | "sort" | "tally" |
                 "combination" | "permutation" | "assoc" | "rassoc" | "pack" |

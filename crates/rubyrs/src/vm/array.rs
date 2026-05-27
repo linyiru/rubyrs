@@ -61,6 +61,51 @@ impl Vm {
                         let a = self.heap.array_mut(id);
                         Some(a.pop().unwrap_or(Value::Nil))
                     }
+                    // `Array#delete(obj)` — value-based delete.
+                    // Removes EVERY element equal to `obj` (using
+                    // `==`, via `ruby_eq`), returns the last
+                    // deleted element, or nil if `obj` wasn't
+                    // found. In-place mutation.
+                    //
+                    // Motivating consumer: tilt's
+                    // `local_extraction` at lib/tilt/template.rb:378
+                    // calls `assignments.delete("locals =
+                    // locals[:locals]")` to decide whether to
+                    // re-append the `locals`-key assignment last.
+                    //
+                    // Divergence: the block form
+                    // `arr.delete(obj) { yield-if-not-found }` is
+                    // not modeled — `delete` here only inspects
+                    // the no-arg-block call shape. With a block,
+                    // CRuby yields `obj` and returns the block's
+                    // result when nothing matched; rubyrs returns
+                    // nil and discards the block.
+                    ("delete", [needle]) => {
+                        // Two-phase: walk the immutable view to
+                        // collect indices that match (need the
+                        // heap borrow for `ruby_eq`'s
+                        // cross-reference resolution), then drain
+                        // those indices via `array_mut`. Last
+                        // matched element wins as the return
+                        // value, mirroring CRuby.
+                        let a = self.heap.array(id);
+                        let hits: Vec<usize> = a
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, x)| x.ruby_eq(needle, &self.heap))
+                            .map(|(i, _)| i)
+                            .collect();
+                        if hits.is_empty() {
+                            Some(Value::Nil)
+                        } else {
+                            let a = self.heap.array_mut(id);
+                            let mut last: Value = Value::Nil;
+                            for &i in hits.iter().rev() {
+                                last = a.remove(i);
+                            }
+                            Some(last)
+                        }
+                    }
                     // `Array#unshift(v)` / `prepend(v)` — insert at
                     // front, return receiver. Variadic in CRuby
                     // (`unshift(a, b, c)` inserts all at once in
