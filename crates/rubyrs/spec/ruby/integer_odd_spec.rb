@@ -15,19 +15,24 @@ describe "Integer#odd?" do
     assert_eq(2.odd?, false)
   end
 
-  it "returns true if self is odd and positive" do
+  # Same bignum-only gating as integer_even_spec.rb's
+  # `**`-literal cases — the values overflow i64 and saturate
+  # to a fixed i64::MAX (odd) under no-bignum, making the
+  # "even bignum" assertions test wrap-to-i64 behaviour instead
+  # of the BigInt `odd?` path the spec was written to exercise.
+  bignum_it "returns true if self is odd and positive" do
     assert_eq((987279**19).odd?, true)
   end
 
-  it "returns true if self is odd and negative" do
+  bignum_it "returns true if self is odd and negative" do
     assert_eq((-9873389**97).odd?, true)
   end
 
-  it "returns false if self is even and positive" do
+  bignum_it "returns false if self is even and positive" do
     assert_eq((10000000**10).odd?, false)
   end
 
-  it "returns false if self is even and negative" do
+  bignum_it "returns false if self is even and negative" do
     assert_eq((-1000000**100).odd?, false)
   end
 
