@@ -12,16 +12,16 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 77 |
-| Examples in corpus | 369 |
-| Skipped `it` traces | 130 |
+| Files | 78 |
+| Examples in corpus | 375 |
+| Skipped `it` traces | 132 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 5 |
-| `fixture` | 45 |
+| `divergent` | 6 |
+| `fixture` | 46 |
 | `method-not-implemented` | 68 |
 | `mock` | 12 |
 
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 13 | 30 | 29 |
-| Integer | 19 | 154 | 17 |
+| Integer | 20 | 160 | 19 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -103,6 +103,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_right_shift_spec.rb` | Integer#>> | `core/integer/right_shift_spec.rb` | 26 | 0 |
 | `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |
 | `integer_times_spec.rb` | Integer#times | `core/integer/times_spec.rb` | 7 | 1 |
+| `integer_to_s_spec.rb` | Integer#to_s | `core/integer/to_s_spec.rb` | 6 | 2 |
 | `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 3 | 3 |
 | `integer_zero_spec.rb` | Integer#zero? | `core/integer/zero_spec.rb` | 2 | 0 |
 | `method_call_spec.rb` | Method#call | `core/method/call_spec.rb (+ shared/call.rb)` | 6 | 0 |
