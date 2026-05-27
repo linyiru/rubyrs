@@ -60,7 +60,7 @@ pub(crate) fn string_call(
         // `bytesize` (added below); for binary protocol gems the
         // bytesize semantic is the meaningful one.
         (Value::Str(a), "length", []) | (Value::Str(a), "size", []) => {
-            Some(Value::Int(a.with_str_lossy(|s| s.chars().count()) as i64))
+            Some(Value::Int(a.char_count() as i64))
         }
         // `String#count(sel, ...)` — count chars matching every
         // selector (multi-arg = intersection). Each selector

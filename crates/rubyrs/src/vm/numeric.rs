@@ -9,6 +9,14 @@
 use crate::error::RubyError;
 use crate::value::Value;
 
+/// `Integer#to_s` / `Integer#inspect` no-arg shape. Shared by the
+/// canonical `numeric_call` arm and `do_call`'s primitive
+/// fast-path so future changes (radix, locale, sign formatting)
+/// can't drift between the two entry points.
+pub(crate) fn integer_to_s_value(n: i64) -> Value {
+    Value::new_str(n.to_string())
+}
+
 /// Try the Int / Float / mixed-numeric arms. Returns
 /// `Ok(Some(v))` on a handled call, `Ok(None)` if the receiver
 /// or method shape doesn't match and `primitive_call` should
@@ -423,7 +431,7 @@ pub(crate) fn numeric_call(
             });
         }
         (Value::Int(a), "to_s", []) | (Value::Int(a), "inspect", []) => {
-            Some(Value::new_str(a.to_string()))
+            Some(integer_to_s_value(*a))
         }
         (Value::Int(a), "to_i", []) => Some(Value::Int(*a)),
         // `abs` / `-@`: i64::MIN.abs() and -i64::MIN both overflow

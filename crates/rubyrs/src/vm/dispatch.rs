@@ -312,6 +312,43 @@ impl Vm {
         }
     }
 
+    /// Primitive-receiver fast-path for the handful of zero-arg
+    /// methods (`String#length` / `#size` / `#to_s`, `Integer#to_s`
+    /// / `#inspect`) that profiling showed dominate fizzbuzz-shape
+    /// loops. Returns true after pushing the result; false if the
+    /// receiver / name / arity don't match and `do_call` should
+    /// continue through normal dispatch.
+    ///
+    /// Currently safe to call after `take_bypass_visibility()`
+    /// because every arm matches a primitive Value (no visibility
+    /// model). Adding an arm for a receiver with a user-Class
+    /// method table requires threading the bypass flag through —
+    /// see the comment at the call site in `do_call`.
+    fn try_fast_primitive(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
+        if no_recv || argc != 0 {
+            return false;
+        }
+        let v = {
+            let recv = self
+                .stack
+                .last()
+                .expect("ICE: stack underflow before do_call receiver");
+            match recv {
+                Value::Str(a) if name_id == self.sym_length || name_id == self.sym_size => {
+                    Value::Int(a.char_count() as i64)
+                }
+                Value::Str(a) if name_id == self.sym_to_s => Value::Str(a.clone()),
+                Value::Int(n) if name_id == self.sym_to_s || name_id == self.sym_inspect => {
+                    crate::vm::numeric::integer_to_s_value(*n)
+                }
+                _ => return false,
+            }
+        };
+        self.stack.pop();
+        self.stack.push(v);
+        true
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
@@ -336,6 +373,13 @@ impl Vm {
             {
                 return Ok(());
             }
+        }
+        // Primitive-receiver fast-path. Runs after
+        // `take_bypass_visibility()` above; the helper's doc
+        // comment spells out why that's currently safe and what
+        // changes if a non-primitive arm is ever added.
+        if self.try_fast_primitive(name_id, argc, no_recv) {
+            return Ok(());
         }
         let name = self.interner.resolve(name_id).clone();
         if no_recv {

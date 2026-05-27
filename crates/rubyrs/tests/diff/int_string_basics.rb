@@ -63,6 +63,45 @@ puts "hello".end_with?("he")
 puts "ab" * 3
 puts "abc" * 0
 
+# Integer#to_s + String#length/size chaining keeps Ruby-visible results.
+puts 0.to_s.length
+puts 9.to_s.length
+puts 10.to_s.size
+puts (-10).to_s.length
+
+# Non-Integer receivers must still dispatch through user Ruby code.
+class WeirdToSLength
+  def to_s
+    [1, 2, 3]
+  end
+end
+puts WeirdToSLength.new.to_s.length
+
+# Integer#inspect is a separate dispatch arm from #to_s; pin its output
+# shape across positive / negative / zero / multi-digit so the
+# fast-path can't silently swap it for #to_s.
+puts 0.inspect
+puts 42.inspect
+puts (-42).inspect
+puts 9999.inspect
+
+# String#to_s on the fast-path returns the receiver, not a new String.
+# CRuby guarantees `s.to_s.equal?(s)` for non-subclassed strings; pin
+# that identity so a future "clone the bytes" refactor regresses here.
+s = "abc"
+puts s.to_s == s
+puts s.to_s.equal?(s)
+puts "".to_s.length
+
+# String#length / #size on non-ASCII must count characters, not bytes
+# — the fast-path branches on `bytes.is_ascii()` and falls through to
+# `chars().count()` for multi-byte input. The ASCII branch is already
+# covered above by `"hello".length` / `.size`.
+puts "中文".length
+puts "中文".size
+puts "héllo".length
+puts "héllo".size
+
 # Lex comparisons
 puts "apple" < "banana"
 puts "banana" > "apple"
