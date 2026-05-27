@@ -46,6 +46,25 @@ puts "hydrated=#{a.value}"
   end
 end
 
+## Module shells reject allocate. CRuby raises NoMethodError on
+## these; rubyrs approximates with TypeError ("allocator undefined
+## for X") as a safe fence until a proper Module/Class allocator
+## lands. Locked in here so the bare-Instance regression (where
+## `Module.new.allocate` returned a meaningless `#<>`) stays
+## fixed; the test pins the rubyrs surface, NOT CRuby's exact
+## NoMethodError shape (see KNOWN GAP in the dispatch arm).
+## Print only "raised + non-empty message" — rubyrs uses
+## TypeError, CRuby uses NoMethodError; bridging the class name
+## is out of scope. The key invariant is that SOMETHING is
+## raised (no more bogus bare-Instance leaks).
+m = Module.new
+begin; m.allocate; rescue StandardError => e
+  puts "Module.new.allocate=raised:#{!e.message.empty?}"
+end
+begin; Module.allocate; rescue StandardError => e
+  puts "Module.allocate=raised:#{!e.message.empty?}"
+end
+
 ## Wrong-arity: zero args expected.
 begin
   Box.allocate(1)

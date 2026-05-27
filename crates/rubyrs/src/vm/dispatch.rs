@@ -1221,19 +1221,30 @@ impl Vm {
                     msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
                 }));
             }
-            if is_primitive_class_name(&cls.name) {
+            // Module / Class shells are NOT user classes — a real
+            // CRuby raises NoMethodError ("undefined method
+            // 'allocate' for ...Module/Class...") on Module-flavored
+            // receivers; we approximate with the same TypeError
+            // surface as the primitive shells so the call site sees
+            // a clean failure instead of a bogus bare-Instance whose
+            // `class` says Module but which can't behave like one
+            // (PR #181 review #1 — Copilot flagged this gap).
+            // KNOWN GAP: `Class.allocate` itself in CRuby DOES
+            // succeed (returns a new anonymous Class). We block it
+            // here for safety until a proper Class/Module allocator
+            // lands; the only caller surfaced today (ERB stub) wants
+            // an Instance, not a Class.
+            if cls.is_module
+                || cls.name == "Module"
+                || cls.name == "Class"
+                || is_primitive_class_name(&cls.name)
+            {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!("allocator undefined for {}", cls.name),
                 }));
             }
-            self.maybe_gc();
-            self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Instance(Instance {
-                class: cls.clone(),
-                ivars: HashMap::new(),
-                singleton_class: None,
-            }));
-            self.stack.push(Value::Object(id));
+            let obj = self.alloc_default_instance(&cls.clone())?;
+            self.stack.push(obj);
             return Ok(());
         }
         if name_id == new_id
@@ -1257,18 +1268,12 @@ impl Vm {
                 for a in &args { g.pin(a.clone()); }
                 // Default Instance allocator — used by every branch of
                 // the cext-selection cascade below that doesn't go
-                // through `rb_define_alloc_func`. Extracted so the
-                // three call sites (cext non-wasi else arm, cext wasi
-                // fallback, no-cext arm) can't drift out of sync.
+                // through `rb_define_alloc_func`. Delegates to
+                // `Vm::alloc_default_instance` so this path and the
+                // `Class#allocate` arm above can't drift on
+                // GC/rooting/allocation behavior (PR #181 review #2).
                 let alloc_instance = |g: &mut PinGuard, cls: &Rc<Class>| -> Result<Value, Trap> {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let id = g.vm.heap.alloc(HeapObj::Instance(Instance {
-                        class: cls.clone(),
-                        ivars: HashMap::new(),
-                        singleton_class: None,
-                    }));
-                    Ok(Value::Object(id))
+                    g.vm.alloc_default_instance(cls)
                 };
                 // Allocator selection. With `cext`, the class may carry
                 // an `rb_define_alloc_func`-registered allocator that
@@ -4676,6 +4681,31 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
 }
 
 impl Vm {
+    /// Default Instance allocator — `maybe_gc` + `check_alloc` +
+    /// `heap.alloc(HeapObj::Instance { class, empty ivars, no
+    /// singleton })` → `Value::Object`. Shared by `Class#allocate`
+    /// and the default branch of `Class.new`'s allocator cascade
+    /// so the two paths can't drift on GC/rooting/allocation
+    /// behavior (PR #181 review #2 — Copilot flagged duplication
+    /// between the two arms).
+    ///
+    /// Note: the `new` arm calls this through `g.vm` while inside
+    /// a `PinGuard`; callers without a PinGuard call it directly
+    /// on `&mut self`. Either is safe — this method does NOT pin
+    /// its result, so any caller that needs to keep the new
+    /// Instance alive across a later `maybe_gc` must pin
+    /// (`PinGuard::pin`) before that point.
+    pub(crate) fn alloc_default_instance(&mut self, cls: &Rc<Class>) -> Result<Value, Trap> {
+        self.maybe_gc();
+        self.check_alloc()?;
+        let id = self.heap.alloc(HeapObj::Instance(Instance {
+            class: cls.clone(),
+            ivars: HashMap::new(),
+            singleton_class: None,
+        }));
+        Ok(Value::Object(id))
+    }
+
     /// Does an instance of the primitive class `class_name`
     /// respond to method `sid`? Builds a sentinel `Value` of
     /// the matching shape and consults the per-primitive
