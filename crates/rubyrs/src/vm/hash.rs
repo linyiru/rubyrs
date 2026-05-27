@@ -261,6 +261,34 @@ impl Vm {
                         };
                         Some(Value::Array(nid))
                     }
+                    ("dup", []) => {
+                        // Shallow copy: clones the pair vector and
+                        // re-allocates a new Hash heap slot. Pair
+                        // Values are copied by ObjId (children
+                        // remain shared with the receiver — matches
+                        // CRuby `Hash#dup` semantics where mutations
+                        // on the dup don't propagate, but mutations
+                        // on shared nested Arrays/Hashes/Strings do.
+                        //
+                        // Default-block carries over (`h.dup` keeps
+                        // `default_proc`). Pin receiver + block
+                        // across alloc — same GC-rooting concern as
+                        // `merge` since the receiver `id` is a Rust-
+                        // local from `do_call`'s recv-pop.
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let default_block = self.heap.hash_default_block(id);
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        if let Some(bid) = default_block {
+                            g.pin(Value::Block(bid));
+                        }
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+                        if default_block.is_some() {
+                            g.vm.heap.hash_set_default_block(nid, default_block);
+                        }
+                        Some(Value::Hash(nid))
+                    }
                     ("merge", [Value::Hash(other)]) => {
                         // CRuby: keys in `other` overwrite keys in `self`,
                         // and `other`'s key-order is appended after self's
