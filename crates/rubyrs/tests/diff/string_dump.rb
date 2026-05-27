@@ -40,9 +40,12 @@ puts 'plain # hash'.dump                        # "plain # hash"
 puts 'trailing #'.dump                          # "trailing #"
 puts 'mid #x not'.dump                          # "mid #x not"
 
-# --- Non-ASCII BMP codepoints ---
-puts "日本語".dump                              # "日本語"
-puts "café".dump                                # "café"
+# --- Non-ASCII BMP codepoints — \uHHHH uppercase ---
+# CRuby always escapes non-ASCII in dump, regardless of how the
+# source string was written; the output is round-trippable
+# ASCII-only.
+puts "日本語".dump                              # "\u65E5\u672C\u8A9E"
+puts "café".dump                                # "caf\u00E9"
 
 # --- Above BMP — curly form ---
 puts "smile\u{1F600}".dump                      # "smile\u{1F600}"
@@ -60,7 +63,9 @@ puts spliced
 # pure invalid). dump must round-trip the exact byte sequence,
 # NOT replace with U+FFFD — that's the whole point: eval'ing the
 # result reconstructs the original String#bytes.
-arr = [0xFF, 0x80, 0x41, 0x42].pack("c*")
+# `c*` is signed char (range -128..127) in CRuby — 0xFF raises
+# RangeError. Use `C*` for unsigned bytes.
+arr = [0xFF, 0x80, 0x41, 0x42].pack("C*")
 puts arr.dump                                   # "\xFF\x80AB"
 
 # --- respond_to? consistency ---

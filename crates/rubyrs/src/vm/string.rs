@@ -646,21 +646,42 @@ impl Vm {
                     // of being smudged to U+FFFD by a lossy decode.
                     // Output reconstructs the exact bytes via eval.
                     //
-                    // Output is built as a String (all chunks are
-                    // ASCII or codepoint escapes which are also
-                    // ASCII when written). Project size against
-                    // `max_value_bytes` before each append so
-                    // pathological inputs trap ResourceExhausted
-                    // rather than allocating without bound.
+                    // Direct `push_str` / `write!` into the
+                    // output String — no per-byte intermediate
+                    // allocation. Projection check before each
+                    // write traps ResourceExhausted before
+                    // pathological 9x-expansion inputs balloon
+                    // the buffer.
+                    use std::fmt::Write;
                     let bytes = s.content.borrow();
+                    let max_cap = self.max_value_bytes;
+                    // Project current+add+closing-quote against
+                    // cap. Macro avoids the `&mut self` borrow
+                    // hassle of a closure that also wants to call
+                    // `self.trap`.
+                    macro_rules! ensure_room {
+                        ($out:expr, $add:expr) => {
+                            if let Some(max) = max_cap
+                                && $out.len() + $add + 1 > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("String#dump output exceeds {max} bytes"),
+                                }));
+                            }
+                        };
+                    }
+                    // Pre-check the minimum 2-byte cap (opening
+                    // and closing quotes) — even an empty input
+                    // dumps to `""`. ensure_room reserves the
+                    // closing quote on every push; the opening
+                    // quote needs its own check.
                     let mut out = String::with_capacity(bytes.len() + 2);
+                    ensure_room!(out, 1);
                     out.push('"');
                     let mut i = 0;
                     while i < bytes.len() {
                         let b = bytes[i];
-                        let (piece, take): (String, usize) = if b < 0x80 {
-                            // ASCII path.
-                            let short = match b {
+                        if b < 0x80 {
+                            let short: Option<&'static str> = match b {
                                 0x07 => Some("\\a"),
                                 0x08 => Some("\\b"),
                                 0x09 => Some("\\t"),
@@ -674,24 +695,29 @@ impl Vm {
                                 _ => None,
                             };
                             if let Some(s) = short {
-                                (s.to_string(), 1)
+                                ensure_room!(out, s.len());
+                                out.push_str(s);
                             } else if b == b'#' {
                                 let next = bytes.get(i + 1).copied();
                                 if matches!(next, Some(b'{') | Some(b'@') | Some(b'$')) {
-                                    ("\\#".to_string(), 1)
+                                    ensure_room!(out, 2);
+                                    out.push_str("\\#");
                                 } else {
-                                    ("#".to_string(), 1)
+                                    ensure_room!(out, 1);
+                                    out.push('#');
                                 }
                             } else if b < 0x20 || b == 0x7F {
-                                (format!("\\x{:02X}", b), 1)
+                                ensure_room!(out, 4);
+                                let _ = write!(out, "\\x{:02X}", b);
                             } else {
-                                // Printable ASCII (b in 0x20..=0x7E
-                                // excluding `"` `\` `#`-handled above)
-                                ((b as char).to_string(), 1)
+                                ensure_room!(out, 1);
+                                out.push(b as char);
                             }
+                            i += 1;
                         } else {
-                            // Non-ASCII byte: try to decode a valid
-                            // UTF-8 sequence of 2-4 bytes from here.
+                            // Try to decode a 2-4 byte UTF-8
+                            // sequence; fall back to \xNN for the
+                            // leading byte on failure.
                             let max_seq = (bytes.len() - i).min(4);
                             let mut decoded: Option<(u32, usize)> = None;
                             for n in 2..=max_seq {
@@ -704,30 +730,26 @@ impl Vm {
                             }
                             match decoded {
                                 Some((cp, n)) if cp <= 0xFFFF => {
-                                    (format!("\\u{:04X}", cp), n)
+                                    ensure_room!(out, 6);
+                                    let _ = write!(out, "\\u{:04X}", cp);
+                                    i += n;
                                 }
                                 Some((cp, n)) => {
-                                    (format!("\\u{{{:X}}}", cp), n)
+                                    // Worst case `\u{HHHHHH}` = 10 bytes.
+                                    ensure_room!(out, 10);
+                                    let _ = write!(out, "\\u{{{:X}}}", cp);
+                                    i += n;
                                 }
                                 None => {
-                                    // Invalid sequence — emit \xNN
-                                    // for the leading byte alone.
-                                    (format!("\\x{:02X}", b), 1)
+                                    ensure_room!(out, 4);
+                                    let _ = write!(out, "\\x{:02X}", b);
+                                    i += 1;
                                 }
                             }
-                        };
-                        // +1 reserves room for the closing quote.
-                        // Trap ResourceExhausted if the projection
-                        // would exceed the per-value byte cap.
-                        if let Some(max) = self.max_value_bytes
-                            && out.len() + piece.len() + 1 > max {
-                                return Err(self.trap(RubyError::ResourceExhausted {
-                                    msg: format!("String#dump output exceeds {max} bytes"),
-                                }));
-                            }
-                        out.push_str(&piece);
-                        i += take;
+                        }
                     }
+                    // Closing quote reserved on every ensure_room
+                    // check above — push unconditionally.
                     out.push('"');
                     return Ok(Some(Value::new_str(out)));
                 }
