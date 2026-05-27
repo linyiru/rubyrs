@@ -14,11 +14,14 @@ describe "Integer#eql?" do
     assert_eq(1.eql?(1), true)
     assert_eq(0.eql?(0), true)
     assert_eq((-7).eql?(-7), true)
+    # `-0` literal is the same Integer as `0` in Ruby — pin the
+    # negative-zero parsing/canonicalisation here rather than in
+    # the "different value" example.
+    assert_eq(0.eql?(-0), true)
   end
 
   it "fixnum: returns false for a different Integer value" do
     assert_eq(1.eql?(2), false)
-    assert_eq(0.eql?(-0), true)   # -0 == 0 in Integer
     assert_eq(9.eql?(-9), false)
   end
 
