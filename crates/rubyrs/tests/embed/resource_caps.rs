@@ -427,3 +427,67 @@ fn preamble_fits_under_tight_resource_caps() {
     rt.eval("1 + 1", "preamble_canary.rb").expect("trivial eval must succeed after preamble under tight caps");
 }
 
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_iter_loops_trap_under_fuel_cap() {
+    // A.3 — DoS guard for the BigInt iter surface. Pre-this-test,
+    // `(2**100).times { }` / `0.upto(10**18) { }` will run
+    // essentially forever on a host that hasn't configured fuel
+    // OR deadline (the runtime's "explicit opt-in" cap model —
+    // no implicit DoS protection, same as the rest of the
+    // resource caps). When EITHER cap IS set, the loop trips:
+    // this test pins the fuel-trip path via the existing
+    // `Config::fuel` mechanism (decremented per dispatched op),
+    // which trips inside the block-invocation dispatch loop and
+    // raises `ResourceExhausted: "out of fuel"`.
+    //
+    // This test pins that behaviour across all three iter
+    // methods (times / upto / downto) for both Int recv (the
+    // existing arms) and BigInt recv (the Phase B.6 arms). The
+    // fuel ticks because every iteration calls invoke_block,
+    // which dispatches at least one op (the block's return).
+    // Without fuel, ops never decrement; with fuel set, the
+    // loop trips after a bounded number of iterations regardless
+    // of the receiver's magnitude.
+    // Each script has a fail-fast break at iteration 1_000_000.
+    // The break is well above the fuel-trip horizon (10_000 fuel
+    // ÷ ~5 ops per iteration ≈ 2_000 iterations max), so it's
+    // dead code when fuel works correctly. If the fuel guard
+    // ever regresses, the test still terminates within a few
+    // seconds instead of hanging the test suite indefinitely —
+    // CI fails fast with an assertion miss rather than a
+    // wall-clock timeout.
+    for script in [
+        // BigInt-recv iter arms (Phase B.6)
+        "i = 0; (2 ** 100).times { i += 1; break if i > 1_000_000 }",
+        "i = 0; (2 ** 80).upto(2 ** 100) { i += 1; break if i > 1_000_000 }",
+        "i = 0; (2 ** 100).downto(0) { i += 1; break if i > 1_000_000 }",
+        // Int-recv iter arms with very large bounds
+        "i = 0; 0.upto(1_000_000_000_000) { i += 1; break if i > 1_000_000 }",
+        "i = 0; 1_000_000_000_000.downto(0) { i += 1; break if i > 1_000_000 }",
+        "i = 0; 10_000_000.times { i += 1; break if i > 1_000_000 }",
+    ] {
+        let mut rt = Runtime::with_config(Config {
+            fuel: Some(10_000),
+            ..Default::default()
+        });
+        let err = rt.eval(script, "iter_fuel.rb").unwrap_err();
+        // Pin the exact "out of fuel" message so the test fails
+        // closed if a future regression accidentally trips a
+        // different ResourceExhausted source (e.g. max_value_bytes,
+        // max_heap_objects, max_frames) — those caps aren't
+        // configured here, so reaching them would indicate the
+        // fuel guard slipped and a different cap caught it
+        // incidentally. Match on `&err.err` so the failure
+        // message can still include the actual error.
+        assert!(
+            matches!(
+                &err.err,
+                RubyError::ResourceExhausted { msg } if msg == "out of fuel"
+            ),
+            "expected ResourceExhausted(\"out of fuel\") for {:?}, got {:?}",
+            script, err.err,
+        );
+    }
+}
