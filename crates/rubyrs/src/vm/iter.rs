@@ -757,6 +757,8 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     // Scoped pin: step_block's args→locals copy can
                     // call maybe_gc (block with rest param has to
