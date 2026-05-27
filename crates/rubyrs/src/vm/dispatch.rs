@@ -71,6 +71,22 @@ enum CallableOutcome {
     },
 }
 
+/// Outcome of [`Vm::try_dispatch_class_intrinsics`].
+///
+/// Same shape as [`CallableOutcome`] — `Handled` means the
+/// helper fired one of the class-receiver arms (`Hash[]` /
+/// `cls.new` / `cls.allocate` / `cls.include` / etc.) and
+/// pushed the result; caller returns `Ok(())` immediately.
+/// `NotHandled { args, recv }` returns inputs intact so the
+/// caller continues with the rest of dispatch.
+enum ClassOutcome {
+    Handled,
+    NotHandled {
+        args: Vec<Value>,
+        recv: Value,
+    },
+}
+
 impl Vm {
     /// `String#encoding` intercept — pushes the preamble's
     /// `Encoding::UTF_8` instance and returns true if the call
@@ -1049,6 +1065,549 @@ impl Vm {
         Ok(CallableOutcome::NotHandled { args, recv })
     }
     
+    /// Class-receiver intrinsics — `cls.[]` (Hash[]) / `cls.new` /
+    /// `cls.allocate` / `cls.include` / `cls.prepend` / `cls.extend`
+    /// / `cls.private` / `cls.public` / `cls.protected` /
+    /// `cls.name` / `cls.superclass` / `cls.method_defined?`.
+    ///
+    /// Returns [`ClassOutcome::Handled`] if one of the arms
+    /// fired; caller `return`s `Ok(())`. Returns
+    /// [`ClassOutcome::NotHandled { args, recv }`] if no arm
+    /// matched; caller continues with the rest of dispatch.
+    ///
+    /// Extracted from `do_call` per the #152 research's
+    /// Candidate E recommendation, #192 commit 4/5. The
+    /// `Class.new` arm integrates with `cext_alloc_func` +
+    /// `with_vm_ptr_set` (R1 from the research). Existing
+    /// code pre-clones `cls.name` to a String before entering
+    /// the cext closure, so no `cls`-borrow conflict surfaces
+    /// from the extraction; kept as-is.
+    ///
+    /// `_name_id` / `_cache_id` are unused today (arms match
+    /// on `name: &str`); kept in the signature for forward
+    /// compat with future arms that may need them.
+    fn try_dispatch_class_intrinsics(
+        &mut self,
+        name: &str,
+        name_id: SymId,
+        _cache_id: u16,
+        args: Vec<Value>,
+        recv: Value,
+    ) -> Result<ClassOutcome, Trap> {
+        // Local SymId for "new" — used by the `cls.new`
+        // override arm. Originally derived in the surrounding
+        // `do_call` body above the extracted cluster; computed
+        // inside the helper now so the cluster is self-
+        // contained.
+        let new_id = self.interner.intern("new");
+    // `Hash[...]` class-method constructor. CRuby has three
+    // call shapes:
+    //   - `Hash[]`               → empty Hash
+    //   - `Hash[k1, v1, k2, v2]` → flat-pair form (even arity)
+    //   - `Hash[[[k, v], ...]]`  → 1 Array of 2-element pairs
+    //   - `Hash[{k => v, ...}]`  → 1 Hash (copy semantics)
+    // The flat-pair form is the most common; older gems prefer
+    // it over `pairs.to_h`. Without this intercept, `Hash[]`
+    // would NoMethodError on Class (no `[]` defined on
+    // Value::Class).
+    //
+    // Odd-arity (k without matching v) is ArgumentError in
+    // CRuby; mirror that.
+    if name == "[]"
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Hash"
+    {
+        // GC rooting: `args` came from `self.stack.drain(...)`
+        // and is a Rust-local Vec with no GC root, so any heap-
+        // shaped element (Array / Hash for the `Hash[[[k,v],...]]`
+        // and `Hash[{…}]` shapes) gets swept if `maybe_gc` runs
+        // before we finish reading their pairs. Pin every arg
+        // across the entire alloc + pair-extract window. Repro
+        // pre-fix: `Hash[[[:x, 10], [:y, 20]]]` under STRESS_GC=1
+        // tripped `ICE: use-after-free` on the inner-pair walk.
+        let mut g = PinGuard::new(self);
+        for a in &args { g.pin(a.clone()); }
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let pairs: Vec<(Value, Value)> = if args.len() == 1 {
+            match &args[0] {
+                Value::Array(aid) => {
+                    // `Hash[[[k, v], ...]]`. Each element must be
+                    // a 2-element Array; anything else is
+                    // ArgumentError in CRuby (`invalid number of
+                    // elements (X for 2)`), but we follow the
+                    // common shape — non-pair elements are dropped
+                    // with TypeError. Stay strict only on the
+                    // outer Array shape.
+                    let outer = g.vm.heap.array(*aid).clone();
+                    let mut out = Vec::with_capacity(outer.len());
+                    for elem in outer {
+                        if let Value::Array(pair_id) = elem {
+                            let pair = g.vm.heap.array(pair_id);
+                            if pair.len() == 2 {
+                                out.push((pair[0].clone(), pair[1].clone()));
+                            } else {
+                                return Err(g.vm.trap(RubyError::ArgumentError {
+                                    msg: format!("invalid number of elements ({} for 2)", pair.len()),
+                                }));
+                            }
+                        } else {
+                            return Err(g.vm.trap(RubyError::TypeError {
+                                msg: format!("wrong element type {} (expected array)", elem.type_name()),
+                            }));
+                        }
+                    }
+                    out
+                }
+                Value::Hash(hid) => g.vm.heap.hash(*hid).clone(),
+                _ => return Err(g.vm.trap(RubyError::ArgumentError {
+                    msg: "odd number of arguments for Hash".into(),
+                })),
+            }
+        } else if args.len().is_multiple_of(2) {
+            args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect()
+        } else {
+            return Err(g.vm.trap(RubyError::ArgumentError {
+                msg: "odd number of arguments for Hash".into(),
+            }));
+        };
+        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+        g.vm.stack.push(Value::Hash(hid));
+        return Ok(ClassOutcome::Handled);
+    }
+    // User-defined `def self.new` takes precedence over the
+    // built-in allocator AND over the Hash.new / String.new /
+    // other built-in class-level intercepts below. CRuby's
+    // `Class#new` is a normal Ruby method (allocate +
+    // initialize), and reopening any class — built-in or
+    // user — to override `self.new` should win. Without this
+    // check ahead of the Hash / String special-cases, e.g.
+    // `class Hash; def self.new; ...; end; end; Hash.new`
+    // silently bypassed the override and returned an empty
+    // `{}` from the hardcoded Hash path.
+    //
+    // The block-form path (`do_call_block`) generally routes
+    // user `self.new` overrides through its general
+    // Value::Class singleton-method dispatch arm, so most
+    // classes don't need a mirrored check there. The one
+    // exception is `do_call_block`'s `Hash.new { block }`
+    // intercept, which fires before that generic arm — it
+    // carries the same singleton pre-check pattern as this
+    // one for parity.
+    //
+    // Documented gap: `def self.new ... super ... end` still
+    // hits the allocator via super only if Class's builtin
+    // `new` is reachable through super_lookup — which it
+    // isn't today. Override-without-super covers the tilt
+    // entry-point (and the common DSL builder pattern); the
+    // super-into-allocator case is a separable follow-up.
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
+        self.invoke_method(m, recv.clone(), args)?;
+        return Ok(ClassOutcome::Handled);
+    }
+    // `String.new` / `String.new(s)` — Tier 1 primitive
+    // constructor. Without this intercept the generic
+    // `Class.new` allocator below would build a
+    // `Value::Object` (Instance with `class = String`), and
+    // every String primitive method (`length`, `<<`,
+    // `bytesize`, …) would `NoMethodError` because they
+    // pattern-match on `Value::Str`, not `Value::Object`.
+    //
+    // CRuby supports `String.new(s, encoding: …, capacity: …)`;
+    // the encoding model is Tier 3 (ADR 0017), so we cover
+    // only the positional `s` argument here. Anything else
+    // raises ArgumentError.
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "String"
+    {
+        match args.as_slice() {
+            [] => {
+                self.stack.push(Value::new_str(""));
+                return Ok(ClassOutcome::Handled);
+            }
+            [Value::Str(s)] => {
+                // Fresh, mutable copy — CRuby's `String.new(s)`
+                // returns an unfrozen clone even if `s` was
+                // frozen.
+                let copy = s.to_string_lossy();
+                self.stack.push(Value::new_str(copy));
+                return Ok(ClassOutcome::Handled);
+            }
+            [other] => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into String",
+                        other.type_name(),
+                    ),
+                }));
+            }
+            _ => {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0..1)",
+                        args.len(),
+                    ),
+                }));
+            }
+        }
+    }
+    // `Module.new` (no block) — returns a fresh anonymous
+    // Module. Empty name is the sentinel for "anonymous"
+    // that `Module#name` consults to return `nil`; `to_s` /
+    // `inspect` render `"#<Module>"` instead. The block-form
+    // `Module.new { |m| ... }` evaluates the block as the
+    // module body and lives in `do_call_block` — same shape
+    // as the existing `Hash.new` / `class_eval` intercepts.
+    //
+    // Documented divergence (NOT addressed here): CRuby
+    // assigns the module's name on first constant write
+    // (`M = Module.new` → `M.name == "M"`). rubyrs leaves
+    // the name empty until a future StoreConst hook lands;
+    // most real-world uses (`include` an anonymous helper)
+    // don't depend on the name-promote behaviour.
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Module"
+    {
+        if !args.is_empty() {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
+                    args.len(),
+                ),
+            }));
+        }
+        let m = std::rc::Rc::new(Class {
+            name: String::new(),
+            is_module: true,
+            ivars: std::cell::RefCell::new(HashMap::new()),
+            methods: std::cell::RefCell::new(HashMap::new()),
+            singleton_methods: std::cell::RefCell::new(HashMap::new()),
+            superclass: std::cell::RefCell::new(None),
+            includes: std::cell::RefCell::new(Vec::new()),
+            prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            class_vars: std::cell::RefCell::new(HashMap::new()),
+            #[cfg(feature = "cext")]
+            cext_alloc_func: std::cell::Cell::new(None),
+        });
+        self.stack.push(Value::Class(m));
+        return Ok(ClassOutcome::Handled);
+    }
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.name.as_str() == "Hash"
+    {
+        // `Hash.new` without a block. CRuby shapes:
+        //   - 0 args: empty Hash, no default
+        //   - 1 arg:  empty Hash with scalar default; missing-
+        //             key lookup returns this value as-is (not
+        //             cached into the Hash).
+        //   - 2+ args: ArgumentError
+        // The block-form (`Hash.new { |h, k| ... }`) routes
+        // through `do_call_block` and has its own intercept
+        // (which raises ArgumentError when a scalar default is
+        // also given — CRuby refuses both at once).
+        if args.len() > 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+            }));
+        }
+        let default = args.first().cloned();
+        // Pin the default across maybe_gc — if it's a heap
+        // value (Array / Hash / String), it could be a
+        // temporary on its way to becoming the default and
+        // would otherwise be unrooted between args.first() and
+        // hash_set_default_value below.
+        let mut g = PinGuard::new(self);
+        if let Some(v) = &default { g.pin(v.clone()); }
+        g.vm.maybe_gc();
+        g.vm.check_alloc()?;
+        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+        if default.is_some() {
+            g.vm.heap.hash_set_default_value(hid, default);
+        }
+        g.vm.stack.push(Value::Hash(hid));
+        return Ok(ClassOutcome::Handled);
+    }
+    // `Class#allocate` user-singleton override — CRuby allows
+    // `def self.allocate` to replace the built-in allocator (used
+    // by Marshal / dup / ORM hydration hooks). Mirrors the
+    // `def self.new` pre-check at line 1053. Must fire BEFORE the
+    // builtin allocate arm below or the user override is silently
+    // shadowed; do_call_block has the same precedence (its
+    // generic singleton check at ~4601 runs before its allocate
+    // arm). PR #181 follow-up: code-review caught the asymmetry.
+    if name == "allocate"
+        && let Value::Class(cls) = &recv
+        && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+        self.invoke_method(m, recv.clone(), args)?;
+        return Ok(ClassOutcome::Handled);
+    }
+    // `Class#allocate` — bare-instance allocator without calling
+    // `initialize`. Used by frameworks for unmarshalling / dup /
+    // clone / ORM hydration, and by the TRY_RUNS pass-7 probe's
+    // `ERB.new` stub (layer #4). Sits before the `new` arm so the
+    // class-receiver path is uniform.
+    //
+    // Semantics:
+    //   - User classes (`Value::Class` not in the primitive
+    //     whitelist): allocate a fresh `HeapObj::Instance` with
+    //     the class pointer set, empty ivars, no singleton class.
+    //     No `initialize` call.
+    //   - Primitive class shells fall into two groups:
+    //       * "Truly disallowed" in CRuby — Integer / Float /
+    //         Symbol / Regexp / Proc / Method / UnboundMethod /
+    //         TrueClass / FalseClass / NilClass / Kernel. CRuby
+    //         raises TypeError; rubyrs matches byte-for-byte.
+    //       * "Allowed in CRuby" — String / Array / Hash / Range.
+    //         CRuby produces a bare instance of the builtin
+    //         (empty string / array / hash / Range struct); rubyrs
+    //         currently raises TypeError because the heap model
+    //         unboxes those values and we don't yet route through
+    //         a TypedData allocator. Documented as a KNOWN GAP
+    //         below; the comment used to claim CRuby parity here
+    //         which was wrong (PR #181 review round 4 Copilot
+    //         comment #2).
+    //     Either way: zero Instance slot to populate, so the
+    //     bare-allocator path can't run for any primitive shell.
+    //   - Zero args; any positional arg raises ArgumentError
+    //     with the standard "wrong number of arguments" shape.
+    //
+    // KNOWN GAP: `cext_alloc_func` (set by
+    // `rb_define_alloc_func`) is currently NOT routed through
+    // this arm. The `new` arm below DOES route through it (so a
+    // cext `Foo.new` produces a TypedData-wrapped Object), but
+    // `Foo.allocate` here falls back to the default bare
+    // Instance. For a cext whose initialize-after-allocate
+    // relies on the alloc_func having wrapped its C struct, the
+    // separation of allocate-vs-new becomes visible. No caller
+    // surfaced today (pass-7 probe layer #4 only needs the
+    // bare Instance path). Routed via a follow-up if a cext
+    // surfaces the need; tracked as a comment so a future
+    // reader doesn't think the bare-allocate is an oversight.
+    // String-compare on the already-resolved `name` instead of
+    // interning "allocate" each call (PR #181 review round 3
+    // Copilot comment #1). Avoids both the per-call hash lookup
+    // on a hot dispatch path and the latent edge case where
+    // unconditional `intern()` could grow the symbol table
+    // outside the existing `Config::max_symbols` accounting
+    // points.
+    if name == "allocate"
+        && let Value::Class(cls) = &recv {
+        if !args.is_empty() {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+            }));
+        }
+        // Module / Class shells are NOT user classes — a real
+        // CRuby raises NoMethodError ("undefined method
+        // 'allocate' for ...Module/Class...") on Module-flavored
+        // receivers; we approximate with the same TypeError
+        // surface as the primitive shells so the call site sees
+        // a clean failure instead of a bogus bare-Instance whose
+        // `class` says Module but which can't behave like one
+        // (PR #181 review #1 — Copilot flagged this gap).
+        // KNOWN GAP: `Class.allocate` itself in CRuby DOES
+        // succeed (returns a new anonymous Class). We block it
+        // here for safety until a proper Class/Module allocator
+        // lands; the only caller surfaced today (ERB stub) wants
+        // an Instance, not a Class.
+        if cls.is_module
+            || cls.name == "Module"
+            || cls.name == "Class"
+            || is_primitive_class_name(&cls.name)
+        {
+            // Anonymous Module / Class shells have an empty
+            // `cls.name`; without a fallback the message would
+            // read "allocator undefined for " (trailing space,
+            // no class hint). Pick "Module" vs "Class" by the
+            // `is_module` flag so the surface is actionable
+            // (PR #181 review round 3 Copilot comment #2).
+            let display = if cls.name.is_empty() {
+                if cls.is_module { "Module" } else { "Class" }
+            } else {
+                &cls.name
+            };
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!("allocator undefined for {}", display),
+            }));
+        }
+        let obj = self.alloc_default_instance(cls)?;
+        self.stack.push(obj);
+        return Ok(ClassOutcome::Handled);
+    }
+    if name_id == new_id
+        && let Value::Class(cls) = &recv {
+            // L3-F: cext-registered allocator path. When the class
+            // came from rb_define_class_under AND the cext called
+            // rb_define_alloc_func on it, route the allocation
+            // through that callback (typically wraps a malloc'd C
+            // struct in TypedData) instead of producing a bare
+            // Instance. Without this, every TypedData_Get_Struct in
+            // the cext's instance methods fails because `self` is a
+            // plain Instance, not a TypedData slot.
+            // Outer PinGuard covers BOTH the allocator call and
+            // the subsequent initialize. cext_dispatch can trigger
+            // maybe_gc (TypedData wrap, result translation,
+            // nested rb_funcall); args + obj live only as Rust
+            // locals here and would be swept otherwise (PR #50
+            // review #1 + #3 — same shape as the Integer#times
+            // PinGuard fix in L3-D).
+            let mut g = PinGuard::new(self);
+            for a in &args { g.pin(a.clone()); }
+            // Default Instance allocator — used by every branch of
+            // the cext-selection cascade below that doesn't go
+            // through `rb_define_alloc_func`. Delegates to
+            // `Vm::alloc_default_instance` so this path and the
+            // `Class#allocate` arm above can't drift on
+            // GC/rooting/allocation behavior (PR #181 review #2).
+            let alloc_instance = |g: &mut PinGuard, cls: &Rc<Class>| -> Result<Value, Trap> {
+                g.vm.alloc_default_instance(cls)
+            };
+            // Allocator selection. With `cext`, the class may carry
+            // an `rb_define_alloc_func`-registered allocator that
+            // must run instead of the default Instance allocation.
+            // Without `cext`, there is no path that could set such
+            // a function, so we collapse to the default allocator
+            // unconditionally. Splitting the whole expression by
+            // cfg (instead of the previous `Option<()>` sentinel
+            // trick) keeps both arms well-typed and removes a
+            // brittle `unreachable!()` site that any future
+            // refactor inside the cfg arm could turn into a real
+            // panic.
+            #[cfg(feature = "cext")]
+            let obj = if let Some(alloc_func) = cls.cext_alloc_func.get() {
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    // arity=0 (self-only) is the alloc_func ABI:
+                    // VALUE allocate(VALUE klass). CURRENT_VM_PTR
+                    // must be set so the cext can rb_funcall back
+                    // and rb_data_typed_object_wrap can locate
+                    // the Vm to allocate on its heap.
+                    let class_name = cls.name.clone();
+                    let qualified = format!("{}::allocate", class_name);
+                    let vm_ptr: *mut Vm = g.vm;
+                    let raw = super::cext::with_vm_ptr_set(vm_ptr, || {
+                        super::cext::cext_dispatch(
+                            &qualified,
+                            alloc_func,
+                            0,
+                            &[],
+                            super::cext::CextSelfHandle::Class(&class_name),
+                        )
+                    })?;
+                    // PR #50 review #2: validate that the cext
+                    // honored the rb_define_alloc_func contract.
+                    // CRuby's allocator must return an Object
+                    // (typically TypedData_Wrap_Struct'd); if a
+                    // buggy cext returns Nil / a Class / an Int
+                    // and we silently proceed, `initialize` is
+                    // called on something that's not an instance,
+                    // and instance-method dispatch later fails
+                    // in a way that's hard to trace back to the
+                    // allocator. Trap immediately with TypeError.
+                    match &raw {
+                        Value::Object(_) => raw,
+                        other => {
+                            let msg = format!(
+                                "allocator function for {} must return an Object, got {}",
+                                class_name,
+                                other.type_name()
+                            );
+                            return Err(g.vm.trap(RubyError::TypeError { msg }));
+                        }
+                    }
+                }
+                #[cfg(target_os = "wasi")]
+                {
+                    // wasi: cext path is stubbed; fall back to
+                    // plain Instance allocation. The `alloc_func`
+                    // from the if-let binding is unused on this
+                    // target (no cext_dispatch to forward it to);
+                    // marker reference keeps -D warnings happy.
+                    let _ = alloc_func;
+                    alloc_instance(&mut g, cls)?
+                }
+            } else {
+                alloc_instance(&mut g, cls)?
+            };
+            #[cfg(not(feature = "cext"))]
+            let obj = {
+                // No cext_alloc_func field exists in this build;
+                // the class always allocates a plain Instance.
+                alloc_instance(&mut g, cls)?
+            };
+            // Pin the freshly-allocated obj across initialize so
+            // a maybe_gc inside the (cext-defined or Ruby-defined)
+            // initialize doesn't sweep it.
+            g.pin(obj.clone());
+            let init_id = g.vm.interner.intern("initialize");
+            let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
+            if let Some(m) = ruby_init {
+                // Ruby-defined initialize takes precedence.
+                // Drop the guard before invoke_method (which
+                // needs &mut self uncontested); the pinned
+                // entries survive only the alloc step — by this
+                // point obj/args are already on Rust locals that
+                // invoke_method propagates.
+                drop(g);
+                self.invoke_method(m, obj.clone(), args)?;
+                self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
+            } else {
+                // L3-F + L3-H: cext-defined initialize (registered
+                // via rb_define_method) lives in
+                // cext_instance_methods. Dispatch through the
+                // existing instance-method path if present — this
+                // picks up arity validation and rb_raise handling
+                // for free. Both fixed arity 0..=5 AND variadic
+                // arity -1 are now dispatchable (L3-H setjmp shim
+                // supports case -1); the filter below mirrors
+                // cext_dispatch's accepted-arities rule.
+                #[cfg(all(feature = "cext", not(target_os = "wasi")))]
+                {
+                    // PR #60 review #10: don't silently skip
+                    // initialize on arity mismatch — that
+                    // diverges from Ruby semantics
+                    // (`Klass.new` must raise ArgumentError if
+                    // the args don't fit initialize). Only
+                    // filter on whether the arity is
+                    // dispatchable by the setjmp shim at all
+                    // ({-1} ∪ 0..=5); cext_dispatch then
+                    // validates argc against arity for fixed
+                    // cases and raises ArgumentError on a
+                    // mismatch.
+                    let cext_init_reg = g.vm.cext_instance_methods
+                        .get(cls.name.as_str())
+                        .and_then(|t| t.get(&init_id).cloned())
+                        .filter(|reg| reg.arity == -1 || (0..=5).contains(&reg.arity));
+                    if let Some(reg) = cext_init_reg {
+                        let qualified = reg.qualified_name.clone();
+                        let func = reg.func;
+                        let arity = reg.arity;
+                        let obj_clone = obj.clone();
+                        let args_ref = args.clone();
+                        let vm_ptr: *mut Vm = g.vm;
+                        super::cext::with_vm_ptr_set(vm_ptr, || {
+                            super::cext::cext_dispatch(
+                                &qualified, func, arity, &args_ref,
+                                super::cext::CextSelfHandle::Object(obj_clone),
+                            )
+                        })?;
+                    }
+                }
+                drop(g);
+                self.stack.push(obj);
+            }
+            return Ok(ClassOutcome::Handled);
+        }
+        // No class-arm matched; return args + recv intact.
+        Ok(ClassOutcome::NotHandled { args, recv })
+    }
+
         pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
@@ -1641,7 +2200,6 @@ impl Vm {
             return Ok(());
         }
 
-        let new_id = self.interner.intern("new");
         // `Hash.new` interception. The preamble defines a stub
         // `class Hash; end` (lib.rs) that has no connection to the
         // primitive `Value::Hash` storage — without this short-
@@ -1663,508 +2221,14 @@ impl Vm {
         // motivating case) is the block form. Without default-
         // block support the whole tilt-load chain stalls on the
         // first `@lazy_map[ext]` access.
-        // `Hash[...]` class-method constructor. CRuby has three
-        // call shapes:
-        //   - `Hash[]`               → empty Hash
-        //   - `Hash[k1, v1, k2, v2]` → flat-pair form (even arity)
-        //   - `Hash[[[k, v], ...]]`  → 1 Array of 2-element pairs
-        //   - `Hash[{k => v, ...}]`  → 1 Hash (copy semantics)
-        // The flat-pair form is the most common; older gems prefer
-        // it over `pairs.to_h`. Without this intercept, `Hash[]`
-        // would NoMethodError on Class (no `[]` defined on
-        // Value::Class).
-        //
-        // Odd-arity (k without matching v) is ArgumentError in
-        // CRuby; mirror that.
-        if &*name == "[]"
-            && let Value::Class(cls) = &recv
-            && cls.name.as_str() == "Hash"
-        {
-            // GC rooting: `args` came from `self.stack.drain(...)`
-            // and is a Rust-local Vec with no GC root, so any heap-
-            // shaped element (Array / Hash for the `Hash[[[k,v],...]]`
-            // and `Hash[{…}]` shapes) gets swept if `maybe_gc` runs
-            // before we finish reading their pairs. Pin every arg
-            // across the entire alloc + pair-extract window. Repro
-            // pre-fix: `Hash[[[:x, 10], [:y, 20]]]` under STRESS_GC=1
-            // tripped `ICE: use-after-free` on the inner-pair walk.
-            let mut g = PinGuard::new(self);
-            for a in &args { g.pin(a.clone()); }
-            g.vm.maybe_gc();
-            g.vm.check_alloc()?;
-            let pairs: Vec<(Value, Value)> = if args.len() == 1 {
-                match &args[0] {
-                    Value::Array(aid) => {
-                        // `Hash[[[k, v], ...]]`. Each element must be
-                        // a 2-element Array; anything else is
-                        // ArgumentError in CRuby (`invalid number of
-                        // elements (X for 2)`), but we follow the
-                        // common shape — non-pair elements are dropped
-                        // with TypeError. Stay strict only on the
-                        // outer Array shape.
-                        let outer = g.vm.heap.array(*aid).clone();
-                        let mut out = Vec::with_capacity(outer.len());
-                        for elem in outer {
-                            if let Value::Array(pair_id) = elem {
-                                let pair = g.vm.heap.array(pair_id);
-                                if pair.len() == 2 {
-                                    out.push((pair[0].clone(), pair[1].clone()));
-                                } else {
-                                    return Err(g.vm.trap(RubyError::ArgumentError {
-                                        msg: format!("invalid number of elements ({} for 2)", pair.len()),
-                                    }));
-                                }
-                            } else {
-                                return Err(g.vm.trap(RubyError::TypeError {
-                                    msg: format!("wrong element type {} (expected array)", elem.type_name()),
-                                }));
-                            }
-                        }
-                        out
-                    }
-                    Value::Hash(hid) => g.vm.heap.hash(*hid).clone(),
-                    _ => return Err(g.vm.trap(RubyError::ArgumentError {
-                        msg: "odd number of arguments for Hash".into(),
-                    })),
-                }
-            } else if args.len().is_multiple_of(2) {
-                args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect()
-            } else {
-                return Err(g.vm.trap(RubyError::ArgumentError {
-                    msg: "odd number of arguments for Hash".into(),
-                }));
-            };
-            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
-            g.vm.stack.push(Value::Hash(hid));
-            return Ok(());
-        }
-        // User-defined `def self.new` takes precedence over the
-        // built-in allocator AND over the Hash.new / String.new /
-        // other built-in class-level intercepts below. CRuby's
-        // `Class#new` is a normal Ruby method (allocate +
-        // initialize), and reopening any class — built-in or
-        // user — to override `self.new` should win. Without this
-        // check ahead of the Hash / String special-cases, e.g.
-        // `class Hash; def self.new; ...; end; end; Hash.new`
-        // silently bypassed the override and returned an empty
-        // `{}` from the hardcoded Hash path.
-        //
-        // The block-form path (`do_call_block`) generally routes
-        // user `self.new` overrides through its general
-        // Value::Class singleton-method dispatch arm, so most
-        // classes don't need a mirrored check there. The one
-        // exception is `do_call_block`'s `Hash.new { block }`
-        // intercept, which fires before that generic arm — it
-        // carries the same singleton pre-check pattern as this
-        // one for parity.
-        //
-        // Documented gap: `def self.new ... super ... end` still
-        // hits the allocator via super only if Class's builtin
-        // `new` is reachable through super_lookup — which it
-        // isn't today. Override-without-super covers the tilt
-        // entry-point (and the common DSL builder pattern); the
-        // super-into-allocator case is a separable follow-up.
-        if name_id == new_id
-            && let Value::Class(cls) = &recv
-            && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
-            return self.invoke_method(m, recv.clone(), args);
-        }
-        // `String.new` / `String.new(s)` — Tier 1 primitive
-        // constructor. Without this intercept the generic
-        // `Class.new` allocator below would build a
-        // `Value::Object` (Instance with `class = String`), and
-        // every String primitive method (`length`, `<<`,
-        // `bytesize`, …) would `NoMethodError` because they
-        // pattern-match on `Value::Str`, not `Value::Object`.
-        //
-        // CRuby supports `String.new(s, encoding: …, capacity: …)`;
-        // the encoding model is Tier 3 (ADR 0017), so we cover
-        // only the positional `s` argument here. Anything else
-        // raises ArgumentError.
-        if name_id == new_id
-            && let Value::Class(cls) = &recv
-            && cls.name.as_str() == "String"
-        {
-            match args.as_slice() {
-                [] => {
-                    self.stack.push(Value::new_str(""));
-                    return Ok(());
-                }
-                [Value::Str(s)] => {
-                    // Fresh, mutable copy — CRuby's `String.new(s)`
-                    // returns an unfrozen clone even if `s` was
-                    // frozen.
-                    let copy = s.to_string_lossy();
-                    self.stack.push(Value::new_str(copy));
-                    return Ok(());
-                }
-                [other] => {
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into String",
-                            other.type_name(),
-                        ),
-                    }));
-                }
-                _ => {
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 0..1)",
-                            args.len(),
-                        ),
-                    }));
-                }
-            }
-        }
-        // `Module.new` (no block) — returns a fresh anonymous
-        // Module. Empty name is the sentinel for "anonymous"
-        // that `Module#name` consults to return `nil`; `to_s` /
-        // `inspect` render `"#<Module>"` instead. The block-form
-        // `Module.new { |m| ... }` evaluates the block as the
-        // module body and lives in `do_call_block` — same shape
-        // as the existing `Hash.new` / `class_eval` intercepts.
-        //
-        // Documented divergence (NOT addressed here): CRuby
-        // assigns the module's name on first constant write
-        // (`M = Module.new` → `M.name == "M"`). rubyrs leaves
-        // the name empty until a future StoreConst hook lands;
-        // most real-world uses (`include` an anonymous helper)
-        // don't depend on the name-promote behaviour.
-        if name_id == new_id
-            && let Value::Class(cls) = &recv
-            && cls.name.as_str() == "Module"
-        {
-            if !args.is_empty() {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!(
-                        "wrong number of arguments (given {}, expected 0)",
-                        args.len(),
-                    ),
-                }));
-            }
-            let m = std::rc::Rc::new(Class {
-                name: String::new(),
-                is_module: true,
-                ivars: std::cell::RefCell::new(HashMap::new()),
-                methods: std::cell::RefCell::new(HashMap::new()),
-                singleton_methods: std::cell::RefCell::new(HashMap::new()),
-                superclass: std::cell::RefCell::new(None),
-                includes: std::cell::RefCell::new(Vec::new()),
-                prepends: std::cell::RefCell::new(Vec::new()),
-                singleton_prepends: std::cell::RefCell::new(Vec::new()),
-                class_vars: std::cell::RefCell::new(HashMap::new()),
-                #[cfg(feature = "cext")]
-                cext_alloc_func: std::cell::Cell::new(None),
-            });
-            self.stack.push(Value::Class(m));
-            return Ok(());
-        }
-        if name_id == new_id
-            && let Value::Class(cls) = &recv
-            && cls.name.as_str() == "Hash"
-        {
-            // `Hash.new` without a block. CRuby shapes:
-            //   - 0 args: empty Hash, no default
-            //   - 1 arg:  empty Hash with scalar default; missing-
-            //             key lookup returns this value as-is (not
-            //             cached into the Hash).
-            //   - 2+ args: ArgumentError
-            // The block-form (`Hash.new { |h, k| ... }`) routes
-            // through `do_call_block` and has its own intercept
-            // (which raises ArgumentError when a scalar default is
-            // also given — CRuby refuses both at once).
-            if args.len() > 1 {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
-                }));
-            }
-            let default = args.first().cloned();
-            // Pin the default across maybe_gc — if it's a heap
-            // value (Array / Hash / String), it could be a
-            // temporary on its way to becoming the default and
-            // would otherwise be unrooted between args.first() and
-            // hash_set_default_value below.
-            let mut g = PinGuard::new(self);
-            if let Some(v) = &default { g.pin(v.clone()); }
-            g.vm.maybe_gc();
-            g.vm.check_alloc()?;
-            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
-            if default.is_some() {
-                g.vm.heap.hash_set_default_value(hid, default);
-            }
-            g.vm.stack.push(Value::Hash(hid));
-            return Ok(());
-        }
-        // `Class#allocate` user-singleton override — CRuby allows
-        // `def self.allocate` to replace the built-in allocator (used
-        // by Marshal / dup / ORM hydration hooks). Mirrors the
-        // `def self.new` pre-check at line 1053. Must fire BEFORE the
-        // builtin allocate arm below or the user override is silently
-        // shadowed; do_call_block has the same precedence (its
-        // generic singleton check at ~4601 runs before its allocate
-        // arm). PR #181 follow-up: code-review caught the asymmetry.
-        if &*name == "allocate"
-            && let Value::Class(cls) = &recv
-            && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
-            return self.invoke_method(m, recv.clone(), args);
-        }
-        // `Class#allocate` — bare-instance allocator without calling
-        // `initialize`. Used by frameworks for unmarshalling / dup /
-        // clone / ORM hydration, and by the TRY_RUNS pass-7 probe's
-        // `ERB.new` stub (layer #4). Sits before the `new` arm so the
-        // class-receiver path is uniform.
-        //
-        // Semantics:
-        //   - User classes (`Value::Class` not in the primitive
-        //     whitelist): allocate a fresh `HeapObj::Instance` with
-        //     the class pointer set, empty ivars, no singleton class.
-        //     No `initialize` call.
-        //   - Primitive class shells fall into two groups:
-        //       * "Truly disallowed" in CRuby — Integer / Float /
-        //         Symbol / Regexp / Proc / Method / UnboundMethod /
-        //         TrueClass / FalseClass / NilClass / Kernel. CRuby
-        //         raises TypeError; rubyrs matches byte-for-byte.
-        //       * "Allowed in CRuby" — String / Array / Hash / Range.
-        //         CRuby produces a bare instance of the builtin
-        //         (empty string / array / hash / Range struct); rubyrs
-        //         currently raises TypeError because the heap model
-        //         unboxes those values and we don't yet route through
-        //         a TypedData allocator. Documented as a KNOWN GAP
-        //         below; the comment used to claim CRuby parity here
-        //         which was wrong (PR #181 review round 4 Copilot
-        //         comment #2).
-        //     Either way: zero Instance slot to populate, so the
-        //     bare-allocator path can't run for any primitive shell.
-        //   - Zero args; any positional arg raises ArgumentError
-        //     with the standard "wrong number of arguments" shape.
-        //
-        // KNOWN GAP: `cext_alloc_func` (set by
-        // `rb_define_alloc_func`) is currently NOT routed through
-        // this arm. The `new` arm below DOES route through it (so a
-        // cext `Foo.new` produces a TypedData-wrapped Object), but
-        // `Foo.allocate` here falls back to the default bare
-        // Instance. For a cext whose initialize-after-allocate
-        // relies on the alloc_func having wrapped its C struct, the
-        // separation of allocate-vs-new becomes visible. No caller
-        // surfaced today (pass-7 probe layer #4 only needs the
-        // bare Instance path). Routed via a follow-up if a cext
-        // surfaces the need; tracked as a comment so a future
-        // reader doesn't think the bare-allocate is an oversight.
-        // String-compare on the already-resolved `name` instead of
-        // interning "allocate" each call (PR #181 review round 3
-        // Copilot comment #1). Avoids both the per-call hash lookup
-        // on a hot dispatch path and the latent edge case where
-        // unconditional `intern()` could grow the symbol table
-        // outside the existing `Config::max_symbols` accounting
-        // points.
-        if &*name == "allocate"
-            && let Value::Class(cls) = &recv {
-            if !args.is_empty() {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
-                }));
-            }
-            // Module / Class shells are NOT user classes — a real
-            // CRuby raises NoMethodError ("undefined method
-            // 'allocate' for ...Module/Class...") on Module-flavored
-            // receivers; we approximate with the same TypeError
-            // surface as the primitive shells so the call site sees
-            // a clean failure instead of a bogus bare-Instance whose
-            // `class` says Module but which can't behave like one
-            // (PR #181 review #1 — Copilot flagged this gap).
-            // KNOWN GAP: `Class.allocate` itself in CRuby DOES
-            // succeed (returns a new anonymous Class). We block it
-            // here for safety until a proper Class/Module allocator
-            // lands; the only caller surfaced today (ERB stub) wants
-            // an Instance, not a Class.
-            if cls.is_module
-                || cls.name == "Module"
-                || cls.name == "Class"
-                || is_primitive_class_name(&cls.name)
-            {
-                // Anonymous Module / Class shells have an empty
-                // `cls.name`; without a fallback the message would
-                // read "allocator undefined for " (trailing space,
-                // no class hint). Pick "Module" vs "Class" by the
-                // `is_module` flag so the surface is actionable
-                // (PR #181 review round 3 Copilot comment #2).
-                let display = if cls.name.is_empty() {
-                    if cls.is_module { "Module" } else { "Class" }
-                } else {
-                    &cls.name
-                };
-                return Err(self.trap(RubyError::TypeError {
-                    msg: format!("allocator undefined for {}", display),
-                }));
-            }
-            let obj = self.alloc_default_instance(cls)?;
-            self.stack.push(obj);
-            return Ok(());
-        }
-        if name_id == new_id
-            && let Value::Class(cls) = &recv {
-                // L3-F: cext-registered allocator path. When the class
-                // came from rb_define_class_under AND the cext called
-                // rb_define_alloc_func on it, route the allocation
-                // through that callback (typically wraps a malloc'd C
-                // struct in TypedData) instead of producing a bare
-                // Instance. Without this, every TypedData_Get_Struct in
-                // the cext's instance methods fails because `self` is a
-                // plain Instance, not a TypedData slot.
-                // Outer PinGuard covers BOTH the allocator call and
-                // the subsequent initialize. cext_dispatch can trigger
-                // maybe_gc (TypedData wrap, result translation,
-                // nested rb_funcall); args + obj live only as Rust
-                // locals here and would be swept otherwise (PR #50
-                // review #1 + #3 — same shape as the Integer#times
-                // PinGuard fix in L3-D).
-                let mut g = PinGuard::new(self);
-                for a in &args { g.pin(a.clone()); }
-                // Default Instance allocator — used by every branch of
-                // the cext-selection cascade below that doesn't go
-                // through `rb_define_alloc_func`. Delegates to
-                // `Vm::alloc_default_instance` so this path and the
-                // `Class#allocate` arm above can't drift on
-                // GC/rooting/allocation behavior (PR #181 review #2).
-                let alloc_instance = |g: &mut PinGuard, cls: &Rc<Class>| -> Result<Value, Trap> {
-                    g.vm.alloc_default_instance(cls)
-                };
-                // Allocator selection. With `cext`, the class may carry
-                // an `rb_define_alloc_func`-registered allocator that
-                // must run instead of the default Instance allocation.
-                // Without `cext`, there is no path that could set such
-                // a function, so we collapse to the default allocator
-                // unconditionally. Splitting the whole expression by
-                // cfg (instead of the previous `Option<()>` sentinel
-                // trick) keeps both arms well-typed and removes a
-                // brittle `unreachable!()` site that any future
-                // refactor inside the cfg arm could turn into a real
-                // panic.
-                #[cfg(feature = "cext")]
-                let obj = if let Some(alloc_func) = cls.cext_alloc_func.get() {
-                    #[cfg(not(target_os = "wasi"))]
-                    {
-                        // arity=0 (self-only) is the alloc_func ABI:
-                        // VALUE allocate(VALUE klass). CURRENT_VM_PTR
-                        // must be set so the cext can rb_funcall back
-                        // and rb_data_typed_object_wrap can locate
-                        // the Vm to allocate on its heap.
-                        let class_name = cls.name.clone();
-                        let qualified = format!("{}::allocate", class_name);
-                        let vm_ptr: *mut Vm = g.vm;
-                        let raw = super::cext::with_vm_ptr_set(vm_ptr, || {
-                            super::cext::cext_dispatch(
-                                &qualified,
-                                alloc_func,
-                                0,
-                                &[],
-                                super::cext::CextSelfHandle::Class(&class_name),
-                            )
-                        })?;
-                        // PR #50 review #2: validate that the cext
-                        // honored the rb_define_alloc_func contract.
-                        // CRuby's allocator must return an Object
-                        // (typically TypedData_Wrap_Struct'd); if a
-                        // buggy cext returns Nil / a Class / an Int
-                        // and we silently proceed, `initialize` is
-                        // called on something that's not an instance,
-                        // and instance-method dispatch later fails
-                        // in a way that's hard to trace back to the
-                        // allocator. Trap immediately with TypeError.
-                        match &raw {
-                            Value::Object(_) => raw,
-                            other => {
-                                let msg = format!(
-                                    "allocator function for {} must return an Object, got {}",
-                                    class_name,
-                                    other.type_name()
-                                );
-                                return Err(g.vm.trap(RubyError::TypeError { msg }));
-                            }
-                        }
-                    }
-                    #[cfg(target_os = "wasi")]
-                    {
-                        // wasi: cext path is stubbed; fall back to
-                        // plain Instance allocation. The `alloc_func`
-                        // from the if-let binding is unused on this
-                        // target (no cext_dispatch to forward it to);
-                        // marker reference keeps -D warnings happy.
-                        let _ = alloc_func;
-                        alloc_instance(&mut g, cls)?
-                    }
-                } else {
-                    alloc_instance(&mut g, cls)?
-                };
-                #[cfg(not(feature = "cext"))]
-                let obj = {
-                    // No cext_alloc_func field exists in this build;
-                    // the class always allocates a plain Instance.
-                    alloc_instance(&mut g, cls)?
-                };
-                // Pin the freshly-allocated obj across initialize so
-                // a maybe_gc inside the (cext-defined or Ruby-defined)
-                // initialize doesn't sweep it.
-                g.pin(obj.clone());
-                let init_id = g.vm.interner.intern("initialize");
-                let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
-                if let Some(m) = ruby_init {
-                    // Ruby-defined initialize takes precedence.
-                    // Drop the guard before invoke_method (which
-                    // needs &mut self uncontested); the pinned
-                    // entries survive only the alloc step — by this
-                    // point obj/args are already on Rust locals that
-                    // invoke_method propagates.
-                    drop(g);
-                    self.invoke_method(m, obj.clone(), args)?;
-                    self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
-                } else {
-                    // L3-F + L3-H: cext-defined initialize (registered
-                    // via rb_define_method) lives in
-                    // cext_instance_methods. Dispatch through the
-                    // existing instance-method path if present — this
-                    // picks up arity validation and rb_raise handling
-                    // for free. Both fixed arity 0..=5 AND variadic
-                    // arity -1 are now dispatchable (L3-H setjmp shim
-                    // supports case -1); the filter below mirrors
-                    // cext_dispatch's accepted-arities rule.
-                    #[cfg(all(feature = "cext", not(target_os = "wasi")))]
-                    {
-                        // PR #60 review #10: don't silently skip
-                        // initialize on arity mismatch — that
-                        // diverges from Ruby semantics
-                        // (`Klass.new` must raise ArgumentError if
-                        // the args don't fit initialize). Only
-                        // filter on whether the arity is
-                        // dispatchable by the setjmp shim at all
-                        // ({-1} ∪ 0..=5); cext_dispatch then
-                        // validates argc against arity for fixed
-                        // cases and raises ArgumentError on a
-                        // mismatch.
-                        let cext_init_reg = g.vm.cext_instance_methods
-                            .get(cls.name.as_str())
-                            .and_then(|t| t.get(&init_id).cloned())
-                            .filter(|reg| reg.arity == -1 || (0..=5).contains(&reg.arity));
-                        if let Some(reg) = cext_init_reg {
-                            let qualified = reg.qualified_name.clone();
-                            let func = reg.func;
-                            let arity = reg.arity;
-                            let obj_clone = obj.clone();
-                            let args_ref = args.clone();
-                            let vm_ptr: *mut Vm = g.vm;
-                            super::cext::with_vm_ptr_set(vm_ptr, || {
-                                super::cext::cext_dispatch(
-                                    &qualified, func, arity, &args_ref,
-                                    super::cext::CextSelfHandle::Object(obj_clone),
-                                )
-                            })?;
-                        }
-                    }
-                    drop(g);
-                    self.stack.push(obj);
-                }
-                return Ok(());
-            }
+        // Class-receiver intrinsics — Hash[] / new / allocate /
+        // include / prepend / extend / private / public / protected
+        // / name / superclass / method_defined?. Extracted into
+        // try_dispatch_class_intrinsics (#192 commit 4/5).
+        let (args, recv) = match self.try_dispatch_class_intrinsics(&name, name_id, cache_id, args, recv)? {
+            ClassOutcome::Handled => return Ok(()),
+            ClassOutcome::NotHandled { args, recv } => (args, recv),
+        };
 
         // Primitive-receiver fallback to the user-Class method
         // table. CRuby's dispatch walks every value's class chain
