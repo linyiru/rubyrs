@@ -28,6 +28,20 @@ on:
         default: "300"
         type: string
 
+# Serialise per-target runs. Without this, a developer who fires
+# `workflow_dispatch` twice in a row (e.g. once with a 5-min
+# soak, realised they wanted longer, fired again with 30 min)
+# would get both runs in parallel. Their corpus-save keys differ
+# by `github.run_id` so they don't clobber each other, but the
+# restore-prefix lookup picks up whichever finished last —
+# non-deterministically. `cancel-in-progress: false` lets a
+# manual run still complete even if the nightly cron fires while
+# it's running (the cron's 5-min run isn't worth aborting the
+# user's longer soak).
+concurrency:
+  group: fuzz-${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   fuzz:
     name: ${{ matrix.target }}
@@ -149,9 +163,14 @@ jobs:
         # the key already exists from an earlier run and
         # `cache/save` no-ops with a "cache already exists" notice
         # — that's the desired behaviour, the existing entry is
-        # still good. Both matrix entries try to save under the
-        # same key concurrently; GitHub serialises and accepts
-        # the first one.
+        # still good. The two matrix entries (`parse`, `eval`)
+        # both reach this step under the same key; whichever
+        # finishes first wins, the loser's `cache/save` call
+        # reports the same "already exists" warning (NOT a hard
+        # failure). `if: always()` keeps the step exit-0 on that
+        # warning path too. Don't read this as "GitHub queues and
+        # accepts both" — only the first save uploads, the
+        # second is dropped silently.
         if: always()
         uses: actions/cache/save@v5
         with:
