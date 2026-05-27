@@ -105,6 +105,130 @@ impl Drop for SpanGuard<'_> {
     }
 }
 
+/// Compile-time intercepts for literal-symbol `Call` arms
+/// (no block): `attr_reader` / `attr_writer` / `attr_accessor`
+/// and `alias_method`. Returns `true` when an intercept fired
+/// (and `b` already holds the emitted ops); the caller should
+/// then `return;` to skip the generic `Op::Call` path.
+///
+/// Each intercept short-circuits only when every relevant arg
+/// is a `SymbolLit` — dynamic forms (`attr_accessor(*xs)`,
+/// `alias_method(a, b)` with non-symbol args) fall through.
+fn try_call_compile_time_intercept(
+    b: &mut ProtoBuilder,
+    receiver: &Option<Box<SExpr>>,
+    name: &str,
+    args: &[SExpr],
+    protos: &mut Vec<Proto>,
+    interner: &mut Interner,
+    cc: &mut u32,
+) -> bool {
+    // attr_reader / attr_writer / attr_accessor
+    if receiver.is_none()
+        && let Some((do_reader, do_writer)) = crate::ast::attr_reader_writer_flags(name)
+        && args.iter().all(|a| matches!(a.node, Expr::SymbolLit(_)))
+    {
+        for a in args {
+            let sym_name = if let Expr::SymbolLit(s) = &a.node { s.clone() } else { unreachable!() };
+            let ivar_name = format!("@{}", sym_name);
+            if do_reader {
+                let body = vec![SExpr { span: a.span, node: Expr::IVarRead(ivar_name.clone()) }];
+                let pidx = compile_proto(
+                    sym_name.clone(), vec![], &body,
+                    b.filename.clone(), protos, interner, cc,
+                );
+                let nid = interner.intern(&sym_name);
+                b.emit(Op::DefMethod(nid, pidx as u32));
+            }
+            if do_writer {
+                let setter_name = format!("{sym_name}=");
+                let val_read = SExpr { span: a.span, node: Expr::LVarRead("val".into()) };
+                let body = vec![SExpr {
+                    span: a.span,
+                    node: Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
+                }];
+                let pidx = compile_proto(
+                    setter_name.clone(), vec!["val".into()], &body,
+                    b.filename.clone(), protos, interner, cc,
+                );
+                let nid = interner.intern(&setter_name);
+                b.emit(Op::DefMethod(nid, pidx as u32));
+            }
+        }
+        b.emit(Op::LoadNil);
+        return true;
+    }
+
+    // alias_method :new, :old — both args must be Symbol literals.
+    // `Op::AliasMethod`'s VM handler pushes Nil itself, so the
+    // compiler must NOT emit a trailing `LoadNil`.
+    if receiver.is_none()
+        && name == "alias_method"
+        && args.len() == 2
+        && matches!(args[0].node, Expr::SymbolLit(_))
+        && matches!(args[1].node, Expr::SymbolLit(_))
+    {
+        let new_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
+        let old_name = if let Expr::SymbolLit(s) = &args[1].node { s.clone() } else { unreachable!() };
+        let nid = interner.intern(&new_name);
+        let oid = interner.intern(&old_name);
+        b.emit(Op::AliasMethod(nid, oid));
+        return true;
+    }
+
+    false
+}
+
+/// Compile-time intercepts for `CallWithBlock` arms whose
+/// block body becomes the method body: `define_method(:foo) { ... }`
+/// and `recv.define_singleton_method(:foo) { ... }`. Returns
+/// `true` when an intercept fired.
+#[allow(clippy::too_many_arguments)]
+fn try_call_with_block_compile_time_intercept(
+    b: &mut ProtoBuilder,
+    receiver: &Option<Box<SExpr>>,
+    name: &str,
+    args: &[SExpr],
+    block_params: &[BlockParam],
+    block_body: &[SExpr],
+    protos: &mut Vec<Proto>,
+    interner: &mut Interner,
+    cc: &mut u32,
+) -> bool {
+    // define_method(:foo) { |args| ... }
+    if receiver.is_none()
+        && name == "define_method"
+        && args.len() == 1
+        && matches!(args[0].node, Expr::SymbolLit(_))
+    {
+        let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
+        let (block_proto_idx, param_start, n_params, rest_slot) =
+            compile_block(b, block_params, block_body, protos, interner, cc);
+        b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
+        let nid = interner.intern(&sym_name);
+        b.emit(Op::DefMethodBlock(nid));
+        return true;
+    }
+
+    // recv.define_singleton_method(:foo) { |args| ... }
+    if let Some(r) = receiver
+        && name == "define_singleton_method"
+        && args.len() == 1
+        && matches!(args[0].node, Expr::SymbolLit(_))
+    {
+        let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
+        compile_expr(b, r, protos, interner, cc);
+        let (block_proto_idx, param_start, n_params, rest_slot) =
+            compile_block(b, block_params, block_body, protos, interner, cc);
+        b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
+        let nid = interner.intern(&sym_name);
+        b.emit(Op::DefObjectSingletonMethodBlock(nid));
+        return true;
+    }
+
+    false
+}
+
 /// Allocate a fresh inline-cache id and emit the appropriate
 /// `Op::Call*` variant for a method dispatch. Centralises the
 /// 4-way `(has_recv, has_block)` matrix that previously lived
@@ -777,90 +901,17 @@ pub(crate) fn compile_expr(
                 compile_body(b, args, protos, interner, cc);
                 return;
             }
-            // attr_accessor / attr_reader / attr_writer — compile-time
-            // desugar. Inside a class body these install getter/setter
-            // methods on the surrounding class via the normal
-            // `Op::DefMethod` machinery; outside a class body they
-            // still emit `DefMethod` ops (which target the top-level
-            // method registry) — that's a divergence from CRuby
-            // (where `attr_*` raises NoMethodError at top level) but
-            // harmless and avoids needing a "class-body context" the
-            // compiler doesn't currently track. Each arg must be a
-            // Symbol literal — dynamic forms (`attr_accessor(*xs)`)
-            // pass through as a regular Call and will fail at
-            // dispatch.
-            // attr_* compile-time intercept inside a normal class
-            // body. Paired with the `class << X` AST-level expansion
-            // in ast.rs (see `attr_reader_writer_flags`): if the
-            // semantics of either intercept change, update both.
-            //
-            // Zero-arg form is intentionally accepted as a silent
-            // no-op — CRuby 3.4 does the same (verified: no
-            // ArgumentError, no methods defined). The for-loop
-            // below handles empty args naturally (vacuous iter()).
-            if receiver.is_none()
-                && let Some((do_reader, do_writer)) = crate::ast::attr_reader_writer_flags(name)
-                && args.iter().all(|a| matches!(a.node, Expr::SymbolLit(_)))
-            {
-                let prev = b.current_span;
-                for a in args {
-                    let sym_name = if let Expr::SymbolLit(s) = &a.node { s.clone() } else { unreachable!() };
-                    let ivar_name = format!("@{}", sym_name);
-                    if do_reader {
-                        // def <sym>; @<sym>; end
-                        let body = vec![SExpr { span: a.span, node: Expr::IVarRead(ivar_name.clone()) }];
-                        let pidx = compile_proto(
-                            sym_name.clone(), vec![], &body,
-                            b.filename.clone(), protos, interner, cc,
-                        );
-                        let nid = interner.intern(&sym_name);
-                        b.emit(Op::DefMethod(nid, pidx as u32));
-                    }
-                    if do_writer {
-                        // def <sym>=(val); @<sym> = val; end
-                        let setter_name = format!("{sym_name}=");
-                        let val_read = SExpr { span: a.span, node: Expr::LVarRead("val".into()) };
-                        let body = vec![SExpr {
-                            span: a.span,
-                            node: Expr::IVarWrite(ivar_name.clone(), Box::new(val_read)),
-                        }];
-                        let pidx = compile_proto(
-                            setter_name.clone(), vec!["val".into()], &body,
-                            b.filename.clone(), protos, interner, cc,
-                        );
-                        let nid = interner.intern(&setter_name);
-                        b.emit(Op::DefMethod(nid, pidx as u32));
-                    }
-                }
-                b.emit(Op::LoadNil);
-                b.current_span = prev;
-                return;
-            }
-            // `alias_method :new, :old` — compile-time intercept when
-            // both args are Symbol literals. Emits a single
-            // `Op::AliasMethod`, which copies the Rc<Method> entry
-            // inside the surrounding class (or toplevel) at runtime.
-            // Dynamic-symbol forms fall through to a normal Call and
-            // currently fail at dispatch.
-            if receiver.is_none()
-                && name == "alias_method"
-                && args.len() == 2
-                && matches!(args[0].node, Expr::SymbolLit(_))
-                && matches!(args[1].node, Expr::SymbolLit(_))
-            {
-                let new_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
-                let old_name = if let Expr::SymbolLit(s) = &args[1].node { s.clone() } else { unreachable!() };
-                let nid = interner.intern(&new_name);
-                let oid = interner.intern(&old_name);
-                // `Op::AliasMethod`'s VM handler pushes Nil itself
-                // (matching `Op::DefMethod`'s shape), so the
-                // compiler must NOT emit a trailing `LoadNil` — that
-                // would leave a stray Nil on the operand stack each
-                // alias, which the class-body Return only happens
-                // to swallow because it truncates to `base_sp`.
-                // Inside a loop or with multiple aliases per body
-                // the imbalance accumulates.
-                b.emit(Op::AliasMethod(nid, oid));
+            // Compile-time intercepts for literal-symbol arms:
+            // `attr_reader` / `attr_writer` / `attr_accessor` and
+            // `alias_method`. Each short-circuits only when every
+            // relevant arg is a Symbol literal — dynamic forms
+            // (`attr_accessor(*xs)`, `alias_method(a, b)` with
+            // non-symbol args) fall through to the generic Call
+            // emit below. See `try_call_compile_time_intercept`
+            // for the per-intercept emit shape and CRuby-divergence
+            // notes (attr_* at top level, Op::AliasMethod's own
+            // LoadNil, etc.).
+            if try_call_compile_time_intercept(b, receiver, name, args, protos, interner, cc) {
                 return;
             }
             if receiver.is_none() && name == "raise" {
@@ -1151,44 +1202,17 @@ pub(crate) fn compile_expr(
             b.emit(Op::NewHash(pairs.len() as u16));
         }
         Expr::CallWithBlock { receiver, name, args, block_params, block_body } => {
-            // `define_method(:foo) { |args| ... }` — compile-time
-            // intercept. The block becomes the method body; its
-            // captured locals Rc stays shared with the surrounding
-            // frame so closures work. Only the literal-Symbol form
-            // is intercepted; dynamic `define_method(sym, &p)`
-            // falls through.
-            if receiver.is_none()
-                && name == "define_method"
-                && args.len() == 1
-                && matches!(args[0].node, Expr::SymbolLit(_))
-            {
-                let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
-                let (block_proto_idx, param_start, n_params, rest_slot) =
-                    compile_block(b, block_params, block_body, protos, interner, cc);
-                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
-                let nid = interner.intern(&sym_name);
-                b.emit(Op::DefMethodBlock(nid));
-                return;
-            }
-            // `recv.define_singleton_method(:foo) { |args| ... }` —
-            // compile-time intercept, analogous to `define_method`
-            // above but with an explicit receiver. The block is
-            // pushed *after* the receiver so the runtime op pops
-            // (block, recv) in that order. Receiver-side TypeError
-            // (non-Object) is raised at
-            // Op::DefObjectSingletonMethodBlock dispatch time.
-            if let Some(r) = receiver
-                && name == "define_singleton_method"
-                && args.len() == 1
-                && matches!(args[0].node, Expr::SymbolLit(_))
-            {
-                let sym_name = if let Expr::SymbolLit(s) = &args[0].node { s.clone() } else { unreachable!() };
-                compile_expr(b, r, protos, interner, cc);
-                let (block_proto_idx, param_start, n_params, rest_slot) =
-                    compile_block(b, block_params, block_body, protos, interner, cc);
-                b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
-                let nid = interner.intern(&sym_name);
-                b.emit(Op::DefObjectSingletonMethodBlock(nid));
+            // Compile-time intercepts for literal-symbol arms whose
+            // block body becomes the method body:
+            // `define_method(:foo) { ... }` and
+            // `recv.define_singleton_method(:foo) { ... }`. Only the
+            // literal-Symbol form is intercepted; dynamic forms
+            // fall through to the generic CallBlock emit below.
+            // See `try_call_with_block_compile_time_intercept` for
+            // the per-intercept emit shape.
+            if try_call_with_block_compile_time_intercept(
+                b, receiver, name, args, block_params, block_body, protos, interner, cc,
+            ) {
                 return;
             }
             let (block_proto_idx, param_start, n_params, rest_slot) =
