@@ -1321,10 +1321,13 @@ fn integer_to_s_raises_argumenterror_on_bad_arity() {
 #[test]
 fn bigint_case_compare_float_is_lossless_via_ruby_eq() {
     // Pin the `ruby_eq` (heap.rs) BigInt × Float lossless path.
-    // Used by `===` (case/when), Array#include?, Hash key lookup,
-    // and Object#== fallback. Pre-fix this PR, ruby_eq had no
-    // BigInt × Float arm — comparisons fell through to the
-    // catch-all `_ => false`. Now routes through the same
+    // Used by `===` (case/when), Array#include?, and `==`/`!=`
+    // dispatch fast-path. (Hash key lookup goes through `ruby_eql`
+    // — eql?-based, type-strict — not ruby_eq, so it's NOT
+    // affected by this fix; tracked separately if/when Hash gets
+    // a `==`-style include? variant.) Pre-fix this PR, ruby_eq
+    // had no BigInt × Float arm — comparisons fell through to
+    // the catch-all `_ => false`. Now routes through the same
     // `bigint_equals_float_lossless` helper as the BinOp `==`
     // path, so `===` returns the right answer in both directions
     // and Array#include? finds float-shaped duplicates of BigInt
