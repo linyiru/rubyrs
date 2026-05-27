@@ -81,14 +81,23 @@ fn summarize_src(file: String, src: &str) -> SpecSummary {
     while i < lines.len() {
         let trimmed = lines[i].trim_start();
 
-        // `it "x" do` / `it 'x' do`. The corpus uses exactly this
-        // shape (string + ` do`); `it` without a string, `fit`,
-        // `xit`, etc. don't appear. We don't try to validate that
-        // here — if a stray form ever lands, the `tests/ruby_spec.rs`
-        // runner already counts in lockstep with this counter
-        // (both follow the `it "..." do` convention) and would
-        // diverge first.
-        if trimmed.starts_with("it ") && trimmed.contains(" do") {
+        // `it "x" do` / `it 'x' do` / `bignum_it "x" do`. The
+        // corpus uses exactly this shape (string + ` do`); `it`
+        // without a string, `fit`, `xit`, etc. don't appear. We
+        // don't try to validate that here — if a stray form ever
+        // lands, the `tests/ruby_spec.rs` runner already counts
+        // in lockstep with this counter (both follow the
+        // `it "..." do` convention) and would diverge first.
+        //
+        // `bignum_it` counts as an example for corpus purposes
+        // (the test exists in source); whether it actually runs
+        // depends on the profile (bignum-on runs all, no-bignum
+        // skips the registration). The runner's pass count under
+        // the bignum-on profile matches this corpus count, which
+        // is what the doc claims.
+        if (trimmed.starts_with("it ") || trimmed.starts_with("bignum_it "))
+            && trimmed.contains(" do")
+        {
             examples += 1;
             i += 1;
             continue;

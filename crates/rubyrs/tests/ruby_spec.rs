@@ -183,6 +183,21 @@ fn make_runtime() -> (Runtime, Rc<RefCell<ExampleTracker>>) {
             Ok(Value::Nil)
         });
     }
+    // Feature-detection host fn for spec_helper's `bignum_enabled?`.
+    // Spec files written for the bignum-on profile (e.g. those that
+    // use `(10000**10).even?` to verify BigInt semantics) call
+    // `bignum_it "..."` instead of `it "..."` — the helper drops the
+    // body when bignum is off, so the same source compiles and runs
+    // on both profiles without producing spurious failures from the
+    // no-bignum `**` arm's `i64::saturating_pow` (which caps at
+    // `i64::MAX`, making the saturated value happen to be odd and
+    // breaking any "is this bignum literal even?" assertion).
+    rt.register_fn("__spec_bignum_enabled", move |_args| {
+        #[cfg(feature = "bignum")]
+        { Ok(Value::Bool(true)) }
+        #[cfg(not(feature = "bignum"))]
+        { Ok(Value::Bool(false)) }
+    });
 
     let helper_src = fs::read_to_string(spec_dir().join("spec_helper.rb"))
         .expect("spec_helper.rb should exist next to ruby/ specs");

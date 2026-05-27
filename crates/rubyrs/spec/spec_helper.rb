@@ -52,6 +52,31 @@ def it(name)
   end
 end
 
+# Feature gate for the `bignum` cargo feature. Backed by the
+# `__spec_bignum_enabled` host fn in tests/ruby_spec.rs which
+# returns true iff rubyrs was built with `--features bignum`
+# (the default). Use this from spec bodies that rely on
+# BigInt-only semantics (e.g. `(10000**10).even?`); without
+# bignum the literal saturates via `i64::saturating_pow` to
+# `i64::MAX` (or the matching negative bound), and the
+# assertion would test that saturation instead of the bignum
+# path the spec was written to exercise.
+def bignum_enabled?
+  __spec_bignum_enabled
+end
+
+# `it` variant that runs the example only when the bignum
+# feature is enabled. Use for spec bodies whose assertions
+# only make sense on the bignum profile (i.e. they test
+# BigInt-valued literals or BigInt-specific dispatch). The
+# example simply doesn't register when bignum is off — no
+# example appears in the report, so the runner can't flag it
+# as a regression. Symmetric counterpart `no_bignum_it` could
+# be added if a body ever needs the opposite gating.
+def bignum_it(name, &block)
+  it(name, &block) if bignum_enabled?
+end
+
 # Boolean assertion. Reports pass on truthy, fail on falsey.
 def assert(condition, label = "assert")
   if condition
