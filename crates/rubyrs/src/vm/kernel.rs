@@ -1561,9 +1561,7 @@ impl Vm {
         // should unwind locally, but a `return` escaping the
         // eval'd top level pops back into the caller's frame.
         loop {
-            if let Err(trap) = self.dispatch_until(depth_before) {
-                return Err(trap);
-            }
+            self.dispatch_until(depth_before)?;
             if self.method_return.is_none() {
                 break;
             }
