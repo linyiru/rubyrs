@@ -427,3 +427,44 @@ fn preamble_fits_under_tight_resource_caps() {
     rt.eval("1 + 1", "preamble_canary.rb").expect("trivial eval must succeed after preamble under tight caps");
 }
 
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_iter_loops_trap_under_fuel_cap() {
+    // A.3 — DoS guard for the BigInt iter surface. Pre-this-test,
+    // `(2**100).times { }` / `0.upto(10**18) { }` would run
+    // essentially forever on a host that hadn't configured fuel
+    // or deadline. They CAN'T silently hang anymore — the
+    // existing `Config::fuel` mechanism (decremented per
+    // dispatched op) trips inside the block-invocation dispatch
+    // loop, raising `ResourceExhausted: "out of fuel"`.
+    //
+    // This test pins that behaviour across all three iter
+    // methods (times / upto / downto) for both Int recv (the
+    // existing arms) and BigInt recv (the Phase B.6 arms). The
+    // fuel ticks because every iteration calls invoke_block,
+    // which dispatches at least one op (the block's return).
+    // Without fuel, ops never decrement; with fuel set, the
+    // loop trips after a bounded number of iterations regardless
+    // of the receiver's magnitude.
+    for script in [
+        // BigInt-recv iter arms (Phase B.6)
+        "(2 ** 100).times { }",
+        "(2 ** 80).upto(2 ** 100) { }",
+        "(2 ** 100).downto(0) { }",
+        // Int-recv iter arms with very large bounds
+        "0.upto(1_000_000_000_000) { }",
+        "1_000_000_000_000.downto(0) { }",
+        "1_000_000.times { sleep_loop = 1 }",
+    ] {
+        let mut rt = Runtime::with_config(Config {
+            fuel: Some(10_000),
+            ..Default::default()
+        });
+        let err = rt.eval(script, "iter_fuel.rb").unwrap_err();
+        assert!(
+            matches!(err.err, RubyError::ResourceExhausted { .. }),
+            "expected ResourceExhausted for {:?}, got {:?}", script, err.err,
+        );
+    }
+}

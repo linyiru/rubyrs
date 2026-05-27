@@ -1045,10 +1045,25 @@ impl Vm {
             // BEFORE the `?` on step_result so Trap propagation also
             // unpins cleanly).
             //
-            // Wall-clock cap is the natural DoS protection for these
-            // (a literal `(2**100).times` would run essentially
-            // forever, exactly as in CRuby; the host's deadline trips
-            // long before any other bound).
+            // DoS protection for unbounded counters (a literal
+            // `(2**100).times` would run essentially forever, exactly
+            // as in CRuby) comes from the two existing per-`eval`
+            // caps, neither of which needs special-casing here:
+            //   - `Config::fuel` — decremented per dispatched op
+            //     inside `step_block`'s invoke_block path. Every
+            //     iteration calls the block, which runs at least one
+            //     op (its own return), so fuel ticks every iteration
+            //     regardless of how trivial the body is. Trips with
+            //     `ResourceExhausted: "out of fuel"`.
+            //   - `Config::deadline` — wall-clock cap, checked every
+            //     1024 ops by `step.rs`. Trips with
+            //     `ResourceExhausted: "wall-clock deadline exceeded"`.
+            // A host that configures NEITHER cap accepts unbounded
+            // CPU consumption as a documented trade-off (consistent
+            // with the rest of the runtime's "explicit opt-in" cap
+            // model). Pinned by
+            // `integer_iter_loops_trap_under_fuel_cap` in
+            // `tests/embed/resource_caps.rs`.
             //
             // Lives BELOW the Int×Int arms above so pure-Int cases
             // keep using the optimized i64 fast path.
