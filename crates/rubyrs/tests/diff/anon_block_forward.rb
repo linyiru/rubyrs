@@ -52,7 +52,20 @@ def combine(a, b, &blk)
 end
 puts with_args(3, 4) { |s| "sum=#{s}" }       # sum=7
 
-# --- (5) Forwarding through yield-style consumer ---
+# --- (5) Method#parameters / arity introspection on the sentinel ---
+# CRuby reports the anonymous block as `[[:block, :&]]` — the
+# literal `:&` Symbol. Our sentinel implementation passes
+# through unchanged, giving byte-for-byte parity.
+class Intro
+  def named(&blk); end
+  def anon(&); end
+end
+puts Intro.instance_method(:named).parameters.inspect  # [[:block, :blk]]
+puts Intro.instance_method(:anon).parameters.inspect   # [[:block, :&]]
+puts Intro.instance_method(:named).arity               # 0
+puts Intro.instance_method(:anon).arity                # 0
+
+# --- (6) Forwarding through yield-style consumer ---
 def yielder
   yield 10
 end

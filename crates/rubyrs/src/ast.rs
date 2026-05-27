@@ -1469,11 +1469,18 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 // no expression on the BlockArgumentNode. Read the
                 // sentinel local `&` populated by the enclosing
                 // `def foo(&)` parameter and forward it as the
-                // block arg. If the enclosing def DIDN'T have `(&)`,
-                // the LVarRead resolves nothing and runtime raises
-                // — CRuby raises a syntax error at parse time
-                // ("no anonymous block parameter") which we don't
-                // surface here, documented gap.
+                // block arg.
+                //
+                // Divergence: if the enclosing def DIDN'T have
+                // `(&)`, CRuby raises a parse-time SyntaxError
+                // ("no anonymous block parameter"). rubyrs auto-
+                // creates the local slot on read (resolving to nil),
+                // so `inner(&)` degenerates to `inner(&nil)` — i.e.
+                // the call proceeds without a block. The callee
+                // either no-ops if it doesn't use the block, or
+                // raises NoMethodError on `nil.call` if it does.
+                // Documented in SUBSET.md; same observable failure,
+                // different diagnostic surface.
                 if ba.expression().is_none() {
                     let block_arg = sp(node, Expr::LVarRead("&".to_string()));
                     return sp(node, Expr::CallWithBlockArg {
@@ -1996,15 +2003,16 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         if let Some(p) = n.parameters() {
             if let Some(b) = p.block() {
                 // `def foo(&blk)`: capture the caller's block into
-                // the named slot. Anonymous form `def foo(&)` would
-                // have `b.name() == None`; CRuby uses it for
-                // forward-the-block-only, which we don't model yet
-                // — treat as no-name UNLESS the parameter list also
-                // had `&` (anonymous block forwarding, Ruby 3.1+).
-                // Bind anonymous form to a reserved sentinel name
-                // `&` (invalid in user identifiers) so the matching
-                // `inner(&)` call site at this method level can
-                // read it via LVarRead. Prism returns
+                // the named slot. Anonymous form `def foo(&)` (Ruby
+                // 3.1+ block forwarding) has `b.name() == None`;
+                // bind it to a reserved sentinel name `&` (invalid
+                // as a user identifier) so the matching `inner(&)`
+                // call site at this method level can read it via
+                // LVarRead. CRuby surfaces the same anonymous block
+                // as the Symbol `:&` in Method#parameters
+                // (`[[:block, :&]]`), so the sentinel passes through
+                // introspection unchanged — byte-for-byte parity
+                // without any unwrap. Prism returns
                 // `BlockParameterNode` directly from `p.block()`
                 // (it's an alternation node, not a generic Node);
                 // no `as_*_node` cast needed.
