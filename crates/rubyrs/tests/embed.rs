@@ -2428,6 +2428,350 @@ fn digits_int_path_error_semantics_match_bignum_profile() {
     }
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_radix_bigint_traps_via_pre_alloc_cap() {
+    // `'%b' % (2 ** N)` allocates ~N bytes during
+    // `to_str_radix`. The post-format cap check in `Kernel#sprintf`
+    // / `String#%` only sees the already-allocated result string
+    // and can't unwind a host OOM. Pre-alloc cap in
+    // `format_radix_any` must trap based on `bits()` BEFORE the
+    // alloc runs.
+    //
+    // Set a 64 KB cap large enough for `2 ** 100_000` to exist
+    // as a BigInt (~12.5 KB magnitude) but small enough that
+    // its base-2 sprintf form (~100 KB) trips. Pin the trap.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "'%b' % (2 ** 100_000)",
+        "sprintf_pre_alloc_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_decimal_bigint_traps_via_pre_alloc_cap() {
+    // Companion to `sprintf_radix_bigint_traps_via_pre_alloc_cap`:
+    // `'%d' % big` used to call `to_string()` directly with no
+    // pre-allocation cap, leaving the most common integer
+    // format-spec exposed to the host-OOM scenario the base-N
+    // pre-alloc helper defends against.
+    let cfg = rubyrs::Config { max_value_bytes: Some(64 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    // `(2 ** 1_000_000)` is ~301_030 decimal digits — well above
+    // the 64 KB cap, well below any reasonable host RAM ceiling
+    // (~120 KB of BigInt magnitude). Pre-alloc check must trap
+    // before `to_string()` materialises the 300 KB decimal string.
+    let err = rt.eval(
+        "'%d' % (2 ** 1_000_000)",
+        "sprintf_decimal_pre_alloc_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_cap_does_not_false_trap_decimal_at_exact_length() {
+    // Regression for cycle 10: earlier the cap estimator used
+    // integer `floor(log2(radix))` as the per-digit bit yield,
+    // which over-estimated digit count by ~10% for radix 10.
+    // `(10 ** 100).to_s` is exactly 101 chars ("1" + 100 "0"s);
+    // pre-fix estimate was ceil(333 bits / 3) = 111, so a cap
+    // of 105 would have false-trapped despite the rendered
+    // value fitting. Post-fix estimate is 101, matching reality.
+    let cfg = rubyrs::Config { max_value_bytes: Some(105), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (10 ** 100).to_s",
+        "to_s_cap_tight.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let expected = format!("1{}", "0".repeat(100));
+    assert_eq!(out.trim(), expected);
+}
+
+#[test]
+fn sprintf_alt_form_suppresses_prefix_for_zero_value() {
+    // CRuby suppresses the alt-form prefix when the value is
+    // zero: `'%#x' % 0` → `"0"`, not `"0x0"`. Same for
+    // `'%#o' % 0` (`"0"`, not `"00"`), `'%#b' % 0` (`"0"`,
+    // not `"0b0"`). All literals here take the Int(0) path;
+    // non-zero alt rendering pinned as the negative half of
+    // the contract.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%#o' % 0\n\
+         puts '%#x' % 0\n\
+         puts '%#X' % 0\n\
+         puts '%#b' % 0\n\
+         puts '%#B' % 0\n\
+         puts '%#o' % 7\n\
+         puts '%#x' % 255",
+        "sprintf_alt_zero.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Zero values: no prefix.
+    assert_eq!(lines[0], "0");
+    assert_eq!(lines[1], "0");
+    assert_eq!(lines[2], "0");
+    assert_eq!(lines[3], "0");
+    assert_eq!(lines[4], "0");
+    // Non-zero: prefix present.
+    assert_eq!(lines[5], "07");
+    assert_eq!(lines[6], "0xff");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_alt_form_zero_via_bignum_arithmetic_still_suppressed() {
+    // Regression guard for the bignum profile: expressions
+    // that route through the BigInt arithmetic path but reduce
+    // to zero (`(2 ** 100) % (2 ** 100)`) demote to Int(0) per
+    // the canonical-BigInt invariant, so the formatter sees
+    // Int(0) and the alt prefix must still be suppressed.
+    // The BigInt(0) formatting arm itself isn't reachable from
+    // user code (demote-on-fit), but the `b.sign() != NoSign`
+    // guard in `format_radix_any` defends against hand-built
+    // BigInt(0) values from FFI / preamble paths; that guard
+    // is exercised structurally rather than dynamically here.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%#x' % ((2 ** 100) % (2 ** 100))\n\
+         puts '%#o' % ((2 ** 100) % (2 ** 100))\n\
+         puts '%#b' % ((2 ** 100) % (2 ** 100))",
+        "sprintf_alt_bignum_arith_zero.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    assert_eq!(out.trim(), "0\n0\n0");
+}
+
+#[test]
+fn sprintf_alt_form_with_zero_pad_keeps_prefix_before_zeros() {
+    // Regression guard: pre-fix `'%#08x' % 255` produced
+    // `00000xff` (zero-pad inserted before the `0x` prefix);
+    // CRuby produces `0x0000ff` (zeros go between prefix and
+    // digits). Same for `%#08X`, `%#08b`, `%#08B`. Octal's `0`
+    // alt prefix happens to behave identically under
+    // unconditional zero-padding (`'%#08o' % 7` → `00000007`
+    // either way), so no special handling there.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%#08x' % 255\n\
+         puts '%#08X' % 255\n\
+         puts '%#08b' % 7\n\
+         puts '%#08B' % 7\n\
+         puts '%#08o' % 7\n\
+         puts '%#08x' % (2 ** 60)",
+        "sprintf_alt_zero_pad.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "0x0000ff");
+    assert_eq!(lines[1], "0X0000FF");
+    assert_eq!(lines[2], "0b000111");
+    assert_eq!(lines[3], "0B000111");
+    assert_eq!(lines[4], "00000007");
+    assert_eq!(lines[5], "0x1000000000000000"); // body > width, no pad
+}
+
+#[test]
+fn sprintf_radix_int_min_does_not_panic() {
+    // Regression guard: `format_radix_int` used to compute the
+    // magnitude of a negative i64 via `(-n) as u64`, which panics
+    // in debug builds for `n == i64::MIN` (-i64::MIN overflows
+    // i64). `'%x' % i64::MIN` is a legitimate Ruby call. Switch
+    // to `unsigned_abs()` so the path stays panic-free; pin all
+    // four base specifiers at the i64::MIN cell.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "imin = -9_223_372_036_854_775_808\n\
+         puts '%x' % imin\n\
+         puts '%X' % imin\n\
+         puts '%o' % imin\n\
+         puts '%b' % imin",
+        "sprintf_imin.rb",
+    ).expect("i64::MIN sprintf must not panic");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Documented divergence: we render `-<unsigned magnitude>`,
+    // CRuby renders the `..f`-prefixed two's-complement form.
+    assert_eq!(lines[0], "-8000000000000000");
+    assert_eq!(lines[1], "-8000000000000000");
+    assert_eq!(lines[2], "-1000000000000000000000");
+    assert_eq!(lines[3], "-1000000000000000000000000000000000000000000000000000000000000000");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_negative_uses_minus_magnitude_form() {
+    // Two distinct CRuby behaviours for negative integers in
+    // non-decimal bases:
+    //   - `Integer#to_s(radix)` returns `-<magnitude>`:
+    //     `(-256).to_s(16) == "-100"`. We match this exactly.
+    //   - `sprintf '%x' % -256` returns `"..f00"` (CRuby's
+    //     two's-complement infinite-ones notation). We diverge
+    //     here and render `-<magnitude>` instead — documented
+    //     in the sibling
+    //     `sprintf_bigint_radix_negative_uses_minus_magnitude_divergence`
+    //     test and in `format_radix_int`'s source comment.
+    //
+    // This test pins the `to_s` half — Int and BigInt receivers
+    // both produce `-<magnitude>` for negative inputs, matching
+    // CRuby byte-for-byte.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (-256).to_s(16)\n\
+         puts (0 - (2 ** 100)).to_s(16)\n\
+         puts (0 - (2 ** 64)).to_s(2).start_with?(\"-1\")",
+        "bigint_to_s_neg.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-100");
+    // 2^100 in hex = 0x10000000000000000000000000 (1 followed by 25 zeros)
+    assert!(lines[1].starts_with("-1") && lines[1].len() == 27,
+        "expected -10000... (27 chars), got {:?}", lines[1]);
+    assert_eq!(lines[2], "true");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn sprintf_bigint_radix_negative_uses_minus_magnitude_divergence() {
+    // Documented divergence shared with the Int sprintf path:
+    // CRuby renders `'%x' % -256` as `..f00` (two's-complement
+    // infinite-ones notation), we render `-100`. Same shape for
+    // negative BigInt. Pin our behaviour so a future "fix" that
+    // adds CRuby compat is an opt-in upgrade rather than a silent
+    // regression.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts '%x' % (0 - 256)\n\
+         puts '%x' % (0 - (2 ** 100))\n\
+         puts '%b' % (0 - (2 ** 16))",
+        "sprintf_bigint_neg.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "-100");
+    assert!(lines[1].starts_with("-1") && lines[1].len() == 27);
+    assert!(lines[2].starts_with("-1"));
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_to_s_radix_traps_under_max_value_bytes() {
+    // Like the 0-arg to_s arm, the radix form's string output must
+    // be capped against `max_value_bytes` to prevent a hostile
+    // script from DoSing the host via `(2 ** 1_000_000).to_s(2)`.
+    // `(2 ** 10_000).to_s(2)` is exactly 10_001 chars; pin under
+    // a 4 KB cap so the trap fires.
+    let cfg = rubyrs::Config { max_value_bytes: Some(4 * 1024), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let err = rt.eval(
+        "(2 ** 10_000).to_s(2)",
+        "to_s_radix_cap.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, rubyrs::RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}", err.err,
+    );
+}
+
+#[test]
+fn integer_to_s_non_integer_radix_raises_typeerror_on_int_path() {
+    // Regression for cycle 13: the BigInt arm of `Integer#to_s(radix)`
+    // raised `TypeError` for non-Integer radix, but the Int arm only
+    // matched `Value::Int(radix)` and fell through to `NoMethodError`,
+    // diverging from CRuby and from the BigInt path. Pin parity on
+    // both sides — the unified `Integer#to_s` API should raise the
+    // same `TypeError` regardless of receiver size.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval("5.to_s(\"x\")", "int_to_s_typeerr.rb").unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { class_name, message } => {
+            assert_eq!(class_name, "TypeError");
+            assert_eq!(message, "no implicit conversion of String into Integer");
+        }
+        other => panic!("expected Uncaught TypeError, got {:?}", other),
+    }
+    // `Float` should error the same way (matches BigInt-path coercion).
+    let err = rt.eval("5.to_s(1.0)", "int_to_s_typeerr_float.rb").unwrap_err();
+    assert!(matches!(
+        err.err,
+        rubyrs::RubyError::Uncaught { ref class_name, .. } if class_name == "TypeError"
+    ));
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_to_s_bigint_radix_raises_rangeerror_not_self_referential_typeerror() {
+    // Pre-fix the catch-all `(Value::Int(_), "to_s", [other])` arm
+    // intercepted `5.to_s(2**100)` (BigInt radix) and emitted
+    // TypeError "no implicit conversion of Integer into Integer"
+    // — `type_name_for_coerce` maps BigInt → "Integer" so the
+    // wording was self-referential nonsense. CRuby raises
+    // `RangeError: bignum too big to convert into 'long'` for this
+    // shape (any BigInt is by canonical-BigInt invariant outside
+    // i64, hence outside the 2..=36 radix range, but it IS an
+    // Integer so TypeError is the wrong error class).
+    let mut rt = rubyrs::Runtime::new();
+    for script in ["5.to_s(2 ** 100)", "(2 ** 100).to_s(2 ** 100)"] {
+        let err = rt.eval(script, "to_s_bigint_radix.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message } => {
+                assert_eq!(class_name, "RangeError", "for {:?}", script);
+                assert_eq!(
+                    message, "bignum too big to convert into `long'",
+                    "for {:?}", script,
+                );
+            }
+            other => panic!("expected Uncaught RangeError for {:?}, got {:?}", script, other),
+        }
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn integer_to_s_non_integer_radix_typeerror_message_matches_bigint_path() {
+    // Cross-check the parity guard above against the BigInt path
+    // so future drift between the two arms is caught immediately.
+    let mut rt = rubyrs::Runtime::new();
+    let err = rt.eval(
+        "(2 ** 100).to_s(\"x\")",
+        "bigint_to_s_typeerr.rb",
+    ).unwrap_err();
+    match err.err {
+        rubyrs::RubyError::Uncaught { class_name, message } => {
+            assert_eq!(class_name, "TypeError");
+            assert_eq!(message, "no implicit conversion of String into Integer");
+        }
+        other => panic!("expected Uncaught TypeError, got {:?}", other),
+    }
+}
+
 #[test]
 fn digits_negative_recv_takes_precedence_over_arity_and_base_errors() {
     // CRuby precedence: a negative `Integer#digits` receiver

@@ -961,6 +961,60 @@ impl Vm {
                 ),
             }));
         }
+        // `Integer#to_s(radix)` — 1-arg form for BigInt receivers.
+        // Symmetric with the Int side (numeric_call's `to_s(radix)`
+        // arm). Validates radix ∈ 2..=36, then defers to
+        // num_bigint's `to_str_radix` (which handles negative sign
+        // and digits >= 10 as lowercase).
+        //
+        // PRE-allocation cap check: `to_str_radix(2)` on a 1M-bit
+        // BigInt allocates ~1 MB before we get a chance to inspect
+        // its length. Estimate the rendered length first via
+        // `bits()` and trap before the alloc. See
+        // [`Vm::check_bigint_to_s_cap`] for the bound — it
+        // delegates to [`bignum_digits_upper_bound`], which uses a
+        // scaled-integer `floor(log2(radix) * 64)` lower bound on
+        // `log2(base)` (power-of-two exact path + f64 fallback for
+        // radices 3/5/6/7/…/36) plus a 1-byte sign accounting.
+        // Mirrored by the 0-arg arm so both paths share the
+        // protection.
+        if name == "to_s" && args.len() == 1
+            && let Value::BigInt(id) = recv
+        {
+            let radix: u32 = match &args[0] {
+                Value::Int(r) => {
+                    if !(2..=36).contains(r) {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("invalid radix {}", r),
+                        }));
+                    }
+                    *r as u32
+                }
+                // Canonical-BigInt invariant: any Value::BigInt is
+                // out of i64 range, so it can never be in 2..=36. But
+                // BigInt IS an Integer — matching it via `other`
+                // produces TypeError "no implicit conversion of
+                // Integer into Integer" (self-referential nonsense).
+                // CRuby raises `RangeError: bignum too big to convert
+                // into 'long'` for `big.to_s(2**100)`; match that.
+                Value::BigInt(_) => {
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: "bignum too big to convert into `long'".to_string(),
+                    }));
+                }
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            crate::vm::numeric::type_name_for_coerce(other),
+                        ),
+                    }));
+                }
+            };
+            self.check_bigint_to_s_cap(*id, radix)?;
+            let s = self.heap.bigint(*id).to_str_radix(radix);
+            return Ok(Some(Value::new_str(s)));
+        }
         let recv_is_bigint = matches!(recv, Value::BigInt(_));
         let arg_is_bigint = args.iter().any(|a| matches!(a, Value::BigInt(_)));
         if !recv_is_bigint && !arg_is_bigint {
@@ -979,17 +1033,17 @@ impl Vm {
                         // `n = 2 ** 1_000_000; n.to_s`), so the
                         // String materialised here must obey the same
                         // `Config::max_value_bytes` cap that other
-                        // primitive_call arms enforce. Without this
-                        // check a script could DoS the host by
-                        // converting a huge BigInt to string.
+                        // primitive_call arms enforce. Pre-allocation
+                        // estimate via `bits()` traps BEFORE the
+                        // `to_string()` call — otherwise the host
+                        // could OOM on a 1 MB string before we get a
+                        // chance to check `s.len()`. Shared helper
+                        // with the 1-arg `to_s(radix)` arm above.
+                        // `check_bigint_to_s_cap` takes `&self`, so
+                        // the heap borrow on `b` can stay live across
+                        // the call without an explicit drop dance.
+                        self.check_bigint_to_s_cap(*id, 10)?;
                         let s = b.to_string();
-                        if let Some(max) = self.max_value_bytes
-                            && s.len() > max
-                        {
-                            return Err(self.trap(RubyError::ResourceExhausted {
-                                msg: format!("value size {} bytes > cap {}", s.len(), max),
-                            }));
-                        }
                         return Ok(Some(Value::new_str(s)));
                     }
                     // Pure read-only predicates — fit cleanly in
@@ -1067,6 +1121,87 @@ impl Vm {
         }
         Ok(None)
     }
+
+    /// Pre-allocation cap check for `BigInt#to_s` / `to_s(radix)`.
+    /// `BigInt::to_str_radix(2)` on a 10M-bit input allocates a
+    /// 10 MB+ string in one go — without this check the host can
+    /// OOM (or hit the allocator's panic-on-fail path) before we
+    /// get a chance to inspect `s.len()`. Estimate the rendered
+    /// length from the BigInt's bit count + per-digit bit yield:
+    ///   `ceil(bits * SCALE / log2_per_digit_scaled) + sign_byte`
+    /// where `log2_per_digit_scaled = floor(log2(radix) * SCALE)`
+    /// is a tight integer lower bound on `log2(base)` (see
+    /// [`bignum_log2_per_digit_scaled`]). Earlier revisions used
+    /// the integer `floor(log2(radix))` which over-estimated the
+    /// digit count by ~10% for radix 10 and ~38% for radix 3 —
+    /// enough to false-trap rendered values that would actually
+    /// fit under a tightly-configured `max_value_bytes`.
+    /// `sign_byte = 1` iff the BigInt is negative, else 0.
+    /// `max_value_bytes` falls back to the same 1 MB safety
+    /// ceiling that `try_bigint_pow` uses when no host cap is
+    /// configured.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn check_bigint_to_s_cap(&self, id: crate::value::ObjId, radix: u32) -> Result<(), crate::error::Trap> {
+        use num_bigint::Sign;
+        let b = self.heap.bigint(id);
+        let bits = b.bits();
+        let sign_byte: u64 = if b.sign() == Sign::Minus { 1 } else { 0 };
+        let digits_est = bignum_digits_upper_bound(bits, radix);
+        let est: u64 = digits_est.saturating_add(sign_byte);
+        let cap = self.max_value_bytes.unwrap_or(1 << 20) as u64;
+        if est > cap {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!("value size ~{} bytes > cap {}", est, cap),
+            }));
+        }
+        Ok(())
+    }
+}
+
+/// Returns `floor(log2(radix) * SCALE)` as an integer lower
+/// bound on `log2(radix)`. Shared by the `to_s(radix)` cap in
+/// [`Vm::check_bigint_to_s_cap`] and the `'%b/%o/%x' % bignum`
+/// pre-allocation cap in [`super::sprintf::format_radix_any`].
+///
+/// `SCALE = 64` keeps the table-free f64 computation within
+/// f64's ~15.95 decimal-digit precision for the 2..=36 radix
+/// domain we care about (the largest value here is
+/// `floor(log2(36) * 64) = 330` which rounds exactly) while
+/// giving enough resolution that the resulting digit estimate
+/// is within +1 of the true value across the supported radix
+/// range. Power-of-two radices short-circuit to an exact
+/// integer multiply to sidestep f64 rounding entirely.
+#[cfg(feature = "bignum")]
+pub(crate) fn bignum_log2_per_digit_scaled(radix: u32) -> u64 {
+    const SCALE: u64 = 64;
+    if radix >= 2 && radix.is_power_of_two() {
+        return (radix.trailing_zeros() as u64) * SCALE;
+    }
+    let v = (radix as f64).log2() * SCALE as f64;
+    (v.floor() as u64).max(1)
+}
+
+/// Returns an upper bound on the number of characters
+/// `BigInt::to_str_radix(radix)` produces for a value with the
+/// given `bits()`. Clamps to ≥ 1 so that `BigInt(0)` (whose
+/// `bits()` is 0 but whose rendered form is `"0"`) costs at
+/// least one byte against `max_value_bytes` — callers compare
+/// `est > cap`, so `Some(0)` still traps even on the zero value
+/// (consistent with the pre-tightening behaviour). Uses `u128`
+/// intermediates to avoid overflow when `bits` approaches
+/// `u64::MAX / SCALE` (≈ 2^58 bits ≈ 32 PB).
+#[cfg(feature = "bignum")]
+pub(crate) fn bignum_digits_upper_bound(bits: u64, radix: u32) -> u64 {
+    const SCALE: u128 = 64;
+    let log2_scaled = bignum_log2_per_digit_scaled(radix) as u128;
+    let scaled_bits = (bits as u128).saturating_mul(SCALE);
+    let digits_est = (scaled_bits + log2_scaled - 1) / log2_scaled;
+    let digits_est_u64 = if digits_est > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        digits_est as u64
+    };
+    digits_est_u64.max(1)
 }
 
 /// BigInt arithmetic surface — shared by the i64-overflow promotion

@@ -21,6 +21,7 @@ pub(crate) fn ruby_sprintf(
     args: &[Value],
     heap: &Heap,
     interner: &Interner,
+    max_value_bytes: Option<usize>,
 ) -> Result<String, RubyError> {
     let mut out = String::new();
     let mut idx: usize = 0;
@@ -79,12 +80,38 @@ pub(crate) fn ruby_sprintf(
             'd' | 'i' => {
                 // BigInt fast path: render the decimal directly via
                 // num_bigint's Display so `'%d' % (2**100)` works.
-                // Other base specifiers (%x/X/o/b/B) remain Int-only
-                // for Phase A; arbitrary-precision base conversion is
-                // a Phase B follow-up.
+                // Base specifiers (%x/X/o/b/B) now route through
+                // `format_radix_any` which has its own BigInt arm
+                // — see those format-spec match arms below.
                 #[cfg(feature = "bignum")]
                 let big_decimal: Option<String> = match arg {
-                    Value::BigInt(id) => Some(heap.bigint(*id).to_string()),
+                    Value::BigInt(id) => {
+                        // Same pre-allocation cap rationale as
+                        // `format_radix_any`: `to_string()` on a
+                        // 10M-bit BigInt allocates ~3 MB before the
+                        // post-format `out.len() > max` check in
+                        // kernel.rs / string.rs can fire — host can
+                        // OOM first. Estimate the decimal length from
+                        // `bits()` and trap BEFORE the alloc via the
+                        // same shared helper that protects the base-N
+                        // arms. `sign_byte` accounts for the `-` /
+                        // `+` / ` ` byte the formatting below may
+                        // prepend (radix=10 has no `0x`/`0b` prefix).
+                        let b = heap.bigint(*id);
+                        let digits_est = super::bignum::bignum_digits_upper_bound(b.bits(), 10);
+                        let sign_byte: u64 = if b.sign() == num_bigint::Sign::Minus
+                            || flag_plus
+                            || flag_space
+                        { 1 } else { 0 };
+                        let est = digits_est.saturating_add(sign_byte);
+                        let cap = max_value_bytes.unwrap_or(1 << 20) as u64;
+                        if est > cap {
+                            return Err(RubyError::ResourceExhausted {
+                                msg: format!("sprintf value size ~{} bytes > cap {}", est, cap),
+                            });
+                        }
+                        Some(b.to_string())
+                    },
                     _ => None,
                 };
                 #[cfg(not(feature = "bignum"))]
@@ -132,11 +159,21 @@ pub(crate) fn ruby_sprintf(
                 }
                 body
             }
-            'x' => format_radix_int(coerce_int(arg)?, 16, false, flag_hash),
-            'X' => format_radix_int(coerce_int(arg)?, 16, true, flag_hash),
-            'o' => format_radix_int(coerce_int(arg)?, 8, false, flag_hash),
-            'b' => format_radix_int(coerce_int(arg)?, 2, false, flag_hash),
-            'B' => format_radix_int(coerce_int(arg)?, 2, true, flag_hash),
+            // Base-N specifiers route through `format_radix_any`,
+            // which dispatches on arg shape: BigInt args render
+            // via `num_bigint::BigInt::to_str_radix` on the
+            // magnitude; everything else coerces to i64 and
+            // defers to `format_radix_int`. Both branches render
+            // negative magnitudes as `-<digits>` rather than
+            // CRuby's `..f`-prefixed two's-complement form —
+            // documented divergence (see `format_radix_int`
+            // comment). For BigInt, the divergence applies the
+            // same way.
+            'x' => format_radix_any(arg, heap, 16, false, flag_hash, max_value_bytes)?,
+            'X' => format_radix_any(arg, heap, 16, true, flag_hash, max_value_bytes)?,
+            'o' => format_radix_any(arg, heap, 8, false, flag_hash, max_value_bytes)?,
+            'b' => format_radix_any(arg, heap, 2, false, flag_hash, max_value_bytes)?,
+            'B' => format_radix_any(arg, heap, 2, true, flag_hash, max_value_bytes)?,
             'f' => {
                 let f = coerce_float(arg)?;
                 let prec = precision.unwrap_or(6);
@@ -188,14 +225,32 @@ pub(crate) fn ruby_sprintf(
                 if flag_minus {
                     body.push_str(&pad);
                 } else if pad_char == '0' {
-                    // Zero-pad goes inside the sign for numbers.
-                    if let Some(first) = body.chars().next() {
-                        if matches!(first, '-' | '+' | ' ') {
-                            let rest: String = body.chars().skip(1).collect();
-                            body = format!("{first}{pad}{rest}");
-                        } else {
-                            body = format!("{pad}{body}");
-                        }
+                    // Zero-pad goes inside (a) the sign and
+                    // (b) the alt-form prefix (`0x`/`0X`/`0b`/`0B`)
+                    // for numbers. CRuby's `'%#08x' % 255` is
+                    // `0x0000ff`, not `00000xff`. Octal's `0`
+                    // alt prefix is itself a digit and CRuby's
+                    // output happens to match unconditional
+                    // zero-padding (both produce `00000007` for
+                    // `'%#08o' % 7`), so we skip prefix detection
+                    // for octal.
+                    let bytes = body.as_bytes();
+                    let sign_len = if matches!(bytes.first(), Some(b'-' | b'+' | b' ')) { 1 } else { 0 };
+                    let prefix_len = if bytes.len() >= sign_len + 2
+                        && bytes[sign_len] == b'0'
+                        && matches!(bytes[sign_len + 1], b'x' | b'X' | b'b' | b'B')
+                    {
+                        2
+                    } else {
+                        0
+                    };
+                    let head_len = sign_len + prefix_len;
+                    if head_len > 0 {
+                        let head = &body[..head_len];
+                        let rest = &body[head_len..];
+                        body = format!("{head}{pad}{rest}");
+                    } else {
+                        body = format!("{pad}{body}");
                     }
                 } else {
                     body = format!("{pad}{body}");
@@ -234,7 +289,115 @@ fn coerce_float(v: &Value) -> Result<f64, RubyError> {
     }
 }
 
+/// Render `arg` in `radix` (2 / 8 / 16). Dispatches:
+/// - `Value::BigInt` → num_bigint's `to_str_radix(radix)` on
+///   the magnitude, prefixed with sign and (if `alt`) the
+///   conventional `0x` / `0X` / `0` / `0b` / `0B` prefix.
+/// - All other shapes → coerce to i64 (TypeError on incoerciable
+///   types) and defer to `format_radix_int`.
+///
+/// Negative values render as `-<digits>` rather than CRuby's
+/// `..f`-prefixed two's-complement form for BOTH Int and BigInt —
+/// documented divergence shared with `format_radix_int`.
+#[cfg(feature = "bignum")]
+fn format_radix_any(
+    arg: &Value,
+    heap: &Heap,
+    radix: u32,
+    upper: bool,
+    alt: bool,
+    max_value_bytes: Option<usize>,
+) -> Result<String, RubyError> {
+    use num_bigint::Sign;
+    if let Value::BigInt(id) = arg {
+        let b = heap.bigint(*id);
+        // CRuby suppresses the alt-form prefix for zero values:
+        // `'%#x' % 0`, `'%#o' % 0`, `'%#b' % 0` all render as
+        // just `"0"`, not `"0x0"` / `"00"` / `"0b0"`. Match that
+        // for both BigInt(0) and (downstream via the i64 path)
+        // Int(0).
+        let alt = alt && b.sign() != Sign::NoSign;
+        // Pre-allocation cap check: `to_str_radix(2)` on a 10M-bit
+        // BigInt allocates a ~10 MB string in one go. Estimate
+        // the rendered length from the BigInt's bit count and
+        // trap BEFORE the alloc — `String#%` / `Kernel#sprintf`'s
+        // post-format cap check only sees the already-allocated
+        // result string and can't unwind a host OOM.
+        //
+        // Bound: `digits_upper_bound(bits, radix) + sign_byte + prefix`
+        // via the shared [`super::bignum::bignum_digits_upper_bound`]
+        // helper, which uses `floor(log2(radix) * 64)` (power-of-two
+        // exact path + f64 fallback) as a tight integer lower
+        // bound on `log2(base)` — within ±1 char of the true digit
+        // count across radix 2..=36. Earlier revisions used the
+        // integer `floor(log2(radix))` which over-estimated by
+        // ~10% for radix 10 — enough to false-trap rendered values
+        // that would actually fit under a tight cap.
+        // `sign_byte` is 1 iff negative, `prefix` is 0 / 1 (octal
+        // `#`) / 2 (`0x`/`0b` `#`).
+        let digits_est = super::bignum::bignum_digits_upper_bound(b.bits(), radix);
+        let sign_byte: u64 = if b.sign() == Sign::Minus { 1 } else { 0 };
+        let prefix_len: u64 = if !alt { 0 } else {
+            match radix { 16 | 2 => 2, 8 => 1, _ => 0 }
+        };
+        let est = digits_est.saturating_add(sign_byte).saturating_add(prefix_len);
+        let cap = max_value_bytes.unwrap_or(1 << 20) as u64;
+        if est > cap {
+            return Err(RubyError::ResourceExhausted {
+                msg: format!("sprintf value size ~{} bytes > cap {}", est, cap),
+            });
+        }
+        let prefix: &str = if !alt { "" } else {
+            match radix {
+                16 => if upper { "0X" } else { "0x" },
+                8 => "0",
+                2 => if upper { "0B" } else { "0b" },
+                _ => "",
+            }
+        };
+        // `to_str_radix` on the magnitude (positive BigUint) gives
+        // lowercase digits 10..35 as 'a'..'z'. Uppercase variant
+        // uppercases in-place via `make_ascii_uppercase` rather
+        // than `to_uppercase()` — the latter allocates a second
+        // full-size String, doubling peak memory for large
+        // BigInt formats (a `%X` of a near-cap value would push
+        // us past the cap during formatting). All `to_str_radix`
+        // output is ASCII, so byte-level uppercase is safe.
+        //
+        // Sign + prefix are prepended in-place via `String::insert*`
+        // for the same peak-memory reason: `format!("{sign}{prefix}{mag}")`
+        // would allocate a second ~`est`-byte String while `mag`
+        // is still live, doubling the resident footprint past the
+        // cap we just validated. Insertion at offset 0 IS O(n)
+        // (memmove of `mag`), but stays within the single
+        // ~`est`-byte allocation.
+        let mut mag = b.magnitude().to_str_radix(radix);
+        if upper { mag.make_ascii_uppercase(); }
+        if !prefix.is_empty() { mag.insert_str(0, prefix); }
+        if b.sign() == Sign::Minus { mag.insert(0, '-'); }
+        return Ok(mag);
+    }
+    Ok(format_radix_int(coerce_int(arg)?, radix, upper, alt))
+}
+
+#[cfg(not(feature = "bignum"))]
+fn format_radix_any(
+    arg: &Value,
+    _heap: &Heap,
+    radix: u32,
+    upper: bool,
+    alt: bool,
+    _max_value_bytes: Option<usize>,
+) -> Result<String, RubyError> {
+    Ok(format_radix_int(coerce_int(arg)?, radix, upper, alt))
+}
+
 fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {
+    // CRuby suppresses the alt-form prefix for `n == 0` (`'%#x' % 0`
+    // → `"0"`, not `"0x0"`). Apply once before the prefix lookup
+    // so both the negative and non-negative arms below see the
+    // adjusted flag.
+    let alt = alt && n != 0;
     let prefix: &str = if !alt { "" } else {
         match radix { 16 => if upper { "0X" } else { "0x" }, 8 => "0", 2 => if upper { "0B" } else { "0b" }, _ => "" }
     };
@@ -245,22 +408,25 @@ fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {
         // We render just `-<unsigned digits>` which is close
         // enough for the common test cases and avoids dragging
         // in BigNum-style "..f" notation. Documented divergence.
-        let mag = match radix {
-            16 => format!("{:x}", (-n) as u64),
-            8 => format!("{:o}", (-n) as u64),
-            2 => format!("{:b}", (-n) as u64),
+        // `unsigned_abs()` (vs `-n`) survives `i64::MIN`, whose
+        // negation would overflow i64 and panic in debug builds.
+        let abs_n = n.unsigned_abs();
+        let mut mag = match radix {
+            16 => format!("{:x}", abs_n),
+            8 => format!("{:o}", abs_n),
+            2 => format!("{:b}", abs_n),
             _ => unreachable!(),
         };
-        let mag = if upper { mag.to_uppercase() } else { mag };
+        if upper { mag.make_ascii_uppercase(); }
         format!("-{prefix}{mag}")
     } else {
-        let mag = match radix {
+        let mut mag = match radix {
             16 => format!("{:x}", n as u64),
             8 => format!("{:o}", n as u64),
             2 => format!("{:b}", n as u64),
             _ => unreachable!(),
         };
-        let mag = if upper { mag.to_uppercase() } else { mag };
+        if upper { mag.make_ascii_uppercase(); }
         format!("{prefix}{mag}")
     }
 }
