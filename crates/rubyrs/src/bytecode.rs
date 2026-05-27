@@ -240,6 +240,26 @@ pub(crate) enum Op {
     /// before the class's own `singleton_methods` at each
     /// superclass level.
     SingletonChainPrepend,
+    /// Push a new `Visibility::Public` entry onto
+    /// `class_visibility_stack`. Emitted by the `class << self`
+    /// body translator at body start so bare `private` / `public`
+    /// / `protected` modifiers inside the singleton body don't
+    /// leak their visibility mutation back into the enclosing
+    /// class body's stack entry. CRuby's `class << self`
+    /// constitutes its own body with its own initial-Public
+    /// visibility scope; this opcode replicates the same
+    /// isolation by giving the singleton body its own stack
+    /// frame to mutate. PushClassVisibilityPublic must always
+    /// be paired with a matching `PopClassVisibility` at body
+    /// end so the stack stays balanced through error paths
+    /// (which we don't currently emit — class << self has no
+    /// rescue surface). PR #233 code-review #1.
+    PushClassVisibilityPublic,
+    /// Pop one entry from `class_visibility_stack`. Pair with
+    /// `PushClassVisibilityPublic` at the boundary of a
+    /// `class << self` body. Restores the enclosing class
+    /// body's visibility state.
+    PopClassVisibility,
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured
     /// locals into a Method, and installs it under `name` in the

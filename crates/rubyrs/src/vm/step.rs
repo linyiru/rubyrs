@@ -1485,6 +1485,28 @@ impl Vm {
                 }
                 self.stack.push(Value::Nil);
             }
+            Op::PushClassVisibilityPublic => {
+                // Open a `class << self` visibility scope —
+                // bare `private` / `public` / `protected` inside
+                // the singleton body mutate THIS top entry
+                // rather than the enclosing class body's,
+                // preventing leakage. Emitted at body start by
+                // the AST translator at the SingletonClassNode
+                // SelfExpr-receiver path. Paired with
+                // `PopClassVisibility` at body end. PR #233
+                // code-review #1.
+                self.class_visibility_stack.push(Visibility::Public);
+                self.stack.push(Value::Nil);
+            }
+            Op::PopClassVisibility => {
+                // Close a `class << self` visibility scope.
+                // Pops one entry — matches the
+                // `PushClassVisibilityPublic` at body start.
+                // Under-pop would underflow; balance is the
+                // translator's responsibility.
+                self.class_visibility_stack.pop();
+                self.stack.push(Value::Nil);
+            }
             Op::DefMethodBlock(name_id) => {
                 // Pop the BlockHandle the preceding `CreateBlock`
                 // pushed, then wrap it as a closure-method. We

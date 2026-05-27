@@ -63,3 +63,26 @@ puts "loaded=true"
 ## returned by direct call.
 puts "public_one=#{WithVisModifier.public_one}"
 puts "visible_again=#{WithVisModifier.visible_again}"
+
+## Visibility leakage guard (PR #233 code-review #2): a bare
+## `private` inside `class << self` body MUST NOT affect the
+## visibility of subsequent INSTANCE methods defined after the
+## `class << self ... end`. CRuby treats `class << self` as
+## its own body with its own initial-Public visibility scope;
+## rubyrs needed `PushClassVisibilityPublic` / `PopClassVisibility`
+## opcodes to replicate that isolation. The check: define a
+## class with `private` inside `class << self`, then add a
+## public instance method after the singleton body. The
+## instance method must be callable from outside.
+class LeakGuard
+  class << self
+    private
+    def hidden_singleton; end
+  end
+  def public_instance_method
+    "still-public"
+  end
+end
+
+puts "post-singleton-instance=#{LeakGuard.new.public_instance_method}"
+puts "respond-to-instance=#{LeakGuard.new.respond_to?(:public_instance_method)}"

@@ -338,6 +338,16 @@ pub(crate) enum Expr {
     /// install an after-freeze guard layer in front of the
     /// class's own singleton methods.
     SingletonChainPrepend(Box<SExpr>),
+    /// Push a new `Visibility::Public` entry onto the runtime
+    /// class_visibility_stack. Emitted by the `class << self`
+    /// body translator at body start so bare `private`/`public`/
+    /// `protected` mutations inside don't leak into the
+    /// enclosing class body. Pairs with `PopClassVisibility`.
+    PushClassVisibilityPublic,
+    /// Pop one entry from class_visibility_stack. Pair with
+    /// `PushClassVisibilityPublic` at the boundary of a
+    /// `class << self` body.
+    PopClassVisibility,
     ArrayLit(Vec<SExpr>),
     HashLit(Vec<(SExpr, SExpr)>),
     /// `begin..end` (exclusive=false) or `begin...end` (exclusive=true).
@@ -2352,10 +2362,17 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             Expr::SelfExpr | Expr::ConstRead(_)
         );
         let synth_local = format!("__cls_lt_lt_recv_{}", node_span(node).byte_offset);
-        let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len() + 1);
+        let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len() + 3);
         if needs_local {
             out.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
         }
+        // Open a fresh visibility scope for the singleton body so
+        // bare `private`/`public`/`protected` modifiers inside
+        // mutate THIS frame rather than leaking into the
+        // enclosing class body's. Pops back at body end. Matches
+        // CRuby's `class << self` body-as-own-scope semantics.
+        // PR #233 code-review #1.
+        out.push(sp(node, Expr::PushClassVisibilityPublic));
         // Closure helper: make a `def recv.name(params) body` SExpr
         // rewriting the receiver-less Def into a singleton-method
         // form. Reused for both real DefNodes in the body and for
@@ -2615,7 +2632,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             if recv_is_self
                 && let Some(call) = bn.as_call_node()
                 && call.receiver().is_none()
-                && call.arguments().map_or(true, |a| a.arguments().iter().count() == 0)
+                && call.arguments().is_none_or(|a| a.arguments().iter().next().is_none())
                 && matches!(cid_to_string(call.name()).as_str(),
                     "private" | "public" | "protected"
                 )
@@ -2825,6 +2842,9 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // every supported entry's last op is already nil-pushing
         // (Def → LoadNil, expanded attr_* → LoadNil), so this only
         // changes the rare zero-arg/empty edge.
+        // Close the visibility scope opened at body start. Pair
+        // with `PushClassVisibilityPublic` above.
+        out.push(sp(node, Expr::PopClassVisibility));
         out.push(sp(node, Expr::Nil));
         return sp(node, Expr::Begin {
             body: out,
