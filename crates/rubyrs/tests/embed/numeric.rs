@@ -1302,11 +1302,10 @@ fn bigint_eq_float_is_lossless() {
     // Pin the BigInt × Float `==` lossless path
     // (bigint_equals_float_lossless in bignum.rs). Pre-fix the arm
     // demoted BigInt to f64 for the compare, so values within the
-    // same Float ULP (e.g. 2**64 vs 2**64+1: f64 ULP at 2^64 is
-    // 2^(64-52)=4096, so 2**64+1 rounds to exactly 2**64 — and
-    // the pre-fix BigInt-side then also collapsed to 2**64,
-    // wrongly compared equal to the rounded-down RHS) wrongly
-    // compared equal.
+    // same Float ULP wrongly compared equal. Example: f64 ULP at
+    // 2^64 is 2^(64-52)=4096, so 2**64+1 rounds to exactly 2**64,
+    // and the pre-fix BigInt-side also collapsed to 2**64 — both
+    // sides end up at the same Float bit pattern.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
