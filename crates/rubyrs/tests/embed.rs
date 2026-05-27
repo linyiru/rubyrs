@@ -2758,6 +2758,85 @@ fn bigint_shift_left_right_promote_and_collapse() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn int_shift_left_promotes_on_value_overflow_not_just_count_overflow() {
+    // Regression for PR #159 cycle 1: `i64::checked_shl` only
+    // detects shift-count overflow (≥ 64), not value overflow.
+    // Pre-fix, `1 << 63` returned `i64::MIN` (sign bit set,
+    // wrapping into negative space) instead of promoting to
+    // BigInt(2^63). Round-trip check `(a << s) >> s == a`
+    // catches bit-loss exactly so these subtler overflow cases
+    // promote like the count-overflow path already did for
+    // `1 << 64`.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // - `1 << 62` is exactly the largest positive i64 (sign
+        //   bit clear) — must stay Int, no false promote.
+        // - `1 << 63` is +2^63 in Ruby (positive Bignum), not
+        //   `i64::MIN`. Must promote.
+        // - `5 << 61` overflows into the sign bit (5 takes 3
+        //   bits, +61 = bit 63 set) — must promote.
+        // - `1 >> -63` == `1 << 63` via direction swap — same
+        //   value-overflow path, must promote.
+        // - `(-1) << 1` == -2 stays Int (sign-preserving, no
+        //   bit-loss).
+        "puts (1 << 62)\n\
+         puts (1 << 62).class.name\n\
+         puts (1 << 63)\n\
+         puts (1 << 63).class.name\n\
+         puts (5 << 61)\n\
+         puts (5 << 61).class.name\n\
+         puts (1 >> -63)\n\
+         puts (1 >> -63).class.name\n\
+         puts ((-1) << 1)\n\
+         puts ((-1) << 1).class.name",
+        "int_shift_value_overflow.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines[0], "4611686018427387904");
+    assert_eq!(lines[1], "Integer");
+    assert_eq!(lines[2], "9223372036854775808"); // +2^63, NOT i64::MIN
+    assert_eq!(lines[3], "Integer");
+    assert_eq!(lines[4], "11529215046068469760"); // 5 * 2^61
+    assert_eq!(lines[5], "Integer");
+    assert_eq!(lines[6], "9223372036854775808"); // 1 >> -63 == 1 << 63
+    assert_eq!(lines[7], "Integer");
+    assert_eq!(lines[8], "-2");
+    assert_eq!(lines[9], "Integer");
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn bigint_shift_left_dos_cap_uses_exact_int_bit_length() {
+    // Regression for PR #159 cycle 1: `recv_bits` over-counted
+    // Int receivers as 64 bits, so small-magnitude shifts under a
+    // tight `max_value_bytes` could false-trap even when the
+    // rendered BigInt fit. With exact bit-length for Ints, the
+    // cap estimator matches the actual storage.
+    //
+    // `5 << 1_000_000` produces a ~125 KB BigInt. Pre-fix recv_bits
+    // = 64 → est_bits = 1_000_064 → est_bytes ≈ 125_040. With
+    // a cap of 125_064 bytes (just above the true est) pre-fix
+    // would still trap because the 64-bit Int width over-counted
+    // by ~61 bits. Post-fix recv_bits = bit_length(5) = 3 →
+    // est_bits = 1_000_003 → est_bytes ≈ 125_032, passes.
+    let cfg = rubyrs::Config { max_value_bytes: Some(125_064), ..Default::default() };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        // `class` returns Integer for both Int and Bignum, so check
+        // a deterministic property: bit_length matches the shift.
+        "puts (5 << 1_000_000).bit_length",
+        "shift_dos_exact_bits.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot().trim(), "1_000_003".replace('_', ""));
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn bigint_shift_left_traps_dos_via_max_value_bytes() {
     // Left-shift DoS cap: `1 << 100_000_000` would allocate
     // ~12.5 MB. Pre-cap estimator must trap before BigInt::shl

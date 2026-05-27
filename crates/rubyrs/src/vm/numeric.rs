@@ -309,13 +309,7 @@ pub(crate) fn numeric_call(
                 #[cfg(feature = "bignum")]
                 {
                     if *b >= 0 {
-                        // Left-shift: only safe if shift count fits
-                        // u32 AND `a << shift` doesn't lose bits.
-                        // `checked_shl` returns None on either case;
-                        // bigint_primitive then promotes.
-                        u32::try_from(*b).ok()
-                            .and_then(|s| a.checked_shl(s))
-                            .map(Value::Int)
+                        try_int_shl_lossless(*a, *b).map(Value::Int)
                     } else {
                         // Right-shift via negative count: result
                         // always fits i64. Clamp huge magnitudes to
@@ -344,9 +338,7 @@ pub(crate) fn numeric_call(
                         // Left-shift via negative count: overflow
                         // path declines for bigint_primitive promote.
                         if *b == i64::MIN { return Ok(None); }
-                        u32::try_from(-b).ok()
-                            .and_then(|s| a.checked_shl(s))
-                            .map(Value::Int)
+                        try_int_shl_lossless(*a, -b).map(Value::Int)
                     }
                 }
                 #[cfg(not(feature = "bignum"))]
@@ -612,6 +604,49 @@ pub(crate) fn numeric_call(
 /// instead of CRuby's `:symname` (inspect form) because numeric.rs
 /// has no heap access to resolve the SymId — minor divergence
 /// limited to the error message text on a non-numeric exponent.
+/// Lossless left-shift for i64 — returns `Some(a << shift)` only
+/// if the result fits exactly in i64 (no high bits lost, sign bit
+/// preserved). Used by the bignum-on `<<` / `>>` fast path to
+/// decline-and-promote when the shift would overflow.
+///
+/// `i64::checked_shl` only detects shift-count overflow (shift ≥
+/// 64), NOT value overflow — so `1.checked_shl(63)` returns
+/// `Some(i64::MIN)` instead of `None`, which under Ruby semantics
+/// should promote to `BigInt(2^63)` rather than wrap to a negative
+/// Fixnum. Round-trip check (`(a << s) >> s == a`) catches
+/// bit-loss exactly: for any `s` < 64 the right-shift reverses
+/// the left-shift iff no bits were shifted out of the sign
+/// position. Returns `None` whenever the result can't be
+/// represented in i64 so bigint_primitive's `try_bigint_bit_shift`
+/// can promote.
+///
+/// Examples (bignum on):
+/// - `try_int_shl_lossless(1, 62)` → `Some(2**62)` (positive,
+///   fits)
+/// - `try_int_shl_lossless(1, 63)` → `None` (bit 63 is sign bit;
+///   `i64::MIN` doesn't round-trip back to `1`)
+/// - `try_int_shl_lossless(5, 61)` → `None` (`5 << 61` overflows
+///   into the sign bit; `>> 61` produces garbage)
+/// - `try_int_shl_lossless(-1, 1)` → `Some(-2)` (sign-preserving)
+/// - `try_int_shl_lossless(1, 64)` → `None` (shift count ≥ 64
+///   handled by the `u32::try_from` + `>= 64` check below)
+#[cfg(feature = "bignum")]
+fn try_int_shl_lossless(a: i64, shift: i64) -> Option<i64> {
+    debug_assert!(shift >= 0, "negative shift should swap direction before reaching here");
+    let s = u32::try_from(shift).ok()?;
+    if s >= 64 {
+        // `wrapping_shl` only consults the low 6 bits of the shift
+        // count on i64; bailing here also short-circuits the
+        // round-trip's masked-shift artifact.
+        return None;
+    }
+    let result = a.wrapping_shl(s);
+    // Round-trip: bits were lost iff arithmetic right-shift by the
+    // same amount doesn't reconstruct the input. `0 << anything ==
+    // 0` round-trips trivially.
+    if (result >> s) == a { Some(result) } else { None }
+}
+
 pub(crate) fn type_name_for_coerce(v: &Value) -> &'static str {
     match v {
         Value::Int(_) => "Integer",
