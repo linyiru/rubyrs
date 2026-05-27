@@ -74,12 +74,21 @@ impl Vm {
                     // re-append the `locals`-key assignment last.
                     //
                     // Divergence: the block form
-                    // `arr.delete(obj) { yield-if-not-found }` is
-                    // not modeled — `delete` here only inspects
-                    // the no-arg-block call shape. With a block,
-                    // CRuby yields `obj` and returns the block's
-                    // result when nothing matched; rubyrs returns
-                    // nil and discards the block.
+                    // `arr.delete(obj) { yield-if-not-found }`
+                    // reaches this arm (via the `first`/`last`-
+                    // style delegation in `collection_call_block`)
+                    // but rubyrs silently drops the block instead
+                    // of yielding `obj` on no-match. CRuby returns
+                    // the block's result on no-match; rubyrs
+                    // returns nil.
+                    ("delete", args) if args.len() != 1 => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 1)",
+                                args.len()
+                            ),
+                        }));
+                    }
                     ("delete", [needle]) => {
                         // Two-phase: walk the immutable view to
                         // collect indices that match (need the

@@ -17,9 +17,10 @@
 # reading from it).
 #
 # DIVERGENCE (documented at the impl site): the block form
-# `arr.delete(obj) { yield-if-not-found }` is NOT modeled here.
-# CRuby yields `obj` and returns the block's result on no-match;
-# rubyrs returns nil and discards the block.
+# `arr.delete(obj) { yield-if-not-found }` reaches the impl (via
+# the `collection_call_block` delegation), but rubyrs silently
+# drops the block instead of yielding `obj` on no-match. CRuby
+# returns the block's result on no-match; rubyrs returns nil.
 
 # --- Single match: returns the matched value, mutates in place ---
 a = [1, 2, 3]
@@ -65,6 +66,18 @@ puts a.inspect                          # [:y, :z]
 a = [1, nil, 2, nil]
 puts a.delete(nil).inspect              # nil
 puts a.inspect                          # [1, 2]
+
+# --- Wrong arity raises ArgumentError (parity with CRuby) ---
+begin
+  [1, 2].delete
+rescue ArgumentError => e
+  puts "delete() → ArgumentError"
+end
+begin
+  [1, 2].delete(1, 2)
+rescue ArgumentError => e
+  puts "delete(1, 2) → ArgumentError"
+end
 
 # --- tilt-shape conditional: truthy return drives append ---
 assignments = ["a = locals[:a]", "locals = locals[:locals]", "b = locals[:b]"]
