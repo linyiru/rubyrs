@@ -68,7 +68,7 @@ cycle. Hit rate collapses to ~0.5 — `shapes[i % 6]` still hits
 (Array indexing is monomorphic, see the workload 02 note on the
 negative-cache slot), but the `.tag` site misses on every
 iteration. **Cliff guard**: if a future real workload exercises a
-7th shape, this is where you'll see it first.
+6+ shape hot site, this is where you'll see it first.
 
 **04 — hot toplevel def.** 10 000 calls to a user toplevel `def
 helper`. Implicit-self routing through
@@ -111,7 +111,7 @@ has been observed redefining methods in a hot loop.
 
 ## What this says about IC sizing
 
-- **Mono and 4-way poly are optimal.** Both well under `IC_WAYS = 5`.
+- **Mono and 4-shape poly are optimal.** Both well under `IC_WAYS = 5`.
 - **5-shape poly now hits 0.9994** (was 0.4998 with IC_WAYS=4) — the
   measured cliff drove the widening, and `perf/ic_stats.sh` rerun
   before merging confirmed the win.

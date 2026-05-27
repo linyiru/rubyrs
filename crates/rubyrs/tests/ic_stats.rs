@@ -64,7 +64,8 @@ fn hot_loop_drives_ic_hit_rate_high() {
     // After the first miss the IC should keep hitting. A hit
     // rate above 99% on the workload-delta alone is the
     // interesting signal — 1000 single-class-shape calls should
-    // saturate the 4-way IC after the very first dispatch.
+    // saturate the IC at any reasonable `IC_WAYS` after the
+    // very first dispatch — single shape can't evict itself.
     let hit_rate = hits as f64 / total as f64;
     assert!(
         hit_rate > 0.99,
