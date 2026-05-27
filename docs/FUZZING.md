@@ -65,7 +65,11 @@ deliberate commit (see `crates/rubyrs/fuzz/rust-toolchain.toml`).
 # from here on, the file does the channel selection.
 cd crates/rubyrs/fuzz
 rustup show
-cargo install cargo-fuzz --locked
+# Pin to the same cargo-fuzz version CI uses (see
+# `.github/workflows/fuzz.yml`'s `taiki-e/install-action` step).
+# Bump both together if cargo-fuzz upstream ships a breaking
+# behavioural change.
+cargo install cargo-fuzz --locked --version "^0.12"
 ```
 
 Then from inside `crates/rubyrs/fuzz/`:

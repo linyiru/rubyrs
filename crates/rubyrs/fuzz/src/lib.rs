@@ -32,12 +32,16 @@ use std::sync::OnceLock;
 /// libfuzzer often exits via `abort()` (a real crash, a SIGABRT
 /// from an ASan finding, an OOM), and a held `TempDir`'s `Drop`
 /// would not run on those paths anyway. The trade-off: the
-/// directory is left on disk after the fuzz process ends; on
-/// CI's ephemeral runner that's a non-issue (whole filesystem
-/// is discarded), and locally the OS tmp cleaner (systemd-tmpfiles
-/// on Linux, periodic on macOS) reaps `tempfile`-prefixed dirs
-/// over the next reboot cycle. Each fuzz process gets a fresh
-/// random suffix, so leftover dirs don't conflict across runs.
+/// `rubyrs-fuzz-*` directory persists on disk after the fuzz
+/// process ends. On CI's ephemeral runner that's a non-issue
+/// (the whole filesystem is discarded with the runner). Locally,
+/// `/tmp` is reaped by age — systemd-tmpfiles on Linux (default
+/// 10-day floor for `/tmp`) and the periodic launchd job on
+/// macOS — not by name prefix; the leftover dirs sit until that
+/// age threshold hits. Each fuzz process gets a fresh random
+/// suffix from `tempfile`, so leftover dirs don't conflict across
+/// runs, but a long-running developer machine will accumulate
+/// them between reboots.
 pub fn ensure_sandbox_cwd() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
