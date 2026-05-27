@@ -2666,8 +2666,35 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         let new_name = String::from_utf8_lossy(new_sym.unescaped()).into_owned();
                         let old_name = String::from_utf8_lossy(old_sym.unescaped()).into_owned();
                         Some(sp(&inner, Expr::AliasSingletonMethod(new_name, old_name)))
-                    } else if inner.as_call_node().is_some() {
-                        Some(tr(ctx, &inner))
+                    } else if let Some(call) = inner.as_call_node() {
+                        // CallNode admitted only when its name is
+                        // NOT one of the forms the body translator
+                        // would otherwise special-case for the
+                        // singleton class. `attr_reader` /
+                        // `attr_writer` / `attr_accessor` /
+                        // `prepend` translated through the regular
+                        // `tr()` path would install on the OUTER
+                        // class (instance methods), not the
+                        // singleton class — semantic divergence
+                        // from the unconditional forms supported
+                        // earlier in this loop. Rather than
+                        // duplicate the special-case logic inside
+                        // the wrapper, reject the name here and
+                        // let it fall through to
+                        // NotImplementedError. Real sinatra cases
+                        // (`ruby2_keywords`) go through the
+                        // generic call path uneventfully because
+                        // there's no body-level special-case for
+                        // them.
+                        let name = cid_to_string(call.name());
+                        let is_special_cased = matches!(name.as_str(),
+                            "attr_reader" | "attr_writer" | "attr_accessor" | "prepend"
+                        );
+                        if is_special_cased {
+                            None
+                        } else {
+                            Some(tr(ctx, &inner))
+                        }
                     } else {
                         None
                     };

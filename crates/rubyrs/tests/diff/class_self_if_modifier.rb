@@ -65,3 +65,17 @@ puts "skipped-direct=#{skipped_direct}"
 
 ## Sentinel that class-body load completed without raising.
 puts "body-loaded=true"
+
+## Special-case-name fence (not exercised by the diff harness —
+## the divergence can't be byte-aligned with CRuby):
+## `attr_reader :x if true`, `attr_writer :x if true`,
+## `attr_accessor :x if true`, and `prepend Mod if true` inside
+## `class << self` body fall through to NotImplementedError
+## in rubyrs (load-time raise). CRuby translates them through
+## the regular call path, which installs INSTANCE methods on
+## the outer class (NOT singleton methods on the singleton
+## class — semantic divergence from the unconditional
+## `class << self; attr_reader :x; end` shape that this
+## translator special-cases). The fence rejects the silent-
+## wrong-class outcome rather than admitting it. PR #218
+## code-review #4 / Copilot round 4.
