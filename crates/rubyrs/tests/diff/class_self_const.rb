@@ -35,11 +35,29 @@ puts "qux=#{WithConst.get_qux.inspect}"
 
 ## rubyrs flattens constant scope in the spike — bare BAR / BAZ
 ## resolves the same const from anywhere. CRuby places these on
-## the singleton class; reachable via `Class#singleton_class::CONST`
-## but NOT via `Class::CONST`. The diff harness pins what BOTH
-## interpreters agree on: bare reads through the singleton method
-## (above) work; cross-scope access patterns are intentionally
-## out of scope for this fixture.
+## the singleton class; `Class#singleton_class::CONST` reaches
+## them but `Class::CONST` (outer-class scope) and toplevel bare
+## reads do NOT. This is a KNOWN GAP at the constants model
+## level — out of scope for this PR.
+##
+## What this fixture CAN pin (both interpreters agree):
+##   - bare reads via singleton methods defined in the same
+##     `class << self` body (`def get_bar; BAR; end` — verified
+##     above).
+##   - explicit `Class#singleton_class::CONST` access (the one
+##     CRuby form the spike-scope model also happens to match).
+##
+## What this fixture CANNOT pin: the divergent paths
+## (`WithConst::BAR` returns 42 in rubyrs / NameError in CRuby;
+## toplevel `BAR` likewise). The diff harness requires byte-
+## identical stdout — any assertion that hits the divergent
+## branches would always fail one interpreter regardless of
+## structure. A future scope-tightening change that lands true
+## per-class const tables would be regression-checked by the
+## bare-via-singleton-method path going stale (it currently
+## depends on the flat-table behavior), surfacing the same
+## signal at that point.
+puts "via-singleton-class=#{WithConst.singleton_class::BAR}"
 
 ## `attr_reader` from the same body still works (alias / def /
 ## attr_* are pre-existing supported forms — pin to confirm the
