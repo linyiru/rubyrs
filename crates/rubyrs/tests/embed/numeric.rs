@@ -1302,8 +1302,11 @@ fn bigint_eq_float_is_lossless() {
     // Pin the BigInt × Float `==` lossless path
     // (bigint_equals_float_lossless in bignum.rs). Pre-fix the arm
     // demoted BigInt to f64 for the compare, so values within the
-    // same Float "gap" (e.g. 2**64 vs 2**64+1, gap of 2 at that
-    // magnitude) wrongly compared equal.
+    // same Float ULP (e.g. 2**64 vs 2**64+1: f64 ULP at 2^64 is
+    // 2^(64-52)=4096, so 2**64+1 rounds to exactly 2**64 — and
+    // the pre-fix BigInt-side then also collapsed to 2**64,
+    // wrongly compared equal to the rounded-down RHS) wrongly
+    // compared equal.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));
@@ -1315,7 +1318,7 @@ fn bigint_eq_float_is_lossless() {
          inf = 1.0 / 0.0\n\
          puts (2**64) == (2**64).to_f         # true (Float-exact)\n\
          puts (2**64 + 1) == (2**64).to_f     # false (precision)\n\
-         puts (2**64) == (2**64 + 1).to_f     # true (RHS: 2**64+1 is exactly halfway between two f64s with gap 2; round-to-nearest-even picks the even-mantissa neighbor → 2**64)\n\
+         puts (2**64) == (2**64 + 1).to_f     # true (RHS rounds: f64 ULP at 2^64 is 2^(64-52)=4096; 2**64+1 is far closer to 2**64 than to 2**64+4096, so it rounds to exactly 2**64)\n\
          puts (2**64).to_f == (2**64 + 1)     # false (Float side is 2**64, not 2**64+1)\n\
          puts (2**64) == nan                  # false (NaN)\n\
          puts (2**64) == inf                  # false (+inf)\n\
@@ -1347,10 +1350,10 @@ fn bigint_cmp_float_is_lossless() {
     // BigInt × Float Lt/Le/Gt/Ge arm demoted both sides to f64,
     // and the `<=>` arm returned nil (because the existing
     // arm required both sides to be BigInt-castable). Both
-    // collapse values within the same Float "gap" onto the
-    // same bit pattern, so e.g. `(2**64 + 1) > (2**64).to_f`
-    // returned false. Pin the lossless path via
-    // bigint_cmp_float_lossless.
+    // collapse values within the same f64 ULP onto the
+    // same bit pattern (ULP at 2^64 is 2^(64-52)=4096), so e.g.
+    // `(2**64 + 1) > (2**64).to_f` returned false. Pin the
+    // lossless path via bigint_cmp_float_lossless.
     let buf = SharedBuf::new();
     let mut rt = rubyrs::Runtime::new();
     rt.set_stdout(Box::new(buf.clone()));

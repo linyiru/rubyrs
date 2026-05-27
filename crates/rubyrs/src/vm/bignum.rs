@@ -110,7 +110,7 @@ use crate::vm::PinGuard;
 ///
 /// Without this, demoting the BigInt to f64 collapses values like
 /// `2**64` and `2**64 + 1` onto the same Float bit pattern (the
-/// gap between consecutive f64s at that magnitude is 2), making
+/// ULP at that magnitude is 2^(64-52)=4096), making
 /// `(2**64 + 1) == (2**64).to_f` wrongly return true. CRuby's
 /// `rb_big_eq` short-circuits on NaN / infinity / non-integral
 /// floats and otherwise compares against a losslessly-constructed
@@ -158,8 +158,11 @@ fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool
 /// - `Some(Greater)` if `bigint > float`.
 ///
 /// Without this, demoting the BigInt to f64 collapses values
-/// within the same Float "gap" onto the same bit pattern: at
-/// magnitude 2^64 the gap is 2, so `(2**64 + 1) > (2**64).to_f`
+/// within the same Float ULP onto the same bit pattern: f64 has
+/// 53-bit precision, so above 2^53 the ULP is 2^(N-52) for
+/// magnitude 2^N — e.g. ULP=2^12=4096 at 2^64. `(2**64 + 1)` is
+/// closer to 2^64 than to 2^64+4096, so it rounds to exactly
+/// 2^64; without the lossless path `(2**64 + 1) > (2**64).to_f`
 /// wrongly returned false. Mirror `bigint_equals_float_lossless`
 /// — finite floats convert losslessly via `from_f64` (truncates
 /// toward zero) and the fractional sign disambiguates the tie.
