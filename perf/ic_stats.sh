@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
-# Run a small fixed corpus of workloads through the `ic-stats`-
-# instrumented rubyrs binary and emit a TSV summary on stdout.
+# Run the workloads in `perf/ic_stats_workloads/` through the
+# `ic-stats`-instrumented rubyrs binary and emit a TSV summary on
+# stdout.
 #
 # Usage:
 #   cargo build -p rubyrs --features ic-stats --release
 #   perf/ic_stats.sh
 #
 # Each row: workload | hits | misses | toplevel_hits | toplevel_misses | hit_rate
-# The intent is to validate the IC's design points (mono / 4-way
-# poly / 5-way megamorphic / hot toplevel def / gen-bump churn)
-# and surface any below-threshold site that wants attention.
+#
+# Today the corpus is 01_monomorphic .. 05_gen_bump_churn covering
+# the IC's design points (mono / 4-way poly / 5-way megamorphic /
+# hot toplevel def / gen-bump churn). Any new `*.rb` dropped into
+# the workloads dir picks up automatically — drop one in if you
+# want to characterise a new dispatch shape, then update
+# `perf/IC_STATS_BASELINE.md` so the doc and TSV stay in lockstep.
+#
+# Exit codes:
+#   0 — every workload produced a parseable ic-stats line
+#   1 — at least one workload failed at runtime (rubyrs crashed)
+#   2 — setup error (missing binary, missing workloads, mktemp
+#       failed) — matches the convention in perf/check.sh and
+#       perf/time_microbench.sh
 
 set -euo pipefail
 # Empty workload glob would otherwise yield the literal pattern
@@ -33,13 +45,13 @@ if [[ ! -x "$BIN" ]]; then
     echo "build the ic-stats binary first:" >&2
     echo "    cargo build -p rubyrs --features ic-stats --release" >&2
     echo "(expected at: $BIN)" >&2
-    exit 1
+    exit 2
 fi
 
 workloads=("$DIR"/*.rb)
 if [[ ${#workloads[@]} -eq 0 ]]; then
     echo "no workloads found in $DIR" >&2
-    exit 1
+    exit 2
 fi
 
 # Capture stderr to a per-iteration tmpfile so we can
