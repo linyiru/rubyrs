@@ -229,6 +229,73 @@ fn try_call_with_block_compile_time_intercept(
     false
 }
 
+/// Compile the body of `Expr::Call` — the no-block call arm.
+/// Tries the literal-symbol intercepts (`attr_*` / `alias_method`)
+/// and the special forms (`__seq__`, `raise`, BinOp fusion);
+/// falls through to a generic `emit_method_call` when none
+/// matched.
+fn compile_call_arm(
+    b: &mut ProtoBuilder,
+    receiver: &Option<Box<SExpr>>,
+    name: &str,
+    args: &[SExpr],
+    protos: &mut Vec<Proto>,
+    interner: &mut Interner,
+    cc: &mut u32,
+) {
+    if receiver.is_none() && name == "__seq__" {
+        compile_body(b, args, protos, interner, cc);
+        return;
+    }
+    if try_call_compile_time_intercept(b, receiver, name, args, protos, interner, cc) {
+        return;
+    }
+    // `raise [class, msg, *more]` — three call shapes that all
+    // funnel through `Op::Raise + LoadNil`. The runtime helper
+    // `normalize_exception` covers String / Exception instance /
+    // Exception class inputs.
+    if receiver.is_none() && name == "raise" {
+        match args.len() {
+            0 => { b.emit(Op::LoadNil); }
+            1 => { compile_expr(b, &args[0], protos, interner, cc); }
+            _ => {
+                // `raise SomeClass, "msg", *more` →
+                // `SomeClass.new("msg", *more)` so initialize fires.
+                let new_call = SExpr {
+                    span: args[0].span,
+                    node: Expr::Call {
+                        receiver: Some(Box::new(args[0].clone())),
+                        name: "new".to_string(),
+                        args: args[1..].to_vec(),
+                    },
+                };
+                compile_expr(b, &new_call, protos, interner, cc);
+            }
+        }
+        b.emit(Op::Raise);
+        b.emit(Op::LoadNil);
+        return;
+    }
+    // `<expr> <op> <int_literal>` fusion → BinOpInt single op.
+    if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {
+        compile_expr(b, r, protos, interner, cc);
+        if let Expr::IntLit(rhs) = &args[0].node {
+            b.emit(Op::BinOpInt(kind, *rhs));
+        } else {
+            compile_expr(b, &args[0], protos, interner, cc);
+            b.emit(Op::BinOp(kind));
+        }
+        return;
+    }
+    // Generic dispatch.
+    let name_id = interner.intern(name);
+    let has_recv = receiver.is_some();
+    if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
+    for a in args { compile_expr(b, a, protos, interner, cc); }
+    let argc = args.len() as u8;
+    emit_method_call(b, name_id, argc, has_recv, false, cc);
+}
+
 /// Allocate a fresh inline-cache id and emit the appropriate
 /// `Op::Call*` variant for a method dispatch. Centralises the
 /// 4-way `(has_recv, has_block)` matrix that previously lived
@@ -897,73 +964,7 @@ pub(crate) fn compile_expr(
             b.emit(Op::ExitLoop);
         }
         Expr::Call { receiver, name, args } => {
-            if receiver.is_none() && name == "__seq__" {
-                compile_body(b, args, protos, interner, cc);
-                return;
-            }
-            // Compile-time intercepts for literal-symbol arms:
-            // `attr_reader` / `attr_writer` / `attr_accessor` and
-            // `alias_method`. Each short-circuits only when every
-            // relevant arg is a Symbol literal — dynamic forms
-            // (`attr_accessor(*xs)`, `alias_method(a, b)` with
-            // non-symbol args) fall through to the generic Call
-            // emit below. See `try_call_compile_time_intercept`
-            // for the per-intercept emit shape and CRuby-divergence
-            // notes (attr_* at top level, Op::AliasMethod's own
-            // LoadNil, etc.).
-            if try_call_compile_time_intercept(b, receiver, name, args, protos, interner, cc) {
-                return;
-            }
-            if receiver.is_none() && name == "raise" {
-                match args.len() {
-                    0 => { b.emit(Op::LoadNil); }
-                    1 => {
-                        // Single arg: a String literal (wrap as
-                        // RuntimeError), an Exception instance
-                        // (pass-through), or an Exception class
-                        // (instantiate via `normalize_exception`).
-                        compile_expr(b, &args[0], protos, interner, cc);
-                    }
-                    _ => {
-                        // `raise SomeClass, "msg", *more` — synthesise
-                        // `SomeClass.new("msg", *more)` so the regular
-                        // `new` path runs `initialize` with the
-                        // remaining args. The Instance returned is the
-                        // value `Raise` consumes; `normalize_exception`
-                        // sees an Object and leaves it alone.
-                        let new_call = SExpr {
-                            span: args[0].span,
-                            node: Expr::Call {
-                                receiver: Some(Box::new(args[0].clone())),
-                                name: "new".to_string(),
-                                args: args[1..].to_vec(),
-                            },
-                        };
-                        compile_expr(b, &new_call, protos, interner, cc);
-                    }
-                }
-                b.emit(Op::Raise);
-                b.emit(Op::LoadNil);
-                return;
-            }
-            if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {
-                compile_expr(b, r, protos, interner, cc);
-                // Fuse `<expr> <op> <int_literal>` into a single op so the
-                // LoadConstInt + BinOp pair becomes one BinOpInt.
-                if let Expr::IntLit(rhs) = &args[0].node {
-                    b.emit(Op::BinOpInt(kind, *rhs));
-                } else {
-                    compile_expr(b, &args[0], protos, interner, cc);
-                    b.emit(Op::BinOp(kind));
-                }
-                return;
-            }
-            let name_id = interner.intern(name);
-            let has_recv = receiver.is_some();
-            if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
-            for a in args { compile_expr(b, a, protos, interner, cc); }
-            let argc = args.len() as u8;
-            emit_method_call(b, name_id, argc, has_recv, false, cc);
+            compile_call_arm(b, receiver, name, args, protos, interner, cc);
         }
         Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
             // `defaults` is parallel to `params`: leading `None`s are
