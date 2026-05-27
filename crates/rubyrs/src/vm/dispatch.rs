@@ -1181,6 +1181,19 @@ impl Vm {
             g.vm.stack.push(Value::Hash(hid));
             return Ok(());
         }
+        // `Class#allocate` user-singleton override — CRuby allows
+        // `def self.allocate` to replace the built-in allocator (used
+        // by Marshal / dup / ORM hydration hooks). Mirrors the
+        // `def self.new` pre-check at line 1053. Must fire BEFORE the
+        // builtin allocate arm below or the user override is silently
+        // shadowed; do_call_block has the same precedence (its
+        // generic singleton check at ~4601 runs before its allocate
+        // arm). PR #181 follow-up: code-review caught the asymmetry.
+        if &*name == "allocate"
+            && let Value::Class(cls) = &recv
+            && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+            return self.invoke_method(m, recv.clone(), args);
+        }
         // `Class#allocate` — bare-instance allocator without calling
         // `initialize`. Used by frameworks for unmarshalling / dup /
         // clone / ORM hydration, and by the TRY_RUNS pass-7 probe's

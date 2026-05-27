@@ -18,6 +18,19 @@ puts "no-init-marker=#{a.instance_variable_get(:@initialized).inspect}"
 puts "no-value=#{a.instance_variable_get(:@value).inspect}"
 puts "no-ivars=#{a.instance_variables.empty?}"
 
+## User `def self.allocate` overrides the builtin allocator
+## (Marshal/dup/ORM-style hook). CRuby honors the override in
+## BOTH no-block and block forms — rubyrs must as well (was a
+## code-review finding: do_call's allocate arm previously fired
+## before the user-singleton lookup).
+class Custom
+  def self.allocate
+    "user-allocate-fired"
+  end
+end
+puts "user-override-no-block=#{Custom.allocate.inspect}"
+puts "user-override-block=#{Custom.allocate { :ignored }.inspect}"
+
 ## Block form: CRuby silently ignores a block passed to
 ## `allocate` — the block must NOT run, and allocation must
 ## still succeed (PR #181 review round 4 Copilot comment #4).
