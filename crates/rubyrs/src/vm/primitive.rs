@@ -91,6 +91,13 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         #[cfg(feature = "bignum")]
         (Value::Int(_), "<=>", [Value::BigInt(_)]) => None,
         (Value::Int(_), "<=>", [_]) => Some(Value::Nil),
+        // Skip the Float catch-all when rhs is BigInt — bigint_primitive's
+        // `<=>` arm (via bigint_cmp_float_lossless) handles the
+        // Float×BigInt case downstream. Matching here would shadow it
+        // with a wrong `nil` (Float and BigInt are both numeric and
+        // should compare losslessly).
+        #[cfg(feature = "bignum")]
+        (Value::Float(_), "<=>", [Value::BigInt(_)]) => None,
         (Value::Float(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Str(_), "<=>", [_]) => Some(Value::Nil),
         (Value::Bool(_), "<=>", [_]) => Some(Value::Nil),

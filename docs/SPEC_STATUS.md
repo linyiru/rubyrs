@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 90 |
-| Examples in corpus | 416 |
-| Skipped `it` traces | 144 |
+| Files | 91 |
+| Examples in corpus | 439 |
+| Skipped `it` traces | 146 |
 
 ### Skipped traces by category
 
@@ -22,8 +22,8 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 7 |
 | `fixture` | 48 |
-| `method-not-implemented` | 77 |
-| `mock` | 12 |
+| `method-not-implemented` | 78 |
+| `mock` | 13 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
 `DROP_PATTERNS` (`fixture` / `mock` / `method-not-implemented` plus the
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 19 | 46 | 38 |
-| Integer | 20 | 161 | 18 |
+| Integer | 21 | 184 | 20 |
 | Method | 11 | 53 | 3 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
@@ -97,6 +97,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_bit_length_spec.rb` | Integer#bit_length | `core/integer/bit_length_spec.rb` | 4 | 0 |
 | `integer_bit_or_spec.rb` | Integer#\| | `core/integer/bit_or_spec.rb` | 10 | 0 |
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
+| `integer_comparison_spec.rb` | Integer#<=> | `core/integer/comparison_spec.rb` | 23 | 2 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
 | `integer_downto_spec.rb` | Integer#downto [stop] when self and stop are Integers | `core/integer/downto_spec.rb` | 3 | 3 |

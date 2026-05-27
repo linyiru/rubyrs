@@ -1342,6 +1342,55 @@ fn bigint_eq_float_is_lossless() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn bigint_cmp_float_is_lossless() {
+    // Sibling to bigint_eq_float_is_lossless. Pre-fix the
+    // BigInt × Float Lt/Le/Gt/Ge arm demoted both sides to f64,
+    // and the `<=>` arm returned nil (because the existing
+    // arm required both sides to be BigInt-castable). Both
+    // collapse values within the same Float "gap" onto the
+    // same bit pattern, so e.g. `(2**64 + 1) > (2**64).to_f`
+    // returned false. Pin the lossless path via
+    // bigint_cmp_float_lossless.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "nan = 0.0 / 0.0\n\
+         inf = 1.0 / 0.0\n\
+         # <=> (BigInt × Float, both directions)\n\
+         puts ((2**64 + 1) <=> (2**64).to_f).inspect    # 1\n\
+         puts ((2**64) <=> (2**64).to_f).inspect        # 0\n\
+         puts ((2**64 - 1) <=> (2**64).to_f).inspect    # -1\n\
+         puts ((2**64).to_f <=> (2**64 + 1)).inspect    # -1\n\
+         puts ((2**64) <=> nan).inspect                 # nil\n\
+         puts ((2**64) <=> inf).inspect                 # -1\n\
+         puts ((2**64) <=> -inf).inspect                # 1\n\
+         # Ordering operators (Lt/Le/Gt/Ge)\n\
+         puts ((2**64 + 1) > (2**64).to_f)              # true\n\
+         puts ((2**64 + 1) < (2**64).to_f)              # false\n\
+         puts ((2**64 + 1) <= (2**64).to_f)             # false\n\
+         puts ((2**64 + 1) >= (2**64).to_f)             # true\n\
+         puts ((2**64).to_f < (2**64 + 1))              # true (Float × BigInt)\n\
+         # NaN: all four ordering ops are false (CRuby parity)\n\
+         puts ((2**64) < nan)                           # false\n\
+         puts ((2**64) > nan)                           # false\n\
+         puts ((2**64) <= nan)                          # false\n\
+         puts ((2**64) >= nan)                          # false",
+        "bigint_cmp_float.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    assert_eq!(lines, vec![
+        "1", "0", "-1", "-1",               // <=> precision + symmetric
+        "nil", "-1", "1",                   // <=> NaN/±inf
+        "true", "false", "false", "true",   // Lt/Le/Gt/Ge precision
+        "true",                             // Float × BigInt direction
+        "false", "false", "false", "false", // NaN ordering
+    ]);
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn int_shift_zero_receiver_never_traps_regardless_of_count() {
     // Regression for PR #159 cycle 2: `0 << anything == 0` and
     // `0 >> anything == 0` in Ruby — should never allocate, never
