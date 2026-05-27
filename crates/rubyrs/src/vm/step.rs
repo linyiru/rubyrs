@@ -1627,9 +1627,35 @@ impl Vm {
                 let is_module = matches!(op, Op::DefModule(..));
                 // Pop superclass (Nil for "default to Object", a Class for `class Foo < Bar`).
                 let parent_val = self.stack.pop().expect("ICE: DefClass without superclass slot");
-                let parent = match parent_val {
+                let explicit_parent = match parent_val {
                     Value::Class(c) => Some(c),
-                    _ => None, // Nil -> default; treat as no explicit parent for now
+                    _ => None,
+                };
+                // CRuby: `class Foo; end` with no explicit parent
+                // defaults to Object. Without this default,
+                // `Object === Foo.new` returns false and
+                // `case scope when Object` fails to match user-class
+                // instances — which breaks tilt's render dispatch
+                // path (tilt 2.7 template.rb:257 case/when on the
+                // render scope, falling back to
+                // `Kernel.instance_method(:class).bind_call(scope)`
+                // for the non-Object branch).
+                //
+                // Skip the default for:
+                //   - modules (Modules don't have superclass)
+                //   - Object itself (otherwise Object < Object cycle)
+                //   - reopen of a class that's already been defined
+                //     (don't change its superclass post-hoc; the
+                //     reopen path below already preserves the
+                //     existing chain)
+                let object_sym = self.interner.intern("Object");
+                let name_str_check = self.interner.resolve(if qual_id.0 == u32::MAX { name_id } else { qual_id }).to_string();
+                let parent = if explicit_parent.is_some() {
+                    explicit_parent
+                } else if is_module || name_str_check == "Object" {
+                    None
+                } else {
+                    self.classes.get(&object_sym).cloned()
                 };
                 // Key the class table by the QUALIFIED SymId when
                 // one is supplied (`module Foo; class Bar; end; end`
