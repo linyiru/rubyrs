@@ -1108,14 +1108,26 @@ mod tests {
         assert!(after.is_none());
     }
 
+    // This test pins the `debug_assert!` inside
+    // `lookup_toplevel_method_cached`. `debug_assert!` is compiled
+    // OUT in release builds, so the `#[should_panic]` would fail
+    // (test "did not panic as expected") whenever `cargo test
+    // --release` runs — which the repo's CI does. Gate the test
+    // on `debug_assertions` so it only runs in the same builds the
+    // assert itself runs in.
+    //
+    // The actual release-build safety net for the spooky-action
+    // invariant ("the populator must not be called with a builtin
+    // name, because the cache slot key can't distinguish user vs
+    // builtin on a future fast-path hit") is now the explicit
+    // `is_builtin_name` guard at the second populator call site
+    // in `vm/dispatch.rs::do_call` — see the comment there. The
+    // assert remains as a debug-mode tripwire for any future
+    // populator-direct caller that forgets the gate.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "is_builtin_name")]
     fn lookup_toplevel_method_cached_rejects_builtin_name() {
-        // Defends the cache-hit fast path in `do_call`: the cache key
-        // alone can't tell a builtin name from a user toplevel def, so
-        // the populator must never store a builtin under that slot.
-        // If a future caller of this function forgets the
-        // `is_builtin_name` gate, the debug assert here fires in tests.
         let (mut vm, _) = mk_vm();
         vm.ensure_call_caches(1);
         let name = vm.interner.intern("sprintf");

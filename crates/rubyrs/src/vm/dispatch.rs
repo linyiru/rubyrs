@@ -526,7 +526,21 @@ impl Vm {
                 self.stack.push(Value::new_str(dir));
                 return Ok(());
             }
-            if let Some(m) = self.lookup_toplevel_method_cached(name_id, cache_id) {
+            // Mirror the fast-path guard above (`can_try_toplevel_fast_path`
+            // around line 345): the toplevel cache slot key
+            // (`TOPLEVEL_METHOD_CACHE_KEY`) doesn't carry the
+            // name, so the cache-hit fast path
+            // (`lookup_toplevel_method_cache_hit`) can't tell a
+            // user `def sprintf` from the builtin. Skipping the
+            // populator here for builtin names keeps the cache
+            // slot empty for those call sites, so the fast path
+            // can't return a shadowing user method on a future
+            // hit. This is the load-bearing version of the
+            // `debug_assert!` inside `lookup_toplevel_method_cached`
+            // (which only fires in debug builds).
+            if !Self::is_builtin_name(&name)
+                && let Some(m) = self.lookup_toplevel_method_cached(name_id, cache_id)
+            {
                 self.invoke_method(m, self_val, args)?;
                 return Ok(());
             }
