@@ -391,7 +391,15 @@ jobs:
           # surrounding do_call stack invariants. Bump landed
           # retroactively in this CI-debt-clearance commit because
           # the merging PRs didn't bump.
-          check crates/rubyrs/src/vm/dispatch.rs     27
+          #
+          # Bumped 27 → 28 (+1) by #192 commit 2/5
+          # (`try_dispatch_send_bypass` helper). The unified
+          # send-bypass recogniser's caller-side match arm has
+          # `recv_opt.expect("with-recv path")` — by construction
+          # we passed `Some(recv)` and `SendBypass::NotHandled`
+          # returns `recv_opt` unchanged from input, so the
+          # expect is ICE-class.
+          check crates/rubyrs/src/vm/dispatch.rs     28
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /

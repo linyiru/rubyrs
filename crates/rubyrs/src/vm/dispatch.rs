@@ -31,6 +31,28 @@ use super::{
 };
 use crate::HostCtx;
 
+/// Outcome of [`Vm::try_dispatch_send_bypass`].
+///
+/// `Handled(r)` means the helper has already done the work
+/// (parsed target sym from `args[0]`, set
+/// `bypass_visibility_once`, pushed args/recv onto the stack,
+/// and recursed into `do_call`); the caller should propagate
+/// `r` immediately.
+///
+/// `NotHandled { args, recv_opt }` means this isn't a `send`
+/// call, or it's a `send` with a user-defined override on the
+/// surrounding self / explicit receiver (CRuby's reserved-name
+/// rule applies only to `__send__`, never `send`); the helper
+/// has moved `args` and `recv_opt` back out so the caller can
+/// continue dispatch with them intact.
+enum SendBypass {
+    Handled(Result<(), Trap>),
+    NotHandled {
+        args: Vec<Value>,
+        recv_opt: Option<Value>,
+    },
+}
+
 impl Vm {
     /// `String#encoding` intercept — pushes the preamble's
     /// `Encoding::UTF_8` instance and returns true if the call
@@ -394,6 +416,85 @@ impl Vm {
         Ok(false)
     }
 
+    /// Result of consulting the `send` / `__send__` bypass
+    /// recogniser. `Handled` means the helper has already done
+    /// all the work (parsed target sym, set
+    /// `bypass_visibility_once`, pushed args/recv, recursed
+    /// into `do_call`) and the caller should `return` the
+    /// contained `Result` immediately. `NotHandled` means the
+    /// call isn't a `send` form, or it's a `send` with a user-
+    /// defined override on the surrounding self/recv (reserved-
+    /// name rule applies only to `__send__`); the helper has
+    /// moved `args` and `recv_opt` *back out* so the caller can
+    /// continue dispatch.
+    ///
+    /// See `try_dispatch_send_bypass` for the full doc; #192
+    /// commit 2/5.
+    fn try_dispatch_send_bypass(
+        &mut self,
+        name: &str,
+        name_id: SymId,
+        cache_id: u16,
+        args: Vec<Value>,
+        recv_opt: Option<Value>,
+    ) -> SendBypass {
+        // Early out for non-send names — the common case.
+        if !matches!(name, "send" | "__send__") {
+            return SendBypass::NotHandled { args, recv_opt };
+        }
+        // Subject for the user-override check:
+        //   - With-recv form: the explicit receiver.
+        //   - No-recv form: the surrounding frame's `self_val`
+        //     (because `bare_send(:x)` is implicit-self).
+        let frame_self_storage;
+        let subject: &Value = match &recv_opt {
+            Some(r) => r,
+            None => {
+                frame_self_storage = self.frames.last()
+                    .expect("ICE: do_call(no_recv) with empty frames")
+                    .self_val
+                    .clone();
+                &frame_self_storage
+            }
+        };
+        // User override only blocks `send` (the reserved-name
+        // rule applies only to `__send__`). Same lookup shape
+        // as the originals at the two inlined sites.
+        let user_override = name == "send" && match subject {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+            }
+            Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+            _ => false,
+        };
+        if user_override {
+            return SendBypass::NotHandled { args, recv_opt };
+        }
+        // Bypass path. Parse target sym from args[0]; on failure
+        // surface the trap through Handled so the caller's `?`
+        // sees it.
+        let target_sym = match self.parse_send_target(&args) {
+            Ok(t) => t,
+            Err(e) => return SendBypass::Handled(Err(e)),
+        };
+        let new_argc = args.len() - 1;
+        // Set bypass_visibility BEFORE recursing so the inner
+        // do_call's `take_bypass_visibility()` sees it. Note:
+        // recursing through the same `do_call` entry preserves
+        // the existing setter-then-recurse pattern; the helper
+        // does NOT call do_call while still holding any borrow.
+        self.bypass_visibility_once = true;
+        let no_recv_for_recursion = recv_opt.is_none();
+        if let Some(recv) = recv_opt {
+            self.stack.push(recv);
+        }
+        for a in args.into_iter().skip(1) {
+            self.stack.push(a);
+        }
+        SendBypass::Handled(self.do_call(target_sym, new_argc, no_recv_for_recursion, u16::MAX))
+    }
+
     pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
@@ -470,28 +571,13 @@ impl Vm {
             // set it for parity with the receiver-form arm, so any
             // helper that later inspects the flag sees a consistent
             // shape.
-            if matches!(&*name, "send" | "__send__") {
-                let frame_self = self.frames.last()
-                    .expect("ICE: do_call(no_recv) with empty frames")
-                    .self_val.clone();
-                let user_override = &*name == "send" && match &frame_self {
-                    Value::Object(id) => {
-                        let cls = self.heap.class_of(*id);
-                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-                    }
-                    Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
-                    _ => false,
-                };
-                if !user_override {
-                    let target_sym = self.parse_send_target(&args)?;
-                    let new_argc = args.len() - 1;
-                    self.bypass_visibility_once = true;
-                    for a in args.into_iter().skip(1) {
-                        self.stack.push(a);
-                    }
-                    return self.do_call(target_sym, new_argc, true, u16::MAX);
-                }
-            }
+            // send/__send__ bypass recogniser — unified helper
+            // (#192 commit 2/5). NotHandled returns args back so
+            // the dispatcher can continue below.
+            let args = match self.try_dispatch_send_bypass(&name, name_id, cache_id, args, None) {
+                SendBypass::Handled(r) => return r,
+                SendBypass::NotHandled { args, .. } => args,
+            };
             // Bare `method(:foo)` — implicit-self capture. Same
             // shape as `obj.method(:foo)` (the receiver-form arm
             // below) but the receiver is the surrounding frame's
@@ -877,28 +963,13 @@ impl Vm {
         // Object arm (e.g. `send(:nonexistent)` raising
         // NoMethodError on a primitive) can't leak the bypass
         // into the next unrelated call.
-        let user_send_override = &*name == "send" && match &recv {
-            Value::Object(id) => {
-                let cls = self.heap.class_of(*id);
-                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-            }
-            // `def self.send` on a class — singleton-method lookup
-            // walking the class's superclass chain. Falls through to
-            // the existing `Value::Class` arm which invokes the
-            // user's singleton `send`.
-            Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
-            _ => false,
+        // send/__send__ bypass recogniser — unified helper
+        // (#192 commit 2/5). NotHandled returns recv + args
+        // back so the dispatcher can continue below.
+        let (recv, args) = match self.try_dispatch_send_bypass(&name, name_id, cache_id, args, Some(recv)) {
+            SendBypass::Handled(r) => return r,
+            SendBypass::NotHandled { args, recv_opt } => (recv_opt.expect("with-recv path"), args),
         };
-        if matches!(&*name, "send" | "__send__") && !user_send_override {
-            let target_sym = self.parse_send_target(&args)?;
-            let new_argc = args.len() - 1;
-            self.bypass_visibility_once = true;
-            self.stack.push(recv);
-            for a in args.into_iter().skip(1) {
-                self.stack.push(a);
-            }
-            return self.do_call(target_sym, new_argc, false, u16::MAX);
-        }
 
         // Int#+/-/* operator method-call BigInt-aware intercept.
         // Op::BinOp's hot path inlines `apply_int.unwrap_or →
