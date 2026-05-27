@@ -10,7 +10,7 @@
 # Each row: workload | hits | misses | toplevel_hits | toplevel_misses | hit_rate
 #
 # Today the corpus is 01_monomorphic .. 05_gen_bump_churn covering
-# the IC's design points (mono / 4-way poly / 5-way megamorphic /
+# the IC's design points (mono / 4-shape poly / 6-shape megamorphic /
 # hot toplevel def / gen-bump churn). Any new `*.rb` dropped into
 # the workloads dir picks up automatically — drop one in if you
 # want to characterise a new dispatch shape, then update

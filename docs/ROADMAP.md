@@ -124,9 +124,10 @@ the diff_cruby fixture or test that locks each one down:
 - **Class inheritance + `super`** — `inheritance`, `super_call`,
   `super_splat`, `def_self_method`
 - **`attr_reader / writer / accessor`** — `attr_accessor`
-- **Per-call-site polymorphic inline cache** — 4-way IC with round-
-  robin eviction; unit tests in `vm::lookup::tests::*` cover the
-  polymorphic and megamorphic paths
+- **Per-call-site polymorphic inline cache** — 5-way IC with round-
+  robin eviction (widened from 4 in PR #185 after the cliff
+  measurement in PR #175); unit tests in `vm::lookup::tests::*`
+  cover the polymorphic and megamorphic paths
 - **Real qualified-name class identity** — `class_qualified_separates`
   + cref-walk `class_cref_walk`; class table now keyed by qualified
   SymId, bare const reads inside a body walk `Op::LoadConstChain`
@@ -170,8 +171,11 @@ In rough order of ROI for the embedding / DSL use case:
    `polish.py` shipped; live coverage in
    [`SPEC_STATUS.md`](SPEC_STATUS.md)
 5. **Bytecode peephole sweep** — DefClass-then-Dup-then-StoreConst is
-   one obvious fusion; IC-stats counters (cargo feature `ic-stats`)
-   to validate the 4-way IC's hit rate on real workloads
+   one obvious fusion. IC-stats counters (cargo feature `ic-stats`,
+   PR #170) + the workload battery in `perf/ic_stats.sh` (PR #175)
+   already exist and drove the IC_WAYS = 4 → 5 widening in PR #185;
+   next IC investment likely waits for a real workload to exceed
+   the new cliff at 6 shapes.
 
 ## Medium term
 

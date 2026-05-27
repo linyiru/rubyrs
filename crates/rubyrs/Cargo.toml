@@ -104,10 +104,11 @@ trace-startup = []
 # `ic-stats` instruments the per-call-site inline cache with hit /
 # miss counters, exposed via the public `Runtime::ic_stats()` API
 # and dumped to stderr by the CLI when `RUBYRS_IC_STATS=1`. Used
-# to validate the 4-way polymorphic IC against real workloads:
-# if a hot dispatch site shows a low hit rate, the call-site is
+# to validate the polymorphic IC (currently `IC_WAYS = 5`,
+# widened from 4 in PR #185) against real workloads: if a hot
+# dispatch site shows a low hit rate, the call-site is
 # megamorphic past `IC_WAYS` and `next_way` round-robin eviction
-# is thrashing — knob for whether widening IC_WAYS pays off.
+# is thrashing — knob for whether widening further pays off.
 # Zero-cost when off: `IcStats` is a ZST and `record_hit` /
 # `record_miss` compile to nothing.
 ic-stats = []

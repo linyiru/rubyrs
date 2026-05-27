@@ -1,9 +1,16 @@
 # Inline-cache hit-rate baseline
 
-First measurement using the `ic-stats` cargo feature (PR #170)
-against a fixed 5-workload battery covering the polymorphic IC's
-design points. Numbers are from `perf/ic_stats.sh`, release
-build, captured 2026-05.
+Measurement using the `ic-stats` cargo feature (PR #170) against
+a fixed workload battery covering the polymorphic IC's design
+points. Numbers are from `perf/ic_stats.sh`, release build,
+captured 2026-05.
+
+## History
+
+| Date | IC_WAYS | Notable |
+|---|---:|---|
+| PR #175 | 4 | First baseline; cliff at 5 shapes (hit rate 0.4998) |
+| PR #185 | **5** | Widened on the strength of the cliff measurement; workload 03 bumped to 6 shapes to keep measuring the new cliff |
 
 Regenerate with:
 
@@ -18,9 +25,24 @@ perf/ic_stats.sh
 |---|---:|---:|---:|---:|---:|
 | 01 monomorphic | 9 999 | 5 | 0 | 3 | **0.9992** |
 | 02 polymorphic, 4 shapes | 19 995 | 9 | 0 | 3 | **0.9994** |
-| 03 megamorphic, 5 shapes | 9 999 | 10 005 | 0 | 3 | **0.4998** |
+| 03 megamorphic, 6 shapes | 9 999 | 10 005 | 0 | 3 | **0.4998** |
 | 04 hot toplevel def | 0 | 4 | 9 999 | 4 | **0.9992** |
 | 05 DefMethod gen-bump churn | 0 | 1 004 | 0 | 3 | **0.0000** |
+
+### Widening before/after (workload 03)
+
+| IC_WAYS | Workload shape | Hit rate |
+|---:|---|---:|
+| 4 | 5 shapes (1 past) | 0.4998 |
+| **5** | 5 shapes (exactly fits) | **0.9994** (ad-hoc probe, not in battery) |
+| **5** | 6 shapes (1 past) | **0.4998** |
+
+The cliff moved from 5 → 6 shapes. The shape of the cliff (~0.5
+hit rate from negative-cache hits + thrashing misses) is identical
+— widening adds headroom but doesn't change the eviction
+algorithm. Switching to LRU is the next lever if a real workload
+appears with skewed-megamorphic access (one hot shape + others
+infrequent), where LRU would keep the hot shape pinned.
 
 ## What each workload measures
 
@@ -28,25 +50,25 @@ perf/ic_stats.sh
 site. Saturates the IC after the first miss. Baseline for "best
 case".
 
-**02 — 4-shape polymorphic.** Cycles among exactly `IC_WAYS = 4`
-classes. All four ways fill on the first cycle, every subsequent
-dispatch hits. Total hits ≈ 2 × N because both `.tag` (Object
-dispatch on the polymorphic site) AND `shapes[i % 4]` contribute
-IC accounting: `do_call` always consults `lookup_method_cached`
-first, including for `Array#[]`, and caches the (None) result —
-so Array indexing is a monomorphic IC hit on every iteration even
-though the actual indexing runs through `collection_call`'s
-fallback. **Confirms IC_WAYS = 4 is exactly sized for typical
-4-shape polymorphism**.
+**02 — 4-shape polymorphic.** Cycles among 4 classes, well under
+`IC_WAYS = 5`. All four ways fill on the first cycle, every
+subsequent dispatch hits. Total hits ≈ 2 × N because both `.tag`
+(Object dispatch on the polymorphic site) AND `shapes[i % 4]`
+contribute IC accounting: `do_call` always consults
+`lookup_method_cached` first, including for `Array#[]`, and
+caches the (None) result — so Array indexing is a monomorphic IC
+hit on every iteration even though the actual indexing runs
+through `collection_call`'s fallback. **Documents the
+comfortable-poly case**; lives well below the cliff.
 
-**03 — 5-shape megamorphic.** One shape past `IC_WAYS`. The
+**03 — 6-shape megamorphic.** One shape past `IC_WAYS = 5`. The
 round-robin eviction (`next_way`) keeps replacing a way that the
-NEXT iteration will need, so every shape misses on a ~5-iteration
-cycle. Hit rate collapses to ~0.5 — `shapes[i % 5]` still hits
+NEXT iteration will need, so every shape misses on a ~6-iteration
+cycle. Hit rate collapses to ~0.5 — `shapes[i % 6]` still hits
 (Array indexing is monomorphic, see the workload 02 note on the
 negative-cache slot), but the `.tag` site misses on every
-iteration. **This is the workload that would benefit from widening
-IC_WAYS to 5 (or switching to LRU eviction from round-robin).**
+iteration. **Cliff guard**: if a future real workload exercises a
+6+ shape hot site, this is where you'll see it first.
 
 **04 — hot toplevel def.** 10 000 calls to a user toplevel `def
 helper`. Implicit-self routing through
@@ -89,12 +111,15 @@ has been observed redefining methods in a hot loop.
 
 ## What this says about IC sizing
 
-- **Mono and 4-way poly are optimal.** No work needed.
-- **Megamorphic at exactly 5 shapes is the cliff.** If a future
-  workload shows a 5–8 shape hot site (e.g. an `Enumerable` chain
-  dispatching over a heterogeneous collection), widen `IC_WAYS` to
-  6–8 or switch to LRU. The branch-prediction cost of widening is
-  small for in-cache scans below ~8.
+- **Mono and 4-shape poly are optimal.** Both well under `IC_WAYS = 5`.
+- **5-shape poly now hits 0.9994** (was 0.4998 with IC_WAYS=4) — the
+  measured cliff drove the widening, and `perf/ic_stats.sh` rerun
+  before merging confirmed the win.
+- **Cliff moved to 6+ shapes.** If a future workload shows a 6–8 shape
+  hot site (e.g. an `Enumerable` chain over a heterogeneous
+  collection), widen further or switch to LRU eviction. The
+  branch-prediction cost of widening is small for in-cache scans
+  below ~8.
 - **Gen-bump churn is total.** Worth file-watching for any future
   hot-path workload that hot-redefines methods (testing frameworks,
   metaprogramming-heavy code). Switching to per-class generation

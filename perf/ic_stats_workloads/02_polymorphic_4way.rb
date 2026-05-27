@@ -1,6 +1,8 @@
 # 4-shape polymorphic dispatch — alternates among 4 classes,
-# which is exactly `IC_WAYS = 4`. Expected: hit rate ~ 0.999
-# after the first cycle (each way fills, all subsequent hits).
+# well under `IC_WAYS = 5`. Expected: hit rate ~ 0.999 after the
+# first cycle (each way fills, all subsequent hits). Filename
+# describes the workload shape (4 user classes), not the IC
+# width.
 #
 # The accumulator USES the dispatch result (rather than a
 # tautological `cond > 0` guard) so a future DCE pass that
