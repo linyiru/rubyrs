@@ -2864,6 +2864,34 @@ fn bigint_responds_to_bit_op_names_matches_dispatch() {
 
 #[cfg(feature = "bignum")]
 #[test]
+fn int_shift_zero_receiver_still_rejects_non_integer_count() {
+    // Regression: the `Value::Int(0)` recv short-circuit in
+    // try_bigint_bit_shift used to run BEFORE the arg-type guard,
+    // so `0 << 1.5` (or `0 >> "foo"`, `0 << nil`, `0 << :sym`)
+    // silently returned 0 instead of raising TypeError. Post-fix
+    // the arg-type guard runs first so the shortcut only fires
+    // for Integer counts.
+    let mut rt = rubyrs::Runtime::new();
+    for script in [
+        "0 << 1.5",
+        "0 >> 1.5",
+        "0 << \"foo\"",
+        "0 >> :sym",
+    ] {
+        let err = rt.eval(script, "zero_shift_nonint.rb").unwrap_err();
+        // Pre-fix: eval succeeded with 0. Post-fix: errors. The
+        // exact error class is locked down by the sibling test
+        // below (`bigint_bit_ops_raise_typeerror_on_non_integer_arg`);
+        // here we just assert the eval no longer silently succeeds.
+        assert!(
+            matches!(err.err, rubyrs::RubyError::Uncaught { .. }),
+            "expected error for {:?}, got {:?}", script, err.err,
+        );
+    }
+}
+
+#[cfg(feature = "bignum")]
+#[test]
 fn int_shift_zero_receiver_never_traps_regardless_of_count() {
     // Regression for PR #159 cycle 2: `0 << anything == 0` and
     // `0 >> anything == 0` in Ruby — should never allocate, never

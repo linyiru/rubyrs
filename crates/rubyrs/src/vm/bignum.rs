@@ -599,6 +599,11 @@ impl Vm {
     ) -> Result<Option<Value>, Trap> {
         let left = match name { "<<" => true, ">>" => false, _ => return Ok(None) };
         if !matches!(recv, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        // Arg-type guard FIRST so we don't accidentally accept
+        // `0 << 1.5` as `0`. Pre-fix the `Value::Int(0)` recv
+        // shortcut below ran ahead of this check and swallowed the
+        // TypeError that a non-Integer arg should raise.
+        if !matches!(arg, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
         // Zero receiver: `0 << anything == 0` and `0 >> anything ==
         // 0` regardless of count sign or magnitude. Short-circuit
         // ahead of the BigInt-count trap and the DoS cap estimator
@@ -606,7 +611,8 @@ impl Vm {
         // false-trap under a tight `max_value_bytes`. The canonical-
         // BigInt invariant means `Value::BigInt(_)` can never be
         // zero (any in-i64 magnitude demotes), so this check only
-        // fires for `Value::Int(0)`.
+        // fires for `Value::Int(0)`. Lives AFTER the arg-type guard
+        // so non-Integer args are still rejected.
         if matches!(recv, Value::Int(0)) {
             return Ok(Some(Value::Int(0)));
         }
