@@ -553,7 +553,7 @@ impl Vm {
                 let mut early = None;
                 for v in snapshot {
                     let r = match g.vm.step_block(block, vec![v], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
@@ -770,7 +770,7 @@ impl Vm {
                 let mut early = None;
                 for (k, v) in snapshot {
                     let r = match g.vm.step_block(block, vec![k, v], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
@@ -794,7 +794,7 @@ impl Vm {
                 let mut early = None;
                 for (k, v) in snapshot {
                     let new_key = match g.vm.step_block(block, vec![k], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
@@ -829,7 +829,7 @@ impl Vm {
                 let mut early = None;
                 for (k, v) in snapshot {
                     let new_v = match g.vm.step_block(block, vec![v], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
@@ -952,7 +952,7 @@ impl Vm {
                 let mut early = None;
                 while i <= end_inc {
                     match g.vm.step_block(block, vec![Value::Int(i)], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(_) => {}
                     }
@@ -1122,7 +1122,7 @@ impl Vm {
                 let mut crossing_idx: Option<usize> = None;
                 for (i, v) in snapshot.iter().enumerate() {
                     let r = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
@@ -1229,7 +1229,7 @@ impl Vm {
                 let mut early: Option<Value> = None;
                 for pair in snapshot.windows(2) {
                     let r = match g.vm.step_block(block, vec![pair[0].clone(), pair[1].clone()], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
@@ -1286,7 +1286,7 @@ impl Vm {
                 let mut early: Option<Value> = None;
                 for v in snapshot {
                     let key = match g.vm.step_block(block, vec![v.clone()], pre_frames)? {
-                        BlockStep::MethodReturn => return Ok(None),
+                        BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
