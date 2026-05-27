@@ -750,8 +750,11 @@ impl Runtime {
             self.vm.last_match = None;
         }
         self.vm.env_hash = None;
-        self.vm.loaded_features.clear();
-        self.vm.loaded_stdlib_stubs.clear();
+        #[cfg(not(target_os = "wasi"))]
+        {
+            self.vm.loaded_features.clear();
+            self.vm.loaded_stdlib_stubs.clear();
+        }
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
