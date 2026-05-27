@@ -57,12 +57,27 @@ puts "alias-to_s=#{Bar.my_to_s.inspect}"
 ## class_allocate.rb).
 puts "alias-ancestors-prefix=#{Bar.my_ancestors_prefix.map(&:to_s).take(1).inspect}"
 
-## Missing-source case (e.g. `alias bad nope_no_such_method`)
-## still raises NameError at class-body load time — the
-## fallback only fires when `responds_to(Class, old_id)` is
-## true (i.e., the name is in the lookup.rs Class respond_to
-## whitelist). Not asserted here because the raise fires
-## during class-body load and aborts the script; the assertion
-## would need an eval/class_eval harness that the byte-for-byte
-## diff harness doesn't compose with cleanly. Verified via a
-## standalone repro outside the diff suite.
+## Missing-source case — the fallback only fires when
+## `responds_to(Class, old_id)` is true. Names NOT in the
+## Class respond_to whitelist (e.g. `nope_no_such_method`)
+## still raise NameError. Use `Object.class_eval` so the
+## raise can be rescued inline without aborting the script.
+missing_source = begin
+  Object.class_eval do
+    class << self
+      alias bad nope_no_such_method
+    end
+  end
+  "DID-NOT-RAISE"
+rescue NameError
+  "NameError"
+end
+puts "missing-source=#{missing_source}"
+
+## KNOWN GAP (separate PR): the forwarder's body uses
+## `Op::ApplyCall` (no-block), so `Foo.new!(args) { ... }`
+## drops the block before reaching `Class#new` → block
+## doesn't reach `initialize`. Sinatra's app-routing pattern
+## uses this shape, so the gap matters; the fix requires a
+## new `Op::ApplyCallBlock` opcode + a block-aware forwarder
+## variant. Flagged for follow-up. PR #229 Copilot round 1 #1.
