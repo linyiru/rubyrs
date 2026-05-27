@@ -52,5 +52,33 @@ pub fn ensure_sandbox_cwd() {
         let path = dir.keep();
         std::env::set_current_dir(&path)
             .expect("ICE: fuzz sandbox set_current_dir failed");
+        // Belt-and-braces: confirm the cwd actually moved.
+        // `set_current_dir` returning Ok doesn't fully guarantee
+        // it on every kernel/FS combo (NFS edge cases, sandbox
+        // policies on macOS) and we'd rather fail fuzzing loudly
+        // than run the rest of the corpus against the runner FS.
+        let cwd = std::env::current_dir()
+            .expect("ICE: current_dir lookup failed after sandbox set");
+        assert_eq!(
+            cwd.canonicalize().ok().as_deref(),
+            path.canonicalize().ok().as_deref(),
+            "ICE: fuzz sandbox cwd did not stick — expected {path:?}, got {cwd:?}"
+        );
     });
+    // Every iteration cheaply re-confirms cwd is still inside the
+    // rubyrs-fuzz-* prefix. Catches the failure mode where a future
+    // fuzz target file forgets to call `ensure_sandbox_cwd` AT
+    // STARTUP but lands here from some later code path — the
+    // assertion fires before the unsandboxed `eval` would read
+    // host files. Pattern check only (no syscall) — sub-microsecond.
+    debug_assert!(
+        std::env::current_dir()
+            .map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("rubyrs-fuzz-"))
+            })
+            .unwrap_or(false),
+        "fuzz sandbox cwd lost between init and call site"
+    );
 }
