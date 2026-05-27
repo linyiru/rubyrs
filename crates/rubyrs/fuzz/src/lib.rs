@@ -2,11 +2,95 @@
 //!
 //! Each `fuzz_targets/*.rs` file is its own libfuzzer binary, so
 //! anything they have in common either gets duplicated or hoisted
-//! here. Today this module holds the sandbox-cwd helper; future
-//! shared concerns (corpus prefilter, panic-hook wiring, etc.)
-//! land here too.
+//! here. Today this module holds:
+//!
+//!   - `ensure_sandbox_cwd` — `require` I/O sandbox setup.
+//!   - `Caps` + `run_with_caps` — the iteration body both targets
+//!     reduce down to. New targets that want different cap
+//!     settings can add another `Caps` preset rather than
+//!     reproducing the full UTF-8-gate + Config-build + eval shape.
+//!
+//! Future shared concerns (corpus prefilter, panic-hook wiring,
+//! etc.) land here too.
 
+use rubyrs::{Config, Runtime};
 use std::sync::OnceLock;
+use std::time::Duration;
+
+/// Resource caps a fuzz target applies to its `Runtime`. Named
+/// presets (`Caps::tight`, `Caps::loose`) encode the parse-vs-eval
+/// balance — tight gives parser + AST→IR more mutation surface per
+/// CPU second, loose lets dispatch / GC / method lookup run for
+/// longer per iteration.
+pub struct Caps {
+    pub fuel: u64,
+    pub max_frames: usize,
+    pub max_heap_objects: usize,
+}
+
+impl Caps {
+    /// Bias toward parser + AST→IR coverage. 50k ops covers
+    /// preamble load (~30k as of 2026-05) + a few thousand ops of
+    /// user code per iteration.
+    pub const fn tight() -> Self {
+        Caps {
+            fuel: 50_000,
+            max_frames: 64,
+            max_heap_objects: 1024,
+        }
+    }
+
+    /// Bias toward deeper VM dispatch / GC / method lookup
+    /// coverage. 10× the tight budget; non-trivial user programs
+    /// (small recursion, a few iterators) run to completion.
+    pub const fn loose() -> Self {
+        Caps {
+            fuel: 500_000,
+            max_frames: 128,
+            max_heap_objects: 4096,
+        }
+    }
+}
+
+/// The full iteration body both fuzz targets share: sandbox the
+/// cwd, UTF-8-gate the input, build a `Config` from the supplied
+/// caps + the cross-target safety defaults
+/// (`max_value_bytes`, `max_symbols`, `deadline`, `stress_gc:
+/// false`), evaluate, ignore the `Result` (script errors are
+/// expected; only Rust panics fail the iteration).
+pub fn run_with_caps(data: &[u8], caps: Caps) {
+    ensure_sandbox_cwd();
+    let source = match std::str::from_utf8(data) {
+        Ok(s) => s,
+        // `Runtime::eval` takes `&str` (UTF-8); skip non-UTF-8
+        // bytes here. Ruby files CAN declare other source
+        // encodings via `# encoding: ...` magic comments, but
+        // rubyrs's embed API doesn't expose that path — covering
+        // it would need a separate fuzz target.
+        Err(_) => return,
+    };
+    let cfg = Config {
+        fuel: Some(caps.fuel),
+        max_frames: Some(caps.max_frames),
+        max_heap_objects: Some(caps.max_heap_objects),
+        // Cross-target invariants — value / symbol / time bounds
+        // that defend the fuzz process against runaway scripts.
+        // Same numbers for both targets because they aren't what
+        // parse-vs-eval is biasing on.
+        max_value_bytes: Some(1 << 16),
+        max_symbols: Some(1 << 14),
+        deadline: Some(Duration::from_millis(500)),
+        // `Config::default()` reads `STRESS_GC` on non-wasi
+        // hosts. The fuzz process inherits the runner's env, and
+        // STRESS_GC=1 is endemic in this repo's test culture
+        // (CI runs every PR twice, once stressed). Pin it off so
+        // the harness's throughput is environment-independent.
+        stress_gc: false,
+        ..Default::default()
+    };
+    let mut rt = Runtime::with_config(cfg);
+    let _ = rt.eval(source, "fuzz.rb");
+}
 
 /// Move the fuzz process cwd into a fresh, unpredictable tempdir
 /// once at startup so that any `require '<relative>'` /
