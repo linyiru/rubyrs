@@ -1,7 +1,8 @@
 # Adapted from ruby/spec core/hash/except_spec.rb at upstream
-# commit 448cb340 (2026-05). Hand-translated — the first two
-# blocks (basic except, no-arg) are inlined. Blocks depending
-# on Hash-subclass / frozen-bit / `to_hash` mocks are dropped.
+# commit 448cb340 (2026-05). Hand-translated — three blocks
+# (basic except, no-arg fresh-copy, ignore-missing-keys) are
+# inlined. Blocks depending on Hash-subclass / frozen-bit /
+# `to_hash` mocks are dropped.
 
 describe "Hash#except" do
   it "returns a hash without the given keys" do

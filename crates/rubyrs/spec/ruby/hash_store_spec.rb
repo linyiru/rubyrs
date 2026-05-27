@@ -1,8 +1,11 @@
 # Adapted from ruby/spec core/hash/store_spec.rb at upstream
-# commit 448cb340 (2026-05). Hand-translated — both the
-# main "stores key/value" block and the "returns value" block
-# are inlined. CRuby's frozen-hash FrozenError sibling is
-# dropped (rubyrs doesn't model the frozen bit at Value level).
+# commit 448cb340 (2026-05). Hand-translated — two blocks
+# inlined: the main "associates key/value + returns value"
+# block (the upstream describe combines both assertions into a
+# single it-string) and the "overwrites the value for an
+# existing key" block. CRuby's frozen-hash FrozenError sibling
+# is dropped (rubyrs doesn't model the frozen bit at Value
+# level).
 
 describe "Hash#store" do
   it "associates the key with the value and return the value" do
