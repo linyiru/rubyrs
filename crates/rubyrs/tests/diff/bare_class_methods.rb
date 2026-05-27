@@ -101,16 +101,26 @@ puts "after-class-body=#{Bar.new.hi}"
 puts "after-class-body-from-mod=#{Bar.new.from_mod}"
 
 ## Module fence on bare `allocate`: a bare `allocate` from
-## inside a `module Foo; ... end` body must NOT dispatch (CRuby
-## raises NameError / "no such method or local variable",
-## rubyrs raises NoMethodError — both raise, neither succeeds).
-## This pins the lookup.rs respond_to fence's match in the
-## bridge (PR #196 Copilot review round 2 #1).
+## inside a `module Foo; ... end` body must fall through the
+## bridge (lookup.rs respond_to says false on Modules) and
+## reach the toplevel/method_missing tail. CRuby raises
+## NameError ("undefined local variable or method"); rubyrs
+## raises NoMethodError ("undefined method for Class"). In
+## CRuby NoMethodError is a NameError subclass, so `rescue
+## NameError` would catch both — but rubyrs models them as
+## sibling subclasses of StandardError. We explicitly pin
+## BOTH classes via a two-arm rescue: a regression that drops
+## the fence would route bare allocate to the dedicated arm's
+## TypeError, which neither arm catches, so the fixture would
+## fail loudly instead of silently accepting `!msg.empty?`
+## for any error class. PR #196 code-review #2.
 module ModAllocFence
   begin
     allocate
     puts "module-allocate=DID-NOT-RAISE"
-  rescue StandardError => e
-    puts "module-allocate=raised:#{!e.message.empty?}"
+  rescue NoMethodError => e
+    puts "module-allocate=fenced-family:#{!e.message.empty?}"
+  rescue NameError => e
+    puts "module-allocate=fenced-family:#{!e.message.empty?}"
   end
 end
