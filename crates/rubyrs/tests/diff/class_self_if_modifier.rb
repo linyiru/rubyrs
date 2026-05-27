@@ -18,22 +18,42 @@ class WithIfMod
       "from-helper"
     end
 
-    ## Conditional call to a method that exists — runs.
-    custom_helper if respond_to?(:custom_helper, true)
+    ## Conditional call with literal-true guard — RUNS.
+    ## Observable side effect: prints at class-body load time.
+    ## Both CRuby and rubyrs evaluate `if true` identically;
+    ## any divergence here would surface as a missing or
+    ## duplicated "guard-true-fired" line. (Earlier draft of
+    ## this fixture used `respond_to?(:custom_helper, true)`
+    ## as the guard, but inside `class << self` body
+    ## CRuby's `respond_to?` for the just-`def`-ed method
+    ## returns false — instance method on the singleton
+    ## class, not method on the singleton-class object —
+    ## while rubyrs returns true. Avoiding the divergent
+    ## guard keeps the fixture focused on the if-modifier
+    ## wrapping itself.)
+    puts "guard-true-fired" if true
 
-    ## Conditional call to a method that doesn't exist — skipped.
-    nonexistent_method if respond_to?(:nonexistent_method)
+    ## Conditional call with literal-false guard — SKIPPED.
+    ## If the modifier admitted both branches by accident,
+    ## a second "guard-false-fired" line would appear and
+    ## the diff harness would catch it.
+    puts "guard-false-fired" if false
 
     ## Conditional alias when the guard says "don't alias" — skipped.
     alias hi_skipped custom_helper if false
 
     ## Conditional alias when the guard says "do alias" — installed.
-    alias hi_installed custom_helper unless method_defined?(:never_defined)
+    alias hi_installed custom_helper unless false
   end
 end
 
 ## The unconditional and the if-true path both work; the if-false
 ## path didn't define the method.
+## (The if-true side effect — `helper-called-at-load-time` —
+## already printed during class-body load above. If absent
+## from rubyrs's stdout, the guard mis-evaluated and the diff
+## harness would catch it.)
+
 puts "installed=#{WithIfMod.hi_installed}"
 puts "skipped-respond=#{WithIfMod.respond_to?(:hi_skipped)}"
 skipped_direct = begin

@@ -2592,7 +2592,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // Recognised inner shapes: bare-call (CallNode, e.g.
             // `ruby2_keywords(:use)`) and the `alias new old` form
             // (AliasMethodNode). Both are wrapped as
-            // `Expr::If { cond, then: [<inner>], else: [Nil] }`.
+            // `Expr::If { cond, then_body: [<inner>], else_body: [Nil] }`.
             // The condition is translated via the regular `tr()`
             // path (so `respond_to?(...)` / `method_defined? :foo`
             // dispatch through their usual builtins).
