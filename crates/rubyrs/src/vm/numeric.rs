@@ -553,6 +553,22 @@ pub(crate) fn type_name_for_coerce(v: &Value) -> &'static str {
     }
 }
 
+/// Like `type_name_for_coerce` but returns the CRuby **class name**
+/// instead of the inspect-friendly token. Use this when building
+/// error messages that should match CRuby's exact text:
+/// `"can't modify frozen NilClass: nil"`, not `"can't modify frozen
+/// nil: nil"`. Diverges from `type_name_for_coerce` only for Nil
+/// (NilClass vs nil) and Bool (TrueClass/FalseClass vs true/false)
+/// — both contexts need the same numeric/string/etc. names.
+pub(crate) fn class_name_for_error(v: &Value) -> &'static str {
+    match v {
+        Value::Nil => "NilClass",
+        Value::Bool(true) => "TrueClass",
+        Value::Bool(false) => "FalseClass",
+        other => type_name_for_coerce(other),
+    }
+}
+
 // Float#inspect — kept private here because it's a single-line
 // inspect that just defers to to_s; if it grows we'll promote
 // it to a method.

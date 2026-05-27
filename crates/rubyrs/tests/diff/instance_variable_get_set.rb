@@ -130,6 +130,21 @@ rescue FrozenError => e
   puts "int-set=#{e.class}: #{e.message}"
 end
 
+## Nil / Bool receivers — CRuby's FrozenError text uses the
+## proper class name (NilClass / TrueClass / FalseClass), not
+## the inspect token (nil / true / false). Pin the message so
+## a regression in the class-name mapping (vm/numeric.rs's
+## `class_name_for_error` vs `type_name_for_coerce`) trips
+## the diff.
+[nil, true, false].each do |v|
+  begin
+    v.instance_variable_set(:@x, 1)
+    puts "#{v.class}-set=NOT-RAISED"
+  rescue FrozenError => e
+    puts "#{v.class}-set=#{e.message}"
+  end
+end
+
 ## Wrong-arity: CRuby raises ArgumentError with the standard
 ## "wrong number of arguments (given N, expected M)" shape on
 ## all three family members (instance_variables takes 0 args,

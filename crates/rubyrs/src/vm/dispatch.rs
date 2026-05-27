@@ -2557,15 +2557,21 @@ impl Vm {
         //
         // Heap shape: read/write reaches the ivar table on
         // `Value::Object` (Instance) and `Value::Class` (Class)
-        // receivers — mirrors `Op::LoadIvar` / `Op::StoreIvar`
-        // in vm/step.rs:552/562. Set on Object slots that aren't
-        // `HeapObj::Instance` (e.g. TypedData) raises a clean
-        // RuntimeError instead of ICE-ing through
-        // `heap.instance_mut`'s assertion; set on primitives
-        // (Int/Str/Float/Sym/Nil/Bool) raises FrozenError.
-        // Broader Array/Hash ivar support would require an ivar
-        // slot on those HeapObj variants — explicit out-of-scope
-        // until a caller surfaces it.
+        // receivers — same storage that `Op::LoadIvar` /
+        // `Op::StoreIvar` in vm/step.rs:552/562 read and write.
+        // The set path is MORE defensive than `Op::StoreIvar`:
+        // that op still calls `heap.instance_mut(*oid)` which
+        // panics with the same "ICE: heap slot is not an
+        // Instance" assertion this fix avoids; if `Op::StoreIvar`
+        // is ever reached for a non-Instance Object slot it will
+        // still ICE (a separate hardening concern, not covered
+        // by this PR). The `_ =>` arm below catches every
+        // non-Object/non-Class receiver — Int/Str/Float/Sym/
+        // Nil/Bool/Array/Hash/Range/Proc/etc. — and raises
+        // FrozenError. For mutable shapes like Array/Hash that
+        // CRuby DOES allow ivars on, supporting that surface
+        // would require ivar slots on those HeapObj variants;
+        // explicit out-of-scope until a caller surfaces it.
         if &*name == "instance_variable_get" && args.len() == 1 {
             let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
             let v = match &recv {
@@ -2603,7 +2609,7 @@ impl Vm {
                     return Ok(());
                 }
                 _ => {
-                    let cls = crate::vm::numeric::type_name_for_coerce(&recv);
+                    let cls = crate::vm::numeric::class_name_for_error(&recv);
                     let inspected = recv.to_inspect(&self.heap, &self.interner);
                     return Err(self.trap(RubyError::FrozenError {
                         msg: format!("can't modify frozen {}: {}", cls, inspected),
