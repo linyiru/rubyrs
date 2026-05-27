@@ -17,9 +17,11 @@ describe "Integer#odd?" do
 
   # Same bignum-only gating as integer_even_spec.rb's
   # `**`-literal cases — the values overflow i64 and saturate
-  # to a fixed i64::MAX (odd) under no-bignum, making the
-  # "even bignum" assertions test wrap-to-i64 behaviour instead
-  # of the BigInt `odd?` path the spec was written to exercise.
+  # via `i64::saturating_pow` to `i64::MAX` (odd) or `i64::MIN`
+  # (even) under no-bignum. The mix means some assertions
+  # trivially pass and others trivially fail under saturation;
+  # neither exercises the BigInt `odd?` path the spec was
+  # written for.
   bignum_it "returns true if self is odd and positive" do
     assert_eq((987279**19).odd?, true)
   end

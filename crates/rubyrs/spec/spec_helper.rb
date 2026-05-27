@@ -57,9 +57,10 @@ end
 # returns true iff rubyrs was built with `--features bignum`
 # (the default). Use this from spec bodies that rely on
 # BigInt-only semantics (e.g. `(10000**10).even?`); without
-# bignum the literal would saturate to i64 and the assertion
-# would test wrap-to-i64 behaviour instead of the bignum path
-# the spec was written to exercise.
+# bignum the literal saturates via `i64::saturating_pow` to
+# `i64::MAX` (or the matching negative bound), and the
+# assertion would test that saturation instead of the bignum
+# path the spec was written to exercise.
 def bignum_enabled?
   __spec_bignum_enabled
 end

@@ -188,8 +188,10 @@ fn make_runtime() -> (Runtime, Rc<RefCell<ExampleTracker>>) {
     // use `(10000**10).even?` to verify BigInt semantics) call
     // `bignum_it "..."` instead of `it "..."` — the helper drops the
     // body when bignum is off, so the same source compiles and runs
-    // on both profiles without producing spurious failures from
-    // wrap-to-i64 semantics.
+    // on both profiles without producing spurious failures from the
+    // no-bignum `**` arm's `i64::saturating_pow` (which caps at
+    // `i64::MAX`, making the saturated value happen to be odd and
+    // breaking any "is this bignum literal even?" assertion).
     rt.register_fn("__spec_bignum_enabled", move |_args| {
         #[cfg(feature = "bignum")]
         { Ok(Value::Bool(true)) }

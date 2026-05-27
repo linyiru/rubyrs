@@ -21,12 +21,15 @@ describe "Integer#even?" do
 
   # The four `**`-literal cases below evaluate to Bignum-sized
   # values (10^40 / 9879^976) that don't fit in i64. Under the
-  # no-bignum profile they'd saturate via `i64::saturating_pow`
-  # to `i64::MAX = 9223372036854775807` (odd), making
-  # `.even?` return false for what was meant to be an "even
-  # bignum" assertion. Gate with `bignum_it` so the cases only
-  # run on the profile where they make sense; rubyrs's Bignum
-  # `#even?` agrees with CRuby per `crates/rubyrs/src/vm/bignum.rs`'s
+  # no-bignum profile the `**` arm saturates via
+  # `i64::saturating_pow` — positives cap at
+  # `i64::MAX = 9223372036854775807` (odd), negatives at
+  # `i64::MIN = -9223372036854775808` (even). The mix means
+  # some assertions trivially pass under saturation and others
+  # trivially fail, neither of which exercises BigInt
+  # semantics. Gate with `bignum_it` so the cases only run on
+  # the profile where they make sense; rubyrs's Bignum `#even?`
+  # agrees with CRuby per `crates/rubyrs/src/vm/bignum.rs`'s
   # `even?` arm (`b & 1 == 0` on the heap-stored magnitude).
   bignum_it "returns true if self is even and positive" do
     assert_eq((10000**10).even?, true)
