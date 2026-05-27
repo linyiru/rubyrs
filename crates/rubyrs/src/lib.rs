@@ -647,18 +647,23 @@ impl ClassStateSnapshot {
     }
 
     /// Restore every captured field into the live `Class`'s
-    /// `RefCell`s. Borrow-mut'ing each field independently is
-    /// fine — the snapshot's borrows have all been dropped by
-    /// the time `capture` returned, and `Drop` won't reborrow.
+    /// `RefCell`s. Uses `clone_from` (in-place clone) rather
+    /// than `*x = y.clone()` — `clone_from` reuses the
+    /// destination's existing allocation (HashMap buckets,
+    /// Vec capacity) instead of dropping it and re-allocating
+    /// fresh. For a 40-class preamble with HashMap method
+    /// tables averaging 5-10 entries each, this cuts the
+    /// per-reset allocator churn by ~half on the hot path
+    /// flagged by /code-review's F2 finding.
     fn restore_into(&self, cls: &value::Class) {
-        *cls.ivars.borrow_mut() = self.ivars.clone();
-        *cls.methods.borrow_mut() = self.methods.clone();
-        *cls.singleton_methods.borrow_mut() = self.singleton_methods.clone();
-        *cls.superclass.borrow_mut() = self.superclass.clone();
-        *cls.includes.borrow_mut() = self.includes.clone();
-        *cls.prepends.borrow_mut() = self.prepends.clone();
-        *cls.singleton_prepends.borrow_mut() = self.singleton_prepends.clone();
-        *cls.class_vars.borrow_mut() = self.class_vars.clone();
+        cls.ivars.borrow_mut().clone_from(&self.ivars);
+        cls.methods.borrow_mut().clone_from(&self.methods);
+        cls.singleton_methods.borrow_mut().clone_from(&self.singleton_methods);
+        cls.superclass.borrow_mut().clone_from(&self.superclass);
+        cls.includes.borrow_mut().clone_from(&self.includes);
+        cls.prepends.borrow_mut().clone_from(&self.prepends);
+        cls.singleton_prepends.borrow_mut().clone_from(&self.singleton_prepends);
+        cls.class_vars.borrow_mut().clone_from(&self.class_vars);
     }
 }
 
@@ -882,29 +887,13 @@ impl Runtime {
         // and dispatch to the wrong fn / method (or panic on
         // `interner.resolve(...)`).
         //
-        // Walk every long-lived table to find the max referenced
-        // SymId; truncate to `max(snapshot.interner_len,
-        // max_long_lived_sym + 1)`. User-interned symbols that
-        // happen to fall below this floor get preserved as a
-        // small leak — acceptable trade-off for never corrupting
-        // dispatch.
-        let mut long_lived_max: Option<usize> = self
-            .vm
-            .host_fns
-            .keys()
-            .map(|sym| sym.0 as usize)
-            .max();
-        for inner in self.vm.cext_class_methods.values() {
-            if let Some(m) = inner.keys().map(|sym| sym.0 as usize).max() {
-                long_lived_max = Some(long_lived_max.map_or(m, |c| c.max(m)));
-            }
-        }
-        for inner in self.vm.cext_instance_methods.values() {
-            if let Some(m) = inner.keys().map(|sym| sym.0 as usize).max() {
-                long_lived_max = Some(long_lived_max.map_or(m, |c| c.max(m)));
-            }
-        }
-        let keep_len = match long_lived_max {
+        // `Vm::long_lived_sym_id_max` walks every long-lived
+        // table to find the max referenced SymId; truncate to
+        // `max(snapshot.interner_len, that_max + 1)`. User-
+        // interned symbols that fall below this floor get
+        // preserved as a small leak — acceptable trade-off for
+        // never corrupting dispatch via a SymId-reuse aliasing.
+        let keep_len = match self.vm.long_lived_sym_id_max() {
             Some(m) => snapshot.interner_len.max(m + 1),
             None => snapshot.interner_len,
         };
