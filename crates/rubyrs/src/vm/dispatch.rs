@@ -2721,7 +2721,7 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
-        if let Some(v) = self.sym_primitive(&recv, &name, &args) {
+        if let Some(v) = self.sym_primitive(&recv, &name, &args)? {
             self.stack.push(v);
             return Ok(());
         }
@@ -5108,7 +5108,7 @@ impl Vm {
             return Ok(());
         }
         if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
-        if let Some(v) = self.sym_primitive(&recv, &name, &args) { self.stack.push(v); return Ok(()); }
+        if let Some(v) = self.sym_primitive(&recv, &name, &args)? { self.stack.push(v); return Ok(()); }
         // Mirror do_call's bigint_primitive hook. Without this,
         // block-form calls on BigInt receivers (`big.send(:to_s) { ... }`)
         // raise NoMethodError because primitive_call/sym_primitive

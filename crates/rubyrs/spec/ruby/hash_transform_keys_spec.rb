@@ -2,21 +2,19 @@
 # upstream commit 448cb340 (2026-05). Hand-translated — first
 # three blocks of the main describe are inlined. Blocks
 # depending on Hash subclass / Enumerator (no-block form) /
-# the keyword-arg mapping shape are dropped. Upstream uses
-# Symbol keys with `&:succ`; rubyrs's subset has `String#succ`
-# but not `Symbol#succ`, so the keys are switched to strings.
+# the keyword-arg mapping shape are dropped.
 
 describe "Hash#transform_keys" do
   it "returns new hash" do
-    h = { "a" => 1, "b" => 2, "c" => 3 }
+    h = { a: 1, b: 2, c: 3 }
     ret = h.transform_keys(&:succ)
     assert(!ret.equal?(h))
     assert_eq(ret.is_a?(Hash), true)
   end
 
   it "sets the result as transformed keys with the given block" do
-    h = { "a" => 1, "b" => 2, "c" => 3 }
-    assert_eq(h.transform_keys(&:succ), { "b" => 1, "c" => 2, "d" => 3 })
+    h = { a: 1, b: 2, c: 3 }
+    assert_eq(h.transform_keys(&:succ), { b: 1, c: 2, d: 3 })
   end
 
   it "keeps last pair if new keys conflict" do

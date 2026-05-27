@@ -40,6 +40,34 @@ impl Vm {
                     // methods by the no-recv fall-through.
                     ("freeze", []) => Some(Value::Array(id)),
                     ("frozen?", []) => Some(Value::Bool(false)),
+                    // Array#<=> — element-wise lex compare; length is
+                    // the tiebreaker when the common prefix is Equal.
+                    // Returns nil when any element pair is incompara-
+                    // ble (cross-type with no ordering). Delegates to
+                    // `value_cmp_v_heap`, which recurses into nested
+                    // Arrays so `[[1,2],[3,4]] <=> [[1,2],[3,5]]` works.
+                    ("<=>", [Value::Array(other)]) => {
+                        Some(match super::util::value_cmp_v_heap(
+                            &Value::Array(id),
+                            &Value::Array(*other),
+                            &self.interner,
+                            &self.heap,
+                        ) {
+                            Some(o) => Value::Int(o as i64),
+                            None => Value::Nil,
+                        })
+                    }
+                    ("<=>", [_]) => Some(Value::Nil),
+                    // Wrong arity (0 or 2+ args) — CRuby raises
+                    // ArgumentError here. The catch-all in the
+                    // outer dispatcher would otherwise surface
+                    // NoMethodError, which mis-reports a real
+                    // caller bug as a missing method.
+                    ("<=>", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 1)", many.len()),
+                        }));
+                    }
                     ("freeze" | "frozen?", many) => {
                         return Err(self.trap(crate::error::RubyError::ArgumentError {
                             msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),

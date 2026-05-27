@@ -160,6 +160,36 @@ fn interner_cap_traps_to_sym_in_loop() {
 }
 
 #[test]
+fn interner_cap_traps_symbol_succ_in_loop() {
+    // `Symbol#succ` re-interns the successor name and was
+    // previously bypassing the cap that `String#to_sym` honours.
+    // With the cap in place, an unbounded `sym = sym.succ` loop
+    // traps the same way `("k" + i.to_s).to_sym` does.
+    let mut rt0 = Runtime::new();
+    rt0.eval("", "warmup.rb").unwrap();
+    let baseline = rt0.symbol_count();
+    let mut rt = Runtime::with_config(Config {
+        max_symbols: Some(baseline + 20),
+        ..Default::default()
+    });
+    let err = rt.eval(
+        r#"
+        sym = :a
+        i = 0
+        while i < 1000
+          sym = sym.succ
+          i = i + 1
+        end
+        "#,
+        "succ_blowup.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { ref msg } if msg.contains("interner")),
+        "expected ResourceExhausted/interner, got {:?}", err.err,
+    );
+}
+
+#[test]
 fn interner_cap_allows_reusing_existing_symbols() {
     // The cap should only fire when a *new* symbol would be
     // interned. Repeatedly calling `.to_sym` on the same string

@@ -15,6 +15,7 @@
 
 use std::rc::Rc;
 
+use crate::error::{RubyError, Trap};
 use crate::intern::SymId;
 use crate::value::{Class, Method, Value};
 
@@ -530,7 +531,7 @@ impl Vm {
                 "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
                 "hash"
             ),
-            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name"),
+            Value::Sym(_) => matches!(name, "to_sym" | "to_s" | "inspect" | "name" | "succ" | "next"),
             Value::Array(_) => matches!(name,
                 "freeze" | "frozen?" |
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
@@ -561,7 +562,7 @@ impl Vm {
                 "length" | "size" | "[]" | "[]=" | "empty?" |
                 "include?" | "has_key?" | "key?" | "member?" |
                 "keys" | "values" | "to_h" | "to_a" |
-                "merge" | "delete" | "invert" | "store" | "except" | "slice" |
+                "merge" | "delete" | "invert" | "store" | "except" | "slice" | "dup" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |
                 "any?" | "all?" | "none?" |
@@ -1004,8 +1005,8 @@ impl Vm {
 /// `Symbol#to_s` / `to_sym` need the Interner to resolve the underlying name,
 /// so they live as a method on Vm rather than in the pure `primitive_call`.
 impl Vm {
-    pub(crate) fn sym_primitive(&self, recv: &Value, name: &str, args: &[Value]) -> Option<Value> {
-        match (recv, name, args) {
+    pub(crate) fn sym_primitive(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
+        Ok(match (recv, name, args) {
             (Value::Sym(id), "to_s", []) => Some(Value::new_str(self.interner.resolve(*id).to_string())),
             // Symbol#name (Ruby 3.0+) returns the same content as
             // #to_s. CRuby distinguishes by returning a frozen
@@ -1021,6 +1022,29 @@ impl Vm {
                 Some(Value::new_str(format!(":{}", self.interner.resolve(*id))))
             }
             (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
+            // Symbol#succ / Symbol#next — alphanumeric successor of
+            // the underlying name, then re-interned. Matches
+            // `String#succ` semantics; CRuby treats Symbol#succ as
+            // `:"#{to_s.succ}".to_sym`. Used by spec idiom
+            // `transform_keys(&:succ)`.
+            //
+            // ResourceCap: gate the intern on `Config::max_symbols`
+            // the same way `String#to_sym` does (`vm/string.rs`'s
+            // `to_sym` arm). Without this, a tight loop like
+            // `sym = :a; loop { sym = sym.succ }` grows the
+            // interner unbounded, bypassing the cap that
+            // String→Symbol coercion enforces. Existing names re-
+            // resolve and don't count toward the cap.
+            (Value::Sym(id), "succ", []) | (Value::Sym(id), "next", []) => {
+                let next_name = crate::vm::string::str_succ(self.interner.resolve(*id));
+                if let Some(max) = self.max_symbols
+                    && !self.interner.contains(&next_name) && self.interner.len() >= max {
+                        return Err(self.trap(RubyError::ResourceExhausted {
+                            msg: format!("interner exhausted: {} symbols", max),
+                        }));
+                    }
+                Some(Value::Sym(self.interner.intern(&next_name)))
+            }
             // Symbol <=> Symbol compares the interned names
             // lexicographically — matches `value_cmp_v`.
             (Value::Sym(a), "<=>", [Value::Sym(b)]) => {
@@ -1031,7 +1055,7 @@ impl Vm {
             // Cross-type with Symbol lhs: nil, not NoMethodError.
             (Value::Sym(_), "<=>", [_]) => Some(Value::Nil),
             _ => None,
-        }
+        })
     }
 }
 
