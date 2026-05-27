@@ -13,14 +13,14 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 91 |
-| Examples in corpus | 439 |
-| Skipped `it` traces | 146 |
+| Examples in corpus | 443 |
+| Skipped `it` traces | 144 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 7 |
+| `divergent` | 5 |
 | `fixture` | 48 |
 | `method-not-implemented` | 78 |
 | `mock` | 13 |
@@ -42,7 +42,7 @@ Find blocks unlocked by a future feature with e.g.
 | BasicObject | 3 | 15 | 0 |
 | Hash | 19 | 46 | 38 |
 | Integer | 21 | 184 | 20 |
-| Method | 11 | 53 | 3 |
+| Method | 11 | 57 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 13 | 53 | 21 |
 | UnboundMethod | 3 | 14 | 1 |
@@ -113,14 +113,14 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_to_s_spec.rb` | Integer#to_s | `core/integer/to_s_spec.rb` | 6 | 2 |
 | `integer_upto_spec.rb` | Integer#upto [stop] when self and stop are Integers | `core/integer/upto_spec.rb` | 3 | 3 |
 | `integer_zero_spec.rb` | Integer#zero? | `core/integer/zero_spec.rb` | 2 | 0 |
-| `method_arity_spec.rb` | Method#arity | `core/method/arity_spec.rb` | 4 | 1 |
+| `method_arity_spec.rb` | Method#arity | `core/method/arity_spec.rb` | 6 | 0 |
 | `method_call_spec.rb` | Method#call | `core/method/call_spec.rb (+ shared/call.rb)` | 6 | 0 |
 | `method_compose_spec.rb` | Method#<< | `core/method/compose_spec.rb` | 6 | 0 |
 | `method_curry_spec.rb` | Method#curry | `core/method/curry_spec.rb` | 5 | 0 |
 | `method_equal_spec.rb` | Method#== | `core/method/equal_value_spec.rb + shared/eql.rb` | 5 | 0 |
 | `method_missing_spec.rb` | BasicObject#method_missing | `core/basicobject/method_missing_spec.rb` | 4 | 0 |
 | `method_owner_spec.rb` | Method#owner | `core/method/owner_spec.rb` | 4 | 0 |
-| `method_parameters_spec.rb` | Method#parameters | `core/method/parameters_spec.rb` | 6 | 2 |
+| `method_parameters_spec.rb` | Method#parameters | `core/method/parameters_spec.rb` | 8 | 1 |
 | `method_receiver_spec.rb` | Method#receiver | `core/method/receiver_spec.rb` | 4 | 0 |
 | `method_source_location_spec.rb` | Method#source_location | `core/method/source_location_spec.rb` | 2 | 0 |
 | `method_to_proc_spec.rb` | Method#to_proc | `core/method/to_proc_spec.rb` | 7 | 0 |

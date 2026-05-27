@@ -33,7 +33,17 @@ describe "Method#arity" do
     assert_eq(ArityT3.new.method(:f).arity, -2)
   end
 
-  # skipped (divergent): it "describes block-only arities (`def f(&blk)`)" do
-  #   `def f(&blk)` is reported as `[[:opt, :blk]]` by `parameters`
-  #   in rubyrs — see method_parameters_spec.rb's divergent block.
+  it "returns 0 when the only param is a block param" do
+    class ArityT4
+      def f(&blk); end
+    end
+    assert_eq(ArityT4.new.method(:f).arity, 0)
+  end
+
+  it "does not count the block param toward arity" do
+    class ArityT5
+      def f(a, b, &blk); end
+    end
+    assert_eq(ArityT5.new.method(:f).arity, 2)
+  end
 end
