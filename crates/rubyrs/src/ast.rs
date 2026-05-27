@@ -2617,20 +2617,23 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             if recv_is_self {
                 let modifier_if = bn.as_if_node()
                     .and_then(|if_n| {
-                        let stmts = if_n.statements()?;
-                        let body_iter = stmts.body();
-                        if body_iter.iter().count() != 1 { return None; }
                         if if_n.subsequent().is_some() { return None; }
-                        let inner = body_iter.iter().next()?;
+                        let stmts = if_n.statements()?;
+                        // Exactly-one-stmt check via a single
+                        // iterator walk: take one, error if there
+                        // are more. Cheaper than `count() + next()`.
+                        let mut it = stmts.body().iter();
+                        let inner = it.next()?;
+                        if it.next().is_some() { return None; }
                         Some((if_n.predicate(), inner, false))
                     });
                 let modifier_unless = bn.as_unless_node()
                     .and_then(|un_n| {
-                        let stmts = un_n.statements()?;
-                        let body_iter = stmts.body();
-                        if body_iter.iter().count() != 1 { return None; }
                         if un_n.else_clause().is_some() { return None; }
-                        let inner = body_iter.iter().next()?;
+                        let stmts = un_n.statements()?;
+                        let mut it = stmts.body().iter();
+                        let inner = it.next()?;
+                        if it.next().is_some() { return None; }
                         Some((un_n.predicate(), inner, true))
                     });
                 if let Some((cond_node, inner, negated)) = modifier_if.or(modifier_unless) {
