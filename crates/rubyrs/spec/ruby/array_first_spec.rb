@@ -13,12 +13,9 @@
 # Re-extracted post-PR #140 — `Array#first(n)` is now in subset
 # (cap-to-length, ArgumentError on negative, block-ignored).
 #
-# Six upstream `it` blocks remain skipped — 4 via polish.py
+# Five upstream `it` blocks remain skipped — 4 via polish.py
 # DROP_PATTERNS (one fixture-recursive, two mock-machinery,
-# one fixture-subclass) plus 2 hand-added skips because the
-# blanket polish rule was too coarse to handle them:
-#   - bignum_value: CRuby raises RangeError; rubyrs raises
-#     NoMethodError (no BigInt arm), traced as `divergent`.
+# one fixture-subclass) plus 1 hand-added skip:
 #   - .replace-based "independent" check: `Array#replace` not
 #     in subset yet (would unlock when shipped).
 # SPEC_STATUS.md is authoritative for the exact counts.
@@ -57,17 +54,18 @@ describe "Array#first" do
     end
   end
 
-  # skipped (divergent): it "raises a RangeError when count is a Bignum" do
-  #   CRuby raises RangeError for `[].first(bignum_value)`.
-  #   rubyrs's `Array#first(n)` arm only matches `Value::Int(n)`
-  #   (see crates/rubyrs/src/vm/array.rs), so a true BigInt arg
-  #   falls through to NoMethodError — i.e. divergent error
-  #   class, not divergent control flow. (The i64-fitting large
-  #   literal in crates/rubyrs/tests/diff/array_first_last_n.rb:34
-  #   exercises the cap-to-length path for `Value::Int`, NOT the
-  #   Bignum dispatch path.)
-  #   Unlock when rubyrs grows a BigInt arm that raises
-  #   RangeError to match.
+  # Gate with `bignum_it`: under `--no-default-features` (no
+  # bignum), `99_999_999_999_999_999_999` saturates to
+  # `i64::MAX` at the AST layer (a `Value::Int`, not BigInt),
+  # so the call would take the cap-to-length path and silently
+  # return `[]` without raising — the test would fail. Same
+  # gating idiom integer_even_spec.rb uses for its bignum
+  # `**`-literal cases.
+  bignum_it "raises a RangeError when count is a Bignum" do
+    assert_raises("RangeError") do
+      [].first(99_999_999_999_999_999_999)
+    end
+  end
 
   it "returns the entire array when count > length" do
     assert_eq([1, 2, 3, 4, 5, 9].first(10), [1, 2, 3, 4, 5, 9])

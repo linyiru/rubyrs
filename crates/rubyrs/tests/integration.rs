@@ -143,11 +143,14 @@ fn env_cap_typo_warns_on_stderr() {
 // fix PR deletes the ratchet fixture and un-skips the matching
 // `# skipped (divergent):` trace in `spec/ruby/*.rb`. Surfaced from
 // the spec-ingestion arc in PR #167 / #158 / #188.
-#[test] fn divergence_array_first_bignum() { run_fixture("divergence_array_first_bignum"); }
-// `divergence_string_strip_nul` removed when this PR fixed the
-// gap (vm/string.rs now strips NUL bytes alongside CRuby's
-// whitespace set). Spec blocks un-skipped in string_strip_spec.rb /
-// string_lstrip_spec.rb / string_rstrip_spec.rb.
+// `divergence_array_first_bignum` removed when this PR fixed
+// the gap (vm/array.rs now raises RangeError for BigInt count
+// in Array#first / #last). Spec block un-skipped in
+// array_first_spec.rb.
+// `divergence_string_strip_nul` removed when an earlier PR
+// fixed the gap (vm/string.rs now strips NUL bytes alongside
+// CRuby's whitespace set). Spec blocks un-skipped in
+// string_strip_spec.rb / string_lstrip_spec.rb / string_rstrip_spec.rb.
 #[test] fn divergence_hash_eql_keys() { run_fixture("divergence_hash_eql_keys"); }
 // `divergence_hash_fetch_arity` removed when this PR fixed the
 // gap (vm/hash.rs now raises ArgumentError on wrong arity).
