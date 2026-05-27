@@ -81,6 +81,30 @@ pub(crate) struct ProtoBuilder {
     pub(crate) class_path: Vec<String>,
 }
 
+/// Scope-bounded `current_span` override. Restores the previous
+/// span on drop, so early returns from `compile_expr` arms don't
+/// need to remember to restore manually. Drop order is enough —
+/// any `b.emit(...)` calls inside the scope happen *before* the
+/// guard's drop runs, so they pick up the overridden span.
+pub(crate) struct SpanGuard<'a> {
+    pub(crate) b: &'a mut ProtoBuilder,
+    prev: Span,
+}
+
+impl<'a> SpanGuard<'a> {
+    pub(crate) fn enter(b: &'a mut ProtoBuilder, span: Span) -> Self {
+        let prev = b.current_span;
+        b.current_span = span;
+        Self { b, prev }
+    }
+}
+
+impl Drop for SpanGuard<'_> {
+    fn drop(&mut self) {
+        self.b.current_span = self.prev;
+    }
+}
+
 impl ProtoBuilder {
     pub(crate) fn new(params: &[String], filename: Rc<str>) -> Self {
         let mut b = Self {
@@ -315,8 +339,8 @@ pub(crate) fn compile_expr(
     b: &mut ProtoBuilder, e: &SExpr,
     protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
 ) {
-    let prev_span = b.current_span;
-    b.current_span = e.span;
+    let mut _span_guard = SpanGuard::enter(b, e.span);
+    let b = &mut *_span_guard.b;
     match &e.node {
         Expr::IntLit(i) => { b.emit(Op::LoadConstInt(*i)); }
         Expr::FloatLit(f) => { b.emit(Op::LoadConstFloat(*f)); }
@@ -404,7 +428,6 @@ pub(crate) fn compile_expr(
                         && rn == name {
                             let slot = b.local_slot(name);
                             b.emit(Op::IncLocal(slot));
-                            b.current_span = prev_span;
                             return;
                         }
             // See note in compile_stmt's LVarWrite arm: pre-allocate
@@ -427,7 +450,6 @@ pub(crate) fn compile_expr(
                         && rn == name {
                             let id = interner.intern(name);
                             b.emit(Op::IncIvar(id));
-                            b.current_span = prev_span;
                             return;
                         }
             compile_expr(b, val, protos, interner, cc);
@@ -736,7 +758,6 @@ pub(crate) fn compile_expr(
         Expr::Call { receiver, name, args } => {
             if receiver.is_none() && name == "__seq__" {
                 compile_body(b, args, protos, interner, cc);
-                b.current_span = prev_span;
                 return;
             }
             // attr_accessor / attr_reader / attr_writer — compile-time
@@ -823,7 +844,6 @@ pub(crate) fn compile_expr(
                 // Inside a loop or with multiple aliases per body
                 // the imbalance accumulates.
                 b.emit(Op::AliasMethod(nid, oid));
-                b.current_span = prev_span;
                 return;
             }
             if receiver.is_none() && name == "raise" {
@@ -856,7 +876,6 @@ pub(crate) fn compile_expr(
                 }
                 b.emit(Op::Raise);
                 b.emit(Op::LoadNil);
-                b.current_span = prev_span;
                 return;
             }
             if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {
@@ -869,7 +888,6 @@ pub(crate) fn compile_expr(
                     compile_expr(b, &args[0], protos, interner, cc);
                     b.emit(Op::BinOp(kind));
                 }
-                b.current_span = prev_span;
                 return;
             }
             let name_id = interner.intern(name);
@@ -1138,7 +1156,6 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
                 let nid = interner.intern(&sym_name);
                 b.emit(Op::DefMethodBlock(nid));
-                b.current_span = prev_span;
                 return;
             }
             // `recv.define_singleton_method(:foo) { |args| ... }` —
@@ -1160,7 +1177,6 @@ pub(crate) fn compile_expr(
                 b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
                 let nid = interner.intern(&sym_name);
                 b.emit(Op::DefObjectSingletonMethodBlock(nid));
-                b.current_span = prev_span;
                 return;
             }
             let (block_proto_idx, param_start, n_params, rest_slot) =
@@ -1225,8 +1241,6 @@ pub(crate) fn compile_expr(
             // Sentinel for stack-balance — unreachable once the
             // return signal fires.
             b.emit(Op::LoadNil);
-            b.current_span = prev_span;
-            return;
         }
         Expr::Next(val) => {
             // Two-target codegen mirroring `Expr::Break`:
@@ -1259,8 +1273,6 @@ pub(crate) fn compile_expr(
             }
             // Sentinel value for stack-balance (unreachable in well-formed code).
             b.emit(Op::LoadNil);
-            b.current_span = prev_span;
-            return;
         }
         Expr::Break(val) => {
             // Compile the break value (or nil) — same for both forms;
@@ -1290,8 +1302,6 @@ pub(crate) fn compile_expr(
             // Sentinel for stack-balance of any unreachable code
             // following this statement (matches Op::Return arm).
             b.emit(Op::LoadNil);
-            b.current_span = prev_span;
-            return;
         }
         Expr::Yield(args) => {
             for a in args { compile_expr(b, a, protos, interner, cc); }
@@ -1430,7 +1440,6 @@ pub(crate) fn compile_expr(
             }
         }
     }
-    b.current_span = prev_span;
 }
 
 // Many positional args is past clippy's default cap, but every one
