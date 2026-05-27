@@ -2893,6 +2893,17 @@ impl Vm {
                 // wrongly returned true.
                 #[cfg(feature = "bignum")]
                 (Value::BigInt(a), Value::BigInt(b)) => a == b,
+                // Other heap-allocated variants — `equal?` is
+                // ObjId / Rc-pointer identity. Pre-fix these fell
+                // through to ruby_eq, which has no arms for them
+                // and returned false even for self-comparison
+                // (`m = obj.method(:foo); m.equal?(m)` was false).
+                // Mirrors the BigInt/Array/Hash arms above.
+                (Value::BoundMethod(a), Value::BoundMethod(b)) => a == b,
+                (Value::UnboundMethod(a), Value::UnboundMethod(b)) => a == b,
+                (Value::CurriedProc(a), Value::CurriedProc(b)) => a == b,
+                #[cfg(feature = "regex")]
+                (Value::Regex(a), Value::Regex(b)) => Rc::ptr_eq(a, b),
                 // Immediates (Int, Float, Sym, Bool, Nil) — fall
                 // back on ruby_eq (value equality).
                 _ => recv.ruby_eq(&args[0], &self.heap),

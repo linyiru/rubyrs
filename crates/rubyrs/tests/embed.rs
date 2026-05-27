@@ -1910,6 +1910,29 @@ fn integer_eql_q_is_type_strict_equality() {
     );
 }
 
+#[test]
+fn equal_q_handles_sibling_heap_variants_via_identity() {
+    // Phase B.7 drive-by: `Object#equal?` mirrored its BigInt arm
+    // pattern for the four other heap-allocated variants that
+    // previously fell through to ruby_eq's `_ => false` default
+    // and reported `false` even for self-comparison.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "m = 5.method(:succ)\n\
+         puts m.equal?(m)\n\
+         um = Integer.instance_method(:succ)\n\
+         puts um.equal?(um)\n\
+         c = proc { |a, b| a + b }.curry\n\
+         puts c.equal?(c)\n\
+         r = /x/\n\
+         puts r.equal?(r)",
+        "equal_sibling.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot().trim(), "true\ntrue\ntrue\ntrue");
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_equal_q_is_object_identity_not_value_equality() {
