@@ -53,6 +53,30 @@ end
 puts String.instance_method(:length).class    # UnboundMethod
 puts String.instance_method("length").class   # UnboundMethod
 
+# Wrong arity raises ArgumentError (CRuby parity, arity check first) ---
+begin
+  Foo.instance_method
+rescue ArgumentError
+  puts "0 arg → ArgumentError"
+end
+begin
+  Foo.instance_method(:a, :b)
+rescue ArgumentError
+  puts "2 args → ArgumentError"
+end
+
+# Wrong arg type raises TypeError "X is not a symbol nor a string" ---
+begin
+  Foo.instance_method(123)
+rescue TypeError
+  puts "int → TypeError"
+end
+begin
+  Foo.instance_method(nil)
+rescue TypeError
+  puts "nil → TypeError"
+end
+
 # Module receiver also works (tilt's TOPOBJECT is a Module) ---
 module CompiledLike
   def render; "rendered"; end
