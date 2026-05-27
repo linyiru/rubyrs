@@ -149,7 +149,9 @@ fn env_cap_typo_warns_on_stderr() {
 // whitespace set). Spec blocks un-skipped in string_strip_spec.rb /
 // string_lstrip_spec.rb / string_rstrip_spec.rb.
 #[test] fn divergence_hash_eql_keys() { run_fixture("divergence_hash_eql_keys"); }
-#[test] fn divergence_hash_fetch_arity() { run_fixture("divergence_hash_fetch_arity"); }
+// `divergence_hash_fetch_arity` removed when this PR fixed the
+// gap (vm/hash.rs now raises ArgumentError on wrong arity).
+// Spec block un-skipped in hash_fetch_spec.rb.
 // `break`/`next` through an `ensure` body inside a `while` loop is
 // implemented with full Ruby semantics (run the ensure body, then
 // complete the structured transfer). The defensive `NotImplementedError`

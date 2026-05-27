@@ -167,6 +167,19 @@ impl Vm {
                             None => default.clone(),
                         })
                     }
+                    // Wrong-arity raises ArgumentError, matching CRuby.
+                    // Previously fell through to the `("freeze" | ..)`
+                    // catch-all path and out to do_call, which surfaced
+                    // a NoMethodError — pinned by
+                    // `tests/fixtures/divergence_hash_fetch_arity.rb`
+                    // (PR #193). This arm catches the 0-arg and 3+-arg
+                    // shapes specifically so 1 and 2 still route to
+                    // the arms above.
+                    ("fetch", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 1..2)", many.len()),
+                        }));
+                    }
                     ("include?", [k]) | ("has_key?", [k]) | ("key?", [k]) | ("member?", [k]) => {
                         let h = self.heap.hash(id);
                         let hit = h.iter().any(|(key, _)| key.ruby_eq(k, &self.heap));

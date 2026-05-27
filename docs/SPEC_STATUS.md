@@ -13,14 +13,14 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 52 |
-| Examples in corpus | 207 |
-| Skipped `it` traces | 82 |
+| Examples in corpus | 208 |
+| Skipped `it` traces | 81 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 3 |
+| `divergent` | 2 |
 | `fixture` | 32 |
 | `method-not-implemented` | 37 |
 | `mock` | 10 |
@@ -40,7 +40,7 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 12 | 41 | 46 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 7 | 15 | 8 |
+| Hash | 7 | 16 | 7 |
 | Integer | 6 | 25 | 7 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
@@ -67,7 +67,7 @@ Find blocks unlocked by a future feature with e.g.
 | `class_eval_spec.rb` | Module#class_eval | `core/module/class_eval_spec.rb` | 6 | 0 |
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
 | `hash_empty_spec.rb` | Hash#empty? | `core/hash/empty_spec.rb` | 2 | 0 |
-| `hash_fetch_spec.rb` | Hash#fetch | `core/hash/fetch_spec.rb` | 4 | 2 |
+| `hash_fetch_spec.rb` | Hash#fetch | `core/hash/fetch_spec.rb` | 5 | 1 |
 | `hash_invert_spec.rb` | Hash#invert | `core/hash/invert_spec.rb` | 2 | 5 |
 | `hash_keys_spec.rb` | Hash#keys | `core/hash/keys_spec.rb` | 2 | 0 |
 | `hash_size_spec.rb` | Hash#size | `core/hash/size_spec.rb` | 3 | 0 |

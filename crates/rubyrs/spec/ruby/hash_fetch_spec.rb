@@ -44,8 +44,12 @@ describe "Hash#fetch" do
   #   Uses `should complain(/...regex.../)` matcher (mspec
   #   internals) to assert the "block supersedes default value
   #   argument" warning. Out of micro-runner surface.
-  # skipped (divergent): it "raises an ArgumentError when not passed one or two arguments" do
-  #   `{}.fetch()` with no args fails as NoMethodError in rubyrs
-  #   rather than ArgumentError. Divergent error class; pin
-  #   later with a dedicated diff fixture.
+  it "raises an ArgumentError when not passed one or two arguments" do
+    assert_raises("ArgumentError") do
+      {}.fetch()
+    end
+    assert_raises("ArgumentError") do
+      {}.fetch(1, 2, 3)
+    end
+  end
 end
