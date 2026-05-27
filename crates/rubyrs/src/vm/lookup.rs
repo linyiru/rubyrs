@@ -590,6 +590,7 @@ impl Vm {
                     | "constants"
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
+                    | "singleton_class"
                 ) {
                     return true;
                 }

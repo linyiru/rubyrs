@@ -2275,6 +2275,32 @@ impl Vm {
                     self.stack.push(v);
                     return Ok(());
                 }
+                // `Module#singleton_class` / `Class#singleton_class`
+                // — this arm fires only for `Value::Class` receivers
+                // (Class/Module objects). CRuby returns the per-object
+                // metaclass (eigenclass) that holds the receiver's
+                // singleton methods. Real metaclass has its own
+                // identity, its `instance_methods` are the original's
+                // singleton_methods, and its `class` is `Class`.
+                //
+                // rubyrs Tier 1 stub: return the receiver itself.
+                // Idempotent (`X.singleton_class.equal?(X.singleton_class)`
+                // is true because both calls return the same `X`),
+                // which is the property real consumers (e.g. tilt's
+                // `@_init = self.class.singleton_class` cache-
+                // invariant check at MRI lib/erb/compiler.rb:828 /
+                // 900) actually need. Methods called on the
+                // "singleton_class" result are dispatched against
+                // the receiver — singleton_methods are NOT visible
+                // as instance_methods of the singleton-class object,
+                // which diverges from CRuby. `Object#singleton_class`
+                // for `Value::Object` receivers is not implemented
+                // here. Documented in docs/SUBSET.md; revisit when
+                // a consumer relies on the real metaclass shape.
+                ("singleton_class", []) => {
+                    self.stack.push(Value::Class(cls.clone()));
+                    return Ok(());
+                }
                 // `Module#instance_methods` — Symbol Array of
                 // instance method names. CRuby's filter rules:
                 //   - `instance_methods` returns public +
