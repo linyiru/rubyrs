@@ -909,3 +909,32 @@ impl crate::vm::Vm {
         unreachable!("apply_int returns None only when bignum is on");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::fnv1a_64;
+
+    /// Pin `fnv1a_64` against canonical FNV-1a 64-bit test
+    /// vectors. The `Integer#hash` / `Float#hash` arms claim
+    /// adherence to the FNV-1a spec (see the doc-comment on
+    /// `fnv1a_64`); without this, a constant typo
+    /// (e.g. hex-digit swap in OFFSET_BASIS or PRIME) would not
+    /// be caught by the integration-side pinning test in
+    /// `tests/embed/equality.rs::integer_and_float_hash_pins_*`
+    /// — that test only locks the tagged-input digests, so it
+    /// would happily re-pin to whatever a typoed algorithm
+    /// produced. These public vectors anchor the algorithm to
+    /// the FNV spec independent of how the function is wired
+    /// up downstream.
+    ///
+    /// Vectors per <http://www.isthe.com/chongo/tech/comp/fnv/>:
+    /// - empty input → the offset basis itself
+    /// - "a" → first byte XOR + one multiply round
+    /// - "foobar" → six-byte round-trip
+    #[test]
+    fn fnv1a_64_matches_canonical_spec_vectors() {
+        assert_eq!(fnv1a_64(b""),       0xcbf29ce484222325);
+        assert_eq!(fnv1a_64(b"a"),      0xaf63dc4c8601ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x85944171f73967e8);
+    }
+}
