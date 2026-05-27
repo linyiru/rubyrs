@@ -1473,17 +1473,19 @@ impl Vm {
             }));
         }
         // Avoid clobbering a previously-registered source ONLY for
-        // our default labels (`(eval)`, `(class_eval)`). User-
-        // supplied filenames pass through unchanged so `__FILE__`
-        // / `Method#source_location` keep returning the caller's
-        // name across repeated evals — a `:N` suffix would leak
-        // into observable metadata (`eval("__FILE__", nil, "foo.rb")`
-        // called twice should both see "foo.rb", not "foo.rb:2").
-        // For our defaults, repeated bare evals do clobber under a
-        // single key without the suffix; this dedupes the
-        // source-table for backtrace fidelity on the common case
-        // (default-filename evals) while keeping the explicit-
-        // filename contract intact.
+        // our default labels (`(eval)`, `(class_eval)`): on
+        // collision, append an incrementing `:N` suffix to the
+        // source-table key so the prior entry is preserved for
+        // backtraces / `Method#source_location`. User-supplied
+        // filenames pass through unchanged so `__FILE__` keeps
+        // returning the caller's name across repeated evals — a
+        // `:N` suffix would leak into observable metadata
+        // (`eval("__FILE__", nil, "foo.rb")` called twice should
+        // both see "foo.rb", not "foo.rb:2"). The trade-off:
+        // explicit-filename collisions clobber the source-table
+        // entry (matching CRuby's actual behavior); the suffix
+        // dedupe applies only to the common ephemeral case of
+        // repeated bare `eval(...)` / `cls.class_eval(str)` calls.
         let is_default_label = filename == "(eval)" || filename == "(class_eval)";
         let mut effective_filename: String = filename.to_string();
         if is_default_label && self.sources.contains_key(effective_filename.as_str()) {

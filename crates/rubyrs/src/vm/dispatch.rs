@@ -4959,12 +4959,29 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
+                    | "class_eval" | "module_eval"
                 );
                 let allocate_allowed =
                     &*name == "allocate"
                         && !cls.is_module
                         && cls.name != "Module";
                 if in_set || allocate_allowed {
+                    // `class_eval` / `module_eval` are the ONLY
+                    // bridge-set members whose block is load-
+                    // bearing. `class C; class_eval { def foo;
+                    // end }; end` defines `foo` on `C` via the
+                    // block-form intercept in do_call_block's
+                    // recv-form path. Re-route through
+                    // do_call_block (preserving block) instead
+                    // of the do_call discard path the other
+                    // bridge names use.
+                    if matches!(&*name, "class_eval" | "module_eval") {
+                        let argc = args.len();
+                        self.stack.push(self_val.clone());
+                        self.stack.push(Value::Block(block));
+                        for a in args { self.stack.push(a); }
+                        return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+                    }
                     // Route through the blockless `do_call`, NOT
                     // `do_call_block` — CRuby silently discards the
                     // block for these Class methods (verified:

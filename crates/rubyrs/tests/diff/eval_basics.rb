@@ -190,6 +190,19 @@ class BareCall
 end
 puts BareCall.new.echo                          # bare-call
 
+# --- Bare BLOCK-form `class_eval { ... }` inside a class body
+#     reaches the receiver-form block intercept via the no-recv
+#     bridge in do_call_block. The block IS the method body —
+#     can't be discarded the way other bridge names' blocks are.
+class BareBlock
+  class_eval do
+    def from_block
+      "block-form bare class_eval"
+    end
+  end
+end
+puts BareBlock.new.from_block                   # block-form bare class_eval
+
 # --- module_eval is an alias for class_eval (string form) ---
 class ModEvalTarget
 end
