@@ -834,6 +834,22 @@ impl Runtime {
         let Some(snapshot) = self.post_preamble.as_ref() else {
             return;
         };
+        // Defensive: reset() should only be called between
+        // `eval` invocations, never from inside one. The `&mut
+        // self` signature prevents the common path (you can't
+        // hold `&mut Runtime` and call reset from a host fn
+        // that already received one), but a future API change
+        // could expose `&mut Runtime` to a callback that reaches
+        // for reset. If that ever happens, wiping `vm.frames`
+        // and `vm.stack` mid-execution would silently corrupt
+        // the active call stack. Catch it in debug builds — the
+        // fuzz crate's release profile re-enables
+        // debug-assertions, so this fires in nightly fuzz too.
+        debug_assert!(
+            self.vm.frames.is_empty(),
+            "Runtime::reset called with {} frames still active",
+            self.vm.frames.len(),
+        );
         // --- Heap: truncate user-allocated slots ---
         // `Vec::truncate` is O(removed) and drops the HeapObj enum
         // variants (including their Rc<...> inner data), releasing
@@ -963,6 +979,18 @@ impl Runtime {
             self.vm.loaded_features.clear();
             self.vm.loaded_stdlib_stubs.clear();
         }
+        // `vm.sources` is the filename → source-text map used by
+        // `Method#source_location` and trap backtraces.
+        // User-supplied filenames accumulate as user evals run;
+        // a stale entry can return the wrong source-text for
+        // line-number resolution if the same filename string is
+        // reused by a later eval with different content (or by
+        // a preamble Method whose name lookup happens to clash).
+        // The Vm struct's own doc-comment for this field
+        // describes it as "can clear between evals". Clear here
+        // unconditionally — the file-source cache is a
+        // user-eval-time concern, not a preamble one.
+        self.vm.sources.clear();
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
