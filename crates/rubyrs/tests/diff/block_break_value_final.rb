@@ -34,9 +34,11 @@ puts "abcabc".sub(/./)  { |c| break :sub_stop }                          # sub_s
 # --- Array#chunk non-local return ------------------------------
 # `chunk { return val }` unwinds the caller method (rubyrs
 # implements chunk eagerly so the block runs synchronously; the
-# `return` triggers method_return inside step_block which
-# unwinds via `break` in the driver). The outer method returns
-# the `return val`.
+# `return` sets `method_return` inside step_block, the driver
+# returns `Ok(Some(Value::Nil))` to mark the primitive as
+# matched, and the outer dispatch loop honours `method_return`
+# to unwind the calling method). The outer method returns the
+# `return val`.
 def chunk_return
   # `.to_a` forces iteration in CRuby (chunk is lazy), so the
   # block runs there and `return` unwinds chunk_return.
