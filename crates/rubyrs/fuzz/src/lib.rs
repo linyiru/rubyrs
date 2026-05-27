@@ -124,13 +124,15 @@ fn build_cfg(caps: &Caps) -> Config {
 /// libfuzzer's coverage-instrumented + ASan iteration becomes
 /// the dominant cost.
 ///
-/// `caps` is captured on first call to seed the Runtime's
-/// preamble construction; subsequent calls' caps are read for
-/// the per-iter `apply_config` refresh. In practice both
-/// targets always pass the same constant (`Caps::tight()` for
-/// parse, `Caps::loose()` for eval) so the captured-vs-passed
-/// distinction is invisible. A future target that varies caps
-/// per call would see the cap change apply on the next iter.
+/// `caps` is read on every call: once to seed the Runtime on
+/// first construction (the closure passed to
+/// `get_or_insert_with`) and again for the per-iter
+/// `apply_config` refresh that runs BEFORE eval. In practice
+/// both targets always pass the same constant (`Caps::tight()`
+/// for parse, `Caps::loose()` for eval), so the distinction is
+/// invisible. A future target that varies caps per call would
+/// see the cap change apply on the SAME iter (apply_config runs
+/// pre-eval) — no one-iteration delay.
 pub fn run_with_caps(data: &[u8], caps: Caps) {
     ensure_sandbox_cwd();
     let source = match std::str::from_utf8(data) {
