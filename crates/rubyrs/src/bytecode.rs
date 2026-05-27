@@ -240,6 +240,36 @@ pub(crate) enum Op {
     /// before the class's own `singleton_methods` at each
     /// superclass level.
     SingletonChainPrepend,
+    /// Push a new `Visibility::Public` entry onto
+    /// `class_visibility_stack`. Emitted by the AST translator
+    /// at the start of EVERY `class << <expr>` body (receiver-
+    /// independent — `class << self`, `class << obj`,
+    /// `class << Const` all wrap their body with Push/Pop) so
+    /// bare `private` / `public` / `protected` modifiers inside
+    /// the singleton body don't leak their visibility mutation
+    /// back into the enclosing class body's stack entry. CRuby's
+    /// `class << <expr>` constitutes its own body with its own
+    /// initial-Public visibility scope; this opcode replicates
+    /// that isolation by giving the singleton body its own stack
+    /// frame to mutate.
+    ///
+    /// Push/Pop are emitted in an UNWIND-SAFE shape: the
+    /// translator wraps the singleton body in
+    /// `Expr::Begin { ensure: [PopClassVisibility] }`, so the
+    /// Pop runs on BOTH normal exit AND exception unwind. A
+    /// `raise` inside the body (or rescued by an outer
+    /// `begin`) still triggers the ensure clause, keeping
+    /// `class_visibility_stack` balanced. PR #233 code-
+    /// review #1 / #3.
+    PushClassVisibilityPublic,
+    /// Pop one entry from `class_visibility_stack`. Paired with
+    /// `PushClassVisibilityPublic` via the body's ensure
+    /// clause (see Push docs for unwind details). Underflow is
+    /// a translator-level invariant breakage and triggers
+    /// unconditional `assert!` in the handler — fires in both
+    /// debug and release builds so an unbalanced Pop surfaces
+    /// during CI's `cargo test --release` (PR #233 round 3 #2).
+    PopClassVisibility,
     /// `define_method(:name) { |args| ... }`. Pops a `Value::Block`
     /// off the operand stack, wraps its BlockHandle's captured
     /// locals into a Method, and installs it under `name` in the

@@ -1275,6 +1275,12 @@ pub(crate) fn compile_expr(
             compile_expr(b, src, protos, interner, cc);
             b.emit(Op::SingletonChainPrepend);
         }
+        Expr::PushClassVisibilityPublic => {
+            b.emit(Op::PushClassVisibilityPublic);
+        }
+        Expr::PopClassVisibility => {
+            b.emit(Op::PopClassVisibility);
+        }
         Expr::ArrayLit(elems) => {
             for e in elems { compile_expr(b, e, protos, interner, cc); }
             b.emit(Op::NewArray(elems.len() as u16));

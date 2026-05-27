@@ -338,6 +338,20 @@ pub(crate) enum Expr {
     /// install an after-freeze guard layer in front of the
     /// class's own singleton methods.
     SingletonChainPrepend(Box<SExpr>),
+    /// Push a new `Visibility::Public` entry onto the runtime
+    /// class_visibility_stack. Emitted by the SingletonClassNode
+    /// translator at body start for EVERY `class << <expr>`
+    /// shape (receiver-independent — `class << self`,
+    /// `class << obj`, `class << Const`) so bare `private` /
+    /// `public` / `protected` mutations inside don't leak into
+    /// the enclosing class body. Pairs with `PopClassVisibility`.
+    PushClassVisibilityPublic,
+    /// Pop one entry from class_visibility_stack. Pair with
+    /// `PushClassVisibilityPublic` at the boundary of a
+    /// `class << <expr>` body — emitted in the body's
+    /// `Begin { ensure: [...] }` so the pop runs on both
+    /// normal exit and exception unwind.
+    PopClassVisibility,
     ArrayLit(Vec<SExpr>),
     HashLit(Vec<(SExpr, SExpr)>),
     /// `begin..end` (exclusive=false) or `begin...end` (exclusive=true).
@@ -2353,9 +2367,6 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         );
         let synth_local = format!("__cls_lt_lt_recv_{}", node_span(node).byte_offset);
         let mut out: Vec<SExpr> = Vec::with_capacity(body_nodes.len() + 1);
-        if needs_local {
-            out.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
-        }
         // Closure helper: make a `def recv.name(params) body` SExpr
         // rewriting the receiver-less Def into a singleton-method
         // form. Reused for both real DefNodes in the body and for
@@ -2586,6 +2597,43 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
+            // `class << self; private; def secret; ...; end; ...` —
+            // bare visibility modifier (`private` / `public` /
+            // `protected`) at body top level. Translates as a
+            // regular method call (Expr::Call with name="private"
+            // and implicit receiver). At runtime self is the
+            // surrounding class (= `class_stack.last()` —
+            // singleton-class body shares the outer class's
+            // class_stack entry), and do_call's
+            // `visibility_from_name` arm at ~line 2417 mutates
+            // `class_visibility_stack.last_mut()` accordingly.
+            // Subsequent `def`s in the same body read that stack
+            // when DefSingletonMethod runs, so the modifier flows
+            // correctly to following method definitions.
+            //
+            // Scope: only the bare-receiver form. The args form
+            // (`private :foo, :bar`) retroactively flips named
+            // methods' visibility on the OUTER class — but
+            // sinatra/base.rb:1690 uses the bare form, and the
+            // args form's interaction with singleton methods is
+            // a separate question we don't need to answer here.
+            //
+            // Motivating call site: sinatra/base.rb:1690's
+            // `class << self; ...; private; ...; end` — bare
+            // `private` precedes a block of helper methods that
+            // sinatra hides from external callers.
+            // (TRY_RUNS pass 9.7 layer #14.)
+            if recv_is_self
+                && let Some(call) = bn.as_call_node()
+                && call.receiver().is_none()
+                && call.arguments().is_none_or(|a| a.arguments().iter().next().is_none())
+                && matches!(cid_to_string(call.name()).as_str(),
+                    "private" | "public" | "protected"
+                )
+            {
+                out.push(tr(ctx, bn));
+                continue;
+            }
             // `class << self; <stmt> if cond` / `class << self;
             // <stmt> unless cond` — and structurally-equivalent
             // block forms `if cond; <stmt>; end` / `unless cond;
@@ -2788,9 +2836,33 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // every supported entry's last op is already nil-pushing
         // (Def → LoadNil, expanded attr_* → LoadNil), so this only
         // changes the rare zero-arg/empty edge.
-        out.push(sp(node, Expr::Nil));
-        return sp(node, Expr::Begin {
+        // Wrap the body in a `Begin { ensure: [Pop] }` so the
+        // visibility scope pop runs on BOTH normal exit and
+        // exception unwind. Without the ensure, a raise inside
+        // the body (or rescued by an outer begin) would skip the
+        // pop and leak an extra entry into
+        // `class_visibility_stack`, corrupting default visibility
+        // for later defs. The Push runs FIRST, OUTSIDE the inner
+        // Begin, so it's not double-counted by any unwind path —
+        // the inner Begin's ensure handles the pairing on every
+        // exit. PR #233 code-review round 2 (#1 unwind safety,
+        // #3 doc accuracy).
+        let inner_begin = sp(node, Expr::Begin {
             body: out,
+            rescue: vec![],
+            ensure: Some(vec![sp(node, Expr::PopClassVisibility)]),
+        });
+        // Outer Begin runs: synthetic-local write (if needed),
+        // Push, inner Begin (with ensure-Pop), final Nil.
+        let mut outer: Vec<SExpr> = Vec::with_capacity(4);
+        if needs_local {
+            outer.push(sp(node, Expr::LVarWrite(synth_local.clone(), Box::new(recv_expr.clone()))));
+        }
+        outer.push(sp(node, Expr::PushClassVisibilityPublic));
+        outer.push(inner_begin);
+        outer.push(sp(node, Expr::Nil));
+        return sp(node, Expr::Begin {
+            body: outer,
             rescue: vec![],
             ensure: None,
         });

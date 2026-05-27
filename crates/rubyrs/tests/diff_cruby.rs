@@ -136,6 +136,7 @@ fn run_diff(name: &str) {
 #[test] fn class_self_cvar() { run_diff("class_self_cvar"); }
 #[test] fn class_self_if_modifier() { run_diff("class_self_if_modifier"); }
 #[test] fn class_self_alias_builtin() { run_diff("class_self_alias_builtin"); }
+#[test] fn class_self_visibility() { run_diff("class_self_visibility"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }
