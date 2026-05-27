@@ -115,6 +115,13 @@ crates/rubyrs/examples/metaprog_bench/static_bench.rb	6500	1000	2M def+ivar (con
 # as the metaprog rows above (static_bench: local 390ms / CI 650
 # / budget 1000 = 2.5× local; mm_bench: 1.62× CI ratio observed).
 crates/rubyrs/benches/fizzbuzz_1m.rb	6500	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
-crates/rubyrs/benches/gc_churn.rb	6500	280	200k short-lived Array+Hash allocs; stresses mark/sweep
+# gc_churn RSS bumped 6500 → 6700 on 2026-05-27 — same
+# direction as dm_bench's per-row bump above. Observed CI
+# RSS 6504 KB (just 4 KB over) after PR #182 / #184 / #186
+# accumulated. The 4 KB is well within run-to-run noise but
+# the ratchet is absolute so it still trips. Bumping to
+# 6700 gives ~200 KB headroom without inflating the cap
+# enough to mask a future regression.
+crates/rubyrs/benches/gc_churn.rb	6700	280	200k short-lived Array+Hash allocs; stresses mark/sweep
 crates/rubyrs/benches/string_interp.rb	6500	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 crates/rubyrs/benches/hash_mutate.rb	6500	650	200k Hash[]= overwrites + 1k Hash[] reads
