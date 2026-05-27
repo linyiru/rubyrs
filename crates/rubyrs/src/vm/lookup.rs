@@ -537,7 +537,7 @@ impl Vm {
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "unshift" | "prepend" |
                 "shift" | "pop" | "delete" | "reverse_each" |
-                "first" | "last" | "empty?" | "include?" |
+                "first" | "last" | "empty?" | "include?" | "member?" |
                 "count" | "sum" | "min" | "max" | "sort" | "tally" |
                 "combination" | "permutation" | "assoc" | "rassoc" | "pack" |
                 "inject" | "reduce" |
@@ -575,7 +575,7 @@ impl Vm {
             Value::Range(_) => matches!(name,
                 "begin" | "end" | "first" | "last" | "min" | "max" |
                 "size" | "length" | "count" |
-                "exclude_end?" | "include?" | "cover?" | "step" | "to_a" |
+                "exclude_end?" | "include?" | "member?" | "cover?" | "step" | "to_a" |
                 "sum" | "inject" | "reduce" |
                 "each" | "map" | "select" | "filter" |
                 "reject" | "find" | "detect" |

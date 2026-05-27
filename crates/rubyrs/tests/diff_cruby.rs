@@ -92,6 +92,7 @@ fn run_diff(name: &str) {
 #[test] fn enumerable_aggregate() { run_diff("enumerable_aggregate"); }
 #[test] fn int_string_basics() { run_diff("int_string_basics"); }
 #[test] fn array_extras() { run_diff("array_extras"); }
+#[test] fn array_range_member() { run_diff("array_range_member"); }
 #[test] fn hash_extras() { run_diff("hash_extras"); }
 #[test] fn rescue_by_class() { run_diff("rescue_by_class"); }
 #[test] fn default_args() { run_diff("default_args"); }
