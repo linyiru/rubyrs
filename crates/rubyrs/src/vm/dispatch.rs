@@ -530,15 +530,29 @@ impl Vm {
             //     (bare `superclass` inside class body)
             // Push self_val + the original args back onto the
             // stack and re-enter `do_call` with `no_recv=false`
-            // so the receiver-form dispatch takes over. The
-            // whitelist mirrors lookup.rs's `Value::Class(_)`
-            // primitive-method set (vm/lookup.rs:590-624) so
-            // `respond_to?` answers true for exactly the same
-            // bare-callable names — keep both in lockstep.
-            // (`allocate` is omitted from this set because it
-            // has a dedicated arm above with stricter fences;
-            // bare `allocate` from inside a class body that
-            // routed here would skip those fences.)
+            // so the receiver-form dispatch takes over. Re-entry
+            // walks all the explicit-receiver arms in order —
+            // for `allocate` this means the dedicated arm with
+            // its Module/primitive fences and user-singleton
+            // override fires WITH all fences intact (PR #196
+            // Copilot review #1 caught that a previous version
+            // of this comment claimed `allocate` was omitted
+            // "to preserve fences", but the bridge re-entry
+            // routes through the dedicated arm, so including
+            // it both fixes bare `allocate` AND keeps the
+            // fences).
+            //
+            // Whitelist contract: this set is exactly lookup.rs's
+            // `Value::Class(_)` primitive-method respond_to set
+            // (vm/lookup.rs:590-624). Keep both in lockstep —
+            // `respond_to?(:foo)` true should mean a bare call
+            // to `foo` from inside a class body resolves
+            // identically to `self.foo`.
+            //
+            // (A future refactor could lift this list to a
+            // shared `pub(crate) const &[&str]` consumed by
+            // both sites — out of scope for this PR but tracked
+            // as a follow-up by Copilot review #1.)
             if matches!(&self_val, Value::Class(_))
                 && matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
@@ -550,6 +564,7 @@ impl Vm {
                     | "autoload" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
+                    | "allocate"
                 ) {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
