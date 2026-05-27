@@ -52,6 +52,78 @@ fn fuel_is_not_bypassed_by_block_iteration() {
 }
 
 #[test]
+fn fuel_resets_between_eval_calls() {
+    // Fuel is per-eval, not lifetime-cumulative. Symmetric with
+    // `deadline_resets_between_eval_calls` below — `Runtime::eval`
+    // re-anchors `vm.fuel` from `Runtime::fuel_budget` at entry,
+    // so a Runtime reused across many evals sees each call get a
+    // fresh budget regardless of what prior evals consumed.
+    //
+    // Pre-refactor (master before this PR), `Config::fuel` went
+    // straight to `vm.fuel` and was decremented monotonically by
+    // `check_fuel` across the Runtime's lifetime; the second eval
+    // here would see whatever fuel the first eval failed to
+    // consume, and a long-lived embedder would eventually trap
+    // on every call. /code-review finding G1 on PR #222.
+    let mut rt = Runtime::with_config(Config { fuel: Some(10_000), ..Default::default() });
+    // First eval consumes most/all of the budget by spinning.
+    let _ = rt.eval("i = 0; while true; i = i + 1; end", "spin.rb").unwrap_err();
+    // Second eval (NO reset between) gets a fresh 10k budget and
+    // a small script succeeds. Without the per-eval re-anchor
+    // this would still see vm.fuel near zero from the prior
+    // trap and trap again.
+    rt.eval("1 + 1", "small.rb").unwrap();
+    // Third eval — same fresh-budget contract holds across many
+    // calls, not just two.
+    rt.eval("a = []; i = 0; while i < 100; a << i; i = i + 1; end; a.length", "small2.rb").unwrap();
+}
+
+#[test]
+fn apply_config_tightens_fuel_for_next_eval() {
+    // Mid-life `apply_config` is the host's mechanism for changing
+    // sandbox tightness on a long-lived Runtime — e.g. loosening
+    // for trusted setup code then tightening before processing
+    // untrusted input. The new cap MUST take effect on the next
+    // `eval`.
+    //
+    // Pre-refactor (master before this PR), `apply_config` wrote
+    // `cfg.fuel` straight to `vm.fuel`. Mid-life that worked once,
+    // but the next `reset()` would write `vm.fuel = snapshot.fuel`
+    // (captured at construction time), silently reverting the
+    // tighten. /code-review finding G3 on PR #222.
+    let mut rt = Runtime::with_config(Config { fuel: Some(1_000_000), ..Default::default() });
+    // Confirm the loose cap permits a workload that the tight cap
+    // would forbid.
+    rt.eval(
+        "a = []; i = 0; while i < 500; a << i; i = i + 1; end; a.length",
+        "loose1.rb",
+    ).unwrap();
+    // Tighten mid-life. apply_config writes the new ceiling to
+    // `Runtime::fuel_budget`; the next eval anchors `vm.fuel`
+    // from there.
+    rt.apply_config(Config { fuel: Some(100), ..Default::default() });
+    // Same workload now traps on the tight cap.
+    let err = rt.eval(
+        "a = []; i = 0; while i < 500; a << i; i = i + 1; end; a.length",
+        "tight.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err.err, RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted under tightened cap, got {:?}", err.err,
+    );
+    // Reset between evals must NOT revert the tightened cap.
+    rt.reset();
+    let err2 = rt.eval(
+        "a = []; i = 0; while i < 500; a << i; i = i + 1; end; a.length",
+        "tight_after_reset.rb",
+    ).unwrap_err();
+    assert!(
+        matches!(err2.err, RubyError::ResourceExhausted { .. }),
+        "tightened cap must survive reset(); got {:?}", err2.err,
+    );
+}
+
+#[test]
 fn unlimited_fuel_runs_normally() {
     let mut rt = Runtime::new();
     rt.eval(r#"i = 0; while i < 100; i = i + 1; end"#, "ok.rb").unwrap();
