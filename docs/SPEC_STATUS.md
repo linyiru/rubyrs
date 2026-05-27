@@ -12,16 +12,16 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 35 |
-| Examples in corpus | 160 |
-| Skipped `it` traces | 46 |
+| Files | 40 |
+| Examples in corpus | 178 |
+| Skipped `it` traces | 53 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
 | `divergent` | 1 |
-| `fixture` | 19 |
+| `fixture` | 26 |
 | `method-not-implemented` | 18 |
 | `mock` | 8 |
 
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 12 | 41 | 46 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 1 | 2 | 0 |
-| Integer | 1 | 7 | 0 |
+| Integer | 6 | 25 | 7 |
 | Method | 7 | 37 | 0 |
 | Module | 3 | 15 | 0 |
 | String | 7 | 37 | 0 |
@@ -68,7 +68,12 @@ Find blocks unlocked by a future feature with e.g.
 | `define_method_spec.rb` | Module#define_method | `core/module/define_method_spec.rb` | 4 | 0 |
 | `hash_keys_spec.rb` | Hash#keys | `core/hash/keys_spec.rb` | 2 | 0 |
 | `instance_eval_spec.rb` | BasicObject#instance_eval | `core/basicobject/instance_eval_spec.rb` | 4 | 0 |
+| `integer_abs_spec.rb` | Integer#abs | `core/integer/abs_spec.rb + shared/abs.rb` | 1 | 1 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
+| `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
+| `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |
+| `integer_succ_spec.rb` | Integer#succ / Integer#next | `core/integer/succ_spec.rb + core/integer/next_spec.rb + shared/next.rb` | 5 | 4 |
+| `integer_zero_spec.rb` | Integer#zero? | `core/integer/zero_spec.rb` | 2 | 0 |
 | `method_call_spec.rb` | Method#call | `core/method/call_spec.rb (+ shared/call.rb)` | 6 | 0 |
 | `method_compose_spec.rb` | Method#<< | `core/method/compose_spec.rb` | 6 | 0 |
 | `method_curry_spec.rb` | Method#curry | `core/method/curry_spec.rb` | 5 | 0 |
