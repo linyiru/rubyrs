@@ -71,3 +71,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0019 — Tier 2 / Tier 3 boundary specification](0019-tier2-tier3-boundary.md)
 - [0020 — Encoding placement — hybrid Tier 1 tag + Tier 2 full registry](0020-encoding-placement.md)
 - [0021 — OutputSink trait — no_std-compatible stdout abstraction](0021-output-sink-trait.md)
+- [0022 — `_http_server` battery — Rust HTTP front, Ruby app handler](0022-http-server-battery.md)
