@@ -12,16 +12,16 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 55 |
-| Examples in corpus | 225 |
-| Skipped `it` traces | 77 |
+| Files | 61 |
+| Examples in corpus | 240 |
+| Skipped `it` traces | 97 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `fixture` | 32 |
-| `method-not-implemented` | 35 |
+| `fixture` | 40 |
+| `method-not-implemented` | 47 |
 | `mock` | 10 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -37,7 +37,7 @@ Find blocks unlocked by a future feature with e.g.
 
 | Class | Files | Examples | Skipped |
 |---|---|---|---|
-| Array | 12 | 44 | 43 |
+| Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 7 | 17 | 6 |
 | Integer | 9 | 38 | 7 |
@@ -51,6 +51,8 @@ Find blocks unlocked by a future feature with e.g.
 | File | Describe | Upstream | Examples | Skipped |
 |---|---|---|---|---|
 | `alias_method_spec.rb` | Module#alias_method | `core/module/alias_method_spec.rb` | 5 | 0 |
+| `array_all_spec.rb` | Array#all? | `core/array/all_spec.rb` | 3 | 3 |
+| `array_any_spec.rb` | Array#any? | `core/array/any_spec.rb` | 3 | 3 |
 | `array_compact_spec.rb` | Array#compact | `core/array/compact_spec.rb` | 5 | 0 |
 | `array_count_spec.rb` | Array#count | `core/array/count_spec.rb` | 3 | 0 |
 | `array_empty_spec.rb` | Array#empty? | `core/array/empty_spec.rb` | 1 | 0 |
@@ -58,8 +60,12 @@ Find blocks unlocked by a future feature with e.g.
 | `array_include_spec.rb` | Array#include? | `core/array/include_spec.rb + shared/index.rb` | 1 | 2 |
 | `array_last_spec.rb` | Array#last | `core/array/last_spec.rb` | 10 | 4 |
 | `array_length_spec.rb` | Array#length | `core/array/length_spec.rb + shared/length.rb` | 1 | 1 |
+| `array_map_spec.rb` | Array#map | `core/array/map_spec.rb + shared/collect.rb` | 3 | 3 |
+| `array_none_spec.rb` | Array#none? | `core/array/none_spec.rb` | 3 | 3 |
 | `array_pop_spec.rb` | Array#pop | `core/array/pop_spec.rb` | 2 | 14 |
+| `array_reject_spec.rb` | Array#reject | `core/array/reject_spec.rb` | 2 | 4 |
 | `array_reverse_spec.rb` | Array#reverse | `core/array/reverse_spec.rb` | 2 | 4 |
+| `array_select_spec.rb` | Array#select | `core/array/select_spec.rb + shared/select.rb` | 1 | 4 |
 | `array_shift_spec.rb` | Array#shift | `core/array/shift_spec.rb` | 2 | 13 |
 | `array_size_spec.rb` | Array#size | `core/array/size_spec.rb + shared/length.rb` | 1 | 1 |
 | `array_take_spec.rb` | Array#take | `core/array/take_spec.rb` | 5 | 0 |
