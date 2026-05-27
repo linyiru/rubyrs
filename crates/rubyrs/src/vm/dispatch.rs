@@ -1193,17 +1193,78 @@ impl Vm {
             //   - `class Symbol; if method_defined?(:name); ...`
             //     in symbol.rb (bare `method_defined?` inside an
             //     `if`/`else` at class-body top level)
+            // Sinatra surfaced more (TRY_RUNS pass 8 layer #8):
+            //   - `class Bar < Foo; superclass.class_eval { ... }`
+            //     (bare `superclass` inside class body)
             // Push self_val + the original args back onto the
             // stack and re-enter `do_call` with `no_recv=false`
-            // so the receiver-form dispatch takes over. The
-            // whitelist matches lookup.rs's `Value::Class(_)`
-            // primitive-method set — keep both in lockstep.
-            if matches!(&self_val, Value::Class(_))
-                && matches!(&*name, "new" | "name" | "method_defined?" | "instance_method" | "undef_method") {
-                let argc = args.len();
-                self.stack.push(self_val.clone());
-                for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, cache_id);
+            // so the receiver-form dispatch takes over. Re-entry
+            // walks all the explicit-receiver arms in order —
+            // for `allocate` this means the dedicated arm with
+            // its Module/primitive fences and user-singleton
+            // override fires WITH all fences intact (PR #196
+            // Copilot review #1 caught that a previous version
+            // of this comment claimed `allocate` was omitted
+            // "to preserve fences", but the bridge re-entry
+            // routes through the dedicated arm, so including
+            // it both fixes bare `allocate` AND keeps the
+            // fences).
+            //
+            // Whitelist contract: this set is exactly lookup.rs's
+            // `Value::Class(_)` primitive-method respond_to set
+            // (see the `Value::Class(cls) =>` arm of
+            // `Vm::responds_to`, around the `"allocate"` gate).
+            // Keep both in lockstep — `respond_to?(:foo)` true
+            // should mean a bare call to `foo` from inside a
+            // class body resolves identically to `self.foo`.
+            // `allocate` has the same Module fence as respond_to
+            // (applied below); the rest of the names apply to
+            // all `Value::Class` receivers.
+            //
+            // (A future refactor could lift this list to a
+            // shared `pub(crate) const &[&str]` consumed by
+            // both sites — out of scope for this PR but tracked
+            // as a follow-up by Copilot review #1.)
+            if let Value::Class(cls) = &self_val {
+                let in_set = matches!(&*name,
+                    "new" | "name" | "to_s" | "inspect"
+                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "superclass" | "ancestors" | "include?"
+                    | "instance_methods" | "public_instance_methods"
+                    | "private_instance_methods" | "protected_instance_methods"
+                    | "constants"
+                    | "autoload" | "private_constant" | "public_constant"
+                    | "deprecate_constant"
+                    | "singleton_class"
+                );
+                // `allocate` gets the same Module fence as
+                // lookup.rs's respond_to gate so bare `allocate`
+                // inside a `module Foo; ... end` body falls
+                // through to NoMethodError instead of bridging
+                // into the dedicated arm and raising TypeError.
+                // True lockstep with respond_to: if
+                // `m.respond_to?(:allocate)` is false (Modules,
+                // the global `Module` shell), bare `allocate`
+                // shouldn't dispatch. PR #196 Copilot round 2 #1.
+                let allocate_allowed =
+                    &*name == "allocate"
+                        && !cls.is_module
+                        && cls.name != "Module";
+                if in_set || allocate_allowed {
+                    let argc = args.len();
+                    self.stack.push(self_val.clone());
+                    for a in args { self.stack.push(a); }
+                    // `cache_id = u16::MAX` (sentinel: skip cache
+                    // write) — re-entry from a bare-call site
+                    // into a receiver-form lookup; the cache
+                    // slot was minted for the bare shape and
+                    // mustn't be populated with a receiver-form
+                    // entry that a future bare retry could
+                    // consult. Same pattern as send / send_with_
+                    // block re-entries (lines ~464 / ~924, plus
+                    // the lib.rs sentinel comment at ~77).
+                    return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+                }
             }
             // `__dir__` — returns the directory of the source
             // file the call lexically appears in. CRuby's
@@ -4668,6 +4729,55 @@ impl Vm {
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
                     self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
                     return Ok(());
+                }
+            }
+            // Block-form parallel of `do_call`'s bare-call Class
+            // bridge (see comments at the no_recv arm around
+            // ~line 537). Without this, bare whitelisted Class
+            // methods invoked with an attached block from inside
+            // a class body would raise NoMethodError even though
+            // their blockless counterparts dispatch correctly —
+            // breaks the lockstep contract for the block form.
+            // Stack restoration matches do_call_block's
+            // `[..., recv, block, *args]` shape so re-entry
+            // sees the receiver-form layout it expects.
+            // PR #196 code-review #3.
+            if let Value::Class(cls) = &self_val {
+                let in_set = matches!(&*name,
+                    "new" | "name" | "to_s" | "inspect"
+                    | "method_defined?" | "instance_method" | "undef_method"
+                    | "superclass" | "ancestors" | "include?"
+                    | "instance_methods" | "public_instance_methods"
+                    | "private_instance_methods" | "protected_instance_methods"
+                    | "constants"
+                    | "autoload" | "private_constant" | "public_constant"
+                    | "deprecate_constant"
+                    | "singleton_class"
+                );
+                let allocate_allowed =
+                    &*name == "allocate"
+                        && !cls.is_module
+                        && cls.name != "Module";
+                if in_set || allocate_allowed {
+                    // Route through the blockless `do_call`, NOT
+                    // `do_call_block` — CRuby silently discards the
+                    // block for these Class methods (verified:
+                    // `class Bar < Foo; ancestors { ran = true };
+                    // end` returns the ancestor array AND `ran`
+                    // stays false). do_call_block doesn't have
+                    // receiver-form arms for most of these names,
+                    // so routing the block form there would
+                    // produce NoMethodError. The `allocate` case
+                    // already has a do_call_block arm that
+                    // discards its block — re-entering do_call
+                    // hits the dedicated allocate arm there
+                    // instead, with the same fences. Same
+                    // outcome, simpler routing.
+                    let argc = args.len();
+                    self.stack.push(self_val.clone());
+                    for a in args { self.stack.push(a); }
+                    let _ = block; // explicitly discarded per CRuby
+                    return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
                 }
             }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
