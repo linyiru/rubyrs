@@ -32,6 +32,37 @@ impl Vm {
                             msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),
                         }));
                     }
+                    // `default` no-arg returns the scalar default
+                    // (set via `Hash.new(value)`) or nil. CRuby's
+                    // 1-arg form `h.default(key)` invokes the
+                    // default_proc with the key — that variant is
+                    // out of subset (needs the step_block scaffold
+                    // and pin discipline; the `[]` arm above
+                    // already routes the lookup-miss path).
+                    ("default", []) => {
+                        Some(self.heap.hash_default_value(id).unwrap_or(Value::Nil))
+                    }
+                    // `default_proc` returns the Block value (CRuby
+                    // returns it as a Proc; rubyrs's Value::Block
+                    // resolves `.class` to "Proc", so the surface
+                    // matches). Nil if the Hash wasn't built via
+                    // `Hash.new { ... }`.
+                    ("default_proc", []) => {
+                        Some(match self.heap.hash_default_block(id) {
+                            Some(bid) => Value::Block(bid),
+                            None => Value::Nil,
+                        })
+                    }
+                    // `any?` no-block — true iff non-empty. The
+                    // with-block form goes through iter.rs's
+                    // `iter_hash_filter` Any mode.
+                    ("any?", []) => {
+                        Some(Value::Bool(!self.heap.hash(id).is_empty()))
+                    }
+                    // `count` no-arg returns the pair count as Int.
+                    // With-block form is in iter.rs (mirrors
+                    // `Array#count` block).
+                    ("count", []) => Some(Value::Int(self.heap.hash(id).len() as i64)),
                     ("[]", [k]) => {
                         // Direct hit first.
                         {

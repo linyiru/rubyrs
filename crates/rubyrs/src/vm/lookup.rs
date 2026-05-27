@@ -572,6 +572,7 @@ impl Vm {
                 "sort" | "sort_by" | "min_by" | "max_by" | "group_by" |
                 "transform_keys" | "transform_values" |
                 "compact" | "compact!" | "filter_map" |
+                "default" | "default_proc" | "count" | "each_with_object" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,
