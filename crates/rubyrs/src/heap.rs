@@ -495,6 +495,29 @@ impl Heap {
                     // visit is needed.
                     Heap::visit_value(recv, &mut self.marks, &mut worklist);
                 }
+                Slot::Live(HeapObj::UnboundMethod { method, .. }) => {
+                    // The snapshot Method may carry a closure
+                    // whose `captured` Vec holds heap-referenced
+                    // Values (`define_method { ... }` captures
+                    // locals). When the class table entry is
+                    // dropped via `remove_method`, the snapshot
+                    // is the sole holder — the regular
+                    // `Vm.maybe_gc` root walker won't reach it
+                    // because it only iterates `Vm.classes`'s
+                    // method tables. Walk explicitly here so the
+                    // captured locals stay reachable for as long
+                    // as the UnboundMethod is alive. Parallel to
+                    // the singleton-class loop at line ~425.
+                    // `class` is `Rc<Class>` (not heap-managed)
+                    // so no further visit needed; `name_id` is a
+                    // SymId.
+                    if let Some(m) = method
+                        && let Some(cl) = &m.closure {
+                        for v in cl.captured.borrow().iter() {
+                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                        }
+                    }
+                }
                 Slot::Live(HeapObj::CurriedProc { underlying, gathered, .. }) => {
                     Heap::visit_value(underlying, &mut self.marks, &mut worklist);
                     for v in gathered {
