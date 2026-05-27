@@ -1,8 +1,8 @@
 # Adapted from ruby/spec core/unboundmethod/bind_spec.rb at
-# upstream commit 448cb340 (2026-05). Hand-translated — the
-# basic "bind returns a callable Method on the new receiver"
-# shape is inlined, plus the "raises TypeError on incompatible
-# receiver" assertion.
+# upstream commit 448cb340 (2026-05). Hand-translated — four
+# it-blocks are inlined: returns a Method bound to the receiver;
+# the bound Method runs the original body; binds onto a subclass
+# instance; raises TypeError on an incompatible receiver.
 
 describe "UnboundMethod#bind" do
   it "returns a Method bound to the given receiver" do

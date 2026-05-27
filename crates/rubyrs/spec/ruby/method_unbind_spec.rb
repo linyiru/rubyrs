@@ -1,7 +1,8 @@
 # Adapted from ruby/spec core/method/unbind_spec.rb at upstream
-# commit 448cb340 (2026-05). Hand-translated — the basic
-# "returns an UnboundMethod" + "round-trip via bind preserves
-# call semantics" shape is inlined. Mock-based tests + the
+# commit 448cb340 (2026-05). Hand-translated — four it-blocks
+# are inlined: returns UnboundMethod; round-trip via bind
+# preserves call semantics; preserves arity through unbind;
+# preserves owner Module across unbind. Mock-based tests + the
 # Method-from-Module variant are dropped.
 
 describe "Method#unbind" do
