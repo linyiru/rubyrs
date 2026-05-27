@@ -86,5 +86,5 @@ has been observed redefining methods in a hot loop.
 - **Gen-bump churn is total.** Worth file-watching for any future
   hot-path workload that hot-redefines methods (testing frameworks,
   metaprogramming-heavy code). Switching to per-class generation
-  would be a O(N classes) memory cost for an unknown payoff —
+  would be an O(N classes) memory cost for an unknown payoff —
   defer until a real workload demands it.

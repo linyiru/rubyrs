@@ -42,11 +42,12 @@ if [[ ${#workloads[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# Capture stderr to a per-iteration tmpfile so we can disentangle
-# the three things the previous pipeline conflated: a successful
-# workload, a crashed workload, and a binary built without
-# `--features ic-stats`. The tmpfile is cleared in-loop and
-# removed on exit.
+# Capture stderr to a per-iteration tmpfile so we can
+# disentangle three distinct cases the parsing logic needs to
+# handle: a successful workload run, a crashed workload, and a
+# binary built without `--features ic-stats` (no `ic-stats` line
+# in stderr at all). The tmpfile is cleared in-loop and removed
+# on exit.
 stderr_file="$(mktemp)"
 trap 'rm -f "$stderr_file"' EXIT
 
