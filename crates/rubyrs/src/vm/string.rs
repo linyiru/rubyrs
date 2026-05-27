@@ -639,51 +639,94 @@ impl Vm {
                 // `"#{@put_cmd} #{content.dump}.freeze"`. Without
                 // dump, ERB compile crashes inside compile_stag.
                 if name == "dump" && args.is_empty() {
+                    // Walk bytes directly so binary strings
+                    // (Value::new_str_bytes, File.read with non-
+                    // UTF-8 content, cext-allocated bytes) keep
+                    // their invalid sequences as `\xNN` instead
+                    // of being smudged to U+FFFD by a lossy decode.
+                    // Output reconstructs the exact bytes via eval.
+                    //
+                    // Output is built as a String (all chunks are
+                    // ASCII or codepoint escapes which are also
+                    // ASCII when written). Project size against
+                    // `max_value_bytes` before each append so
+                    // pathological inputs trap ResourceExhausted
+                    // rather than allocating without bound.
                     let bytes = s.content.borrow();
-                    let src = String::from_utf8_lossy(&bytes);
-                    let mut out = String::with_capacity(src.len() + 2);
+                    let mut out = String::with_capacity(bytes.len() + 2);
                     out.push('"');
-                    let chars: Vec<char> = src.chars().collect();
-                    for (i, c) in chars.iter().enumerate() {
-                        let cp = *c as u32;
-                        match c {
-                            '\x07' => out.push_str("\\a"),
-                            '\x08' => out.push_str("\\b"),
-                            '\t'   => out.push_str("\\t"),
-                            '\n'   => out.push_str("\\n"),
-                            '\x0B' => out.push_str("\\v"),
-                            '\x0C' => out.push_str("\\f"),
-                            '\r'   => out.push_str("\\r"),
-                            '\x1B' => out.push_str("\\e"),
-                            '"'    => out.push_str("\\\""),
-                            '\\'   => out.push_str("\\\\"),
-                            '#' => {
-                                // Only escape `#` if it'd open an
-                                // interpolation in the round-tripped
-                                // literal: `#{`, `#@`, `#$`.
-                                let next = chars.get(i + 1).copied();
-                                if matches!(next, Some('{') | Some('@') | Some('$')) {
-                                    out.push_str("\\#");
+                    let mut i = 0;
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        let (piece, take): (String, usize) = if b < 0x80 {
+                            // ASCII path.
+                            let short = match b {
+                                0x07 => Some("\\a"),
+                                0x08 => Some("\\b"),
+                                0x09 => Some("\\t"),
+                                0x0A => Some("\\n"),
+                                0x0B => Some("\\v"),
+                                0x0C => Some("\\f"),
+                                0x0D => Some("\\r"),
+                                0x1B => Some("\\e"),
+                                b'"' => Some("\\\""),
+                                b'\\' => Some("\\\\"),
+                                _ => None,
+                            };
+                            if let Some(s) = short {
+                                (s.to_string(), 1)
+                            } else if b == b'#' {
+                                let next = bytes.get(i + 1).copied();
+                                if matches!(next, Some(b'{') | Some(b'@') | Some(b'$')) {
+                                    ("\\#".to_string(), 1)
                                 } else {
-                                    out.push('#');
+                                    ("#".to_string(), 1)
+                                }
+                            } else if b < 0x20 || b == 0x7F {
+                                (format!("\\x{:02X}", b), 1)
+                            } else {
+                                // Printable ASCII (b in 0x20..=0x7E
+                                // excluding `"` `\` `#`-handled above)
+                                ((b as char).to_string(), 1)
+                            }
+                        } else {
+                            // Non-ASCII byte: try to decode a valid
+                            // UTF-8 sequence of 2-4 bytes from here.
+                            let max_seq = (bytes.len() - i).min(4);
+                            let mut decoded: Option<(u32, usize)> = None;
+                            for n in 2..=max_seq {
+                                if let Ok(s) = std::str::from_utf8(&bytes[i..i + n])
+                                    && let Some(c) = s.chars().next()
+                                    && c.len_utf8() == n {
+                                    decoded = Some((c as u32, n));
+                                    break;
                                 }
                             }
-                            _ if cp < 0x20 || cp == 0x7F => {
-                                out.push_str(&format!("\\x{:02X}", cp));
+                            match decoded {
+                                Some((cp, n)) if cp <= 0xFFFF => {
+                                    (format!("\\u{:04X}", cp), n)
+                                }
+                                Some((cp, n)) => {
+                                    (format!("\\u{{{:X}}}", cp), n)
+                                }
+                                None => {
+                                    // Invalid sequence — emit \xNN
+                                    // for the leading byte alone.
+                                    (format!("\\x{:02X}", b), 1)
+                                }
                             }
-                            _ if cp < 0x7F => {
-                                // Printable ASCII (other than the
-                                // shorthand cases handled above)
-                                // passes through verbatim.
-                                out.push(*c);
+                        };
+                        // +1 reserves room for the closing quote.
+                        // Trap ResourceExhausted if the projection
+                        // would exceed the per-value byte cap.
+                        if let Some(max) = self.max_value_bytes
+                            && out.len() + piece.len() + 1 > max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("String#dump output exceeds {max} bytes"),
+                                }));
                             }
-                            _ if cp <= 0xFFFF => {
-                                out.push_str(&format!("\\u{:04X}", cp));
-                            }
-                            _ => {
-                                out.push_str(&format!("\\u{{{:X}}}", cp));
-                            }
-                        }
+                        out.push_str(&piece);
+                        i += take;
                     }
                     out.push('"');
                     return Ok(Some(Value::new_str(out)));

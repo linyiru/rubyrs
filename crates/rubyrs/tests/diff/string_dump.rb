@@ -55,5 +55,13 @@ spliced = "_erbout << #{content.dump}.freeze"
 puts spliced
 # _erbout << "Hello, <%= name %>!\nSecond line\n".freeze
 
+# --- Invalid UTF-8 bytes survive as \xNN ---
+# Pack raw bytes (some valid as standalone leading bytes, some
+# pure invalid). dump must round-trip the exact byte sequence,
+# NOT replace with U+FFFD — that's the whole point: eval'ing the
+# result reconstructs the original String#bytes.
+arr = [0xFF, 0x80, 0x41, 0x42].pack("c*")
+puts arr.dump                                   # "\xFF\x80AB"
+
 # --- respond_to? consistency ---
 puts "x".respond_to?(:dump)                     # true
