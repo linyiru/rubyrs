@@ -214,20 +214,20 @@ pub fn ensure_sandbox_cwd() {
             "ICE: fuzz sandbox cwd did not stick — expected {path:?}, got {cwd:?}"
         );
     });
-    // Every iteration cheaply re-confirms cwd is still inside the
-    // rubyrs-fuzz-* prefix. Catches the failure mode where a future
-    // fuzz target file forgets to call `ensure_sandbox_cwd` AT
-    // STARTUP but lands here from some later code path — the
-    // assertion fires before the unsandboxed `eval` would read
-    // host files. Pattern check only (no syscall) — sub-microsecond.
-    debug_assert!(
-        std::env::current_dir()
-            .map(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("rubyrs-fuzz-"))
-            })
-            .unwrap_or(false),
-        "fuzz sandbox cwd lost between init and call site"
-    );
+    // No per-call check: `OnceLock::get_or_init` runs the
+    // setup-and-assert above exactly once, and once `set_current_dir`
+    // has stuck, only mid-process `chdir` could move the cwd back
+    // out of the sandbox — which would already be a host-level
+    // bug rubyrs doesn't expose to scripts (no `Dir.chdir`
+    // mutation path reaches `std::env::set_current_dir`).
+    //
+    // An earlier revision had a per-iter `debug_assert!` calling
+    // `std::env::current_dir()` to detect drift; the comment
+    // claimed it was "no syscall — sub-microsecond" but
+    // `std::env::current_dir()` is a `getcwd(2)` syscall plus a
+    // PathBuf alloc. The fuzz `[profile.release]` re-enables
+    // debug-assertions (Cargo.toml), so this fired every iter and
+    // showed up as a low-but-measurable fraction of per-iter
+    // overhead. Dropped — the OnceLock-time assertion already
+    // catches the realistic failure mode (cwd setup never stuck).
 }
