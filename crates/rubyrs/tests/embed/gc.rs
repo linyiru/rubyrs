@@ -387,3 +387,42 @@ fn hash_each_with_index_pin_pair_id_under_stress_gc() {
         "pair or index corrupted, got: {out}"
     );
 }
+
+#[test]
+fn array_chunk_pin_heap_keys_under_stress_gc() {
+    // Regression: Array#chunk accumulates block-returned keys in
+    // a Rust-local `Vec<(Value, Vec<Value>)>`. If the block
+    // returns a heap-managed Value (Array / Hash / Str /
+    // Object), the previous iteration's key is only reachable
+    // via this Rust-local Vec — not via scan_roots. Next
+    // iteration's step_block can fire maybe_gc, sweep the key,
+    // and the post-iter `groups.last() / ruby_eq` then reads
+    // freed memory. Surfaced by Copilot review on PR #187.
+    //
+    // The fixture forces both conditions: STRESS_GC (alloc-time
+    // sweeps) + block returning a fresh heap Array each call.
+    // Without the `g.pin(key.clone())` fix, this would ICE on
+    // the second iteration's `ruby_eq` reading a dead Array
+    // slot.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # Block returns a fresh Array each call — heap-managed
+        # key. With 4 distinct elements we get 4 distinct keys
+        # accumulating in `groups`. Under STRESS_GC each key
+        # alloc + each step_block call triggers a sweep; the
+        # previously-stored keys must survive.
+        puts [1, 2, 3, 4].chunk { |x| [x] }.inspect
+    "#, "chunk_pin.rb").expect("eval should not ICE");
+    let out = buf.snapshot();
+    // CRuby: `[[[1], [1]], [[2], [2]], [[3], [3]], [[4], [4]]]`
+    // (each group has one element since each key is unique).
+    assert_eq!(
+        out, "[[[1], [1]], [[2], [2]], [[3], [3]], [[4], [4]]]\n",
+        "chunk output corrupted (likely a key was swept), got: {out}"
+    );
+}

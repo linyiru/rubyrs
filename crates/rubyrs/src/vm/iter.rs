@@ -694,6 +694,23 @@ impl Vm {
                     if same_as_last {
                         groups.last_mut().unwrap().1.push(v);
                     } else {
+                        // Pin block-returned `key` for the rest of
+                        // the primitive. `groups` is a Rust-local
+                        // Vec, not part of scan_roots; if `key` is a
+                        // heap Value (Array/Hash/Object/Str returned
+                        // by the block), the next iteration's
+                        // step_block can fire maybe_gc and sweep it,
+                        // leaving `groups.last()` / `ruby_eq` /
+                        // post-loop materialization reading freed
+                        // memory. `v` itself is safe (transitively
+                        // rooted through the pinned source Array),
+                        // so only `key` needs pinning.
+                        //
+                        // O(distinct_keys) pin growth — bounded by
+                        // the output size, which is the natural cost
+                        // ceiling for this primitive. Pre-existing
+                        // gap surfaced by Copilot review on PR #187.
+                        g.pin(key.clone());
                         groups.push((key, vec![v]));
                     }
                 }
