@@ -228,24 +228,28 @@ honours (per-class methods/ivars/singleton_methods restored,
 heap truncated to post-preamble high-water, interner truncation
 respects post-construction host_fn / cext SymIds, etc.).
 
-### 3. Preamble-fuel coupling
+### 3. ~~Preamble-fuel coupling~~ — fixed in PR #204
 
-`Runtime::with_config` consumes user-supplied `Config::fuel`
-during preamble load (lib.rs:460-499). The harness works
-around this by sizing `Caps::tight()`'s fuel above the observed
-~30k preamble cost — but that number is undocumented in the
-embed API and grows silently with each rubyrs PR that adds
-exception classes.
+`Runtime::with_config` used to consume user-supplied
+`Config::fuel` during preamble load — a host setting a tight
+fuel budget would panic during construction with
+`ICE: failed to load exception preamble` instead of getting a
+recoverable Runtime. PR #204 introduced the `CapsGuard` RAII
+pattern that lifts all six resource caps (fuel / max_frames /
+max_heap_objects / max_symbols / max_value_bytes / deadline)
+for the duration of `load_preamble` and restores them after,
+so preamble runs unbounded and user evals see the host's caps
+as documented.
 
-The workflow's `Preamble-fuel smoke check` step catches the
-case where the preamble exceeds the cap (single-input run of
-empty source; if it traps, the workflow fails fast before
-soaking 5 min on identical crashes). But that's a guard, not a
-fix.
+The workflow's `Preamble-fuel smoke check` step is still in
+place as a CI guard against future regressions in this area:
+runs the empty input under a tight cap for 5s, fails the job
+loudly if the preamble traps. Cheap insurance even with the
+coupling fixed.
 
-The right fix is one of:
-- preamble loader uses an unbounded internal fuel budget and
-  only the post-construction `eval()` calls observe user fuel;
-- `.expect("ICE: failed to load exception preamble")` at
-  lib.rs:460 downgrades to a `Trap` return so the host can
-  gracefully handle setup failure.
+Historic record: the original harness sized `Caps::tight()`'s
+fuel at 50k as an empirical workaround above the observed ~30k
+preamble cost. With the coupling fixed, that 50k could be
+tightened back to whatever exec/s budget the parser-focused
+target actually wants — left at 50k for now to bias mutation
+toward the parser surface, not as a workaround.
