@@ -1464,6 +1464,23 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             //   - `&proc_value` — block-argument forwarding.
             //     Evaluate the expression to a Value::Block at
             //     runtime and pass it as the block.
+            if let Some(ba) = bnode.as_block_argument_node() {
+                // Anonymous `inner(&)` (Ruby 3.1+ block forwarding):
+                // no expression on the BlockArgumentNode. Read the
+                // sentinel local `&` populated by the enclosing
+                // `def foo(&)` parameter and forward it as the
+                // block arg. If the enclosing def DIDN'T have `(&)`,
+                // the LVarRead resolves nothing and runtime raises
+                // — CRuby raises a syntax error at parse time
+                // ("no anonymous block parameter") which we don't
+                // surface here, documented gap.
+                if ba.expression().is_none() {
+                    let block_arg = sp(node, Expr::LVarRead("&".to_string()));
+                    return sp(node, Expr::CallWithBlockArg {
+                        receiver, name, args, block_arg: Box::new(block_arg),
+                    });
+                }
+            }
             if let Some(ba) = bnode.as_block_argument_node()
                 && let Some(expr) = ba.expression() {
                     if let Some(sn) = expr.as_symbol_node() {
@@ -1982,11 +1999,16 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 // the named slot. Anonymous form `def foo(&)` would
                 // have `b.name() == None`; CRuby uses it for
                 // forward-the-block-only, which we don't model yet
-                // — treat as no-name (skip the bind). Prism returns
+                // — treat as no-name UNLESS the parameter list also
+                // had `&` (anonymous block forwarding, Ruby 3.1+).
+                // Bind anonymous form to a reserved sentinel name
+                // `&` (invalid in user identifiers) so the matching
+                // `inner(&)` call site at this method level can
+                // read it via LVarRead. Prism returns
                 // `BlockParameterNode` directly from `p.block()`
                 // (it's an alternation node, not a generic Node);
                 // no `as_*_node` cast needed.
-                block_param = b.name().map(cid_to_string);
+                block_param = Some(b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string()));
             }
             if let Some(r) = p.rest()
                 && let Some(rp) = r.as_rest_parameter_node() {
