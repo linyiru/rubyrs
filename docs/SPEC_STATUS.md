@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 108 |
-| Examples in corpus | 523 |
-| Skipped `it` traces | 157 |
+| Files | 112 |
+| Examples in corpus | 565 |
+| Skipped `it` traces | 159 |
 
 ### Skipped traces by category
 
@@ -22,8 +22,8 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 3 |
 | `fixture` | 51 |
-| `method-not-implemented` | 86 |
-| `mock` | 17 |
+| `method-not-implemented` | 87 |
+| `mock` | 18 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
 `DROP_PATTERNS` (`fixture` / `mock` / `method-not-implemented` plus the
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 59 | 63 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 24 | 62 | 43 |
-| Integer | 25 | 212 | 20 |
+| Integer | 29 | 254 | 22 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 19 | 81 | 30 |
@@ -108,10 +108,14 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_comparison_spec.rb` | Integer#<=> | `core/integer/comparison_spec.rb` | 23 | 2 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
+| `integer_divmod_spec.rb` | Integer#divmod | `core/integer/divmod_spec.rb` | 10 | 1 |
 | `integer_downto_spec.rb` | Integer#downto [stop] when self and stop are Integers | `core/integer/downto_spec.rb` | 5 | 1 |
 | `integer_eql_spec.rb` | Integer#eql? | `core/integer/eql_spec.rb` | 10 | 1 |
 | `integer_equal_value_spec.rb` | Integer#== | `core/integer/equal_value_spec.rb + core/integer/shared/equal.rb` | 10 | 1 |
 | `integer_even_spec.rb` | Integer#even? | `core/integer/even_spec.rb` | 5 | 1 |
+| `integer_fdiv_spec.rb` | Integer#fdiv | `core/integer/fdiv_spec.rb` | 10 | 1 |
+| `integer_gcd_spec.rb` | Integer#gcd | `core/integer/gcd_spec.rb` | 11 | 0 |
+| `integer_lcm_spec.rb` | Integer#lcm | `core/integer/lcm_spec.rb` | 11 | 0 |
 | `integer_left_shift_spec.rb` | Integer#<< | `core/integer/left_shift_spec.rb` | 26 | 0 |
 | `integer_nobits_spec.rb` | Integer#nobits? | `core/integer/nobits_spec.rb` | 5 | 1 |
 | `integer_odd_spec.rb` | Integer#odd? | `core/integer/odd_spec.rb` | 5 | 1 |

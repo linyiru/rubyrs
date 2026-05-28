@@ -1417,6 +1417,56 @@ fn bigint_eq_float_is_lossless() {
 }
 
 #[test]
+fn integer_divmod_fdiv_gcd_lcm_basic() {
+    // Quick happy-path + error pin for the 4 methods landed in this
+    // batch. Spec coverage lives in spec/ruby/integer_{divmod,fdiv,
+    // gcd,lcm}_spec.rb; this is the cross-profile guard for the
+    // dispatch wiring (arity, TypeError, ZeroDivisionError).
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected_inspect) in [
+        // divmod (Int × Int floor + Float result)
+        ("13.divmod(4).inspect", "[3, 1]"),
+        ("(-13).divmod(4).inspect", "[-4, 3]"),
+        ("13.divmod(4.0).inspect", "[3, 1.0]"),
+        // fdiv
+        ("8.fdiv(9.0).inspect", (8.0_f64 / 9.0).to_string().as_str()),
+        ("1.fdiv(0).infinite?.inspect", "1"),
+        ("(-1).fdiv(0).infinite?.inspect", "-1"),
+        ("1.fdiv(0.0/0.0).nan?.inspect", "true"),
+        // gcd/lcm
+        ("10.gcd(5).inspect", "5"),
+        ("(-12).gcd(-6).inspect", "6"),
+        ("200.lcm(2001).inspect", "400200"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(&format!("puts {}", script), "div_fdiv_gcd_lcm.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected_inspect, "for {:?}", script);
+    }
+    // Errors
+    for (script, expected_class) in [
+        ("13.divmod(0)", "ZeroDivisionError"),
+        ("13.divmod(0.0)", "ZeroDivisionError"),
+        ("13.divmod(\"10\")", "TypeError"),
+        ("13.divmod", "ArgumentError"),
+        ("13.divmod(1, 2)", "ArgumentError"),
+        ("1.fdiv(\"x\")", "TypeError"),
+        ("1.fdiv", "ArgumentError"),
+        ("12.gcd", "ArgumentError"),
+        ("12.gcd(30, 20)", "ArgumentError"),
+        ("39.gcd(3.8)", "TypeError"),
+    ] {
+        let err = rt.eval(script, "errors.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+            }
+            other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
+#[test]
 fn integer_div_mod_floor_semantics() {
     // Pin CRuby floor-division semantics for `/` and `%`. Pre-fix
     // rubyrs used Rust's truncating-toward-zero `/` and `%`, so

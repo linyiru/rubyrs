@@ -344,7 +344,8 @@ pub(crate) fn numeric_call(
         // also early-returns when `args.len() != 1`. Without this
         // guard the 0-arg and 2+-arg shapes escape on both profiles.
         (Value::Int(_), "&" | "|" | "^" | "<<" | ">>"
-            | "allbits?" | "anybits?" | "nobits?", args_slice)
+            | "allbits?" | "anybits?" | "nobits?"
+            | "gcd" | "lcm" | "fdiv", args_slice)
             if args_slice.len() != 1 =>
         {
             return Err(RubyError::ArgumentError {
@@ -369,6 +370,103 @@ pub(crate) fn numeric_call(
         (Value::Int(a), "allbits?", [Value::Int(m)]) => Some(Value::Bool((a & m) == *m)),
         (Value::Int(a), "anybits?", [Value::Int(m)]) => Some(Value::Bool((a & m) != 0)),
         (Value::Int(a), "nobits?",  [Value::Int(m)]) => Some(Value::Bool((a & m) == 0)),
+        // `Integer#gcd(n)` — greatest common divisor (always
+        // positive). CRuby raises TypeError on non-Integer arg
+        // (handled by the unified TypeError guard below); arity
+        // is single-arg. The `i64::MIN` magnitude (2^63) doesn't
+        // fit i64, so a result equal to i64::MIN magnitude requires
+        // BigInt promotion — declined here under bignum so
+        // bigint_primitive picks it up. Mixed Int×BigInt routes
+        // through bigint_primitive directly.
+        (Value::Int(a), "gcd", [Value::Int(b)]) => {
+            #[cfg(feature = "bignum")]
+            { if *a == i64::MIN || *b == i64::MIN { return Ok(None); } }
+            Some(Value::Int(gcd_i64(*a, *b)))
+        }
+        // `Integer#lcm(n)` — least common multiple (always positive).
+        // |a * b| overflows i64 easily, so the helper checks via
+        // `checked_*` and declines under bignum for overflow.
+        (Value::Int(a), "lcm", [Value::Int(b)]) => {
+            match lcm_i64(*a, *b) {
+                Some(v) => Some(Value::Int(v)),
+                #[cfg(feature = "bignum")]
+                None => return Ok(None),
+                #[cfg(not(feature = "bignum"))]
+                None => {
+                    // Under no-bignum we can't promote; replicate
+                    // lcm_i64's `|a/gcd * b|` identity with
+                    // wrapping_* so the fallback matches the
+                    // sign-positive contract of the bignum path
+                    // (the previous `(*a).wrapping_mul(*b)` skipped
+                    // the divide-by-gcd AND lost the abs, which
+                    // could return a negative result — breaking
+                    // CRuby parity on lcm's always-positive guarantee).
+                    let g = gcd_i64(*a, *b);
+                    let q = a.wrapping_div(g);
+                    Some(Value::Int(q.wrapping_mul(*b).wrapping_abs()))
+                }
+            }
+        }
+        // `Integer#fdiv(n)` — Float division, always returns Float.
+        // `(a / b).to_f` would lose precision for large operands;
+        // CRuby's fdiv uses a direct f64 division on the operands.
+        // For |i| > 2^53 the i64-to-f64 cast loses bits, but
+        // that's also what CRuby's `Integer#to_f / Integer#to_f`
+        // does — matching parity is more important than absolute
+        // precision (BigInt path uses num_traits::ToPrimitive for
+        // a similar approximation).
+        (Value::Int(a), "fdiv", [Value::Int(b)]) => {
+            Some(Value::Float((*a as f64) / (*b as f64)))
+        }
+        (Value::Int(a), "fdiv", [Value::Float(b)]) => {
+            Some(Value::Float((*a as f64) / *b))
+        }
+        // Non-Integer arg for gcd/lcm: TypeError (matches CRuby's
+        // wording "not an integer"). Float is rejected too — CRuby's
+        // gcd/lcm strictly require Integer args. BigInt args under
+        // bignum are routed to bigint_primitive before this arm
+        // fires (cfg-gated to non-BigInt below).
+        #[cfg(feature = "bignum")]
+        (Value::Int(_), "gcd" | "lcm", [other])
+            if !matches!(other, Value::Int(_) | Value::BigInt(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: "not an integer".to_string(),
+            });
+        }
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "gcd" | "lcm", [other])
+            if !matches!(other, Value::Int(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: "not an integer".to_string(),
+            });
+        }
+        // Non-numeric arg for fdiv: TypeError (CRuby: "no implicit
+        // conversion of X into Float"). Float and Int (and BigInt
+        // under bignum) are accepted as numeric.
+        #[cfg(feature = "bignum")]
+        (Value::Int(_), "fdiv", [other])
+            if !matches!(other, Value::Int(_) | Value::Float(_) | Value::BigInt(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Float",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "fdiv", [other])
+            if !matches!(other, Value::Int(_) | Value::Float(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Float",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
         (Value::Int(a), op, [Value::Int(b)]) => match op {
             "+" => Some(Value::Int(a + b)),
             "-" => Some(Value::Int(a - b)),
@@ -987,6 +1085,52 @@ pub(crate) fn floor_mod_f64(a: f64, b: f64) -> f64 {
     } else {
         r
     }
+}
+
+/// Greatest common divisor on i64, Euclidean algorithm. Result
+/// is always non-negative (CRuby parity — `(-12).gcd(6)` is 6).
+/// Under bignum the caller declines `i64::MIN` inputs so the
+/// BigInt-promotion path returns the exact 2^63 result. Under
+/// no-bignum the helper saturates: if the magnitude would be
+/// `2^63` (only reachable when at least one operand is i64::MIN
+/// and the algorithm collapses to it), return `i64::MAX` so the
+/// result stays positive instead of wrapping to i64::MIN.
+/// Saturation costs 1 from the true magnitude — acceptable under
+/// the no-bignum wrapping-on-overflow convention.
+pub(crate) fn gcd_i64(a: i64, b: i64) -> i64 {
+    let mut x = a.unsigned_abs();
+    let mut y = b.unsigned_abs();
+    while y != 0 {
+        let r = x % y;
+        x = y;
+        y = r;
+    }
+    // Saturate to i64::MAX when the magnitude is 2^63 to keep
+    // the always-non-negative contract. Without this, the cast
+    // wraps to i64::MIN.
+    if x > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        x as i64
+    }
+}
+
+/// Least common multiple on i64. Returns `None` on overflow
+/// (caller promotes to BigInt under bignum, or wraps under
+/// no-bignum). Algebraic identity: `lcm(a, b) = |a*b| / gcd(a, b)`,
+/// implemented as `|a / gcd * b|` to defer the multiplication
+/// past the divide. `lcm(0, _)` is 0 by convention.
+pub(crate) fn lcm_i64(a: i64, b: i64) -> Option<i64> {
+    if a == 0 || b == 0 { return Some(0); }
+    #[cfg(feature = "bignum")]
+    if a == i64::MIN || b == i64::MIN { return None; }
+    #[cfg(not(feature = "bignum"))]
+    let (a, b) = (a, b); // no early-decline; wrap below
+    let g = gcd_i64(a, b);
+    // `a / g` is exact (g divides a); multiply by b then take
+    // absolute value. checked_mul to surface overflow as None.
+    let quotient = a / g;
+    quotient.checked_mul(b).map(i64::wrapping_abs)
 }
 
 /// CRuby-parity lossless three-way comparison between an Int

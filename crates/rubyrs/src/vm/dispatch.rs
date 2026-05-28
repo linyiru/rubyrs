@@ -3806,6 +3806,153 @@ impl Vm {
                 msg: "out of domain".to_string(),
             }));
         }
+        // `Integer#divmod(b)` — returns [q, r] Array where
+        // q = floor(a/b), r = a - b*q (CRuby floor semantics).
+        // Lives in dispatch.rs because the Array result needs
+        // heap-alloc + maybe_gc + check_alloc. Sits alongside
+        // `digits` for the same reason. Sibling BigInt dispatch
+        // is handled in bigint_primitive (which routes its own
+        // BigInt-receiver path through here for the alloc).
+        let recv_is_integer = {
+            #[cfg(feature = "bignum")]
+            { matches!(&recv, Value::Int(_) | Value::BigInt(_)) }
+            #[cfg(not(feature = "bignum"))]
+            { matches!(&recv, Value::Int(_)) }
+        };
+        if recv_is_integer && &*name == "divmod" {
+            if args.len() != 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len(),
+                    ),
+                }));
+            }
+            // Compute q, r as Values. Float arg → both q, r Float.
+            // Zero divisor (Int or Float) → ZeroDivisionError.
+            // NaN divisor → FloatDomainError.
+            // Non-Numeric → TypeError.
+            let arg = &args[0];
+            let (q, r) = match arg {
+                Value::Int(b) => {
+                    if *b == 0 {
+                        return Err(self.trap(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        }));
+                    }
+                    match &recv {
+                        Value::Int(a) => {
+                            // Compute via the floor helpers. Under
+                            // bignum, i64::MIN/-1 needs BigInt
+                            // promotion (sibling to apply_int's
+                            // None-on-overflow path); route through
+                            // bigint_arith for that case.
+                            #[cfg(feature = "bignum")]
+                            if *a == i64::MIN && *b == -1 {
+                                let q = self.bigint_arith(
+                                    crate::bytecode::BinOpKind::Div, &recv, arg,
+                                ).expect("ICE: bigint_arith None for i64::MIN/-1")?;
+                                let r = self.bigint_arith(
+                                    crate::bytecode::BinOpKind::Mod, &recv, arg,
+                                ).expect("ICE: bigint_arith None for i64::MIN/-1")?;
+                                (q, r)
+                            } else {
+                                (
+                                    Value::Int(crate::vm::floor_div_i64(*a, *b)),
+                                    Value::Int(crate::vm::floor_mod_i64(*a, *b)),
+                                )
+                            }
+                            #[cfg(not(feature = "bignum"))]
+                            (
+                                Value::Int(crate::vm::floor_div_i64(*a, *b)),
+                                Value::Int(crate::vm::floor_mod_i64(*a, *b)),
+                            )
+                        }
+                        #[cfg(feature = "bignum")]
+                        Value::BigInt(_) => {
+                            // BigInt × Int — promotes through bigint_arith.
+                            let q = self.bigint_arith(
+                                crate::bytecode::BinOpKind::Div, &recv, arg,
+                            ).expect("ICE: bigint_arith None for BigInt divmod")?;
+                            let r = self.bigint_arith(
+                                crate::bytecode::BinOpKind::Mod, &recv, arg,
+                            ).expect("ICE: bigint_arith None for BigInt divmod")?;
+                            (q, r)
+                        }
+                        _ => unreachable!("recv is Int or BigInt by outer guard"),
+                    }
+                }
+                Value::Float(b) => {
+                    if b.is_nan() {
+                        // CRuby raises FloatDomainError (which is a
+                        // RangeError subclass). rubyrs doesn't model
+                        // FloatDomainError as a distinct class, and
+                        // raising via Uncaught bypasses the rescue
+                        // dispatch entirely. Use RangeError so the
+                        // CRuby ancestor chain still routes the
+                        // exception to `rescue RangeError` /
+                        // `rescue StandardError` correctly — only
+                        // `rescue FloatDomainError` (the specific
+                        // class) misses, which is documented as a
+                        // follow-up alongside the exception-class
+                        // wiring for FloatDomainError specifically.
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "NaN".to_string(),
+                        }));
+                    }
+                    if *b == 0.0 {
+                        return Err(self.trap(RubyError::ZeroDivisionError {
+                            msg: "divided by 0".to_string(),
+                        }));
+                    }
+                    let a_f = match &recv {
+                        Value::Int(n) => *n as f64,
+                        #[cfg(feature = "bignum")]
+                        Value::BigInt(id) => {
+                            use num_traits::ToPrimitive;
+                            self.heap.bigint(*id).to_f64().unwrap_or(f64::NAN)
+                        }
+                        _ => unreachable!("recv is Int or BigInt"),
+                    };
+                    let q_f = (a_f / *b).floor();
+                    let r_f = crate::vm::numeric::floor_mod_f64(a_f, *b);
+                    // CRuby: q is Integer-valued Float for Int.divmod(Float)? No —
+                    // for `13.divmod(4.0)` CRuby returns `[3, 1.0]` (Int q, Float r).
+                    let q_int = if q_f.is_finite() && q_f >= (i64::MIN as f64) && q_f < (i64::MAX as f64) {
+                        Value::Int(q_f as i64)
+                    } else {
+                        // q overflows i64 → keep as Float (CRuby would
+                        // promote to BigInt; approximate by Float for
+                        // now matching the fdiv precision tier).
+                        Value::Float(q_f)
+                    };
+                    (q_int, Value::Float(r_f))
+                }
+                #[cfg(feature = "bignum")]
+                Value::BigInt(_) => {
+                    let q = self.bigint_arith(
+                        crate::bytecode::BinOpKind::Div, &recv, arg,
+                    ).expect("ICE: bigint_arith None for BigInt divmod")?;
+                    let r = self.bigint_arith(
+                        crate::bytecode::BinOpKind::Mod, &recv, arg,
+                    ).expect("ICE: bigint_arith None for BigInt divmod")?;
+                    (q, r)
+                }
+                _ => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "{} can't be coerced into Integer",
+                            crate::vm::numeric::type_name_for_coerce(arg),
+                        ),
+                    }));
+                }
+            };
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(vec![q, r]));
+            self.stack.push(Value::Array(id));
+            return Ok(());
+        }
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(
