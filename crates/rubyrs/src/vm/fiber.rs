@@ -1052,6 +1052,138 @@ mod tests {
         );
     }
 
+    // ===== P1c.4: Category 3 deep tests — Fiber-scoped Vm state =====
+    //
+    // ADR 0023 v2 §"Fiber-scoped Vm state" lists 12 "Must
+    // stash" Vm fields. P1c.4 pins one test per non-trivial
+    // group, demonstrating that yielding inside the
+    // corresponding context preserves both the fiber's
+    // state AND the resumer's state. swap_with_vm_is_involutive
+    // already pins the swap itself; these tests show end-
+    // to-end correctness through real bytecode.
+
+    /// P1c.4 (frames): yield from inside a method called by
+    /// the fiber body. Both frames must survive the
+    /// snapshot save; on resume, the inner method's local
+    /// state must still be intact + the return path back
+    /// to body must work.
+    #[test]
+    fn fiber_yield_inside_nested_method_call() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            def m(x)
+              y = x * 10
+              __rubyrs_fiber_yield(y)   # yield inside m's frame
+              y + 1                      # resumes here; uses y from m's locals
+            end
+            body = proc { m(3) }
+            fib = __rubyrs_fiber_new(body)
+            r1 = __rubyrs_fiber_resume(fib, nil)   # expect 30 (from y * 10)
+            r2 = __rubyrs_fiber_resume(fib, nil)   # expect 31 (y + 1, body's final value)
+            "#{r1}/#{r2}"
+        "##, "p1c4_nested.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "30/31"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P1c.4 (frames, stack): yield from inside a deeper
+    /// 3-level call chain. Exercises that arbitrary frame
+    /// depth survives + the operand stack doesn't get
+    /// confused by partial-expression state.
+    #[test]
+    fn fiber_yield_inside_three_level_call_chain() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            def deep
+              __rubyrs_fiber_yield(:deepest)
+              :deep_done
+            end
+            def mid
+              deep
+            end
+            def outer
+              mid
+            end
+            body = proc { outer }
+            fib = __rubyrs_fiber_new(body)
+            r1 = __rubyrs_fiber_resume(fib, nil)
+            r2 = __rubyrs_fiber_resume(fib, nil)
+            "#{r1.inspect}/#{r2.inspect}"
+        "##, "p1c4_deep.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), ":deepest/:deep_done"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P1c.4 (frames + locals.captured): yield from inside
+    /// a block that closes over outer-scope locals. The
+    /// block's captured Rc<RefCell<Vec<Value>>> must remain
+    /// shared with the outer frame across yield/resume so
+    /// subsequent reads see updates.
+    #[test]
+    fn fiber_yield_inside_closure_preserves_captures() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            body = proc {
+              counter = 0
+              cb = -> {
+                counter += 1
+                __rubyrs_fiber_yield(counter)
+              }
+              cb.call    # counter = 1, yields 1
+              cb.call    # counter = 2, yields 2
+              counter    # body returns counter = 2
+            }
+            fib = __rubyrs_fiber_new(body)
+            r1 = __rubyrs_fiber_resume(fib, nil)
+            r2 = __rubyrs_fiber_resume(fib, nil)
+            r3 = __rubyrs_fiber_resume(fib, nil)
+            "#{r1}/#{r2}/#{r3}"
+        "##, "p1c4_closure.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "1/2/2"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P1c.4 (frames + rescue handlers): yield from inside
+    /// a `rescue` block, then resume. The exception object
+    /// bound to `e` must still be accessible after resume
+    /// (it lives in the rescue frame's locals which is
+    /// part of the snapshot).
+    #[test]
+    fn fiber_yield_inside_rescue_preserves_exception_local() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            body = proc {
+              begin
+                raise "deliberate"
+              rescue => e
+                __rubyrs_fiber_yield(e.message)
+                "post:#{e.message}"
+              end
+            }
+            fib = __rubyrs_fiber_new(body)
+            r1 = __rubyrs_fiber_resume(fib, nil)
+            r2 = __rubyrs_fiber_resume(fib, nil)
+            "#{r1.inspect}/#{r2.inspect}"
+        "##, "p1c4_rescue.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(
+                s.to_string_lossy(),
+                "\"deliberate\"/\"post:deliberate\""
+            ),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
     /// P1c.2c: resume on a returned fiber raises
     /// FiberError ("dead fiber called").
     #[test]
