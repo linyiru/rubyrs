@@ -1535,8 +1535,15 @@ impl Vm {
                 // wording for singleton-bearing receivers
                 // sees a known divergence we accept until a
                 // real consumer needs it.
-                let cls = self.heap.real_class_of(*id);
-                format!("an instance of {}", cls.name)
+                // `try_real_class_of` is the fallible variant
+                // so a corrupt `Value::Object(id)` reaching
+                // here doesn't panic the host on the failure
+                // path — falls back to the generic type tag.
+                // (Code-review #291 round 2.)
+                match self.heap.try_real_class_of(*id) {
+                    Some(cls) => format!("an instance of {}", cls.name),
+                    None => recv.type_name().to_string(),
+                }
             }
             other => other.type_name().to_string(),
         }
