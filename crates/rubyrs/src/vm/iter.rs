@@ -2691,9 +2691,21 @@ impl Vm {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    // Pin the current accumulator across the
+                    // block call: after the first iteration `acc`
+                    // is whatever the block returned, which may
+                    // be a heap-backed Array / Hash / BigInt held
+                    // only in this Rust local. `step_block` can
+                    // allocate (block prelude argv, frame setup)
+                    // and run maybe_gc before our argv is rooted
+                    // in frame locals — without an explicit pin
+                    // the accumulator can be swept mid-call.
+                    let acc_heap = acc.is_gc_heap_ref();
+                    if acc_heap { g.vm.pinned.push(acc.clone()); }
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![acc.clone(), Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
+                    if acc_heap { g.vm.pinned.pop(); }
                     match step? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
@@ -2721,9 +2733,15 @@ impl Vm {
                     g.vm.maybe_gc();
                     g.vm.check_alloc()?;
                     let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    // See no-init form for the rationale on
+                    // pinning the running `acc` across each
+                    // block call.
+                    let acc_heap = acc.is_gc_heap_ref();
+                    if acc_heap { g.vm.pinned.push(acc.clone()); }
                     g.vm.pinned.push(Value::Array(pair_id));
                     let step = g.vm.step_block(block, vec![acc.clone(), Value::Array(pair_id)], pre_frames);
                     g.vm.pinned.pop();
+                    if acc_heap { g.vm.pinned.pop(); }
                     match step? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
@@ -2753,7 +2771,22 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in &snapshot {
-                    let r = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+                    // Pin the running accumulator across the
+                    // block invocation: once `apply_int_promote`
+                    // / `try_bigint_binop` widens `acc` to a
+                    // freshly-allocated BigInt, the next iter's
+                    // `step_block` allocates and may run
+                    // maybe_gc before our argv is rooted — the
+                    // BigInt would be held only in this Rust
+                    // local and could be swept. Int and Symbol
+                    // accumulators short-circuit via
+                    // is_gc_heap_ref so we don't pay for the
+                    // pin push/pop in the all-Int hot path.
+                    let acc_heap = acc.is_gc_heap_ref();
+                    if acc_heap { g.vm.pinned.push(acc.clone()); }
+                    let step = g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames);
+                    if acc_heap { g.vm.pinned.pop(); }
+                    let r = match step? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
