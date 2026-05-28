@@ -947,8 +947,8 @@ impl Vm {
         //
         // `instance_exec` is NOT in this set: CRuby defines it on
         // BasicObject, not Kernel. `Kernel.instance_method(:instance_exec)`
-        // raises NameError. Future BasicObject-builtins PR will
-        // install it there.
+        // raises NameError; the registered version lives in
+        // `install_basic_object_builtins` below.
         // Per-entry shape: (name, arity, param-list, defining-class).
         // Param-list element shape: (param-name, optional-default).
         // Aliased so clippy's type_complexity lint doesn't trip

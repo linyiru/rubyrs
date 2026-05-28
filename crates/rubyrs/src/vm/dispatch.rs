@@ -1969,7 +1969,20 @@ impl Vm {
                         }));
                     }
                     let sid = self.interner.intern(raw);
-                    let snapshot = self.lookup_method_uncached(&cls, sid);
+                    // Same Kernel/BasicObject registry consultation
+                    // as the Symbol-form arm above — without this,
+                    // `Kernel.instance_method("class")` would fall
+                    // back to the proto_idx-default reflection
+                    // while `Kernel.instance_method(:class)` would
+                    // get the synth metadata. CRuby treats Symbol
+                    // and String forms identically.
+                    let snapshot = match cls.name.as_str() {
+                        "Kernel" => self.kernel_builtin_method(sid)
+                            .or_else(|| self.lookup_method_uncached(&cls, sid)),
+                        "BasicObject" => self.basic_object_builtin_method(sid)
+                            .or_else(|| self.lookup_method_uncached(&cls, sid)),
+                        _ => self.lookup_method_uncached(&cls, sid),
+                    };
                     if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method '{}' for class '{}'", raw, cls.name),
