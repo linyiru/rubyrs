@@ -818,6 +818,31 @@ impl Vm {
         self.bypass_visibility_once = false;
     }
 
+    /// Vm-level inner half of `Runtime::reset_between_requests`.
+    /// Clears the Vm-owned per-request transient state. The
+    /// Runtime wrapper additionally handles the cext debug-
+    /// assert (CURRENT_VM_PTR null) and the regex feature-
+    /// gated last_match.
+    ///
+    /// Exposed for callers (the `_http_server` battery's
+    /// per-request handler) that hold `&mut Vm` directly
+    /// via `current_vm_ptr()` without going back through the
+    /// Runtime API.
+    #[cfg(feature = "_http_server")]
+    pub(crate) fn reset_between_requests_inner(&mut self) {
+        self.stack.clear();
+        self.frames.clear();
+        self.pinned.clear();
+        self.class_stack.clear();
+        self.class_visibility_stack.clear();
+        self.globals.clear();
+        self.clear_control_flow_signals();
+        #[cfg(feature = "regex")]
+        {
+            self.last_match = None;
+        }
+    }
+
     pub(crate) fn collection_call(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
         Ok(match recv {
             Value::Array(id) => return self.array_collection_call(*id, name, args),

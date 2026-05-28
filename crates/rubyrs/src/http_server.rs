@@ -479,6 +479,7 @@ async fn handle_request_with_app(
     block_id: crate::value::ObjId,
     listener_addr: SocketAddr,
     peer_addr: SocketAddr,
+    per_request_fuel: Option<u64>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     use crate::value::Value;
 
@@ -504,17 +505,18 @@ async fn handle_request_with_app(
         .collect();
     let body_vec: Vec<u8> = body_bytes_full.to_vec();
 
-    // Phase B: synchronous Vm work — build env, call block,
-    // marshal response. No .await between these steps so the
-    // VmBorrow contract (ADR 0022 v5) holds: while the Vm is
-    // borrowed, control does not yield back to the tokio
-    // executor.
-    let response_components = {
+    // Phase B: synchronous Vm work — reset + refill + build
+    // env + call block + marshal response. No .await between
+    // these steps so the VmBorrow contract (ADR 0022 v5)
+    // holds: while the Vm is borrowed, control does not yield
+    // back to the tokio executor.
+    //
+    // Result type carries the HTTP status separately so the
+    // `ResourceExhausted` path can map to 503 while other
+    // app-side errors stay 500.
+    let response_components: Result<MarshaledResponse, (u16, String)> = {
         let ptr = crate::vm::current_vm_ptr();
         if ptr.is_null() {
-            // Should never happen — the outer host fn
-            // dispatched through `with_vm_ptr_set`. Defence-
-            // in-depth.
             return Ok(error_response(
                 500,
                 "internal: CURRENT_VM_PTR null inside _http_server handler".to_string(),
@@ -525,6 +527,17 @@ async fn handle_request_with_app(
         // inside this synchronous block. No .await reached
         // while the borrow is live.
         let vm = unsafe { &mut *ptr };
+
+        // Stage 5d: per-request cleanup + fuel re-anchor.
+        // Clears request-N's globals / control-flow signals
+        // / pinned roots so they don't leak to request N+1.
+        // Refill resets vm.fuel to the per-request budget
+        // (when supplied) so a CPU-runaway request traps
+        // without depleting the worker's lifetime budget.
+        vm.reset_between_requests_inner();
+        if let Some(n) = per_request_fuel {
+            vm.fuel = Some(n);
+        }
 
         let env_id = build_rack_env(
             vm,
@@ -540,8 +553,23 @@ async fn handle_request_with_app(
         let env_val = Value::Hash(env_id);
 
         match call_ruby_block_sync(vm, block_id, vec![env_val]) {
-            Ok(app_result) => marshal_rack_response(vm, app_result),
-            Err(trap) => Err(format!("Rack app raised: {:?}", trap.err)),
+            Ok(app_result) => marshal_rack_response(vm, app_result)
+                .map_err(|msg| (500, msg)),
+            Err(trap) => {
+                // Stage 5d: ResourceExhausted (fuel / heap
+                // / frames / deadline cap exhausted)
+                // surfaces as 503 Service Unavailable —
+                // distinct from 500 Internal Server Error
+                // for app-side exceptions. The worker
+                // SURVIVES this trap; the next request gets
+                // its own reset_between_requests + refill.
+                use crate::error::RubyError;
+                let status = match &trap.err {
+                    RubyError::ResourceExhausted { .. } => 503,
+                    _ => 500,
+                };
+                Err((status, format!("Rack app raised: {}", trap.err.message())))
+            }
         }
     };
     // VmBorrow scope ends; Phase C can resume tokio await.
@@ -557,7 +585,7 @@ async fn handle_request_with_app(
                 error_response(500, format!("response builder failed: {e}"))
             })
         }
-        Err(msg) => error_response(500, msg),
+        Err((status, msg)) => error_response(status, msg),
     };
     Ok(response)
 }
@@ -583,6 +611,7 @@ async fn serve_with_app_until_shutdown(
     listener: TcpListener,
     block_id: crate::value::ObjId,
     listener_addr: SocketAddr,
+    per_request_fuel: Option<u64>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
     loop {
@@ -594,7 +623,10 @@ async fn serve_with_app_until_shutdown(
                 let io = TokioIo::new(stream);
                 tokio::task::spawn_local(async move {
                     let svc = service_fn(move |req| {
-                        handle_request_with_app(req, block_id, listener_addr, peer_addr)
+                        handle_request_with_app(
+                            req, block_id, listener_addr, peer_addr,
+                            per_request_fuel,
+                        )
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(io, svc)
@@ -615,6 +647,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
     addr: SocketAddr,
     duration: std::time::Duration,
     block_id: crate::value::ObjId,
+    per_request_fuel: Option<u64>,
 ) -> std::io::Result<SocketAddr> {
     let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -626,7 +659,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
         let listener_addr = listener.local_addr()?;
         tokio::select! {
             res = serve_with_app_until_shutdown(
-                listener, block_id, listener_addr, shutdown_rx,
+                listener, block_id, listener_addr, per_request_fuel, shutdown_rx,
             ) => res?,
             _ = tokio::time::sleep(duration) => {}
         }
@@ -746,16 +779,33 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     });
 
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        // Argument shape:
+        // Argument shape (3 or 4 args):
         //   (bind_addr: String, duration_secs: Integer, app: Block/Lambda)
-        let (addr_str, duration_secs, block_id) = match args {
+        //   (bind_addr: String, duration_secs: Integer, app: Block/Lambda, per_request_fuel: Integer)
+        //
+        // The 4-arg form (stage 5d) is the production shape:
+        // per-request fuel cap means a CPU-runaway request
+        // gets 503 + the worker survives. 3-arg form skips
+        // refill (vm.fuel persists from the prior eval).
+        let (addr_str, duration_secs, block_id, per_request_fuel) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id)
+                (addr.to_string_lossy(), *secs, *id, None)
+            }
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel)] => {
+                if *fuel < 0 {
+                    return Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: format!("per_request_fuel must be non-negative, got {fuel}"),
+                        },
+                        backtrace: vec![],
+                    });
+                }
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64))
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda)"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil)"
                             .to_string(),
                     },
                     backtrace: vec![],
@@ -780,13 +830,14 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         })?;
 
         let duration = Duration::from_secs(duration_secs as u64);
-        let bound = run_blocking_for_duration_with_app(addr, duration, block_id)
-            .map_err(|e| Trap {
-                err: RubyError::RuntimeError {
-                    msg: format!("http_serve_with_app: {e}"),
-                },
-                backtrace: vec![],
-            })?;
+        let bound = run_blocking_for_duration_with_app(
+            addr, duration, block_id, per_request_fuel,
+        ).map_err(|e| Trap {
+            err: RubyError::RuntimeError {
+                msg: format!("http_serve_with_app: {e}"),
+            },
+            backtrace: vec![],
+        })?;
 
         Ok(Value::Str(std::rc::Rc::new(
             crate::value::RStr::new(bound.to_string()),
@@ -1045,6 +1096,120 @@ mod tests {
             raise "unknown key should return nil" \
                 unless env["NONEXISTENT_KEY"].nil?
         "#, "stage_4c1_check.rb").expect("env hash Ruby-side assertions all hold");
+    }
+
+    /// Stage 5d integration: per_request_fuel cap +
+    /// `ResourceExhausted` catch at the `app.call` boundary
+    /// produces 503 — and the worker SURVIVES to serve a
+    /// second request cleanly.
+    ///
+    /// This is the canonical "Ruby app misbehaves, server
+    /// stays up" scenario the entire fuel-refill machinery
+    /// exists for. Two requests on the same socket:
+    ///   1. First request: runaway loop, fuel exhausts →
+    ///      503 from server
+    ///   2. Second request: well-behaved → 200 from server
+    ///   3. State doesn't leak: $req_count global was 0
+    ///      in request 1 (before runaway), should be 0 in
+    ///      request 2 too (reset_between_requests cleared
+    ///      it)
+    #[test]
+    fn runaway_request_503s_then_worker_survives_next_request() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18094";
+
+        // Client thread: sends two requests, verifies each.
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+
+            // Request 1 — runaway path. Connect fresh,
+            // send, read response.
+            let mut c1 = TcpStream::connect(server_addr).expect("connect 1");
+            c1.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            c1.write_all(
+                b"GET /runaway HTTP/1.1\r\n\
+                  Host: localhost\r\nConnection: close\r\n\r\n",
+            ).expect("write 1");
+            let mut r1 = Vec::new();
+            c1.read_to_end(&mut r1).expect("read 1");
+            drop(c1);
+
+            // Small pause between requests so the server has
+            // time to land back at the accept loop.
+            thread::sleep(Duration::from_millis(50));
+
+            // Request 2 — well-behaved path.
+            let mut c2 = TcpStream::connect(server_addr).expect("connect 2");
+            c2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            c2.write_all(
+                b"GET /ok HTTP/1.1\r\n\
+                  Host: localhost\r\nConnection: close\r\n\r\n",
+            ).expect("write 2");
+            let mut r2 = Vec::new();
+            c2.read_to_end(&mut r2).expect("read 2");
+
+            (
+                String::from_utf8_lossy(&r1).into_owned(),
+                String::from_utf8_lossy(&r2).into_owned(),
+            )
+        });
+
+        // Server: lambda checks $req_count global (should
+        // be 0 every request — reset_between_requests
+        // clears it). Path /runaway runs a tight loop that
+        // exhausts fuel; /ok returns immediately.
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(
+            r#"
+            app = ->(env) {{
+              # Verify reset_between_requests cleared the global.
+              # If state leaks, $req_count would be 1 in request 2
+              # (set by request 1 before its runaway), not 0.
+              previous = $req_count || 0
+              $req_count = previous + 1
+
+              if env['PATH_INFO'] == '/runaway'
+                # Tight loop to exhaust per_request_fuel (10_000).
+                # Will trap with ResourceExhausted; server catches
+                # → 503; worker survives.
+                1_000_000.times {{ 1 + 1 }}
+                [200, {{}}, ["never reached"]]
+              else
+                [200, {{"Content-Type" => "text/plain"}}, ["previous_req_count=#{{previous}}"]]
+              end
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app, 10_000)
+            "#,
+        ), "stage_5d_runaway.rb").expect("server ran 2 seconds");
+
+        let (r1, r2) = client_thread.join().expect("client thread did not panic");
+
+        // Request 1 should be 503 (ResourceExhausted caught
+        // and mapped at app.call boundary).
+        assert!(
+            r1.contains("HTTP/1.1 503"),
+            "request 1 (runaway) want 503, got:\n{r1}",
+        );
+
+        // Request 2 should be 200 — worker survived.
+        assert!(
+            r2.contains("HTTP/1.1 200"),
+            "request 2 (after runaway) want 200, got:\n{r2}",
+        );
+
+        // Request 2's body should show previous_req_count=0:
+        // request 1's $req_count = 1 was cleared by
+        // reset_between_requests before request 2's app.call.
+        assert!(
+            r2.contains("previous_req_count=0"),
+            "expected reset_between_requests to clear $req_count between requests; \
+             body was:\n{r2}",
+        );
     }
 
     /// Stage 4c.3 end-to-end smoke test: Ruby block runs
