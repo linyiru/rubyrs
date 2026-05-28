@@ -178,6 +178,38 @@ impl Vm {
                     for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
                 }
             }
+            // `singleton_class.class_eval { define_method(...) }`
+            // installs closure methods into `singleton_methods`
+            // via the eigenclass-shell redirect (PR #253). Without
+            // walking this table, captures reachable only through
+            // a singleton method's `MethodClosure` would be swept
+            // under STRESS_GC. (Code-review #253 round 5.)
+            for m in cls.singleton_methods.borrow().values() {
+                if let Some(cl) = &m.closure {
+                    for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                }
+            }
+            // The eigenclass shell itself isn't in `self.classes`
+            // (only the real class is); walk the cached shell's
+            // own tables too so any method installed on the
+            // shell's own singleton-methods (a meta-meta case
+            // from `def self.foo` inside
+            // `singleton_class.class_eval`) keeps its captures
+            // and class-vars alive.
+            if let Some(shell) = cls.singleton_view.borrow().as_ref() {
+                for m in shell.methods.borrow().values() {
+                    if let Some(cl) = &m.closure {
+                        for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                    }
+                }
+                for m in shell.singleton_methods.borrow().values() {
+                    if let Some(cl) = &m.closure {
+                        for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                    }
+                }
+                for v in shell.ivars.borrow().values() { roots.push(v.clone()); }
+                for v in shell.class_vars.borrow().values() { roots.push(v.clone()); }
+            }
             // Class variables (`@@foo`) hold arbitrary Values
             // (Array/Hash/Object); without rooting them, a
             // `@@items = []; ...; @@items << x` pattern under
