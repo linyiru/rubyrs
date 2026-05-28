@@ -1271,6 +1271,169 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             crate::value::RStr::new(bound.to_string()),
         )))
     });
+
+    // Stage 7c PoC: `__rubyrs_http_serve_prefork`.
+    //
+    // Argument shape (4-5 args):
+    //   (addr, secs, app, n_workers)
+    //   (addr, secs, app, n_workers, on_worker_boot)
+    //
+    // For 7c only N=1 is honored — no actual fork(2); the
+    // call runs in the current process. The `on_worker_boot`
+    // block (if supplied) is invoked exactly once with the
+    // worker index (always 0 for N=1) BEFORE the accept
+    // loop starts. This proves the worker-boot semantics
+    // in isolation: visible side effects (e.g., setting a
+    // global) are observable from app calls, and a raise
+    // in on_worker_boot fails the server fast.
+    //
+    // N>=2 (real libc::fork + waitpid supervisor) lands in
+    // 7d, gated cfg(target_family = "unix"). On Windows,
+    // N>=2 returns ArgumentError unconditionally — there's
+    // no SO_REUSEPORT equivalent.
+    rt.register_fn("__rubyrs_http_serve_prefork", |args| {
+        let (addr_str, duration_secs, block_id, n_workers, on_worker_boot_id) = match args {
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(n)] => {
+                (addr.to_string_lossy(), *secs, *id, *n, None)
+            }
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(n), Value::Block(boot_id)] => {
+                (addr.to_string_lossy(), *secs, *id, *n, Some(*boot_id))
+            }
+            _ => {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_http_serve_prefork(addr: String, duration_secs: Integer, app: Proc/Lambda, n_workers: Integer, on_worker_boot: Proc/Lambda = nil)"
+                            .to_string(),
+                    },
+                    backtrace: vec![],
+                });
+            }
+        };
+
+        if duration_secs < 0 {
+            return Err(Trap {
+                err: RubyError::ArgumentError {
+                    msg: format!("duration_secs must be non-negative, got {duration_secs}"),
+                },
+                backtrace: vec![],
+            });
+        }
+        if n_workers < 1 {
+            return Err(Trap {
+                err: RubyError::ArgumentError {
+                    msg: format!("n_workers must be >= 1, got {n_workers}"),
+                },
+                backtrace: vec![],
+            });
+        }
+        if n_workers > 1 {
+            // 7d will lift this gate. Until then, multi-
+            // worker requests fail explicitly rather than
+            // silently degrading to N=1.
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: format!("n_workers > 1 not yet implemented (Stage 7d); got n_workers={n_workers}"),
+                },
+                backtrace: vec![],
+            });
+        }
+
+        let addr: SocketAddr = addr_str.parse().map_err(|e| Trap {
+            err: RubyError::ArgumentError {
+                msg: format!("invalid bind address '{addr_str}': {e}"),
+            },
+            backtrace: vec![],
+        })?;
+
+        // Bind ONCE in the parent (for N=1 this IS the
+        // worker). 7d will fork before this point and each
+        // child will re-bind via SO_REUSEPORT.
+        #[cfg(unix)]
+        let listener = bind_reuseport_v4(addr).map_err(|e| Trap {
+            err: RubyError::RuntimeError {
+                msg: format!("http_serve_prefork bind: {e}"),
+            },
+            backtrace: vec![],
+        })?;
+        #[cfg(not(unix))]
+        let listener = std::net::TcpListener::bind(addr).map_err(|e| Trap {
+            err: RubyError::RuntimeError {
+                msg: format!("http_serve_prefork bind: {e}"),
+            },
+            backtrace: vec![],
+        })?;
+        #[cfg(not(unix))]
+        listener.set_nonblocking(true).map_err(|e| Trap {
+            err: RubyError::RuntimeError {
+                msg: format!("http_serve_prefork set_nonblocking: {e}"),
+            },
+            backtrace: vec![],
+        })?;
+        let bound = listener.local_addr().unwrap_or(addr);
+
+        // Invoke on_worker_boot if supplied. The Vm is
+        // already parked into CURRENT_VM_PTR by the host
+        // fn dispatcher (ADR 0013). Argument = worker
+        // index (always 0 for N=1). A raise here surfaces
+        // as the host fn's trap — the server never starts.
+        if let Some(boot_id) = on_worker_boot_id {
+            let ptr = crate::vm::current_vm_ptr();
+            if ptr.is_null() {
+                return Err(Trap {
+                    err: RubyError::RuntimeError {
+                        msg: "internal: CURRENT_VM_PTR null in serve_prefork host fn".to_string(),
+                    },
+                    backtrace: vec![],
+                });
+            }
+            // SAFETY: ADR 0013 — outer &mut Vm parked by
+            // invoke_host_fn; we re-borrow time-disjointly.
+            let vm = unsafe { &mut *ptr };
+            let worker_index = Value::Int(0);
+            // call_ruby_block_sync propagates any trap (incl.
+            // ResourceExhausted) as Err — fine; we surface
+            // it to the embedder rather than silently
+            // skipping the server.
+            call_ruby_block_sync(vm, boot_id, vec![worker_index])?;
+        }
+
+        let duration = Duration::from_secs(duration_secs as u64);
+
+        // Non-unix has no on_listener variant (cfg-gated);
+        // fall back to the addr-taking entry. For N=1
+        // this is semantically identical.
+        #[cfg(unix)]
+        let _serve_bound = run_blocking_for_duration_with_app_on_listener(
+            listener, duration, block_id, None, None,
+            DEFAULT_MAX_BODY_BYTES, None, None, None, false,
+        ).map_err(|e| Trap {
+            err: RubyError::RuntimeError {
+                msg: format!("http_serve_prefork: {e}"),
+            },
+            backtrace: vec![],
+        })?;
+        #[cfg(not(unix))]
+        {
+            // Drop the bound std listener; the addr-taking
+            // path will rebind. SO_REUSEADDR isn't set
+            // there, so the TIME_WAIT skip is lost — but
+            // Windows isn't the Stage 7 target.
+            drop(listener);
+            run_blocking_for_duration_with_app(
+                addr, duration, block_id, None, None,
+                DEFAULT_MAX_BODY_BYTES, None, None, None, false,
+            ).map_err(|e| Trap {
+                err: RubyError::RuntimeError {
+                    msg: format!("http_serve_prefork: {e}"),
+                },
+                backtrace: vec![],
+            })?;
+        }
+
+        Ok(Value::Str(std::rc::Rc::new(
+            crate::value::RStr::new(bound.to_string()),
+        )))
+    });
 }
 
 #[cfg(test)]
@@ -2892,6 +3055,188 @@ mod tests {
             assigned.port(),
             0,
             "kernel should have assigned a non-zero port",
+        );
+    }
+
+    /// Stage 7c: `__rubyrs_http_serve_prefork(N=1)` invokes
+    /// the `on_worker_boot` block exactly once with the
+    /// worker index (0), BEFORE the accept loop starts.
+    /// Side effects from on_worker_boot (here: setting a
+    /// global) are observable from the app block.
+    ///
+    /// This is the API-shape proof that downstream forked
+    /// workers (7d) will rely on: each child runs the boot
+    /// hook in its own address space before accepting.
+    #[test]
+    fn prefork_n1_invokes_on_worker_boot_before_serving() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18140";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client
+                .write_all(b"GET /boot HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // Globals are cleared by reset_between_requests
+        // (intentional per-request isolation). on_worker_boot
+        // state must live somewhere request-reset doesn't
+        // touch — class-instance variables are the
+        // idiomatic Ruby choice (Puma uses the same
+        // pattern for boot-time DB connections).
+        rt.eval(&format!(r#"
+            class WorkerState
+              @count = 0
+              @worker_id = nil
+              def self.boot!(idx)
+                @count += 1
+                @worker_id = idx
+              end
+              def self.count; @count; end
+              def self.worker_id; @worker_id; end
+            end
+            app = ->(env) {{
+              body = "boot_count=#{{WorkerState.count}} worker=#{{WorkerState.worker_id}}"
+              [200, {{"Content-Type" => "text/plain"}}, [body]]
+            }}
+            on_boot = ->(idx) {{ WorkerState.boot!(idx) }}
+            __rubyrs_http_serve_prefork("{server_addr}", 1, app, 1, on_boot)
+        "#), "stage_7c_prefork_n1.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 from prefork N=1, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("boot_count=1"),
+            "on_worker_boot must run exactly once before serve, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("worker=0"),
+            "worker index 0 must be visible to app, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 7c: when on_worker_boot raises, the server
+    /// fails fast — no accept loop is entered, no requests
+    /// served. The trap surfaces as the host fn's error.
+    /// This is the contract that lets embedders use boot
+    /// as the "must succeed or kill the worker" sanity
+    /// gate (e.g., DB connection re-open).
+    #[test]
+    fn prefork_n1_on_worker_boot_raise_aborts_serve() {
+        use std::time::Duration;
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let start = std::time::Instant::now();
+        let result = rt.eval(r#"
+            app = ->(env) { [200, {}, ["ok"]] }
+            on_boot = ->(idx) { raise "db reconnect failed" }
+            __rubyrs_http_serve_prefork("127.0.0.1:18141", 5, app, 1, on_boot)
+        "#, "stage_7c_boot_raises.rb");
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected on_worker_boot raise to surface, got Ok",
+        );
+        let err_msg = format!("{result:?}");
+        assert!(
+            err_msg.contains("db reconnect failed"),
+            "expected original boot error in trap, got: {err_msg}",
+        );
+        // Server's duration_secs was 5 — if boot-raise
+        // didn't abort, eval would block ~5s. Bound at 2s
+        // with slack for compilation.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected fail-fast (<2s), took {elapsed:?} — on_worker_boot raise didn't abort serve",
+        );
+    }
+
+    /// Stage 7c: the 4-arg form (no on_worker_boot) still
+    /// serves normally. Equivalent to the existing addr-
+    /// taking entry but via the prefork host fn (and via
+    /// the on_listener internal path on unix).
+    #[test]
+    fn prefork_n1_without_on_worker_boot_serves() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18142";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            app = ->(env) {{ [200, {{"Content-Type" => "text/plain"}}, ["no_boot_ok"]] }}
+            __rubyrs_http_serve_prefork("{server_addr}", 1, app, 1)
+        "#), "stage_7c_no_boot.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200") && response_text.contains("no_boot_ok"),
+            "expected 200 + body, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 7c: n_workers >= 2 is gated off until 7d
+    /// lands. Explicit RuntimeError rather than silent
+    /// degrade to N=1.
+    #[test]
+    fn prefork_rejects_n_gte_2_until_7d() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            app = ->(env) { [200, {}, []] }
+            __rubyrs_http_serve_prefork("127.0.0.1:0", 0, app, 4)
+        "#, "stage_7c_n_too_big.rb").expect_err("should reject N=4");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("n_workers > 1 not yet implemented"),
+            "expected gating error, got: {msg}",
+        );
+    }
+
+    /// Stage 7c: n_workers < 1 is an ArgumentError.
+    #[test]
+    fn prefork_rejects_n_lt_1() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            app = ->(env) { [200, {}, []] }
+            __rubyrs_http_serve_prefork("127.0.0.1:0", 0, app, 0)
+        "#, "stage_7c_n_zero.rb").expect_err("should reject N=0");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("n_workers must be >= 1"),
+            "expected ArgumentError on N=0, got: {msg}",
         );
     }
 
