@@ -2623,6 +2623,157 @@ impl Vm {
             // Array. Block return is ignored; `memo` is the
             // observable result. Same up-front pin discipline as
             // `Hash#count` above.
+            // `h.flat_map { |k, v| ... }` — like map then one-level
+            // flatten. CRuby: `{a:1,b:2}.flat_map { |k,v| [k,v] }`
+            // gives `[:a, 1, :b, 2]`. When the block return is an
+            // Array, its elements are spliced into the result;
+            // otherwise the value is pushed as-is.
+            (Value::Hash(id), "flat_map", []) | (Value::Hash(id), "collect_concat", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                // Defensive pin of every heap-slot k/v before the
+                // block runs — block can mutate the receiver and
+                // sweep elements held only in Rust-local Vecs.
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    let r = match g.vm.step_block(block, vec![k, v], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    match r {
+                        Value::Array(rid) => {
+                            let items: Vec<Value> = g.vm.heap.array(rid).clone();
+                            for it in items { g.vm.heap.array_mut(result_id).push(it); }
+                        }
+                        other => g.vm.heap.array_mut(result_id).push(other),
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
+            // `h.reduce { |acc, (k, v)| ... }` — no-init form.
+            // First (k, v) pair seeds `acc` as a fresh `[k, v]`
+            // Array; subsequent pairs are passed as the second
+            // argument (also packaged as `[k, v]`). Empty Hash
+            // returns nil. The block's second arg is destructurable
+            // as `|acc, (k, v)|`.
+            (Value::Hash(id), "reduce", []) | (Value::Hash(id), "inject", []) => {
+                let id = *id;
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let first_id = g.vm.heap.alloc(HeapObj::Array(vec![snapshot[0].0.clone(), snapshot[0].1.clone()]));
+                g.pin(Value::Array(first_id));
+                let pre_frames = g.vm.frames.len();
+                let mut acc = Value::Array(first_id);
+                let mut early = None;
+                for (k, v) in &snapshot[1..] {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![acc.clone(), Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    match step? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => { acc = r; }
+                    }
+                }
+                Some(early.unwrap_or(acc))
+            }
+            (Value::Hash(id), "reduce", [init]) | (Value::Hash(id), "inject", [init]) => {
+                let id = *id;
+                let init = init.clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                g.pin(init.clone());
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut acc = init;
+                let mut early = None;
+                for (k, v) in &snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![acc.clone(), Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    match step? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => { acc = r; }
+                    }
+                }
+                Some(early.unwrap_or(acc))
+            }
+            // `h.sum { |k, v| expr }` — sums block return values.
+            // Default initial accumulator is Int(0) (CRuby). With
+            // an Int init, seed from there. Mirrors the Array#sum
+            // dispatch via `apply_int_promote` / `try_bigint_binop`
+            // so Bignum-of-sum cases work.
+            (Value::Hash(id), "sum", []) | (Value::Hash(id), "sum", [Value::Int(_)]) => {
+                let id = *id;
+                let init: i64 = match args { [Value::Int(n)] => *n, _ => 0 };
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let kind = crate::bytecode::BinOpKind::Add;
+                let mut acc: Value = Value::Int(init);
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in &snapshot {
+                    let r = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    match (&acc, &r) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            acc = g.vm.apply_int_promote(kind, *x, *y)?;
+                        }
+                        _ => {
+                            #[cfg(feature = "bignum")]
+                            if let Some(next) = g.vm.try_bigint_binop(kind, &acc, &r)? {
+                                acc = next;
+                                continue;
+                            }
+                            return Ok(None);
+                        }
+                    }
+                }
+                Some(early.unwrap_or(acc))
+            }
             (Value::Hash(id), "each_with_object", [seed]) => {
                 let id = *id;
                 let seed = seed.clone();

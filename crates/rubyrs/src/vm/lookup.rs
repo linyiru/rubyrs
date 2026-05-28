@@ -597,6 +597,7 @@ impl Vm {
                 "transform_keys" | "transform_values" |
                 "compact" | "compact!" | "filter_map" |
                 "default" | "default_proc" | "count" | "each_with_object" |
+                "flat_map" | "collect_concat" | "reduce" | "inject" | "sum" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,
