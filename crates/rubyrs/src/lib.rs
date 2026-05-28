@@ -660,6 +660,23 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
     }
 }
 
+/// Extract a human-readable message from a [`std::panic::catch_unwind`]
+/// payload. `panic!("msg")` / `panic!("{} ...", x)` boxes a `String`;
+/// `panic!("static str")` boxes a `&'static str`. Other payload types
+/// (custom error structs panicked with `panic_any`) lose their text,
+/// but we still want SOMETHING in the Trap message rather than a
+/// silent `<unknown>` — log the payload's type id so a host can
+/// at least correlate against its own panic site.
+fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s.to_string()
+    } else {
+        format!("<non-string panic payload, type_id = {:?}>", (**payload).type_id())
+    }
+}
+
 /// Pure lexical resolve of a path — collapses `.` and `..`
 /// segments without touching the filesystem. The single shared
 /// implementation behind:
@@ -1934,7 +1951,54 @@ RUBY_ENGINE = "ruby".freeze
     /// Parse, compile, and run a Ruby source. The returned value is the
     /// final expression of the script; embedders can ignore it for
     /// statements with no return value.
+    ///
+    /// Panic safety: the body is wrapped in [`std::panic::catch_unwind`]
+    /// so a Rust panic anywhere below this entry point — an ICE-class
+    /// `panic!`/`.unwrap()`/`.expect()` in the VM, an OOM in a
+    /// vendored dep, a host-fn callback (registered via
+    /// [`Runtime::register_fn`] or [`Runtime::register_fn_v2`]) that
+    /// panics — is converted to a [`Trap`] with
+    /// [`RubyError::RuntimeError`] carrying the panic payload. The
+    /// host's call site sees an ordinary `Err`, not an unwind, which
+    /// matters for two cases:
+    ///
+    ///   1. Embedders calling `eval` from `extern "C"` (without
+    ///      `-unwind`) — a panic crossing that boundary is undefined
+    ///      behaviour. Catching here makes the public API FFI-safe by
+    ///      default.
+    ///   2. Long-running host loops (rubund batch evaluation,
+    ///      `_http_server` request handlers) that need to survive a
+    ///      single bad script without crashing the process.
+    ///
+    /// State guarantee is best-effort: every existing RAII guard
+    /// (notably [`PreambleLiftGuard`] for sandbox caps) still runs on
+    /// the unwind path, so externally-visible caps stay intact. The
+    /// internal Vm state, however, may be left mid-execution (operand
+    /// stack partially populated, frames partially torn down). The
+    /// next `eval` clears those before running, so subsequent calls
+    /// on the same Runtime are safe; if you don't trust the residue,
+    /// call [`Runtime::reset`] or drop and rebuild.
     pub fn eval(&mut self, source: &str, filename: &str) -> Result<Value, Trap> {
+        // The actual work lives in `eval_inner`. This thin wrapper
+        // only adds the panic→Trap conversion so the inner body stays
+        // free of `catch_unwind` ceremony.
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let outcome = catch_unwind(AssertUnwindSafe(|| self.eval_inner(source, filename)));
+        match outcome {
+            Ok(result) => result,
+            Err(payload) => Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: format!(
+                        "host-side panic during eval: {}",
+                        panic_payload_message(&payload),
+                    ),
+                },
+                backtrace: vec![],
+            }),
+        }
+    }
+
+    fn eval_inner(&mut self, source: &str, filename: &str) -> Result<Value, Trap> {
         let filename_rc: Rc<str> = Rc::from(filename);
         let source_rc: Rc<str> = Rc::from(source);
         // Single source-of-truth map on the Vm. Backtrace

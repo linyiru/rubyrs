@@ -483,3 +483,116 @@ fn uncaught_exception_format_trap_uses_script_class_name() {
     assert!(!formatted.contains("Uncaught"), "should not leak host tag: {formatted}");
 }
 
+
+// ---------- Host-side panic → Trap conversion (C4) ----------
+
+#[test]
+fn host_fn_panic_becomes_runtime_error_trap() {
+    // A `register_fn` callback that Rust-panics must NOT unwind
+    // through `Runtime::eval` — embedders calling eval from
+    // `extern "C"` would hit UB on the cross-boundary unwind.
+    // The eval wrapper catches and converts to a RuntimeError
+    // Trap whose message preserves the panic payload string.
+    let mut rt = Runtime::new();
+    rt.register_fn("explode", |_| {
+        panic!("host fn boom");
+    });
+    let err = rt.eval(r#"explode"#, "test.rb").unwrap_err();
+    match &err.err {
+        rubyrs::RubyError::RuntimeError { msg } => {
+            assert!(
+                msg.contains("host-side panic during eval"),
+                "expected panic-trap prefix in message, got {msg:?}",
+            );
+            assert!(
+                msg.contains("host fn boom"),
+                "expected original panic payload preserved, got {msg:?}",
+            );
+        }
+        other => panic!("expected RuntimeError, got {other:?}"),
+    }
+}
+
+#[test]
+fn host_fn_panic_with_static_str_payload_is_preserved() {
+    // `panic!("static literal")` boxes the str as `&'static str`,
+    // NOT String. The payload-extractor must handle both shapes
+    // — otherwise static-str panics surface as
+    // `<non-string panic payload>`, which would lose actionable
+    // diagnostic info in the most common shape.
+    let mut rt = Runtime::new();
+    rt.register_fn("explode", |_| {
+        panic!("static literal payload");
+    });
+    let err = rt.eval(r#"explode"#, "test.rb").unwrap_err();
+    let rubyrs::RubyError::RuntimeError { msg } = &err.err else {
+        panic!("expected RuntimeError, got {:?}", err.err);
+    };
+    assert!(
+        msg.contains("static literal payload"),
+        "static-str payload should be preserved, got {msg:?}",
+    );
+}
+
+#[test]
+fn host_fn_panic_with_panic_any_payload_falls_back_gracefully() {
+    // `panic_any(custom_struct)` boxes the struct opaquely;
+    // downcast::<String> and downcast::<&str> both fail. The
+    // helper should fall back to a type-id-bearing diagnostic
+    // rather than silently dropping the panic context.
+    let mut rt = Runtime::new();
+    rt.register_fn("explode", |_| {
+        std::panic::panic_any(42_u64);
+    });
+    let err = rt.eval(r#"explode"#, "test.rb").unwrap_err();
+    let rubyrs::RubyError::RuntimeError { msg } = &err.err else {
+        panic!("expected RuntimeError, got {:?}", err.err);
+    };
+    assert!(
+        msg.contains("non-string panic payload"),
+        "expected fallback diagnostic, got {msg:?}",
+    );
+}
+
+#[test]
+fn host_can_continue_after_host_fn_panic() {
+    // After a caught host-fn panic, the same Runtime must still
+    // be usable for fresh evals — the eval entry's
+    // frames/stack/pinned clear is the safety net. This is the
+    // shape rubund's batch evaluator and `_http_server`'s
+    // request loop care about: one bad gemspec or one bad
+    // request handler shouldn't kill the process.
+    let mut rt = Runtime::new();
+    rt.register_fn("explode", |_| panic!("boom"));
+    let _ = rt.eval(r#"explode"#, "first.rb").unwrap_err();
+    let v = rt.eval(r#"1 + 2"#, "second.rb").unwrap();
+    assert!(matches!(v, rubyrs::Value::Int(3)));
+}
+
+#[test]
+fn host_fn_returning_trap_is_not_rewrapped_by_panic_catcher() {
+    // Sanity contract: the panic→Trap path mustn't accidentally
+    // hijack callbacks that legitimately return `Err(Trap)`.
+    // Those propagate through script-level dispatch and surface
+    // as `Uncaught { class_name: "KeyError", ... }` (the
+    // existing "Uncaught" variant shape — see
+    // `ruby_error_is_normalises_direct_and_uncaught_shapes`).
+    // What MUST NOT happen is re-wrapping into a generic
+    // RuntimeError with "host-side panic during eval" — that
+    // would lose the original class.
+    let mut rt = Runtime::new();
+    rt.register_fn("raise_key", |_| Err(rubyrs::Trap {
+        err: rubyrs::RubyError::KeyError { msg: "expected".into() },
+        backtrace: vec![],
+    }));
+    let err = rt.eval(r#"raise_key"#, "test.rb").unwrap_err();
+    let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+        panic!("expected Uncaught variant, got {:?}", err.err);
+    };
+    assert_eq!(class_name, "KeyError", "original class must survive");
+    assert_eq!(message, "expected", "original message must survive");
+    assert!(
+        !message.contains("host-side panic"),
+        "Trap path must not be re-wrapped by panic catcher; got {message:?}",
+    );
+}
