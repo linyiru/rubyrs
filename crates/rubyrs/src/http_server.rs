@@ -68,6 +68,136 @@ pub struct HttpServerConfig {
 #[allow(dead_code)] // Used once the Limited wrapper lands in stage 4.
 pub(crate) const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// Maximum workers a single prefork invocation can spawn.
+/// Cap exists because the child-pid table for the parent's
+/// async-signal-safe forwarding handler is a fixed-size
+/// static array. 64 covers any realistic CPU count.
+#[cfg(target_family = "unix")]
+const MAX_PREFORK_WORKERS: usize = 64;
+
+/// Parent-side state for FU1 signal forwarding. The
+/// SIGINT/SIGTERM handler reads PREFORK_CHILD_PIDS and
+/// forwards the signal to each non-zero entry via
+/// `kill(pid, sig)`. AtomicI32 lets the handler load
+/// values without taking a lock — async-signal-safe.
+///
+/// Reused across invocations of the prefork host fn;
+/// reset at the top of each fork loop.
+#[cfg(target_family = "unix")]
+static PREFORK_CHILD_PIDS: [std::sync::atomic::AtomicI32; MAX_PREFORK_WORKERS] = [
+    // 64 zeros — manual expansion of `[AtomicI32::new(0); N]`,
+    // which clippy flags via declare_interior_mutable_const
+    // when used inside a `const ZERO = ...; [ZERO; N]` form.
+    // The repeated-call form is the idiomatic alternative.
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+    const { std::sync::atomic::AtomicI32::new(0) },
+];
+
+/// Signal-handler entry point that forwards SIGINT/SIGTERM
+/// to all known prefork children. Must remain async-
+/// signal-safe — only `kill(2)` + atomic loads here.
+///
+/// Without this, external `kill <parent_pid>` (e.g., from
+/// a process manager that doesn't know about the
+/// children's pgroup) wouldn't propagate to the workers,
+/// and they'd serve until their duration timer expired.
+#[cfg(target_family = "unix")]
+extern "C" fn prefork_forward_signal(sig: libc::c_int) {
+    for slot in PREFORK_CHILD_PIDS.iter() {
+        let pid = slot.load(std::sync::atomic::Ordering::SeqCst);
+        if pid > 0 {
+            // SAFETY: kill(2) is async-signal-safe (POSIX
+            // §2.4.3). Stale pids return ESRCH harmlessly.
+            unsafe { libc::kill(pid, sig); }
+        }
+    }
+}
+
+/// Install the SIGINT + SIGTERM forwarding handler. Idempotent
+/// in practice — `sigaction` overwrites prior handlers, and
+/// the static state is per-process so a second prefork call
+/// reuses the same handler safely.
+#[cfg(target_family = "unix")]
+fn install_prefork_signal_handlers() {
+    use std::mem::MaybeUninit;
+    unsafe {
+        let mut act: MaybeUninit<libc::sigaction> = MaybeUninit::zeroed();
+        let ptr = act.as_mut_ptr();
+        (*ptr).sa_sigaction = prefork_forward_signal as *const () as libc::sighandler_t;
+        // SA_RESTART: the parent's blocking waitpid resumes
+        // after the handler returns instead of failing with
+        // EINTR. The handler's only job is forwarding; the
+        // actual reap stays in the waitpid loop.
+        (*ptr).sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut (*ptr).sa_mask);
+        let act_init = act.assume_init();
+        libc::sigaction(libc::SIGINT, &act_init, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &act_init, std::ptr::null_mut());
+    }
+}
+
 /// Bind a TCP listener with `SO_REUSEADDR + SO_REUSEPORT`
 /// set, returning a `std::net::TcpListener` (NOT tokio's —
 /// the tokio runtime must be built post-`fork(2)` in each
@@ -1366,6 +1496,29 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                     backtrace: vec![],
                 });
             }
+            if (n_workers as usize) > MAX_PREFORK_WORKERS {
+                // FU1: fixed-size pid table for async-
+                // signal-safe forwarding; cap there.
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: format!(
+                            "n_workers must be <= {MAX_PREFORK_WORKERS}, got {n_workers}"
+                        ),
+                    },
+                    backtrace: vec![],
+                });
+            }
+
+            // FU1: reset the parent's static child-pid
+            // table from any prior invocation, install the
+            // forwarding sig handler. Both run BEFORE fork
+            // so children inherit the static (all zeros at
+            // this point — child uses libc::exit, never
+            // reads the table).
+            for slot in PREFORK_CHILD_PIDS.iter() {
+                slot.store(0, std::sync::atomic::Ordering::SeqCst);
+            }
+            install_prefork_signal_handlers();
 
             let mut child_pids: Vec<libc::pid_t> = Vec::with_capacity(n_workers as usize);
             for worker_index in 0..n_workers {
@@ -1399,6 +1552,21 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                     // was NOT inherited — each child builds
                     // its own inside on_listener.
                     //
+                    // FU1: reset SIGINT/SIGTERM to defaults
+                    // before tokio's runtime registers its
+                    // own. The parent's forwarding handler
+                    // was inherited but it would walk the
+                    // parent's pid table (now stale in the
+                    // child's COW copy) and try to signal
+                    // pids — at best harmless ESRCH, at
+                    // worst confusing if recycled. Tokio
+                    // installs its own handlers via
+                    // `install_signal_handler=true` below.
+                    unsafe {
+                        libc::signal(libc::SIGINT, libc::SIG_DFL);
+                        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                    }
+                    //
                     // CRITICAL: must call libc::exit() at
                     // the end rather than returning from
                     // Rust. Returning would unwind + drop
@@ -1426,9 +1594,16 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                                 ))?;
                         }
                         let duration = Duration::from_secs(duration_secs as u64);
+                        // FU1: install_signal_handler=true
+                        // wires tokio::signal::ctrl_c()
+                        // (SIGINT) + sigterm into the
+                        // child's accept loop's `select!`,
+                        // so a forwarded signal cuts short
+                        // serving rather than the duration
+                        // timer being the only exit.
                         run_blocking_for_duration_with_app_on_listener(
                             listener, duration, block_id, None, None,
-                            DEFAULT_MAX_BODY_BYTES, None, None, None, false,
+                            DEFAULT_MAX_BODY_BYTES, None, None, None, true,
                         ).map_err(|e| format!("child {worker_index} serve: {e}"))?;
                         Ok(())
                     })();
@@ -1444,22 +1619,36 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                     // exactly what we want for fork-safety.
                     unsafe { libc::exit(exit_code) };
                 } else {
+                    // FU1: publish pid into the static
+                    // table BEFORE pushing into the Vec.
+                    // Use SeqCst so the forwarding handler
+                    // sees it atomically if SIGTERM/SIGINT
+                    // races with the fork loop. usize cast
+                    // is safe — worker_index < n_workers <=
+                    // MAX_PREFORK_WORKERS.
+                    PREFORK_CHILD_PIDS[worker_index as usize]
+                        .store(pid, std::sync::atomic::Ordering::SeqCst);
                     child_pids.push(pid);
                 }
             }
 
             // ===== Parent: waitpid loop =====
             //
-            // SIGINT/SIGTERM sent to the parent (e.g.,
-            // Ctrl+C or k8s termination) goes to the whole
-            // process group by default — children receive
-            // it too and exit. Parent's job here is just
-            // to reap zombies and return.
+            // SIGINT/SIGTERM to the parent (Ctrl+C, k8s
+            // termination, systemd unit stop, manual
+            // kill <parent_pid>) fires the FU1 handler,
+            // which `kill()`s each child with the same
+            // signal. With install_signal_handler=true,
+            // each child's accept loop cuts short and
+            // returns; their tokio runtimes drop in-flight
+            // requests cleanly and they exit 0. Parent's
+            // SA_RESTART-flagged waitpid resumes and reaps
+            // them.
             //
             // No restart-on-crash supervision in 7d; lands
-            // as a follow-up. A failed child exits with
-            // code 1; parent observes via WEXITSTATUS but
-            // doesn't act on it.
+            // as FU2. A failed child exits with code 1;
+            // parent observes via WEXITSTATUS but doesn't
+            // act on it.
             for &cpid in &child_pids {
                 let mut status = 0;
                 unsafe { libc::waitpid(cpid, &mut status, 0); }
