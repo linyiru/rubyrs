@@ -5189,71 +5189,12 @@ impl Vm {
         // content so `{1 => :a}[1] == :a` works. For heap objects
         // where equality is identity, hash by object_id.
         if &*name == "hash" && args.is_empty() {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            // Salt each variant with a distinct type tag before
-            // hashing the value bits. Without the tag, the
-            // Rust-derived `Hash` impls collapse across types —
-            // e.g. `Nil` writing `0u8` produces the same byte
-            // sequence as `Bool(false)` (Rust's `bool::hash`
-            // delegates to `u8(0)`), so `nil.hash == false.hash`
-            // deterministically. Tagging keeps the value-type
-            // domains injective by construction.
-            match &recv {
-                Value::Int(n) => { 1u8.hash(&mut h); n.hash(&mut h); }
-                Value::Float(f) => { 2u8.hash(&mut h); f.to_bits().hash(&mut h); }
-                Value::Str(s) => {
-                    // Hash raw bytes (binary-safe) — `with_str_lossy`
-                    // would replace invalid UTF-8 with U+FFFD,
-                    // collapsing distinct binary strings to the
-                    // same hash and breaking Hash key semantics
-                    // for non-UTF-8 content.
-                    3u8.hash(&mut h);
-                    s.content.borrow().hash(&mut h);
-                }
-                Value::Sym(sid) => { 4u8.hash(&mut h); sid.0.hash(&mut h); }
-                Value::Bool(b) => { 5u8.hash(&mut h); b.hash(&mut h); }
-                Value::Nil => { 6u8.hash(&mut h); }
-                // Range hashes by content — CRuby's
-                // `(1..5).hash == (1..5).hash` is true. Without
-                // this arm we'd fall to the identity branch
-                // below, and two `(1..5)` allocations would
-                // produce different hashes (Set/Hash with Range
-                // keys would miss). Feed the recursive content
-                // hashes of begin/end (computed via `object_hash`
-                // — same salt scheme) plus the exclusive flag.
-                Value::Range(id) => {
-                    let (begin, end, excl) = {
-                        let r = self.heap.range(*id);
-                        (r.begin.clone(), r.end.clone(), r.exclusive)
-                    };
-                    8u8.hash(&mut h);
-                    object_hash(&begin, &self.heap).hash(&mut h);
-                    object_hash(&end, &self.heap).hash(&mut h);
-                    excl.hash(&mut h);
-                }
-                // Heap-managed / classes / blocks / methods —
-                // identity hash via object_id. CRuby Array/Hash
-                // override `hash` to recurse over contents; ours
-                // doesn't yet (documented gap — Array/Hash
-                // `#hash` is identity-based, not content-based,
-                // so equal-by-content arrays/hashes won't hash
-                // alike). Hash key lookup itself doesn't depend
-                // on `#hash` today — `vm/hash.rs` does a linear
-                // scan with `ruby_eql`, so `{[1] => :a}[[1]]`
-                // does find the entry; only `#hash`-using paths
-                // (e.g. `Set`, custom user code) see the gap.
-                _ => { 7u8.hash(&mut h); object_id_for(&recv).hash(&mut h); }
-            }
-            // Return the full 64-bit hash as i64 — Ruby permits
-            // negative hashes, and masking off the sign bit here
-            // would drop 1 bit of entropy without benefit. Other
-            // `#hash` impls in this crate likewise return the
-            // unmasked i64 cast (String uses DefaultHasher in
-            // `vm/string.rs`; Integer/Float use fnv1a_64 in
-            // `vm/numeric.rs` for cross-rustc stability — both
-            // still cast the full u64 to i64 without masking).
-            let v = h.finish() as i64;
+            // Single source of truth — `object_hash` handles all
+            // per-variant salt and recursive container hashing
+            // (Array order-sensitive, Hash order-insensitive)
+            // with cycle detection. See its doc for the type-tag
+            // table.
+            let v = object_hash(&recv, &self.heap);
             self.stack.push(Value::Int(v));
             return Ok(());
         }
@@ -7728,14 +7669,33 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
     }
 }
 
-/// Compute the universal `Object#hash` value for `v` without
-/// going through dispatch. Used by `Range#hash` and any future
-/// container-of-content hashing arm so they recurse over their
-/// children with the same salt scheme as the top-level
-/// `Object#hash` arm. Mirrors the per-variant tags 1..7 used
-/// inline above (Int=1, Float=2, Str=3, Sym=4, Bool=5, Nil=6,
-/// heap=7); kept in lock-step with that match.
+/// Compute the universal `Object#hash` value for `v`. Backs
+/// both the `Object#hash` dispatch arm and any container that
+/// needs to recurse over its children with the same salt
+/// scheme.
+///
+/// Per-variant type tags (kept stable — changing one would
+/// reshuffle every Hash key in user code on upgrade):
+///   1 Int, 2 Float, 3 Str, 4 Sym, 5 Bool, 6 Nil,
+///   7 heap-identity (default fallback), 8 Range,
+///   9 Array (order-sensitive), 10 Hash (order-insensitive).
 fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
+    let mut visited = std::collections::HashSet::new();
+    object_hash_inner(v, heap, &mut visited)
+}
+
+/// Sentinel id returned when `object_hash_inner` re-enters a
+/// container it's already inside (`a = []; a << a; a.hash`).
+/// Mirrors CRuby's `rb_exec_recursive` substitute — a fixed
+/// value used to break the recursion. The exact constant
+/// doesn't matter as long as it's stable across runs.
+const HASH_RECURSION_SENTINEL: i64 = 0x52_55_42_59_52_53_43_59; // "RUBYRSCY"
+
+fn object_hash_inner(
+    v: &Value,
+    heap: &crate::heap::Heap,
+    visited: &mut std::collections::HashSet<crate::value::ObjId>,
+) -> i64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     match v {
@@ -7751,9 +7711,65 @@ fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
                 (r.begin.clone(), r.end.clone(), r.exclusive)
             };
             8u8.hash(&mut h);
-            object_hash(&begin, heap).hash(&mut h);
-            object_hash(&end, heap).hash(&mut h);
+            object_hash_inner(&begin, heap, visited).hash(&mut h);
+            object_hash_inner(&end, heap, visited).hash(&mut h);
             excl.hash(&mut h);
+        }
+        // Array#hash is order-sensitive — `[1,2].hash !=
+        // [2,1].hash`. Feed length plus each element's content
+        // hash sequentially. On re-entry (cyclic array) emit
+        // the sentinel instead of recursing. We iterate by
+        // index + per-step `clone()` of one element rather than
+        // cloning the whole Vec up front so a 1M-element array
+        // costs O(1) extra memory per hash call.
+        Value::Array(id) => {
+            9u8.hash(&mut h);
+            if !visited.insert(*id) {
+                HASH_RECURSION_SENTINEL.hash(&mut h);
+            } else {
+                let len = heap.array(*id).len();
+                (len as u64).hash(&mut h);
+                for i in 0..len {
+                    let el = heap.array(*id)[i].clone();
+                    object_hash_inner(&el, heap, visited).hash(&mut h);
+                }
+                visited.remove(id);
+            }
+        }
+        // Hash#hash is order-INsensitive — `{a:1,b:2}.hash ==
+        // {b:2,a:1}.hash` because the two hashes are `==`. We
+        // XOR a per-pair combinator across pairs so pair order
+        // can't affect the result, but the combinator itself
+        // mixes key and value non-symmetrically (mul-then-add)
+        // so a swap of key/value *within* a pair perturbs the
+        // result. A bare `kh ^ vh` per pair would collide
+        // structurally: e.g. `{1=>2, 2=>1}` and `{1=>1, 2=>2}`
+        // both reduce to `acc = 0` despite being `!=`. Length
+        // still participates so empty-vs-full disambiguates.
+        Value::Hash(id) => {
+            10u8.hash(&mut h);
+            if !visited.insert(*id) {
+                HASH_RECURSION_SENTINEL.hash(&mut h);
+            } else {
+                let len = heap.hash(*id).len();
+                (len as u64).hash(&mut h);
+                let mut acc: i64 = 0;
+                for i in 0..len {
+                    let (k, val) = heap.hash(*id)[i].clone();
+                    let kh = object_hash_inner(&k, heap, visited);
+                    let vh = object_hash_inner(&val, heap, visited);
+                    // (kh * 31 + vh) — non-commutative in kh,vh
+                    // so swapping key with value changes the
+                    // pair's contribution; XOR across pairs
+                    // keeps overall ordering irrelevant.
+                    let pair_h = (kh as i128)
+                        .wrapping_mul(31)
+                        .wrapping_add(vh as i128) as i64;
+                    acc ^= pair_h;
+                }
+                acc.hash(&mut h);
+                visited.remove(id);
+            }
         }
         _ => { 7u8.hash(&mut h); object_id_for(v).hash(&mut h); }
     }
