@@ -2862,6 +2862,26 @@ fn float_domain_error_class_and_rescue_chain() {
         }
     }
 
+    // sprintf %d / %b / %o / %x with NaN/±Infinity — CRuby
+    // raises FloatDomainError; previously rubyrs silently
+    // `as i64`-clamped. Mirror the unified surface.
+    for (script, expected_msg) in [
+        ("sprintf(\"%d\", 0.0/0.0)",  "NaN"),
+        ("sprintf(\"%d\", 1.0/0.0)",  "Infinity"),
+        ("sprintf(\"%d\", -1.0/0.0)", "-Infinity"),
+        ("sprintf(\"%b\", 0.0/0.0)",  "NaN"),
+        ("sprintf(\"%x\", 1.0/0.0)",  "Infinity"),
+    ] {
+        let err = rt.eval(script, "fde_sprintf.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "FloatDomainError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected Uncaught FloatDomainError for {:?}, got {:?}", script, other),
+        }
+    }
+
     // Kernel#Integer parity — `Integer(Float::NAN)` and
     // `Integer(Float::INFINITY)` previously raised TypeError,
     // divergent from CRuby AND inconsistent with `Float#to_i`

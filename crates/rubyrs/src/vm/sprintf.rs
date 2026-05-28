@@ -264,6 +264,18 @@ pub(crate) fn ruby_sprintf(
 fn coerce_int(v: &Value) -> Result<i64, RubyError> {
     match v {
         Value::Int(n) => Ok(*n),
+        // CRuby raises `FloatDomainError: NaN/Infinity` for
+        // `sprintf("%d", Float::NAN)` etc. — matches the
+        // `Float#to_i` / `Kernel#Integer` traps wired in this
+        // PR so the helper's "every Float→Integer trap site"
+        // docstring actually holds. Finite Float still casts
+        // via `as i64` (CRuby's `%d` truncates toward zero
+        // for finite operands).
+        Value::Float(f) if f.is_nan() || f.is_infinite() => {
+            Err(RubyError::FloatDomainError {
+                msg: crate::vm::numeric::float_domain_label(*f).to_string(),
+            })
+        }
         Value::Float(f) => Ok(*f as i64),
         Value::Str(s) => Ok(s.to_string_lossy().trim().parse::<i64>().unwrap_or(0)),
         Value::Nil => Err(RubyError::TypeError {
