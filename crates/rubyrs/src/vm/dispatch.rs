@@ -4558,6 +4558,90 @@ impl Vm {
             self.stack.push(Value::Array(id));
             return Ok(());
         }
+        // `Numeric#coerce(other)` — the Tier-2 Numeric protocol
+        // entry point. Returns a 2-element Array `[other_promoted,
+        // self_promoted]` so arithmetic operators on heterogeneous
+        // numeric pairs can route through a uniform "promote then
+        // operate on same-type" path. Implemented for Integer
+        // (Int + BigInt) and Float receivers; Phase C (Rational /
+        // Complex) will extend this surface.
+        //
+        // CRuby parity:
+        //   - Int.coerce(Integer)  → [Integer, Integer]
+        //   - Int.coerce(Float)    → [Float,   Float]
+        //   - Float.coerce(Numeric)→ [Float,   Float]
+        //   - any.coerce(non-Numeric) → TypeError
+        //     "<other> can't be coerced into <recv_class>"
+        let recv_is_numeric = matches!(&recv, Value::Int(_) | Value::Float(_))
+            || {
+                #[cfg(feature = "bignum")]
+                { matches!(&recv, Value::BigInt(_)) }
+                #[cfg(not(feature = "bignum"))]
+                { false }
+            };
+        if recv_is_numeric && &*name == "coerce" {
+            if args.len() != 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len(),
+                    ),
+                }));
+            }
+            let arg = &args[0];
+            let recv_class: &str = match &recv {
+                Value::Int(_) => "Integer",
+                #[cfg(feature = "bignum")]
+                Value::BigInt(_) => "Integer",
+                Value::Float(_) => "Float",
+                _ => unreachable!("guarded by recv_is_numeric"),
+            };
+            // Pair: [coerced_other, coerced_self]. Float dominates
+            // — any pair containing a Float collapses both sides
+            // to Float. Otherwise both stay Integer (Int and
+            // BigInt are the same Ruby class; pass through
+            // unchanged).
+            let (other_v, self_v) = match (&recv, arg) {
+                (Value::Float(_), Value::Float(_)) => (arg.clone(), recv.clone()),
+                (Value::Float(s), Value::Int(o)) => {
+                    (Value::Float(*o as f64), Value::Float(*s))
+                }
+                (Value::Int(s), Value::Float(_)) => {
+                    (arg.clone(), Value::Float(*s as f64))
+                }
+                #[cfg(feature = "bignum")]
+                (Value::Float(s), Value::BigInt(id)) => {
+                    use num_traits::ToPrimitive;
+                    let o_f = self.heap.bigint(*id).to_f64().unwrap_or(f64::INFINITY);
+                    (Value::Float(o_f), Value::Float(*s))
+                }
+                #[cfg(feature = "bignum")]
+                (Value::BigInt(id), Value::Float(_)) => {
+                    use num_traits::ToPrimitive;
+                    let s_f = self.heap.bigint(*id).to_f64().unwrap_or(f64::INFINITY);
+                    (arg.clone(), Value::Float(s_f))
+                }
+                (Value::Int(_), Value::Int(_)) => (arg.clone(), recv.clone()),
+                #[cfg(feature = "bignum")]
+                (Value::Int(_), Value::BigInt(_))
+                | (Value::BigInt(_), Value::Int(_))
+                | (Value::BigInt(_), Value::BigInt(_)) => (arg.clone(), recv.clone()),
+                _ => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "{} can't be coerced into {}",
+                            crate::vm::numeric::type_name_for_coerce(arg),
+                            recv_class,
+                        ),
+                    }));
+                }
+            };
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(vec![other_v, self_v]));
+            self.stack.push(Value::Array(id));
+            return Ok(());
+        }
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(

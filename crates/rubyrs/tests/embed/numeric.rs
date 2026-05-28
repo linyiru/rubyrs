@@ -2935,6 +2935,88 @@ fn integer_chr_basic() {
 }
 
 #[test]
+fn numeric_coerce_basic() {
+    // `Numeric#coerce(other)` — Tier-2 protocol entry point;
+    // returns `[other_promoted, self_promoted]`. Spec coverage
+    // lives in spec/ruby/integer_coerce_spec.rb; this is the
+    // cross-profile embed guard for happy paths + error shapes.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // Integer × Integer — pass-through (both already Integer).
+        ("puts 1.coerce(2).inspect",          "[2, 1]"),
+        ("puts 10.coerce(20).inspect",        "[20, 10]"),
+        // Integer × Float — promote both to Float.
+        ("puts 1.coerce(2.5).inspect",        "[2.5, 1.0]"),
+        ("puts 5.coerce(-3.14).inspect",      "[-3.14, 5.0]"),
+        // Float × Integer — promote both to Float.
+        ("puts 2.5.coerce(1).inspect",        "[1.0, 2.5]"),
+        // Float × Float — pass-through.
+        ("puts 3.7.coerce(1.5).inspect",      "[1.5, 3.7]"),
+        // BigInt × Integer / BigInt × BigInt — both Integer subclass.
+        #[cfg(feature = "bignum")]
+        ("puts (2**64).coerce(1).inspect",          "[1, 18446744073709551616]"),
+        #[cfg(feature = "bignum")]
+        ("puts 1.coerce(2**64).inspect",            "[18446744073709551616, 1]"),
+        #[cfg(feature = "bignum")]
+        ("puts (2**64).coerce(2**70).inspect",      "[1180591620717411303424, 18446744073709551616]"),
+        // BigInt × Float — promote both to Float.
+        #[cfg(feature = "bignum")]
+        ("puts (2**64).coerce(2.5).inspect",        "[2.5, 1.8446744073709552e19]"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(&format!("{}", script), "coerce.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Non-Numeric arg → TypeError with CRuby-shape "X can't be
+    // coerced into <recv_class>".
+    for (script, expected_msg) in [
+        ("5.coerce(:sym)", "Symbol can't be coerced into Integer"),
+        ("5.coerce(nil)",  "nil can't be coerced into Integer"),
+        ("5.coerce(\"x\")","String can't be coerced into Integer"),
+        ("1.5.coerce(nil)","nil can't be coerced into Float"),
+        ("1.5.coerce(\"x\")","String can't be coerced into Float"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).coerce(:sym)", "Symbol can't be coerced into Integer"),
+    ] {
+        let err = rt.eval(script, "coerce_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "TypeError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected Uncaught TypeError for {:?}, got {:?}", script, other),
+        }
+    }
+    // Arity guard.
+    for (script, expected_class) in [
+        ("5.coerce()",       "ArgumentError"),
+        ("5.coerce(1, 2)",   "ArgumentError"),
+        ("1.5.coerce(1, 2)", "ArgumentError"),
+    ] {
+        let err = rt.eval(script, "coerce_arity.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+            }
+            ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+    // respond_to? true for Int + Float (+ BigInt under bignum).
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts 5.respond_to?(:coerce); puts 1.5.respond_to?(:coerce)", "rt_coerce.rb").expect("eval");
+    assert_eq!(buf.snapshot().trim(), "true\ntrue");
+    #[cfg(feature = "bignum")]
+    {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval("puts (2**64).respond_to?(:coerce)", "rt_big_coerce.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), "true");
+    }
+}
+
+#[test]
 fn float_domain_error_class_and_rescue_chain() {
     // FloatDomainError sits at FloatDomainError < RangeError <
     // StandardError < Exception. Verify (a) the class is exposed
