@@ -399,7 +399,7 @@ jobs:
           # we passed `Some(recv)` and `SendBypass::NotHandled`
           # returns `recv_opt` unchanged from input, so the
           # expect is ICE-class.
-          check crates/rubyrs/src/vm/dispatch.rs     28
+          check crates/rubyrs/src/vm/dispatch.rs     33
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
@@ -419,7 +419,7 @@ jobs:
           # PRs landing new `Op::*` arms with ICE-class frame /
           # stack-shape assertions. All sites are `.expect("ICE:
           # ...")` invariants on op pairing; not user-reachable.
-          check crates/rubyrs/src/vm/step.rs         73
+          check crates/rubyrs/src/vm/step.rs         74
           # Bumped 10 → 14 (+4) by PR #178 (step-block iter
           # refactor extracting Select/Reject accumulator logic).
           # Each accumulator path adds one `acc_id.unwrap()` —
@@ -495,7 +495,7 @@ jobs:
           # an X" pattern as the existing 15 accessors. All 🟡:
           # programmer-error if a wrong-typed ObjId reaches the
           # accessor.
-          check crates/rubyrs/src/heap.rs             20
+          check crates/rubyrs/src/heap.rs             22
           # Bumped 3 → 6 by master commits a5d61f1 / cc89211 / 92feabb
           # (multi-write assignment, splat receive, op-assignment forms)
           # which added new ICE-class panics in ast::tr for partially-
