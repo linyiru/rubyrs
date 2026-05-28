@@ -921,6 +921,70 @@ impl Vm {
         Ok(Some(Value::Bool(result)))
     }
 
+    /// `gcd` / `lcm` on Integer × Integer where at least one
+    /// operand is BigInt (or numeric.rs declined the i64::MIN
+    /// case). Both ops always return a non-negative Integer
+    /// (CRuby parity). `lcm(0, _)` is 0.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_gcd_lcm(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        arg: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        if !matches!(recv, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        if !matches!(arg, Value::Int(_) | Value::BigInt(_)) {
+            return Err(self.trap(RubyError::TypeError {
+                msg: "not an integer".to_string(),
+            }));
+        }
+        use num_integer::Integer;
+        let ax = match self.as_bigint_ref(recv) { Some(v) => v, None => return Ok(None) };
+        let bx = match self.as_bigint_ref(arg) { Some(v) => v, None => return Ok(None) };
+        let result = match name {
+            "gcd" => ax.gcd(&*bx),
+            "lcm" => ax.lcm(&*bx),
+            _ => return Ok(None),
+        };
+        drop(ax);
+        drop(bx);
+        Ok(Some(self.bigint_to_value(result)?))
+    }
+
+    /// `fdiv` on Integer recv with any numeric arg (or for the
+    /// mixed Integer×Numeric case where numeric.rs declined).
+    /// Returns Float. Uses num_traits::ToPrimitive for BigInt →
+    /// f64 — approximate past 2^53, matches CRuby Bignum#fdiv.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn try_bigint_fdiv(
+        &mut self,
+        recv: &Value,
+        arg: &Value,
+    ) -> Result<Option<Value>, Trap> {
+        if !matches!(recv, Value::Int(_) | Value::BigInt(_)) { return Ok(None); }
+        use num_traits::ToPrimitive;
+        let a_f = match recv {
+            Value::Int(n) => *n as f64,
+            Value::BigInt(id) => self.heap.bigint(*id).to_f64().unwrap_or(f64::NAN),
+            _ => return Ok(None),
+        };
+        let b_f = match arg {
+            Value::Int(n) => *n as f64,
+            Value::Float(f) => *f,
+            Value::BigInt(id) => self.heap.bigint(*id).to_f64().unwrap_or(f64::NAN),
+            // Non-numeric → TypeError (matches CRuby).
+            _ => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Float",
+                        crate::vm::numeric::type_name_for_coerce(arg),
+                    ),
+                }));
+            }
+        };
+        Ok(Some(Value::Float(a_f / b_f)))
+    }
+
     /// Bitwise shifts `<<` / `>>` with BigInt promotion.
     ///
     /// CRuby semantics (two's-complement, arbitrary precision):
@@ -1541,6 +1605,48 @@ impl Vm {
         // Int-side guard (numeric.rs L346).
         if matches!(recv, Value::BigInt(_))
             && matches!(name, "allbits?" | "anybits?" | "nobits?")
+            && args.len() != 1
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args.len(),
+                ),
+            }));
+        }
+        // `gcd` / `lcm` on Integer × Integer where at least one
+        // operand is BigInt. numeric.rs's pure Int×Int arms handle
+        // the fixnum happy path; this fires for the mixed shapes
+        // (`big.gcd(0xff)`, `0xff.gcd(big)`, `big.gcd(big)`) and
+        // for the i64::MIN cases that numeric.rs declined.
+        if args.len() == 1
+            && matches!(name, "gcd" | "lcm")
+            && let Some(v) = self.try_bigint_gcd_lcm(recv, name, &args[0])?
+        {
+            return Ok(Some(v));
+        }
+        if matches!(recv, Value::BigInt(_))
+            && matches!(name, "gcd" | "lcm")
+            && args.len() != 1
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args.len(),
+                ),
+            }));
+        }
+        // `fdiv` for BigInt receiver or mixed Integer×Numeric.
+        // Returns Float; uses num_traits::ToPrimitive for the
+        // BigInt → f64 conversion (approximate past 2^53, matches
+        // CRuby's Bignum#fdiv).
+        if args.len() == 1 && name == "fdiv"
+            && let Some(v) = self.try_bigint_fdiv(recv, &args[0])?
+        {
+            return Ok(Some(v));
+        }
+        if matches!(recv, Value::BigInt(_))
+            && name == "fdiv"
             && args.len() != 1
         {
             return Err(self.trap(RubyError::ArgumentError {

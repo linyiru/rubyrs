@@ -476,6 +476,7 @@ impl Vm {
                 "times" | "upto" | "downto" |
                 "digits" | "bit_length" | "[]" |
                 "allbits?" | "anybits?" | "nobits?" |
+                "gcd" | "lcm" | "fdiv" | "divmod" |
                 "eql?" | "hash"
             ),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
@@ -505,6 +506,7 @@ impl Vm {
                 "even?" | "odd?" |
                 "bit_length" | "digits" |
                 "allbits?" | "anybits?" | "nobits?" |
+                "gcd" | "lcm" | "fdiv" | "divmod" |
                 "times" | "upto" | "downto" |
                 "succ" | "next" | "pred" |
                 "eql?" | "hash"
