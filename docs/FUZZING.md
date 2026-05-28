@@ -196,7 +196,7 @@ the follow-up work they motivated — re-flagging the same items
 as "future work" would be misleading. New gaps belong above
 under "Known limits + future work".
 
-### ~~Filesystem sandbox covers `require` only~~ — fixed in PR (current)
+### ~~Filesystem sandbox covers `require` only~~ — fixed by `Config::allow_filesystem_io` (PR #257)
 
 `ensure_sandbox_cwd` moves the process cwd into a tempdir, which
 made `require '<relative>'` look up against an empty directory but
