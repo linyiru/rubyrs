@@ -1928,6 +1928,30 @@ impl Vm {
         if !recv_is_bigint && !arg_is_bigint {
             return Ok(None);
         }
+        // `BigInt#chr` arity / 1-arg guards — sibling to the
+        // numeric.rs arms for the Int receiver. The 0-arg happy
+        // path is handled by the `args.is_empty()` block below
+        // (which routes to RangeError via the canonical-BigInt
+        // invariant). 1+ arg shapes need explicit handling here
+        // because the `args.is_empty()` block won't fire and
+        // bignum_primitive would otherwise return `Ok(None)` →
+        // NoMethodError, contradicting respond_to?(:chr) = true.
+        if name == "chr" && recv_is_bigint && args.len() > 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            }));
+        }
+        if name == "chr" && recv_is_bigint && args.len() == 1 {
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Encoding",
+                    crate::vm::numeric::type_name_for_coerce(&args[0]),
+                ),
+            }));
+        }
         // Phase A heap-read operations — only meaningful on a BigInt
         // receiver (Int#to_s already handled by numeric_call).
         if recv_is_bigint && args.is_empty()
@@ -1965,6 +1989,22 @@ impl Vm {
                         return Ok(Some(Value::Float(
                             b.to_string().parse::<f64>().unwrap_or(f64::INFINITY)
                         )));
+                    }
+                    // `BigInt#chr` — any `Value::BigInt` is by the
+                    // canonical-BigInt invariant outside i64 range,
+                    // therefore necessarily outside 0..=255. CRuby
+                    // uses the literal message "bignum out of char
+                    // range" (not the interpolated value) here, so
+                    // we match that exactly. Bonus: avoids
+                    // materialising the BigInt's full decimal
+                    // expansion into the error payload — the
+                    // sibling to_s arms guard against that via
+                    // `check_bigint_to_s_cap`, but the chr error
+                    // path didn't need the value at all.
+                    "chr" => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum out of char range".to_string(),
+                        }));
                     }
                     "zero?" => return Ok(Some(Value::Bool(b.sign() == Sign::NoSign))),
                     "positive?" => return Ok(Some(Value::Bool(b.sign() == Sign::Plus))),

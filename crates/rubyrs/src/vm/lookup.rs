@@ -481,6 +481,7 @@ impl Vm {
                 "allbits?" | "anybits?" | "nobits?" |
                 "gcd" | "lcm" | "fdiv" | "divmod" |
                 "ceil" | "floor" | "round" | "truncate" |
+                "chr" |
                 "eql?" | "hash"
             ),
             // Phase A BigInt subset + Phase B.1 `**` + Phase B.2
@@ -514,6 +515,7 @@ impl Vm {
                 "ceil" | "floor" | "round" | "truncate" |
                 "times" | "upto" | "downto" |
                 "succ" | "next" | "pred" |
+                "chr" |
                 "eql?" | "hash"
             ),
             Value::Float(_) => matches!(name,

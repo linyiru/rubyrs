@@ -2682,6 +2682,96 @@ fn pow_neg_exponent_minus_one_preserves_parity_beyond_f64_mantissa() {
     assert_eq!(buf.snapshot().trim(), "-1.0\n1.0");
 }
 
+#[test]
+fn integer_chr_basic() {
+    // Pin the 0..255 byte-form Integer#chr surface; spec coverage
+    // lives in spec/ruby/integer_chr_spec.rb. Cross-profile guard
+    // for the (a) happy path round-trips, (b) RangeError shape for
+    // out-of-range receivers, (c) TypeError for the unsupported
+    // 1-arg `chr(encoding)` form, (d) BigInt-recv routing through
+    // bignum_primitive's chr arm.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        ("65.chr", "A"),
+        ("0.chr.bytes.inspect", "[0]"),
+        ("127.chr.bytes.inspect", "[127]"),
+        ("128.chr.bytes.inspect", "[128]"),
+        ("255.chr.bytes.inspect", "[255]"),
+        ("65.chr.length.inspect", "1"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(&format!("puts {}", script), "chr.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    for (script, expected_class) in [
+        ("(-1).chr", "RangeError"),
+        ("256.chr", "RangeError"),
+        ("1000.chr", "RangeError"),
+        ("65.chr(\"UTF-8\")", "TypeError"),
+        ("65.chr(nil)", "TypeError"),
+        // Regression guard: an Integer arg used to be silently
+        // shadowed by the broad `(Int, op, [Int])` arm and
+        // surface NoMethodError despite respond_to?(:chr) being
+        // true. Pin TypeError so the shadow doesn't re-emerge.
+        ("65.chr(0)", "TypeError"),
+        ("65.chr(-1)", "TypeError"),
+        // 2+-arg arity guard — without it 65.chr falls through
+        // to NoMethodError instead of CRuby's ArgumentError.
+        ("65.chr(\"UTF-8\", \"extra\")", "ArgumentError"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).chr", "RangeError"),
+        #[cfg(feature = "bignum")]
+        ("(-(2**64)).chr", "RangeError"),
+        // BigInt-recv arity/1-arg coherence with respond_to?
+        // — previously `(2**64).chr("UTF-8")` fell through
+        // bignum_primitive and raised NoMethodError.
+        #[cfg(feature = "bignum")]
+        ("(2**64).chr(\"UTF-8\")", "TypeError"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).chr(nil)", "TypeError"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).chr(1, 2)", "ArgumentError"),
+    ] {
+        let err = rt.eval(script, "chr_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+            }
+            other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+    // CRuby uses the literal "bignum out of char range" message
+    // for BigInt-recv `chr`. Pin the message text — interpolating
+    // the BigInt's decimal expansion would diverge from CRuby AND
+    // bypass `check_bigint_to_s_cap`, so this also serves as the
+    // DoS-shape regression guard.
+    #[cfg(feature = "bignum")]
+    {
+        let err = rt.eval("(2**64).chr", "chr_msg.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message, .. } => {
+                assert_eq!(class_name, "RangeError");
+                assert_eq!(message, "bignum out of char range");
+            }
+            other => panic!("expected RangeError, got {:?}", other),
+        }
+    }
+    // respond_to? should report true on both Int and BigInt
+    // receivers (whitelist guard in lookup.rs).
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts 65.respond_to?(:chr)", "rt_int.rb").expect("eval");
+    assert_eq!(buf.snapshot().trim(), "true");
+    #[cfg(feature = "bignum")]
+    {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval("puts (2**64).respond_to?(:chr)", "rt_big.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), "true");
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_pow_bigint_exponent_traps() {

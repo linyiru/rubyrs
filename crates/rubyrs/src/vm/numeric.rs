@@ -355,6 +355,39 @@ pub(crate) fn numeric_call(
                 ),
             });
         }
+        // `Integer#chr` arity / 1-arg guards. Both arms must live
+        // BEFORE the broad `(Value::Int(a), op, [Value::Int(b)])`
+        // arm below, otherwise `65.chr(0)` matches that arm first
+        // and the inner `_ => None` falls through to NoMethodError
+        // (same lesson as the `to_s` / `pow` / `eql?` placements
+        // above this point). The 0-arg happy path arm further
+        // below isn't shadowed — the broad arm requires exactly
+        // one `Value::Int` arg — so it stays where it lives.
+        (Value::Int(_), "chr", args_slice) if args_slice.len() > 1 => {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args_slice.len(),
+                ),
+            });
+        }
+        // `Integer#chr(encoding)` — CRuby widens the accepted
+        // range up to U+10FFFF and returns a multi-byte String
+        // tagged with the requested Encoding. We don't model the
+        // Tier 3/4 Encoding object (ADR 0017 / ADR 0020), so no
+        // value the caller passes can satisfy "implicitly
+        // convertible to Encoding". Surface CRuby's TypeError
+        // shape uniformly across all arg types — placement here
+        // (before line ~617) is what guarantees `Int` args also
+        // reach this arm.
+        (Value::Int(_), "chr", [arg]) => {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Encoding",
+                    type_name_for_coerce(arg),
+                ),
+            });
+        }
         // ceil/floor/round/truncate accept 0..1 args (precision).
         // 2+ args raises ArgumentError matching CRuby.
         (Value::Int(_), "ceil" | "floor" | "round" | "truncate", args_slice)
@@ -956,6 +989,12 @@ pub(crate) fn numeric_call(
             }
             Some(Value::new_str_bytes(vec![n as u8]))
         }
+        // (The 1-arg `Integer#chr(encoding)` TypeError arm and the
+        // 2+-arg ArgumentError arity guard live earlier in this
+        // match — see comments near the `(Value::Int(_), "chr", _)`
+        // guards above — so that the broad `(Int, op, [Int])` arm
+        // doesn't shadow them for `Int` args. Only the 0-arg
+        // happy path remains here.)
 
         // `Float#eql?(other)` — type-strict equality. Only true
         // when `other` is also a Float and `==` agrees (so
