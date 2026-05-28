@@ -74,3 +74,23 @@ puts "tilt-walk=#{result.inspect}"
 puts "respond-autoload?=#{Object.respond_to?(:autoload?)}"
 puts "respond-const_defined?=#{Object.respond_to?(:const_defined?)}"
 puts "respond-const_get=#{Object.respond_to?(:const_get)}"
+
+## Shape 8: `const_defined?` / `const_get` with unique missing
+## names don't intern the lookup key — defends against the
+## `Object.const_defined?("X#{i}")` interner-growth attack a
+## hostile script could use to escape `Config::max_symbols`.
+## Both interpreters agree on the surface behavior (false /
+## NameError); the divergence is unobservable at the Ruby level
+## but pinned via this shape so a regression that re-introduces
+## the intern is detected (it would still match this output but
+## audit caught it on Copilot review #277). (code-review #277.)
+1000.times do |i|
+  Object.const_defined?("Missing#{i}")
+end
+err = begin
+  Object.const_get("DefinitelyMissingConst")
+  "no-raise"
+rescue NameError
+  "NameError"
+end
+puts "interner-safe=#{err}"

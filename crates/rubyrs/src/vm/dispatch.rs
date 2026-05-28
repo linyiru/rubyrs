@@ -3096,6 +3096,17 @@ impl Vm {
                 } else {
                     format!("{}::{}", cls.name, const_name)
                 };
+                // Gate the intern so untrusted code probing
+                // unique missing names (`Object.const_defined?("X#{i}")`)
+                // can't grow the interner past `Config::max_symbols`.
+                // A non-interned key cannot match any registered
+                // class/constant — return false directly. Same
+                // pattern as `parse_send_target` (line 363-376).
+                // (Copilot review #277 round 1.)
+                if !self.interner.contains(&lookup) {
+                    self.stack.push(Value::Bool(false));
+                    return Ok(());
+                }
                 let qid = self.interner.intern(&lookup);
                 let found = self.classes.contains_key(&qid) || self.constants.contains_key(&qid);
                 self.stack.push(Value::Bool(found));
@@ -3125,6 +3136,15 @@ impl Vm {
                 } else {
                     format!("{}::{}", cls.name, const_name)
                 };
+                // Gate the intern (see const_defined? above) —
+                // a non-interned key can't be a registered
+                // constant, so raise NameError without
+                // growing the interner.
+                if !self.interner.contains(&lookup) {
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("uninitialized constant {}", lookup),
+                    }));
+                }
                 let qid = self.interner.intern(&lookup);
                 if let Some(c) = self.classes.get(&qid).cloned() {
                     self.stack.push(Value::Class(c));
@@ -3828,6 +3848,12 @@ impl Vm {
             } else {
                 format!("{}::{}", cls.name, const_name)
             };
+            // Same intern-cap gate as the no_recv arm above —
+            // see that arm's comment. (Copilot review #277 round 1.)
+            if !self.interner.contains(&lookup) {
+                self.stack.push(Value::Bool(false));
+                return Ok(());
+            }
             let qid = self.interner.intern(&lookup);
             let found = self.classes.contains_key(&qid) || self.constants.contains_key(&qid);
             self.stack.push(Value::Bool(found));
@@ -3852,6 +3878,11 @@ impl Vm {
             } else {
                 format!("{}::{}", cls.name, const_name)
             };
+            if !self.interner.contains(&lookup) {
+                return Err(self.trap(RubyError::NameError {
+                    msg: format!("uninitialized constant {}", lookup),
+                }));
+            }
             let qid = self.interner.intern(&lookup);
             if let Some(c) = self.classes.get(&qid).cloned() {
                 self.stack.push(Value::Class(c));
