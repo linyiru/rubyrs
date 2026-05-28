@@ -1128,15 +1128,19 @@ impl Vm {
                 // (toplevel singleton has no well-defined target)
                 // we fall back to installing on `toplevel_methods`.
                 let proto = &self.protos[p_idx as usize];
-                // When `class_stack.last()` is an eigenclass shell
-                // (from `cls.singleton_class.class_eval { ... }`),
-                // `install_method` redirects the install into
-                // `cls.singleton_methods`. `defining_class` has to
-                // point at the same `cls` so `super_lookup` walks
-                // the right ancestor chain — using the shell would
-                // miss every node in the receiver's superclass
-                // chain. (Code-review #253 round 1 #1.)
-                let defining_class = self.class_stack.last().map(|c| Rc::downgrade(&c.effective_install_class()));
+                // Install ALWAYS lands on `cls.singleton_methods`
+                // (see line below), so `defining_class` must match
+                // wherever the method physically lives — not the
+                // `effective_install_class`. When `cls` IS the
+                // eigenclass shell (rare: `def self.foo` inside
+                // `singleton_class.class_eval`), the method lives
+                // on the shell's `singleton_methods` (a meta-meta
+                // table); pointing `defining_class` at the
+                // underlying real class would break `super_lookup`
+                // because the method isn't in the real class's
+                // singleton chain. Keep `cls` as-is.
+                // (Code-review #253 round 2 #2.)
+                let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
                 let params = proto.params.clone();
                 let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
@@ -1215,8 +1219,21 @@ impl Vm {
                 // The walk lets `class Child < Parent; alias_method :x,
                 // :parent_method; end` work: the source method lives
                 // on Parent, the alias name `x` lands on Child.
+                // When `class_stack.last()` is an eigenclass shell,
+                // `def`/`define_method` redirects the install into
+                // the real class's `singleton_methods` — so the
+                // source-method lookup for `alias_method` has to
+                // walk that same chain via
+                // `lookup_class_singleton_method`. Otherwise
+                // aliasing a just-defined singleton method inside
+                // `singleton_class.class_eval` would miss and
+                // raise NameError. (Code-review #253 round 2 #1.)
                 let existing = if let Some(cls) = self.class_stack.last() {
-                    self.lookup_method_uncached(cls, old_id)
+                    if let Some(real) = cls.singleton_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                        self.lookup_class_singleton_method(&real, old_id)
+                    } else {
+                        self.lookup_method_uncached(cls, old_id)
+                    }
                 } else {
                     self.toplevel_methods.get(&old_id).cloned()
                 };

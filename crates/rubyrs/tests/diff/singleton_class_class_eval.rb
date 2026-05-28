@@ -114,3 +114,20 @@ Child6.singleton_class.class_eval do
 end
 puts "parsed-def-on-shell=#{Child6.shouted_greet.inspect}"
 puts "parent-still-reachable=#{Parent6.greet.inspect}"
+
+## `alias_method` inside `singleton_class.class_eval` must
+## resolve the source method via the underlying real class's
+## singleton-method chain (NOT the shell's empty instance-
+## methods table). Pre-fix the source lookup ran
+## `lookup_method_uncached(shell, :greet)`, missed, and raised
+## NameError. (Code-review #253 round 2 #1.)
+class A7
+  def self.greet
+    "original"
+  end
+end
+A7.singleton_class.class_eval do
+  alias_method :hi, :greet
+end
+puts "alias-on-shell=#{A7.hi.inspect}"
+puts "alias-preserves-original=#{A7.greet.inspect}"
