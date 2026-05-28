@@ -641,3 +641,62 @@ fn array_chunk_while_pin_snapshot_under_receiver_mutation() {
         "chunk_while output corrupted (first inner Array did not survive): {out}"
     );
 }
+
+#[test]
+fn hash_reduce_pin_heap_acc_under_stress_gc() {
+    // Regression: Hash#reduce / #inject's per-iteration acc-pin
+    // was positioned AFTER the loop-top `maybe_gc()` + pair-
+    // Array alloc. After iter 1, `acc` is whatever the block
+    // returned — when it's a heap-backed Array, the loop-top
+    // maybe_gc swept it before the pin push could root it,
+    // and the immediately-following pair_id alloc reused the
+    // slot. Caught by code-review on PR #278 and reproduced
+    // here as a use-after-free panic.
+    let mut rt = Runtime::with_config(Config { stress_gc: true, ..Default::default() });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # acc starts as `[]` (from-init form) and grows by 2
+        # elements per iter — each `acc + [k, v]` allocates a
+        # fresh Array that becomes the next iter's acc, held
+        # only in the iter.rs Rust local. Without the hoisted
+        # pin the next loop-top maybe_gc sweeps it.
+        h = {a: 1, b: 2, c: 3, d: 4}
+        r = h.reduce([]) { |acc, (k, v)| acc + [k, v] }
+        puts r.inspect
+    "#, "hash_reduce_acc.rb").expect("eval should not ICE on heap-backed reduce acc");
+    let out = buf.snapshot();
+    assert!(
+        out.starts_with("[:a, 1, :b, 2, :c, 3, :d, 4]"),
+        "reduce acc corrupted under STRESS_GC: {out}"
+    );
+}
+
+#[test]
+#[cfg(feature = "bignum")]
+fn hash_sum_pin_bigint_acc_under_stress_gc() {
+    // Regression: Hash#sum's acc-pin had the same position
+    // bug as reduce. The all-Int hot path was safe (Int is
+    // not a heap ref) but Bignum overflow promoted acc to a
+    // freshly-allocated BigInt held only in the Rust local;
+    // the next iter's loop-top maybe_gc swept it before the
+    // pin push. Reproducible as `ICE: heap slot is not a
+    // BigInt` under STRESS_GC=1.
+    let mut rt = Runtime::with_config(Config { stress_gc: true, ..Default::default() });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        # 4_611_686_018_427_387_904 = 2^62. Two of those
+        # overflow i64::MAX → apply_int_promote widens acc
+        # to a BigInt on iter 2.
+        h = {a: 1, b: 2, c: 3, d: 4, e: 5}
+        r = h.sum(0) { |k, v| 4_611_686_018_427_387_904 }
+        puts r
+    "#, "hash_sum_bigint.rb").expect("eval should not ICE on BigInt sum acc");
+    let out = buf.snapshot();
+    // 5 * 2^62 = 23_058_430_092_136_939_520.
+    assert!(
+        out.starts_with("23058430092136939520"),
+        "sum BigInt acc corrupted under STRESS_GC: {out}"
+    );
+}
