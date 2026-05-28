@@ -600,51 +600,44 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
     }
 }
 
-/// Snapshot of every Runtime field the preamble-bootstrap path
-/// must lift before running `load_preamble` and restore after.
-/// Bundling them into one type means "add a new resource cap"
-/// touches exactly one struct (plus its `take_from` / `restore_to`
-/// pair); previous shape had six paired `.take()` + restore lines
-/// in `with_config`, easy to forget half of on a new cap.
+/// Subset of Runtime+Vm settings that get **lifted during
+/// preamble load** and restored after — the inclusion criterion
+/// is "safe to temporarily suspend while `load_preamble` runs"
+/// (a resource budget or a pure-performance flag the preamble
+/// shouldn't observe).
 ///
-/// Every field here is either an `Option<primitive>` (Copy) or
-/// `bool`, so the guard can restore by `&self` reference without
-/// moving anything out of itself in `Drop`.
+/// Security capabilities — see `Config::allow_filesystem_io` —
+/// deliberately do NOT belong here: a host's sandbox contract
+/// must hold during preamble too. Concretely, lifting
+/// `allow_filesystem_io` would make a future preamble fragment
+/// that accidentally adds `require '...'` / `File.read(...)`
+/// silently succeed instead of loudly trapping at construction,
+/// hiding a security-contract violation from the host.
+///
+/// Every field is `Option<primitive>` (Copy) or `bool`, so the
+/// guard can restore by `&self` reference without moving out in
+/// `Drop`.
 #[derive(Default)]
-struct ResourceCaps {
+struct PreambleLiftedSettings {
     fuel: Option<u64>,
     max_frames: Option<usize>,
     max_symbols: Option<usize>,
     max_value_bytes: Option<usize>,
     max_live: Option<usize>,
     deadline: Option<std::time::Duration>,
-    // `stress_gc` is treated as a cap here even though it isn't a
-    // resource budget — it makes GC fire on every potential point,
-    // ballooning preamble cost ~10× when on. Lifting it during
-    // preamble keeps Runtime construction time observably
-    // independent of the host's stress_gc choice.
+    // `stress_gc` qualifies as "lift during preamble" because it
+    // makes GC fire on every potential point, ballooning preamble
+    // cost ~10× when on. Lifting keeps Runtime construction time
+    // observably independent of the host's stress_gc choice.
     stress_gc: bool,
-    // NOTE: `allow_filesystem_io` is NOT in ResourceCaps. The
-    // other fields here are budgets / pure-performance settings
-    // where lifting during preamble is safe and pragmatic
-    // (preamble is internal infrastructure, host caps don't
-    // need to apply). `allow_filesystem_io` is a *capability* —
-    // a sandbox host setting `false` is making a security
-    // contract that no script-driven path reaches the host FS.
-    // Lifting it during preamble would weaken that contract:
-    // a future preamble fragment that accidentally adds
-    // `require '...'` or `File.read(...)` would silently
-    // succeed when the host configured the sandbox off,
-    // instead of loudly trapping at construction. Loud failure
-    // is the safer default for a security cap.
 }
 
-impl ResourceCaps {
-    /// Take caps off the Runtime + Vm, leaving zero/None in place.
-    /// Subsequent eval()s run unbounded until the caps are
-    /// restored.
+impl PreambleLiftedSettings {
+    /// Take settings off the Runtime + Vm, leaving zero/None in
+    /// place. Subsequent eval()s inside the guarded scope run
+    /// without these constraints until the settings are restored.
     fn take_from(rt: &mut Runtime) -> Self {
-        ResourceCaps {
+        PreambleLiftedSettings {
             // `fuel_budget` (not `vm.fuel`) is the source of
             // truth — `vm.fuel` is just a per-eval working
             // counter `eval()` overwrites from `fuel_budget` at
@@ -662,7 +655,7 @@ impl ResourceCaps {
         }
     }
 
-    /// Restore the captured caps. Takes `&self` because every
+    /// Restore the captured settings. Takes `&self` because every
     /// field is Copy / bool, so `Drop` can call this through the
     /// guard's reference without moving out.
     fn restore_to(&self, rt: &mut Runtime) {
@@ -673,32 +666,29 @@ impl ResourceCaps {
         rt.vm.heap.max_live = self.max_live;
         rt.deadline = self.deadline;
         rt.vm.stress_gc = self.stress_gc;
-        // `allow_filesystem_io` deliberately not restored here —
-        // it's not in ResourceCaps (host's security cap is
-        // honoured during preamble too, see struct doc).
     }
 }
 
-/// RAII guard that lifts ResourceCaps off a Runtime for as long
-/// as it exists in scope, and restores them on Drop — including
-/// the unwinding path if `load_preamble` (or anything else inside
-/// the guarded scope) Rust-panics. Without this, a host that
-/// catches the unwind via `catch_unwind` could recover a Runtime
-/// with all caps silently zeroed, defeating the very sandbox
-/// they configured.
-struct CapsGuard<'a> {
+/// RAII guard that lifts `PreambleLiftedSettings` off a Runtime
+/// for as long as it exists in scope, and restores them on Drop
+/// — including the unwinding path if `load_preamble` (or anything
+/// else inside the guarded scope) Rust-panics. Without this, a
+/// host that catches the unwind via `catch_unwind` could recover
+/// a Runtime with all settings silently zeroed, defeating the
+/// very sandbox they configured.
+struct PreambleLiftGuard<'a> {
     rt: &'a mut Runtime,
-    saved: ResourceCaps,
+    saved: PreambleLiftedSettings,
 }
 
-impl<'a> CapsGuard<'a> {
+impl<'a> PreambleLiftGuard<'a> {
     fn lift(rt: &'a mut Runtime) -> Self {
-        let saved = ResourceCaps::take_from(rt);
-        CapsGuard { rt, saved }
+        let saved = PreambleLiftedSettings::take_from(rt);
+        PreambleLiftGuard { rt, saved }
     }
 }
 
-impl Drop for CapsGuard<'_> {
+impl Drop for PreambleLiftGuard<'_> {
     fn drop(&mut self) {
         self.saved.restore_to(self.rt);
     }
@@ -731,6 +721,38 @@ impl PostPreambleSnapshot {
             toplevel_methods: rt.vm.toplevel_methods.clone(),
             class_states,
             sources: rt.vm.sources.clone(),
+        }
+    }
+
+    /// Restore every baseline HashMap captured in this snapshot
+    /// to the live `Vm`. Bundles the four `clone_from` calls
+    /// (`classes`, `constants`, `toplevel_methods`, `sources`)
+    /// plus the per-class `RefCell` restoration loop into one
+    /// site, so `reset()` no longer has them scattered across
+    /// ~60 lines with unrelated volatile-state clears between.
+    ///
+    /// `clone_from` (not `= ...clone()`) reuses the destination
+    /// allocation across resets — the values are `Rc<...>` so
+    /// each "clone" is a refcount bump, not a deep copy. Per-
+    /// class state goes through `ClassStateSnapshot::restore_into`,
+    /// which itself uses `clone_from` on each `RefCell` field.
+    ///
+    /// A future field added to `PostPreambleSnapshot` for
+    /// "restore as map" duty should go here too, so the
+    /// "forgot one" risk of scattered restores is bounded to a
+    /// single function.
+    fn restore_baseline_maps_into(&self, vm: &mut vm::Vm) {
+        vm.classes.clone_from(&self.classes);
+        vm.constants.clone_from(&self.constants);
+        vm.toplevel_methods.clone_from(&self.toplevel_methods);
+        vm.sources.clone_from(&self.sources);
+        // Per-class RefCells — see `PostPreambleSnapshot::class_states`
+        // for the field set rationale. Iterates live `vm.classes`
+        // (its keyset matches the snapshot's, just clone_from'd above).
+        for (cls_name, cls) in &vm.classes {
+            if let Some(snap) = self.class_states.get(cls_name) {
+                snap.restore_into(cls);
+            }
         }
     }
 }
@@ -808,28 +830,28 @@ impl Runtime {
         // snapshot time, so its preamble runs under defaults —
         // that's by design and documented on `new_default_impl`.
         //
-        // Then lift the resource caps + `stress_gc` for the
-        // duration of preamble load. The preamble is internal
-        // infrastructure, not user code; consuming the host's
-        // resource budget for bootstrap means a host that wants a
-        // tight sandbox (fuzz, untrusted-script eval) cannot
-        // construct a Runtime at all — the preamble traps and
-        // `.expect` in `load_preamble` panics with SIGABRT instead
-        // of returning a recoverable error. Originally surfaced
-        // by the cargo-fuzz harness in PR #180 with a magic
-        // `fuel: Some(50_000)` workaround.
+        // Then lift the budgets + `stress_gc` (see
+        // `PreambleLiftedSettings`) for the duration of preamble
+        // load. The preamble is internal infrastructure, not user
+        // code; consuming the host's resource budget for bootstrap
+        // means a host that wants a tight sandbox (fuzz,
+        // untrusted-script eval) cannot construct a Runtime at all
+        // — the preamble traps and `.expect` in `load_preamble`
+        // panics with SIGABRT instead of returning a recoverable
+        // error. Originally surfaced by the cargo-fuzz harness in
+        // PR #180 with a magic `fuel: Some(50_000)` workaround.
         //
-        // The `CapsGuard` is RAII: on every exit path from this
+        // The `PreambleLiftGuard` is RAII: on every exit path from this
         // scope (normal return AND panic unwinding), the saved
-        // caps are restored. A panic mid-preamble that an
+        // settings are restored. A panic mid-preamble that an
         // embedder catches via `catch_unwind` therefore yields a
         // Runtime with its sandbox intact, not silently disarmed.
         let mut rt = Self::build_skeleton();
         rt.apply_config(cfg);
         {
-            let guard = CapsGuard::lift(&mut rt);
+            let guard = PreambleLiftGuard::lift(&mut rt);
             guard.rt.load_preamble();
-            // guard drops here; caps restored.
+            // guard drops here; lifted settings restored.
         }
         rt.post_preamble = Some(PostPreambleSnapshot::capture(&rt));
         rt
@@ -1053,32 +1075,9 @@ impl Runtime {
         //     snapshot's keyset. Clone-and-replace is the only
         //     way to fully rewind.
         //
-        // Rc<Class> / Rc<Method> / Value::Str(Rc<...>) all clone
-        // by refcount bump, so the actual cost is HashMap copies
-        // (~hundreds of entries; sub-microsecond). `clone_from`
-        // (not `= ...clone()`) reuses the existing map's
-        // allocation across resets — matches the pattern
-        // `ClassStateSnapshot::restore_into` already uses for the
-        // per-class RefCells, and shaves allocator churn off the
-        // fuzz / per-request hot path.
-        self.vm.classes.clone_from(&snapshot.classes);
-        self.vm.constants.clone_from(&snapshot.constants);
-        self.vm.toplevel_methods.clone_from(&snapshot.toplevel_methods);
-        // --- Per-class state: replace EVERY mutable RefCell
-        //     field on each preamble Class with the snapshot's
-        //     captured value. ---
-        // `methods` alone wasn't enough — user code can also
-        // mutate `singleton_methods` (`def self.x`), `ivars`
-        // (`@x = ...` in a class body), `includes`
-        // (`include Mod`), `prepends`, `singleton_prepends`,
-        // `class_vars` (`@@x`), and `superclass`. Each one
-        // would leak across resets if the snapshot only
-        // covered methods.
-        for (cls_name, cls) in &self.vm.classes {
-            if let Some(snap) = snapshot.class_states.get(cls_name) {
-                snap.restore_into(cls);
-            }
-        }
+        // Restore baseline HashMaps + per-class RefCells in one
+        // shot — see `PostPreambleSnapshot::restore_baseline_maps_into`.
+        snapshot.restore_baseline_maps_into(&mut self.vm);
         // --- Literal caches keyed by user-time SymIds: clear. ---
         // `regex_cache` and `bigint_lit_cache` map compile-time-
         // interned SymIds to compiled regex / parsed BigInt
@@ -1118,10 +1117,6 @@ impl Runtime {
             self.vm.loaded_features.clear();
             self.vm.loaded_stdlib_stubs.clear();
         }
-        // Restore preamble filename→source-text so `Method#source_location`
-        // and trap backtraces on preamble methods keep resolving
-        // after reset; see `PostPreambleSnapshot::sources`.
-        self.vm.sources.clone_from(&snapshot.sources);
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
@@ -1696,7 +1691,7 @@ RUBY_ENGINE = "ruby".freeze
         // `check_fuel`, but never accumulates across calls.
         // Symmetric with the deadline re-anchor below. `None`
         // (unlimited) is the default; preamble runs under
-        // `CapsGuard`-lifted `fuel_budget = None` so it bypasses
+        // `PreambleLiftGuard`-lifted `fuel_budget = None` so it bypasses
         // the host's cap entirely.
         self.vm.fuel = self.fuel_budget;
         // Anchor the wall-clock deadline (P2-14a) to *this* eval
@@ -1838,12 +1833,12 @@ impl Drop for Runtime {
 }
 
 #[cfg(test)]
-mod caps_guard_tests {
+mod preamble_lift_guard_tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::time::Duration;
 
-    /// `CapsGuard`'s whole purpose is to be panic-safe — Drop
+    /// `PreambleLiftGuard`'s whole purpose is to be panic-safe — Drop
     /// must fire on unwinding and restore caps even when the
     /// guarded scope panics. Without this, an embedder that
     /// catches the unwind via `catch_unwind` (rubund evaluating
@@ -1856,7 +1851,7 @@ mod caps_guard_tests {
     /// need to simulate the panic to prove the guarantee holds
     /// if it ever did.
     #[test]
-    fn caps_guard_restores_on_panic_in_guarded_scope() {
+    fn preamble_lift_guard_restores_on_panic_in_guarded_scope() {
         let mut rt = Runtime::new();
         // Stamp recognisable cap values so the assertion can
         // distinguish "restored" from "default". `fuel_budget`
@@ -1874,7 +1869,7 @@ mod caps_guard_tests {
         // `AssertUnwindSafe` because Runtime isn't UnwindSafe; the
         // test is the one asserting it's safe to unwind through.
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = CapsGuard::lift(&mut rt);
+            let _guard = PreambleLiftGuard::lift(&mut rt);
             // Inside the guard, caps should be zero.
             assert!(_guard.rt.fuel_budget.is_none(), "lift should clear fuel_budget");
             assert!(_guard.rt.vm.max_frames.is_none());
@@ -1902,11 +1897,11 @@ mod caps_guard_tests {
     /// guard's normal-exit Drop also restores correctly (i.e.
     /// we're not relying on the panic to trigger restore).
     #[test]
-    fn caps_guard_restores_on_normal_scope_exit() {
+    fn preamble_lift_guard_restores_on_normal_scope_exit() {
         let mut rt = Runtime::new();
         rt.fuel_budget = Some(999);
         {
-            let _guard = CapsGuard::lift(&mut rt);
+            let _guard = PreambleLiftGuard::lift(&mut rt);
             assert!(_guard.rt.fuel_budget.is_none());
         }
         assert_eq!(rt.fuel_budget, Some(999));

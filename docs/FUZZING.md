@@ -252,9 +252,10 @@ respects post-construction host_fn / cext SymIds, etc.).
 fuel budget would panic during construction with
 `ICE: failed to load exception preamble` instead of getting a
 recoverable Runtime. PR #204 introduced the `CapsGuard` RAII
-pattern that lifts all six resource caps (fuel / max_frames /
-max_heap_objects / max_symbols / max_value_bytes / deadline)
-for the duration of `load_preamble` and restores them after,
+pattern (renamed `PreambleLiftGuard` in PR #262) that lifts all
+six resource caps (fuel / max_frames / max_heap_objects /
+max_symbols / max_value_bytes / deadline) for the duration of
+`load_preamble` and restores them after,
 so preamble runs unbounded and user evals see the host's caps
 as documented.
 
