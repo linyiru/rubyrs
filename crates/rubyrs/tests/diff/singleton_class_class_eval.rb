@@ -188,3 +188,21 @@ class A10
 end
 puts "shell-anc-includes-Object=#{A10.singleton_class.ancestors.include?(Object)}"
 puts "shell-superclass-nonnil=#{!A10.singleton_class.superclass.nil?}"
+
+## `shell.method_defined?(:redirected)` returns true for
+## methods installed via `singleton_class.class_eval` even
+## though they live on `cls.singleton_methods` (not on the
+## shell's own `methods` table). The known-gap comment on
+## the singleton_class arm calls out `instance_methods` /
+## `include?` / `include` / `prepend` but missed
+## `method_defined?`; feature-detection idioms like
+## `cls.singleton_class.method_defined?(:foo) ||
+## cls.singleton_class.define_method(:foo) { … }` would
+## double-define without this fix. (Code-review #253 round
+## 9 #3.)
+class A11; end
+A11.singleton_class.class_eval do
+  define_method(:greet) { "hi" }
+end
+puts "shell-method-defined-redirected=#{A11.singleton_class.method_defined?(:greet)}"
+puts "shell-method-defined-absent=#{A11.singleton_class.method_defined?(:not_there)}"

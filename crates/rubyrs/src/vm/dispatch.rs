@@ -6090,6 +6090,22 @@ impl Vm {
 /// Kernel methods and stays out of false-negative territory while
 /// the synthesis cost isn't justified.
 fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
+    // Eigenclass-shell: methods installed via
+    // `singleton_class.class_eval { def foo; end }` redirect
+    // into `target.singleton_methods` rather than the shell's
+    // own `methods` table. CRuby's `shell.method_defined?(:foo)`
+    // returns true for redirected installs, so walk the
+    // target's singleton-method chain when the shell asks.
+    // (Code-review #253 round 9 #3.)
+    if let Some(target) = cls
+        .singleton_target
+        .borrow()
+        .as_ref()
+        .and_then(std::rc::Weak::upgrade)
+        && vm.lookup_class_singleton_method(&target, sid).is_some()
+    {
+        return true;
+    }
     if vm.lookup_method_uncached(cls, sid).is_some() {
         return true;
     }
