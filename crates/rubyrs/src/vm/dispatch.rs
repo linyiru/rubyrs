@@ -1894,6 +1894,25 @@ impl Vm {
         // inside the helper now so the cluster is self-
         // contained.
         let new_id = self.interner.intern("new");
+    // Singleton-class-shell fence: `A.singleton_class.new` raises
+    // TypeError in CRuby ("can't create instance of singleton
+    // class"). Without this fence the shell falls into the
+    // default `Class.new` allocator at line 2294 and silently
+    // allocates a `Value::Object` whose class is the shell —
+    // producing an orphan instance whose every method call
+    // raises NoMethodError because the shell's method table is
+    // empty. Defensive code that `rescue TypeError`s to detect
+    // singleton-class misuse would skip; the orphan only
+    // surfaces as the confusing downstream NoMethodError.
+    // (Code-review #253 round 9 #1.)
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.singleton_target.borrow().is_some()
+    {
+        return Err(self.trap(RubyError::TypeError {
+            msg: "can't create instance of singleton class".into(),
+        }));
+    }
     // `Hash[...]` class-method constructor. CRuby has three
     // call shapes:
     //   - `Hash[]`               → empty Hash
@@ -2256,6 +2275,16 @@ impl Vm {
         if !args.is_empty() {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+            }));
+        }
+        // Eigenclass-shell fence — CRuby:
+        // `A.singleton_class.allocate` raises TypeError ("can't
+        // create instance of singleton class"). Without this the
+        // shell falls into the bare-instance allocator below and
+        // produces an orphan. (Code-review #253 round 9 #1.)
+        if cls.singleton_target.borrow().is_some() {
+            return Err(self.trap(RubyError::TypeError {
+                msg: "can't create instance of singleton class".into(),
             }));
         }
         // Module / Class shells are NOT user classes — a real
@@ -5932,6 +5961,15 @@ impl Vm {
                     msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
                 }));
             }
+            // Eigenclass-shell fence — CRuby:
+            // `A.singleton_class.allocate` raises TypeError
+            // ("can't create instance of singleton class").
+            // (Code-review #253 round 9 #1.)
+            if cls.singleton_target.borrow().is_some() {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "can't create instance of singleton class".into(),
+                }));
+            }
             if cls.is_module
                 || cls.name == "Module"
                 || cls.name == "Class"
@@ -5953,6 +5991,16 @@ impl Vm {
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {
+                // Eigenclass-shell fence (block-form parallel of
+                // the no-block fence in
+                // `try_dispatch_class_intrinsics`). CRuby raises
+                // TypeError for `A.singleton_class.new { … }` too.
+                // (Code-review #253 round 9 #1.)
+                if cls.singleton_target.borrow().is_some() {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: "can't create instance of singleton class".into(),
+                    }));
+                }
                 // Pin args during the alloc window — see the matching
                 // comment in `do_call`'s new-branch for the rationale.
                 // Route through `Vm::alloc_default_instance` so the

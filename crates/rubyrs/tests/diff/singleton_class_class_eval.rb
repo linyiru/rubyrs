@@ -150,3 +150,24 @@ A8.singleton_class.class_eval do
   alias_method :class_name, :name
 end
 puts "alias-builtin-on-shell=#{A8.class_name.inspect}"
+
+## `shell.new` / `shell.allocate` / `shell.new { … }` must
+## raise CRuby's TypeError ("can't create instance of
+## singleton class"). Pre-fix rubyrs silently allocated an
+## orphan instance whose class was the shell — surface
+## broken downstream as a confusing NoMethodError on
+## anything called on it. (Code-review #253 round 9 #1.)
+class A9; end
+%i[shell_new shell_allocate shell_new_block].each do |shape|
+  err = begin
+    case shape
+    when :shell_new       then A9.singleton_class.new
+    when :shell_allocate  then A9.singleton_class.allocate
+    when :shell_new_block then A9.singleton_class.new { :body }
+    end
+    "DID-NOT-RAISE"
+  rescue TypeError => e
+    "TypeError: #{e.message}"
+  end
+  puts "#{shape}=#{err}"
+end
