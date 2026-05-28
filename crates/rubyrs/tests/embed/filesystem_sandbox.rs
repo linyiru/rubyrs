@@ -293,3 +293,190 @@ fn ioerror_is_rescuable_in_script() {
         .unwrap();
     assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"caught"));
 }
+
+// ---------- allowlist scope (allow_filesystem_io: true + allowed_paths: Some) ----------
+
+/// Build a tempdir + write a probe file under it, returning the
+/// canonicalized tempdir path and the probe path. The tempdir is
+/// canonicalized because `apply_config` canonicalizes
+/// `allowed_paths` entries — using a non-canonical prefix would
+/// silently slip past `starts_with` on macOS where `/tmp` is a
+/// symlink to `/private/tmp`.
+fn alloc_tempdir(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let raw = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("rubyrs-allowlist-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&raw).expect("mkdir tempdir");
+    let dir = std::fs::canonicalize(&raw).expect("canonicalize tempdir");
+    let probe = dir.join("probe.txt");
+    std::fs::write(&probe, "probe contents").expect("write probe");
+    (dir, probe)
+}
+
+#[test]
+fn allowlist_permits_file_read_inside_prefix() {
+    // `allow_filesystem_io: true` + `allowed_paths: Some([gem_root])`
+    // is the rubund use case: open FS, but constrained to one
+    // directory tree. A `File.read` inside the prefix succeeds.
+    let (dir, probe) = alloc_tempdir("read-inside");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"File.read({:?})"#, probe.to_string_lossy());
+    let v = rt.eval(&script, "test.rb").unwrap();
+    assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"probe contents"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_blocks_file_read_outside_prefix() {
+    // Same Runtime config, but the script tries to read a path
+    // OUTSIDE the allowed prefix. Must trap with IOError — the
+    // host's gem-root sandbox can't be escaped by passing a
+    // different absolute path.
+    let (dir, _probe) = alloc_tempdir("read-outside");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let err = rt
+        .eval(r#"File.read("/etc/passwd")"#, "test.rb")
+        .unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "IOError" && message.contains("outside Config::allowed_paths")),
+        "expected Uncaught/IOError outside-allowlist, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_blocks_traversal_out_of_prefix() {
+    // Defense against the obvious bypass: `File.read("/allowed/../etc/passwd")`.
+    // The path is lexically resolved BEFORE the `starts_with`
+    // check, so `..` is collapsed and the resolved path
+    // `/etc/passwd` doesn't start with the prefix.
+    let (dir, _probe) = alloc_tempdir("read-traversal");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let traversal = format!("{}/../../../etc/passwd", dir.to_string_lossy());
+    let script = format!(r#"File.read({:?})"#, traversal);
+    let err = rt.eval(&script, "test.rb").unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"),
+        "expected IOError on traversal, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_permits_file_metadata_probe_inside_prefix() {
+    // `File.exist?` / `.size` are gated too — verify allowlist
+    // mode lets them through when the path is inside the prefix.
+    let (dir, probe) = alloc_tempdir("metadata-inside");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"File.exist?({:?})"#, probe.to_string_lossy());
+    let v = rt.eval(&script, "test.rb").unwrap();
+    assert!(matches!(v, rubyrs::Value::Bool(true)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_blocks_file_metadata_probe_outside_prefix() {
+    // The metadata-probe path also leaks FS structure if
+    // unguarded. Verify the allowlist scope applies.
+    let (dir, _probe) = alloc_tempdir("metadata-outside");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let err = rt
+        .eval(r#"File.exist?("/etc/passwd")"#, "test.rb")
+        .unwrap_err();
+    assert!(matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allow_filesystem_io_false_overrides_allowlist() {
+    // Layered model: bool is the coarse gate. If `allow_filesystem_io:
+    // false`, `allowed_paths` is ignored — sandbox is completely
+    // shut, even paths "inside" a configured allowlist trap. Locks
+    // in that hosts can't use `allowed_paths` to ACCIDENTALLY
+    // re-open a sandbox they meant to keep closed.
+    let (dir, probe) = alloc_tempdir("bool-wins");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: false,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"File.read({:?})"#, probe.to_string_lossy());
+    let err = rt.eval(&script, "test.rb").unwrap_err();
+    // Trap message says "filesystem I/O disabled" (the bool
+    // gate's wording), NOT "outside Config::allowed_paths" (the
+    // scope gate's wording) — proves bool fired first.
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "IOError"
+            && message.contains("filesystem I/O disabled")
+            && !message.contains("outside")),
+        "expected bool-gate trap, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_none_is_full_open() {
+    // Regression: with `allow_filesystem_io: true, allowed_paths:
+    // None`, behaviour should match the bool-only mode that
+    // shipped in PR #257 — no narrowing. The CLI binary uses
+    // exactly this config.
+    let (dir, probe) = alloc_tempdir("none-open");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: None,
+        ..Default::default()
+    });
+    // Reading inside any path works (the existing opt-in test
+    // covers a tempdir read; here we use the probe just to keep
+    // the test self-contained).
+    let script = format!(r#"File.read({:?})"#, probe.to_string_lossy());
+    let v = rt.eval(&script, "test.rb").unwrap();
+    assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"probe contents"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_with_multiple_prefixes() {
+    // `allowed_paths` is a Vec — passes when ANY prefix matches.
+    // Use case: a host that wants to allow access to two
+    // unrelated trees (e.g., gem root + vendor cache).
+    let (dir_a, probe_a) = alloc_tempdir("multi-a");
+    let (dir_b, probe_b) = alloc_tempdir("multi-b");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir_a.clone(), dir_b.clone()]),
+        ..Default::default()
+    });
+    // Both probes readable.
+    for probe in [&probe_a, &probe_b] {
+        let script = format!(r#"File.read({:?})"#, probe.to_string_lossy());
+        let v = rt.eval(&script, "test.rb").unwrap();
+        assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"probe contents"));
+    }
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}

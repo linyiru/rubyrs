@@ -29,8 +29,18 @@ impl Vm {
         };
         Ok(Some(match (name, args) {
             ("read", [p]) => {
+                // First-gate: bool capability. Runs BEFORE path_arg so
+                // a wrong-type arg under sandbox-on traps with IOError,
+                // not TypeError (PR #257 F6 ordering contract).
                 self.check_filesystem_io_allowed("File.read", None)?;
                 let path = path_arg(p)?;
+                // Second-gate: allowlist scope (no-op when `allowed_paths:
+                // None`). The redundant bool re-check inside is one
+                // branch — negligible vs the syscall below.
+                self.check_filesystem_io_allowed(
+                    "File.read",
+                    Some(Path::new(&path)),
+                )?;
                 // L3-G follow-up: read raw bytes, not UTF-8-validated
                 // String. msgpack/protobuf/binary-protocol fixtures
                 // are not valid UTF-8; the previous read_to_string
@@ -62,6 +72,10 @@ impl Vm {
             ("write", [p, body]) => {
                 self.check_filesystem_io_allowed("File.write", None)?;
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(
+                    "File.write",
+                    Some(Path::new(&path)),
+                )?;
                 let contents: Vec<u8> = match body {
                     Value::Str(s) => s.content.borrow().clone(),
                     _ => body.to_display(&self.heap, &self.interner).into_bytes(),
@@ -89,6 +103,7 @@ impl Vm {
                 };
                 self.check_filesystem_io_allowed(op, None)?;
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(op, Some(Path::new(&path)))?;
                 let exists = std::fs::metadata(&path)
                     .map(|m| if name == "file?" { m.is_file() } else { true })
                     .unwrap_or(false);
@@ -97,12 +112,20 @@ impl Vm {
             ("directory?", [p]) => {
                 self.check_filesystem_io_allowed("File.directory?", None)?;
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(
+                    "File.directory?",
+                    Some(Path::new(&path)),
+                )?;
                 let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
                 Value::Bool(is_dir)
             }
             ("size", [p]) => {
                 self.check_filesystem_io_allowed("File.size", None)?;
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(
+                    "File.size",
+                    Some(Path::new(&path)),
+                )?;
                 match std::fs::metadata(&path) {
                     Ok(m) => Value::Int(m.len() as i64),
                     Err(e) => return Err(self.trap(RubyError::RuntimeError {
