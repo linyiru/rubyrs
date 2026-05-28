@@ -204,56 +204,104 @@ impl Vm {
             // then popping the method frame and pushing the value
             // as its return. Exit the whole dispatch if we
             // unwound off the bottom of the frame stack.
-            if let Some(val) = self.take_method_return() {
-                // `take_method_return` (vm.rs) already cleared
-                // `pending_loop_transfer` for us — the invariant
-                // (non-local `return` supersedes a mid-ensure
-                // break/next) is captured at the consume site
-                // rather than duplicated here. See that helper's
-                // doc comment for why the clear is required:
-                // EndEnsure is reachable on TWO paths (exception
-                // unwind via `unwind_with_exception`, AND the
-                // loop-transfer walk via `continue_loop_transfer`),
-                // and neither runs automatically as we pop frames
-                // below, so a stale pending could in principle be
-                // consumed later. The helper closes that window.
-                while let Some(f) = self.frames.last() {
-                    if !f.is_block { break; }
-                    let f = self.frames.pop().unwrap();
-                    self.stack.truncate(f.base_sp);
-                    // `class_eval { ... }` frames are both
-                    // `is_block: true` (so this loop walks
-                    // through them, matching CRuby's "return
-                    // exits the method, not the block") AND
-                    // `is_class_body: true` (so `def name`
-                    // inside the block lands on the class).
-                    // The class-body cleanup that the Op::Return
-                    // arm does inline (pop class_stack +
-                    // class_visibility_stack) has to happen here
-                    // too — otherwise a non-local return through
-                    // a class_eval block would leak class-stack
-                    // entries.
-                    if f.is_class_body {
-                        let _cls = self.class_stack.pop()
-                            .expect("ICE: class_stack empty unwinding through class_eval");
-                        self.class_visibility_stack.pop();
-                    }
-                }
-                if let Some(f) = self.frames.pop() {
-                    self.stack.truncate(f.base_sp);
-                    if f.is_class_body {
-                        let cls = self.class_stack.pop()
-                            .expect("ICE: class_stack empty on method-return");
-                        self.class_visibility_stack.pop();
-                        self.stack.push(Value::Class(cls));
-                    } else if let Some(replacement) = f.swap_return {
-                        self.stack.push(replacement);
-                    } else {
-                        self.stack.push(val);
+            if self.method_return.is_some() {
+                // Capture the lexical-owner Rc BEFORE
+                // `take_method_return` clears it (the helper
+                // pairs the value and locals consumption to keep
+                // the invariant that they vanish together).
+                let owner_rc = self.method_return_locals.clone();
+                let val = self.take_method_return().unwrap();
+                // Lexical-aware unwind: walk frames popping
+                // intermediate blocks AND intermediate methods
+                // (the yielding-but-not-defining method, e.g.
+                // `outer` in `outer { ... return ... }` where
+                // the block was defined in caller_method). The
+                // target is the topmost non-block frame whose
+                // `locals` Rc matches the snapshot taken at
+                // `Op::ReturnMethod` time. (TRY_RUNS pass-10
+                // layer #4.)
+                //
+                // Pre-scan to locate the target index. If no
+                // match exists (block escaped its lexical scope
+                // — e.g. stored as a Proc and called from
+                // elsewhere after the owner returned, OR
+                // `method_return_locals` is None because some
+                // path set `method_return` without going through
+                // Op::ReturnMethod), fall back to the legacy
+                // "first non-block" behavior: walk while
+                // `is_block`, then pop exactly one method frame.
+                // The CRuby-correct response is LocalJumpError,
+                // but Tier-1 doesn't model that yet — tracked as
+                // a separate future layer. (Copilot review #285
+                // round 1.)
+                let target_idx: Option<usize> = match &owner_rc {
+                    Some(rc) => self.frames.iter().rposition(
+                        |f| !f.is_block && std::rc::Rc::ptr_eq(&f.locals, rc),
+                    ),
+                    None => None,
+                };
+                if let Some(owner_idx) = target_idx {
+                    // Walk down to and including the owner frame.
+                    while self.frames.len() > owner_idx {
+                        let is_owner = self.frames.len() == owner_idx + 1;
+                        let f = self.frames.pop().unwrap();
+                        self.stack.truncate(f.base_sp);
+                        // `class_eval { ... }` frames are both
+                        // `is_block: true` AND `is_class_body:
+                        // true`. The class-body cleanup the
+                        // Op::Return arm does inline (pop
+                        // class_stack + class_visibility_stack)
+                        // has to happen here too — otherwise a
+                        // non-local return through a class_eval
+                        // block would leak class-stack entries.
+                        if f.is_class_body {
+                            let cls = self.class_stack.pop()
+                                .expect("ICE: class_stack empty unwinding through class_eval");
+                            self.class_visibility_stack.pop();
+                            if is_owner {
+                                self.stack.push(Value::Class(cls));
+                            }
+                        } else if is_owner {
+                            if let Some(replacement) = f.swap_return {
+                                self.stack.push(replacement);
+                            } else {
+                                self.stack.push(val.clone());
+                            }
+                        }
                     }
                     if self.frames.is_empty() { return Ok(()); }
                 } else {
-                    return Ok(());
+                    // Legacy fallback: walk block frames, then
+                    // pop one method frame. Matches the pre-#285
+                    // behavior so Tier-1 stays compatible when
+                    // `method_return_locals` doesn't pin down a
+                    // lexical owner in the live stack.
+                    while let Some(f) = self.frames.last() {
+                        if !f.is_block { break; }
+                        let f = self.frames.pop().unwrap();
+                        self.stack.truncate(f.base_sp);
+                        if f.is_class_body {
+                            let _cls = self.class_stack.pop()
+                                .expect("ICE: class_stack empty unwinding through class_eval (fallback)");
+                            self.class_visibility_stack.pop();
+                        }
+                    }
+                    if let Some(f) = self.frames.pop() {
+                        self.stack.truncate(f.base_sp);
+                        if f.is_class_body {
+                            let cls = self.class_stack.pop()
+                                .expect("ICE: class_stack empty on method-return (fallback)");
+                            self.class_visibility_stack.pop();
+                            self.stack.push(Value::Class(cls));
+                        } else if let Some(replacement) = f.swap_return {
+                            self.stack.push(replacement);
+                        } else {
+                            self.stack.push(val);
+                        }
+                        if self.frames.is_empty() { return Ok(()); }
+                    } else {
+                        return Ok(());
+                    }
                 }
                 continue;
             }
@@ -2082,6 +2130,20 @@ impl Vm {
                 // enclosing method.
                 let v = self.stack.pop().unwrap_or(Value::Nil);
                 self.method_return = Some(v);
+                // Snapshot the lexical-owner identity. The current
+                // frame is the block where `return` fired; its
+                // `locals` Rc was set from the BlockHandle's
+                // `captured` slot, which points at the locals Vec
+                // of the method that lexically created the block.
+                // The unwind walker uses `Rc::ptr_eq` to find that
+                // method frame — NOT just the nearest method
+                // frame (which could be the yielding caller, e.g.
+                // `Array#each`'s parent in `outer { return }`
+                // shapes). (TRY_RUNS pass-10 layer #4.)
+                let owner_locals = self.frames.last()
+                    .expect("ICE: ReturnMethod with empty frame stack")
+                    .locals.clone();
+                self.method_return_locals = Some(owner_locals);
             }
         }
         Ok(true)

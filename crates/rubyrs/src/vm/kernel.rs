@@ -1488,47 +1488,49 @@ impl Vm {
             // outer dispatch loop will re-take and re-apply the
             // invariant via the same helper if the unwind keeps
             // climbing.
+            let owner_rc = self.method_return_locals.clone();
             let val = self.take_method_return().unwrap();
-            // Pop block frames (handling class_eval block + class
-            // body bookkeeping).
-            while let Some(f) = self.frames.last() {
-                if !f.is_block { break; }
+            // Lexical-aware unwind, mirroring step.rs's dispatch
+            // arm but capped at `depth_before + 1` so the
+            // lexical-owner method frame can never be our pushed
+            // <main> (that case is "the return escapes the
+            // required file"). (TRY_RUNS pass-10 layer #4.)
+            let mut escaped = false;
+            loop {
                 if self.frames.len() <= depth_before + 1 {
-                    // Next pop would be our <main> — escape.
+                    // Popping the next frame would take us at or
+                    // below the require sentinel — the return
+                    // escapes this `require` boundary.
+                    escaped = true;
                     break;
                 }
+                let f_ref = self.frames.last().unwrap();
+                let is_owner = !f_ref.is_block && match &owner_rc {
+                    Some(rc) => std::rc::Rc::ptr_eq(&f_ref.locals, rc),
+                    None => true,  // legacy fallback
+                };
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
-                    let _cls = self.class_stack.pop()
+                    let cls = self.class_stack.pop()
                         .expect("ICE: class_stack empty unwinding through class_eval (require/_relative)");
                     self.class_visibility_stack.pop();
+                    if is_owner {
+                        self.stack.push(Value::Class(cls));
+                    }
+                } else if is_owner {
+                    if let Some(r) = f.swap_return {
+                        self.stack.push(r);
+                    } else {
+                        self.stack.push(val.clone());
+                    }
                 }
+                if is_owner { break; }
             }
-            if self.frames.len() <= depth_before + 1 {
-                // The next pop would be our <main>, meaning the
-                // non-local return targets either our <main> itself
-                // (treat as file-return-with-value) or something
-                // above it (escapes). Either way, restore the
-                // method_return signal and exit the loop — the
-                // post-loop bookkeeping decides between
-                // "successful load with this value as result" and
-                // "outer unwind takes over".
+            if escaped {
                 self.method_return = Some(val);
+                self.method_return_locals = owner_rc;
                 break;
-            }
-            // Pop the enclosing method frame, mirroring dispatch.
-            let f = self.frames.pop().unwrap();
-            self.stack.truncate(f.base_sp);
-            if f.is_class_body {
-                let cls = self.class_stack.pop()
-                    .expect("ICE: class_stack empty on method-return (require/_relative)");
-                self.class_visibility_stack.pop();
-                self.stack.push(Value::Class(cls));
-            } else if let Some(r) = f.swap_return {
-                self.stack.push(r);
-            } else {
-                self.stack.push(val);
             }
             // Continue dispatching at the method's caller (still
             // inside required file body since we capped at
@@ -1736,7 +1738,38 @@ impl Vm {
             if self.method_return.is_none() {
                 break;
             }
+            // `eval` deliberately keeps the legacy "walk blocks,
+            // pop one method" unwind here — DO NOT mirror the
+            // layer-4 lexical-owner walk that
+            // `require_in_filescope` uses. CRuby's semantics for
+            // `return` originating in eval'd top-level code are
+            // "return from the method enclosing the eval call"
+            // (RUBY_TAG_RETURN propagates past the eval boundary),
+            // NOT "return from the eval'd <main>". A lexical-walk
+            // here whose owner_rc points at the eval's <main>
+            // locals would stop *at* eval's <main> and assign the
+            // return value back to the eval-call's caller — the
+            // wrong semantics. The legacy "pop one method"
+            // followed by escape-to-outer-dispatch correctly
+            // funnels return-from-eval through the enclosing
+            // method. (code-review #285 round 2 #1 — adopted as
+            // "no change" with documenting comment after we
+            // verified the lexical walk gave the wrong answer
+            // for `eval(\"outer_eval { return :b }\")`.)
+            //
+            // The dual-method-frame chain (`outer { lex { return } }`
+            // entirely inside eval) is intentionally accepted to
+            // mis-pop one frame in this path — a known Tier-1
+            // divergence vs CRuby that ships separately from
+            // layer #4 if it ever becomes load-bearing for a
+            // real script.
             let val = self.take_method_return().unwrap();
+            // `take_method_return` already cleared
+            // `method_return_locals` paired with the value — no
+            // dangling Rc to worry about on the escape branch
+            // below. (code-review #285 round 2 #2 — the field-pair
+            // invariant the helper enforces is what makes this
+            // legacy path safe to leave alone.)
             while let Some(f) = self.frames.last() {
                 if !f.is_block { break; }
                 if self.frames.len() <= depth_before + 1 {

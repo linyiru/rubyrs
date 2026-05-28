@@ -512,6 +512,21 @@ pub(crate) struct Vm {
     /// semantics: `return` inside a `do…end` exits the enclosing
     /// method, not just the block.
     pub(crate) method_return: Option<Value>,
+    /// Identity of the lexical-owner frame for an in-flight
+    /// non-local return. CRuby's `return` inside a block exits
+    /// the method that **lexically defined** the block, not
+    /// the method that happens to be yielding. The block's
+    /// `captured` Rc points at the lexical owner's locals;
+    /// `Op::ReturnMethod` snapshots that Rc here so the unwind
+    /// loop can identify the right method frame by
+    /// `Rc::ptr_eq` (the lexical owner is the topmost
+    /// non-block frame whose `locals` Rc matches). If no
+    /// matching frame is found, the block escaped its lexical
+    /// scope (CRuby raises LocalJumpError; Tier-1 falls back
+    /// to the legacy "walk-blocks-then-pop-one-method" path
+    /// to preserve existing behavior). (TRY_RUNS pass-10
+    /// layer #4.)
+    pub(crate) method_return_locals: Option<Rc<RefCell<Vec<Value>>>>,
     /// In-flight `break`/`next` through `ensure` chain. Set by
     /// `Op::BreakLoop`/`Op::NextLoop` when an `is_ensure` handler
     /// sits between the source and the target; cleared once the
@@ -705,6 +720,7 @@ impl Vm {
             method_compose_forwarder_proto: None,
             sources: HashMap::new(),
             method_return: None,
+            method_return_locals: None,
             pending_loop_transfer: None,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
@@ -754,6 +770,15 @@ impl Vm {
         if v.is_some() {
             self.pending_loop_transfer = None;
         }
+        // Always clear `method_return_locals` — the field-pair
+        // invariant says it lives and dies with `method_return`,
+        // and unconditional clear here is the cheapest way to
+        // close the no-op-take leak window: a caller that takes
+        // while `method_return` is already None (e.g. after
+        // `clear_control_flow_signals` left a stale Rc behind in
+        // some hypothetical future code path) still leaves the
+        // VM in a consistent state. (code-review #285 round 2 #4.)
+        self.method_return_locals = None;
         v
     }
 
@@ -837,6 +862,13 @@ impl Vm {
     pub(crate) fn clear_control_flow_signals(&mut self) {
         self.break_signaled = false;
         self.method_return = None;
+        // Paired with `method_return` — see field doc. Without
+        // this, a Runtime::reset between requests would leave a
+        // stale Rc pinning the previous request's locals Vec
+        // alive, AND silently violate the
+        // `method_return.is_some() ⇔ method_return_locals.is_some()`
+        // invariant. (code-review #285 round 2 #3.)
+        self.method_return_locals = None;
         self.pending_loop_transfer = None;
         self.suppress_call_result_push = false;
         self.bypass_visibility_once = false;
