@@ -215,10 +215,14 @@ fn opt_in_runtime_permits_file_read_and_write() {
         allow_filesystem_io: true,
         ..Default::default()
     });
-    // Use the env-provided temp dir to avoid /tmp racing with
-    // other tests.
-    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("fs-sandbox-opt-in-{}.txt", std::process::id()));
+    // RAII tempdir — same alloc_tempdir helper the allowlist
+    // tests use, so cleanup runs on every exit path including
+    // panic-unwind. The probe file already exists inside `dir`
+    // (helper writes it); we use a different filename so the
+    // test's File.write actually exercises a fresh write rather
+    // than overwriting the probe.
+    let (_guard_opt_in, dir, _probe) = alloc_tempdir("opt-in");
+    let tmp = dir.join("write_target.txt");
     let tmp_str = tmp.to_string_lossy().into_owned();
     // write
     rt.eval(
@@ -231,8 +235,6 @@ fn opt_in_runtime_permits_file_read_and_write() {
         .eval(&format!(r#"File.read({tmp_str:?})"#), "read.rb")
         .unwrap();
     assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"hello sandbox"));
-    // cleanup
-    let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]
@@ -245,9 +247,10 @@ fn apply_config_mid_life_can_lock_down_filesystem() {
         allow_filesystem_io: true,
         ..Default::default()
     });
-    // Setup eval that needs FS — works under the loose config.
-    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("fs-sandbox-tighten-{}.txt", std::process::id()));
+    // RAII tempdir — see opt_in_runtime_permits_file_read_and_write
+    // for the rationale.
+    let (_guard_tighten, dir, _probe) = alloc_tempdir("tighten");
+    let tmp = dir.join("write_target.txt");
     let tmp_str = tmp.to_string_lossy().into_owned();
     rt.eval(
         &format!(r#"File.write({tmp_str:?}, "setup")"#),
@@ -265,8 +268,6 @@ fn apply_config_mid_life_can_lock_down_filesystem() {
         .eval(&format!(r#"File.read({tmp_str:?})"#), "read.rb")
         .unwrap_err();
     assert!(matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"));
-    // cleanup
-    let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]
