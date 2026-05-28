@@ -240,6 +240,17 @@ pub(crate) enum Expr {
         receiver: Option<Box<SExpr>>,
         name: String,
         args: Vec<SExpr>,
+        /// `true` when the final entry in `args` originated from a
+        /// `KeywordHashNode` (CRuby's `foo(k: v, ...)` sugar) vs.
+        /// from an explicit positional `HashLit` (`foo({k: v})`).
+        /// Survives to bytecode via the `Op::CallKw*` variants so
+        /// the dispatcher can split the trailing Hash into a
+        /// dedicated kwargs channel for `primitive_call` / kw_param
+        /// binding. AST consumers that synthesise `Call` nodes
+        /// (operator desugaring, attr-write rewriting, etc.) should
+        /// default to `false` — only the call-site argument walker
+        /// in ast.rs sets it `true`.
+        kwargs_trailing: bool,
     },
     If {
         cond: Box<SExpr>,
@@ -593,8 +604,7 @@ fn tr_kwhash(
     it.fold(first, |lhs, rhs| sp(parent, Expr::Call {
         receiver: Some(Box::new(lhs)),
         name: "merge".into(),
-        args: vec![rhs],
-    }))
+        args: vec![rhs], kwargs_trailing: false }))
 }
 
 pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
@@ -878,8 +888,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let combined = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![rhs],
-        });
+            args: vec![rhs], kwargs_trailing: false });
         return sp(node, Expr::CvarWrite(name, Box::new(combined)));
     }
     // `@@x ||= y` — assign-if-falsy. CRuby: read; if truthy
@@ -994,8 +1003,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let rhs = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(ctx, &n.value())],
-        });
+            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
         return sp(node, Expr::LVarWrite(name, Box::new(rhs)));
     }
     if let Some(n) = node.as_instance_variable_operator_write_node() {
@@ -1005,8 +1013,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let rhs = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(ctx, &n.value())],
-        });
+            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
         return sp(node, Expr::IVarWrite(name, Box::new(rhs)));
     }
     // `a ||= b` → `a || (a = b)`; `a &&= b` → `a && (a = b)`.
@@ -1048,15 +1055,13 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let read = sp(node, Expr::Call {
             receiver: Some(Box::new(recv.clone())),
             name: "[]".into(),
-            args: idx_args.clone(),
-        });
+            args: idx_args.clone(), kwargs_trailing: false });
         let mut write_args = idx_args;
         write_args.push(tr(ctx, &n.value()));
         let write = sp(node, Expr::Call {
             receiver: Some(Box::new(recv)),
             name: "[]=".into(),
-            args: write_args,
-        });
+            args: write_args, kwargs_trailing: false });
         return sp(node, Expr::Or(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_index_and_write_node() {
@@ -1070,15 +1075,13 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let read = sp(node, Expr::Call {
             receiver: Some(Box::new(recv.clone())),
             name: "[]".into(),
-            args: idx_args.clone(),
-        });
+            args: idx_args.clone(), kwargs_trailing: false });
         let mut write_args = idx_args;
         write_args.push(tr(ctx, &n.value()));
         let write = sp(node, Expr::Call {
             receiver: Some(Box::new(recv)),
             name: "[]=".into(),
-            args: write_args,
-        });
+            args: write_args, kwargs_trailing: false });
         return sp(node, Expr::And(Box::new(read), Box::new(write)));
     }
     if let Some(n) = node.as_index_operator_write_node() {
@@ -1099,20 +1102,17 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let read = sp(node, Expr::Call {
             receiver: Some(Box::new(recv.clone())),
             name: "[]".into(),
-            args: idx_args.clone(),
-        });
+            args: idx_args.clone(), kwargs_trailing: false });
         let new_val = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(ctx, &n.value())],
-        });
+            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
         let mut write_args = idx_args;
         write_args.push(new_val);
         return sp(node, Expr::Call {
             receiver: Some(Box::new(recv)),
             name: "[]=".into(),
-            args: write_args,
-        });
+            args: write_args, kwargs_trailing: false });
     }
     // Global-variable op-writes — same desugar pattern as IVar.
     // Unknown globals read as nil (Op::LoadGlobal default), so
@@ -1124,8 +1124,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let rhs = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(ctx, &n.value())],
-        });
+            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
         return sp(node, Expr::GVarWrite(name, Box::new(rhs)));
     }
     if let Some(n) = node.as_global_variable_or_write_node() {
@@ -1158,8 +1157,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let rhs = sp(node, Expr::Call {
             receiver: Some(Box::new(read)),
             name: op,
-            args: vec![tr(ctx, &n.value())],
-        });
+            args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
         return sp(node, Expr::ConstWrite(name, false, Box::new(rhs)));
     }
     if let Some(n) = node.as_constant_or_write_node() {
@@ -1205,8 +1203,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             let rhs = sp(node, Expr::Call {
                 receiver: Some(Box::new(read)),
                 name: op.clone(),
-                args: vec![tr(ctx, &n.value())],
-            });
+                args: vec![tr(ctx, &n.value())], kwargs_trailing: false });
             sp(node, Expr::ConstWrite(name, abs, Box::new(rhs)))
         };
         if let Some(joined) = flatten_constant_path(&target.as_node()) {
@@ -1385,8 +1382,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             let acc = it.fold(first, |lhs, rhs| sp(node, Expr::Call {
                 receiver: Some(Box::new(lhs)),
                 name: "+".into(),
-                args: vec![rhs],
-            }));
+                args: vec![rhs], kwargs_trailing: false }));
             return sp(node, Expr::Apply {
                 receiver,
                 name,
@@ -1499,8 +1495,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         let body_call = sp(node, Expr::Call {
                             receiver: Some(Box::new(sp(node, Expr::LVarRead(param_name.clone())))),
                             name: method_name,
-                            args: vec![],
-                        });
+                            args: vec![], kwargs_trailing: false });
                         return sp(node, Expr::CallWithBlock {
                             receiver, name, args,
                             block_params: vec![BlockParam::Single(param_name)],
@@ -1518,7 +1513,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     });
                 }
         }
-        return sp(node, Expr::Call { receiver, name, args });
+        return sp(node, Expr::Call { receiver, name, args , kwargs_trailing: false });
     }
     // `return`, `next`, `break` all collapse multi-arg forms
     // into a single value the same way CRuby does:
@@ -1554,8 +1549,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     return Some(Box::new(sp(span_node, Expr::Call {
                         receiver: None,
                         name: "Array".into(),
-                        args: vec![inner_expr],
-                    })));
+                        args: vec![inner_expr], kwargs_trailing: false })));
                 }
                 Some(Box::new(tr(ctx, only)))
             }
@@ -1589,8 +1583,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         chunks.push(sp(span_node, Expr::Call {
                             receiver: None,
                             name: "Array".into(),
-                            args: vec![inner_expr],
-                        }));
+                            args: vec![inner_expr], kwargs_trailing: false }));
                     } else {
                         buf.push(tr(ctx, n));
                     }
@@ -1603,8 +1596,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 let acc = it.fold(first, |lhs, rhs| sp(span_node, Expr::Call {
                     receiver: Some(Box::new(lhs)),
                     name: "+".into(),
-                    args: vec![rhs],
-                }));
+                    args: vec![rhs], kwargs_trailing: false }));
                 Some(Box::new(acc))
             }
         }
@@ -1662,16 +1654,14 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             return Spanned::new(span, Expr::Call {
                 receiver: None,
                 name: "__defined_ivar?".into(),
-                args: vec![sp(node, Expr::SymbolLit(name))],
-            });
+                args: vec![sp(node, Expr::SymbolLit(name))], kwargs_trailing: false });
         }
         if let Some(cr) = inner.as_constant_read_node() {
             let name = cid_to_string(cr.name());
             return Spanned::new(span, Expr::Call {
                 receiver: None,
                 name: "__defined_const?".into(),
-                args: vec![sp(node, Expr::SymbolLit(name))],
-            });
+                args: vec![sp(node, Expr::SymbolLit(name))], kwargs_trailing: false });
         }
         if inner.as_constant_path_node().is_some()
             && let Some(joined) = flatten_constant_path(&inner)
@@ -1686,8 +1676,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             return Spanned::new(span, Expr::Call {
                 receiver: None,
                 name: "__defined_const?".into(),
-                args: vec![sp(node, Expr::SymbolLit(joined))],
-            });
+                args: vec![sp(node, Expr::SymbolLit(joined))], kwargs_trailing: false });
         }
         if let Some(cn) = inner.as_call_node() {
             // No-receiver, no-args call → runtime method check on
@@ -1704,8 +1693,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 return Spanned::new(span, Expr::Call {
                     receiver: None,
                     name: "__defined_method?".into(),
-                    args: vec![sp(node, Expr::SymbolLit(name))],
-                });
+                    args: vec![sp(node, Expr::SymbolLit(name))], kwargs_trailing: false });
             }
             return s("method");
         }
@@ -1808,8 +1796,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             let acc = it.fold(first, |lhs, rhs| sp(node, Expr::Call {
                 receiver: Some(Box::new(lhs)),
                 name: "+".into(),
-                args: vec![rhs],
-            }));
+                args: vec![rhs], kwargs_trailing: false }));
             return sp(node, Expr::SuperApply(Box::new(acc)));
         }
         let args: Vec<SExpr> = arg_nodes.iter().map(|n| tr(ctx, n)).collect();
@@ -1902,8 +1889,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                                 Some(pred) => sp(cn, Expr::Call {
                                     receiver: Some(Box::new(sp(cn, Expr::LVarRead(sp_name.clone())))),
                                     name: "===".into(),
-                                    args: vec![pred.clone()],
-                                }),
+                                    args: vec![pred.clone()], kwargs_trailing: false }),
                                 None => sp(cn, Expr::LVarRead(sp_name.clone())),
                             };
                             return (sp(cn, Expr::CallWithBlock {
@@ -1937,8 +1923,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                         Some(pred) => sp(node, Expr::Call {
                             receiver: Some(Box::new(wc)),
                             name: "===".into(),
-                            args: vec![pred.clone()],
-                        }),
+                            args: vec![pred.clone()], kwargs_trailing: false }),
                         None => wc,
                     }
                 };
@@ -1986,8 +1971,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let cond = Box::new(sp(node, Expr::Call {
             receiver: Some(Box::new(raw_cond)),
             name: "!".into(),
-            args: vec![],
-        }));
+            args: vec![], kwargs_trailing: false }));
         let body: Vec<SExpr> = n.statements()
             .map(|s| s.body().iter().map(|c| tr(ctx, &c)).collect())
             .unwrap_or_default();
@@ -2143,8 +2127,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         let acc = it.fold(first, |lhs, rhs| sp(node, Expr::Call {
             receiver: Some(Box::new(lhs)),
             name: "+".into(),
-            args: vec![rhs],
-        }));
+            args: vec![rhs], kwargs_trailing: false }));
         return acc;
     }
     if let Some(n) = node.as_hash_node() {
@@ -2179,8 +2162,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         return it.fold(first, |lhs, rhs| sp(node, Expr::Call {
             receiver: Some(Box::new(lhs)),
             name: "merge".into(),
-            args: vec![rhs],
-        }));
+            args: vec![rhs], kwargs_trailing: false }));
     }
     if let Some(n) = node.as_class_node() {
         // Class name shape:
@@ -2352,8 +2334,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             args: vec![
                 sp(node, Expr::SymbolLit(new_name)),
                 sp(node, Expr::SymbolLit(old_name)),
-            ],
-        });
+            ], kwargs_trailing: false });
     }
     if let Some(n) = node.as_singleton_class_node() {
         let recv_expr = tr(ctx, &n.expression());
@@ -2789,8 +2770,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                             sp(&cond_node, Expr::Call {
                                 receiver: Some(Box::new(raw_cond)),
                                 name: "!".into(),
-                                args: vec![],
-                            })
+                                args: vec![], kwargs_trailing: false })
                         } else {
                             raw_cond
                         };
@@ -2848,8 +2828,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     args: vec![
                         sp(bn, Expr::ConstRead("NotImplementedError".into())),
                         sp(bn, Expr::StrLit(msg.into())),
-                    ],
-                }));
+                    ], kwargs_trailing: false }));
                 continue;
             }
             ctx.errors.push(
@@ -2968,7 +2947,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
 }
 
 fn seq_inner(stmts: Vec<SExpr>) -> Expr {
-    Expr::Call { receiver: None, name: "__seq__".to_string(), args: stmts }
+    Expr::Call { receiver: None, name: "__seq__".to_string(), args: stmts , kwargs_trailing: false }
 }
 
 #[allow(dead_code)]

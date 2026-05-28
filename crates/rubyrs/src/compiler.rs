@@ -656,8 +656,7 @@ fn compile_call_arm(
                     node: Expr::Call {
                         receiver: Some(Box::new(args[0].clone())),
                         name: "new".to_string(),
-                        args: args[1..].to_vec(),
-                    },
+                        args: args[1..].to_vec(), kwargs_trailing: false },
                 };
                 compile_expr(b, &new_call, protos, interner, cc);
             }
@@ -866,7 +865,7 @@ fn compile_stmt(
     b.current_span = e.span;
     match &e.node {
         Expr::LVarWrite(name, val) => {
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+            if let Expr::Call { receiver: Some(r), name: op, args , .. } = &val.node
                 && op == "+" && args.len() == 1
                     && let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
@@ -886,7 +885,7 @@ fn compile_stmt(
             b.emit(Op::StoreLocal(slot));
         }
         Expr::IVarWrite(name, val) => {
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+            if let Expr::Call { receiver: Some(r), name: op, args , .. } = &val.node
                 && op == "+" && args.len() == 1
                     && let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
@@ -1024,7 +1023,7 @@ pub(crate) fn compile_expr(
             // Fast path: `name = name + 1` — extremely common in `while i < N`
             // counters and `each` accumulators. Compile to a single `IncLocal`
             // that does the read-modify-write in place.
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+            if let Expr::Call { receiver: Some(r), name: op, args , .. } = &val.node
                 && op == "+" && args.len() == 1
                     && let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
@@ -1046,7 +1045,7 @@ pub(crate) fn compile_expr(
         }
         Expr::IVarWrite(name, val) => {
             // Fast path: @name = @name + 1
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+            if let Expr::Call { receiver: Some(r), name: op, args , .. } = &val.node
                 && op == "+" && args.len() == 1
                     && let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
@@ -1200,7 +1199,7 @@ pub(crate) fn compile_expr(
         Expr::While { cond, body, post } => {
             compile_while_arm(b, cond, body, *post, protos, interner, cc);
         }
-        Expr::Call { receiver, name, args } => {
+        Expr::Call { receiver, name, args , .. } => {
             compile_call_arm(b, receiver, name, args, protos, interner, cc);
         }
         Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
