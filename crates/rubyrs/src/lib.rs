@@ -1578,6 +1578,31 @@ impl Runtime {
     pub fn __test_vm_protos_len(&self) -> usize {
         self.vm.protos.len()
     }
+    /// Inspect per-eval working state. The eval-entry cleanup
+    /// guarantees these are zeroed before each eval; tests assert
+    /// they're ALSO zeroed after the catch_unwind Err arm runs, so
+    /// host inspection between failed eval and next eval sees a
+    /// clean Runtime.
+    #[doc(hidden)]
+    pub fn __test_vm_frames_len(&self) -> usize {
+        self.vm.frames.len()
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_stack_len(&self) -> usize {
+        self.vm.stack.len()
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_pinned_len(&self) -> usize {
+        self.vm.pinned.len()
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_fuel(&self) -> Option<u64> {
+        self.vm.fuel
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_deadline_at_is_some(&self) -> bool {
+        self.vm.deadline_at.is_some()
+    }
 
     /// Bootstrap the built-in Ruby class hierarchy (currently just
     /// exceptions) by `eval`-ing a small Ruby preamble. Done with the
@@ -2007,15 +2032,37 @@ RUBY_ENGINE = "ruby".freeze
         let outcome = catch_unwind(AssertUnwindSafe(|| self.eval_inner(source, filename)));
         match outcome {
             Ok(result) => result,
-            Err(payload) => Err(Trap {
-                err: RubyError::RuntimeError {
-                    msg: format!(
-                        "host-side panic during eval: {}",
-                        panic_payload_message(payload.as_ref()),
-                    ),
-                },
-                backtrace: vec![],
-            }),
+            Err(payload) => {
+                // Mirror the post-run cleanup eval_inner does (lines
+                // 2114-2120). On the unwind path that cleanup never
+                // ran, leaving vm.fuel / vm.deadline_at set to the
+                // eval's anchor values and frames / stack / pinned
+                // potentially mid-execution. Without this Err-arm
+                // cleanup, a host that catches the Trap and inspects
+                // Runtime state without calling eval again sees
+                // stale residue — and the docstring contract that
+                // those fields are "undefined-meaning at eval exit"
+                // is broken on the new exit shape.
+                //
+                // Idempotent with the next eval's entry-clear, so
+                // this is a strict upgrade: state is clean the
+                // instant the host receives Err, not "eventually".
+                self.vm.fuel = None;
+                self.vm.deadline_at = None;
+                self.vm.frames.clear();
+                self.vm.stack.clear();
+                self.vm.pinned.clear();
+                self.vm.clear_control_flow_signals();
+                Err(Trap {
+                    err: RubyError::RuntimeError {
+                        msg: format!(
+                            "host-side panic during eval: {}",
+                            panic_payload_message(payload.as_ref()),
+                        ),
+                    },
+                    backtrace: vec![],
+                })
+            }
         }
     }
 

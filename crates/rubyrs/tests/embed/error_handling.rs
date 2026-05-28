@@ -635,3 +635,34 @@ fn host_fn_returning_trap_is_not_rewrapped_by_panic_catcher() {
         "Trap path must not be re-wrapped by panic catcher; got {message:?}",
     );
 }
+
+#[test]
+fn host_fn_panic_leaves_runtime_state_clean() {
+    // Defends the docstring contract that vm.fuel / vm.deadline_at
+    // are "undefined-meaning at eval exit" — pre-fix the post-run
+    // cleanup at the bottom of `eval_inner` only ran on Ok / Err
+    // exit, NOT on the catch_unwind unwind path. A host that
+    // catches the panic-Trap and inspects Runtime state without
+    // calling eval again would see stale fuel/deadline anchored
+    // from the failed eval, plus residue in frames/stack/pinned.
+    //
+    // Post-fix the Err arm of the panic catcher runs the same
+    // cleanup eagerly. State queried immediately after the catch
+    // must match a fresh Runtime.
+    use std::time::Duration;
+    let mut rt = Runtime::with_config(rubyrs::Config {
+        fuel: Some(100_000),
+        deadline: Some(Duration::from_secs(60)),
+        ..Default::default()
+    });
+    rt.register_fn("explode", |_| panic!("inside dispatch"));
+    // Confirm the test config actually anchors deadline at eval
+    // entry (sanity check — if this fails the test below is
+    // meaningless).
+    let _ = rt.eval(r#"explode"#, "test.rb").unwrap_err();
+    assert_eq!(rt.__test_vm_fuel(), None, "vm.fuel should be cleared after panic");
+    assert!(!rt.__test_vm_deadline_at_is_some(), "vm.deadline_at should be cleared after panic");
+    assert_eq!(rt.__test_vm_frames_len(), 0, "vm.frames should be drained after panic");
+    assert_eq!(rt.__test_vm_stack_len(), 0, "vm.stack should be drained after panic");
+    assert_eq!(rt.__test_vm_pinned_len(), 0, "vm.pinned should be drained after panic");
+}
