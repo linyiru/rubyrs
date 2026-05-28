@@ -654,13 +654,23 @@ pub(crate) struct FiberResponseBody {
     /// Subsequent poll_frame calls return Ready(None)
     /// without touching the Vm.
     done: bool,
+    /// P2b.2b.4: set to `true` after returning a Ready
+    /// frame. On the next poll_frame call we return
+    /// `Pending` (with the waker re-armed) BEFORE
+    /// resuming the Fiber again. This forces hyper's
+    /// connection driver to yield back to the tokio
+    /// executor, which in turn flushes the encoded chunk
+    /// to the socket. Without this tick, multiple
+    /// synchronously-yielded frames would coalesce into
+    /// a single TCP write and break true streaming.
+    yield_next_poll: bool,
 }
 
 #[cfg(feature = "_fiber")]
 impl FiberResponseBody {
     #[allow(dead_code)] // P2b.2b.3 caller
     pub(crate) fn new(fiber_id: crate::value::ObjId) -> Self {
-        Self { fiber_id, done: false }
+        Self { fiber_id, done: false, yield_next_poll: false }
     }
 }
 
@@ -671,7 +681,7 @@ impl hyper::body::Body for FiberResponseBody {
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         use crate::value::Value;
         use crate::vm::fiber::{resume_fiber, FiberStep};
@@ -679,6 +689,18 @@ impl hyper::body::Body for FiberResponseBody {
         let this = self.get_mut();
         if this.done {
             return std::task::Poll::Ready(None);
+        }
+        // P2b.2b.4: yield back to the executor between
+        // frames so hyper's H1 encoder flushes the just-
+        // delivered chunk to the socket before we resume
+        // the Fiber for the next one. Without this, fully
+        // synchronous Ready returns coalesce into a single
+        // TCP write — breaking SSE / long-poll / true
+        // streaming use cases.
+        if this.yield_next_poll {
+            this.yield_next_poll = false;
+            cx.waker().wake_by_ref();
+            return std::task::Poll::Pending;
         }
         let ptr = crate::vm::current_vm_ptr();
         if ptr.is_null() {
@@ -714,6 +736,7 @@ impl hyper::body::Body for FiberResponseBody {
                         return std::task::Poll::Ready(Some(Err(err)));
                     }
                 };
+                this.yield_next_poll = true;
                 std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(chunk_bytes))))
             }
             Ok(FiberStep::Returned(_)) => {
@@ -4333,6 +4356,128 @@ mod tests {
         assert!(
             !response_text.contains("alpha_beta"),
             "P2b.2b.3 streaming must NOT concatenate writes, got:\n{response_text}",
+        );
+    }
+
+    /// P2b.2b.4: chunk-timing proof. A streaming body that
+    /// yields `FIRST`, blocks for ~500ms, then yields
+    /// `SECOND` must deliver `FIRST` to the client BEFORE
+    /// the 500ms wall clock elapses. Buffered would
+    /// concatenate both into one chunk arriving only after
+    /// the body returns — so the time-gap between `FIRST`
+    /// and `SECOND` on the wire would be near 0.
+    ///
+    /// We measure: (arrival_time_of_SECOND − arrival_time_of_FIRST).
+    /// Streaming gap should be close to the sleep (500ms,
+    /// minus scheduling slack). We assert >= 250ms to keep
+    /// the test stable under CI jitter.
+    ///
+    /// The test registers a private `__rubyrs_test_sleep_ms`
+    /// host fn (real `std::thread::sleep`) on the runtime
+    /// — keeps this test self-contained without adding a
+    /// public `sleep` to rubyrs.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2b2b4_first_chunk_arrives_before_body_finishes() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let server_addr = "127.0.0.1:18132";
+        let sleep_ms: u64 = 500;
+
+        let client_thread = thread::spawn(move || -> (String, Option<Duration>, Option<Duration>) {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            client.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+
+            let start = Instant::now();
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let mut first_at: Option<Duration> = None;
+            let mut second_at: Option<Duration> = None;
+
+            loop {
+                match client.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        let s = String::from_utf8_lossy(&buf);
+                        if first_at.is_none() && s.contains("FIRST_CHUNK") {
+                            first_at = Some(start.elapsed());
+                        }
+                        if second_at.is_none() && s.contains("SECOND_CHUNK") {
+                            second_at = Some(start.elapsed());
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            (String::from_utf8_lossy(&buf).into_owned(), first_at, second_at)
+        });
+
+        let mut rt = crate::Runtime::new();
+        // Test-private sleep helper — real wall-clock sleep
+        // on the worker thread (acceptable: single
+        // connection, single-threaded tokio).
+        rt.register_fn("__rubyrs_test_sleep_ms", |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let ms = match args {
+                [Value::Int(n)] if *n >= 0 => *n as u64,
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_sleep_ms(ms: Integer)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            std::thread::sleep(Duration::from_millis(ms));
+            Ok(crate::value::Value::Nil)
+        });
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class SlowStream
+              def each
+                yield "FIRST_CHUNK\n"
+                __rubyrs_test_sleep_ms({sleep_ms})
+                yield "SECOND_CHUNK\n"
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, SlowStream.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 3, app)
+        "#), "p2b2b4_timing.rb").expect("server ran");
+
+        let (response_text, first_at, second_at) = client_thread.join().expect("client thread");
+        let first_at = first_at.unwrap_or_else(|| panic!("FIRST_CHUNK must arrive; response:\n{response_text}"));
+        let second_at = second_at.unwrap_or_else(|| panic!("SECOND_CHUNK must arrive; response:\n{response_text}"));
+
+        let gap = second_at.saturating_sub(first_at);
+        // Half the sleep is a comfortable lower bound:
+        // streaming should produce ~500ms gap; buffered
+        // would produce ~0ms. 250ms cleanly separates the
+        // two regimes.
+        let min_gap = Duration::from_millis(sleep_ms / 2);
+        assert!(
+            gap >= min_gap,
+            "P2b.2b.4: gap between FIRST_CHUNK and SECOND_CHUNK arrival must be >= {min_gap:?} \
+             (Ruby slept {sleep_ms}ms between yields). Got gap={gap:?}, first_at={first_at:?}, \
+             second_at={second_at:?}. A near-zero gap indicates buffered fallback.\nresponse:\n{response_text}",
+        );
+        // Sanity: FIRST should arrive close to start
+        // (well before the sleep finishes). Streaming
+        // implies first_at < sleep_ms; buffered would have
+        // first_at >= sleep_ms.
+        assert!(
+            first_at < Duration::from_millis(sleep_ms),
+            "P2b.2b.4: FIRST_CHUNK must arrive before the sleep elapses ({sleep_ms}ms); \
+             got first_at={first_at:?}. Late first-chunk indicates buffering.",
         );
     }
 
