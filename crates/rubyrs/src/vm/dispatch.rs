@@ -24,7 +24,7 @@ use crate::heap::HeapObj;
 use crate::intern::SymId;
 use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 
-#[cfg(all(feature = "cext", not(target_os = "wasi")))]
+#[cfg(any(all(feature = "cext", not(target_os = "wasi")), feature = "_http_server"))]
 use super::with_vm_ptr_set;
 use super::{
     primitive_call, value_cmp_v_heap, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
@@ -253,12 +253,28 @@ impl Vm {
                 // future non-cext V1 host needs TLS-Vm access, this
                 // is the site to move `with_vm_ptr_set` out of
                 // `mod cext` and lift the cfg gate.
-                #[cfg(all(feature = "cext", not(target_os = "wasi")))]
+                // Set the TLS Vm pointer for re-entrant V1
+                // host fns:
+                //   - cext bridge: rb_funcallv callback
+                //     dispatches through CURRENT_VM_PTR
+                //   - _http_server battery: per-request Ruby
+                //     block invocation reads CURRENT_VM_PTR
+                //     to access &mut Vm for step_block
+                // Either feature enables the machinery; both
+                // share the same TLS slot defined in
+                // super::vm_ptr.
+                #[cfg(any(
+                    all(feature = "cext", not(target_os = "wasi")),
+                    feature = "_http_server",
+                ))]
                 {
                     let vm_ptr: *mut Vm = self;
                     with_vm_ptr_set(vm_ptr, || host(args))
                 }
-                #[cfg(any(not(feature = "cext"), target_os = "wasi"))]
+                #[cfg(not(any(
+                    all(feature = "cext", not(target_os = "wasi")),
+                    feature = "_http_server",
+                )))]
                 { host(args) }
             }
             HostFnSlot::V2(host) => {

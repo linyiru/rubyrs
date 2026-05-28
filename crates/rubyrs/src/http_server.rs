@@ -390,6 +390,38 @@ mod tests {
         })
     }
 
+    /// Stage 4b verification: confirm that
+    /// `current_vm_ptr()` returns a non-null pointer when
+    /// called inside a host fn body. This proves the
+    /// dispatch path correctly sets `CURRENT_VM_PTR` for the
+    /// `_http_server` feature path (independent of `cext`)
+    /// — stage 4c's per-request handler will rely on this
+    /// to invoke the Ruby block.
+    ///
+    /// The test registers a sentinel host fn that asserts
+    /// the pointer is non-null at call time. Ruby invokes
+    /// it; if the dispatch wiring is correct, the fn
+    /// returns Nil. If `_http_server` is enabled but the
+    /// cfg gate wasn't widened, the pointer would be null
+    /// and the test fails inside the closure.
+    #[test]
+    fn current_vm_ptr_is_set_inside_http_server_host_fn() {
+        use crate::vm::current_vm_ptr;
+
+        let mut rt = crate::Runtime::new();
+        rt.register_fn("__sentinel_check_vm_ptr", |_args| {
+            let ptr = current_vm_ptr();
+            assert!(!ptr.is_null(),
+                "expected CURRENT_VM_PTR to be set inside host fn body; \
+                 got null. Did the cfg gate at vm/dispatch.rs::invoke_host_fn \
+                 widen to include `feature = \"_http_server\"`?",
+            );
+            Ok(crate::value::Value::Nil)
+        });
+        rt.eval(r#"__sentinel_check_vm_ptr"#, "stage_4b_check.rb")
+            .expect("sentinel host fn returned Nil cleanly");
+    }
+
     /// Stage 3 integration test: register the host fns,
     /// then have a Ruby script invoke
     /// `__rubyrs_http_serve_hardcoded` with a 0-second

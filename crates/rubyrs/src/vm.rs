@@ -34,8 +34,20 @@ mod string;
 mod util;
 #[cfg(feature = "bignum")]
 pub(crate) use bignum::bigint_equals_float_lossless;
-#[cfg(all(feature = "cext", not(target_os = "wasi")))]
-pub(crate) use cext::with_vm_ptr_set;
+// `with_vm_ptr_set` lives in `vm_ptr` (extracted from cext in
+// PoC stage 4a). Re-export from here so both the cext bridge
+// and the `_http_server` battery's dispatch path find it via
+// `super::with_vm_ptr_set`.
+#[cfg(any(all(feature = "cext", not(target_os = "wasi")), feature = "_http_server"))]
+pub(crate) use vm_ptr::with_vm_ptr_set;
+// `current_vm_ptr` is the read-side used by host fn bodies
+// that re-enter the Vm. _http_server battery's per-request
+// handler uses this to access &mut Vm without the host fn
+// signature itself needing to carry one. Only `#[cfg(test)]`
+// today (stage 4b verification test); the production
+// per-request handler (stage 4c+) will drop the cfg gate.
+#[cfg(all(feature = "_http_server", test))]
+pub(crate) use vm_ptr::current_vm_ptr;
 pub(crate) use numeric::{floor_div_i64, floor_mod_i64, int_cmp_float_lossless};
 pub(crate) use lookup::{class_is_a, flatten_ancestors, CallCache};
 pub use lookup::IcStats;
