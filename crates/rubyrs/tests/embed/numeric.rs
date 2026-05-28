@@ -3016,6 +3016,39 @@ fn numeric_coerce_basic() {
     }
 }
 
+#[cfg(feature = "bignum")]
+#[test]
+fn numeric_coerce_pass_through_bigint_survives_stress_gc() {
+    // Regression guard for the GC root hole Copilot flagged on
+    // PR #289: when `coerce` returns existing BigInt values
+    // unchanged (e.g. `1.coerce(2**64)` / `(2**64).coerce(1)`),
+    // the BigInt ObjIds live only as Rust locals between the
+    // stack drain and the result Array allocation. Without a
+    // PinGuard, the maybe_gc fired inside that window swept
+    // the BigInt before it was rooted in the Array.
+    //
+    // Stress GC trips a collect on every allocation, so the bug
+    // is reliably observable under this config when present.
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        stress_gc: true,
+        ..Default::default()
+    });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts 1.coerce(2**64).inspect; \
+         puts (2**64).coerce(1).inspect; \
+         puts (2**64).coerce(2**70).inspect",
+        "coerce_stress_gc.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "[18446744073709551616, 1]\n\
+         [1, 18446744073709551616]\n\
+         [1180591620717411303424, 18446744073709551616]",
+    );
+}
+
 #[test]
 fn float_domain_error_class_and_rescue_chain() {
     // FloatDomainError sits at FloatDomainError < RangeError <

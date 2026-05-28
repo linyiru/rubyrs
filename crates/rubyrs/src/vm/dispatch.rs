@@ -4636,10 +4636,24 @@ impl Vm {
                     }));
                 }
             };
-            self.maybe_gc();
-            self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Array(vec![other_v, self_v]));
-            self.stack.push(Value::Array(id));
+            // GC root hole: both `other_v` and `self_v` may carry
+            // pass-through BigInt ObjIds whose only live root at this
+            // point is the Rust local (recv / args were drained from
+            // the stack on the way in). Without the PinGuard,
+            // `maybe_gc()` runs with those ObjIds unreachable and
+            // sweeps the BigInt — leaving the result Array with a
+            // dangling slot. Pin both Values across the alloc; drop
+            // restores normal GC reachability via the freshly-pushed
+            // `Value::Array(id)` on the stack.
+            let arr_id = {
+                let mut g = PinGuard::new(self);
+                g.pin(other_v.clone());
+                g.pin(self_v.clone());
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                g.vm.heap.alloc(HeapObj::Array(vec![other_v, self_v]))
+            };
+            self.stack.push(Value::Array(arr_id));
             return Ok(());
         }
         if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
