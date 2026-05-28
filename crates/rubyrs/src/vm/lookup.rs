@@ -459,8 +459,11 @@ impl Vm {
             // `instance_exec` is a universal dispatch arm (block-form
             // self-swap, parity with `instance_eval`). Whitelisted
             // here so feature detection agrees with what dispatch
-            // accepts on every receiver type.
-            | "instance_exec"
+            // accepts on every receiver type. `instance_eval`
+            // joins for the same reason — both are universal
+            // dispatch arms and both surface in BasicObject's
+            // reflection registry.
+            | "instance_exec" | "instance_eval"
         ) {
             return true;
         }
