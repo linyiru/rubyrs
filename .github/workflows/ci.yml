@@ -655,3 +655,77 @@ jobs:
           cargo +nightly miri test --lib -p rubyrs vm::raise::
           cargo +nightly miri test --lib -p rubyrs vm::cext::miri_tests::
           cargo +nightly miri test -p rubyrs-cext --test safety_negative
+
+  coverage:
+    name: Coverage (per-file ratchet)
+    # Same ratchet philosophy as panic-budget / perf-budget: per-file
+    # baselines stored in-tree; CI fails if any file drops below
+    # `baseline - tolerance_pct`. The tolerance absorbs sub-1% noise from
+    # minor refactors; intentional drops are reviewed via the baseline-
+    # JSON diff. See docs/COVERAGE.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install Ruby (oracle for diff tests)
+        # The same diff-vs-CRuby integration tests the `test` job uses;
+        # without Ruby on PATH they're skipped, which would deflate the
+        # measured coverage and force a baseline lowering on every run.
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Cache cargo registry + cargo-llvm-cov
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            target
+          # Separate cache key from `test` job — the coverage job needs
+          # an INSTRUMENTED build (rustc-LLVM-cov flags differ), so its
+          # target/ artifacts shouldn't share with the release-built test
+          # job's cache or each would invalidate the other's.
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-
+
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! command -v cargo-llvm-cov >/dev/null; then
+            cargo install cargo-llvm-cov --locked
+          fi
+          cargo llvm-cov --version
+
+      - name: Generate LCOV report
+        # `--workspace` covers every crate in the workspace; the ratchet
+        # script filters to `crates/` so registry-built deps don't pollute
+        # the baseline. `--lcov` is the standard format and matches the
+        # ratchet's parser. `--all-targets` covers integration tests too
+        # (under tests/), which exercise embed-API surfaces the unit
+        # tests miss. STRESS_GC stays OFF here — coverage doesn't care
+        # about GC pressure, and the extra runtime cost is wasted.
+        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+
+      - name: Ratchet per-file coverage
+        # Compares parsed LCOV against crates/rubyrs/coverage_baseline.json.
+        # Fails on any file below `baseline - tolerance_pct` (1.0% default).
+        # New source files without a baseline also fail — the host adds
+        # them via `python3 scripts/coverage_ratchet.py --update` after
+        # measuring locally; the baseline diff lands in the PR.
+        run: python3 scripts/coverage_ratchet.py --lcov lcov.info --baseline crates/rubyrs/coverage_baseline.json
+
+      - name: Upload LCOV artifact
+        # Available for download from the Actions UI so reviewers can
+        # inspect the per-line picture when investigating a regression.
+        # Kept for 30 days (default).
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-${{ github.run_id }}
+          path: lcov.info

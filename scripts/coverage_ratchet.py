@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Per-file line-coverage ratchet.
+
+Reads an LCOV file (`cargo llvm-cov --lcov`), compares per-file line% against
+a committed baseline JSON, and fails CI if any file drops below
+`baseline - tolerance_pct`.
+
+Baselines are rounded DOWN to whole percentage points so minor refactor noise
+doesn't flap the gate. Hosts BUMP a baseline by re-running with --update after
+adding tests; LOWERING a baseline is intentional and reviewed in the PR diff.
+
+Companion to docs/PANIC_AUDIT.md / the panic-budget CI job — same ratchet
+philosophy, different signal.
+
+Usage:
+    python3 scripts/coverage_ratchet.py \\
+        --lcov lcov.info \\
+        --baseline crates/rubyrs/coverage_baseline.json
+
+    # Refresh baselines after improvements:
+    python3 scripts/coverage_ratchet.py \\
+        --lcov lcov.info \\
+        --baseline crates/rubyrs/coverage_baseline.json \\
+        --update
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from pathlib import Path
+
+
+def parse_lcov(path: Path) -> dict[str, tuple[int, int]]:
+    """Return `{relative_source_path: (lines_hit, lines_found)}`.
+
+    LCOV record shape (only the fields we need):
+
+        SF:<source path>
+        LF:<lines instrumented>
+        LH:<lines hit>
+        end_of_record
+    """
+    out: dict[str, tuple[int, int]] = {}
+    src: str | None = None
+    lh: int | None = None
+    lf: int | None = None
+    with path.open() as fh:
+        for raw in fh:
+            line = raw.strip()
+            if line.startswith("SF:"):
+                src = line[3:]
+            elif line.startswith("LH:"):
+                lh = int(line[3:])
+            elif line.startswith("LF:"):
+                lf = int(line[3:])
+            elif line == "end_of_record":
+                if src is not None and lh is not None and lf is not None:
+                    out[src] = (lh, lf)
+                src, lh, lf = None, None, None
+    return out
+
+
+def normalize(path: str, repo_root: Path) -> str:
+    """LCOV emits absolute paths; baselines are repo-relative for portability."""
+    p = Path(path)
+    try:
+        return str(p.resolve().relative_to(repo_root.resolve()))
+    except ValueError:
+        # Outside the repo (a dep) — leave absolute so it's skipped by the
+        # `files` allowlist in the baseline.
+        return str(p)
+
+
+def pct(hit: int, found: int) -> float:
+    if found == 0:
+        return 100.0
+    return hit / found * 100.0
+
+
+def floor_to_int(x: float) -> int:
+    """Round DOWN to whole percent — baseline absorbs sub-1% noise."""
+    return int(math.floor(x))
+
+
+def load_baseline(path: Path) -> dict:
+    if not path.exists():
+        return {"tolerance_pct": 1.0, "files": {}}
+    with path.open() as fh:
+        return json.load(fh)
+
+
+def write_baseline(path: Path, data: dict) -> None:
+    # Sort keys for stable diffs.
+    files_sorted = dict(sorted(data["files"].items()))
+    data["files"] = files_sorted
+    with path.open("w") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--lcov", type=Path, required=True, help="Path to lcov.info from cargo llvm-cov")
+    ap.add_argument("--baseline", type=Path, required=True, help="Path to coverage baseline JSON")
+    ap.add_argument(
+        "--update",
+        action="store_true",
+        help="Rewrite baseline with current measurements (rounded down to whole percent).",
+    )
+    ap.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent,
+        help="Repo root (default: parent of scripts/)",
+    )
+    args = ap.parse_args()
+
+    if not args.lcov.exists():
+        print(f"::error::lcov file not found: {args.lcov}", file=sys.stderr)
+        return 2
+
+    coverage = parse_lcov(args.lcov)
+    # Filter to repo-relative paths (drops third-party deps).
+    rel = {}
+    for path, (hit, found) in coverage.items():
+        norm = normalize(path, args.repo_root)
+        # Only ratchet files under our crates/. Excludes registry/index/git
+        # dep paths LCOV may emit when --workspace pulls them in, plus any
+        # test files that slip through (cargo llvm-cov by default measures
+        # coverage OF library code BY tests, so test files shouldn't appear
+        # — but defensive filter for sub-crate test trees).
+        if norm.startswith("crates/") and "/tests/" not in norm:
+            rel[norm] = (hit, found, pct(hit, found))
+
+    baseline = load_baseline(args.baseline)
+    tolerance = float(baseline.get("tolerance_pct", 1.0))
+    baselines = baseline.get("files", {})
+
+    if args.update:
+        new_files = {f: floor_to_int(v[2]) for f, v in rel.items()}
+        baseline["files"] = new_files
+        baseline.setdefault("tolerance_pct", tolerance)
+        baseline.setdefault(
+            "_doc",
+            "Per-file line-coverage baselines, percent points (whole numbers). "
+            "Generated by scripts/coverage_ratchet.py --update. "
+            "Files NEW to the project default to their first measured %; "
+            "files DROPPED from the project must also be dropped here. "
+            "See docs/COVERAGE.md.",
+        )
+        write_baseline(args.baseline, baseline)
+        print(f"Wrote {len(new_files)} baselines to {args.baseline}")
+        return 0
+
+    # Audit mode: any file < baseline - tolerance is a regression.
+    fail = 0
+    regressed: list[str] = []
+    missing_baseline: list[str] = []
+    for fpath, (hit, found, current) in sorted(rel.items()):
+        if fpath not in baselines:
+            missing_baseline.append(f"{fpath}: {current:.1f}% ({hit}/{found}) — no baseline")
+            continue
+        base = float(baselines[fpath])
+        floor = base - tolerance
+        if current + 1e-9 < floor:
+            regressed.append(
+                f"{fpath}: {current:.1f}% < baseline {base:.0f}% - {tolerance:.1f}% tolerance "
+                f"(={floor:.1f}%); {hit}/{found} lines"
+            )
+            fail = 1
+        else:
+            arrow = "+" if current >= base else "~"
+            print(f"  {arrow} {fpath}: {current:.1f}% (baseline {base:.0f}%)")
+
+    # New source files without baselines — fail by default; host runs --update
+    # to add them. Mirrors the panic-budget pattern (every file has an entry).
+    if missing_baseline:
+        fail = 1
+        print("\n::error::Source files without coverage baselines:")
+        for line in missing_baseline:
+            print(f"  {line}")
+        print(
+            "Fix: after adding the new files to the project, run "
+            "`python3 scripts/coverage_ratchet.py --lcov lcov.info "
+            f"--baseline {args.baseline} --update` to capture baselines."
+        )
+
+    # Baselines for files no longer in the project — warn but don't fail.
+    stale = sorted(set(baselines) - set(rel))
+    if stale:
+        print("\n::warning::Baselines for files that no longer exist in the project:")
+        for s in stale:
+            print(f"  {s}: {baselines[s]:.0f}% (consider removing from baseline)")
+
+    if regressed:
+        print("\n::error::Coverage regressions:")
+        for line in regressed:
+            print(f"  {line}")
+        print(
+            "\nFix: either add tests so coverage recovers, OR (if the drop is "
+            "intentional — e.g., production-code grew with deferred test work) "
+            "rerun with --update and document in the PR body. Lowering a "
+            "baseline is reviewed in the PR diff."
+        )
+
+    return fail
+
+
+if __name__ == "__main__":
+    sys.exit(main())
