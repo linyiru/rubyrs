@@ -656,7 +656,7 @@ fn error_response(status: u16, msg: String) -> Response<Full<Bytes>> {
 /// block per request instead of returning a hardcoded
 /// response. Caller supplies the block_id; the listener's
 /// connection handlers all close over the same block.
-#[allow(clippy::too_many_arguments)] // 6 args; signature stays flat for stage-by-stage growth
+#[allow(clippy::too_many_arguments)] // 7 args; signature stays flat for stage-by-stage growth
 async fn serve_with_app_until_shutdown(
     listener: TcpListener,
     block_id: crate::value::ObjId,
@@ -664,6 +664,7 @@ async fn serve_with_app_until_shutdown(
     per_request_fuel: Option<u64>,
     max_request_body_bytes: usize,
     per_request_io_deadline: Option<std::time::Duration>,
+    max_headers: Option<usize>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
     loop {
@@ -681,9 +682,21 @@ async fn serve_with_app_until_shutdown(
                             per_request_io_deadline,
                         )
                     });
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(io, svc)
-                        .await;
+                    // hyper auto-responds 431 Request Header
+                    // Fields Too Large when the request has
+                    // more headers than `max_headers` (counts
+                    // headers, not bytes). The parser layer
+                    // handles this BEFORE our service_fn
+                    // runs, so the app block is never
+                    // invoked for an oversized-header
+                    // request — same security guarantee as
+                    // the Limited body cap (stage 6a) and
+                    // the I/O deadline (stage 6b).
+                    let mut builder = hyper::server::conn::http1::Builder::new();
+                    if let Some(n) = max_headers {
+                        builder.max_headers(n);
+                    }
+                    let _ = builder.serve_connection(io, svc).await;
                 });
             }
         }
@@ -696,6 +709,7 @@ async fn serve_with_app_until_shutdown(
 /// Stage 4c.3 entry point — wired into the
 /// `__rubyrs_http_serve_with_app(addr, secs, app)` host fn
 /// via `register_host_fns`.
+#[allow(clippy::too_many_arguments)] // 7 args; flat for stage-by-stage growth
 pub(crate) fn run_blocking_for_duration_with_app(
     addr: SocketAddr,
     duration: std::time::Duration,
@@ -703,6 +717,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
     per_request_fuel: Option<u64>,
     max_request_body_bytes: usize,
     per_request_io_deadline: Option<std::time::Duration>,
+    max_headers: Option<usize>,
 ) -> std::io::Result<SocketAddr> {
     let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -717,6 +732,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
                 listener, block_id, listener_addr,
                 per_request_fuel, max_request_body_bytes,
                 per_request_io_deadline,
+                max_headers,
                 shutdown_rx,
             ) => res?,
             _ = tokio::time::sleep(duration) => {}
@@ -837,11 +853,12 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     });
 
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        // Argument shape (3 / 4 / 5 / 6 args, growing):
+        // Argument shape (3 / 4 / 5 / 6 / 7 args, growing):
         //   (addr, secs, app)
         //   (addr, secs, app, per_request_fuel)
         //   (addr, secs, app, per_request_fuel, max_body_bytes)
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms)
+        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers)
         //
         // Each positional adds one more security knob. Per
         // ADR 0022 v5 these will eventually move into a
@@ -862,34 +879,52 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 Ok(())
             }
         };
-        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline) = match args {
+        // Helper for io_deadline_ms semantics (0 disables).
+        let parse_io_deadline = |ms: i64| -> Option<Duration> {
+            if ms == 0 { None } else { Some(Duration::from_millis(ms as u64)) }
+        };
+        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None)
+                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
                 check_non_negative("io_deadline_ms", *io_ms)?;
-                let deadline = if *io_ms == 0 {
-                    None  // 0 disables the deadline; matches Bun.serve idle_timeout=0 idiom
-                } else {
-                    Some(Duration::from_millis(*io_ms as u64))
-                };
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, deadline)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), None)
+            }
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h)] => {
+                check_non_negative("per_request_fuel", *fuel)?;
+                check_non_negative("max_body_bytes", *max_body)?;
+                check_non_negative("io_deadline_ms", *io_ms)?;
+                // max_headers = 0 → use hyper default (100);
+                // otherwise apply explicit cap. Matches the
+                // "0 disables / unsets" idiom used by
+                // io_deadline_ms above.
+                if *max_h < 0 {
+                    return Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: format!("max_headers must be non-negative, got {max_h}"),
+                        },
+                        backtrace: vec![],
+                    });
+                }
+                let max_headers = if *max_h == 0 { None } else { Some(*max_h as usize) };
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers)
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0)"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0, max_headers: Integer = 0)"
                             .to_string(),
                     },
                     backtrace: vec![],
@@ -915,7 +950,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
         let duration = Duration::from_secs(duration_secs as u64);
         let bound = run_blocking_for_duration_with_app(
-            addr, duration, block_id, per_request_fuel, max_body_bytes, io_deadline,
+            addr, duration, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers,
         ).map_err(|e| Trap {
             err: RubyError::RuntimeError {
                 msg: format!("http_serve_with_app: {e}"),
@@ -1180,6 +1215,127 @@ mod tests {
             raise "unknown key should return nil" \
                 unless env["NONEXISTENT_KEY"].nil?
         "#, "stage_4c1_check.rb").expect("env hash Ruby-side assertions all hold");
+    }
+
+    /// Stage 6c: request with too many headers triggers
+    /// HTTP 431 Request Header Fields Too Large at the
+    /// hyper parser layer — the app block is NEVER
+    /// invoked, the parser short-circuits before
+    /// service_fn dispatch.
+    ///
+    /// hyper's `Builder::max_headers(N)` rejects any
+    /// request with more than N headers. Default 100;
+    /// caller passes a smaller value to lock it down for
+    /// untrusted-client scenarios.
+    ///
+    /// Test shape:
+    ///   - max_headers = 5 (very tight cap)
+    ///   - Client sends 50 distinct headers
+    ///   - Server returns 431
+    ///   - App block never invoked (global stays false)
+    #[test]
+    fn too_many_headers_yields_431_without_invoking_app() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18099";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            // 50 distinct headers — way above the cap of 5
+            // (Host counts as 1, so 49 X-Custom-N + Host =
+            // 50 total).
+            let mut req = String::from("GET /flood HTTP/1.1\r\nHost: localhost\r\n");
+            for i in 0..49 {
+                req.push_str(&format!("X-Custom-{i}: value{i}\r\n"));
+            }
+            req.push_str("Connection: close\r\n\r\n");
+            client.write_all(req.as_bytes()).expect("write request");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        // 7-arg form: max_headers = 5
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            $reached = false
+            app = ->(env) {{
+              $reached = true
+              [200, {{}}, ["should never reach this"]]
+            }}
+            __rubyrs_http_serve_with_app(
+              "{server_addr}", 1, app,
+              1_000_000, 10_000, 0, 5
+            )
+            raise "app must NOT run on header-count overflow; was reached" if $reached
+        "#), "stage_6c_header_count.rb").expect("server ran + app stayed cold");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 431"),
+            "expected 431 Request Header Fields Too Large, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 6c: when `max_headers = 0` (or arg omitted),
+    /// hyper's default of 100 applies — a request with
+    /// 10 headers passes through normally.
+    #[test]
+    fn header_count_default_allows_normal_traffic() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18100";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            // 10 headers — well under hyper's default (100)
+            let mut req = String::from("GET /normal HTTP/1.1\r\nHost: localhost\r\n");
+            for i in 0..9 {
+                req.push_str(&format!("X-Custom-{i}: v{i}\r\n"));
+            }
+            req.push_str("Connection: close\r\n\r\n");
+            client.write_all(req.as_bytes()).expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        // 7-arg form with max_headers = 0 (use hyper default)
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            app = ->(env) {{
+              count = env.keys.count {{ |k| k.start_with?("HTTP_X_CUSTOM_") }}
+              [200, {{"Content-Type" => "text/plain"}}, ["custom_headers=#{{count}}"]]
+            }}
+            __rubyrs_http_serve_with_app(
+              "{server_addr}", 1, app,
+              1_000_000, 10_000, 0, 0
+            )
+        "#), "stage_6c_header_default.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 OK for 10-header request, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("custom_headers=9"),
+            "expected 9 X-Custom-* headers in env, got:\n{response_text}",
+        );
     }
 
     /// Stage 6b: slow-body upload triggers 504 Gateway
