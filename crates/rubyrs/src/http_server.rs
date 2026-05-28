@@ -311,9 +311,8 @@ fn install_prefork_signal_handlers() {
 ///   This is the production-grade path for pre-fork.
 /// - **FreeBSD**: has `SO_REUSEPORT_LB` (constant 0x10000)
 ///   for kernel-LB; plain `SO_REUSEPORT` is permissive only.
-///   We currently set only `SO_REUSEPORT` here — FreeBSD
-///   users running pre-fork should add the LB variant
-///   explicitly (TODO follow-up).
+///   A1 wires both — FreeBSD users running pre-fork get
+///   the same kernel hash-LB Linux provides.
 /// - **macOS / Darwin**: NO `SO_REUSEPORT_LB` (verified
 ///   against libc 0.2.169+ — only `SO_REUSEPORT=0x0200` is
 ///   exposed in `unix/bsd/apple/mod.rs`). Multiple binds
@@ -343,6 +342,15 @@ pub(crate) fn bind_reuseport_v4(addr: SocketAddr) -> std::io::Result<std::net::T
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
     socket.set_reuse_port(true)?;
+    // A1: FreeBSD has SO_REUSEPORT_LB (kernel hash-LB
+    // variant). Plain SO_REUSEPORT is permissive only on
+    // FreeBSD — the kernel allows multiple binds but
+    // doesn't load-balance. Setting the LB variant turns
+    // on the same 4-tuple-hash distribution Linux gets
+    // by default. Per FU3, Darwin doesn't expose this
+    // constant; Linux SO_REUSEPORT already implies LB.
+    #[cfg(target_os = "freebsd")]
+    socket.set_reuse_port_lb(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
     // Backlog 1024 matches Puma's default and is high

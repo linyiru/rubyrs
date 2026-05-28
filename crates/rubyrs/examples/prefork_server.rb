@@ -18,8 +18,8 @@
 #   connections to the most-recent listener — load distribution
 #   is OS-discretion. CoreFoundation/dispatch are officially
 #   fork-unsafe; production should be Linux.
-# - FreeBSD: SO_REUSEPORT_LB exists but isn't wired here yet
-#   (PoC TODO). Falls back to permissive SO_REUSEPORT.
+# - FreeBSD: A1 wires SO_REUSEPORT_LB (kernel hash-LB,
+#   same shape as Linux). Production-suitable.
 # - Windows: unsupported. N>=2 returns ArgumentError.
 #
 # Vm state across fork (per ADR 0022 v3 "Inherited state"):

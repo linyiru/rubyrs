@@ -254,7 +254,7 @@ for a runnable example.
 |----------|---------------|--------------|-------|
 | Linux 3.9+ | ✅ | ✅ — kernel hash-balanced SO_REUSEPORT | Production target |
 | macOS    | ✅ | ⚠️  dev-only | Workers fork + boot + serve, but Darwin has no `SO_REUSEPORT_LB` — kernel typically routes new connections to the most-recent listener, NOT hash-distributed. Apple's CoreFoundation/dispatch are officially fork-unsafe. |
-| FreeBSD  | ✅ | ⚠️  partial | `SO_REUSEPORT` only (permissive). Kernel-LB needs `SO_REUSEPORT_LB` set explicitly — not wired in this PoC (see `bind_reuseport_v4` doc TODO). |
+| FreeBSD  | ✅ | ✅ | Wires both `SO_REUSEPORT` + `SO_REUSEPORT_LB` (kernel hash-LB, same shape as Linux). |
 | Windows  | ✅ | ❌ | No `fork(2)`, no `SO_REUSEPORT` equivalent. N≥2 returns ArgumentError. |
 
 **Vm state across fork**: class defs, method tables, constants, and
