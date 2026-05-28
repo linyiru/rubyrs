@@ -67,7 +67,18 @@ pub(crate) const FLOAT_HASH_TAG: u8 = 0x46; // 'F'
 /// `"NaN"` for NaN, `"Infinity"` for `+Infinity`, `"-Infinity"`
 /// for `-Infinity`. Used by every Float→Integer trap site so the
 /// message text stays uniform across the surface.
+///
+/// Precondition: `a.is_nan() || a.is_infinite()`. Calling with a
+/// finite `a` (including `0.0` and any negative finite) falls
+/// through to the `"-Infinity"` branch and silently mislabels the
+/// trap — assert in debug so the contract is enforced at the
+/// helper instead of memorised at every call site.
 pub(crate) fn float_domain_label(a: f64) -> &'static str {
+    debug_assert!(
+        a.is_nan() || a.is_infinite(),
+        "float_domain_label called with finite value {}",
+        a,
+    );
     if a.is_nan() {
         "NaN"
     } else if a > 0.0 {
