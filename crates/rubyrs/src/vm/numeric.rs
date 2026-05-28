@@ -970,9 +970,12 @@ pub(crate) fn floor_mod_i64(a: i64, b: i64) -> i64 {
 /// `a - (a/b).floor() * b` formulation: `1.0 % Infinity` is 1.0
 /// here (CRuby parity), not NaN.
 ///
-/// NaN / NaN-propagation: if either operand is NaN, Rust's `%`
-/// returns NaN, the sign comparison short-circuits (NaN < 0 is
-/// false on both sides), and we return NaN — matches CRuby.
+/// NaN propagation: if either operand is NaN, Rust's `%`
+/// returns NaN; the `(r < 0.0) != (b < 0.0)` test then evaluates
+/// (both halves are false since `NaN < 0.0` is false), so the
+/// `r + b` branch may execute, but `NaN + anything == NaN`, so
+/// the result is still NaN — matches CRuby's `Float#%` on NaN
+/// inputs.
 pub(crate) fn floor_mod_f64(a: f64, b: f64) -> f64 {
     let r = a % b;
     if r != 0.0 && (r < 0.0) != (b < 0.0) {

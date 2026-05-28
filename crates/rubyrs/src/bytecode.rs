@@ -476,11 +476,12 @@ impl BinOpKind {
             // remainder's sign matches the divisor's sign, so
             // `(-13) / 4 == -4` (Rust's wrapping_div gives -3) and
             // `(-13) % 4 == 3` (Rust's wrapping_rem gives -1).
-            // Delegated to the helpers in `vm::numeric` so the
-            // method-call path (`5.send(:/, 2)`) and the BinOp
-            // fast path stay in lock-step. See
-            // `crate::vm::numeric::floor_div_i64` /
-            // `floor_mod_i64`.
+            // Delegated to the helpers re-exported through `vm`
+            // (`crate::vm::floor_div_i64` / `crate::vm::floor_mod_i64`)
+            // so the method-call path (`5.send(:/, 2)`) and this
+            // BinOp fast path stay in lock-step. Definitions live
+            // in vm/numeric.rs, but that module is private — the
+            // re-exports in vm.rs are what we can name from here.
             //
             // `i64::MIN / -1` is the one overflow case: the result
             // `2^63` doesn't fit i64. Bignum builds return None
