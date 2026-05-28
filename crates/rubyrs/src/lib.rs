@@ -34,6 +34,8 @@ mod bytecode;
 mod compiler;
 mod error;
 mod heap;
+#[cfg(feature = "_http_server")]
+mod http_server;
 mod intern;
 mod output;
 #[cfg(feature = "stdlib")]
@@ -44,6 +46,9 @@ mod vm;
 pub use output::{NullSink, OutputError, OutputSink};
 #[cfg(feature = "std-sink")]
 pub use output::StdSink;
+
+#[cfg(feature = "_http_server")]
+pub use http_server::HttpServerConfig;
 
 use std::io::Write;
 use std::path::Path;

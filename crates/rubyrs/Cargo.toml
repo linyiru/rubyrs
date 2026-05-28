@@ -122,6 +122,24 @@ trace-startup = []
 # Zero-cost when off: `IcStats` is a ZST and `record_hit` /
 # `record_miss` compile to nothing.
 ic-stats = []
+# `_http_server` enables the inbound HTTP server battery per
+# ADR 0022 v4. Pulls in hyper + tokio (current-thread runtime)
+# + http-body-util + bytes for the wire-protocol side; the
+# Ruby-facing `Rubyrs::HttpServer` class plus Rack SPEC env
+# hash construction live in `crates/rubyrs/src/http_server.rs`.
+# Opt-in only; not in `default` because the dep tree adds
+# ~12-18 MB stripped on top of the Tier 1 build. Per ADR 0019
+# v3 Rule 3, batteries are individually opt-in. Phase H1
+# (this PoC) ships HTTP/1.1 + buffered body in/out only;
+# H2/H3/TLS land as separate batteries.
+_http_server = [
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:tokio",
+    "dep:http-body-util",
+    "dep:bytes",
+    "dep:http",
+]
 
 [dependencies]
 ruby-prism.workspace = true
@@ -130,6 +148,14 @@ regex = { version = "1", optional = true }
 # pulled in. ADR 0018 Phase 1 will switch this to `default-features =
 # false` when rubyrs-core extracts (num-bigint's `std` is opt-out).
 num-bigint = { version = "0.4", optional = true }
+# `_http_server` battery dependencies (ADR 0022 v4). All
+# optional behind the feature flag.
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio", "server"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "signal", "time", "macros"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+http = { version = "1", optional = true }
 # Brings `num_integer::Integer::div_rem` into scope so we can do
 # one division step (returning quotient + remainder) instead of
 # separate `/` and `%` divisions inside `Integer#digits`'s loop.
