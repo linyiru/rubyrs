@@ -2662,18 +2662,122 @@ impl Vm {
         Ok(ClassOutcome::NotHandled { args, recv })
     }
 
-        /// Shim for `Op::CallKw*` — the compiler marks call sites
-        /// whose trailing arg came from `KeywordHashNode` (`foo(k: v)`
-        /// sugar) so the dispatcher can route that Hash to a dedicated
-        /// kwargs channel. Currently delegates to [`do_call`]; a
-        /// follow-up commit will pop the trailing Hash into a
-        /// `pending_kwargs` slot consumed by `primitive_call` so
-        /// primitives can read `:half` etc. without inspecting the
-        /// positional args heuristically. Wiring the opcode path
-        /// first keeps the bytecode shape stable across the
-        /// transition.
+        /// `Op::CallKw*` entry — the compiler emits this for call
+        /// sites whose trailing arg came from `KeywordHashNode`
+        /// (`foo(k: v)` sugar). Peek at the trailing Hash on the
+        /// stack; if the call targets a primitive that consumes
+        /// the kwarg (currently only `Integer#round(half:)` /
+        /// `Float#round(half:)`), dispatch the kwarg-aware path
+        /// directly. Otherwise fall through to `do_call`, which
+        /// continues to treat the trailing Hash as a positional
+        /// arg — preserves today's behaviour for user-defined
+        /// methods (whose `invoke_method` already pops the Hash
+        /// when the proto declares kw_params) and for primitives
+        /// that genuinely take a positional Hash.
         pub(crate) fn do_call_kw(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
-            self.do_call(name_id, argc, no_recv, cache_id)
+            // Only `round` is kwarg-aware today. For everything
+            // else the trailing Hash travels as positional —
+            // identical to pre-CallKw behaviour, so user code
+            // that passed a literal Hash isn't blocked.
+            let name = self.interner.resolve(name_id).clone();
+            if &*name != "round" {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            if argc == 0 {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            // Trailing arg should be the kwargs Hash. Peek without
+            // disturbing the stack until we've confirmed we can
+            // handle this dispatch — otherwise the fallthrough to
+            // do_call needs the stack intact.
+            let trailing_idx = self.stack.len() - 1;
+            let trailing = self.stack[trailing_idx].clone();
+            let Value::Hash(hash_id) = trailing else {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            };
+            // Resolve the :half kwarg. CRuby raises
+            // `ArgumentError: unknown keyword: :foo` for unknown
+            // keys, `ArgumentError: invalid rounding mode: foo`
+            // for unknown values.
+            let half_sym = self.interner.intern("half");
+            let pairs: Vec<(Value, Value)> = self.heap.hash(hash_id).clone();
+            let mut mode = crate::vm::numeric::HalfMode::Up;
+            for (k, v) in &pairs {
+                match k {
+                    Value::Sym(s) if *s == half_sym => {
+                        match v {
+                            Value::Sym(vsym) => {
+                                let name = self.interner.resolve(*vsym).to_string();
+                                mode = match name.as_str() {
+                                    "up" => crate::vm::numeric::HalfMode::Up,
+                                    "down" => crate::vm::numeric::HalfMode::Down,
+                                    "even" => crate::vm::numeric::HalfMode::Even,
+                                    other => {
+                                        return Err(self.trap(RubyError::ArgumentError {
+                                            msg: format!("invalid rounding mode: {}", other),
+                                        }));
+                                    }
+                                };
+                            }
+                            _ => {
+                                return Err(self.trap(RubyError::ArgumentError {
+                                    msg: "invalid rounding mode: (non-symbol)".to_string(),
+                                }));
+                            }
+                        }
+                    }
+                    Value::Sym(s) => {
+                        let key = self.interner.resolve(*s).to_string();
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("unknown keyword: :{}", key),
+                        }));
+                    }
+                    _ => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "non-symbol key in keyword arguments".to_string(),
+                        }));
+                    }
+                }
+            }
+            // Pop the kwargs Hash + positional args + receiver
+            // off the stack to call the helper. The recv-shape
+            // mirrors do_call's split.
+            let _kwargs_hash = self.stack.pop().expect("ICE: kwargs hash");
+            let positional_argc = argc - 1; // exclude the kwargs Hash
+            let split = self.stack.len() - positional_argc;
+            let pos_args: Vec<Value> = self.stack.drain(split..).collect();
+            let recv = if no_recv {
+                self.frames.last().expect("ICE: do_call_kw no frames").self_val.clone()
+            } else {
+                self.stack.pop().expect("ICE: do_call_kw recv")
+            };
+            // Dispatch — for now only Int and Float receivers.
+            // Anything else falls back to NoMethodError-shape via
+            // a re-dispatch that pushes everything back; simpler
+            // initial scope: return ArgumentError if the receiver
+            // isn't Numeric (so misuse is loud).
+            let result = match (&recv, pos_args.as_slice()) {
+                (Value::Int(a), []) => crate::vm::numeric::int_round_with_half(*a, 0, mode),
+                (Value::Int(a), [Value::Int(n)]) => {
+                    crate::vm::numeric::int_round_with_half(*a, *n, mode)
+                }
+                (Value::Float(a), []) => {
+                    crate::vm::numeric::float_round_with_half(*a, 0, mode)
+                        .map_err(|e| self.trap(e))?
+                }
+                (Value::Float(a), [Value::Int(n)]) => {
+                    crate::vm::numeric::float_round_with_half(*a, *n, mode)
+                        .map_err(|e| self.trap(e))?
+                }
+                _ => {
+                    return Err(self.trap(RubyError::NoMethodError {
+                        method: format!("round(half:) on {}", recv.type_name()),
+                        recv_type: std::borrow::Cow::Owned(recv.type_name().to_string()),
+                    }));
+                }
+            };
+            self.stack.push(result);
+            Ok(())
         }
         pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch

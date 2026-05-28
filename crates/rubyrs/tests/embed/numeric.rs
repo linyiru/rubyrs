@@ -1479,6 +1479,60 @@ fn integer_ceil_floor_round_truncate_basic() {
 }
 
 #[test]
+fn round_half_kwarg_dispatch() {
+    // End-to-end pin for the new kwarg routing infra:
+    // `Op::CallKw` emitted for `foo(a, half: :up)` sugar →
+    // `do_call_kw` resolves the `:half` Symbol → dispatches
+    // `int_round_with_half` / `float_round_with_half`.
+    //
+    // Distinction from a positional Hash: `25.round(-1, {half:
+    // :up})` (explicit braces) is positional, hits the normal
+    // round arm, and the Hash is ignored — that's the today
+    // behaviour and is intentional for the MVP. Pin only the
+    // kwarg-sugar form here.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // Int receiver, default + each mode at half boundary.
+        ("puts 25.round(-1, half: :up)",   "30"),
+        ("puts 25.round(-1, half: :down)", "20"),
+        ("puts 25.round(-1, half: :even)", "20"),
+        ("puts 35.round(-1, half: :even)", "40"),
+        ("puts (-25).round(-1, half: :up)",   "-30"),
+        ("puts (-25).round(-1, half: :down)", "-20"),
+        // Float receiver, no-precision form.
+        ("puts 2.5.round(half: :up)",   "3"),
+        ("puts 2.5.round(half: :down)", "2"),
+        ("puts 2.5.round(half: :even)", "2"),
+        ("puts 3.5.round(half: :even)", "4"),
+        // Float receiver, negative-precision form.
+        ("puts 25.0.round(-1, half: :down)", "20"),
+        // Positional Hash WITHOUT kwarg sugar should NOT be
+        // routed through the kwarg path. `25.round(-1)` defaults
+        // to :up.
+        ("puts 25.round(-1)", "30"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "round_half.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Error shapes: unknown rounding mode + unknown kwarg key.
+    for (script, expected_class, expected_msg) in [
+        ("25.round(-1, half: :weird)", "ArgumentError", "invalid rounding mode: weird"),
+        ("25.round(-1, foo: :bar)",    "ArgumentError", "unknown keyword: :foo"),
+    ] {
+        let err = rt.eval(script, "round_half_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
+#[test]
 fn integer_divmod_fdiv_gcd_lcm_basic() {
     // Quick happy-path + error pin for the 4 methods landed in this
     // batch. Spec coverage lives in spec/ruby/integer_{divmod,fdiv,

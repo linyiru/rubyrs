@@ -5,11 +5,11 @@
 # - skipped (mock): the `mock("Object").should_receive(:to_int)`
 #   coerce tests — micro-runner has no mock library and the
 #   to_int protocol isn't wired through ceil/floor/round/truncate.
-# - skipped (method-not-implemented): `half:` keyword argument.
-#   rubyrs's dispatch doesn't yet route kwargs to method-call
-#   primitives uniformly; the default round-half-away-from-zero
-#   behavior is implemented but `:up` / `:down` / `:even` modes
-#   need kwarg plumbing. Tracked as follow-up.
+# - `half:` keyword argument (`:up` / `:down` / `:even`) is
+#   implemented via the dedicated `Op::CallKw*` kwarg-routing
+#   path; both Int and Float receivers route through
+#   `int_round_with_half` / `float_round_with_half` for these
+#   modes. Default :up matches CRuby's round-half-away-from-zero.
 # - skipped (method-not-implemented): `10**70`-magnitude inputs
 #   and precision -71 — needs BigInt-aware rounding.
 # - skipped (method-not-implemented): `min_long - 1` / `Float::INFINITY`
@@ -65,10 +65,32 @@ describe "Integer#round" do
   # skipped (mock): `mock("Object").should_receive(:to_int)` —
   # to_int coerce protocol is a separate follow-up.
 
-  # skipped (method-not-implemented): `half:` keyword arg
-  # (`25.round(-1, half: :up)` etc.). Default round-half-away-from-zero
-  # is implemented and matches `half: :up` for positive half;
-  # `:down` / `:even` modes need kwarg plumbing.
+  it "rounds to nearest, half away from zero by default and with half: :up" do
+    assert_eq(25.round(-1), 30)
+    assert_eq(25.round(-1, half: :up), 30)
+    assert_eq((-25).round(-1, half: :up), -30)
+  end
+
+  it "rounds half toward zero with half: :down" do
+    assert_eq(25.round(-1, half: :down), 20)
+    assert_eq(35.round(-1, half: :down), 30)
+    assert_eq((-25).round(-1, half: :down), -20)
+  end
+
+  it "rounds half to even with half: :even (banker's rounding)" do
+    assert_eq(25.round(-1, half: :even), 20)
+    assert_eq(35.round(-1, half: :even), 40)
+    assert_eq(45.round(-1, half: :even), 40)
+    assert_eq(55.round(-1, half: :even), 60)
+  end
+
+  it "raises ArgumentError for unknown half: value" do
+    assert_raises("ArgumentError") { 25.round(-1, half: :weird) }
+  end
+
+  it "raises ArgumentError for unknown kwarg key" do
+    assert_raises("ArgumentError") { 25.round(-1, foo: :bar) }
+  end
 
   # skipped (method-not-implemented): `42.round(min_long - 1)` /
   # `42.round(Float::INFINITY)` / `42.round(1<<31)` RangeError
