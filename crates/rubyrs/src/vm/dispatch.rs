@@ -4638,7 +4638,48 @@ impl Vm {
             self.stack.push(Value::Bool(yes));
             return Ok(());
         }
-        if self.try_method_missing(&recv, name_id, args, None)? {
+        if self.try_method_missing(&recv, name_id, args.clone(), None)? {
+            return Ok(());
+        }
+        // Kernel module-function fallback: CRuby's `Kernel#Array`,
+        // `Kernel#Integer`, `Kernel#Float`, `Kernel#String`,
+        // `Kernel#sprintf`, `Kernel#format` are private instance
+        // methods on Kernel (included in Object). With an
+        // explicit receiver CRuby raises NoMethodError-private,
+        // which lets `method_missing` intercept; only if NO
+        // `method_missing` is defined does the call actually
+        // surface as NoMethodError. We model the latter half
+        // here: when normal lookup AND method_missing miss, route
+        // to `builtin_call`. This sits AFTER `try_method_missing`
+        // so a user `method_missing` wins (matches CRuby), and
+        // before NoMethodError so sinatra's
+        // `codes.flat_map(&method(:Array))` shape (sinatra/base.rb
+        // :1404) — `method(:Array)` captures, `.call` re-dispatches
+        // through here with no user method_missing — succeeds.
+        // (TRY_RUNS layer #25.)
+        //
+        // `eval` is intentionally NOT in this set: with-recv
+        // `obj.eval(...)` would silently discard the receiver
+        // (Kernel#eval ignores it), which is surprise-driven.
+        // CRuby raises NoMethodError-private here. The
+        // `method(:eval).call(src)` route still works via the
+        // no_recv `builtin_call` at the top of do_call.
+        // (code-review #267 #3.)
+        if matches!(name.as_ref(),
+            "Array" | "Integer" | "Float" | "String"
+            | "sprintf" | "format"
+        ) && let Some(res) = self.builtin_call(name.as_ref(), &args) {
+            let v = res?;
+            // Mirror the flag handling in the no_recv builtin
+            // path (line 452-459): clears
+            // `suppress_call_result_push` if set; unconditionally
+            // pushing would corrupt the rescue handler's stack
+            // (Copilot review #267 round 1).
+            if self.suppress_call_result_push {
+                self.suppress_call_result_push = false;
+            } else {
+                self.stack.push(v);
+            }
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {

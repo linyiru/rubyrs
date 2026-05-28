@@ -147,6 +147,7 @@ fn run_diff(name: &str) {
 #[test] fn module_define_method() { run_diff("module_define_method"); }
 #[test] fn singleton_class_class_eval() { run_diff("singleton_class_class_eval"); }
 #[test] fn proc_arity() { run_diff("proc_arity"); }
+#[test] fn kernel_array_via_method() { run_diff("kernel_array_via_method"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }
