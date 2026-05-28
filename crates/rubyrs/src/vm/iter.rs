@@ -281,6 +281,17 @@ impl Vm {
         // tap/then/yield_self block path so the universal-arm
         // family stays together. (The no-block path is in
         // dispatch.rs.)
+        //
+        // Known limitation: this short-circuit (and the existing
+        // tap/then/yield_self ones) shadow user-defined overrides
+        // because `collection_call_block` runs before user-method
+        // lookup in `do_call_block`. A user class that
+        // \`def itself; ... end\` won't see its body invoked when
+        // a block is attached. Fixing this requires the same
+        // user-override probe pattern used by the `send` arm in
+        // dispatch.rs (lines ~513-523) but applied uniformly to
+        // the whole Object-extras family — out of scope for this
+        // PR; tracked as Tier-2 follow-up.
         if name == "itself" {
             if !args.is_empty() {
                 return Err(self.trap(crate::error::RubyError::ArgumentError {
