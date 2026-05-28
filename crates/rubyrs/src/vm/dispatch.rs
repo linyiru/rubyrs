@@ -1122,12 +1122,22 @@ impl Vm {
                 self.stack.push(Value::Int(h));
                 return Ok(CallableOutcome::Handled);
             }
-        // `m.source_location` — `[filename, lineno]` for user-
-        // defined methods; `nil` for builtins (no Method record
-        // in any class). Lineno is computed from the proto's
-        // first op_span via the Vm-side `sources` mirror; falls
-        // back to 0 if the source text isn't available (rare —
-        // synthesised protos for forwarders / preamble eval).
+        // `m.source_location` — three shapes:
+        //   - User-defined methods: `[filename, lineno]` derived
+        //     from the proto's first op_span via the Vm-side
+        //     `sources` mirror; falls back to lineno 0 if the
+        //     source text isn't available (rare — synthesised
+        //     protos for forwarders / preamble eval).
+        //   - Synth builtins with `source_label = Some(label)`
+        //     (Kernel reflection records): `[label, line]` where
+        //     label is the static "<internal:kernel>" string and
+        //     line is the meta's placeholder.
+        //   - Synth builtins with `source_label = None`
+        //     (BasicObject reflection records): `nil`. CRuby
+        //     reports nil for these C-defined methods even though
+        //     the Kernel set returns a label — we mirror.
+        //   - Methods with no snapshot (none-of-the-above
+        //     fallback): `nil`.
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
             && name == "source_location" && args.is_empty() {
                 // Prefer the snapshot Method so introspection
@@ -1160,7 +1170,14 @@ impl Vm {
                 // is a placeholder; reading `self.protos[0].filename`
                 // would surface an unrelated file.
                 if let Some(meta) = &m.builtin {
-                    let filename_str = Value::new_str(meta.source_label.to_string());
+                    // `None` source_label → nil. CRuby's behavior
+                    // for some C-defined methods (e.g.
+                    // BasicObject's __id__).
+                    let Some(label) = meta.source_label else {
+                        self.stack.push(Value::Nil);
+                        return Ok(CallableOutcome::Handled);
+                    };
+                    let filename_str = Value::new_str(label.to_string());
                     self.maybe_gc();
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(meta.source_line)]));
@@ -1961,12 +1978,17 @@ impl Vm {
                 // Kernel.methods deliberately so regular dispatch
                 // doesn't re-find it; the registry lives only for
                 // this introspection surface.
-                let snapshot = if cls.name == "Kernel" {
-                    self.kernel_builtin_method(*sid)
-                        .or_else(|| self.lookup_method_uncached(&cls, *sid))
-                } else {
-                    self.lookup_method_uncached(&cls, *sid)
-                };
+                // User-defined methods on the class table win —
+                // reopening Kernel/BasicObject to shadow `class` /
+                // `equal?` / etc. should surface that method
+                // through reflection, not the synth metadata.
+                // Registry is the fallback when the live table
+                // misses, and the ancestor-chain walk lets
+                // inherited reflection (`User.instance_method(:class)`
+                // → Kernel synth via Object→Kernel include chain)
+                // work the same as the direct case.
+                let snapshot = self.lookup_method_uncached(&cls, *sid)
+                    .or_else(|| self.builtin_method_via_ancestor_chain(&cls, *sid));
                 if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                     let mname = self.interner.resolve(*sid).to_string();
                     return Err(self.trap(RubyError::NameError {
@@ -2003,7 +2025,11 @@ impl Vm {
                         }));
                     }
                     let sid = self.interner.intern(raw);
-                    let snapshot = self.lookup_method_uncached(&cls, sid);
+                    // Same registry consultation as the Symbol-form
+                    // arm above — live table first, then ancestor-
+                    // chain walk so inherited reflection works.
+                    let snapshot = self.lookup_method_uncached(&cls, sid)
+                        .or_else(|| self.builtin_method_via_ancestor_chain(&cls, sid));
                     if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method '{}' for class '{}'", raw, cls.name),

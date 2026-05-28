@@ -553,6 +553,15 @@ pub(crate) struct Vm {
     /// uses this for O(1) HashMap lookup into `classes` instead of a
     /// linear name-string walk.
     pub(crate) kernel_class_sym: Option<crate::intern::SymId>,
+    /// BasicObject reflection metadata — same shape as Kernel but
+    /// for methods CRuby defines on BasicObject (the root):
+    /// `__id__`, `__send__`, `equal?`, `instance_eval`,
+    /// `instance_exec`, `==`, `!=`, `!`. Kept off
+    /// `BasicObject.methods` for the same reason as Kernel — see
+    /// `kernel_builtin_metas`.
+    pub(crate) basic_object_builtin_metas: std::collections::HashMap<crate::intern::SymId, std::rc::Rc<crate::value::BuiltinMeta>>,
+    /// Cached `BasicObject` SymId — same role as `kernel_class_sym`.
+    pub(crate) basic_object_class_sym: Option<crate::intern::SymId>,
     /// Cached index into `protos` of the callable→Block
     /// forwarder. Lazily built on first `&callable` coercion in
     /// `do_call_block` (BoundMethod, CurriedProc, ...). The
@@ -688,6 +697,8 @@ impl Vm {
             bypass_visibility_once: false,
             kernel_builtin_metas: std::collections::HashMap::new(),
             kernel_class_sym: None,
+            basic_object_builtin_metas: std::collections::HashMap::new(),
+            basic_object_class_sym: None,
         }
     }
 

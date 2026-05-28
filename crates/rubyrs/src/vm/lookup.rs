@@ -459,8 +459,11 @@ impl Vm {
             // `instance_exec` is a universal dispatch arm (block-form
             // self-swap, parity with `instance_eval`). Whitelisted
             // here so feature detection agrees with what dispatch
-            // accepts on every receiver type.
-            | "instance_exec"
+            // accepts on every receiver type. `instance_eval`
+            // joins for the same reason — both are universal
+            // dispatch arms and both surface in BasicObject's
+            // reflection registry.
+            | "instance_exec" | "instance_eval"
         ) {
             return true;
         }
@@ -917,13 +920,14 @@ impl Vm {
     /// The set covers the common reflection targets: zero-arg
     /// metadata accessors (`class`, `nil?`, `frozen?`, `to_s`,
     /// `inspect`, `hash`, `object_id`, `itself`), single-arg type
-    /// predicates (`is_a?`, `kind_of?`, `instance_of?`, `equal?`),
-    /// and the variadic dispatchers (`send`, `__send__`,
-    /// `respond_to?`). `instance_exec` is intentionally absent —
-    /// CRuby defines it on BasicObject, not Kernel; future
-    /// BasicObject-builtins follow-up installs it there. Methods
-    /// NOT in this set continue through the primitive-sentinel
-    /// `instance_method` path with `proto_idx`-default reflection.
+    /// predicates (`is_a?`, `kind_of?`, `instance_of?`), and the
+    /// variadic dispatchers (`send`, `respond_to?`).
+    /// `equal?`, `__send__`, `instance_exec`, `instance_eval`,
+    /// `==`, `!=`, `!`, `__id__` are intentionally absent — CRuby
+    /// defines them on BasicObject; see
+    /// `install_basic_object_builtins`. Methods NOT in either set
+    /// continue through the primitive-sentinel `instance_method`
+    /// path with `proto_idx`-default reflection.
     pub(crate) fn install_kernel_builtins(&mut self) {
         let kernel_sym = self.interner.intern("Kernel");
         // Defensive: preamble/object.rb must load before this. If
@@ -951,15 +955,25 @@ impl Vm {
         //
         // `instance_exec` is NOT in this set: CRuby defines it on
         // BasicObject, not Kernel. `Kernel.instance_method(:instance_exec)`
-        // raises NameError. Future BasicObject-builtins PR will
-        // install it there.
-        // Per-entry shape: (name, arity, param-list, defining-class).
-        // Param-list element shape: (param-name, optional-default).
+        // raises NameError; the registered version lives in
+        // `install_basic_object_builtins` below.
+        // Per-entry shape: (method-name, arity, parameters,
+        // source_label). The parameters slice mirrors
+        // `BuiltinMeta.parameters` — each element is (kind, name)
+        // where kind is "req"/"opt"/"rest"/"keyrest"/"block" and
+        // name is `Some(...)` for a Ruby-source-visible name or
+        // `None` to surface as anonymous in `Method#parameters`
+        // (CRuby's C-defined methods report anonymous names).
         // Aliased so clippy's type_complexity lint doesn't trip
         // (the inline 4-tuple-with-nested-slice form was reading as
         // dense without saving any ergonomics).
-        type KernelEntry<'a> =
-            (&'a str, i64, &'a [(&'a str, Option<&'a str>)], &'a str);
+        //
+        // `&'static str` everywhere: makes the no-allocation /
+        // no-leak guarantee explicit at the type level so a
+        // future edit can't accidentally introduce a non-static
+        // label that BuiltinMeta would have to leak to store.
+        type KernelEntry =
+            (&'static str, i64, &'static [(&'static str, Option<&'static str>)], &'static str);
         let entries: &[KernelEntry] = &[
             // Zero-arg metadata accessors
             ("class", 0, &[], "<internal:kernel>"),
@@ -971,14 +985,15 @@ impl Vm {
             ("object_id", 0, &[], "<internal:kernel>"),
             ("itself", 0, &[], "<internal:kernel>"),
             // Single-arg type predicates (required positional,
-            // anonymous in CRuby's C-defined parameter list)
+            // anonymous in CRuby's C-defined parameter list).
+            // `equal?` and `__send__` are intentionally NOT here —
+            // CRuby defines them on BasicObject (not Kernel); see
+            // the BasicObject registry in `install_basic_object_builtins`.
             ("is_a?", 1, &[("req", None)], "<internal:kernel>"),
             ("kind_of?", 1, &[("req", None)], "<internal:kernel>"),
             ("instance_of?", 1, &[("req", None)], "<internal:kernel>"),
-            ("equal?", 1, &[("req", None)], "<internal:kernel>"),
             // Variadic dispatchers (CRuby: arity -1, params [[:rest]])
             ("send", -1, &[("rest", None)], "<internal:kernel>"),
-            ("__send__", -1, &[("rest", None)], "<internal:kernel>"),
             ("respond_to?", -1, &[("rest", None)], "<internal:kernel>"),
         ];
         for (name, arity, params, src_label) in entries {
@@ -996,10 +1011,68 @@ impl Vm {
                 // rather than allocating + leaking. The leak in
                 // the prior version was a harmless drop-in until
                 // someone added a non-static label.
-                source_label: src_label,
+                source_label: Some(src_label),
                 source_line: 0,
             });
             self.kernel_builtin_metas.insert(name_id, meta);
+        }
+    }
+
+    /// BasicObject builtins — installed alongside Kernel's
+    /// (preamble/object.rb runs before this). The set mirrors
+    /// CRuby's `BasicObject.instance_methods(false)`:
+    ///   - `__id__` (alias of object_id)
+    ///   - `__send__` (public-receiver-only send variant —
+    ///     reserved name CRuby guarantees user code can't shadow)
+    ///   - `equal?` (identity comparison)
+    ///   - `instance_eval` / `instance_exec` (self-swap evaluators)
+    ///   - `==` / `!=` / `!` (universal operators)
+    ///
+    /// Same off-chain design as Kernel — stored in
+    /// `Vm.basic_object_builtin_metas`, consulted by the
+    /// `instance_method` arm when receiver is BasicObject.
+    pub(crate) fn install_basic_object_builtins(&mut self) {
+        let bo_sym = self.interner.intern("BasicObject");
+        if !self.classes.contains_key(&bo_sym) {
+            return;
+        }
+        self.basic_object_class_sym = Some(bo_sym);
+        // BasicObject methods report `source_location: nil` in
+        // CRuby (verified: `BasicObject.instance_method(:__id__)
+        // .source_location` returns nil, unlike Kernel which
+        // returns `["<internal:kernel>", N]`). Mirror by passing
+        // `None` for source_label.
+        // `&'static str` everywhere + type alias — same shape as
+        // install_kernel_builtins, minus the source-label slot
+        // (BasicObject methods uniformly report `nil` for
+        // source_location). Alias keeps clippy's type_complexity
+        // lint quiet for symmetry with KernelEntry.
+        type BasicObjectEntry =
+            (&'static str, i64, &'static [(&'static str, Option<&'static str>)]);
+        let entries: &[BasicObjectEntry] = &[
+            ("__id__", 0, &[]),
+            ("!", 0, &[]),
+            ("equal?", 1, &[("req", None)]),
+            ("==", 1, &[("req", None)]),
+            ("!=", 1, &[("req", None)]),
+            ("__send__", -1, &[("rest", None)]),
+            ("instance_eval", -1, &[("rest", None)]),
+            ("instance_exec", -1, &[("rest", None)]),
+        ];
+        for (name, arity, params) in entries {
+            let name_id = self.interner.intern(name);
+            let parameters: Vec<(&'static str, Option<String>)> = params
+                .iter()
+                .map(|(k, n)| (*k, n.map(|s| s.to_string())))
+                .collect();
+            let meta = std::rc::Rc::new(BuiltinMeta {
+                name_id,
+                arity: *arity,
+                parameters,
+                source_label: None,
+                source_line: 0,
+            });
+            self.basic_object_builtin_metas.insert(name_id, meta);
         }
     }
 
@@ -1010,16 +1083,77 @@ impl Vm {
     /// table.
     pub(crate) fn kernel_builtin_method(&self, name_id: SymId) -> Option<Rc<Method>> {
         let meta = self.kernel_builtin_metas.get(&name_id)?.clone();
-        // `Method.params` is used by the fixed-arity fast path to
-        // size the locals vector. Anonymous CRuby-C params (the
-        // `None` name we install for `is_a?` / `send` / etc.)
-        // would shrink the Vec below the required-arg count and
-        // panic the fast path's `locals[i] = arg` write. Fill
-        // anonymous slots with stable placeholder names ("arg0",
-        // "arg1", ...) so the Vec is sized correctly even though
-        // the builtin short-circuit at the top of
-        // `invoke_method_with_block` should always bypass the fast
-        // path. Belt-and-braces.
+        let cls = self.classes.get(&self.kernel_class_sym?)?.clone();
+        Some(Self::materialise_builtin_method(meta, &cls))
+    }
+
+    /// Same as `kernel_builtin_method` but for the BasicObject
+    /// registry. Looked up by the `instance_method` arm when the
+    /// receiver is BasicObject.
+    pub(crate) fn basic_object_builtin_method(&self, name_id: SymId) -> Option<Rc<Method>> {
+        let meta = self.basic_object_builtin_metas.get(&name_id)?.clone();
+        let cls = self.classes.get(&self.basic_object_class_sym?)?.clone();
+        Some(Self::materialise_builtin_method(meta, &cls))
+    }
+
+    /// Walk `cls`'s ancestor chain looking for a registered
+    /// Kernel or BasicObject builtin matching `name_id`. Used by
+    /// `instance_method` when the live method table misses: a
+    /// user class that inherits Kernel via include (i.e. any
+    /// `class User; end` since PR #256) should surface `#class`,
+    /// `#nil?`, etc. through reflection just like
+    /// `Kernel.instance_method(:class)` does directly. Without
+    /// this walk, only the direct Kernel/BasicObject receivers
+    /// would hit the registry.
+    ///
+    /// Returns None if `cls` doesn't transitively include Kernel
+    /// AND doesn't transitively inherit from BasicObject — i.e.
+    /// the unusual case of a class whose chain bypasses both
+    /// roots (BasicObject subclasses opt out of Kernel; that's
+    /// the only way to lose both).
+    pub(crate) fn builtin_method_via_ancestor_chain(
+        &self,
+        cls: &Rc<Class>,
+        name_id: SymId,
+    ) -> Option<Rc<Method>> {
+        // Kernel first — most-common: every Object descendant
+        // includes Kernel transitively, so this branch handles
+        // the vast majority of user classes.
+        if let Some(ksym) = self.kernel_class_sym
+            && let Some(kernel) = self.classes.get(&ksym)
+            && class_is_a(cls, kernel)
+        {
+            if let Some(m) = self.kernel_builtin_method(name_id) {
+                return Some(m);
+            }
+        }
+        // BasicObject — root for everything that inherits Object,
+        // also for opt-out classes (`class X < BasicObject; end`)
+        // that skip Kernel entirely.
+        if let Some(bsym) = self.basic_object_class_sym
+            && let Some(bo) = self.classes.get(&bsym)
+            && class_is_a(cls, bo)
+        {
+            if let Some(m) = self.basic_object_builtin_method(name_id) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    /// Shared materialisation for both Kernel and BasicObject
+    /// builtin Method records. Synthesises a Method with the meta
+    /// as the introspection payload, a placeholder `proto_idx = 0`
+    /// (never read because invoke_method_with_block short-
+    /// circuits on `builtin.is_some()`), and FixedArity sized
+    /// to match the meta's anonymous-or-named params. The
+    /// anonymous-param `arg{i}` placeholder names exist as a
+    /// belt-and-braces guard against the fixed-arity fast path
+    /// indexing into a too-small locals vector — the builtin
+    /// short-circuit should always bypass that fast path, but
+    /// the structural mismatch was a real footgun in the cycle-1
+    /// review.
+    fn materialise_builtin_method(meta: std::rc::Rc<BuiltinMeta>, cls: &Rc<Class>) -> Rc<Method> {
         let params_strings: Vec<String> = meta
             .parameters
             .iter()
@@ -1034,21 +1168,15 @@ impl Vm {
         } else {
             None
         };
-        // Direct SymId-keyed lookup — `Vm.classes` is a
-        // HashMap<SymId, Rc<Class>>, so this is O(1). The
-        // `kernel_class_sym` cache is populated during
-        // `install_kernel_builtins`; if absent, kernel hasn't
-        // been bootstrapped yet and we have no synth to return.
-        let kernel = self.classes.get(&self.kernel_class_sym?)?.clone();
-        Some(Rc::new(Method {
+        Rc::new(Method {
             params: params_strings,
-            proto_idx: 0, // never read — builtin short-circuit
+            proto_idx: 0,
             fixed_arity,
-            defining_class: Some(Rc::downgrade(&kernel)),
+            defining_class: Some(Rc::downgrade(cls)),
             visibility: std::cell::Cell::new(crate::value::Visibility::Public),
             closure: None,
             builtin: Some(meta),
-        }))
+        })
     }
 
     /// Shared `super` lookup for both `Op::Super` (positional args)

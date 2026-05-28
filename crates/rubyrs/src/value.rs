@@ -461,11 +461,16 @@ pub struct BuiltinMeta {
     /// CRuby `Method#parameters` shape: list of (kind, name)
     /// pairs where kind is `"req"`, `"opt"`, `"rest"`, etc.
     pub(crate) parameters: Vec<(&'static str, Option<String>)>,
-    /// `Method#source_location` label. CRuby reports things like
-    /// `"<internal:kernel>"` for C-implemented methods; we mirror.
-    pub(crate) source_label: &'static str,
-    /// Line on the source label. CRuby uses real C-file line
-    /// numbers; we use `0` as a stable placeholder.
+    /// `Method#source_location` label. `Some(label)` emits the
+    /// `[label, line]` array. `None` emits `nil` — CRuby's shape
+    /// for some C-defined methods (e.g.
+    /// `BasicObject.instance_method(:__id__).source_location`
+    /// returns nil even though Kernel's `:class` returns
+    /// `["<internal:kernel>", 18]`).
+    pub(crate) source_label: Option<&'static str>,
+    /// Line on the source label when `source_label` is `Some`.
+    /// CRuby uses real C-file line numbers; we use `0` as a
+    /// stable placeholder. Ignored when `source_label` is `None`.
     pub(crate) source_line: i64,
 }
 
