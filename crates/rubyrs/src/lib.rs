@@ -293,6 +293,42 @@ pub struct Config {
     /// path-handling layer) or restrict to case-sensitive volumes
     /// for the gem-root tree.
     pub allowed_paths: Option<Vec<std::path::PathBuf>>,
+
+    /// Seed `$LOAD_PATH` with these paths at Runtime construction.
+    /// Equivalent to the embedder doing `$LOAD_PATH.unshift(p)`
+    /// (in order) before any script eval, but typed and verified
+    /// at Config-construction time rather than buried in an
+    /// implicit first-eval. The canonical embedder shape:
+    ///
+    /// ```text
+    /// Config {
+    ///     load_paths: Some(vec![
+    ///         PathBuf::from("/usr/share/myapp/lib"),
+    ///         PathBuf::from("/usr/share/myapp/vendor"),
+    ///     ]),
+    ///     ..Default::default()
+    /// }
+    /// ```
+    ///
+    /// `None` (default) means `$LOAD_PATH` starts empty — the
+    /// pre-PR behaviour. Subsequent script-side
+    /// `$LOAD_PATH.unshift(...)` still works on top of the seed.
+    ///
+    /// One-time seeding: only `Runtime::with_config` honours this
+    /// field. Calling `Runtime::apply_config` later does NOT
+    /// re-seed — re-seeding would clobber any script-side
+    /// `unshift`s the embedder made between construction and the
+    /// reconfig, which is rarely what a host wants. Hosts that
+    /// genuinely need to reset `$LOAD_PATH` mid-life should
+    /// `eval("\$LOAD_PATH.clear")` followed by explicit unshifts.
+    ///
+    /// Why this is sandbox-orthogonal: `load_paths` is the SOURCE
+    /// of paths `require` walks; `allowed_paths` is the SCOPE that
+    /// `require` (and `File.*`) is allowed to touch. For rubund's
+    /// gemspec evaluator, both fields combine into the canonical
+    /// shape: `allowed_paths: Some(vec![gem_root])` +
+    /// `load_paths: Some(vec![gem_root.join("lib")])`.
+    pub load_paths: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Default for Config {
@@ -337,6 +373,12 @@ impl Default for Config {
             // want scoped FS access (rubund evaluating gemspecs in a
             // gem root, for instance) opt in by setting Some(prefixes).
             allowed_paths: None,
+            // No seeded `$LOAD_PATH` by default — `require` only
+            // resolves against the caller-source dir + its parent
+            // until a script does `$LOAD_PATH.unshift(...)`.
+            // Embedders shipping bundled .rb files set
+            // `Some(vec![...])` to inject the seed at construction.
+            load_paths: None,
         }
     }
 }
@@ -968,7 +1010,23 @@ impl Runtime {
         // embedder catches via `catch_unwind` therefore yields a
         // Runtime with its sandbox intact, not silently disarmed.
         let mut rt = Self::build_skeleton();
+        // Take `load_paths` out of cfg BEFORE moving cfg into
+        // apply_config. apply_config is deliberately load_paths-
+        // agnostic so a mid-life reconfig can't clobber any
+        // script-side `$LOAD_PATH.unshift(...)` the embedder
+        // made between construction and the reconfig — see
+        // `Config::load_paths` docstring.
+        let mut cfg = cfg;
+        let load_paths_seed = cfg.load_paths.take();
         rt.apply_config(cfg);
+        // Seed `$LOAD_PATH` BEFORE the preamble runs so the seed
+        // lands in the post-preamble snapshot — `Runtime::reset`
+        // then preserves it. (A late seed after the snapshot
+        // would be wiped on the first reset, defeating the
+        // construction-time contract.)
+        if let Some(paths) = load_paths_seed {
+            rt.seed_load_path(paths);
+        }
         {
             let guard = PreambleLiftGuard::lift(&mut rt);
             guard.rt.load_preamble();
@@ -976,6 +1034,37 @@ impl Runtime {
         }
         rt.post_preamble = Some(PostPreambleSnapshot::capture(&rt));
         rt
+    }
+
+    /// Seed `$LOAD_PATH` with paths in order. The semantics mirror
+    /// the embedder doing `$LOAD_PATH.unshift(p)` for each `p` in
+    /// reverse (so the FIRST entry in `paths` ends up at index 0,
+    /// matching the user's intuition that "earlier in the vec =
+    /// earlier in the search order"). Used by `with_config` to
+    /// implement `Config::load_paths`.
+    ///
+    /// Allocates the `$LOAD_PATH` Array on the heap if it hasn't
+    /// been already (`Vm::ensure_load_path` is idempotent). Panics
+    /// only if heap-cap checks reject the allocation, which would
+    /// indicate a misconfigured Runtime (`max_heap_objects: 0`
+    /// during preamble would already have aborted by the time
+    /// we get here).
+    fn seed_load_path(&mut self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let lp_id = self.vm.ensure_load_path()
+            .expect("ICE: failed to allocate $LOAD_PATH array during Config::load_paths seeding");
+        let arr = self.vm.heap.array_mut(lp_id);
+        for p in paths {
+            // PathBuf → String via `to_string_lossy` so the value
+            // stored in the Array is a Ruby String (`$LOAD_PATH`
+            // entries are always Strings in Ruby; CRuby coerces
+            // non-string entries via `File::Stat`'s expand_path
+            // path). Lossy is acceptable here — paths originating
+            // from `Config` are host-supplied, well-formed.
+            arr.push(crate::value::Value::new_str(p.to_string_lossy().into_owned()));
+        }
     }
 
     /// Construct a Runtime skeleton (fresh Vm, no preamble) shared

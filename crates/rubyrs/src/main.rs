@@ -249,6 +249,13 @@ fn main() {
         // the shell can. Embed users wanting scope (rubund for
         // gemspec evaluation, etc.) supply Some(prefixes).
         allowed_paths: None,
+        // CLI binary: no seeded `$LOAD_PATH` — scripts opt in
+        // explicitly via `$LOAD_PATH.unshift(...)`, matching
+        // CRuby's `ruby script.rb` shape (CRuby's gem env
+        // pre-populates $LOAD_PATH but that's a gem-host
+        // responsibility, not the CLI's). Embed users shipping
+        // bundled .rb files supply Some(paths).
+        load_paths: None,
     };
 
     // wasi-wizer fast path: if the binary was put through
