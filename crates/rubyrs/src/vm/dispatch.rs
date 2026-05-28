@@ -2871,7 +2871,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
-                    | "autoload" | "private_constant" | "public_constant"
+                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
                     | "class_eval" | "module_eval"
@@ -3041,6 +3041,102 @@ impl Vm {
                 }
                 self.stack.push(Value::Nil);
                 return Ok(());
+            }
+            // `autoload?(:Const [, inherit])` — CRuby returns the
+            // file path string if `:Const` is set for autoload on
+            // this module, else nil. Since `autoload` is itself a
+            // no-op stub (rubyrs doesn't model lazy loading), the
+            // registry is always empty and `autoload?` always
+            // returns nil. tilt's `mapping.rb:362` calls
+            // `scope.autoload?(n)` inside `constant_defined?` —
+            // expects nil so the second `const_defined?` check
+            // proceeds. (TRY_RUNS pass-10 layer #1.)
+            if &*name == "autoload?"
+                && let Value::Class(_) = &self_val {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    }));
+                }
+                self.stack.push(Value::Nil);
+                return Ok(());
+            }
+            // `Mod.const_defined?(:Const [, inherit])` — looks up
+            // the qualified name in `self.classes` (Class/Module
+            // table) AND `self.constants` (other Value constants).
+            // tilt's `mapping.rb:361-365` walks `Tilt::Backend` etc.
+            // via `scope.const_defined?(n)`. The `inherit` arg is
+            // accepted for arity parity but Tier-1 doesn't model
+            // ancestor const lookup — `Foo::Bar` only resolves on
+            // Foo itself, not its includes/superclass chain.
+            // (TRY_RUNS pass-10 layer #2.)
+            if &*name == "const_defined?"
+                && let Value::Class(cls) = &self_val {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    }));
+                }
+                let const_name = match &args[0] {
+                    Value::Sym(s) => self.interner.resolve(*s).to_string(),
+                    Value::Str(s) => s.to_string_lossy(),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                    })),
+                };
+                // Top-level constants live under the bare SymId
+                // in `self.classes` / `self.constants`. Object
+                // is the rooting scope (CRuby: top-level consts
+                // are constants of Object), so probing
+                // `Object.const_defined?(:Tilt)` must look up the
+                // BARE "Tilt" key. Other classes use the
+                // qualified `Cls::Name` form.
+                let lookup = if cls.name == "Object" {
+                    const_name.clone()
+                } else {
+                    format!("{}::{}", cls.name, const_name)
+                };
+                let qid = self.interner.intern(&lookup);
+                let found = self.classes.contains_key(&qid) || self.constants.contains_key(&qid);
+                self.stack.push(Value::Bool(found));
+                return Ok(());
+            }
+            // `Mod.const_get(:Const [, inherit])` — paired with
+            // const_defined?. Returns the actual Class/Value
+            // constant if defined; raises NameError otherwise.
+            // tilt's `constant_defined?` walk calls `scope.const_get(n)`
+            // after the `const_defined?` check passes.
+            if &*name == "const_get"
+                && let Value::Class(cls) = &self_val {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    }));
+                }
+                let const_name = match &args[0] {
+                    Value::Sym(s) => self.interner.resolve(*s).to_string(),
+                    Value::Str(s) => s.to_string_lossy(),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                    })),
+                };
+                let lookup = if cls.name == "Object" {
+                    const_name.clone()
+                } else {
+                    format!("{}::{}", cls.name, const_name)
+                };
+                let qid = self.interner.intern(&lookup);
+                if let Some(c) = self.classes.get(&qid).cloned() {
+                    self.stack.push(Value::Class(c));
+                    return Ok(());
+                }
+                if let Some(v) = self.constants.get(&qid).cloned() {
+                    self.stack.push(v);
+                    return Ok(());
+                }
+                return Err(self.trap(RubyError::NameError {
+                    msg: format!("uninitialized constant {}", lookup),
+                }));
             }
             // `private_constant` / `public_constant` /
             // `deprecate_constant` accept any number of symbol args
@@ -3695,6 +3791,79 @@ impl Vm {
             }
             self.stack.push(Value::Nil);
             return Ok(());
+        }
+        // `Foo.autoload?(:Bar)` — explicit-receiver parallel of
+        // the no_recv arm above. Returns nil since the registry
+        // is always empty (autoload is a no-op stub).
+        if &*name == "autoload?"
+            && let Value::Class(_) = &recv {
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                }));
+            }
+            self.stack.push(Value::Nil);
+            return Ok(());
+        }
+        // `Foo.const_defined?(:Bar)` — explicit-receiver parallel.
+        // tilt's actual call site is
+        // `scope.const_defined?(n)` where scope is reached via the
+        // `inject(Object)` walk in `constant_defined?`.
+        if &*name == "const_defined?"
+            && let Value::Class(cls) = &recv {
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                }));
+            }
+            let const_name = match &args[0] {
+                Value::Sym(s) => self.interner.resolve(*s).to_string(),
+                Value::Str(s) => s.to_string_lossy(),
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                })),
+            };
+            let lookup = if cls.name == "Object" {
+                const_name.clone()
+            } else {
+                format!("{}::{}", cls.name, const_name)
+            };
+            let qid = self.interner.intern(&lookup);
+            let found = self.classes.contains_key(&qid) || self.constants.contains_key(&qid);
+            self.stack.push(Value::Bool(found));
+            return Ok(());
+        }
+        if &*name == "const_get"
+            && let Value::Class(cls) = &recv {
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                }));
+            }
+            let const_name = match &args[0] {
+                Value::Sym(s) => self.interner.resolve(*s).to_string(),
+                Value::Str(s) => s.to_string_lossy(),
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                })),
+            };
+            let lookup = if cls.name == "Object" {
+                const_name.clone()
+            } else {
+                format!("{}::{}", cls.name, const_name)
+            };
+            let qid = self.interner.intern(&lookup);
+            if let Some(c) = self.classes.get(&qid).cloned() {
+                self.stack.push(Value::Class(c));
+                return Ok(());
+            }
+            if let Some(v) = self.constants.get(&qid).cloned() {
+                self.stack.push(v);
+                return Ok(());
+            }
+            return Err(self.trap(RubyError::NameError {
+                msg: format!("uninitialized constant {}", lookup),
+            }));
         }
         if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
             && let Value::Class(_) = &recv {
@@ -6206,7 +6375,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
-                    | "autoload" | "private_constant" | "public_constant"
+                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
                     | "class_eval" | "module_eval"

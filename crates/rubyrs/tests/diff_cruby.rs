@@ -150,6 +150,8 @@ fn run_diff(name: &str) {
 #[test] fn proc_arity() { run_diff("proc_arity"); }
 #[test] fn kernel_array_via_method() { run_diff("kernel_array_via_method"); }
 #[test] fn array_dup_clone() { run_diff("array_dup_clone"); }
+#[test] fn module_const_reflection() { run_diff("module_const_reflection"); }
+#[test] fn string_sub_bang() { run_diff("string_sub_bang"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }

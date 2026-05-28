@@ -543,7 +543,7 @@ impl Vm {
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
-                "sub" | "gsub" | "sub!" | "gsub!" |
+                "sub" | "sub!" | "gsub" | "gsub!" |
                 "tr" | "squeeze" |
                 "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
                 "unpack" | "unpack1" | "bytes" |
@@ -636,7 +636,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
-                    | "autoload" | "private_constant" | "public_constant"
+                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
                     // Bridge keeping the bare-call shape (inside a
