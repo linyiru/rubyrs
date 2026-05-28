@@ -474,10 +474,11 @@ pub(crate) fn run_blocking(
 /// synchronous block of (env-build + call + marshal). Per
 /// ADR 0013, this is time-disjoint with the outer
 /// `invoke_host_fn`'s `&mut Vm` borrow.
-#[allow(clippy::too_many_arguments)] // 6 args, each load-bearing per ADR 0022 v5
+#[allow(clippy::too_many_arguments)] // 8 args; flat for stage-by-stage growth
 async fn handle_request_with_app(
     req: Request<Incoming>,
     block_id: crate::value::ObjId,
+    on_error_block: Option<crate::value::ObjId>,
     listener_addr: SocketAddr,
     peer_addr: SocketAddr,
     per_request_fuel: Option<u64>,
@@ -601,7 +602,7 @@ async fn handle_request_with_app(
         );
         let env_val = Value::Hash(env_id);
 
-        match call_ruby_block_sync(vm, block_id, vec![env_val]) {
+        match call_ruby_block_sync(vm, block_id, vec![env_val.clone()]) {
             Ok(app_result) => marshal_rack_response(vm, app_result)
                 .map_err(|msg| (500, msg)),
             Err(trap) => {
@@ -613,11 +614,43 @@ async fn handle_request_with_app(
                 // SURVIVES this trap; the next request gets
                 // its own reset_between_requests + refill.
                 use crate::error::RubyError;
-                let status = match &trap.err {
-                    RubyError::ResourceExhausted { .. } => 503,
-                    _ => 500,
-                };
-                Err((status, format!("Rack app raised: {}", trap.err.message())))
+                let is_resource_exhausted = matches!(&trap.err, RubyError::ResourceExhausted { .. });
+
+                // Stage 6f: when an `on_error` block is
+                // configured AND the trap is not
+                // ResourceExhausted, hand the error to the
+                // embedder's mapper instead of returning a
+                // hardcoded 500. ResourceExhausted stays
+                // 503 unconditionally — it's a security
+                // signal (worker hit a cap) and overriding
+                // it would let app code mask runaways. The
+                // on_error block receives `(env, err_class,
+                // err_message)` and must return a Rack
+                // triplet. If it itself raises or returns
+                // malformed, we fall back to the plain 500.
+                if !is_resource_exhausted {
+                    if let Some(err_id) = on_error_block {
+                        let class_str = Value::Str(std::rc::Rc::new(
+                            crate::value::RStr::new(trap.err.class_name().to_string()),
+                        ));
+                        let msg_str = Value::Str(std::rc::Rc::new(
+                            crate::value::RStr::new(trap.err.message()),
+                        ));
+                        match call_ruby_block_sync(vm, err_id, vec![env_val, class_str, msg_str]) {
+                            Ok(handler_result) => marshal_rack_response(vm, handler_result)
+                                .map_err(|msg| (500, format!("on_error block returned malformed Rack triplet: {msg}"))),
+                            Err(handler_trap) => Err((500, format!(
+                                "on_error block itself raised: {} (original: {})",
+                                handler_trap.err.message(),
+                                trap.err.message(),
+                            ))),
+                        }
+                    } else {
+                        Err((500, format!("Rack app raised: {}", trap.err.message())))
+                    }
+                } else {
+                    Err((503, format!("Rack app raised: {}", trap.err.message())))
+                }
             }
         }
     };
@@ -656,10 +689,11 @@ fn error_response(status: u16, msg: String) -> Response<Full<Bytes>> {
 /// block per request instead of returning a hardcoded
 /// response. Caller supplies the block_id; the listener's
 /// connection handlers all close over the same block.
-#[allow(clippy::too_many_arguments)] // 9 args; flat for stage-by-stage growth
+#[allow(clippy::too_many_arguments)] // 10 args; flat for stage-by-stage growth
 async fn serve_with_app_until_shutdown(
     listener: TcpListener,
     block_id: crate::value::ObjId,
+    on_error_block: Option<crate::value::ObjId>,
     listener_addr: SocketAddr,
     per_request_fuel: Option<u64>,
     max_request_body_bytes: usize,
@@ -736,7 +770,7 @@ async fn serve_with_app_until_shutdown(
                 tokio::task::spawn_local(async move {
                     let svc = service_fn(move |req| {
                         handle_request_with_app(
-                            req, block_id, listener_addr, peer_addr,
+                            req, block_id, on_error_block, listener_addr, peer_addr,
                             per_request_fuel, max_request_body_bytes,
                             per_request_io_deadline,
                         )
@@ -788,11 +822,12 @@ async fn serve_with_app_until_shutdown(
 /// Stage 4c.3 entry point — wired into the
 /// `__rubyrs_http_serve_with_app(addr, secs, app)` host fn
 /// via `register_host_fns`.
-#[allow(clippy::too_many_arguments)] // 9 args; flat for stage-by-stage growth
+#[allow(clippy::too_many_arguments)] // 10 args; flat for stage-by-stage growth
 pub(crate) fn run_blocking_for_duration_with_app(
     addr: SocketAddr,
     duration: std::time::Duration,
     block_id: crate::value::ObjId,
+    on_error_block: Option<crate::value::ObjId>,
     per_request_fuel: Option<u64>,
     max_request_body_bytes: usize,
     per_request_io_deadline: Option<std::time::Duration>,
@@ -810,7 +845,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
         let listener_addr = listener.local_addr()?;
         tokio::select! {
             res = serve_with_app_until_shutdown(
-                listener, block_id, listener_addr,
+                listener, block_id, on_error_block, listener_addr,
                 per_request_fuel, max_request_body_bytes,
                 per_request_io_deadline,
                 max_headers,
@@ -936,7 +971,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     });
 
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        // Argument shape (3 / 4 / 5 / 6 / 7 / 8 / 9 args, growing):
+        // Argument shape (3 / 4 / 5 / 6 / 7 / 8 / 9 / 10 args, growing):
         //   (addr, secs, app)
         //   (addr, secs, app, per_request_fuel)
         //   (addr, secs, app, per_request_fuel, max_body_bytes)
@@ -944,6 +979,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers)
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler)
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms)
+        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms, on_error)
         //
         // Each positional adds one more security knob. Per
         // ADR 0022 v5 these will eventually move into a
@@ -1012,31 +1048,31 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             }
             Ok(if ms == 0 { None } else { Some(Duration::from_millis(ms as u64)) })
         };
-        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, install_signal_handler, idle_timeout) = match args {
+        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, install_signal_handler, idle_timeout, on_error_block) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None, None, false, None)
+                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None, None, false, None, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None, None, false, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None, None, false, None, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None, None, false, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None, None, false, None, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
                 check_non_negative("io_deadline_ms", *io_ms)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), None, false, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), None, false, None, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
                 check_non_negative("io_deadline_ms", *io_ms)?;
                 let max_headers = parse_max_headers(*max_h)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, false, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, false, None, None)
             }
             // Stage 6d: 8-arg form with install_signal_handler
             // flag. Integer 0/1 (rubyrs has no native Bool yet
@@ -1051,7 +1087,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 check_non_negative("io_deadline_ms", *io_ms)?;
                 let max_headers = parse_max_headers(*max_h)?;
                 let install_sig = parse_sig_flag(*sig)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, None, None)
             }
             // Stage 6e: 9-arg form adds idle_timeout_ms.
             // Caps keep-alive idle time per-connection via
@@ -1065,12 +1101,30 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 let max_headers = parse_max_headers(*max_h)?;
                 let install_sig = parse_sig_flag(*sig)?;
                 let idle = parse_idle_timeout(*idle_ms)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, idle)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, idle, None)
+            }
+            // Stage 6f: 10-arg form adds the optional
+            // `on_error` block. When the main app raises a
+            // non-ResourceExhausted trap, the server hands
+            // (env, err_class, err_message) to this block
+            // and expects a Rack triplet back. If on_error
+            // itself raises or returns malformed, we fall
+            // back to the plain 500. ResourceExhausted
+            // stays 503 unconditionally — it's a security
+            // signal that app code must not override.
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h), Value::Int(sig), Value::Int(idle_ms), Value::Block(err_id)] => {
+                check_non_negative("per_request_fuel", *fuel)?;
+                check_non_negative("max_body_bytes", *max_body)?;
+                check_non_negative("io_deadline_ms", *io_ms)?;
+                let max_headers = parse_max_headers(*max_h)?;
+                let install_sig = parse_sig_flag(*sig)?;
+                let idle = parse_idle_timeout(*idle_ms)?;
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, idle, Some(*err_id))
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0, max_headers: Integer = 0, install_signal_handler: Integer = 0, idle_timeout_ms: Integer = 0)"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0, max_headers: Integer = 0, install_signal_handler: Integer = 0, idle_timeout_ms: Integer = 0, on_error: Proc/Lambda = nil)"
                             .to_string(),
                     },
                     backtrace: vec![],
@@ -1096,7 +1150,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
         let duration = Duration::from_secs(duration_secs as u64);
         let bound = run_blocking_for_duration_with_app(
-            addr, duration, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, idle_timeout, install_signal_handler,
+            addr, duration, block_id, on_error_block, per_request_fuel, max_body_bytes, io_deadline, max_headers, idle_timeout, install_signal_handler,
         ).map_err(|e| Trap {
             err: RubyError::RuntimeError {
                 msg: format!("http_serve_with_app: {e}"),
@@ -1639,6 +1693,194 @@ mod tests {
         assert!(
             msg.contains("idle_timeout_ms must be non-negative"),
             "expected ArgumentError mentioning idle_timeout_ms, got: {msg}",
+        );
+    }
+
+    /// Stage 6f: when the main app raises and an
+    /// `on_error` block is configured, the server hands
+    /// (env, err_class, err_message) to on_error and uses
+    /// its Rack triplet for the response. We use a custom
+    /// status (418) so the test pins on the on_error path
+    /// (vs the hardcoded 500 fallback).
+    #[test]
+    fn on_error_block_handles_app_exception() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18103";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /boom HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // 10-arg form: app raises, on_error maps to 418.
+        // We pass two blocks: the failing app and the
+        // recovering on_error mapper.
+        rt.eval(&format!(r#"
+            app = ->(env) {{ raise "kaboom" }}
+            on_error = ->(env, klass, msg) {{
+              body = "handled by on_error: #{{klass}}: #{{msg}}"
+              [418, {{"Content-Type" => "text/plain", "X-Mapped" => "true"}}, [body]]
+            }}
+            __rubyrs_http_serve_with_app(
+              "{server_addr}", 1, app,
+              1_000_000, 10_000, 0, 0, 0, 0, on_error
+            )
+        "#), "stage_6f_on_error.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 418"),
+            "expected 418 from on_error mapper, got:\n{response_text}",
+        );
+        assert!(
+            response_text.to_lowercase().contains("x-mapped: true"),
+            "expected on_error's custom header, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("handled by on_error"),
+            "expected on_error's custom body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("kaboom"),
+            "expected original error message threaded through on_error, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 6f: when on_error itself raises, the server
+    /// falls back to a plain 500 — it does not crash the
+    /// worker and does not loop. The 500 body should
+    /// reference both errors so an operator can debug.
+    #[test]
+    fn on_error_block_itself_raises_falls_back_to_500() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18104";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /boom HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            app = ->(env) {{ raise "primary boom" }}
+            on_error = ->(env, klass, msg) {{ raise "secondary boom" }}
+            __rubyrs_http_serve_with_app(
+              "{server_addr}", 1, app,
+              1_000_000, 10_000, 0, 0, 0, 0, on_error
+            )
+        "#), "stage_6f_on_error_raises.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 500"),
+            "expected 500 fallback when on_error raises, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("on_error block itself raised"),
+            "expected diagnostic body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("secondary boom") && response_text.contains("primary boom"),
+            "expected both errors in body, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 6f: ResourceExhausted (fuel cap) BYPASSES the
+    /// on_error block — it's a security signal that app
+    /// code must not be able to mask. The server still
+    /// returns 503 even when on_error is configured.
+    ///
+    /// We send TWO requests in sequence: first a runaway
+    /// that exhausts per_request_fuel, second a trivial
+    /// /ok. Same pattern as
+    /// `runaway_request_503s_then_worker_survives` — the
+    /// second request triggers a reset_between_requests +
+    /// fuel refill so the top-level eval has enough fuel
+    /// to complete after `__rubyrs_http_serve_with_app`
+    /// returns.
+    #[test]
+    fn on_error_does_not_intercept_resource_exhausted() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18105";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let read_one = |path: &str| {
+                let mut client = TcpStream::connect(server_addr).expect("connect");
+                client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let req = format!(
+                    "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                );
+                client.write_all(req.as_bytes()).expect("write");
+                let mut response = Vec::new();
+                let _ = client.read_to_end(&mut response);
+                String::from_utf8_lossy(&response).into_owned()
+            };
+            let r1 = read_one("/runaway");
+            let r2 = read_one("/ok");
+            (r1, r2)
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            app = ->(env) {{
+              if env['PATH_INFO'] == '/runaway'
+                1_000_000.times {{ 1 + 1 }}
+                [200, {{}}, ["never reached"]]
+              else
+                [200, {{"Content-Type" => "text/plain"}}, ["ok"]]
+              end
+            }}
+            on_error = ->(env, klass, msg) {{
+              [418, {{"Content-Type" => "text/plain"}}, ["should not be reached"]]
+            }}
+            __rubyrs_http_serve_with_app(
+              "{server_addr}", 2, app,
+              10_000, 10_000, 0, 0, 0, 0, on_error
+            )
+        "#), "stage_6f_resource_exhausted.rb").expect("server ran");
+
+        let (r1, r2) = client_thread.join().expect("client thread");
+
+        assert!(
+            r1.contains("HTTP/1.1 503"),
+            "request 1 (runaway): expected 503 for ResourceExhausted (on_error must NOT intercept), got:\n{r1}",
+        );
+        assert!(
+            !r1.contains("should not be reached"),
+            "request 1: on_error must not be invoked for ResourceExhausted, got body:\n{r1}",
+        );
+        assert!(
+            r2.contains("HTTP/1.1 200"),
+            "request 2 (/ok): worker should survive ResourceExhausted, got:\n{r2}",
         );
     }
 
