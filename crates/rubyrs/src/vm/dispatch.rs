@@ -3287,11 +3287,11 @@ impl Vm {
         // on it. Skip Object (its own arm below handles that) and
         // Class (Class.new etc. handled by the earlier arm).
         //
-        // `skip_builtin_kernel_lookup_once`: when a synth Kernel
-        // Method re-enters `do_call` to dispatch the primitive,
-        // skip this fallback so we don't re-find the same synth on
-        // the chain (Kernel is now mixed into Object — every
-        // primitive walks through it). Consume the flag once.
+        // No synth-bypass flag is needed: the Kernel reflection
+        // builtins live in a separate `Vm.kernel_builtin_metas`
+        // registry, NOT on `Kernel.methods`, so chain-walking
+        // here doesn't re-find them. See `install_kernel_builtins`
+        // (vm/lookup.rs) for the rationale.
         if !matches!(&recv, Value::Object(_) | Value::Class(_))
             && let Value::Class(cls) = self.class_of(&recv)
             && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
@@ -5567,6 +5567,7 @@ impl Vm {
                     defining_class: Some(std::rc::Rc::downgrade(&target_cls)),
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                    builtin: None,
                 });
                 target_cls.methods.borrow_mut().insert(name_sym, m);
                 self.method_gen = self.method_gen.wrapping_add(1);

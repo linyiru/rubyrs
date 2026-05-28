@@ -517,6 +517,10 @@ pub(crate) struct Vm {
     /// surface (`instance_method` / `methods` if we ever add it),
     /// not for dispatch.
     pub(crate) kernel_builtin_metas: std::collections::HashMap<crate::intern::SymId, std::rc::Rc<crate::value::BuiltinMeta>>,
+    /// Cached `Kernel` SymId, set at install time. `kernel_builtin_method`
+    /// uses this for O(1) HashMap lookup into `classes` instead of a
+    /// linear name-string walk.
+    pub(crate) kernel_class_sym: Option<crate::intern::SymId>,
     /// Cached index into `protos` of the callable→Block
     /// forwarder. Lazily built on first `&callable` coercion in
     /// `do_call_block` (BoundMethod, CurriedProc, ...). The
@@ -647,6 +651,7 @@ impl Vm {
             suppress_call_result_push: false,
             bypass_visibility_once: false,
             kernel_builtin_metas: std::collections::HashMap::new(),
+            kernel_class_sym: None,
         }
     }
 

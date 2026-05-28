@@ -912,9 +912,11 @@ impl Vm {
     /// `inspect`, `hash`, `object_id`, `itself`), single-arg type
     /// predicates (`is_a?`, `kind_of?`, `instance_of?`, `equal?`),
     /// and the variadic dispatchers (`send`, `__send__`,
-    /// `respond_to?`, `instance_exec`). Methods NOT in this set
-    /// continue through the primitive-sentinel `instance_method`
-    /// path with `proto_idx`-default reflection.
+    /// `respond_to?`). `instance_exec` is intentionally absent —
+    /// CRuby defines it on BasicObject, not Kernel; future
+    /// BasicObject-builtins follow-up installs it there. Methods
+    /// NOT in this set continue through the primitive-sentinel
+    /// `instance_method` path with `proto_idx`-default reflection.
     pub(crate) fn install_kernel_builtins(&mut self) {
         let kernel_sym = self.interner.intern("Kernel");
         // Defensive: preamble/object.rb must load before this. If
@@ -924,6 +926,11 @@ impl Vm {
         if !self.classes.contains_key(&kernel_sym) {
             return;
         }
+        // Cache the SymId for O(1) class lookup in
+        // `kernel_builtin_method` later. The interner doesn't
+        // shift SymIds post-install, so this stays stable for
+        // the lifetime of the Vm.
+        self.kernel_class_sym = Some(kernel_sym);
         // (name, arity, params, source_label)
         //
         // Arity follows CRuby's `Method#arity` encoding:
@@ -970,7 +977,12 @@ impl Vm {
                 name_id,
                 arity: *arity,
                 parameters,
-                source_label: Box::leak(src_label.to_string().into_boxed_str()),
+                // `src_label` is already a `&'static str` (string
+                // literal in the entries table); store directly
+                // rather than allocating + leaking. The leak in
+                // the prior version was a harmless drop-in until
+                // someone added a non-static label.
+                source_label: src_label,
                 source_line: 0,
             });
             self.kernel_builtin_metas.insert(name_id, meta);
@@ -984,10 +996,21 @@ impl Vm {
     /// table.
     pub(crate) fn kernel_builtin_method(&self, name_id: SymId) -> Option<Rc<Method>> {
         let meta = self.kernel_builtin_metas.get(&name_id)?.clone();
+        // `Method.params` is used by the fixed-arity fast path to
+        // size the locals vector. Anonymous CRuby-C params (the
+        // `None` name we install for `is_a?` / `send` / etc.)
+        // would shrink the Vec below the required-arg count and
+        // panic the fast path's `locals[i] = arg` write. Fill
+        // anonymous slots with stable placeholder names ("arg0",
+        // "arg1", ...) so the Vec is sized correctly even though
+        // the builtin short-circuit at the top of
+        // `invoke_method_with_block` should always bypass the fast
+        // path. Belt-and-braces.
         let params_strings: Vec<String> = meta
             .parameters
             .iter()
-            .filter_map(|(_, n)| n.clone())
+            .enumerate()
+            .map(|(i, (_, n))| n.clone().unwrap_or_else(|| format!("arg{}", i)))
             .collect();
         let fixed_arity = if meta.arity >= 0 {
             Some(crate::value::FixedArity {
@@ -997,9 +1020,12 @@ impl Vm {
         } else {
             None
         };
-        let kernel = self.classes.iter()
-            .find(|(_, c)| c.name == "Kernel")
-            .map(|(_, c)| c.clone())?;
+        // Direct SymId-keyed lookup — `Vm.classes` is a
+        // HashMap<SymId, Rc<Class>>, so this is O(1). The
+        // `kernel_class_sym` cache is populated during
+        // `install_kernel_builtins`; if absent, kernel hasn't
+        // been bootstrapped yet and we have no synth to return.
+        let kernel = self.classes.get(&self.kernel_class_sym?)?.clone();
         Some(Rc::new(Method {
             params: params_strings,
             proto_idx: 0, // never read — builtin short-circuit
