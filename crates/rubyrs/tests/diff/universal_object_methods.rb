@@ -65,6 +65,17 @@ big2 = -big1
 puts big1.object_id != big2.object_id             # true
 puts big1.object_id != false.object_id            # true
 
+# Cycle-5 review: `2n+1` only stays inside the safe Int domain
+# while `n < (1<<58)`. For `n >= 1<<58`, naive `2n+1` sets
+# bit 59 or higher and could collide with Float/Sym/Heap ids.
+# rubyrs pushes such ints to the hash fallback so they stay
+# distinct from those domains — this is one of the rare points
+# where we intentionally diverge from CRuby's exact id values
+# in exchange for cross-type injectivity. The cross-type guard
+# below still holds under CRuby (CRuby uses LSB tagging so its
+# fixnum/Sym/heap ids never collide either, by construction):
+puts (1 << 60).object_id != :foo.object_id        # true
+
 # respond_to? whitelist matches new universal arms
 puts Object.new.respond_to?(:object_id)           # true
 puts Object.new.respond_to?(:__id__)              # true

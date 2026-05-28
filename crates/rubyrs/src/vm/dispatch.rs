@@ -4697,13 +4697,22 @@ impl Vm {
                 // Heap-managed / classes / blocks / methods —
                 // identity hash via object_id. CRuby Array/Hash
                 // override `hash` to recurse over contents; ours
-                // doesn't yet (documented gap — `Array#==`
-                // works content-wise but `{[1] => :a}[[1]]`
-                // would miss).
+                // doesn't yet (documented gap — Array/Hash
+                // `#hash` is identity-based, not content-based,
+                // so equal-by-content arrays/hashes won't hash
+                // alike). Hash key lookup itself doesn't depend
+                // on `#hash` today — `vm/hash.rs` does a linear
+                // scan with `ruby_eql`, so `{[1] => :a}[[1]]`
+                // does find the entry; only `#hash`-using paths
+                // (e.g. `Set`, custom user code) see the gap.
                 _ => object_id_for(&recv).hash(&mut h),
             }
-            // Take the low 63 bits to stay in positive i64 range.
-            let v = (h.finish() & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+            // Return the full 64-bit hash as i64 — Ruby permits
+            // negative hashes and other #hash impls in this
+            // crate (Integer/Float/String) all return the
+            // unmasked `h.finish() as i64`. Masking here would
+            // drop 1 bit of entropy without benefit.
+            let v = h.finish() as i64;
             self.stack.push(Value::Int(v));
             return Ok(());
         }
@@ -6928,15 +6937,23 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
         (1i64 << 62) | ((type_subtag as i64) << 58) | (payload_masked as i64)
     }
     match v {
-        // CRuby-exact Fixnum encoding `2n+1` (always odd) for
-        // ints in the safe range; falls back to a bit-59 tag
-        // for large magnitudes where `2n+1` would overflow and
-        // become non-injective (e.g. naive
-        // `i64::MAX.wrapping_mul(2).wrapping_add(1) == 0`
-        // collides with `false.object_id == 0`).
+        // CRuby-exact Fixnum encoding `2n+1` for ints in the
+        // safe range; falls back to a bit-59 tag otherwise.
+        // Safe range:
+        //   * `n < 0` — id is negative (sign bit set), distinct
+        //     from every type-tagged id (Float/Sym/Heap all set
+        //     specific positive bits and clear the sign bit).
+        //     Only excluded by overflow of `2n+1` itself
+        //     (i.e. `n == i64::MIN`).
+        //   * `n >= 0` — id must clear bits 59..62 so it doesn't
+        //     collide with Float(bit 60) / Sym(bit 61) /
+        //     Heap(bit 62). That means `id < (1<<59)` i.e.
+        //     `n < (1<<58)`.
+        // Without this guard, e.g. `n = 1<<60` yields
+        // `2n+1 = 2^61+1` which collides with `Sym(SymId(1))`.
         Value::Int(n) => match n.checked_mul(2).and_then(|m| m.checked_add(1)) {
-            Some(id) => id,
-            None => {
+            Some(id) if *n < 0 || id < (1i64 << 59) => id,
+            _ => {
                 // Out-of-range int (|n| > 2^62 roughly): hash
                 // the full 64-bit pattern into 59 bits and set
                 // bit 59 as the type tag. A raw low-bit mask
