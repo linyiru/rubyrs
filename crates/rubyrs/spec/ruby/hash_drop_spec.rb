@@ -28,6 +28,14 @@ describe "Hash#drop" do
     assert_raises("ArgumentError") { {a: 1}.drop(-1) }
   end
 
+  it "raises ArgumentError when called without an argument" do
+    assert_raises("ArgumentError") { {a: 1}.drop }
+  end
+
+  it "raises ArgumentError when given too many arguments" do
+    assert_raises("ArgumentError") { {a: 1}.drop(1, 2) }
+  end
+
   bignum_it "raises RangeError on a BigInt size" do
     assert_raises("RangeError") { {a: 1}.drop(10_000_000_000_000_000_000_000) }
   end

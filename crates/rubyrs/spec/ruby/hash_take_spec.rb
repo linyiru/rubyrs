@@ -26,6 +26,16 @@ describe "Hash#take" do
     assert_raises("ArgumentError") { {a: 1}.take(-1) }
   end
 
+  it "raises ArgumentError when called without an argument" do
+    # respond_to?(:take) is true, so a no-arg call must raise
+    # ArgumentError rather than fall through to NoMethodError.
+    assert_raises("ArgumentError") { {a: 1}.take }
+  end
+
+  it "raises ArgumentError when given too many arguments" do
+    assert_raises("ArgumentError") { {a: 1}.take(1, 2) }
+  end
+
   bignum_it "raises RangeError on a BigInt size" do
     assert_raises("RangeError") { {a: 1}.take(10_000_000_000_000_000_000_000) }
   end

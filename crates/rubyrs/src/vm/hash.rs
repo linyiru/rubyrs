@@ -427,6 +427,24 @@ impl Vm {
                         let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
                         Some(Value::Array(aid))
                     }
+                    // Wrong-arity arm for take / drop — CRuby
+                    // raises ArgumentError on the no-arg call
+                    // (`h.take` / `h.drop` without an Int). The
+                    // BigInt and Int arms above already match
+                    // the supported shapes; this catches `[]`
+                    // and any non-Int/BigInt arg shape, raising
+                    // a clear "wrong number of arguments" error
+                    // instead of falling through to a
+                    // misleading NoMethodError despite
+                    // respond_to? returning true.
+                    ("take" | "drop", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 1)",
+                                many.len(),
+                            ),
+                        }));
+                    }
                     // `h.min` / `h.max` (no block) — find min/max
                     // entry via lexicographic compare on the
                     // `[k, v]` pair (key first, value tiebreaker).

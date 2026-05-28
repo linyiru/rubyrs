@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 132 |
-| Examples in corpus | 779 |
+| Examples in corpus | 783 |
 | Skipped `it` traces | 151 |
 
 ### Skipped traces by category
@@ -40,7 +40,7 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 35 | 136 | 49 |
+| Hash | 35 | 140 | 49 |
 | Integer | 34 | 303 | 28 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
@@ -77,7 +77,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_count_spec.rb` | Hash#count | `core/hash/count_spec.rb + core/enumerable/count_spec.rb` | 3 | 1 |
 | `hash_default_proc_spec.rb` | Hash#default_proc | `core/hash/default_proc_spec.rb` | 2 | 1 |
 | `hash_default_spec.rb` | Hash#default | `core/hash/default_spec.rb` | 3 | 1 |
-| `hash_drop_spec.rb` | Hash#drop | `core/hash/drop_spec.rb` | 6 | 0 |
+| `hash_drop_spec.rb` | Hash#drop | `core/hash/drop_spec.rb` | 8 | 0 |
 | `hash_each_pair_spec.rb` | Hash#each_pair | `core/hash/each_pair_spec.rb + shared/each.rb` | 3 | 2 |
 | `hash_each_with_object_spec.rb` | Hash#each_with_object | `core/enumerable/each_with_object_spec.rb` | 3 | 1 |
 | `hash_empty_spec.rb` | Hash#empty? | `core/hash/empty_spec.rb` | 2 | 0 |
@@ -101,7 +101,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_slice_spec.rb` | Hash#slice | `core/hash/slice_spec.rb` | 3 | 1 |
 | `hash_store_spec.rb` | Hash#store | `core/hash/store_spec.rb` | 2 | 1 |
 | `hash_sum_spec.rb` | Hash#sum | `core/hash/sum_spec.rb` | 6 | 1 |
-| `hash_take_spec.rb` | Hash#take | `core/hash/take_spec.rb` | 6 | 0 |
+| `hash_take_spec.rb` | Hash#take | `core/hash/take_spec.rb` | 8 | 0 |
 | `hash_take_while_spec.rb` | Hash#take_while | `core/hash/take_while_spec.rb` | 11 | 0 |
 | `hash_to_a_spec.rb` | Hash#to_a | `core/hash/to_a_spec.rb` | 1 | 1 |
 | `hash_transform_keys_spec.rb` | Hash#transform_keys | `core/hash/transform_keys_spec.rb` | 3 | 5 |
