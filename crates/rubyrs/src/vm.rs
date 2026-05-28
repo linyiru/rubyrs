@@ -510,6 +510,21 @@ pub(crate) struct Vm {
     /// semantics: `return` inside a `do…end` exits the enclosing
     /// method, not just the block.
     pub(crate) method_return: Option<Value>,
+    /// Identity of the lexical-owner frame for an in-flight
+    /// non-local return. CRuby's `return` inside a block exits
+    /// the method that **lexically defined** the block, not
+    /// the method that happens to be yielding. The block's
+    /// `captured` Rc points at the lexical owner's locals;
+    /// `Op::ReturnMethod` snapshots that Rc here so the unwind
+    /// loop can identify the right method frame by
+    /// `Rc::ptr_eq` (the lexical owner is the topmost
+    /// non-block frame whose `locals` Rc matches). If no
+    /// matching frame is found, the block escaped its lexical
+    /// scope (CRuby raises LocalJumpError; Tier-1 falls back
+    /// to the legacy "walk-blocks-then-pop-one-method" path
+    /// to preserve existing behavior). (TRY_RUNS pass-10
+    /// layer #4.)
+    pub(crate) method_return_locals: Option<Rc<RefCell<Vec<Value>>>>,
     /// In-flight `break`/`next` through `ensure` chain. Set by
     /// `Op::BreakLoop`/`Op::NextLoop` when an `is_ensure` handler
     /// sits between the source and the target; cleared once the
@@ -703,6 +718,7 @@ impl Vm {
             method_compose_forwarder_proto: None,
             sources: HashMap::new(),
             method_return: None,
+            method_return_locals: None,
             pending_loop_transfer: None,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
@@ -751,6 +767,10 @@ impl Vm {
         let v = self.method_return.take();
         if v.is_some() {
             self.pending_loop_transfer = None;
+            // `method_return_locals` is consumed paired with the
+            // value; clear it here so a future return doesn't
+            // accidentally inherit the old owner identity.
+            self.method_return_locals = None;
         }
         v
     }

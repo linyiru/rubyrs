@@ -58,3 +58,43 @@ def compute
   999  # unreachable
 end
 puts compute                                     # 42
+
+## Layer #4 shapes: lexical-owner unwind. `return` exits the
+## method that LEXICALLY DEFINED the block, not the
+## dynamic-context method that's currently yielding. Pre-fix
+## rubyrs unwound "while is_block" and so stopped at the
+## nearest non-block frame (= the yielder), leaving the
+## lexical-owner method running with the wrong value.
+## (TRY_RUNS pass-10 layer #4.)
+
+## L4-Shape 1: `return` from a block defined in caller_method
+## but YIELDED by `outer`. CRuby: exits caller_method →
+## caller_method's caller sees nothing further. Pre-fix:
+## exited `outer` only, so caller_method got `r = :b` and
+## printed "after: :b". Post-fix: caller_method itself returns,
+## printing the block's value `:b` directly.
+def yield_outer(items)
+  items.each { |it| yield it }
+  "yielder-fell-through"
+end
+def lexical_owner_1
+  r = yield_outer([:a, :b, :c]) do |x|
+    return x if x == :b
+  end
+  "after: #{r.inspect}"
+end
+puts "L4-1=#{lexical_owner_1}"
+
+## L4-Shape 2: nested-block — `return` from an inner block
+## whose lexical owner is `triple`. CRuby unwinds through both
+## block frames AND any methods between them.
+def triple
+  [1].each do
+    [2].each do
+      return "got-out"
+    end
+    "inner-fell"
+  end
+  "outer-fell"
+end
+puts "L4-2=#{triple}"
