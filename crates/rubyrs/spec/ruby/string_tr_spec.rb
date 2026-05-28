@@ -1,10 +1,8 @@
 # Adapted from ruby/spec core/string/tr_spec.rb at upstream
-# commit 448cb340 (2026-05). Hand-translated — baseline literal-
-# char translation shapes. The character-range shorthand
-# (`tr("a-y", "b-z")`) is dropped — rubyrs's `tr` doesn't
-# expand ranges and treats the `-` literally, which diverges
-# from CRuby. The negation form (`tr("^aeiou", "*")`) is also
-# dropped for the same reason.
+# commit 448cb340 (2026-05). Hand-translated — full set-syntax
+# coverage: literal chars, range shorthand (`a-y` → a..y),
+# `^`-negation, empty-to_str delete, longer-source last-char
+# stretch.
 
 describe "String#tr" do
   it "translates each char from the source set to the corresponding char in the dest set" do
@@ -25,12 +23,41 @@ describe "String#tr" do
     assert_eq("hello".tr("xyz", "abc"), "hello")
   end
 
-  # skipped (divergent): it "translates characters in the range" do
-  #   Character-range shorthand `tr("a-y", "b-z")`. rubyrs treats
-  #   `-` literally; CRuby expands the range.
-  # skipped (divergent): it "treats a leading ^ in from_str as negation" do
-  #   Negation form `tr("^aeiou", "*")`. rubyrs treats `^`
-  #   literally; CRuby negates the set.
+  it "translates characters in the range" do
+    assert_eq("hello".tr("a-y", "b-z"), "ifmmp")
+    assert_eq("hello".tr("a-y", "A-Y"), "HELLO")
+  end
+
+  it "treats a leading ^ in from_str as negation" do
+    assert_eq("hello".tr("^aeiou", "*"), "*e**o")
+  end
+
+  it "deletes negated characters when to_str is empty" do
+    assert_eq("hello".tr("^aeiou", ""), "eo")
+  end
+
+  it "deletes set characters when to_str is empty" do
+    assert_eq("hello".tr("aeiou", ""), "hll")
+  end
+
+  it "treats `^` literally in to_str (not as negation)" do
+    # `^` is only a negation prefix in from_str; in to_str it
+    # maps positionally like any other char.
+    assert_eq("a".tr("a", "^b"), "^")
+  end
+
+  it "uses the LAST occurrence's index for duplicate chars in from_str" do
+    # CRuby builds the translation table by overwriting per-char
+    # entries, so duplicates in `from` resolve to the last
+    # paired `to` char.
+    assert_eq("a".tr("aa", "12"), "2")
+    assert_eq("a".tr("aaa", "123"), "3")
+  end
+
+  it "raises ArgumentError on a reversed range" do
+    assert_raises("ArgumentError") { "abc".tr("c-a", "x") }
+  end
+
   # skipped (method-not-implemented): describe "String#tr!" do ... end
   #   Destructive variant.
 end
