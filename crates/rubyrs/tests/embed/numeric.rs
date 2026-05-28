@@ -2824,15 +2824,20 @@ fn float_domain_error_class_and_rescue_chain() {
         ("(0.0/0.0).truncate", "NaN"),
     ] {
         let err = rt.eval(script, "fde_to_i.rb").unwrap_err();
+        // At the eval boundary the dispatcher always re-shapes a
+        // typed trap into `Uncaught { class_name, message }` via
+        // `trap_to_exception` + `unwind_with_exception` (see
+        // vm/step.rs:289 — only ResourceExhausted / Uncaught /
+        // SyntaxError bypass that conversion). Pin the boundary
+        // shape AND that the class_name is exactly
+        // "FloatDomainError" so a regression that downgrades to
+        // a generic RangeError-shaped Uncaught fails loudly.
         match err.err {
-            rubyrs::RubyError::FloatDomainError { ref msg } => {
-                assert_eq!(msg, expected_msg, "for {:?}", script);
-            }
             rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
                 assert_eq!(class_name, "FloatDomainError", "for {:?}", script);
                 assert_eq!(message, expected_msg, "for {:?}", script);
             }
-            ref other => panic!("expected FloatDomainError for {:?}, got {:?}", script, other),
+            ref other => panic!("expected Uncaught FloatDomainError for {:?}, got {:?}", script, other),
         }
     }
 }
