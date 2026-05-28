@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ## [Unreleased]
 
+### Added
+### Changed
+### Fixed
+### Internal
+
+## [0.1.0] - 2026-05-28
+
 ### Release highlights
 
 The first tagged release of rubyrs — an embeddable Ruby 3.4
