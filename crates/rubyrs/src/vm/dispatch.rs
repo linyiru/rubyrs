@@ -1417,7 +1417,19 @@ impl Vm {
                 // BasicObject has no parent and returns nil. User
                 // classes return their parent.
                 if cls.is_module {
-                    // CRuby formats this as
+                    // Probe for a user-defined singleton override
+                    // first — `def M.superclass; ...; end` (or
+                    // `M.singleton_class.prepend(...)`) lets user
+                    // code shadow the default raise. Falling through
+                    // here lets the normal dispatch chain in
+                    // try_dispatch_callable_intrinsics' caller
+                    // resolve and invoke the override.
+                    let sup_id = self.interner.intern("superclass");
+                    if self.lookup_class_singleton_method(&cls, sup_id).is_some() {
+                        return Ok(false);
+                    }
+                    // No override: raise NoMethodError. CRuby
+                    // formats this as
                     // "undefined method 'superclass' for module M",
                     // i.e. lowercase "module" + the actual name.
                     // Carry the dynamic name through `recv_type`'s

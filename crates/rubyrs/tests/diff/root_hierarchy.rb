@@ -54,6 +54,17 @@ end
 # --- BasicObject.ancestors is just [BasicObject] ---
 puts BasicObject.ancestors.inspect             # [BasicObject]
 
+# --- Module#superclass user override wins (CRuby parity) ---
+# Defining `def M.superclass` overrides the default raise.
+# respond_to? also reflects the override.
+module Overridden
+  def self.superclass
+    "user-defined"
+  end
+end
+puts Overridden.superclass                     # user-defined
+puts Overridden.respond_to?(:superclass)       # true
+
 # --- respond_to?(:superclass) parity: Modules report false ---
 # CRuby raises NoMethodError on M.superclass, so respond_to?
 # returns false too. Feature-detection patterns like

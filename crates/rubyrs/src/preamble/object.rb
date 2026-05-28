@@ -1,6 +1,10 @@
-# Universal ancestor hierarchy: BasicObject → Kernel (module,
-# mixed into Object) → Object. Mirrors CRuby's actual chain
-# instead of an isolated Object stub.
+# Universal ancestor hierarchy: BasicObject ← Object (Kernel
+# is mixed into Object as a module, not a superclass between
+# them). Mirrors CRuby's actual chain instead of an isolated
+# Object stub. The resulting Object.ancestors is
+# `[Object, Kernel, BasicObject]` — Kernel appears between
+# Object and BasicObject in the ancestor *walk* because of
+# the include, but it's not a superclass.
 #
 # Why model the full chain:
 #   - `Object.ancestors` returns `[Object, Kernel, BasicObject]`,
