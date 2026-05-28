@@ -40,6 +40,12 @@ describe "String#tr" do
     assert_eq("hello".tr("aeiou", ""), "hll")
   end
 
+  it "treats `^` literally in to_str (not as negation)" do
+    # `^` is only a negation prefix in from_str; in to_str it
+    # maps positionally like any other char.
+    assert_eq("a".tr("a", "^b"), "^")
+  end
+
   # skipped (method-not-implemented): describe "String#tr!" do ... end
   #   Destructive variant.
 end

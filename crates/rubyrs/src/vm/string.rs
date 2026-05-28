@@ -407,22 +407,38 @@ pub(crate) fn string_call(
         // LAST char (CRuby's "stretch" behaviour). If `to` is
         // empty, those chars are deleted.
         //
-        // Both `from` and `to` go through `parse_tr_set`, which
-        // expands range shorthand (`a-z` → `[a, b, ..., z]`) and
-        // detects a leading `^` in `from` as set negation
-        // ("translate every char NOT in the set"). Under negation
-        // every translated char maps to `to`'s LAST char (or is
-        // deleted if `to` is empty), per CRuby.
+        // `from` and `to` both go through `parse_tr_set`. `from`
+        // honours a leading `^` as set negation ("translate every
+        // char NOT in the set" — non-set chars all map to `to`'s
+        // LAST char, or are deleted if `to` is empty). `to`
+        // treats `^` as a literal — `tr("a", "^b")` translates
+        // `a` to `^`. Range overflow (set > TR_SET_MAX_CHARS)
+        // raises ArgumentError, bounding intermediate Vec growth
+        // against `tr("\u{0}-\u{10FFFF}", "*")` style inputs.
         (Value::Str(a), "tr", [Value::Str(from), Value::Str(to)]) => {
             let a_ref = a.to_string_lossy();
             let from_ref = from.to_string_lossy();
             let to_ref = to.to_string_lossy();
-            let (from_chars, from_negated) = parse_tr_set(&from_ref);
-            let (to_chars, _) = parse_tr_set(&to_ref);
+            let (from_chars, from_negated) = match parse_tr_set(&from_ref, true) {
+                Ok(t) => t,
+                Err(msg) => return Err(crate::error::RubyError::ArgumentError {
+                    msg: msg.to_string(),
+                }),
+            };
+            let (to_chars, _) = match parse_tr_set(&to_ref, false) {
+                Ok(t) => t,
+                Err(msg) => return Err(crate::error::RubyError::ArgumentError {
+                    msg: msg.to_string(),
+                }),
+            };
             let mut out = String::with_capacity(a_ref.len());
             for ch in a_ref.chars() {
-                let in_set = from_chars.contains(&ch);
-                let translate = if from_negated { !in_set } else { in_set };
+                // Single linear scan: `position` returns Some(idx)
+                // iff `ch` is in the set, so we can drive both
+                // the membership test and the index lookup from
+                // one walk.
+                let idx_opt = from_chars.iter().position(|c| *c == ch);
+                let translate = if from_negated { idx_opt.is_none() } else { idx_opt.is_some() };
                 if !translate {
                     out.push(ch);
                     continue;
@@ -437,7 +453,7 @@ pub(crate) fn string_call(
                 } else {
                     // Position-based: same index in `to`, or last
                     // char if `from` is longer than `to`.
-                    let idx = from_chars.iter().position(|c| *c == ch).unwrap();
+                    let idx = idx_opt.unwrap();
                     if idx < to_chars.len() {
                         out.push(to_chars[idx]);
                     } else {
@@ -1490,18 +1506,33 @@ impl Vm {
 /// inside the selector, octal forms) that real-world consumers
 /// rarely hit; we omit those here. Add as motivating cases
 /// appear.
+/// Hard cap on the expanded char count for a single tr set.
+/// Well above any legitimate human-written usage (full ASCII +
+/// punctuation + a few BMP runs is < 1k chars; the full Unicode
+/// range is ~1.1M codepoints). Bounds the intermediate Vec so
+/// `tr("\u{0}-\u{10FFFF}", "*")` over untrusted input can't OOM
+/// the host. Past the cap we raise ArgumentError rather than
+/// silently truncate.
+const TR_SET_MAX_CHARS: usize = 65_536;
+
 /// Order-preserving sibling of `parse_count_selector` used by
-/// `String#tr` (and ready for `squeeze` if it grows the same
-/// surface). Position matters here because tr maps each source-
-/// set position to the same dest-set position; using a HashSet
-/// would collapse the ordering and break the index-based
-/// mapping. Range / `^`-negation handling matches
+/// `String#tr`. Position matters here because tr maps each
+/// source-set position to the same dest-set position; using
+/// a HashSet would collapse the ordering and break the index-
+/// based mapping. Range expansion matches
 /// `parse_count_selector`.
-pub(crate) fn parse_tr_set(sel: &str) -> (Vec<char>, bool) {
-    let mut negate = false;
+///
+/// `allow_negation` gates the leading-`^` interpretation:
+/// `String#tr`'s `from_str` accepts negation but `to_str`
+/// treats `^` as a literal char — so callers pass `true` for
+/// the source set and `false` for the dest.
+///
+/// Returns `Err` with a CRuby-shaped message on range overflow
+/// (`TR_SET_MAX_CHARS`).
+pub(crate) fn parse_tr_set(sel: &str, allow_negation: bool) -> Result<(Vec<char>, bool), &'static str> {
     let mut chars: Vec<char> = sel.chars().collect();
-    if chars.first() == Some(&'^') && chars.len() > 1 {
-        negate = true;
+    let negate = allow_negation && chars.first() == Some(&'^') && chars.len() > 1;
+    if negate {
         chars.remove(0);
     }
     let mut out: Vec<char> = Vec::with_capacity(chars.len());
@@ -1511,6 +1542,10 @@ pub(crate) fn parse_tr_set(sel: &str) -> (Vec<char>, bool) {
             let start = chars[i] as u32;
             let end = chars[i + 2] as u32;
             if start <= end {
+                let span = (end - start + 1) as usize;
+                if out.len().saturating_add(span) > TR_SET_MAX_CHARS {
+                    return Err("invalid range in string transliteration (set too large)");
+                }
                 for cp in start..=end {
                     if let Some(c) = char::from_u32(cp) {
                         out.push(c);
@@ -1523,10 +1558,13 @@ pub(crate) fn parse_tr_set(sel: &str) -> (Vec<char>, bool) {
             // literal chars (matches CRuby's behavior on e.g.
             // `tr("z-a", ...)` which emits no translation).
         }
+        if out.len() >= TR_SET_MAX_CHARS {
+            return Err("invalid range in string transliteration (set too large)");
+        }
         out.push(chars[i]);
         i += 1;
     }
-    (out, negate)
+    Ok((out, negate))
 }
 
 pub(crate) fn parse_count_selector(sel: &str) -> (std::collections::HashSet<char>, bool) {
