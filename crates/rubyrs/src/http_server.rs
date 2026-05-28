@@ -769,17 +769,30 @@ pub(crate) fn marshal_rack_response(
             other.type_name(),
         )),
     };
-    // A3: accept Array directly OR any object that
-    // responds to `to_a` (Rack each-shape — Enumerable-y
-    // objects, Enumerator instances, custom classes).
-    // The Array path stays fast; the to_a path invokes
-    // the method synchronously + expects an Array back.
+    // A3 / P2a body detection table per ADR 0023 v2
+    // §"Detection order":
     //
-    // True streaming (Ruby producing chunks overlapped
-    // with socket writes) needs Fiber + a !Send Vm
-    // bridge — deferred to a separate ADR. A3α scope
-    // is "API-shape compatibility" so Rack apps + Sinatra
-    // responses can flow through unmodified.
+    //   Array → each → call → to_a
+    //
+    // Per Rack 3 SPEC §"Body", `each` is the preferred
+    // shape when an object responds to both `each` and
+    // `call` (e.g., Rails ActionDispatch::Response,
+    // Rack::BodyProxy, Sinatra::Response). v1 of this ADR
+    // had `call` first — would have mis-routed those.
+    //
+    // P2a scope: rewrites the detection ORDER + raises
+    // clear errors for shapes that need Fiber-driven
+    // streaming (`each`-only or `call`-only with no
+    // `to_a`). Those shapes land in P2b (Stream writer +
+    // hyper BoxBody poll_frame Fiber wiring). For now:
+    //
+    //   - Array → fast path (no Fiber, A3α unchanged)
+    //   - responds to `each` AND `to_a` → to_a path (A3α)
+    //   - responds to `each` only → error "P2b-pending"
+    //   - responds to `call` AND `to_a` → to_a path
+    //   - responds to `call` only → error "P2b-pending"
+    //   - responds to `to_a` only → to_a path (A3α)
+    //   - none → error
     let body_val = arr[2].clone();
     let body_arr_id = match &body_val {
         Value::Array(id) => *id,
@@ -788,14 +801,36 @@ pub(crate) fn marshal_rack_response(
             let cls = match &class_val {
                 Value::Class(c) => c.clone(),
                 _ => return Err(format!(
-                    "Rack body must be Array or respond to to_a; got {} (no class to dispatch to)",
+                    "Rack body must be Array or respond to each/call/to_a; got {} (no class to dispatch to)",
                     other.type_name(),
                 )),
             };
+            let each_sym = vm.interner.intern("each");
+            let call_sym = vm.interner.intern("call");
             let to_a_sym = vm.interner.intern("to_a");
-            let method = vm.lookup_method_uncached(&cls, to_a_sym).ok_or_else(|| {
+            let has_each = vm.lookup_method_uncached(&cls, each_sym).is_some();
+            let has_call = vm.lookup_method_uncached(&cls, call_sym).is_some();
+            let to_a_method = vm.lookup_method_uncached(&cls, to_a_sym);
+            // Pre-P2b: if the body responds to each / call
+            // but NOT to_a, we can't fall back to the
+            // buffered to_a path — return a clear error
+            // pointing at the unimplemented streaming
+            // path. With P2b in place this branch will
+            // route to the Fiber-driven each / call paths.
+            if has_each && to_a_method.is_none() {
+                return Err(format!(
+                    "Rack body responds to `each` but no `to_a` — Fiber-driven streaming (A3β P2b) not yet wired; define `to_a` on {} as a workaround",
+                    other.type_name(),
+                ));
+            }
+            if has_call && to_a_method.is_none() {
+                return Err(format!(
+                    "Rack body responds to `call` (Rack 3 streaming shape) but no `to_a` — Fiber-driven streaming (A3β P2b) not yet wired; this shape is buffered in P2b",
+                ));
+            }
+            let method = to_a_method.ok_or_else(|| {
                 format!(
-                    "Rack body must be Array or respond to to_a; got {} — no `to_a` method found",
+                    "Rack body must be Array or respond to each/call/to_a; got {} — no `to_a` method found",
                     other.type_name(),
                 )
             })?;
@@ -3433,6 +3468,164 @@ mod tests {
         );
     }
 
+    /// P2a: detection order Array → each → call → to_a.
+    /// A body responding to BOTH `each` and `to_a` (the
+    /// Rails BodyProxy / Sinatra::Response shape) MUST
+    /// route through `to_a` in P2a (Fiber-driven each
+    /// iteration lands in P2b). Asserts the 200 serves
+    /// correctly via the to_a path even with each defined.
+    #[test]
+    fn p2a_each_and_to_a_routes_through_to_a() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18113";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /p2a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // Class with BOTH each + to_a. Mirrors
+        // Rack::BodyProxy / ActionDispatch::Response.
+        rt.eval(&format!(r#"
+            class DualBody
+              def each
+                yield "via_each"
+              end
+              def to_a
+                ["via_to_a"]
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, DualBody.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "p2a_each_and_to_a.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        // P2a routes via to_a, NOT each.
+        assert!(
+            response_text.contains("via_to_a"),
+            "P2a must route via to_a (Fiber each lands in P2b), got:\n{response_text}",
+        );
+        assert!(
+            !response_text.contains("via_each"),
+            "P2a should NOT use each yet (Fiber iteration deferred to P2b), got:\n{response_text}",
+        );
+    }
+
+    /// P2a: a body responding to `each` but NOT `to_a`
+    /// raises a P2b-pending error pointing at the
+    /// unimplemented streaming path. Rack 3 each-shape
+    /// bodies are detected; the error guides users
+    /// toward defining to_a as a workaround until P2b.
+    #[test]
+    fn p2a_each_only_returns_p2b_pending_error() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18114";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /p2a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class EachOnly
+              def each
+                yield "chunk"
+              end
+            end
+            app = ->(env) {{ [200, {{}}, EachOnly.new] }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "p2a_each_only.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 500"),
+            "expected 500 for each-only body (P2b-pending), got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("Fiber-driven streaming (A3β P2b)"),
+            "expected P2b-pending diagnostic, got:\n{response_text}",
+        );
+    }
+
+    /// P2a: a body responding to `call` (Rack 3 streaming
+    /// shape) but NOT `to_a` also raises a P2b-pending
+    /// error. v1 of ADR 0023 had `call` detected before
+    /// `each` — would have mis-routed dual-shape bodies.
+    /// v2 (this commit) puts each before call AND defers
+    /// real call-based streaming to P2b.
+    #[test]
+    fn p2a_call_only_returns_p2b_pending_error() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18115";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /p2a HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class CallOnly
+              def call(stream)
+                stream.write("hi")
+              end
+            end
+            app = ->(env) {{ [200, {{}}, CallOnly.new] }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "p2a_call_only.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 500"),
+            "expected 500 for call-only body (P2b-pending), got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("Rack 3 streaming shape"),
+            "expected Rack 3 streaming-shape diagnostic, got:\n{response_text}",
+        );
+    }
+
     /// A3: Rack body that doesn't respond to `to_a` AND
     /// isn't an Array → 500 with a clear diagnostic.
     /// Today an Integer is the cleanest "neither" — it
@@ -3471,7 +3664,7 @@ mod tests {
             "expected 500 for non-iterable body, got:\n{response_text}",
         );
         assert!(
-            response_text.contains("Array or respond to to_a"),
+            response_text.contains("Array or respond to each/call/to_a"),
             "expected diagnostic mentioning Array/to_a, got:\n{response_text}",
         );
     }
