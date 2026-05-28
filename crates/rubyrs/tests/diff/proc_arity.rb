@@ -1,5 +1,5 @@
-## `Proc#arity` — CRuby-shape arity for blocks. Closes
-## TRY_RUNS layer #24 — sinatra/base.rb:1810
+## `Proc#arity` — CRuby-shape arity for blocks. Closes TRY_RUNS
+## layer #24 — sinatra/base.rb:1810
 ## (`Sinatra::Base.compile!`) reads `block.arity` to size
 ## the route block's positional binding list; without this
 ## method the probe stalls at NoMethodError on `Proc#arity`.
