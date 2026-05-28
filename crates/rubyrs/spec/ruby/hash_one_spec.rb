@@ -11,6 +11,15 @@ describe "Hash#one?" do
     assert_eq({a: 1, b: 2}.one?, false)
   end
 
+  it "yields a single [k, v] Array per entry (matches Hash#each)" do
+    # Single-param block should receive the whole pair, not
+    # just the key. `|k, v|` blocks auto-splat. Pins the
+    # convention shared with flat_map / sum / partition.
+    pairs = []
+    {a: 1, b: 2}.one? { |pair| pairs << pair; false }
+    assert_eq(pairs, [[:a, 1], [:b, 2]])
+  end
+
   it "returns true iff exactly one entry yields truthy" do
     h = {a: 1, b: 2, c: 3}
     assert_eq(h.one? { |k, v| v == 2 }, true)

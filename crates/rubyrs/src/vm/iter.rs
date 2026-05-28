@@ -2578,11 +2578,14 @@ impl Vm {
             (Value::Hash(id), "any?", []) => Some(self.iter_hash_filter(*id, IterMode::Any, block)?),
             (Value::Hash(id), "all?", []) => Some(self.iter_hash_filter(*id, IterMode::All, block)?),
             (Value::Hash(id), "none?", []) => Some(self.iter_hash_filter(*id, IterMode::NoneM, block)?),
-            // `h.one? { |k, v| ... }` — true iff exactly one
-            // entry yields truthy. Standalone arm rather than an
-            // IterMode extension because the count-then-compare
-            // shape doesn't fit the Any/All/NoneM short-circuit
-            // loop in `iter_hash_filter`.
+            // `h.one? { |pair| ... }` / `{ |k, v| ... }` — true
+            // iff exactly one entry yields truthy. CRuby yields
+            // a single `[k, v]` Array per entry (matching
+            // Hash#each); `|k, v|` blocks auto-splat. Standalone
+            // arm rather than an IterMode extension because the
+            // count-then-compare shape doesn't fit the
+            // Any/All/NoneM short-circuit loop in
+            // `iter_hash_filter`.
             (Value::Hash(id), "one?", []) => {
                 let id = *id;
                 let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
@@ -2597,7 +2600,13 @@ impl Vm {
                 let mut count: i64 = 0;
                 let mut early = None;
                 for (k, v) in snapshot {
-                    let r = match g.vm.step_block(block, vec![k, v], pre_frames)? {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let r = match step? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
@@ -2611,12 +2620,12 @@ impl Vm {
                 }
                 Some(early.unwrap_or(Value::Bool(count == 1)))
             }
-            // `h.partition { |k, v| ... }` — returns
-            // `[truthy_pairs_array, falsy_pairs_array]`. Each
-            // pair is materialised as a fresh `[k, v]` Array
-            // (matching CRuby's "Hash#partition yields Array<[k,v]>"
-            // convention). Block yields k, v as separate args via
-            // auto-splat (matches the existing Hash#each pattern).
+            // `h.partition { |pair| ... }` / `{ |k, v| ... }` —
+            // returns `[truthy_pairs_array, falsy_pairs_array]`.
+            // Each pair is materialised as a fresh `[k, v]`
+            // Array. CRuby yields a single pair Array per entry
+            // (matching Hash#each); single-param blocks receive
+            // the pair, two-param blocks auto-splat.
             (Value::Hash(id), "partition", []) => {
                 let id = *id;
                 let mut g = PinGuard::new(self);
@@ -2638,14 +2647,17 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    let r = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let r = match step? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                     let target = if r.is_truthy() { yes_id } else { no_id };
                     g.vm.heap.array_mut(target).push(Value::Array(pair_id));
                 }
