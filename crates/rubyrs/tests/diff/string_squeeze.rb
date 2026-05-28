@@ -1,7 +1,9 @@
 # String#squeeze — collapse runs of consecutive identical chars.
 # With a char-set arg, only chars in the set are squeezed.
-# Range syntax (`"a-z"`) and ^-negation in the set are NOT
-# expanded — same conservative semantics as `tr` (SUBSET.md).
+# Range syntax (`"a-z"`) and ^-negation work via the shared
+# `parse_tr_set` (same as `tr` / `count`). This fixture pins
+# the literal-char baseline; range/negation coverage lives in
+# spec/ruby/string_squeeze_spec.rb.
 
 # No-arg form.
 puts "aaabbbccc".squeeze               # abc
