@@ -461,12 +461,15 @@ pub(crate) fn numeric_call(
         //     selector's rounding mode (ceil → +∞, floor → -∞,
         //     round → half-away-from-zero, truncate → toward 0).
         //
-        // Under bignum the `10**|n|` computation overflows i64 at
-        // |n| >= 19 and the result can also overflow. Those cases
-        // decline here so bigint_primitive can promote — though
-        // current bigint dispatch doesn't yet handle these
-        // selectors (tracked as method-not-implemented in the
-        // associated specs for `10**70`-magnitude inputs).
+        // Under bignum the `10**|n|` computation overflows i128
+        // at |n| > 38 and the result can also overflow i64. Those
+        // cases decline here, which currently surfaces as
+        // NoMethodError (bigint_primitive's ceil/floor/round/truncate
+        // arms only handle 0-arg / positive-precision no-ops on
+        // BigInt receivers; the negative-precision branch with
+        // Int recv isn't wired through yet). Tracked as
+        // method-not-implemented in the associated specs for
+        // `10**70`-magnitude inputs.
         (Value::Int(a), "ceil" | "floor" | "round" | "truncate", []) => {
             Some(Value::Int(*a))
         }
@@ -483,15 +486,17 @@ pub(crate) fn numeric_call(
             // that `(-*n) as u64` would hit in debug builds when
             // someone passes i64::MIN as the precision.
             let abs_n = n.unsigned_abs();
-            // For |n| > 38, 10^|n| overflows i128 too. Under
-            // bignum, defer so a future BigInt-aware path can
-            // produce the exact answer. Under no-bignum the
-            // "wrap to i64" convention can't represent ANY
-            // non-zero result either, so 0 is the best we have
-            // — note this matches the no-bignum behavior of
-            // other arithmetic ops that wrap past representable
-            // range (the result is congruent to 0 mod 2^64 only
-            // by coincidence; 0 is the principled fall-back).
+            // For |n| > 38, 10^|n| overflows i128 too, so we
+            // can't apply the i128-widened round-mode arithmetic
+            // below. Under bignum: defer (surfaces as
+            // NoMethodError until a BigInt-aware path lands).
+            // Under no-bignum: return 0 as an explicit fallback —
+            // NOT a true "wrap to i64" of the mathematical answer
+            // (computing `10^|n| mod 2^64` via wrapping_pow would
+            // give some i64 with no semantic meaning). 0 is the
+            // safest concrete answer we can produce; document this
+            // is a divergence from the wrap convention rather than
+            // a coincidence.
             if abs_n > 38 {
                 #[cfg(feature = "bignum")]
                 { return Ok(None); }
