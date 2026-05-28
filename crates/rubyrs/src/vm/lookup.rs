@@ -681,7 +681,7 @@ impl Vm {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, name_id).is_some()
             }
-            Value::Block(_) => matches!(name, "call" | "[]" | "()" | "curry" | ">>" | "<<"),
+            Value::Block(_) => matches!(name, "call" | "[]" | "()" | "yield" | "arity" | "curry" | ">>" | "<<"),
             #[cfg(feature = "regex")]
             Value::Regex(_) => matches!(name,
                 "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect"
