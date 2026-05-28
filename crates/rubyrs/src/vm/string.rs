@@ -686,15 +686,23 @@ pub(crate) fn string_call(
                 });
             }
             let a_ref = a.to_string_lossy();
-            if !re.is_match(&a_ref) { return Ok(Some(Value::Nil)); }
             let repl_ref = repl.to_string_lossy();
             let repl_xlated = ruby_backref_to_dollar(&repl_ref);
-            let new_bytes = re.replace(&a_ref, repl_xlated.as_str()).into_owned().into_bytes();
-            if *a.borrow() != new_bytes {
-                check(new_bytes.len())?;
-                *a.borrow_mut() = new_bytes;
+            // `regex::Regex::replace` returns `Cow::Borrowed`
+            // when there's no match — use that to detect the
+            // no-match case in a single scan instead of running
+            // a separate `is_match` first.
+            match re.replace(&a_ref, repl_xlated.as_str()) {
+                std::borrow::Cow::Borrowed(_) => Some(Value::Nil),
+                std::borrow::Cow::Owned(new_str) => {
+                    let new_bytes = new_str.into_bytes();
+                    if *a.borrow() != new_bytes {
+                        check(new_bytes.len())?;
+                        *a.borrow_mut() = new_bytes;
+                    }
+                    Some(Value::Str(a.clone()))
+                }
             }
-            Some(Value::Str(a.clone()))
         }
         #[cfg(feature = "regex")]
         (Value::Str(a), "gsub!", [Value::Regex(re), Value::Str(repl)]) => {
@@ -704,15 +712,21 @@ pub(crate) fn string_call(
                 });
             }
             let a_ref = a.to_string_lossy();
-            if !re.is_match(&a_ref) { return Ok(Some(Value::Nil)); }
             let repl_ref = repl.to_string_lossy();
             let repl_xlated = ruby_backref_to_dollar(&repl_ref);
-            let new_bytes = re.replace_all(&a_ref, repl_xlated.as_str()).into_owned().into_bytes();
-            if *a.borrow() != new_bytes {
-                check(new_bytes.len())?;
-                *a.borrow_mut() = new_bytes;
+            // Same single-scan no-match detection via the Cow
+            // returned by `replace_all`.
+            match re.replace_all(&a_ref, repl_xlated.as_str()) {
+                std::borrow::Cow::Borrowed(_) => Some(Value::Nil),
+                std::borrow::Cow::Owned(new_str) => {
+                    let new_bytes = new_str.into_bytes();
+                    if *a.borrow() != new_bytes {
+                        check(new_bytes.len())?;
+                        *a.borrow_mut() = new_bytes;
+                    }
+                    Some(Value::Str(a.clone()))
+                }
             }
-            Some(Value::Str(a.clone()))
         }
         // String#tr — character-by-character translation. Each
         // char in `from` maps to the same-index char in `to`; if
