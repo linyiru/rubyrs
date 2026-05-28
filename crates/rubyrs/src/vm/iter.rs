@@ -2810,7 +2810,18 @@ impl Vm {
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
-                let mut seen: Vec<Value> = Vec::with_capacity(snapshot.len());
+                // `seen_id` is a heap-backed Array of block
+                // return values — heap-ref keys (Array / Hash /
+                // String / BigInt / Object) MUST be rooted
+                // across iterations, otherwise the next iter's
+                // maybe_gc sweeps them and the subsequent
+                // `ruby_eql` scan reads use-after-free slots.
+                // Storing in a pinned Array gives them a real
+                // root via the GC walker.
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let seen_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len())));
+                g.pin(Value::Array(seen_id));
                 let mut early = None;
                 for (k, v) in snapshot {
                     g.vm.maybe_gc();
@@ -2826,10 +2837,13 @@ impl Vm {
                     };
                     // First-seen wins: only push if no
                     // previously-seen key is `ruby_eql` to this
-                    // one.
-                    let already_seen = seen.iter().any(|s| s.ruby_eql(&key, &g.vm.heap));
+                    // one. seen_id is heap-backed + pinned so
+                    // its contents stay rooted across the next
+                    // iter's maybe_gc.
+                    let already_seen = g.vm.heap.array(seen_id).iter()
+                        .any(|s| s.ruby_eql(&key, &g.vm.heap));
                     if !already_seen {
-                        seen.push(key);
+                        g.vm.heap.array_mut(seen_id).push(key);
                         g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
                     }
                 }
