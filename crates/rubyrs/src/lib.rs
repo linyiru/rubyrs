@@ -840,20 +840,20 @@ impl Runtime {
         // snapshot time, so its preamble runs under defaults —
         // that's by design and documented on `new_default_impl`.
         //
-        // Then lift the resource caps + `stress_gc` for the
-        // duration of preamble load. The preamble is internal
-        // infrastructure, not user code; consuming the host's
-        // resource budget for bootstrap means a host that wants a
-        // tight sandbox (fuzz, untrusted-script eval) cannot
-        // construct a Runtime at all — the preamble traps and
-        // `.expect` in `load_preamble` panics with SIGABRT instead
-        // of returning a recoverable error. Originally surfaced
-        // by the cargo-fuzz harness in PR #180 with a magic
-        // `fuel: Some(50_000)` workaround.
+        // Then lift the budgets + `stress_gc` (see
+        // `PreambleLiftedSettings`) for the duration of preamble
+        // load. The preamble is internal infrastructure, not user
+        // code; consuming the host's resource budget for bootstrap
+        // means a host that wants a tight sandbox (fuzz,
+        // untrusted-script eval) cannot construct a Runtime at all
+        // — the preamble traps and `.expect` in `load_preamble`
+        // panics with SIGABRT instead of returning a recoverable
+        // error. Originally surfaced by the cargo-fuzz harness in
+        // PR #180 with a magic `fuel: Some(50_000)` workaround.
         //
         // The `PreambleLiftGuard` is RAII: on every exit path from this
         // scope (normal return AND panic unwinding), the saved
-        // caps are restored. A panic mid-preamble that an
+        // settings are restored. A panic mid-preamble that an
         // embedder catches via `catch_unwind` therefore yields a
         // Runtime with its sandbox intact, not silently disarmed.
         let mut rt = Self::build_skeleton();
@@ -861,7 +861,7 @@ impl Runtime {
         {
             let guard = PreambleLiftGuard::lift(&mut rt);
             guard.rt.load_preamble();
-            // guard drops here; caps restored.
+            // guard drops here; lifted settings restored.
         }
         rt.post_preamble = Some(PostPreambleSnapshot::capture(&rt));
         rt
