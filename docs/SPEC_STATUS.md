@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 121 |
-| Examples in corpus | 688 |
+| Examples in corpus | 690 |
 | Skipped `it` traces | 147 |
 
 ### Skipped traces by category
@@ -44,7 +44,7 @@ Find blocks unlocked by a future feature with e.g.
 | Integer | 34 | 296 | 30 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
-| String | 23 | 149 | 24 |
+| String | 23 | 151 | 24 |
 | UnboundMethod | 4 | 18 | 0 |
 
 ## Files
@@ -152,7 +152,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_downcase_spec.rb` | String#downcase | `core/string/downcase_spec.rb` | 7 | 1 |
 | `string_empty_spec.rb` | String#empty? | `core/string/empty_spec.rb` | 5 | 0 |
 | `string_end_with_spec.rb` | String#end_with? | `core/string/end_with_spec.rb + shared/string/end_with.rb` | 3 | 3 |
-| `string_gsub_spec.rb` | String#gsub with pattern and replacement | `core/string/gsub_spec.rb` | 15 | 0 |
+| `string_gsub_spec.rb` | String#gsub with pattern and replacement | `core/string/gsub_spec.rb` | 16 | 0 |
 | `string_include_spec.rb` | String#include? with String | `core/string/include_spec.rb` | 8 | 0 |
 | `string_length_spec.rb` | String#length | `core/string/length_spec.rb` | 1 | 0 |
 | `string_ljust_spec.rb` | String#ljust | `core/string/ljust_spec.rb` | 4 | 1 |
@@ -164,7 +164,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_squeeze_spec.rb` | String#squeeze | `core/string/squeeze_spec.rb` | 9 | 1 |
 | `string_start_with_spec.rb` | String#start_with? | `core/string/start_with_spec.rb + shared/string/start_with.rb` | 3 | 7 |
 | `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 6 | 2 |
-| `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 14 | 0 |
+| `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 15 | 0 |
 | `string_swapcase_spec.rb` | String#swapcase | `core/string/swapcase_spec.rb` | 9 | 1 |
 | `string_tr_spec.rb` | String#tr | `core/string/tr_spec.rb` | 14 | 0 |
 | `string_upcase_spec.rb` | String#upcase | `core/string/upcase_spec.rb` | 7 | 1 |

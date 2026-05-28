@@ -120,6 +120,18 @@ describe "String#gsub!" do
     assert_eq("hello".gsub!(/z/, "Q"), nil)
   end
 
+  it "honours Ruby-style numeric backrefs (\\0, \\1) in the replacement" do
+    # Guards the `ruby_backref_to_dollar` translation on the
+    # destructive Regexp arm — every match site should expand
+    # the captures, not just the first.
+    s = "hello"
+    s.gsub!(/(l)/, "<\\1>")
+    assert_eq(s, "he<l><l>o")
+    s = "abc"
+    s.gsub!(/[abc]/, "[\\0]")
+    assert_eq(s, "[a][b][c]")
+  end
+
   it "raises a FrozenError on a frozen instance that is modified" do
     s = "hi".freeze
     assert_raises("FrozenError") { s.gsub!("h", "H") }

@@ -117,6 +117,18 @@ describe "String#sub!" do
     assert_eq("hello".sub!(/z/, "Q"), nil)
   end
 
+  it "honours Ruby-style numeric backrefs (\\0, \\1) in the replacement" do
+    # Guards the `ruby_backref_to_dollar` translation on the
+    # destructive Regexp arm. `\0` references the whole match
+    # and `\1` references the first capture group.
+    s = "hello"
+    s.sub!(/(l)/, "<\\1>")
+    assert_eq(s, "he<l>lo")
+    s = "abc"
+    s.sub!(/b/, "[\\0]")
+    assert_eq(s, "a[b]c")
+  end
+
   it "raises a FrozenError on a frozen instance that is modified" do
     s = "hi".freeze
     assert_raises("FrozenError") { s.sub!("h", "H") }
