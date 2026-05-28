@@ -78,3 +78,38 @@ describe "String#sub with pattern and block" do
   # + block raises NoMethodError. See docs/SUBSET.md → "String
   # built-in methods" for the full gap list.
 end
+
+describe "String#sub!" do
+  it "modifies self in place and returns self on a match" do
+    s = "hello"
+    r = s.sub!("l", "L")
+    assert(r.equal?(s))
+    assert_eq(s, "heLlo")
+  end
+
+  it "returns nil if no substitutions were made" do
+    s = "hello"
+    assert_eq(s.sub!("xyz", "Q"), nil)
+    # Sanity: the original was not mutated.
+    assert_eq(s, "hello")
+  end
+
+  it "handles an empty pattern by prepending the replacement" do
+    s = "hello"
+    s.sub!("", "X")
+    assert_eq(s, "Xhello")
+  end
+
+  it "supports a Regexp pattern" do
+    s = "hello"
+    s.sub!(/l+/, "L")
+    assert_eq(s, "heLo")
+    assert_eq("hello".sub!(/z/, "Q"), nil)
+  end
+
+  it "raises a FrozenError on a frozen instance that is modified" do
+    s = "hi".freeze
+    assert_raises("FrozenError") { s.sub!("h", "H") }
+  end
+end
+

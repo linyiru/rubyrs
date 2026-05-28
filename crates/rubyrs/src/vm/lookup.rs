@@ -543,7 +543,8 @@ impl Vm {
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |
                 "to_s" | "inspect" |
-                "sub" | "gsub" | "tr" | "squeeze" |
+                "sub" | "gsub" | "sub!" | "gsub!" |
+                "tr" | "squeeze" |
                 "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
                 "unpack" | "unpack1" | "bytes" |
                 "match?" | "match" | "scan" | "index" | "rindex" |

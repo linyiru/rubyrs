@@ -81,3 +81,37 @@ describe "String#gsub with pattern and block" do
     assert_eq("aaa".gsub(/a/) { "!" }, "!!!")
   end
 end
+
+describe "String#gsub!" do
+  it "modifies self in place and returns self on a match" do
+    s = "hello"
+    r = s.gsub!("l", "L")
+    assert(r.equal?(s))
+    assert_eq(s, "heLLo")
+  end
+
+  it "returns nil if no substitutions were made" do
+    s = "hello"
+    assert_eq(s.gsub!("xyz", "Q"), nil)
+    assert_eq(s, "hello")
+  end
+
+  it "handles an empty pattern by wrapping the replacement around every char" do
+    s = "abc"
+    s.gsub!("", "X")
+    assert_eq(s, "XaXbXcX")
+  end
+
+  it "supports a Regexp pattern" do
+    s = "hello"
+    s.gsub!(/l/, "L")
+    assert_eq(s, "heLLo")
+    assert_eq("hello".gsub!(/z/, "Q"), nil)
+  end
+
+  it "raises a FrozenError on a frozen instance that is modified" do
+    s = "hi".freeze
+    assert_raises("FrozenError") { s.gsub!("h", "H") }
+  end
+end
+
