@@ -35,6 +35,29 @@ fn default_runtime_blocks_file_read() {
 }
 
 #[test]
+fn sandbox_gate_runs_before_arg_type_check() {
+    // Wrong-type argument (Integer instead of String) under
+    // sandbox should trap with IOError, not TypeError — the
+    // sandbox cap is the first gate, matching the
+    // require/require_relative/cext_require ordering. A script
+    // probing whether a method is gated by passing wrong-typed
+    // args (a small information disclosure) gets IOError too.
+    let mut rt = Runtime::new();
+    let err = rt.eval(r#"File.read(123)"#, "test.rb").unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"),
+        "expected IOError (sandbox first), got {:?}",
+        err.err,
+    );
+    let err = rt.eval(r#"File.exist?(:sym)"#, "test.rb").unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"),
+        "expected IOError (sandbox first), got {:?}",
+        err.err,
+    );
+}
+
+#[test]
 fn default_runtime_blocks_file_write() {
     let mut rt = Runtime::new();
     let err = rt

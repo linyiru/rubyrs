@@ -29,8 +29,8 @@ impl Vm {
         };
         Ok(Some(match (name, args) {
             ("read", [p]) => {
-                let path = path_arg(p)?;
                 self.check_filesystem_io_allowed("File.read")?;
+                let path = path_arg(p)?;
                 // L3-G follow-up: read raw bytes, not UTF-8-validated
                 // String. msgpack/protobuf/binary-protocol fixtures
                 // are not valid UTF-8; the previous read_to_string
@@ -60,8 +60,8 @@ impl Vm {
                 }
             }
             ("write", [p, body]) => {
-                let path = path_arg(p)?;
                 self.check_filesystem_io_allowed("File.write")?;
+                let path = path_arg(p)?;
                 let contents: Vec<u8> = match body {
                     Value::Str(s) => s.content.borrow().clone(),
                     _ => body.to_display(&self.heap, &self.interner).into_bytes(),
@@ -74,7 +74,6 @@ impl Vm {
                 }
             }
             ("exist?", [p]) | ("exists?", [p]) | ("file?", [p]) => {
-                let path = path_arg(p)?;
                 // Resolve to a `&'static str` upfront — passing
                 // `&format!("File.{name}")` would allocate a
                 // fresh String on every call even on the
@@ -89,20 +88,21 @@ impl Vm {
                     _ => unreachable!(),
                 };
                 self.check_filesystem_io_allowed(op)?;
+                let path = path_arg(p)?;
                 let exists = std::fs::metadata(&path)
                     .map(|m| if name == "file?" { m.is_file() } else { true })
                     .unwrap_or(false);
                 Value::Bool(exists)
             }
             ("directory?", [p]) => {
-                let path = path_arg(p)?;
                 self.check_filesystem_io_allowed("File.directory?")?;
+                let path = path_arg(p)?;
                 let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
                 Value::Bool(is_dir)
             }
             ("size", [p]) => {
-                let path = path_arg(p)?;
                 self.check_filesystem_io_allowed("File.size")?;
+                let path = path_arg(p)?;
                 match std::fs::metadata(&path) {
                     Ok(m) => Value::Int(m.len() as i64),
                     Err(e) => return Err(self.trap(RubyError::RuntimeError {
