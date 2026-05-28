@@ -577,6 +577,86 @@ mod tests {
         }
     }
 
+    // ===== P1c.1: HeapObj::Fiber + alloc_fiber + GC mark =====
+
+    /// P1c.1: heap allocation path — `Heap::alloc_fiber`
+    /// creates a `HeapObj::Fiber`, returns its ObjId,
+    /// and `Heap::fiber(id)` retrieves the FiberObject.
+    /// Identity round-trip with the body_block field.
+    #[test]
+    fn alloc_fiber_round_trips_through_heap() {
+        use crate::heap::Heap;
+        let mut heap = Heap::new();
+        // Sentinel ObjId — body_block reference; doesn't need
+        // to point at an actual Block for this test, just be
+        // round-trippable.
+        let body_id = crate::value::ObjId(7777);
+        let fiber_id = heap.alloc_fiber(body_id);
+        let fiber = heap.fiber(fiber_id);
+        assert_eq!(fiber.body_block, body_id, "body_block round-trips");
+        assert_eq!(*fiber.state.borrow(), FiberState::Created);
+    }
+
+    /// P1c.1: GC mark walks the FiberObject's body_block —
+    /// a Block held only by a suspended Fiber survives
+    /// collect when the Fiber is reachable.
+    ///
+    /// Setup:
+    /// 1. Allocate a real Block heap slot (the body)
+    /// 2. Allocate a Fiber wrapping that body_block's ObjId
+    /// 3. Run GC with the Fiber as a root
+    /// 4. Verify both the Fiber AND the body Block survive
+    ///    (block isn't otherwise reachable)
+    #[test]
+    fn gc_marks_fiber_body_block_keeps_block_alive() {
+        use crate::heap::{Heap, HeapObj};
+        use crate::value::BlockHandle;
+
+        let mut heap = Heap::new();
+        // Allocate a body Block. Minimal BlockHandle —
+        // captured = empty, self_val = Nil, no rest slot.
+        let body_block = BlockHandle {
+            proto_idx: 0,
+            captured: std::rc::Rc::new(std::cell::RefCell::new(vec![])),
+            self_val: crate::value::Value::Nil,
+            param_start: 0,
+            n_params: 0,
+            rest_slot: None,
+        };
+        let body_id = heap.alloc(HeapObj::Block(body_block));
+        // Allocate a Fiber pointing at the body.
+        let fiber_id = heap.alloc_fiber(body_id);
+        // Run GC with just the Fiber as a root.
+        let _frees = heap.collect(&[crate::value::Value::Object(fiber_id)]);
+        // Both must survive.
+        assert!(
+            matches!(heap.get(fiber_id), HeapObj::Fiber(_)),
+            "Fiber slot must survive GC when it's a root",
+        );
+        assert!(
+            matches!(heap.get(body_id), HeapObj::Block(_)),
+            "Body Block must survive GC because the Fiber's mark walk reaches it",
+        );
+    }
+
+    /// P1c.1: GC sweeps a Fiber when it's NOT a root.
+    /// Complements the above test — confirms reachability
+    /// is necessary (not just sufficient) for survival.
+    #[test]
+    fn gc_sweeps_unreachable_fiber() {
+        use crate::heap::Heap;
+        let mut heap = Heap::new();
+        let body_id = crate::value::ObjId(0);
+        let _fiber_id = heap.alloc_fiber(body_id);
+        // GC with NO roots — fiber should be swept.
+        let pre_count = heap.live_count;
+        let _frees = heap.collect(&[]);
+        assert!(
+            heap.live_count < pre_count,
+            "Fiber must be swept when unreachable",
+        );
+    }
+
     /// P1b: two consecutive resumes preserve state — the
     /// fiber's snapshot captured at first-drop is visible
     /// on the next install. Pins the "FiberStashGuard

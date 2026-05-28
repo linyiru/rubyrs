@@ -11,7 +11,7 @@ use crate::value::{Class, FixedArity, Method, ObjId, Value, Visibility};
 mod array;
 mod bignum;
 #[cfg(feature = "_fiber")]
-mod fiber;
+pub(crate) mod fiber;
 #[cfg(feature = "cext")]
 mod cext;
 #[cfg(all(feature = "cext", target_os = "wasi"))]

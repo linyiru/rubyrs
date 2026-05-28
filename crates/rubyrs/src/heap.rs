@@ -96,6 +96,21 @@ pub(crate) enum HeapObj {
     /// All three fields walked by GC — `underlying` and each
     /// gathered Value can hold heap references.
     CurriedProc { underlying: Value, gathered: Vec<Value>, target_arity: u16 },
+    /// P1c (ADR 0023) — heap home for a Tier-2 Fiber. Wraps a
+    /// [`crate::vm::fiber::FiberObject`]: the body block, the
+    /// suspended snapshot, lifecycle state, and last-yielded
+    /// value. Cfg-gated on `_fiber`; absent in Tier 1 builds.
+    ///
+    /// GC walk: the snapshot's `frames` (locals + self_val +
+    /// swap_return + block_arg), `stack`, `pinned`,
+    /// `method_return`, plus the FiberObject's own
+    /// `last_value` and `body_block`. Anything heap-bearing
+    /// inside the suspended Fiber must be reached this way —
+    /// the regular root walker (vm.stack / vm.frames) only sees
+    /// the actively-resumed Fiber's state, never the suspended
+    /// ones' snapshots.
+    #[cfg(feature = "_fiber")]
+    Fiber(crate::vm::fiber::FiberObject),
 }
 
 /// Heap representation of a CRuby-shape TypedData object. See
@@ -346,6 +361,28 @@ impl Heap {
     pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
         if let HeapObj::Range(r) = self.get(id) { r } else { panic!("ICE: heap slot is not a Range") }
     }
+
+    // P1c (ADR 0023) — Fiber heap accessors. cfg(_fiber) only.
+    #[cfg(feature = "_fiber")]
+    #[allow(dead_code)] // P1c.2 (bytecode wiring) consumes these
+    pub(crate) fn fiber(&self, id: ObjId) -> &crate::vm::fiber::FiberObject {
+        if let HeapObj::Fiber(f) = self.get(id) {
+            f
+        } else {
+            panic!("ICE: heap slot is not a Fiber")
+        }
+    }
+
+    /// Allocate a `HeapObj::Fiber` wrapping a fresh `FiberObject`
+    /// (state = Created, empty snapshot) for the given body
+    /// block. Returns the new slot's `ObjId` — callers wrap as
+    /// `Value::Object(id)` (no dedicated `Value::Fiber` variant
+    /// today; dispatch goes through the registered Fiber class).
+    #[cfg(feature = "_fiber")]
+    #[allow(dead_code)] // P1c.2 consumes this
+    pub(crate) fn alloc_fiber(&mut self, body_block: ObjId) -> ObjId {
+        self.alloc(HeapObj::Fiber(crate::vm::fiber::FiberObject::new(body_block)))
+    }
     #[cfg(feature = "bignum")]
     pub(crate) fn bigint(&self, id: ObjId) -> &num_bigint::BigInt {
         if let HeapObj::BigInt(b) = self.get(id) { b } else { panic!("ICE: heap slot is not a BigInt") }
@@ -565,6 +602,58 @@ impl Heap {
                 Slot::Live(HeapObj::CurriedProc { underlying, gathered, .. }) => {
                     Heap::visit_value(underlying, &mut self.marks, &mut worklist);
                     for v in gathered {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                }
+                #[cfg(feature = "_fiber")]
+                Slot::Live(HeapObj::Fiber(fiber)) => {
+                    // P1c (ADR 0023 v2 §"Correctness" #3): mark
+                    // walks every heap-bearing slot inside the
+                    // suspended snapshot — frames' locals +
+                    // self_val + swap_return + block_arg, plus
+                    // the operand stack and pinned set. Without
+                    // this, a Value reachable only from a
+                    // suspended Fiber gets swept while the
+                    // Fiber still holds it. P1d adds the dual-
+                    // location walk (walk both vm.frames AND
+                    // every suspended FiberObject snapshot
+                    // unconditionally); this arm covers the
+                    // suspended-snapshot side.
+                    let body_block_id = fiber.body_block;
+                    if !self.marks[body_block_id.0 as usize] {
+                        self.marks[body_block_id.0 as usize] = true;
+                        worklist.push(body_block_id);
+                    }
+                    Heap::visit_value(
+                        &fiber.last_value.borrow(),
+                        &mut self.marks,
+                        &mut worklist,
+                    );
+                    let snap = fiber.snapshot.borrow();
+                    for frame in &snap.frames {
+                        let locals = frame.locals.borrow();
+                        for v in locals.iter() {
+                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                        }
+                        drop(locals);
+                        Heap::visit_value(&frame.self_val, &mut self.marks, &mut worklist);
+                        if let Some(v) = &frame.swap_return {
+                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                        }
+                        if let Some(bid) = frame.block_arg
+                            && !self.marks[bid.0 as usize]
+                        {
+                            self.marks[bid.0 as usize] = true;
+                            worklist.push(bid);
+                        }
+                    }
+                    for v in &snap.stack {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    for v in &snap.pinned {
+                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                    }
+                    if let Some(v) = &snap.method_return {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                 }
