@@ -656,7 +656,7 @@ fn error_response(status: u16, msg: String) -> Response<Full<Bytes>> {
 /// block per request instead of returning a hardcoded
 /// response. Caller supplies the block_id; the listener's
 /// connection handlers all close over the same block.
-#[allow(clippy::too_many_arguments)] // 7 args; signature stays flat for stage-by-stage growth
+#[allow(clippy::too_many_arguments)] // 8 args; flat for stage-by-stage growth
 async fn serve_with_app_until_shutdown(
     listener: TcpListener,
     block_id: crate::value::ObjId,
@@ -665,12 +665,70 @@ async fn serve_with_app_until_shutdown(
     max_request_body_bytes: usize,
     per_request_io_deadline: Option<std::time::Duration>,
     max_headers: Option<usize>,
+    install_signal_handler: bool,
     mut shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
+    // Stage 6d signal handlers.
+    //
+    // When `install_signal_handler` is true, the accept
+    // loop races against SIGINT (Ctrl+C from a TTY) and
+    // SIGTERM (default for k8s pod termination + systemd
+    // `systemctl stop`). On Unix both wire up; on Windows
+    // only Ctrl+C is available (tokio::signal::unix is
+    // cfg(unix)-only). Either signal triggers graceful
+    // shutdown — the accept loop breaks; in-flight
+    // connection tasks complete on their own.
+    //
+    // When false (default), signals fall through to the
+    // embedder's own handler, and shutdown only happens
+    // via the explicit oneshot or the duration timeout
+    // from the caller. This is the right default for
+    // embeds where rubyrs is one subsystem among many and
+    // the host owns signal routing.
+    //
+    // Pinned `Future` boxes let `select!` drive them by
+    // reference each iteration without consuming. When
+    // install_signal_handler is false we use
+    // `future::pending` which never resolves — the
+    // `select!` arm is effectively disabled.
+    let mut sigint_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> =
+        if install_signal_handler {
+            Box::pin(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+        } else {
+            Box::pin(std::future::pending::<()>())
+        };
+    // SIGTERM is Unix-only; on non-Unix the future is
+    // `pending` so the `select!` arm is inert. This keeps
+    // the macro free of cfg-attributes (which it doesn't
+    // accept on branches).
+    let mut sigterm_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> = {
+        #[cfg(unix)]
+        {
+            if install_signal_handler {
+                Box::pin(async {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                        sig.recv().await;
+                    }
+                })
+            } else {
+                Box::pin(std::future::pending::<()>())
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Box::pin(std::future::pending::<()>())
+        }
+    };
+
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => return Ok(()),
+            _ = &mut sigint_fut => return Ok(()),
+            _ = &mut sigterm_fut => return Ok(()),
             accept = listener.accept() => {
                 let (stream, peer_addr) = accept?;
                 let io = TokioIo::new(stream);
@@ -709,7 +767,7 @@ async fn serve_with_app_until_shutdown(
 /// Stage 4c.3 entry point — wired into the
 /// `__rubyrs_http_serve_with_app(addr, secs, app)` host fn
 /// via `register_host_fns`.
-#[allow(clippy::too_many_arguments)] // 7 args; flat for stage-by-stage growth
+#[allow(clippy::too_many_arguments)] // 8 args; flat for stage-by-stage growth
 pub(crate) fn run_blocking_for_duration_with_app(
     addr: SocketAddr,
     duration: std::time::Duration,
@@ -718,6 +776,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
     max_request_body_bytes: usize,
     per_request_io_deadline: Option<std::time::Duration>,
     max_headers: Option<usize>,
+    install_signal_handler: bool,
 ) -> std::io::Result<SocketAddr> {
     let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -733,6 +792,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
                 per_request_fuel, max_request_body_bytes,
                 per_request_io_deadline,
                 max_headers,
+                install_signal_handler,
                 shutdown_rx,
             ) => res?,
             _ = tokio::time::sleep(duration) => {}
@@ -853,12 +913,13 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     });
 
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        // Argument shape (3 / 4 / 5 / 6 / 7 args, growing):
+        // Argument shape (3 / 4 / 5 / 6 / 7 / 8 args, growing):
         //   (addr, secs, app)
         //   (addr, secs, app, per_request_fuel)
         //   (addr, secs, app, per_request_fuel, max_body_bytes)
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms)
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers)
+        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler)
         //
         // Each positional adds one more security knob. Per
         // ADR 0022 v5 these will eventually move into a
@@ -883,48 +944,72 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         let parse_io_deadline = |ms: i64| -> Option<Duration> {
             if ms == 0 { None } else { Some(Duration::from_millis(ms as u64)) }
         };
-        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers) = match args {
+        // max_headers helper: 0 → hyper default (100); >0 →
+        // explicit cap. Matches the "0 disables / unsets"
+        // idiom used by io_deadline_ms above.
+        let parse_max_headers = |max_h: i64| -> Result<Option<usize>, Trap> {
+            if max_h < 0 {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: format!("max_headers must be non-negative, got {max_h}"),
+                    },
+                    backtrace: vec![],
+                });
+            }
+            Ok(if max_h == 0 { None } else { Some(max_h as usize) })
+        };
+        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, install_signal_handler) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None, None)
+                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None, None, false)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None, None, false)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None, None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None, None, false)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
                 check_non_negative("io_deadline_ms", *io_ms)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), None)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), None, false)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
                 check_non_negative("io_deadline_ms", *io_ms)?;
-                // max_headers = 0 → use hyper default (100);
-                // otherwise apply explicit cap. Matches the
-                // "0 disables / unsets" idiom used by
-                // io_deadline_ms above.
-                if *max_h < 0 {
+                let max_headers = parse_max_headers(*max_h)?;
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, false)
+            }
+            // Stage 6d: 8-arg form with install_signal_handler
+            // flag. Integer 0/1 (rubyrs has no native Bool yet
+            // in host-fn args; convention shared with existing
+            // 0-disables knobs). When 1, the serve loop wires
+            // SIGINT (all platforms) and SIGTERM (Unix only)
+            // to graceful shutdown. Defaults to false in
+            // shorter arities so existing embeds opt in.
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h), Value::Int(sig)] => {
+                check_non_negative("per_request_fuel", *fuel)?;
+                check_non_negative("max_body_bytes", *max_body)?;
+                check_non_negative("io_deadline_ms", *io_ms)?;
+                let max_headers = parse_max_headers(*max_h)?;
+                if *sig != 0 && *sig != 1 {
                     return Err(Trap {
                         err: RubyError::ArgumentError {
-                            msg: format!("max_headers must be non-negative, got {max_h}"),
+                            msg: format!("install_signal_handler must be 0 or 1, got {sig}"),
                         },
                         backtrace: vec![],
                     });
                 }
-                let max_headers = if *max_h == 0 { None } else { Some(*max_h as usize) };
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, *sig == 1)
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0, max_headers: Integer = 0)"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0, max_headers: Integer = 0, install_signal_handler: Integer = 0)"
                             .to_string(),
                     },
                     backtrace: vec![],
@@ -950,7 +1035,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
         let duration = Duration::from_secs(duration_secs as u64);
         let bound = run_blocking_for_duration_with_app(
-            addr, duration, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers,
+            addr, duration, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, install_signal_handler,
         ).map_err(|e| Trap {
             err: RubyError::RuntimeError {
                 msg: format!("http_serve_with_app: {e}"),
@@ -1335,6 +1420,83 @@ mod tests {
         assert!(
             response_text.contains("custom_headers=9"),
             "expected 9 X-Custom-* headers in env, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 6d: the 8-arg form (with the
+    /// `install_signal_handler` flag) parses correctly,
+    /// the duration-based shutdown still terminates the
+    /// loop, and a real HTTP exchange still completes.
+    ///
+    /// We deliberately do NOT raise real SIGINT/SIGTERM in
+    /// this test: the test runner shares the process, so
+    /// a real signal would kill the whole `cargo test`
+    /// invocation. The signal-arm correctness is exercised
+    /// by inspection (both signal futures resolve to
+    /// `return Ok(())` in the `select!`); this test
+    /// guarantees that wiring signals in does not break
+    /// the duration-shutdown path or the request flow.
+    #[test]
+    fn install_signal_handler_flag_does_not_break_serve() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18101";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client
+                .write_all(b"GET /sig HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, ["ok"]]
+            }}
+            __rubyrs_http_serve_with_app(
+              "{server_addr}", 1, app,
+              1_000_000, 10_000, 0, 0, 1
+            )
+        "#), "stage_6d_signal_flag.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 with signal handler enabled, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 6d: the 8-arg form rejects values for
+    /// `install_signal_handler` outside the {0, 1} domain.
+    /// Other non-negative integers are not a meaningful
+    /// "level" — the flag is binary today, and ambiguous
+    /// input ought to surface an ArgumentError rather than
+    /// silently treating "2" as truthy.
+    #[test]
+    fn install_signal_handler_rejects_out_of_range_values() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            app = ->(env) { [200, {}, []] }
+            __rubyrs_http_serve_with_app(
+              "127.0.0.1:0", 0, app,
+              1_000_000, 10_000, 0, 0, 2
+            )
+        "#, "stage_6d_signal_flag_bad.rb").expect_err("should reject sig=2");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("install_signal_handler must be 0 or 1"),
+            "expected ArgumentError mentioning install_signal_handler, got: {msg}",
         );
     }
 
