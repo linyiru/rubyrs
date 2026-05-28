@@ -1512,7 +1512,27 @@ impl Vm {
     pub(crate) fn recv_desc_for_error(&self, recv: &Value) -> String {
         match recv {
             Value::Object(id) => {
-                let cls = self.heap.class_of(*id);
+                // `real_class_of` skips the eigenclass shell.
+                // `class_of` would return the singleton class
+                // when one has been installed (e.g. via
+                // `def obj.foo`), rendering the error as
+                // "an instance of #<Class:#<Inner>>" — never
+                // what a script wants to see. (Copilot review
+                // #291 round 1.)
+                //
+                // Known gap: CRuby switches *format* when a
+                // singleton is installed — it inspects the
+                // receiver with its memory address
+                // ("for #<Inner:0x000…>") instead of using
+                // "an instance of …". That would require us to
+                // mirror `Object#inspect` here, including the
+                // memory-address suffix. Tier-1 ships the
+                // simpler "an instance of <real class>" form;
+                // a script that asserts on the inspect-form
+                // wording for singleton-bearing receivers
+                // sees a known divergence we accept until a
+                // real consumer needs it.
+                let cls = self.heap.real_class_of(*id);
                 format!("an instance of {}", cls.name)
             }
             other => other.type_name().to_string(),
