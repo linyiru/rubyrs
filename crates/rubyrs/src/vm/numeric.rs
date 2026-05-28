@@ -1086,6 +1086,25 @@ pub(crate) fn numeric_call(
                 msg: float_domain_label(*a).to_string(),
             });
         }
+        // BigInt-precision form (`Float::NAN.round(2**70)` etc.)
+        // — same FloatDomainError contract as the Int-precision
+        // form, just at the magnitude end. Under bignum the
+        // canonical-BigInt invariant means any BigInt is far
+        // past the i64 range, so `bigint_primitive` doesn't
+        // model a Float-recv arm; without this trap the call
+        // surfaces as NoMethodError, divergent from CRuby AND
+        // asymmetric with the Int-precision shape this PR just
+        // normalised. Positive vs. negative BigInt precision is
+        // immaterial — NaN / ±Infinity have no representable
+        // Integer at any precision, so trap unconditionally.
+        #[cfg(feature = "bignum")]
+        (Value::Float(a), "round" | "truncate", [Value::BigInt(_)])
+            if a.is_nan() || a.is_infinite() =>
+        {
+            return Err(RubyError::FloatDomainError {
+                msg: float_domain_label(*a).to_string(),
+            });
+        }
         (Value::Float(a), "round", [Value::Int(n)]) => {
             if *n == 0 {
                 Some(Value::Int(a.round() as i64))

@@ -2833,6 +2833,16 @@ fn float_domain_error_class_and_rescue_chain() {
         ("(1.0/0.0).round(-2)",     "Infinity"),
         ("(-1.0/0.0).truncate(0)",  "-Infinity"),
         ("(-1.0/0.0).truncate(-1)", "-Infinity"),
+        // BigInt-precision form — under bignum any BigInt sits
+        // outside i64, so without a dedicated arm the call
+        // surfaces NoMethodError. Pin both positive and negative
+        // BigInt-precision: NaN/Inf trap unconditionally.
+        #[cfg(feature = "bignum")]
+        ("(0.0/0.0).round(2**70)",     "NaN"),
+        #[cfg(feature = "bignum")]
+        ("(1.0/0.0).truncate(2**70)",  "Infinity"),
+        #[cfg(feature = "bignum")]
+        ("(-1.0/0.0).round(-(2**70))", "-Infinity"),
     ] {
         let err = rt.eval(script, "fde_to_i.rb").unwrap_err();
         // At the eval boundary the dispatcher always re-shapes a
