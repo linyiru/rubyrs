@@ -136,5 +136,21 @@ describe "String#gsub!" do
     s = "hi".freeze
     assert_raises("FrozenError") { s.gsub!("h", "H") }
   end
+
+  it "accepts a Regexp pattern and block, mutating every match site" do
+    s = "hello"
+    r = s.gsub!(/l/) { |m| m.upcase }
+    assert(r.equal?(s))
+    assert_eq(s, "heLLo")
+  end
+
+  it "returns nil when the block-form Regexp pattern doesn't match" do
+    assert_eq("hello".gsub!(/z/) { |m| m.upcase }, nil)
+  end
+
+  it "raises FrozenError on the block-form Regexp variant too" do
+    s = "hi".freeze
+    assert_raises("FrozenError") { s.gsub!(/h/) { |m| m.upcase } }
+  end
 end
 
