@@ -48,7 +48,7 @@ pub use output::{NullSink, OutputError, OutputSink};
 pub use output::StdSink;
 
 #[cfg(feature = "_http_server")]
-pub use http_server::HttpServerConfig;
+pub use http_server::{HttpServerConfig, register_host_fns as register_http_server_host_fns};
 
 use std::io::Write;
 use std::path::Path;
