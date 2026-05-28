@@ -76,6 +76,13 @@ puts big1.object_id != false.object_id            # true
 # fixnum/Sym/heap ids never collide either, by construction):
 puts (1 << 60).object_id != :foo.object_id        # true
 
+# Cycle-6 review: without per-variant type-tag salt,
+# `nil.hash == false.hash` deterministically — Rust's
+# `bool::hash` writes `u8(0)` and our Nil arm also wrote `u8(0)`,
+# producing identical DefaultHasher state. Distinct salts
+# (Nil=6, Bool=5, etc.) keep value-type domains injective.
+puts nil.hash != false.hash                       # true
+
 # respond_to? whitelist matches new universal arms
 puts Object.new.respond_to?(:object_id)           # true
 puts Object.new.respond_to?(:__id__)              # true

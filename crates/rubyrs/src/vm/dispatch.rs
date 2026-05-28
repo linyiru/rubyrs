@@ -4661,8 +4661,9 @@ impl Vm {
         // `"#<ClassName:0xADDR>"`. We can't expose real addresses
         // (sandbox), so use the object_id hex form. Primitive
         // arms for Str/Int/Sym/Array/Hash run earlier in dispatch
-        // and shadow this; only Object / Class instances fall
-        // through here.
+        // and shadow this, and `Value::Class` is handled by
+        // `primitive_call` (vm/primitive.rs), so only plain
+        // `Object` instances actually fall through here.
         if (&*name == "to_s" || &*name == "inspect") && args.is_empty() {
             let cls_name = match self.class_of(&recv) {
                 Value::Class(c) => c.name.clone(),
@@ -4680,20 +4681,29 @@ impl Vm {
         if &*name == "hash" && args.is_empty() {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
+            // Salt each variant with a distinct type tag before
+            // hashing the value bits. Without the tag, the
+            // Rust-derived `Hash` impls collapse across types —
+            // e.g. `Nil` writing `0u8` produces the same byte
+            // sequence as `Bool(false)` (Rust's `bool::hash`
+            // delegates to `u8(0)`), so `nil.hash == false.hash`
+            // deterministically. Tagging keeps the value-type
+            // domains injective by construction.
             match &recv {
-                Value::Int(n) => n.hash(&mut h),
-                Value::Float(f) => f.to_bits().hash(&mut h),
+                Value::Int(n) => { 1u8.hash(&mut h); n.hash(&mut h); }
+                Value::Float(f) => { 2u8.hash(&mut h); f.to_bits().hash(&mut h); }
                 Value::Str(s) => {
                     // Hash raw bytes (binary-safe) — `with_str_lossy`
                     // would replace invalid UTF-8 with U+FFFD,
                     // collapsing distinct binary strings to the
                     // same hash and breaking Hash key semantics
                     // for non-UTF-8 content.
+                    3u8.hash(&mut h);
                     s.content.borrow().hash(&mut h);
                 }
-                Value::Sym(sid) => sid.0.hash(&mut h),
-                Value::Bool(b) => b.hash(&mut h),
-                Value::Nil => 0u8.hash(&mut h),
+                Value::Sym(sid) => { 4u8.hash(&mut h); sid.0.hash(&mut h); }
+                Value::Bool(b) => { 5u8.hash(&mut h); b.hash(&mut h); }
+                Value::Nil => { 6u8.hash(&mut h); }
                 // Heap-managed / classes / blocks / methods —
                 // identity hash via object_id. CRuby Array/Hash
                 // override `hash` to recurse over contents; ours
@@ -4705,7 +4715,7 @@ impl Vm {
                 // scan with `ruby_eql`, so `{[1] => :a}[[1]]`
                 // does find the entry; only `#hash`-using paths
                 // (e.g. `Set`, custom user code) see the gap.
-                _ => object_id_for(&recv).hash(&mut h),
+                _ => { 7u8.hash(&mut h); object_id_for(&recv).hash(&mut h); }
             }
             // Return the full 64-bit hash as i64 — Ruby permits
             // negative hashes and other #hash impls in this
