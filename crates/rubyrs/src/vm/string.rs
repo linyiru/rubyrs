@@ -1505,17 +1505,6 @@ impl Vm {
 /// iteration. CRuby's full spec covers a few more edge cases
 /// (bracketed-string forms, all-non-alnum) which we don't reach
 /// in the subset; those return the input unchanged.
-/// Parse a `String#count` / `#tr` style selector into a
-/// (char-set, negate) pair. Supports CRuby's mini-syntax:
-/// - leading `^` (first char only) → negate the set
-/// - `a-z` → expand range inclusive (only when neither end is
-///   `^` itself; `^-` and `-^` stay literal)
-/// - everything else → literal char
-///
-/// CRuby's tr-syntax has a few finer corners (backslash escapes
-/// inside the selector, octal forms) that real-world consumers
-/// rarely hit; we omit those here. Add as motivating cases
-/// appear.
 /// Hard cap on the expanded char count for a single tr set.
 /// Well above any legitimate human-written usage (full ASCII +
 /// punctuation + a few BMP runs is < 1k chars; the full Unicode
@@ -1525,12 +1514,26 @@ impl Vm {
 /// silently truncate.
 const TR_SET_MAX_CHARS: usize = 65_536;
 
-/// Order-preserving sibling of `parse_count_selector` used by
-/// `String#tr`. Position matters here because tr maps each
-/// source-set position to the same dest-set position; using
-/// a HashSet would collapse the ordering and break the index-
-/// based mapping. Range expansion matches
-/// `parse_count_selector`.
+/// Parse a `String#tr` / `#count` style selector into an
+/// order-preserving (char-vec, negate) pair. Supports CRuby's
+/// mini-syntax:
+/// - leading `^` (first char only) → negate the set
+/// - `a-z` → expand range inclusive (only when neither end is
+///   `^` itself; `^-` and `-^` stay literal)
+/// - everything else → literal char
+///
+/// CRuby's tr-syntax has a few finer corners (backslash escapes
+/// inside the selector, octal forms) that real-world consumers
+/// rarely hit; we omit those here. Add as motivating cases
+/// appear.
+///
+/// Ordering matters for `tr`: it maps each source-set position
+/// to the same dest-set position; using a HashSet would
+/// collapse the ordering and break the index-based mapping.
+/// `count` doesn't need ordering and `parse_count_selector`
+/// delegates here and dedupes into a HashSet at no asymptotic
+/// cost — keeping a single source of truth for both the mini-
+/// syntax and the `TR_SET_MAX_CHARS` DoS cap.
 ///
 /// `allow_negation` gates the leading-`^` interpretation:
 /// `String#tr`'s `from_str` accepts negation but `to_str`
