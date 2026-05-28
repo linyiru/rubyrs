@@ -22,7 +22,7 @@ describe "Hash#sum" do
     assert_eq({}.sum(42) { |k, v| v }, 42)
   end
 
-  it "promotes Int to BigInt on overflow" do
+  bignum_it "promotes Int to BigInt on overflow" do
     # `apply_int_promote` path: when an Int+Int sum
     # overflows i64, the result widens to BigInt. Use a
     # block that yields a large per-entry contribution.
