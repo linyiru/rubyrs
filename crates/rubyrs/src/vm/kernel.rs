@@ -613,23 +613,22 @@ impl Vm {
                         // and the cext fallback's "cannot find C ext" trap is
                         // RuntimeError — wrong class for `rescue LoadError`,
                         // and a more revealing message than the scope reject.
-                        let scope_violation: Option<std::path::PathBuf> =
-                            if self.allow_filesystem_io
-                                && self.allowed_paths.is_some()
-                                && std::path::Path::new(&*path_str).is_absolute()
-                            {
-                                let resolved = crate::lexically_resolve_path(
-                                    std::path::Path::new(&*path_str),
-                                );
-                                let prefixes = self.allowed_paths.as_ref().expect("checked");
-                                if prefixes.iter().any(|pfx| resolved.starts_with(pfx)) {
-                                    None
-                                } else {
-                                    Some(resolved)
-                                }
-                            } else {
+                        let scope_violation: Option<std::path::PathBuf> = if self
+                            .allow_filesystem_io
+                            && let Some(prefixes) = self.allowed_paths.as_ref()
+                            && std::path::Path::new(&*path_str).is_absolute()
+                        {
+                            let resolved = crate::lexically_resolve_path(
+                                std::path::Path::new(&*path_str),
+                            );
+                            if prefixes.iter().any(|pfx| resolved.starts_with(pfx)) {
                                 None
-                            };
+                            } else {
+                                Some(resolved)
+                            }
+                        } else {
+                            None
+                        };
                         if let Some(resolved) = scope_violation {
                             return Some(Err(self.trap(RubyError::LoadError {
                                 msg: format!(
@@ -1882,6 +1881,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         | "bigdecimal" | "monitor" | "erb"
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util"
+        | "rack"
     )
 }
 

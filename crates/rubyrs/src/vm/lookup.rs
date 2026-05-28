@@ -1126,10 +1126,9 @@ impl Vm {
         if let Some(ksym) = self.kernel_class_sym
             && let Some(kernel) = self.classes.get(&ksym)
             && class_is_a(cls, kernel)
+            && let Some(m) = self.kernel_builtin_method(name_id)
         {
-            if let Some(m) = self.kernel_builtin_method(name_id) {
-                return Some(m);
-            }
+            return Some(m);
         }
         // BasicObject — root for everything that inherits Object,
         // also for opt-out classes (`class X < BasicObject; end`)
@@ -1137,10 +1136,9 @@ impl Vm {
         if let Some(bsym) = self.basic_object_class_sym
             && let Some(bo) = self.classes.get(&bsym)
             && class_is_a(cls, bo)
+            && let Some(m) = self.basic_object_builtin_method(name_id)
         {
-            if let Some(m) = self.basic_object_builtin_method(name_id) {
-                return Some(m);
-            }
+            return Some(m);
         }
         None
     }
