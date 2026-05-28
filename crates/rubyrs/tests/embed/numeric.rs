@@ -1567,6 +1567,77 @@ fn round_half_kwarg_dispatch() {
         "round_half_user.rb",
     ).expect("eval");
     assert_eq!(buf.snapshot().trim(), "user-down");
+
+    // (post-#284 polish) |n| > 38 returns 0, not the original
+    // receiver — matches the regular `Integer#round(-100)` arm.
+    for (script, expected) in [
+        ("puts 123.round(-100, half: :up)",   "0"),
+        ("puts 123.round(-100, half: :down)", "0"),
+        ("puts 123.round(-100, half: :even)", "0"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "round_half_large_n.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // (post-#284 polish) non-Symbol/String :half value reports
+    // the inspect shape rather than the class name.
+    for (script, expected_msg) in [
+        ("25.round(-1, half: 0)",   "invalid rounding mode: 0"),
+        ("25.round(-1, half: nil)", "invalid rounding mode: nil"),
+        ("25.round(-1, half: 1.5)", "invalid rounding mode: 1.5"),
+    ] {
+        let err = rt.eval(script, "round_half_inspect.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "ArgumentError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected ArgumentError for {:?}, got {:?}", script, other),
+        }
+    }
+    // (c) CRuby parity — String value for the `:half` kwarg is
+    //     accepted the same as the Symbol form.
+    for (script, expected) in [
+        ("puts 25.round(-1, half: \"up\")",   "30"),
+        ("puts 25.round(-1, half: \"down\")", "20"),
+        ("puts 35.round(-1, half: \"even\")", "40"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "round_half_str.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+
+    // (d) BigInt promotion on i64::MIN overflow — under the
+    //     bignum profile, `(-2**63).round(-1, half: :up)` produces
+    //     `-9223372036854775810` (doesn't fit i64). Pre-polish:
+    //     silently returned i64::MIN unchanged.
+    #[cfg(feature = "bignum")]
+    {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(
+            "puts ((-(2**63)).round(-1, half: :up)).inspect",
+            "round_half_bignum.rb",
+        ).expect("eval");
+        assert_eq!(buf.snapshot().trim(), "-9223372036854775810");
+    }
+    // (e) Under no-bignum, the same overflow raises RangeError
+    //     instead of silently truncating.
+    #[cfg(not(feature = "bignum"))]
+    {
+        let err = rt.eval(
+            "(-(2**63)).round(-1, half: :up)",
+            "round_half_nobignum.rb",
+        ).unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+                assert_eq!(class_name, "RangeError");
+            }
+            ref other => panic!("expected RangeError, got {:?}", other),
+        }
+    }
 }
 
 #[test]
