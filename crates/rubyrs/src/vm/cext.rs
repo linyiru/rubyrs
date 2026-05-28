@@ -918,7 +918,25 @@ impl Vm {
         // `Config::allowed_paths` prefix. Canonicalize so a symlink
         // pointing into the allowlist (or out of it) is resolved
         // before the prefix check — matches require_ruby's shape.
-        let canon_so = std::fs::canonicalize(&so_path).unwrap_or_else(|_| so_path.clone());
+        //
+        // Canonicalize must succeed: a silent fallback to the
+        // un-resolved `so_path` would let a symlink whose
+        // path-string lies inside the prefix bypass the gate while
+        // `Library::new` below follows the symlink to dlopen an
+        // outside-prefix target (TOCTOU / EACCES on a parent of
+        // the symlink target both let canonicalize fail after
+        // `exists()` succeeded). Hard-trap LoadError instead,
+        // matching require_ruby's "cannot find" failure shape.
+        let canon_so = match std::fs::canonicalize(&so_path) {
+            Ok(p) => p,
+            Err(e) => return Err(self.trap(RubyError::LoadError {
+                msg: format!(
+                    "cext_require: cannot canonicalize {} ({})",
+                    so_path.display(),
+                    e,
+                ),
+            })),
+        };
         self.check_load_allowed("cext_require", Some(&canon_so))?;
 
         let stem = so_path

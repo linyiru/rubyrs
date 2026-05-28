@@ -601,3 +601,66 @@ fn allowlist_blocks_require_relative_traversal() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&sibling_dir);
 }
+
+#[test]
+#[cfg(all(not(target_os = "wasi"), unix))]
+fn allowlist_blocks_cext_via_symlink_target() {
+    // Defends the symlink-tight contract on the load family. Place
+    // a (placeholder) .dylib at /allowed/inner.{so,dylib} as a
+    // SYMLINK pointing to /sibling/real.{so,dylib} which is
+    // OUTSIDE the allowlist prefix. cext_require's canonicalize
+    // resolves the symlink to /sibling/real.* — outside scope —
+    // and the post-canonicalize check_load_allowed traps LoadError
+    // BEFORE dlopen runs. Pre-fix, the canonicalize-success path
+    // already caught this, but the falsely-falling-back path
+    // (`unwrap_or_else(|_| so_path.clone())`) would have let the
+    // gate accept the in-scope symlink path and `Library::new`
+    // would have followed it. The new hard-trap-on-canonicalize-
+    // fail closes that gap.
+    use std::os::unix::fs::symlink;
+    let (allowed, _) = alloc_tempdir("cext-symlink-allowed");
+    let (sibling, _) = alloc_tempdir("cext-symlink-target");
+    // The file extension cext_require auto-probes. We pick `.so`
+    // because it's the lookup target on Linux and a benign fallback
+    // on macOS (macOS tries .dylib/.bundle first; the test still
+    // exercises the scope gate either way because the require uses
+    // an explicit extension).
+    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let target = sibling.join(format!("real.{ext}"));
+    // Not a valid C ext — just bytes. dlopen would fail, but the
+    // scope gate must fire first.
+    std::fs::write(&target, b"placeholder").expect("write placeholder");
+    let link = allowed.join(format!("inner.{ext}"));
+    symlink(&target, &link).expect("symlink");
+
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"require {:?}"#, link.with_extension("").to_string_lossy());
+    let err = rt.eval(&script, "test.rb").unwrap_err();
+    // Either:
+    //   - cext feature on  → scope gate traps "outside Config::allowed_paths"
+    //   - cext feature off → "built without cext feature" / "no .rb at"
+    // Both classes are LoadError; we assert the gate triggered or the
+    // require flow stopped before any dlopen. The critical contract
+    // is that we never reach dlopen on the un-resolved symlink path.
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "LoadError"),
+        "expected LoadError, got {:?}",
+        err.err,
+    );
+    // When the cext feature is on the gate-specific message must
+    // appear — proves canonicalize-then-scope ran (not the old
+    // silent fallback).
+    if cfg!(feature = "cext") {
+        let RubyError::Uncaught { message, .. } = &err.err else { unreachable!() };
+        assert!(
+            message.contains("outside Config::allowed_paths"),
+            "expected scope-gate message, got {message:?}",
+        );
+    }
+    let _ = std::fs::remove_dir_all(&allowed);
+    let _ = std::fs::remove_dir_all(&sibling);
+}
