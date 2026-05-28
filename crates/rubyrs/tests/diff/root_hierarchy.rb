@@ -54,6 +54,24 @@ end
 # --- BasicObject.ancestors is just [BasicObject] ---
 puts BasicObject.ancestors.inspect             # [BasicObject]
 
+# --- respond_to?(:superclass) parity: Modules report false ---
+# CRuby raises NoMethodError on M.superclass, so respond_to?
+# returns false too. Feature-detection patterns like
+# `cls.respond_to?(:superclass) && cls.superclass` rely on
+# this truthiness alignment.
+puts SomeModule.respond_to?(:superclass)       # false
+puts Object.respond_to?(:superclass)           # true
+
+# --- BasicObject can't be re-rooted ---
+# CRuby raises TypeError on `class BasicObject < Anything`
+# to prevent the cycle Object < BasicObject < Object.
+begin
+  eval "class BasicObject < Object; end"
+  puts "no raise (BAD)"
+rescue TypeError => e
+  puts "BasicObject reparent: #{e.message}"
+end
+
 # --- Class < BasicObject explicit form bypasses Object ---
 # (User code can opt out of Kernel/Object by inheriting from
 # BasicObject directly — e.g. DSL receivers that want maximal
