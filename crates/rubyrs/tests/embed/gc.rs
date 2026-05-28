@@ -700,3 +700,38 @@ fn hash_sum_pin_bigint_acc_under_stress_gc() {
         "sum BigInt acc corrupted under STRESS_GC: {out}"
     );
 }
+
+#[test]
+fn hash_first_min_max_pin_receiver_under_stress_gc() {
+    // Regression: Hash#first / #min / #max in hash.rs went
+    // through `maybe_gc` + `heap.alloc` without pinning the
+    // receiver Hash (held only in the Rust local from do_call's
+    // recv-pop) or the chosen k/v pair. Under STRESS_GC=1, a
+    // sweep at the alloc boundary would corrupt the returned
+    // pair Array.
+    //
+    // Reproducer is load-bearing only when the receiver is
+    // an INLINE Hash literal — a local-bound Hash gets rooted
+    // via the frame-locals walker. Inline literals are built
+    // on the operand stack, popped into the do_call recv-pop
+    // Rust local, then ONLY held there. Interpolation in the
+    // key plus inner-Array initialization fires enough allocs
+    // to make the sweep window observable. Verified to ICE
+    // (`use-after-free`) on the unfixed code via stash test.
+    let mut rt = Runtime::with_config(Config { stress_gc: true, ..Default::default() });
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(r#"
+        r = {"long-key-#{1+1}" => [Array.new(3) { |i| i*2 }, "nested"]}.first
+        puts r.inspect
+        puts({"b" => 2, "a" => 1, "c" => 3}.min.inspect)
+        puts({"b" => 2, "a" => 1, "c" => 3}.max.inspect)
+    "#, "hash_first_min_max.rb").expect("eval should not ICE under STRESS_GC");
+    let out = buf.snapshot();
+    assert!(
+        out.contains(r#"["long-key-2", "#) &&
+        out.contains(r#"["a", 1]"#) &&
+        out.contains(r#"["c", 3]"#),
+        "first/min/max output corrupted under STRESS_GC: {out}"
+    );
+}
