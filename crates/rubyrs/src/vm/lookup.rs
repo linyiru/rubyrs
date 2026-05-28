@@ -627,6 +627,19 @@ impl Vm {
                     // when `self` is a Class. Keep this list in lockstep
                     // with the bridge whitelist there.
                     | "class_eval" | "module_eval"
+                    // Runtime-dispatch `Module#define_method` arms in
+                    // dispatch.rs accept both explicit-receiver and
+                    // no_recv shapes on any Class/Module:
+                    //   - block form (`define_method(:foo) { … }`)
+                    //     handled in `do_call_block` (no_recv reads
+                    //     self_val from the current frame).
+                    //   - no-block form raises ArgumentError via
+                    //     `try_dispatch_class_intrinsics`; the
+                    //     no_recv bare-call reaches the recv form
+                    //     through the `do_call` bridge (PR #245
+                    //     Copilot round 2 #1), so the bridge
+                    //     whitelist stays in lockstep with this one.
+                    | "define_method"
                 ) {
                     return true;
                 }

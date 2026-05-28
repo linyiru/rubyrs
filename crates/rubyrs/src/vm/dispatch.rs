@@ -2047,6 +2047,65 @@ impl Vm {
         self.stack.push(Value::Class(m));
         return Ok(ClassOutcome::Handled);
     }
+    // `Module#define_method` no-block path. The block-form
+    // intrinsic lives in `do_call_block`; this arm handles the
+    // no-block shapes that CRuby validates here, ordered to
+    // match CRuby's actual validation sequence (arity first,
+    // then missing-block). The 2-arg Proc/UnboundMethod form
+    // (`define_method(:foo, proc { … })`) is NOT yet supported
+    // in rubyrs Tier-1 — it falls through to standard dispatch
+    // and surfaces as NoMethodError so a caller that hits the
+    // unsupported shape gets a clear "not implemented" signal.
+    // A future PR landing the 2-arg form should swap that
+    // fall-through for the install arm.
+    // (PR #245 Copilot round 2 #2 + round 4 #1 + round 5 #1.)
+    if &*name == "define_method"
+        && let Value::Class(cls) = &recv
+    {
+        // Same precedence rule as the block-form arm — user
+        // override wins regardless of arity (let the override
+        // own its own validation).
+        if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+            let recv_val = Value::Class(cls.clone());
+            self.invoke_method(m, recv_val, args)?;
+            return Ok(ClassOutcome::Handled);
+        }
+        // CRuby validates arity before the missing-block check:
+        //   0 args      → ArgumentError "wrong number of arguments
+        //                 (given 0, expected 1..2)"
+        //   1 arg, none → ArgumentError "tried to create Proc
+        //                 object without a block"
+        //   2 args      → Proc/UnboundMethod install form, NOT yet
+        //                 supported in rubyrs Tier-1; raise an
+        //                 ArgumentError that names the actual
+        //                 cause. (code-review #245 round 7 #3 —
+        //                 previously fell through to NoMethodError,
+        //                 which misleadingly claimed the method
+        //                 was undefined when dispatch actually
+        //                 reached this arm. NotImplementedError
+        //                 would be more semantically accurate but
+        //                 RubyError lacks a registered variant for
+        //                 it, and Uncaught is by design not
+        //                 catchable by `rescue` — ArgumentError
+        //                 with an explicit "not yet supported"
+        //                 message is the best catchable shape.)
+        //   3+ args     → ArgumentError "wrong number of arguments
+        //                 (given N, expected 1..2)"
+        match args.len() {
+            0 => return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1..2)".into(),
+            })),
+            1 => return Err(self.trap(RubyError::ArgumentError {
+                msg: "tried to create Proc object without a block".into(),
+            })),
+            2 => return Err(self.trap(RubyError::ArgumentError {
+                msg: "the 2-arg Proc/UnboundMethod form of `Module#define_method` is not yet supported by rubyrs Tier-1".into(),
+            })),
+            n => return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+            })),
+        }
+    }
     if name_id == new_id
         && let Value::Class(cls) = &recv
         && cls.name.as_str() == "Hash"
@@ -2571,6 +2630,20 @@ impl Vm {
                     | "deprecate_constant"
                     | "singleton_class"
                     | "class_eval" | "module_eval"
+                    // `define_method` joins the bridge so bare
+                    // `define_method(:foo)` inside a class body
+                    // (no_recv, NO block) is forwarded to the
+                    // Value::Class(cls) recv form, where
+                    // `try_dispatch_class_intrinsics` raises the
+                    // CRuby-shape `ArgumentError ("tried to create
+                    // Proc object without a block")`. The block
+                    // form (`define_method(:foo) { … }`) has its
+                    // own no_recv handling in `do_call_block` and
+                    // does NOT need this bridge. Keeps the
+                    // do_call bridge whitelist in lockstep with
+                    // lookup.rs's respond_to whitelist (PR #245
+                    // Copilot round 2 #1).
+                    | "define_method"
                 );
                 // `allocate` gets the same Module fence as
                 // lookup.rs's respond_to gate so bare `allocate`
@@ -5242,6 +5315,145 @@ impl Vm {
                 vec![mod_val],
             )?;
             return Ok(());
+        }
+        // `Module#define_method(:name) { |args| body }` —
+        // dynamically install a block-as-method on the receiver
+        // class's instance-methods table. Mirrors the
+        // `Op::DefMethodBlock` opcode's install logic but is
+        // entered via runtime dispatch rather than a parsed
+        // `def`. Both shapes accepted:
+        //   - explicit receiver: `cls.define_method(:foo) { ... }`
+        //     → recv = Some(Value::Class(target))
+        //   - bare-call inside `class_eval do ... end` where
+        //     self is the class:
+        //     `cls.class_eval { define_method(:foo) { ... } }`
+        //     → no_recv = true, frame self_val = the class.
+        //     Sinatra/base.rb's `define_singleton` uses this
+        //     shape; the block_arg `&content` becomes the
+        //     attached block.
+        //
+        // Closure semantics match DefMethodBlock: the
+        // BlockHandle's `captured` Rc is shared with the
+        // installed Method so outer-scope locals stay live.
+        // CRuby returns the method name as a Symbol.
+        // (TRY_RUNS pass-9.7d layer #21.)
+        if &*name == "define_method" {
+            // Track whether we picked the target via explicit
+            // receiver vs no_recv (bare call in class body). The
+            // `class_visibility_stack` lexical-visibility lookup
+            // below only makes sense for the no_recv path, where
+            // the target IS the surrounding class body. For the
+            // explicit-receiver path, the surrounding visibility
+            // belongs to whatever class body we're currently in —
+            // which may be unrelated to `target_cls`. Leaking the
+            // caller's `private` onto methods installed on an
+            // unrelated class diverges from CRuby
+            // (code-review #245 round 7 #1).
+            let (target_cls, explicit_recv) = match &recv {
+                Some(Value::Class(c)) => (Some(c.clone()), true),
+                None => {
+                    let self_val = self.frames.last()
+                        .expect("ICE: define_method no_recv with empty frames")
+                        .self_val
+                        .clone();
+                    if let Value::Class(c) = self_val { (Some(c), false) } else { (None, false) }
+                }
+                _ => (None, false),
+            };
+            // Precedence rule (parallels `Module.new` / `Hash.new`):
+            // a user-defined `def self.define_method(...)` on the
+            // receiver (or its singleton-prepended chain) wins over
+            // the built-in intrinsic. Without this check, override
+            // attempts silently shadow into this arm. Only consult
+            // when we actually resolved a target class — otherwise
+            // fall through to normal dispatch (which will raise
+            // NoMethodError on the non-Class receiver).
+            if let Some(cls) = &target_cls
+                && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                let recv_val = Value::Class(cls.clone());
+                return self.invoke_method_with_block(m, recv_val, args, Some(block));
+            }
+            if let Some(target_cls) = target_cls {
+                // Arity arrangement matches the no-block arm above:
+                //   0       → wrong-arity ArgumentError
+                //   1       → install the block (path below)
+                //   2       → 2-arg Proc/UnboundMethod form NOT
+                //             yet supported (even with a block,
+                //             CRuby silently drops the block and
+                //             uses the proc — too subtle to fake);
+                //             raise NoMethodError so the caller
+                //             gets a clear "not implemented" signal
+                //   3+      → wrong-arity ArgumentError
+                // CRuby's wording is `expected 1..2` even when a
+                // block is attached, so we use the same message
+                // across both arms (PR #245 Copilot round 6 #1).
+                match args.len() {
+                    1 => {}
+                    2 => return Err(self.trap(RubyError::ArgumentError {
+                        msg: "the 2-arg Proc/UnboundMethod form of `Module#define_method` is not yet supported by rubyrs Tier-1".into(),
+                    })),
+                    n => return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+                    })),
+                }
+                let name_sym = match &args[0] {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => {
+                        // Same `Config::max_symbols` cap as
+                        // `parse_send_target` / `resolve_ivar_name_arg`
+                        // — without this, untrusted code could grow
+                        // the interner unbounded via
+                        // `cls.define_method("dyn_#{i}") {}` in a loop.
+                        // Existing symbols always re-resolve; only
+                        // fresh names count against the cap.
+                        let raw = s.to_string_lossy();
+                        if let Some(max) = self.max_symbols
+                            && !self.interner.contains(&raw) && self.interner.len() >= max {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                        self.interner.intern(&raw)
+                    }
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Symbol or String)",
+                            other.type_name(),
+                        ),
+                    })),
+                };
+                let (proto_idx, captured, param_start, n_params) = {
+                    let bh = self.heap.block(block);
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params)
+                };
+                let proto = &self.protos[proto_idx];
+                let params = proto.params.clone();
+                // Explicit-receiver path: visibility defaults to
+                // Public (the new method's target class doesn't
+                // share lexical scope with the caller's visibility
+                // stack). No-recv (bare call in class body): inherit
+                // the surrounding class's current visibility, since
+                // `define_method` and `def` should behave the same
+                // way under `private` / `public` modifiers.
+                let vis = if explicit_recv {
+                    crate::value::Visibility::Public
+                } else {
+                    self.class_visibility_stack.last().copied()
+                        .unwrap_or(crate::value::Visibility::Public)
+                };
+                let m = std::rc::Rc::new(crate::value::Method {
+                    params,
+                    proto_idx,
+                    fixed_arity: None,
+                    defining_class: Some(std::rc::Rc::downgrade(&target_cls)),
+                    visibility: std::cell::Cell::new(vis),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                });
+                target_cls.methods.borrow_mut().insert(name_sym, m);
+                self.method_gen = self.method_gen.wrapping_add(1);
+                self.stack.push(Value::Sym(name_sym));
+                return Ok(());
+            }
         }
         if &*name == "new"
             && let Some(Value::Class(cls)) = &recv
