@@ -85,6 +85,7 @@ fn run_error_fixture(name: &str) {
 #[test] fn exception() { run_fixture("exception"); }
 #[test] fn symbol_interp() { run_fixture("symbol_interp"); }
 #[test] fn gc_block() { run_fixture("gc_block"); }
+#[test] fn object_then_noblock_divergence() { run_fixture("object_then_noblock_divergence"); }
 
 /// Malformed `RUBYRS_*` env-var values must trigger a stderr
 /// warning AND still let the script run with the default cap

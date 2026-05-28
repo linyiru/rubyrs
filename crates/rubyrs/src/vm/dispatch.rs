@@ -4646,9 +4646,27 @@ impl Vm {
             self.stack.push(Value::Int(id));
             return Ok(());
         }
+        // Arity guard for the Object-extras family. All four
+        // take zero arguments; CRuby raises ArgumentError on
+        // extra args regardless of whether a block is present,
+        // so check before the per-method arms to keep the
+        // error type consistent. Without this guard
+        // `42.tap(1)` falls through to NoMethodError, hiding
+        // the real mistake.
+        if matches!(&*name, "itself" | "tap" | "then" | "yield_self") && !args.is_empty() {
+            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
+                    args.len()
+                ),
+            }));
+        }
         // `Object#itself` — universal, no args. Returns the
         // receiver unchanged. Common with `group_by(&:itself)`
-        // and other Symbol#to_proc idioms.
+        // and other Symbol#to_proc idioms. CRuby ignores any
+        // attached block (`obj.itself { ... }` still returns
+        // obj); see the block-form fast path in
+        // `collection_call_block` (vm/iter.rs) for that case.
         if &*name == "itself" && args.is_empty() {
             self.stack.push(recv);
             return Ok(());

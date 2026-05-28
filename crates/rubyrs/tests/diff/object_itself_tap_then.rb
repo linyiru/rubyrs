@@ -56,18 +56,34 @@ puts 42.respond_to?(:then)
 puts 42.respond_to?(:yield_self)
 puts Object.new.respond_to?(:itself)
 
-# No-block tap raises LocalJumpError
+# No-block tap raises LocalJumpError (both CRuby and rubyrs)
 begin
   5.tap
 rescue LocalJumpError => e
   puts "tap-noblock"
 end
 
-# No-block then/yield_self — rubyrs raises LocalJumpError
-# (documented divergence from CRuby which returns an
-# Enumerator).  The fixture asserts the *class* of the error
-# rather than reproducing CRuby's Enumerator return, so the
-# diff parity is preserved by both interpreters printing
-# `LocalJumpError` for `then` only if we run under rubyrs;
-# under CRuby this branch wouldn't fire. Skip this assertion
-# from the diff fixture — leave a comment for the divergence.
+# Arity guard — CRuby raises ArgumentError on extra args for
+# every member of this family regardless of block presence
+# (cycle-1 review of PR #290). Without an explicit guard
+# rubyrs would fall through to NoMethodError.
+[:itself, :tap, :then, :yield_self].each do |m|
+  begin
+    5.send(m, 1)
+  rescue ArgumentError => e
+    puts "#{m}-extra-arg"
+  end
+end
+
+# itself with an attached block — CRuby silently ignores the
+# block and still returns the receiver. We must NOT raise
+# LocalJumpError here even though there's no `yield` path —
+# the cycle-1 reviewer flagged this as a divergence from
+# CRuby's universal-arm semantics.
+puts 7.itself { raise "block must not run" }
+
+# Note: rubyrs's `then` / `yield_self` without a block raise
+# LocalJumpError, while CRuby returns an Enumerator. This
+# divergence is exercised by a rubyrs-only unit test in
+# crates/rubyrs/src/vm/dispatch.rs's test module instead of
+# this diff fixture so CRuby parity stays clean.
