@@ -1491,167 +1491,57 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         )))
     });
 
+    // FU4b: __rubyrs_http_serve_with_app accepts only the
+    // Hash-arg form. Two arities:
+    //   (addr, secs, app)            → all options default
+    //   (addr, secs, app, options)   → parse the Hash
+    //
+    // Options keys accepted: see WITH_APP_OPTION_KEYS.
+    // `on_worker_boot` is rejected here (only meaningful
+    // for the prefork form — see FU4c).
+    const WITH_APP_OPTION_KEYS: &[&str] = &[
+        "per_request_fuel", "max_body_bytes", "io_deadline_ms", "max_headers",
+        "install_signal_handler", "idle_timeout_ms", "on_error",
+    ];
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        // Argument shape (3 / 4 / 5 / 6 / 7 / 8 / 9 / 10 args, growing):
-        //   (addr, secs, app)
-        //   (addr, secs, app, per_request_fuel)
-        //   (addr, secs, app, per_request_fuel, max_body_bytes)
-        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms)
-        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers)
-        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler)
-        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms)
-        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms, on_error)
-        //
-        // Each positional adds one more security knob. Per
-        // ADR 0022 v5 these will eventually move into a
-        // Hash arg (Bun-shape) to avoid 8-positional creep;
-        // PoC keeps positional for now.
-        //
-        // Negative-value checks are factored into a helper
-        // so each arity branch stays a one-liner.
-        let check_non_negative = |label: &str, n: i64| -> Result<(), Trap> {
-            if n < 0 {
-                Err(Trap {
-                    err: RubyError::ArgumentError {
-                        msg: format!("{label} must be non-negative, got {n}"),
-                    },
-                    backtrace: vec![],
-                })
-            } else {
-                Ok(())
-            }
-        };
-        // Helper for io_deadline_ms semantics (0 disables).
-        let parse_io_deadline = |ms: i64| -> Option<Duration> {
-            if ms == 0 { None } else { Some(Duration::from_millis(ms as u64)) }
-        };
-        // max_headers helper: 0 → hyper default (100); >0 →
-        // explicit cap. Matches the "0 disables / unsets"
-        // idiom used by io_deadline_ms above.
-        let parse_max_headers = |max_h: i64| -> Result<Option<usize>, Trap> {
-            if max_h < 0 {
-                return Err(Trap {
-                    err: RubyError::ArgumentError {
-                        msg: format!("max_headers must be non-negative, got {max_h}"),
-                    },
-                    backtrace: vec![],
-                });
-            }
-            Ok(if max_h == 0 { None } else { Some(max_h as usize) })
-        };
-        // install_signal_handler validator — flag is binary
-        // today; ambiguous input surfaces ArgumentError
-        // rather than silently treating "2" as truthy.
-        let parse_sig_flag = |sig: i64| -> Result<bool, Trap> {
-            if sig != 0 && sig != 1 {
-                return Err(Trap {
-                    err: RubyError::ArgumentError {
-                        msg: format!("install_signal_handler must be 0 or 1, got {sig}"),
-                    },
-                    backtrace: vec![],
-                });
-            }
-            Ok(sig == 1)
-        };
-        // idle_timeout helper: 0 → no cap (rely on the
-        // OS/peer to close); >0 → header_read_timeout cap
-        // applied per-connection (covers both initial-
-        // headers wait and the inter-request gap on a
-        // keep-alive socket).
-        let parse_idle_timeout = |ms: i64| -> Result<Option<Duration>, Trap> {
-            if ms < 0 {
-                return Err(Trap {
-                    err: RubyError::ArgumentError {
-                        msg: format!("idle_timeout_ms must be non-negative, got {ms}"),
-                    },
-                    backtrace: vec![],
-                });
-            }
-            Ok(if ms == 0 { None } else { Some(Duration::from_millis(ms as u64)) })
-        };
-        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, install_signal_handler, idle_timeout, on_error_block) = match args {
+        let (addr_str, duration_secs, block_id, opts) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None, None, false, None, None)
+                (addr.to_string_lossy(), *secs, *id, ServeOptions::default())
             }
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel)] => {
-                check_non_negative("per_request_fuel", *fuel)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None, None, false, None, None)
-            }
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body)] => {
-                check_non_negative("per_request_fuel", *fuel)?;
-                check_non_negative("max_body_bytes", *max_body)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None, None, false, None, None)
-            }
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms)] => {
-                check_non_negative("per_request_fuel", *fuel)?;
-                check_non_negative("max_body_bytes", *max_body)?;
-                check_non_negative("io_deadline_ms", *io_ms)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), None, false, None, None)
-            }
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h)] => {
-                check_non_negative("per_request_fuel", *fuel)?;
-                check_non_negative("max_body_bytes", *max_body)?;
-                check_non_negative("io_deadline_ms", *io_ms)?;
-                let max_headers = parse_max_headers(*max_h)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, false, None, None)
-            }
-            // Stage 6d: 8-arg form with install_signal_handler
-            // flag. Integer 0/1 (rubyrs has no native Bool yet
-            // in host-fn args; convention shared with existing
-            // 0-disables knobs). When 1, the serve loop wires
-            // SIGINT (all platforms) and SIGTERM (Unix only)
-            // to graceful shutdown. Defaults to false in
-            // shorter arities so existing embeds opt in.
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h), Value::Int(sig)] => {
-                check_non_negative("per_request_fuel", *fuel)?;
-                check_non_negative("max_body_bytes", *max_body)?;
-                check_non_negative("io_deadline_ms", *io_ms)?;
-                let max_headers = parse_max_headers(*max_h)?;
-                let install_sig = parse_sig_flag(*sig)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, None, None)
-            }
-            // Stage 6e: 9-arg form adds idle_timeout_ms.
-            // Caps keep-alive idle time per-connection via
-            // hyper's header_read_timeout (fires for both
-            // slow initial headers AND idle gap between
-            // requests on keep-alive). 0 → no cap.
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h), Value::Int(sig), Value::Int(idle_ms)] => {
-                check_non_negative("per_request_fuel", *fuel)?;
-                check_non_negative("max_body_bytes", *max_body)?;
-                check_non_negative("io_deadline_ms", *io_ms)?;
-                let max_headers = parse_max_headers(*max_h)?;
-                let install_sig = parse_sig_flag(*sig)?;
-                let idle = parse_idle_timeout(*idle_ms)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, idle, None)
-            }
-            // Stage 6f: 10-arg form adds the optional
-            // `on_error` block. When the main app raises a
-            // non-ResourceExhausted trap, the server hands
-            // (env, err_class, err_message) to this block
-            // and expects a Rack triplet back. If on_error
-            // itself raises or returns malformed, we fall
-            // back to the plain 500. ResourceExhausted
-            // stays 503 unconditionally — it's a security
-            // signal that app code must not override.
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h), Value::Int(sig), Value::Int(idle_ms), Value::Block(err_id)] => {
-                check_non_negative("per_request_fuel", *fuel)?;
-                check_non_negative("max_body_bytes", *max_body)?;
-                check_non_negative("io_deadline_ms", *io_ms)?;
-                let max_headers = parse_max_headers(*max_h)?;
-                let install_sig = parse_sig_flag(*sig)?;
-                let idle = parse_idle_timeout(*idle_ms)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, idle, Some(*err_id))
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Hash(hash_id)] => {
+                let ptr = crate::vm::current_vm_ptr();
+                if ptr.is_null() {
+                    return Err(Trap {
+                        err: RubyError::RuntimeError {
+                            msg: "internal: CURRENT_VM_PTR null in __rubyrs_http_serve_with_app".to_string(),
+                        },
+                        backtrace: vec![],
+                    });
+                }
+                // SAFETY: ADR 0013 — &mut Vm parked by
+                // invoke_host_fn; we use a shared borrow
+                // only for parser interner lookups.
+                let vm = unsafe { &*ptr };
+                let parsed = parse_serve_options(vm, *hash_id, WITH_APP_OPTION_KEYS)?;
+                (addr.to_string_lossy(), *secs, *id, parsed)
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0, max_headers: Integer = 0, install_signal_handler: Integer = 0, idle_timeout_ms: Integer = 0, on_error: Proc/Lambda = nil)"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, options: Hash = {}) — options keys: per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms, on_error"
                             .to_string(),
                     },
                     backtrace: vec![],
                 });
             }
         };
+        let per_request_fuel = opts.per_request_fuel;
+        let max_body_bytes = opts.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES);
+        let io_deadline = opts.io_deadline;
+        let max_headers = opts.max_headers;
+        let install_signal_handler = opts.install_signal_handler;
+        let idle_timeout = opts.idle_timeout;
+        let on_error_block = opts.on_error_block;
 
         if duration_secs < 0 {
             return Err(Trap {
@@ -2420,7 +2310,7 @@ mod tests {
             }}
             __rubyrs_http_serve_with_app(
               "{server_addr}", 1, app,
-              1_000_000, 10_000, 0, 5
+              {{ per_request_fuel: 1_000_000, max_body_bytes: 10_000, max_headers: 5 }}
             )
             raise "app must NOT run on header-count overflow; was reached" if $reached
         "#), "stage_6c_header_count.rb").expect("server ran + app stayed cold");
@@ -2471,7 +2361,7 @@ mod tests {
             }}
             __rubyrs_http_serve_with_app(
               "{server_addr}", 1, app,
-              1_000_000, 10_000, 0, 0
+              {{ per_request_fuel: 1_000_000, max_body_bytes: 10_000 }}
             )
         "#), "stage_6c_header_default.rb").expect("server ran");
 
@@ -2529,7 +2419,7 @@ mod tests {
             }}
             __rubyrs_http_serve_with_app(
               "{server_addr}", 1, app,
-              1_000_000, 10_000, 0, 0, 1
+              {{ per_request_fuel: 1_000_000, max_body_bytes: 10_000, install_signal_handler: 1 }}
             )
         "#), "stage_6d_signal_flag.rb").expect("server ran");
 
@@ -2554,12 +2444,12 @@ mod tests {
             app = ->(env) { [200, {}, []] }
             __rubyrs_http_serve_with_app(
               "127.0.0.1:0", 0, app,
-              1_000_000, 10_000, 0, 0, 2
+              { per_request_fuel: 1_000_000, max_body_bytes: 10_000, install_signal_handler: 2 }
             )
         "#, "stage_6d_signal_flag_bad.rb").expect_err("should reject sig=2");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("install_signal_handler must be 0 or 1"),
+            msg.contains("'install_signal_handler' must be 0 or 1"),
             "expected ArgumentError mentioning install_signal_handler, got: {msg}",
         );
     }
@@ -2598,12 +2488,12 @@ mod tests {
 
         let mut rt = crate::Runtime::new();
         super::register_host_fns(&mut rt);
-        // 9-arg form: idle_timeout_ms = 300
+        // idle_timeout_ms = 300
         rt.eval(&format!(r#"
             app = ->(env) {{ [200, {{}}, []] }}
             __rubyrs_http_serve_with_app(
               "{server_addr}", 2, app,
-              1_000_000, 10_000, 0, 0, 0, 300
+              {{ per_request_fuel: 1_000_000, max_body_bytes: 10_000, idle_timeout_ms: 300 }}
             )
         "#), "stage_6e_idle_timeout.rb").expect("server ran");
 
@@ -2626,6 +2516,49 @@ mod tests {
         );
     }
 
+    /// FU4b: unknown option key from the host fn end is
+    /// rejected. End-to-end verification that the parser's
+    /// "typo guard" path is wired all the way through
+    /// (FU4a tests bypassed the host fn).
+    #[test]
+    fn with_app_rejects_unknown_option_key() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            app = ->(env) { [200, {}, []] }
+            __rubyrs_http_serve_with_app("127.0.0.1:0", 0, app, {
+              per_request_fuel: 100,
+              not_a_real_option: 42,
+            })
+        "#, "fu4b_unknown.rb").expect_err("should reject unknown key");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("unknown option 'not_a_real_option'"),
+            "got: {msg}",
+        );
+    }
+
+    /// FU4b: with_app rejects `on_worker_boot` — only
+    /// valid for the prefork host fn (FU4c lifts that
+    /// for prefork; with_app stays restricted).
+    #[test]
+    fn with_app_rejects_on_worker_boot_key() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            app = ->(env) { [200, {}, []] }
+            on_boot = ->(idx) { idx }
+            __rubyrs_http_serve_with_app("127.0.0.1:0", 0, app, {
+              on_worker_boot: on_boot,
+            })
+        "#, "fu4b_no_boot.rb").expect_err("should reject on_worker_boot");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("unknown option 'on_worker_boot'"),
+            "got: {msg}",
+        );
+    }
+
     /// Stage 6e: `idle_timeout_ms < 0` is an ArgumentError.
     #[test]
     fn idle_timeout_rejects_negative_value() {
@@ -2635,12 +2568,12 @@ mod tests {
             app = ->(env) { [200, {}, []] }
             __rubyrs_http_serve_with_app(
               "127.0.0.1:0", 0, app,
-              1_000_000, 10_000, 0, 0, 0, -1
+              { idle_timeout_ms: -1 }
             )
         "#, "stage_6e_idle_neg.rb").expect_err("should reject idle=-1");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("idle_timeout_ms must be non-negative"),
+            msg.contains("'idle_timeout_ms' must be non-negative"),
             "expected ArgumentError mentioning idle_timeout_ms, got: {msg}",
         );
     }
@@ -2683,7 +2616,7 @@ mod tests {
             }}
             __rubyrs_http_serve_with_app(
               "{server_addr}", 1, app,
-              1_000_000, 10_000, 0, 0, 0, 0, on_error
+              {{ per_request_fuel: 1_000_000, max_body_bytes: 10_000, on_error: on_error }}
             )
         "#), "stage_6f_on_error.rb").expect("server ran");
 
@@ -2737,7 +2670,7 @@ mod tests {
             on_error = ->(env, klass, msg) {{ raise "secondary boom" }}
             __rubyrs_http_serve_with_app(
               "{server_addr}", 1, app,
-              1_000_000, 10_000, 0, 0, 0, 0, on_error
+              {{ per_request_fuel: 1_000_000, max_body_bytes: 10_000, on_error: on_error }}
             )
         "#), "stage_6f_on_error_raises.rb").expect("server ran");
 
@@ -2813,7 +2746,7 @@ mod tests {
             }}
             __rubyrs_http_serve_with_app(
               "{server_addr}", 2, app,
-              10_000, 10_000, 0, 0, 0, 0, on_error
+              {{ per_request_fuel: 10_000, max_body_bytes: 10_000, on_error: on_error }}
             )
         "#), "stage_6f_resource_exhausted.rb").expect("server ran");
 
@@ -2891,7 +2824,7 @@ mod tests {
               $reached = true
               [200, {{}}, ["should never reach this"]]
             }}
-            __rubyrs_http_serve_with_app("{server_addr}", 2, app, 1_000_000, 10_000, 300)
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app, {{ per_request_fuel: 1_000_000, max_body_bytes: 10_000, io_deadline_ms: 300 }})
             raise "app must NOT run when io_deadline fires; was reached" if $reached
         "#), "stage_6b_slow_body.rb").expect("server ran + app stayed cold");
 
@@ -2951,7 +2884,7 @@ mod tests {
             app = ->(env) {{
               [200, {{"Content-Type" => "text/plain"}}, ["body_len=#{{env['CONTENT_LENGTH']}}"]]
             }}
-            __rubyrs_http_serve_with_app("{server_addr}", 2, app, 1_000_000, 10_000, 0)
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app, {{ per_request_fuel: 1_000_000, max_body_bytes: 10_000 }})
         "#), "stage_6b_disable_timeout.rb").expect("server ran");
 
         let response_text = client_thread.join().expect("client thread");
@@ -3024,7 +2957,7 @@ mod tests {
             # 4-arg shape: per_request_fuel = nil-equiv (omit), but
             # we want max_body_bytes = 100 → use 5-arg form with
             # per_request_fuel = 1_000_000 (well above any need).
-            __rubyrs_http_serve_with_app("{server_addr}", 1, app, 1_000_000, 100)
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app, {{ per_request_fuel: 1_000_000, max_body_bytes: 100 }})
             # Post-serve assertion: app must NOT have run.
             raise "app should not be invoked on 413 path; was reached" if $reached
         "#), "stage_6a_oversized.rb").expect("server ran + app stayed cold");
@@ -3082,7 +3015,7 @@ mod tests {
               body = "method=#{{env['REQUEST_METHOD']}};len=#{{env['CONTENT_LENGTH']}};"
               [200, {{"Content-Type" => "text/plain"}}, [body]]
             }}
-            __rubyrs_http_serve_with_app("{server_addr}", 1, app, 1_000_000, 1024)
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app, {{ per_request_fuel: 1_000_000, max_body_bytes: 1024 }})
         "#), "stage_6a_within_cap.rb").expect("server ran");
 
         let response_text = client_thread.join().expect("client thread");
@@ -3186,7 +3119,7 @@ mod tests {
                 [200, {{"Content-Type" => "text/plain"}}, ["previous_req_count=#{{previous}}"]]
               end
             }}
-            __rubyrs_http_serve_with_app("{server_addr}", 2, app, 10_000)
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app, {{ per_request_fuel: 10_000 }})
             "#,
         ), "stage_5d_runaway.rb").expect("server ran 2 seconds");
 
