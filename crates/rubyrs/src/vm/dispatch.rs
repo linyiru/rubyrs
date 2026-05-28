@@ -4460,10 +4460,18 @@ impl Vm {
                             // bigint_arith for that case.
                             #[cfg(feature = "bignum")]
                             if *a == i64::MIN && *b == -1 {
-                                let q = self.bigint_arith(
+                                // recv is Int(i64::MIN), no heap id
+                                // to pin on the recv side — but q is
+                                // a freshly-promoted BigInt whose
+                                // only root is this local across the
+                                // Mod call's `bigint_to_value` →
+                                // `maybe_gc` window.
+                                let mut g = PinGuard::new(self);
+                                let q = g.vm.bigint_arith(
                                     crate::bytecode::BinOpKind::Div, &recv, arg,
                                 ).expect("ICE: bigint_arith None for i64::MIN/-1")?;
-                                let r = self.bigint_arith(
+                                g.pin(q.clone());
+                                let r = g.vm.bigint_arith(
                                     crate::bytecode::BinOpKind::Mod, &recv, arg,
                                 ).expect("ICE: bigint_arith None for i64::MIN/-1")?;
                                 (q, r)
@@ -4482,10 +4490,19 @@ impl Vm {
                         #[cfg(feature = "bignum")]
                         Value::BigInt(_) => {
                             // BigInt × Int — promotes through bigint_arith.
-                            let q = self.bigint_arith(
+                            // Pin recv AND q across BOTH calls — both
+                            // route through `bigint_to_value` →
+                            // `maybe_gc`, which would otherwise sweep
+                            // recv (drained from the stack) before
+                            // its bigint heap slot is read, AND sweep
+                            // q before r lands.
+                            let mut g = PinGuard::new(self);
+                            g.pin(recv.clone());
+                            let q = g.vm.bigint_arith(
                                 crate::bytecode::BinOpKind::Div, &recv, arg,
                             ).expect("ICE: bigint_arith None for BigInt divmod")?;
-                            let r = self.bigint_arith(
+                            g.pin(q.clone());
+                            let r = g.vm.bigint_arith(
                                 crate::bytecode::BinOpKind::Mod, &recv, arg,
                             ).expect("ICE: bigint_arith None for BigInt divmod")?;
                             (q, r)
@@ -4535,10 +4552,17 @@ impl Vm {
                 }
                 #[cfg(feature = "bignum")]
                 Value::BigInt(_) => {
-                    let q = self.bigint_arith(
+                    // BigInt arg arm — pin recv + arg + q across the
+                    // bigint_arith calls (each routes through
+                    // bigint_to_value → maybe_gc).
+                    let mut g = PinGuard::new(self);
+                    g.pin(recv.clone());
+                    g.pin(arg.clone());
+                    let q = g.vm.bigint_arith(
                         crate::bytecode::BinOpKind::Div, &recv, arg,
                     ).expect("ICE: bigint_arith None for BigInt divmod")?;
-                    let r = self.bigint_arith(
+                    g.pin(q.clone());
+                    let r = g.vm.bigint_arith(
                         crate::bytecode::BinOpKind::Mod, &recv, arg,
                     ).expect("ICE: bigint_arith None for BigInt divmod")?;
                     (q, r)
@@ -4552,10 +4576,25 @@ impl Vm {
                     }));
                 }
             };
-            self.maybe_gc();
-            self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Array(vec![q, r]));
-            self.stack.push(Value::Array(id));
+            // GC root hole (sibling to the coerce fix in PR #289):
+            // for BigInt divmod, `q` and `r` are freshly-allocated
+            // BigInt ObjIds returned by `bigint_arith` — their only
+            // live root at this point is the Rust local. Without the
+            // PinGuard, `maybe_gc()` runs with both ObjIds
+            // unreachable and sweeps them before the result Array is
+            // allocated, leaving the Array with dangling slots.
+            // Pin both Values across maybe_gc + heap.alloc; Drop
+            // restores normal GC reachability via the freshly-pushed
+            // `Value::Array(id)` on the stack.
+            let arr_id = {
+                let mut g = PinGuard::new(self);
+                g.pin(q.clone());
+                g.pin(r.clone());
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                g.vm.heap.alloc(HeapObj::Array(vec![q, r]))
+            };
+            self.stack.push(Value::Array(arr_id));
             return Ok(());
         }
         // `Numeric#coerce(other)` — the Tier-2 Numeric protocol
