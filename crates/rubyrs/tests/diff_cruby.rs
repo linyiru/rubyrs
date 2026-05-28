@@ -146,6 +146,7 @@ fn run_diff(name: &str) {
 #[test] fn env_nested_lookup() { run_diff("env_nested_lookup"); }
 #[test] fn module_define_method() { run_diff("module_define_method"); }
 #[test] fn singleton_class_class_eval() { run_diff("singleton_class_class_eval"); }
+#[test] fn proc_arity() { run_diff("proc_arity"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }

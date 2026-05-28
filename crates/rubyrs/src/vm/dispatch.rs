@@ -579,6 +579,50 @@ impl Vm {
                 self.dispatch_until(pre_frames)?;
                 return Ok(CallableOutcome::Handled);
             }
+        // `Proc#arity` — CRuby-shape arity for the block. Block
+        // params in rubyrs Tier-1 are only required + rest (no
+        // optionals, no keyword params — `compile_block` accepts
+        // only `BlockParam::{Single, Destructure, Rest}`), so
+        // the formula is:
+        //   has_rest → -(n_required + 1)
+        //   else     →  n_required
+        // The Proto's `rest_param` field is NOT populated for
+        // blocks (rest_slot lives on the BlockHandle directly);
+        // can't share the `proto_arity` helper used by
+        // `Method#arity` / `UnboundMethod#arity` without
+        // walking the BlockHandle here. Sinatra's `compile!`
+        // (sinatra/base.rb:1810) reads `block.arity` to size
+        // the route block's positional bindings. (TRY_RUNS
+        // layer #24.)
+        if matches!(&recv, Value::Block(_) | Value::CurriedProc(_))
+            && name == "arity" && !args.is_empty() {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+            }));
+        }
+        if let Value::Block(bid) = &recv
+            && name == "arity" && args.is_empty() {
+            let (n_required, has_rest) = {
+                let bh = self.heap.block(*bid);
+                (bh.n_params as i64, bh.rest_slot.is_some())
+            };
+            let arity = if has_rest { -(n_required + 1) } else { n_required };
+            self.stack.push(Value::Int(arity));
+            return Ok(CallableOutcome::Handled);
+        }
+        // `CurriedProc#arity` — CRuby returns -1 for any curried
+        // proc/lambda regardless of remaining required slots
+        // (the curried wrapper accepts a variable number of args
+        // per `.call` site as the partial application grows).
+        // Without this arm, `proc { |a| }.curry.arity` falls
+        // through to NoMethodError even though `Proc#arity`
+        // works — inconsistent now that the Block arm exists.
+        // (Copilot review #263 round 3.)
+        if let Value::CurriedProc(_) = &recv
+            && name == "arity" && args.is_empty() {
+            self.stack.push(Value::Int(-1));
+            return Ok(CallableOutcome::Handled);
+        }
         // `Object#method(:name)` — capture (recv, name_id) into a
         // BoundMethod heap object. Returned Value can be `.call`'d
         // (handled in the next arm) or stored. Args must be a
@@ -1237,42 +1281,24 @@ impl Vm {
                     }
                     Some(m) => {
                         let proto = &self.protos[m.proto_idx];
+                        // Shared `proto_arity` helper carries the
+                        // CRuby formula (required-kw bumping,
+                        // block-param exclusion, etc.). NOTE:
+                        // `Proc#arity` does NOT share this helper
+                        // — blocks store rest info on
+                        // `BlockHandle`, not on the Proto, so the
+                        // block intrinsic arm above computes
+                        // arity from the handle directly.
+                        let arity = self.proto_arity(m.proto_idx);
+                        // Other counts still needed for the
+                        // `parameters` build below.
                         let n_req_pos = proto.n_required_positional as usize;
                         let rest_count = proto.rest_param.is_some() as usize;
                         let kw_count = proto.kw_param_defaults.len();
                         let kw_rest_count = proto.kw_rest_param.is_some() as usize;
-                        // `block_param`'s name is appended to
-                        // `proto.params` by the compiler (so the
-                        // body's locals see `blk` at its slot), but
-                        // it must not count as a positional optional
-                        // for arity/parameters introspection. Without
-                        // this subtraction, `def f(&blk)` returns
-                        // arity -1 and parameters `[[:opt, :blk]]`
-                        // instead of arity 0 and `[[:block, :blk]]`.
                         let block_count = proto.block_param.is_some() as usize;
                         let positional_total = proto.params.len()
                             .saturating_sub(rest_count + kw_count + kw_rest_count + block_count);
-                        let n_opt_pos = positional_total.saturating_sub(n_req_pos);
-                        let n_req_kw = proto.kw_param_defaults.iter().filter(|d| d.is_none()).count();
-                        let n_opt_kw = proto.kw_param_defaults.iter().filter(|d| d.is_some()).count();
-                        // CRuby's arity rule: any *required* keyword
-                        // adds 1 to the mandatory count; the kwargs
-                        // bundle is then treated as a single
-                        // mandatory arg (so the signature is "fully
-                        // specified" if there's no opt-pos / rest).
-                        // If there are no required kwargs but some
-                        // optional/kw_rest are present, the bundle
-                        // is treated as a single OPTIONAL arg —
-                        // arity goes negative.
-                        let req_kw_present = n_req_kw > 0;
-                        let effective_req = n_req_pos + req_kw_present as usize;
-                        let has_pos_optional = n_opt_pos > 0 || rest_count > 0;
-                        let has_kw_optional = !req_kw_present && (n_opt_kw > 0 || kw_rest_count > 0);
-                        let arity: i64 = if has_pos_optional || has_kw_optional {
-                            -((effective_req + 1) as i64)
-                        } else {
-                            effective_req as i64
-                        };
                         let mut params: Vec<(&'static str, Option<String>)> = Vec::new();
                         for i in 0..n_req_pos {
                             params.push(("req", Some(proto.params[i].clone())));
@@ -6436,6 +6462,53 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
 }
 
 impl Vm {
+    /// CRuby-shape arity for a Proto: required positional count
+    /// when the signature is fully fixed; `-(required + 1)`
+    /// otherwise. Used by `Method#arity` and
+    /// `UnboundMethod#arity`. Note: `Proc#arity` does NOT call
+    /// this helper — blocks store rest info on `BlockHandle`
+    /// (the Proto's `rest_param` field stays empty for them),
+    /// and the block arm in `try_dispatch_callable_intrinsics`
+    /// computes arity directly from the handle's `n_params` /
+    /// `rest_slot`.
+    ///
+    /// The Proto's parameter layout is
+    /// `[required..., optional..., rest?, kw..., kw_rest?, block?]`.
+    /// `n_required_positional` covers the leading required slots;
+    /// optionals are the gap between that and the rest/kw/block
+    /// tail. The `block_param` slot is appended to `proto.params`
+    /// so the body sees the local but it must NOT count as an
+    /// optional positional for introspection.
+    ///
+    /// Required keyword (`def f(a:)`) bumps the mandatory count
+    /// by 1 (CRuby treats the kwargs bundle as one mandatory
+    /// arg). Any optional/rest position OR optional/kw_rest
+    /// keyword (when no required-kw is present) flips the result
+    /// negative.
+    /// (TRY_RUNS layer #24.)
+    pub(crate) fn proto_arity(&self, proto_idx: usize) -> i64 {
+        let proto = &self.protos[proto_idx];
+        let n_req_pos = proto.n_required_positional as usize;
+        let rest_count = proto.rest_param.is_some() as usize;
+        let kw_count = proto.kw_param_defaults.len();
+        let kw_rest_count = proto.kw_rest_param.is_some() as usize;
+        let block_count = proto.block_param.is_some() as usize;
+        let positional_total = proto.params.len()
+            .saturating_sub(rest_count + kw_count + kw_rest_count + block_count);
+        let n_opt_pos = positional_total.saturating_sub(n_req_pos);
+        let n_req_kw = proto.kw_param_defaults.iter().filter(|d| d.is_none()).count();
+        let n_opt_kw = proto.kw_param_defaults.iter().filter(|d| d.is_some()).count();
+        let req_kw_present = n_req_kw > 0;
+        let effective_req = n_req_pos + req_kw_present as usize;
+        let has_pos_optional = n_opt_pos > 0 || rest_count > 0;
+        let has_kw_optional = !req_kw_present && (n_opt_kw > 0 || kw_rest_count > 0);
+        if has_pos_optional || has_kw_optional {
+            -((effective_req + 1) as i64)
+        } else {
+            effective_req as i64
+        }
+    }
+
     /// Default Instance allocator — `maybe_gc` + `check_alloc` +
     /// `heap.alloc(HeapObj::Instance { class, empty ivars, no
     /// singleton })` → `Value::Object`. Shared by `Class#allocate`
