@@ -1,7 +1,10 @@
 # Adapted from ruby/spec core/string/count_spec.rb at upstream
 # commit 448cb340 (2026-05). Hand-translated — baseline shapes
-# for single-set char counting. Range / negation forms are
-# dropped, same as in string_tr_spec.rb.
+# for single-set char counting PLUS range / negation shorthand
+# (which rubyrs's `count` set-parser DOES expand correctly —
+# unlike `String#tr`, where the same shorthand is divergent;
+# see string_tr_spec.rb). The two methods have separate
+# set-parser implementations.
 
 describe "String#count" do
   it "counts characters in the given set" do
