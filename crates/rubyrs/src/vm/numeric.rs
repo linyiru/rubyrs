@@ -483,23 +483,33 @@ pub(crate) fn numeric_call(
             // that `(-*n) as u64` would hit in debug builds when
             // someone passes i64::MIN as the precision.
             let abs_n = n.unsigned_abs();
-            if abs_n > 18 {
-                // 10^19 overflows i64; defer to bignum path (which
-                // isn't implemented for these selectors yet).
+            // For |n| > 38, 10^|n| overflows i128 too. Under
+            // bignum, defer so a future BigInt-aware path can
+            // produce the exact answer. Under no-bignum the
+            // "wrap to i64" convention can't represent ANY
+            // non-zero result either, so 0 is the best we have
+            // — note this matches the no-bignum behavior of
+            // other arithmetic ops that wrap past representable
+            // range (the result is congruent to 0 mod 2^64 only
+            // by coincidence; 0 is the principled fall-back).
+            if abs_n > 38 {
                 #[cfg(feature = "bignum")]
                 { return Ok(None); }
                 #[cfg(not(feature = "bignum"))]
                 { return Ok(Some(Value::Int(0))); }
             }
-            let pow10 = 10i64.pow(abs_n as u32);
-            // Truncating div + rem keeps the sign of `r` matching
-            // the dividend (Rust's wrapping_*). The rounding-mode
-            // adjustment below derives ceil/floor/round from the
-            // truncated quotient.
-            let trunc_q = a.wrapping_div(pow10);
-            let trunc_r = a.wrapping_rem(pow10);
+            // Widen to i128 so pow10 and the round-mode arithmetic
+            // can't overflow for |n| <= 38 (i128 holds 10^38 with
+            // room). Cast back to i64 at the end; under bignum we
+            // detect the truncation and defer for promotion;
+            // under no-bignum we wrap per the existing
+            // wrapping-on-overflow convention (same one +/-/* use).
+            let pow10: i128 = 10i128.pow(abs_n as u32);
+            let a128 = *a as i128;
+            let trunc_q = a128 / pow10;
+            let trunc_r = a128 % pow10;
             let half = pow10 / 2;
-            let q = match op {
+            let q: i128 = match op {
                 "truncate" => trunc_q,
                 "floor" => if trunc_r < 0 { trunc_q - 1 } else { trunc_q },
                 "ceil"  => if trunc_r > 0 { trunc_q + 1 } else { trunc_q },
@@ -512,16 +522,18 @@ pub(crate) fn numeric_call(
                 }
                 _ => unreachable!(),
             };
-            // Multiplication can overflow at i64 boundary (e.g.
-            // `(2**62).round(-1)` near i64::MAX). Decline here so
-            // bignum can promote; under no-bignum saturate via
-            // wrapping (acceptable per existing convention).
-            match q.checked_mul(pow10) {
-                Some(v) => Some(Value::Int(v)),
+            let result_i128 = q.wrapping_mul(pow10);
+            if result_i128 >= (i64::MIN as i128) && result_i128 <= (i64::MAX as i128) {
+                Some(Value::Int(result_i128 as i64))
+            } else {
                 #[cfg(feature = "bignum")]
-                None => return Ok(None),
+                { return Ok(None); }
+                // Under no-bignum, wrap the i128 result into i64
+                // per the existing wrapping-on-overflow convention
+                // (matches `+`/`-`/`*` overflow behavior; documented
+                // in Cargo.toml feature notes).
                 #[cfg(not(feature = "bignum"))]
-                None => Some(Value::Int(q.wrapping_mul(pow10))),
+                { Some(Value::Int(result_i128 as i64)) }
             }
         }
         (Value::Int(a), "fdiv", [Value::Int(b)]) => {
