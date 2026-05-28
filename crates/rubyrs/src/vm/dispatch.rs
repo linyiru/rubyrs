@@ -4646,6 +4646,27 @@ impl Vm {
             self.stack.push(Value::Int(id));
             return Ok(());
         }
+        // `Object#itself` — universal, no args. Returns the
+        // receiver unchanged. Common with `group_by(&:itself)`
+        // and other Symbol#to_proc idioms.
+        if &*name == "itself" && args.is_empty() {
+            self.stack.push(recv);
+            return Ok(());
+        }
+        // `Object#tap` / `#then` / `#yield_self` without a
+        // block — the block-taking forms are handled by
+        // `collection_call_block` (vm/iter.rs). Reaching this
+        // arm means no block was passed; CRuby raises
+        // LocalJumpError for `tap`, while `then`/`yield_self`
+        // would normally return an Enumerator. rubyrs has no
+        // Enumerator type yet, so for now both raise
+        // LocalJumpError uniformly — documented divergence,
+        // less surprising than silent NoMethodError.
+        if args.is_empty() && matches!(&*name, "tap" | "then" | "yield_self") {
+            return Err(self.trap(crate::error::RubyError::LocalJumpError {
+                msg: format!("no block given (yield)"),
+            }));
+        }
         // `Object#frozen?` — universal, no args.
         // CRuby treats all immediates (Integer, Float, Symbol,
         // true, false, nil) as always-frozen. Str/Array/Hash/Regex

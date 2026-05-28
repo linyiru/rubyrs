@@ -454,6 +454,11 @@ impl Vm {
             // detection (`obj.respond_to?(:object_id)`) must
             // agree.
             | "object_id" | "__id__" | "hash" | "frozen?" | "inspect"
+            // Object-extras family (Kleisli `then`/`yield_self`,
+            // debug `tap`, identity `itself`) — universal arms
+            // in `do_call` succeed on every receiver, so feature
+            // detection has to agree.
+            | "itself" | "tap" | "then" | "yield_self"
             // The ivar-introspection family (`instance_variables` /
             // `instance_variable_get` / `instance_variable_set`)
             // is implemented as universal dispatch arms in
