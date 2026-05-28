@@ -237,7 +237,62 @@ pub struct Config {
     /// harnesses, sandbox / gemspec evaluators, and any embed
     /// that processes untrusted Ruby leave the default; the
     /// filesystem is off-limits.
+    ///
+    /// See [`Config::allowed_paths`] for the second layer that
+    /// narrows an open sandbox to a set of canonicalized prefixes
+    /// (rubund's gemspec-evaluator shape).
     pub allow_filesystem_io: bool,
+    /// Path-level narrowing on top of `allow_filesystem_io`. The
+    /// two fields compose as a layered sandbox:
+    ///
+    /// | `allow_filesystem_io` | `allowed_paths` | Behaviour |
+    /// |---|---|---|
+    /// | `false` | (any) | All FS-touching ops trap. `allowed_paths` is ignored. |
+    /// | `true` | `None` (default) | Fully open — same as the bool-only mode. |
+    /// | `true` | `Some(prefixes)` | Open, but each FS op's resolved path must start with one of `prefixes`; otherwise traps. |
+    ///
+    /// Use case: a host like rubund evaluates untrusted gemspecs
+    /// that may legitimately do `File.read("Gemfile.lock")` or
+    /// `require_relative "lib/version"`, but must NOT escape
+    /// the gem root. `Config { allow_filesystem_io: true,
+    /// allowed_paths: Some(vec![gem_root]), .. }` gives the
+    /// gemspec exactly that scope — `apply_config` canonicalizes
+    /// each entry once, so the host doesn't have to.
+    ///
+    /// Prefixes must be absolute paths that exist on disk at
+    /// `apply_config` time. A relative or nonexistent prefix
+    /// panics with a diagnostic explaining why; this is
+    /// intentional — silently misconfiguring the sandbox (either
+    /// widening it by collapsing `..`, or dead-ending it by
+    /// leaving the prefix relative) is worse than refusing to
+    /// start.
+    ///
+    /// Path matching is by `starts_with` on the canonicalized
+    /// `allowed_paths` entries. The input path is lexically
+    /// resolved (relative inputs joined with cwd; `..`/`.`
+    /// collapsed) for `File.*` ops, and canonicalized for the
+    /// `require` / `require_relative` / `cext_require` family
+    /// (which already touch disk to find the source). This
+    /// defends against simple traversal
+    /// (`/allowed/../../etc/passwd` resolves outside the prefix)
+    /// across the whole sandbox, AND defends against symlink
+    /// escapes on the load family. `File.*` does NOT canonicalize
+    /// its input by design (avoids the per-op syscall on the hot
+    /// path); a host that wants symlink-tight scoping on `File.*`
+    /// must ensure no symlinks under the allowed prefixes point
+    /// outside them.
+    ///
+    /// Case sensitivity: `starts_with` is byte-exact. On case-
+    /// insensitive filesystems (macOS APFS default, Windows NTFS),
+    /// the canonicalized prefix preserves the on-disk case but
+    /// scripts may pass paths with different case. `File.*`,
+    /// which doesn't canonicalize its input, will reject those
+    /// legitimate paths with `IOError`. Hosts on such filesystems
+    /// should normalize script-supplied paths to the on-disk case
+    /// before they reach the gate (e.g., via the embedder's own
+    /// path-handling layer) or restrict to case-sensitive volumes
+    /// for the gem-root tree.
+    pub allowed_paths: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Default for Config {
@@ -277,6 +332,11 @@ impl Default for Config {
             // / __dir__ cannot reach the host filesystem. The CLI
             // binary opts in explicitly via `Config { allow_filesystem_io: true, .. }`.
             allow_filesystem_io: false,
+            // No path-level narrowing by default — `allow_filesystem_io`
+            // already covers the secure-by-default case. Hosts that
+            // want scoped FS access (rubund evaluating gemspecs in a
+            // gem root, for instance) opt in by setting Some(prefixes).
+            allowed_paths: None,
         }
     }
 }
@@ -598,6 +658,36 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
         let p = std::ptr::addr_of_mut!(WIZER_RUNTIME);
         (*p).take()
     }
+}
+
+/// Pure lexical resolve of a path — collapses `.` and `..`
+/// segments without touching the filesystem. The single shared
+/// implementation behind:
+///   - per-op allowlist check input normalization
+///   - `File.expand_path`'s sandbox-on lexical-only path
+///
+/// NOT used as an `apply_config`-time fallback for non-
+/// canonicalizable prefixes: collapsing `..` there silently
+/// WIDENED the allowlist (e.g. `/gems/x/../../etc` → `/etc`),
+/// so that path now panics instead. See `apply_config`.
+///
+/// Absolute paths stay absolute; relative paths stay relative
+/// (the caller decides whether to join with cwd first).
+///
+/// `..` from the root is a no-op (matches POSIX `cd /..` and
+/// CRuby's `File.expand_path("..", "/")` semantics — returns
+/// `/`, not an error).
+pub(crate) fn lexically_resolve_path(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut resolved = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => { resolved.pop(); }
+            Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
 }
 
 /// Subset of Runtime+Vm settings that get **lifted during
@@ -925,6 +1015,36 @@ impl Runtime {
         self.vm.time_now = cfg.time_now;
         self.deadline = cfg.deadline;
         self.vm.allow_filesystem_io = cfg.allow_filesystem_io;
+        // Canonicalize each allowed prefix once at apply_config
+        // time. The per-op `check_path_in_allowlist` lexically
+        // resolves the input and does `starts_with` against the
+        // already-canonical entries — no per-op syscall.
+        //
+        // Fail loudly if any prefix can't be canonicalized. The
+        // earlier silent fallback to `lexically_resolve_path` had
+        // two failure modes: (a) it collapsed `..` segments, so a
+        // host-supplied nonexistent path like
+        // `/gems/x/../../etc` widened to `/etc`; (b) it left
+        // relative inputs relative, but per-op resolution joins
+        // with cwd → absolute, so `starts_with("subdir")` on an
+        // absolute path is always false and the sandbox went
+        // silently dead. Panic-with-context lets the host fix
+        // their config; a misconfigured sandbox is strictly worse
+        // than no startup.
+        self.vm.allowed_paths = cfg.allowed_paths.map(|prefixes| {
+            prefixes
+                .into_iter()
+                .map(|p| std::fs::canonicalize(&p).unwrap_or_else(|e| {
+                    panic!(
+                        "Config::allowed_paths prefix {:?} cannot be canonicalized ({}). \
+                         Prefixes must be absolute paths that exist on disk; \
+                         relative or nonexistent inputs are rejected to avoid silently \
+                         widening or dead-ending the sandbox.",
+                        p, e,
+                    )
+                }))
+                .collect()
+        });
     }
 
     /// Rewind the Runtime to its post-preamble state — every class,

@@ -444,6 +444,14 @@ pub(crate) struct Vm {
     /// makes File.*/require/__dir__ trap; `true` lets them
     /// through.
     pub(crate) allow_filesystem_io: bool,
+    /// Mirror of `Config::allowed_paths`. When `Some(prefixes)`,
+    /// each FS op's resolved path is checked against the
+    /// prefixes before proceeding (see
+    /// `Vm::check_path_in_allowlist`). Entries are canonicalized
+    /// once by `apply_config` so the per-op check can do a pure
+    /// lexical resolve + `starts_with` without further syscalls.
+    /// `None` (default) means no narrowing on top of the bool.
+    pub(crate) allowed_paths: Option<Vec<std::path::PathBuf>>,
     /// Per-eval working counter; `Some(0)` means exhausted, `None`
     /// means unlimited. Re-anchored at each `Runtime::eval` entry
     /// from `Runtime::fuel_budget` (which `apply_config` writes
@@ -674,6 +682,9 @@ impl Vm {
             // `allow_filesystem_io: false`. CLI / FS-needing
             // embedders flip this via `apply_config`.
             allow_filesystem_io: false,
+            // No path narrowing by default — `allow_filesystem_io: false`
+            // already covers the secure-by-default sandbox.
+            allowed_paths: None,
             fuel: None,
             max_frames: None,
             deadline_at: None,

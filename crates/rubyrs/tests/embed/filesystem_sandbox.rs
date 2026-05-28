@@ -293,3 +293,627 @@ fn ioerror_is_rescuable_in_script() {
         .unwrap();
     assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"caught"));
 }
+
+// ---------- allowlist scope (allow_filesystem_io: true + allowed_paths: Some) ----------
+
+/// Build a tempdir + write a probe file under it, returning the
+/// canonicalized tempdir path and the probe path. The tempdir is
+/// canonicalized because `apply_config` canonicalizes
+/// `allowed_paths` entries — using a non-canonical prefix would
+/// silently slip past `starts_with` on macOS where `/tmp` is a
+/// symlink to `/private/tmp`.
+fn alloc_tempdir(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let raw = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("rubyrs-allowlist-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&raw).expect("mkdir tempdir");
+    let dir = std::fs::canonicalize(&raw).expect("canonicalize tempdir");
+    let probe = dir.join("probe.txt");
+    std::fs::write(&probe, "probe contents").expect("write probe");
+    (dir, probe)
+}
+
+#[test]
+fn allowlist_permits_file_read_inside_prefix() {
+    // `allow_filesystem_io: true` + `allowed_paths: Some([gem_root])`
+    // is the rubund use case: open FS, but constrained to one
+    // directory tree. A `File.read` inside the prefix succeeds.
+    let (dir, probe) = alloc_tempdir("read-inside");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"File.read({:?})"#, probe.to_string_lossy());
+    let v = rt.eval(&script, "test.rb").unwrap();
+    assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"probe contents"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_blocks_file_read_outside_prefix() {
+    // Same Runtime config, but the script tries to read a path
+    // OUTSIDE the allowed prefix. Must trap with IOError — the
+    // host's gem-root sandbox can't be escaped by passing a
+    // different absolute path.
+    let (dir, _probe) = alloc_tempdir("read-outside");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let err = rt
+        .eval(r#"File.read("/etc/passwd")"#, "test.rb")
+        .unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "IOError" && message.contains("outside Config::allowed_paths")),
+        "expected Uncaught/IOError outside-allowlist, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_blocks_traversal_out_of_prefix() {
+    // Defense against the obvious bypass: `File.read("/allowed/../etc/passwd")`.
+    // The path is lexically resolved BEFORE the `starts_with`
+    // check, so `..` is collapsed and the resolved path
+    // `/etc/passwd` doesn't start with the prefix.
+    let (dir, _probe) = alloc_tempdir("read-traversal");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let traversal = format!("{}/../../../etc/passwd", dir.to_string_lossy());
+    let script = format!(r#"File.read({:?})"#, traversal);
+    let err = rt.eval(&script, "test.rb").unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"),
+        "expected IOError on traversal, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_permits_file_metadata_probe_inside_prefix() {
+    // `File.exist?` / `.size` are gated too — verify allowlist
+    // mode lets them through when the path is inside the prefix.
+    let (dir, probe) = alloc_tempdir("metadata-inside");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"File.exist?({:?})"#, probe.to_string_lossy());
+    let v = rt.eval(&script, "test.rb").unwrap();
+    assert!(matches!(v, rubyrs::Value::Bool(true)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_blocks_file_metadata_probe_outside_prefix() {
+    // The metadata-probe path also leaks FS structure if
+    // unguarded. Verify the allowlist scope applies.
+    let (dir, _probe) = alloc_tempdir("metadata-outside");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let err = rt
+        .eval(r#"File.exist?("/etc/passwd")"#, "test.rb")
+        .unwrap_err();
+    assert!(matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allow_filesystem_io_false_overrides_allowlist() {
+    // Layered model: bool is the coarse gate. If `allow_filesystem_io:
+    // false`, `allowed_paths` is ignored — sandbox is completely
+    // shut, even paths "inside" a configured allowlist trap. Locks
+    // in that hosts can't use `allowed_paths` to ACCIDENTALLY
+    // re-open a sandbox they meant to keep closed.
+    let (dir, probe) = alloc_tempdir("bool-wins");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: false,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"File.read({:?})"#, probe.to_string_lossy());
+    let err = rt.eval(&script, "test.rb").unwrap_err();
+    // Trap message says "filesystem I/O disabled" (the bool
+    // gate's wording), NOT "outside Config::allowed_paths" (the
+    // scope gate's wording) — proves bool fired first.
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "IOError"
+            && message.contains("filesystem I/O disabled")
+            && !message.contains("outside")),
+        "expected bool-gate trap, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_none_is_full_open() {
+    // Regression: with `allow_filesystem_io: true, allowed_paths:
+    // None`, behaviour should match the bool-only mode that
+    // shipped in PR #257 — no narrowing. The CLI binary uses
+    // exactly this config.
+    let (dir, probe) = alloc_tempdir("none-open");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: None,
+        ..Default::default()
+    });
+    // Reading inside any path works (the existing opt-in test
+    // covers a tempdir read; here we use the probe just to keep
+    // the test self-contained).
+    let script = format!(r#"File.read({:?})"#, probe.to_string_lossy());
+    let v = rt.eval(&script, "test.rb").unwrap();
+    assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"probe contents"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allowlist_with_multiple_prefixes() {
+    // `allowed_paths` is a Vec — passes when ANY prefix matches.
+    // Use case: a host that wants to allow access to two
+    // unrelated trees (e.g., gem root + vendor cache).
+    let (dir_a, probe_a) = alloc_tempdir("multi-a");
+    let (dir_b, probe_b) = alloc_tempdir("multi-b");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir_a.clone(), dir_b.clone()]),
+        ..Default::default()
+    });
+    // Both probes readable.
+    for probe in [&probe_a, &probe_b] {
+        let script = format!(r#"File.read({:?})"#, probe.to_string_lossy());
+        let v = rt.eval(&script, "test.rb").unwrap();
+        assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"probe contents"));
+    }
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_permits_require_inside_prefix() {
+    // `require <absolute-path>` resolves through ruby_source_candidates →
+    // canonicalize → my new `check_load_allowed("require", Some(canon))`.
+    // Inside the allowlist prefix → load proceeds.
+    let (dir, _probe) = alloc_tempdir("require-inside");
+    let lib_path = dir.join("hello_lib.rb");
+    std::fs::write(&lib_path, "HELLO_LIB_LOADED = true").expect("write lib");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(
+        r#"require {:?}; HELLO_LIB_LOADED"#,
+        lib_path.with_extension("").to_string_lossy()
+    );
+    let v = rt.eval(&script, "test.rb").unwrap();
+    assert!(matches!(v, rubyrs::Value::Bool(true)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_blocks_require_outside_prefix() {
+    // Plant a real .rb file outside the allowlist prefix. Sandbox
+    // is open (bool=true), but `allowed_paths` restricts to
+    // `prefix_dir`. `require` must trap LoadError because canon
+    // resolves outside that prefix.
+    let (prefix_dir, _) = alloc_tempdir("require-outside-allowed");
+    let (sibling_dir, _) = alloc_tempdir("require-outside-target");
+    let outside_lib = sibling_dir.join("evil_lib.rb");
+    std::fs::write(&outside_lib, "EVIL_LOADED = true").expect("write evil");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![prefix_dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(
+        r#"require {:?}"#,
+        outside_lib.with_extension("").to_string_lossy()
+    );
+    let err = rt.eval(&script, "test.rb").unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "LoadError"
+            && message.contains("outside Config::allowed_paths")),
+        "expected LoadError outside-allowlist, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&prefix_dir);
+    let _ = std::fs::remove_dir_all(&sibling_dir);
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_permits_require_relative_inside_prefix() {
+    // `require_relative` anchors to the eval'd source file's
+    // directory. By passing the source filename as a path INSIDE
+    // the allowlist tempdir, require_relative resolves siblings
+    // there. Verify the canonicalize-then-scope path succeeds.
+    let (dir, _) = alloc_tempdir("require-relative-inside");
+    let lib_path = dir.join("rel_target.rb");
+    std::fs::write(&lib_path, "REL_TARGET_LOADED = true").expect("write target");
+    // The script is "called from" caller.rb inside dir, so
+    // require_relative "rel_target" → dir/rel_target.rb.
+    let caller_path = dir.join("caller.rb");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let v = rt
+        .eval(
+            r#"require_relative "rel_target"; REL_TARGET_LOADED"#,
+            caller_path.to_str().unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(v, rubyrs::Value::Bool(true)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_blocks_require_relative_traversal() {
+    // require_relative with `..` traversal that escapes the
+    // allowlist prefix. Canonicalize resolves the `..` to an
+    // absolute path outside the prefix, so the scope gate must
+    // trap LoadError. The target file has to exist for canon to
+    // succeed (otherwise we'd hit the "cannot find" trap first
+    // and never reach the scope gate — the gate only triggers on
+    // a real escape attempt to an existing file).
+    let (dir, _) = alloc_tempdir("require-relative-traversal-allowed");
+    let (sibling_dir, _) = alloc_tempdir("require-relative-traversal-target");
+    let outside = sibling_dir.join("escape.rb");
+    std::fs::write(&outside, "ESCAPED = true").expect("write escape");
+    let caller_path = dir.join("caller.rb");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    // From dir/caller.rb, `../<sibling>/escape` walks out of dir.
+    let sibling_name = sibling_dir.file_name().unwrap().to_string_lossy();
+    let script = format!(
+        r#"require_relative "../{}/escape""#,
+        sibling_name
+    );
+    let err = rt.eval(&script, caller_path.to_str().unwrap()).unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "LoadError"
+            && message.contains("outside Config::allowed_paths")),
+        "expected LoadError on traversal, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&sibling_dir);
+}
+
+#[test]
+#[cfg(all(not(target_os = "wasi"), unix))]
+fn allowlist_blocks_cext_via_symlink_target() {
+    // Defends the symlink-tight contract on the load family. Place
+    // a (placeholder) .dylib at /allowed/inner.{so,dylib} as a
+    // SYMLINK pointing to /sibling/real.{so,dylib} which is
+    // OUTSIDE the allowlist prefix. cext_require's canonicalize
+    // resolves the symlink to /sibling/real.* — outside scope —
+    // and the post-canonicalize check_load_allowed traps LoadError
+    // BEFORE dlopen runs. Pre-fix, the canonicalize-success path
+    // already caught this, but the falsely-falling-back path
+    // (`unwrap_or_else(|_| so_path.clone())`) would have let the
+    // gate accept the in-scope symlink path and `Library::new`
+    // would have followed it. The new hard-trap-on-canonicalize-
+    // fail closes that gap.
+    use std::os::unix::fs::symlink;
+    let (allowed, _) = alloc_tempdir("cext-symlink-allowed");
+    let (sibling, _) = alloc_tempdir("cext-symlink-target");
+    // The file extension cext_require auto-probes. We pick `.so`
+    // because it's the lookup target on Linux and a benign fallback
+    // on macOS (macOS tries .dylib/.bundle first; the test still
+    // exercises the scope gate either way because the require uses
+    // an explicit extension).
+    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let target = sibling.join(format!("real.{ext}"));
+    // Not a valid C ext — just bytes. dlopen would fail, but the
+    // scope gate must fire first.
+    std::fs::write(&target, b"placeholder").expect("write placeholder");
+    let link = allowed.join(format!("inner.{ext}"));
+    symlink(&target, &link).expect("symlink");
+
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"require {:?}"#, link.with_extension("").to_string_lossy());
+    let err = rt.eval(&script, "test.rb").unwrap_err();
+    // Either:
+    //   - cext feature on  → scope gate traps "outside Config::allowed_paths"
+    //   - cext feature off → "built without cext feature" / "no .rb at"
+    // Both classes are LoadError; we assert the gate triggered or the
+    // require flow stopped before any dlopen. The critical contract
+    // is that we never reach dlopen on the un-resolved symlink path.
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "LoadError"),
+        "expected LoadError, got {:?}",
+        err.err,
+    );
+    // When the cext feature is on the gate-specific message must
+    // appear — proves canonicalize-then-scope ran (not the old
+    // silent fallback).
+    if cfg!(feature = "cext") {
+        let RubyError::Uncaught { message, .. } = &err.err else { unreachable!() };
+        assert!(
+            message.contains("outside Config::allowed_paths"),
+            "expected scope-gate message, got {message:?}",
+        );
+    }
+    let _ = std::fs::remove_dir_all(&allowed);
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+#[test]
+#[should_panic(expected = "cannot be canonicalized")]
+fn allowlist_panics_on_relative_prefix() {
+    // A relative prefix is unusable as a sandbox boundary: per-op
+    // resolution joins inputs with cwd to absolute form, so
+    // `starts_with("gemroot")` against an absolute resolved input
+    // is always false. Pre-fix this silently produced a dead
+    // sandbox where every legitimate op trapped. Post-fix:
+    // apply_config panics with a clear diagnostic so the host
+    // sees the misconfig immediately.
+    let _rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![std::path::PathBuf::from("gemroot")]),
+        ..Default::default()
+    });
+}
+
+#[test]
+#[should_panic(expected = "cannot be canonicalized")]
+fn allowlist_panics_on_nonexistent_traversal_prefix() {
+    // A nonexistent prefix with `..` segments is the silent-widen
+    // case: pre-fix, `lexically_resolve_path` collapsed `..` and
+    // stored a BROADER path than the host typed (e.g.
+    // `/nonexistent/x/../../etc` became `/etc`, granting access
+    // to the host's /etc tree). Post-fix: apply_config refuses
+    // any prefix that can't be canonicalized.
+    let _rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![std::path::PathBuf::from(
+            "/nonexistent-rubyrs-test-prefix/x/../../etc",
+        )]),
+        ..Default::default()
+    });
+}
+
+#[test]
+fn allowlist_forces_file_expand_path_into_lexical_mode() {
+    // Under bool=true + allowed_paths=Some, File.expand_path
+    // must NOT touch the host cwd or call canonicalize — both
+    // would leak FS state outside the allowlist scope. With no
+    // base arg and a relative input, the result should be root-
+    // anchored (`/<resolved>`), not cwd-anchored.
+    let (dir, _) = alloc_tempdir("expand-lexical");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let v = rt.eval(r#"File.expand_path("foo/bar")"#, "test.rb").unwrap();
+    let s = match &v {
+        rubyrs::Value::Str(s) => s.to_string_lossy(),
+        other => panic!("expected Str, got {other:?}"),
+    };
+    // Must NOT contain the host cwd (the leak the pre-fix code
+    // produced). Must be absolute and lexically resolved.
+    assert_eq!(s, "/foo/bar", "expected root-anchored lexical form, got {s:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[cfg(unix)]
+fn allowlist_file_expand_path_does_not_follow_symlinks() {
+    // Pre-fix, canonicalize would resolve a symlink-laden input
+    // even under allowlist mode, leaking the target path.
+    // Verify the post-fix lexical-only mode returns the input as
+    // written (after `..` collapse), with no symlink resolution.
+    use std::os::unix::fs::symlink;
+    let (allowed, _) = alloc_tempdir("expand-symlink");
+    let target_dir = allowed.join("real");
+    std::fs::create_dir_all(&target_dir).expect("mkdir real");
+    let link = allowed.join("link");
+    let _ = std::fs::remove_file(&link);
+    symlink(&target_dir, &link).expect("symlink");
+
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"File.expand_path({:?})"#, link.to_string_lossy());
+    let v = rt.eval(&script, "test.rb").unwrap();
+    let s = match &v {
+        rubyrs::Value::Str(s) => s.to_string_lossy(),
+        other => panic!("expected Str, got {other:?}"),
+    };
+    // Returned path is the symlink itself (lexical), NOT the
+    // resolved target. Proves canonicalize didn't run.
+    assert_eq!(s, link.to_string_lossy(), "expected un-canonicalized lexical form");
+    let _ = std::fs::remove_dir_all(&allowed);
+}
+
+#[test]
+#[cfg(unix)]
+fn allowlist_dunder_dir_does_not_canonicalize_symlinks() {
+    // Under bool=true + allowed_paths=Some, __dir__ must NOT
+    // canonicalize. Pre-fix, a script whose filename was a
+    // symlink would learn the symlink TARGET via __dir__'s
+    // canonicalize call — exactly the info-leak shape the
+    // load family closes via post-canonicalize scope check.
+    // __dir__ falls back to the lexical parent instead.
+    use std::os::unix::fs::symlink;
+    let (allowed, _) = alloc_tempdir("dunderdir-symlink");
+    let real_dir = allowed.join("real");
+    std::fs::create_dir_all(&real_dir).expect("mkdir real");
+    let real_file = real_dir.join("script.rb");
+    std::fs::write(&real_file, "").expect("write real script");
+    let link = allowed.join("link.rb");
+    let _ = std::fs::remove_file(&link);
+    symlink(&real_file, &link).expect("symlink");
+
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    let v = rt.eval("__dir__", link.to_str().unwrap()).unwrap();
+    let s = match &v {
+        rubyrs::Value::Str(s) => s.to_string_lossy(),
+        other => panic!("expected Str, got {other:?}"),
+    };
+    // Lexical parent of `link.rb` is `allowed` — NOT
+    // `allowed/real` (which is what canonicalize would have
+    // returned by following the symlink).
+    assert_eq!(s, allowed.to_string_lossy(), "__dir__ should not follow symlinks under allowlist");
+    let _ = std::fs::remove_dir_all(&allowed);
+}
+
+#[test]
+#[cfg(all(not(target_os = "wasi"), unix))]
+fn allowlist_require_walks_candidates_past_symlink_poisoned_one() {
+    // Defends require_ruby's candidate walk against the
+    // "first-canon-wins masks a legitimate later candidate"
+    // shape. Layout:
+    //   - caller is /allowed1/caller.rb
+    //   - /allowed1/sib.rb is a SYMLINK pointing to /outside/sib.rb
+    //     (canonicalize succeeds but the target is outside scope)
+    //   - /load_dir/sib.rb is a REAL file inside scope
+    //   - $LOAD_PATH includes /load_dir
+    //
+    // Pre-fix, find_map(canonicalize.ok()) picked candidate[1]
+    // (the caller-dir hit) — canon resolved to /outside/sib.rb,
+    // scope check failed → require traps LoadError even though
+    // /load_dir/sib.rb is a legitimate match further down.
+    // Post-fix: walk skips out-of-scope canon hits and finds the
+    // /load_dir entry.
+    use std::os::unix::fs::symlink;
+    let (allowed1, _) = alloc_tempdir("require-walk-caller");
+    let (load_dir, _) = alloc_tempdir("require-walk-loadpath");
+    let (outside, _) = alloc_tempdir("require-walk-outside");
+
+    let outside_lib = outside.join("sib.rb");
+    std::fs::write(&outside_lib, "POISONED = true").expect("write outside");
+    let caller_sib = allowed1.join("sib.rb");
+    let _ = std::fs::remove_file(&caller_sib);
+    symlink(&outside_lib, &caller_sib).expect("symlink poison");
+
+    let good_lib = load_dir.join("sib.rb");
+    std::fs::write(&good_lib, "WALKED = true").expect("write good");
+
+    let caller = allowed1.join("caller.rb");
+
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        // Both `allowed1` (where the caller and the poisoned
+        // symlink live) and `load_dir` are in scope, but the
+        // symlink TARGET (outside/sib.rb) is not. The walk must
+        // skip the poisoned candidate and find load_dir's entry.
+        allowed_paths: Some(vec![allowed1.clone(), load_dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(
+        r#"$LOAD_PATH.unshift({:?}); require "sib"; defined?(WALKED) == "constant""#,
+        load_dir.to_string_lossy(),
+    );
+    let v = rt.eval(&script, caller.to_str().unwrap()).unwrap();
+    assert!(
+        matches!(v, rubyrs::Value::Bool(true)),
+        "expected the in-scope $LOAD_PATH candidate to be picked (WALKED defined); got {v:?}",
+    );
+    let _ = std::fs::remove_dir_all(&allowed1);
+    let _ = std::fs::remove_dir_all(&load_dir);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_require_pre_empts_absolute_path_outside_scope() {
+    // Defends against the `require '/etc/foo'`-style probe under
+    // bool=true + allowed_paths=Some(other). The pre-emption at
+    // the require dispatch arm traps LoadError with the scope-
+    // gate message immediately, without routing to either the
+    // .rb-probe (find_ruby_source_candidate's .exists() stat) or
+    // the cext fallback (which would raise RuntimeError 'cannot
+    // find C ext' — wrong class for `rescue LoadError`).
+    let (allowed, _) = alloc_tempdir("require-preempt-allowed");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    // Path is absolute, doesn't lie inside `allowed`, and is
+    // contrived to not exist anywhere (closes the path-exists
+    // confound). Pre-fix without the find-scope-aware + dispatch-
+    // preempt changes: stat side-channel + RuntimeError trap.
+    // Post-fix: LoadError with scope message, no stat.
+    let err = rt
+        .eval(
+            r#"require "/nonexistent-rubyrs-test-path/foo""#,
+            "test.rb",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "LoadError"
+            && message.contains("outside Config::allowed_paths")),
+        "expected LoadError with scope-gate message, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&allowed);
+}
+
+#[test]
+fn allowlist_trap_message_does_not_leak_cwd() {
+    // Pre-fix the trap message embedded the cwd-joined absolute
+    // path, so a script catching IOError could read the host's
+    // cwd via `e.message`. Post-fix, the message embeds only the
+    // ORIGINAL input the script supplied. A relative-path trap
+    // must mention the relative path verbatim and NOT contain
+    // the cwd prefix.
+    let (allowed, _) = alloc_tempdir("trap-msg-cwd");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    let cwd = std::env::current_dir().expect("cwd readable").to_string_lossy().into_owned();
+    let err = rt
+        .eval(r#"File.read("rel-secret.txt")"#, "test.rb")
+        .unwrap_err();
+    let RubyError::Uncaught { message, .. } = &err.err else {
+        panic!("expected Uncaught, got {:?}", err.err);
+    };
+    assert!(
+        message.contains("rel-secret.txt"),
+        "message should mention the script's input, got {message:?}",
+    );
+    assert!(
+        !message.contains(&cwd),
+        "message must NOT contain host cwd {cwd:?}, got {message:?}",
+    );
+    let _ = std::fs::remove_dir_all(&allowed);
+}

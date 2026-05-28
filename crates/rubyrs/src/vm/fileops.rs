@@ -29,8 +29,18 @@ impl Vm {
         };
         Ok(Some(match (name, args) {
             ("read", [p]) => {
-                self.check_filesystem_io_allowed("File.read")?;
+                // First-gate: bool capability. Runs BEFORE path_arg so
+                // a wrong-type arg under sandbox-on traps with IOError,
+                // not TypeError (PR #257 F6 ordering contract).
+                self.check_filesystem_io_allowed("File.read", None)?;
                 let path = path_arg(p)?;
+                // Second-gate: allowlist scope (no-op when `allowed_paths:
+                // None`). The redundant bool re-check inside is one
+                // branch — negligible vs the syscall below.
+                self.check_filesystem_io_allowed(
+                    "File.read",
+                    Some(Path::new(&path)),
+                )?;
                 // L3-G follow-up: read raw bytes, not UTF-8-validated
                 // String. msgpack/protobuf/binary-protocol fixtures
                 // are not valid UTF-8; the previous read_to_string
@@ -60,8 +70,12 @@ impl Vm {
                 }
             }
             ("write", [p, body]) => {
-                self.check_filesystem_io_allowed("File.write")?;
+                self.check_filesystem_io_allowed("File.write", None)?;
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(
+                    "File.write",
+                    Some(Path::new(&path)),
+                )?;
                 let contents: Vec<u8> = match body {
                     Value::Str(s) => s.content.borrow().clone(),
                     _ => body.to_display(&self.heap, &self.interner).into_bytes(),
@@ -87,22 +101,31 @@ impl Vm {
                     "file?" => "File.file?",
                     _ => unreachable!(),
                 };
-                self.check_filesystem_io_allowed(op)?;
+                self.check_filesystem_io_allowed(op, None)?;
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(op, Some(Path::new(&path)))?;
                 let exists = std::fs::metadata(&path)
                     .map(|m| if name == "file?" { m.is_file() } else { true })
                     .unwrap_or(false);
                 Value::Bool(exists)
             }
             ("directory?", [p]) => {
-                self.check_filesystem_io_allowed("File.directory?")?;
+                self.check_filesystem_io_allowed("File.directory?", None)?;
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(
+                    "File.directory?",
+                    Some(Path::new(&path)),
+                )?;
                 let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
                 Value::Bool(is_dir)
             }
             ("size", [p]) => {
-                self.check_filesystem_io_allowed("File.size")?;
+                self.check_filesystem_io_allowed("File.size", None)?;
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(
+                    "File.size",
+                    Some(Path::new(&path)),
+                )?;
                 match std::fs::metadata(&path) {
                     Ok(m) => Value::Int(m.len() as i64),
                     Err(e) => return Err(self.trap(RubyError::RuntimeError {
@@ -136,34 +159,36 @@ impl Vm {
                 // `File.expand_path(path, base=cwd)`. CRuby
                 // doesn't require the path to exist — it just
                 // resolves relative paths and `..`/`.`
-                // components. Our previous `canonicalize`-only
-                // shape would silently fall back to the raw
-                // input when the path was missing, which trips
-                // gem entry-point setup like
-                // `$LOAD_PATH.unshift File.expand_path("..",
-                // __dir__)`. Re-implement the lexical resolver:
-                //   1. If path is absolute, use as-is.
-                //   2. Else join with base (defaults to cwd).
-                //   3. Manually collapse `.` and `..` segments.
-                //   4. Try canonicalize for the "follows
-                //      symlinks" guarantee; fall back to the
-                //      lexically-resolved form when the file
-                //      doesn't exist (CRuby's behavior).
-                use std::path::{Component, Path, PathBuf};
+                // components.
+                //
+                // Mode selection: cwd-read + canonicalize are
+                // "full host FS" operations. They only fire when
+                // `allow_filesystem_io: true` AND `allowed_paths:
+                // None` (the fully-open shape). In any other
+                // shape — sandbox off OR scoped-by-allowlist —
+                // fall back to the lexical-only form (root-anchored,
+                // no symlink resolve), matching what CRuby returns
+                // for paths that don't exist on disk. This closes
+                // an info-leak under `allowed_paths: Some(_)`:
+                // `File.expand_path('.')` previously returned the
+                // host's actual cwd to script code (outside the
+                // allowlist scope), and the canonicalize call
+                // followed symlinks anywhere on the host FS.
+                use std::path::{Path, PathBuf};
                 let path = path_arg(p)?;
+                // Wide-open shape: sandbox on AND no allowlist.
+                let wide_open = self.allow_filesystem_io && self.allowed_paths.is_none();
                 let base: String = match args.get(1) {
                     Some(Value::Str(s)) => s.to_string_lossy(),
                     // When the host explicitly didn't supply a
-                    // base, fall back to cwd — but only when the
-                    // sandbox is off. With the sandbox on, the
-                    // host's cwd is treated as host-FS state the
-                    // script shouldn't observe. Use `/` as the
-                    // sentinel rather than `.` so the lexical
-                    // expansion still produces an ABSOLUTE path
-                    // (CRuby's contract for File.expand_path —
-                    // gems and `$LOAD_PATH.unshift` consumers
-                    // rely on the absolute-shape).
-                    _ if self.allow_filesystem_io => std::env::current_dir()
+                    // base, fall back to cwd only in the wide-open
+                    // shape. Otherwise use `/` as the sentinel so
+                    // the lexical expansion still produces an
+                    // ABSOLUTE path (CRuby's contract for
+                    // File.expand_path — gems and
+                    // `$LOAD_PATH.unshift` consumers rely on the
+                    // absolute-shape).
+                    _ if wide_open => std::env::current_dir()
                         .map(|d| d.to_string_lossy().into_owned())
                         .unwrap_or_else(|_| ".".to_string()),
                     _ => "/".to_string(),
@@ -178,26 +203,12 @@ impl Vm {
                     b.push(p_path);
                     b
                 };
-                // Collapse Components into a normalised PathBuf
-                // without touching the filesystem.
-                let mut resolved = PathBuf::new();
-                for c in joined.components() {
-                    match c {
-                        Component::ParentDir => { resolved.pop(); }
-                        Component::CurDir => {}
-                        other => resolved.push(other.as_os_str()),
-                    }
-                }
-                // When `allow_filesystem_io` is true, prefer
-                // `canonicalize`'s symlink-resolved form (matches
-                // CRuby on existent files); on canonicalize-fail
-                // for non-existent paths, fall back to the
-                // lexically resolved form. When the FS cap is
-                // false (sandbox on), skip the canonicalize
-                // syscall entirely — return the lexical form,
-                // which is also what CRuby returns for paths
-                // that don't exist on disk.
-                let final_path = if self.allow_filesystem_io {
+                // Shared lexical collapse (single source of
+                // truth; gc.rs's `check_path_in_allowlist` uses
+                // the same helper so scope-check and visible
+                // string stay in lockstep).
+                let resolved = crate::lexically_resolve_path(&joined);
+                let final_path = if wide_open {
                     std::fs::canonicalize(&resolved).unwrap_or(resolved)
                 } else {
                     resolved

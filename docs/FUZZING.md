@@ -179,14 +179,9 @@ sees the connection.
 ## Known limits + future work
 
 No outstanding gaps from the initial fuzz-tier rollout — see
-"Historical: closed gaps" below for the three items that motivated
-the embed-API work surrounding the harness.
-
-A future `allowed_paths: Option<Vec<PathBuf>>` allowlist (stricter
-than the current bool flag) is a possible follow-up if rubund's
-gemspec-evaluator use case ever needs scoped FS access — `Config {
-allow_filesystem_io: true, allowed_paths: Some(vec![gem_root]) }`
-shape. Out of scope until a real consumer needs it.
+"Historical: closed gaps" below for the items that motivated the
+embed-API work surrounding the harness, including the layered
+`allowed_paths` allowlist that closed the last known follow-up.
 
 ## Historical: closed gaps
 
@@ -221,9 +216,22 @@ The cwd-tempdir trick in `ensure_sandbox_cwd` stays as
 defense-in-depth at the syscall layer, but the cap is the
 load-bearing sandbox now.
 
-Tests: `tests/embed/filesystem_sandbox.rs` (12 cases covering
-each gated method, the lexical fallbacks, mid-life `apply_config`
-tighten, and `rescue IOError` from script code).
+A follow-up landed `Config::allowed_paths: Option<Vec<PathBuf>>`
+as a second layer on top of the bool: `allow_filesystem_io: true,
+allowed_paths: Some(vec![gem_root])` scopes the open sandbox to a
+canonicalized prefix list (rubund's gemspec-evaluator shape). The
+two layers are AND-composed at the gate — bool=false short-circuits
+regardless of `allowed_paths`; bool=true with `allowed_paths: None`
+preserves the PR #257 wide-open behaviour. Lexical `..` collapse
+runs before the prefix check, and `require` / `require_relative` /
+`cext_require` apply the scope post-canonicalize so symlinks can't
+escape it.
+
+Tests: `tests/embed/filesystem_sandbox.rs` (27 cases covering each
+gated method, the lexical fallbacks, mid-life `apply_config`
+tighten, `rescue IOError` from script code, the bool-vs-allowlist
+ordering contract, traversal defence, and require-family scope
+rejection).
 
 ### ~~Runtime preamble rebuilt every iteration~~ — fixed in PR #212 + adoption PR
 
