@@ -449,14 +449,18 @@ impl BinOpKind {
         })
     }
     /// Applies the op against two i64 operands. Returns `Some(v)`
-    /// for the in-range result; returns `None` only when the
-    /// `bignum` feature is on AND an Add/Sub/Mul would overflow
-    /// i64 — the caller promotes to BigInt in that case. With
-    /// `bignum` off the arms fall back to `wrapping_*` so callers
-    /// can keep an unconditional `.unwrap()` on the return.
-    /// Div/Mod still use `wrapping_*` either way because the only
-    /// overflow case (`i64::MIN / -1`) is documented divergence
-    /// from CRuby either way; comparison arms cannot overflow.
+    /// for the in-range result; returns `None` when the caller
+    /// must promote to BigInt. With `bignum` on, `None` fires for:
+    /// (a) Add/Sub/Mul overflow (via `checked_*`), and
+    /// (b) `Div` on `i64::MIN / -1` (result is 2^63, doesn't fit
+    /// i64). With `bignum` off, Add/Sub/Mul fall back to
+    /// `wrapping_*` and the Div overflow case wraps to `i64::MIN`
+    /// per the existing wrapping-on-overflow convention — both
+    /// paths always return `Some(...)`. Div/Mod implement CRuby's
+    /// floor-division semantics via `floor_div_i64` /
+    /// `floor_mod_i64` (sign of remainder matches divisor);
+    /// `% -1` is always 0 so Mod can't overflow. Comparison arms
+    /// cannot overflow.
     pub(crate) fn apply_int(self, a: i64, b: i64) -> Option<Value> {
         #[cfg(feature = "bignum")]
         let arith = |a: i64, b: i64, op: fn(i64, i64) -> Option<i64>| op(a, b);
@@ -472,8 +476,33 @@ impl BinOpKind {
             BinOpKind::Add => Value::Int(arith(a, b, add)?),
             BinOpKind::Sub => Value::Int(arith(a, b, sub)?),
             BinOpKind::Mul => Value::Int(arith(a, b, mul)?),
-            BinOpKind::Div => Value::Int(a.wrapping_div(b)),
-            BinOpKind::Mod => Value::Int(a.wrapping_rem(b)),
+            // CRuby uses floor division for Integer#/ and #%: the
+            // remainder's sign matches the divisor's sign, so
+            // `(-13) / 4 == -4` (Rust's wrapping_div gives -3) and
+            // `(-13) % 4 == 3` (Rust's wrapping_rem gives -1).
+            // Delegated to the helpers re-exported through `vm`
+            // (`crate::vm::floor_div_i64` / `crate::vm::floor_mod_i64`)
+            // so the method-call path (`5.send(:/, 2)`) and this
+            // BinOp fast path stay in lock-step. Definitions live
+            // in vm/numeric.rs, but that module is private — the
+            // re-exports in vm.rs are what we can name from here.
+            //
+            // `i64::MIN / -1` is the one overflow case: the result
+            // `2^63` doesn't fit i64. Bignum builds return None
+            // here so the caller's `bigint_arith` fallback promotes
+            // to BigInt (matching CRuby parity). No-bignum builds
+            // wrap to `i64::MIN` per the existing wrapping-on-
+            // overflow convention (the same one `+`/`-`/`*` use
+            // via `wrapping_*` under no-bignum). `% -1` is
+            // always 0 — no overflow.
+            #[cfg(feature = "bignum")]
+            BinOpKind::Div => {
+                if a == i64::MIN && b == -1 { return None; }
+                Value::Int(crate::vm::floor_div_i64(a, b))
+            }
+            #[cfg(not(feature = "bignum"))]
+            BinOpKind::Div => Value::Int(crate::vm::floor_div_i64(a, b)),
+            BinOpKind::Mod => Value::Int(crate::vm::floor_mod_i64(a, b)),
             BinOpKind::Lt => Value::Bool(a < b),
             BinOpKind::Le => Value::Bool(a <= b),
             BinOpKind::Gt => Value::Bool(a > b),

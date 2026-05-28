@@ -1417,6 +1417,69 @@ fn bigint_eq_float_is_lossless() {
 }
 
 #[test]
+fn integer_div_mod_floor_semantics() {
+    // Pin CRuby floor-division semantics for `/` and `%`. Pre-fix
+    // rubyrs used Rust's truncating-toward-zero `/` and `%`, so
+    // `(-13) / 4` returned -3 (CRuby: -4) and `(-13) % 4`
+    // returned -1 (CRuby: 3). Both the BinOp fast path
+    // (`BinOpKind::apply_int`) and the cold method-call path
+    // (numeric_call's `/` and `%` arms) route through the same
+    // `floor_div_i64` / `floor_mod_i64` helpers, so the cases
+    // below cover both entry points (literal-shape uses the
+    // fast path; `send(...)` exercises the method-call shape).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "# Int×Int — every sign combination\n\
+         puts (13 / 4)                    # 3\n\
+         puts (13 % 4)                    # 1\n\
+         puts ((-13) / 4)                 # -4 (floor, not -3)\n\
+         puts ((-13) % 4)                 # 3 (sign follows divisor)\n\
+         puts (13 / (-4))                 # -4\n\
+         puts (13 % (-4))                 # -3\n\
+         puts ((-13) / (-4))              # 3\n\
+         puts ((-13) % (-4))              # -1\n\
+         # Method-call shape — cold path through numeric.rs\n\
+         puts (13.send(:/, 4))            # 3\n\
+         puts ((-13).send(:%, 4))         # 3\n\
+         # i64::MIN / -1 overflow promotion. The expression form\n\
+         # works via apply_int's None → bigint_arith fallback;\n\
+         # the method-call shape goes through numeric_call which\n\
+         # also returns None, so bigint_primitive needs an explicit\n\
+         # promotion hook (added per /code-review on PR #254).\n\
+         puts ((-9223372036854775808) / -1).inspect           # 9223372036854775808\n\
+         puts ((-9223372036854775808).send(:/, -1)).inspect   # 9223372036854775808 (lock-step)\n\
+         # Float × Float — same floor semantics\n\
+         puts ((-13.0) % 4.0)             # 3.0\n\
+         puts (13.0 % (-4.0))             # -3.0\n\
+         # Int × Float / Float × Int — same\n\
+         puts ((-13) % 4.0)               # 3.0\n\
+         puts ((-13.0) % 4)               # 3.0\n\
+         # Infinity edge case (cycle 1 review): 1.0 % Infinity\n\
+         # should be 1.0, not NaN. CRuby parity.\n\
+         puts (1.0 % (1.0/0.0))           # 1.0",
+        "div_mod_floor.rb",
+    ).expect("eval");
+    let out = buf.snapshot();
+    let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Under bignum, i64::MIN/-1 promotes to BigInt 2^63. Under
+    // no-bignum, both paths wrap to i64::MIN per the documented
+    // wrapping-on-overflow convention (floor_div_i64's doc).
+    #[cfg(feature = "bignum")]
+    let imin_div_expected = "9223372036854775808";
+    #[cfg(not(feature = "bignum"))]
+    let imin_div_expected = "-9223372036854775808";
+    assert_eq!(lines, vec![
+        "3", "1", "-4", "3", "-4", "-3", "3", "-1",  // Int×Int sign combos
+        "3", "3",                                      // method-call shape
+        imin_div_expected, imin_div_expected,          // i64::MIN/-1 (promote or wrap)
+        "3.0", "-3.0", "3.0", "3.0",                   // Float-involved
+        "1.0",                                         // Infinity
+    ]);
+}
+
+#[test]
 fn int_cmp_float_is_lossless() {
     // Sibling to bigint_cmp_float_is_lossless. The Int×Float
     // arm in numeric.rs pre-fix demoted the i64 to f64 for the
