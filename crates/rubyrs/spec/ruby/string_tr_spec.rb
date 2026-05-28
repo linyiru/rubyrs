@@ -58,6 +58,19 @@ describe "String#tr" do
     assert_raises("ArgumentError") { "abc".tr("c-a", "x") }
   end
 
-  # skipped (method-not-implemented): describe "String#tr!" do ... end
-  #   Destructive variant.
+  describe "String#tr!" do
+    it "modifies self in place and returns self" do
+      s = "hello"
+      assert(s.tr!("l", "r").equal?(s))
+      assert_eq(s, "herro")
+    end
+
+    it "returns nil if no changes were made" do
+      assert_eq("hello".tr!("xyz", "abc"), nil)
+    end
+
+    it "raises ArgumentError on a reversed range" do
+      assert_raises("ArgumentError") { "abc".tr!("c-a", "x") }
+    end
+  end
 end

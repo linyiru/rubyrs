@@ -42,6 +42,21 @@ describe "String#squeeze" do
   # skipped (method-not-implemented): it "squeezes the intersection of two or more args" do
   #   Multi-arg intersection form (`"hello".squeeze("a-z", "^l")`).
   #   rubyrs's squeeze arm only accepts 0 or 1 selector arg.
-  # skipped (method-not-implemented): describe "String#squeeze!" do ... end
-  #   Destructive variant.
+  describe "String#squeeze!" do
+    it "modifies self in place and returns self" do
+      s = "aabbcc"
+      assert(s.squeeze!.equal?(s))
+      assert_eq(s, "abc")
+    end
+
+    it "returns nil if no changes were made" do
+      assert_eq("abc".squeeze!, nil)
+    end
+
+    it "honours the literal-set selector" do
+      s = "aabbcc"
+      s.squeeze!("a")
+      assert_eq(s, "abbcc")
+    end
+  end
 end

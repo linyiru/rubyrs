@@ -31,6 +31,15 @@ describe "String#upcase" do
   # skipped (method-not-implemented): it "respects the Unicode case-mapping options" do
   #   Option forms `upcase(:ascii)` / `:turkic` / `:lithuanian`
   #   / `:fold`. Tier-2 Encoding work (ADR 0020).
-  # skipped (method-not-implemented): describe "String#upcase!" do ... end
-  #   Destructive variant.
+  describe "String#upcase!" do
+    it "modifies self in place and returns self" do
+      s = "hello"
+      assert(s.upcase!.equal?(s))
+      assert_eq(s, "HELLO")
+    end
+
+    it "returns nil if no changes are made" do
+      assert_eq("HELLO".upcase!, nil)
+    end
+  end
 end

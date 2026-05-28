@@ -31,4 +31,20 @@ describe "String#reverse" do
     assert_eq(r.equal?(s), false)
     assert_eq(r, "cba")
   end
+
+  describe "String#reverse!" do
+    it "modifies self in place and returns self" do
+      s = "hello"
+      assert(s.reverse!.equal?(s))
+      assert_eq(s, "olleh")
+    end
+
+    it "returns self even when the result equals the input" do
+      # CRuby `reverse!` never returns nil — palindromes still
+      # return self (unlike upcase!/downcase!/strip!/etc.).
+      s = "aba"
+      assert(s.reverse!.equal?(s))
+      assert_eq(s, "aba")
+    end
+  end
 end
