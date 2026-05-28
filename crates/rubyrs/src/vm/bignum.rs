@@ -1691,14 +1691,41 @@ impl Vm {
             && let [Value::BigInt(prec_id)] = args
         {
             use num_bigint::Sign;
-            let prec = self.heap.bigint(*prec_id);
-            if prec.sign() != Sign::Minus {
-                // Positive (or zero — but canonical invariant
-                // excludes BigInt(0)) BigInt precision: no-op.
+            let prec_sign = self.heap.bigint(*prec_id).sign();
+            if prec_sign != Sign::Minus {
+                // Positive (or zero — canonical invariant excludes
+                // BigInt(0)) precision: no-op for any Integer self.
                 return Ok(Some(recv.clone()));
             }
-            // Negative huge precision: defer with NoMethodError so
-            // it surfaces as missing rather than wrong-answer.
+            // Negative huge precision: apply the same per-op/sign
+            // zero-result shortcut numeric.rs uses for |n| > 38
+            // (matches the math: |recv| is at most i64-sized or a
+            // canonical BigInt, but the precision magnitude is far
+            // huger, so |recv/10^|prec|| = 0 with remainder = recv).
+            //   - truncate, round: always 0
+            //   - ceil with recv <= 0: 0
+            //   - floor with recv >= 0: 0
+            // The two genuinely-BigInt cases (ceil with recv > 0,
+            // floor with recv < 0) still defer to NoMethodError.
+            let recv_sign = match recv {
+                Value::Int(n) => {
+                    if *n > 0 { Sign::Plus }
+                    else if *n < 0 { Sign::Minus }
+                    else { Sign::NoSign }
+                }
+                Value::BigInt(id) => self.heap.bigint(*id).sign(),
+                _ => unreachable!("recv guard above"),
+            };
+            let zero_result = match name {
+                "truncate" | "round" => true,
+                "ceil"  => !matches!(recv_sign, Sign::Plus),
+                "floor" => !matches!(recv_sign, Sign::Minus),
+                _ => unreachable!(),
+            };
+            if zero_result {
+                return Ok(Some(Value::Int(0)));
+            }
+            // Genuinely needs BigInt — defer.
             return Ok(None);
         }
         // Existing arm: BigInt receiver with 0-arg or Int precision.
