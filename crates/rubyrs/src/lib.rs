@@ -1036,12 +1036,23 @@ impl Runtime {
         rt
     }
 
-    /// Seed `$LOAD_PATH` with paths in order. The semantics mirror
-    /// the embedder doing `$LOAD_PATH.unshift(p)` for each `p` in
-    /// reverse (so the FIRST entry in `paths` ends up at index 0,
-    /// matching the user's intuition that "earlier in the vec =
-    /// earlier in the search order"). Used by `with_config` to
+    /// Seed `$LOAD_PATH` with paths so that `paths[0]` ends up at
+    /// `$LOAD_PATH[0]`, `paths[1]` at `$LOAD_PATH[1]`, etc. — i.e.
+    /// the seed becomes the PREFIX of the Array, regardless of
+    /// whatever was there before. Used by `with_config` to
     /// implement `Config::load_paths`.
+    ///
+    /// Implementation: iterate `paths` in reverse and `insert(0)`
+    /// each entry. Currently the Array is always empty when this
+    /// runs (`with_config` calls us before the preamble, and
+    /// `ensure_load_path` allocates an empty Vec), so behaviour is
+    /// observably identical to `push` in forward order — but if a
+    /// future preamble change pre-populates `$LOAD_PATH` before
+    /// our call, the reverse-insert form keeps the seed at the
+    /// front and preserves the documented `paths[0] = index 0`
+    /// contract. Robustness against that change is essentially
+    /// free (a few `Vec::insert(0)` calls on a single-digit-length
+    /// Vec).
     ///
     /// Allocates the `$LOAD_PATH` Array on the heap if it hasn't
     /// been already (`Vm::ensure_load_path` is idempotent). Panics
@@ -1056,14 +1067,20 @@ impl Runtime {
         let lp_id = self.vm.ensure_load_path()
             .expect("ICE: failed to allocate $LOAD_PATH array during Config::load_paths seeding");
         let arr = self.vm.heap.array_mut(lp_id);
-        for p in paths {
+        // Walk in reverse and insert at index 0 so that the FIRST
+        // path in the Vec lands at $LOAD_PATH[0], independent of
+        // whether the Array was previously empty. This is the
+        // semantics the doc promises ("paths[0] → index 0") and
+        // the only ordering that survives a future preamble
+        // change that pre-fills `$LOAD_PATH`.
+        for p in paths.into_iter().rev() {
             // PathBuf → String via `to_string_lossy` so the value
             // stored in the Array is a Ruby String (`$LOAD_PATH`
             // entries are always Strings in Ruby; CRuby coerces
-            // non-string entries via `File::Stat`'s expand_path
-            // path). Lossy is acceptable here — paths originating
-            // from `Config` are host-supplied, well-formed.
-            arr.push(crate::value::Value::new_str(p.to_string_lossy().into_owned()));
+            // non-string entries via `File.expand_path`). Lossy
+            // is acceptable here — paths originating from `Config`
+            // are host-supplied and assumed well-formed.
+            arr.insert(0, crate::value::Value::new_str(p.to_string_lossy().into_owned()));
         }
     }
 
