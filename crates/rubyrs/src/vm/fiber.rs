@@ -459,6 +459,11 @@ pub(crate) fn resume_fiber(
     let is_first_resume = matches!(initial_state, FiberState::Created);
     *vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Running;
 
+    // P1c.3: stash the previous current_fiber_id so
+    // `Fiber.current` inside nested resumes sees the right
+    // chain. Restored after the guard drops.
+    let prev_current_fiber = vm.current_fiber_id.replace(fiber_id);
+
     let guard = FiberStashGuard::install(vm, fiber_id);
     let pre_depth = 0usize; // fiber's outside frame count is 0 by definition
 
@@ -511,6 +516,14 @@ pub(crate) fn resume_fiber(
     // guard drops here, restoring Vm + writing the (post-
     // execution) snapshot back into the FiberObject.
     drop(guard);
+
+    // P1c.3: restore the previous current_fiber_id. For a
+    // top-level resume this puts None back; for nested
+    // resumes (Fiber A resumed Fiber B), this puts A's
+    // id back so A's continuing bytecode sees
+    // `Fiber.current == A`.
+    vm.current_fiber_id = prev_current_fiber;
+
     outcome
 }
 
@@ -582,6 +595,66 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         let vm = unsafe { &mut *ptr };
         vm.fiber_yield_pending = Some(v);
         Ok(Value::Nil)
+    });
+
+    // P1c.3: __rubyrs_fiber_current() -> Value
+    //
+    // Returns the currently-running Fiber as a
+    // `Value::Object(id)`, or `Value::Nil` at the top level
+    // (no fiber active). ADR 0023 v2's "sentinel root
+    // Fiber" is simplified to Nil — there's no concrete
+    // root Fiber object in v1; embedders test for nil to
+    // detect "called outside a fiber" context.
+    rt.register_fn("__rubyrs_fiber_current", move |_args| {
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "internal: CURRENT_VM_PTR null in __rubyrs_fiber_current".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
+        // SAFETY: ADR 0013 contract.
+        let vm = unsafe { &*ptr };
+        Ok(match vm.current_fiber_id {
+            Some(id) => Value::Object(id),
+            None => Value::Nil,
+        })
+    });
+
+    // P1c.3: __rubyrs_fiber_alive_q(fiber) -> Bool
+    //
+    // True iff the fiber's state is not `Returned`. Created,
+    // Running, and Suspended all count as alive. Matches
+    // CRuby's `Fiber#alive?` semantic.
+    rt.register_fn("__rubyrs_fiber_alive_q", move |args| {
+        let fiber_id = match args {
+            [Value::Object(id)] => *id,
+            _ => {
+                return Err(arg_err(
+                    "__rubyrs_fiber_alive_q(fiber: Fiber)",
+                ));
+            }
+        };
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "internal: CURRENT_VM_PTR null in __rubyrs_fiber_alive_q".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
+        // SAFETY: ADR 0013 contract.
+        let vm = unsafe { &*ptr };
+        if !matches!(vm.heap.get(fiber_id), crate::heap::HeapObj::Fiber(_)) {
+            return Err(arg_err(
+                "__rubyrs_fiber_alive_q: arg is not a Fiber",
+            ));
+        }
+        let state = *vm.heap.fiber(fiber_id).state.borrow();
+        Ok(Value::Bool(!matches!(state, FiberState::Returned)))
     });
 
     // __rubyrs_fiber_resume(fiber, arg) -> Value
@@ -881,6 +954,102 @@ mod tests {
             Value::Str(s) => assert_eq!(s.to_string_lossy(), ":waiting/\"42\""),
             other => panic!("expected Str, got {other:?}"),
         }
+    }
+
+    /// P1c.3: `__rubyrs_fiber_current` returns Nil at the
+    /// top level and the running Fiber's Value inside a
+    /// body. Verifies the set/restore around resume.
+    #[test]
+    fn fiber_current_is_nil_at_toplevel_and_self_inside_body() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // Inside a fiber body, __rubyrs_fiber_current is the
+        // running fiber's Value::Object — non-nil. Outside,
+        // it's Nil. We compare against the fiber's own
+        // identity to confirm the host fn returns THE
+        // SAME fiber, not just any non-nil sentinel.
+        let r = rt.eval(r##"
+            outside = __rubyrs_fiber_current
+            body = proc {
+              inside = __rubyrs_fiber_current
+              # Capture both nil-ness and identity-match with
+              # the parent-scope fib variable.
+              __rubyrs_fiber_yield([outside.nil?, inside.nil?])
+            }
+            fib = __rubyrs_fiber_new(body)
+            arr = __rubyrs_fiber_resume(fib, nil)
+            "outside_nil=#{arr[0]} inside_nil=#{arr[1]}"
+        "##, "p1c3_current.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => {
+                assert_eq!(
+                    s.to_string_lossy(),
+                    "outside_nil=true inside_nil=false",
+                );
+            }
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P1c.3: `__rubyrs_fiber_current` restores correctly
+    /// after a resume — back to Nil at top level when the
+    /// fiber yields or returns.
+    #[test]
+    fn fiber_current_restores_to_nil_after_resume() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            body = proc { __rubyrs_fiber_yield(:y); :done }
+            fib = __rubyrs_fiber_new(body)
+            before = __rubyrs_fiber_current
+            __rubyrs_fiber_resume(fib, nil)
+            after_yield = __rubyrs_fiber_current
+            __rubyrs_fiber_resume(fib, nil)
+            after_return = __rubyrs_fiber_current
+            "#{before.inspect}/#{after_yield.inspect}/#{after_return.inspect}"
+        "##, "p1c3_restore.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "nil/nil/nil"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P1c.3: `__rubyrs_fiber_alive_q` is true while the
+    /// fiber is Created / Suspended, false after return.
+    #[test]
+    fn fiber_alive_q_lifecycle() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            body = proc { __rubyrs_fiber_yield(:y); :done }
+            fib = __rubyrs_fiber_new(body)
+            a = __rubyrs_fiber_alive_q(fib)   # Created → alive
+            __rubyrs_fiber_resume(fib, nil)
+            b = __rubyrs_fiber_alive_q(fib)   # Suspended → alive
+            __rubyrs_fiber_resume(fib, nil)
+            c = __rubyrs_fiber_alive_q(fib)   # Returned → dead
+            "#{a}/#{b}/#{c}"
+        "##, "p1c3_alive.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "true/true/false"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P1c.3: `__rubyrs_fiber_alive_q` rejects non-Fiber
+    /// args with ArgumentError.
+    #[test]
+    fn fiber_alive_q_rejects_non_fiber() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r##"
+            __rubyrs_fiber_alive_q("not a fiber")
+        "##, "p1c3_bad.rb").expect_err("expected error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("__rubyrs_fiber_alive_q") || msg.contains("not a Fiber"),
+            "expected fiber-arg error, got: {msg}",
+        );
     }
 
     /// P1c.2c: resume on a returned fiber raises

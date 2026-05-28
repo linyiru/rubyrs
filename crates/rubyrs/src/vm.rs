@@ -586,6 +586,20 @@ pub(crate) struct Vm {
     /// field.
     #[cfg(feature = "_fiber")]
     pub(crate) fiber_yield_pending: Option<Value>,
+    /// P1c.3 (ADR 0023) — currently-running Fiber's ObjId.
+    ///
+    /// Set by `resume_fiber` BEFORE installing the
+    /// FiberStashGuard, restored to the prior value AFTER
+    /// the guard drops. `Fiber.current` reads this — at the
+    /// top level (outside any Fiber) it's None and the host
+    /// fn returns a sentinel "root" Value. Nested resume
+    /// (Fiber A resumes Fiber B) sees the parent's id stash
+    /// while B runs, and restoration on B's yield/return
+    /// puts A's id back.
+    ///
+    /// cfg(_fiber)-gated.
+    #[cfg(feature = "_fiber")]
+    pub(crate) current_fiber_id: Option<ObjId>,
     /// Builtin reflection metadata for the synth Methods that
     /// `Kernel.instance_method(:foo)` returns. Looked up by the
     /// `instance_method` arm when the receiver is Kernel.
@@ -750,6 +764,8 @@ impl Vm {
             bypass_visibility_once: false,
             #[cfg(feature = "_fiber")]
             fiber_yield_pending: None,
+            #[cfg(feature = "_fiber")]
+            current_fiber_id: None,
             kernel_builtin_metas: std::collections::HashMap::new(),
             kernel_class_sym: None,
             basic_object_builtin_metas: std::collections::HashMap::new(),
