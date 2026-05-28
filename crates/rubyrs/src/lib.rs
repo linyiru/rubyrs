@@ -601,22 +601,18 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
 }
 
 /// Subset of Runtime+Vm settings that get **lifted during
-/// preamble load** and restored after. The inclusion criterion
-/// is "safe to temporarily suspend while
-/// `load_preamble` runs" — typically a resource budget or a
-/// pure-performance flag the host configured for user-eval but
-/// the preamble itself shouldn't observe. Security capabilities
-/// (e.g. `allow_filesystem_io`) deliberately do NOT live here:
-/// a host setting `allow_filesystem_io: false` is making a
-/// security contract that no script-driven path touches the
-/// host FS, and that contract should hold during preamble too —
-/// see `Runtime::with_config` for how preamble runs honour the
-/// host's sandbox setting.
+/// preamble load** and restored after — the inclusion criterion
+/// is "safe to temporarily suspend while `load_preamble` runs"
+/// (a resource budget or a pure-performance flag the preamble
+/// shouldn't observe).
 ///
-/// Bundling the lifted settings into one struct means adding a
-/// new one touches exactly the type + its `take_from` /
-/// `restore_to` pair; previous shape had paired `.take()` +
-/// restore lines inside `with_config`, easy to forget half of.
+/// Security capabilities — see `Config::allow_filesystem_io` —
+/// deliberately do NOT belong here: a host's sandbox contract
+/// must hold during preamble too. Concretely, lifting
+/// `allow_filesystem_io` would make a future preamble fragment
+/// that accidentally adds `require '...'` / `File.read(...)`
+/// silently succeed instead of loudly trapping at construction,
+/// hiding a security-contract violation from the host.
 ///
 /// Every field is `Option<primitive>` (Copy) or `bool`, so the
 /// guard can restore by `&self` reference without moving out in
