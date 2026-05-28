@@ -46,6 +46,18 @@ describe "String#tr" do
     assert_eq("a".tr("a", "^b"), "^")
   end
 
+  it "uses the LAST occurrence's index for duplicate chars in from_str" do
+    # CRuby builds the translation table by overwriting per-char
+    # entries, so duplicates in `from` resolve to the last
+    # paired `to` char.
+    assert_eq("a".tr("aa", "12"), "2")
+    assert_eq("a".tr("aaa", "123"), "3")
+  end
+
+  it "raises ArgumentError on a reversed range" do
+    assert_raises("ArgumentError") { "abc".tr("c-a", "x") }
+  end
+
   # skipped (method-not-implemented): describe "String#tr!" do ... end
   #   Destructive variant.
 end

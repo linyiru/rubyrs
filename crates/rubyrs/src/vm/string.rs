@@ -437,13 +437,19 @@ pub(crate) fn string_call(
             // Pre-build a `char → index` lookup so the per-input-
             // char hot loop is O(1) instead of O(from_chars.len()).
             // For large expanded sets (`tr("a-z", ...)` etc.) the
-            // prior `position()` scan would be O(n*m). Earliest-
-            // index wins on duplicate chars in `from` — matches
-            // the position() semantics it replaces.
+            // prior `position()` scan would be O(n*m).
+            //
+            // Duplicate chars in `from`: LAST occurrence wins.
+            // CRuby builds the translation table by iterating
+            // `from`/`to` and overwriting the per-char entry on
+            // each step, so e.g. `"a".tr("aa", "12") == "2"`.
+            // `insert()` overwrites on hit; if we used
+            // `entry().or_insert(i)` the first occurrence would
+            // win, which diverges from CRuby.
             let mut from_index: std::collections::HashMap<char, usize> =
                 std::collections::HashMap::with_capacity(from_chars.len());
             for (i, c) in from_chars.iter().enumerate() {
-                from_index.entry(*c).or_insert(i);
+                from_index.insert(*c, i);
             }
             let mut out = String::with_capacity(a_ref.len());
             for ch in a_ref.chars() {
@@ -1521,8 +1527,7 @@ const TR_SET_MAX_CHARS: usize = 65_536;
 /// - `a-z` → expand range inclusive (any `x-y` where `x <= y`,
 ///   including ranges whose endpoint is `^` like `A-^` — `^` is
 ///   only special as the leading-position negation prefix)
-/// - reversed range (`z-a`) → no expansion; the three chars
-///   fall through as literals
+/// - reversed range (`z-a`) → ArgumentError (matches CRuby)
 /// - everything else → literal char
 ///
 /// CRuby's tr-syntax has a few finer corners (backslash escapes
@@ -1575,11 +1580,11 @@ pub(crate) fn parse_tr_set(sel: &str, allow_negation: bool) -> Result<(Vec<char>
                 i += 3;
                 continue;
             }
-            // Reversed range (e.g. `z-a`) — no range expansion.
-            // The three chars (`z`, `-`, `a`) are pushed as
-            // literals by the fall-through below, so a `-` in
-            // the input still translates positionally if `to`
-            // has a corresponding char.
+            // Reversed range (e.g. `"c-a"`) — CRuby raises
+            // ArgumentError "invalid range \"X-Y\" in string
+            // transliteration". rubyrs previously silently
+            // treated this as 3 literal chars, which diverged.
+            return Err("invalid range in string transliteration");
         }
         if out.len() >= TR_SET_MAX_CHARS {
             return Err("invalid range in string transliteration (set too large)");
