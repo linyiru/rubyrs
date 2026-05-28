@@ -496,6 +496,18 @@ struct ClassStateSnapshot {
     includes: Vec<std::rc::Rc<value::Class>>,
     prepends: Vec<std::rc::Rc<value::Class>>,
     singleton_prepends: Vec<std::rc::Rc<value::Class>>,
+    /// Lazy eigenclass shell built by `Class#singleton_class`.
+    /// Captured / restored so `Runtime::reset()` drops shells
+    /// created during the session (and any mutations on them);
+    /// the normal post-reset state is `None`. A preamble-time
+    /// `singleton_class` call would land in the snapshot as the
+    /// shell `Rc` so a subsequent reset restores the same
+    /// cached identity. (Code-review #253 round 4.)
+    singleton_view: Option<std::rc::Rc<value::Class>>,
+    /// Weak back-reference from a shell to the real class.
+    /// Snapshot only matters for shells (real classes always
+    /// have `None`); restoring this for a non-shell is a no-op.
+    singleton_target: Option<std::rc::Weak<value::Class>>,
     class_vars: std::collections::HashMap<intern::SymId, value::Value>,
 }
 
@@ -691,6 +703,8 @@ impl ClassStateSnapshot {
             includes: cls.includes.borrow().clone(),
             prepends: cls.prepends.borrow().clone(),
             singleton_prepends: cls.singleton_prepends.borrow().clone(),
+            singleton_view: cls.singleton_view.borrow().clone(),
+            singleton_target: cls.singleton_target.borrow().clone(),
             class_vars: cls.class_vars.borrow().clone(),
         }
     }
@@ -712,6 +726,8 @@ impl ClassStateSnapshot {
         cls.includes.borrow_mut().clone_from(&self.includes);
         cls.prepends.borrow_mut().clone_from(&self.prepends);
         cls.singleton_prepends.borrow_mut().clone_from(&self.singleton_prepends);
+        cls.singleton_view.borrow_mut().clone_from(&self.singleton_view);
+        cls.singleton_target.borrow_mut().clone_from(&self.singleton_target);
         cls.class_vars.borrow_mut().clone_from(&self.class_vars);
     }
 }
