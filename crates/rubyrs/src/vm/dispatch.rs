@@ -2907,7 +2907,16 @@ impl Vm {
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| ".".to_string())
                 };
-                let dir = if self.allow_filesystem_io {
+                // Mirrors File.expand_path's mode selection: only
+                // touch the host FS (canonicalize → symlink-resolved
+                // parent) in the wide-open shape (sandbox on AND no
+                // allowlist). Under `allowed_paths: Some(_)`,
+                // canonicalize would resolve symlinks anywhere on
+                // the host — same info-leak shape File.expand_path
+                // closed. Fall back to lexical parent in every
+                // other case, matching the Err(_) arm above.
+                let wide_open = self.allow_filesystem_io && self.allowed_paths.is_none();
+                let dir = if wide_open {
                     match std::fs::canonicalize(&fname) {
                         Ok(real) => real.parent()
                             .map(|p| p.to_string_lossy().into_owned())

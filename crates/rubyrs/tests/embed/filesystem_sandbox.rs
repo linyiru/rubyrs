@@ -755,3 +755,39 @@ fn allowlist_file_expand_path_does_not_follow_symlinks() {
     assert_eq!(s, link.to_string_lossy(), "expected un-canonicalized lexical form");
     let _ = std::fs::remove_dir_all(&allowed);
 }
+
+#[test]
+#[cfg(unix)]
+fn allowlist_dunder_dir_does_not_canonicalize_symlinks() {
+    // Under bool=true + allowed_paths=Some, __dir__ must NOT
+    // canonicalize. Pre-fix, a script whose filename was a
+    // symlink would learn the symlink TARGET via __dir__'s
+    // canonicalize call — exactly the info-leak shape the
+    // load family closes via post-canonicalize scope check.
+    // __dir__ falls back to the lexical parent instead.
+    use std::os::unix::fs::symlink;
+    let (allowed, _) = alloc_tempdir("dunderdir-symlink");
+    let real_dir = allowed.join("real");
+    std::fs::create_dir_all(&real_dir).expect("mkdir real");
+    let real_file = real_dir.join("script.rb");
+    std::fs::write(&real_file, "").expect("write real script");
+    let link = allowed.join("link.rb");
+    let _ = std::fs::remove_file(&link);
+    symlink(&real_file, &link).expect("symlink");
+
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    let v = rt.eval("__dir__", link.to_str().unwrap()).unwrap();
+    let s = match &v {
+        rubyrs::Value::Str(s) => s.to_string_lossy(),
+        other => panic!("expected Str, got {other:?}"),
+    };
+    // Lexical parent of `link.rb` is `allowed` — NOT
+    // `allowed/real` (which is what canonicalize would have
+    // returned by following the symlink).
+    assert_eq!(s, allowed.to_string_lossy(), "__dir__ should not follow symlinks under allowlist");
+    let _ = std::fs::remove_dir_all(&allowed);
+}
