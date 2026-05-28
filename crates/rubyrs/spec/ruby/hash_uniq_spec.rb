@@ -30,4 +30,12 @@ describe "Hash#uniq" do
     out = {a: 1, b: 2}.uniq { |pair| break :early }
     assert_eq(out, :early)
   end
+
+  it "raises ArgumentError when called with positional args (no-block)" do
+    assert_raises("ArgumentError") { {a: 1}.uniq(1) }
+  end
+
+  it "raises ArgumentError when called with positional args + block" do
+    assert_raises("ArgumentError") { {a: 1}.uniq(1) { |p| p } }
+  end
 end

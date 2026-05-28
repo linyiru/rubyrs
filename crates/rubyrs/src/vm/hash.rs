@@ -581,6 +581,18 @@ impl Vm {
                         }
                         Some(Value::Array(aid))
                     }
+                    // Wrong-arity for uniq — CRuby's no-block
+                    // form takes no args; without this guard
+                    // `h.uniq(1)` falls through to NoMethodError
+                    // despite respond_to?(:uniq) returning true.
+                    ("uniq", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0)",
+                                many.len(),
+                            ),
+                        }));
+                    }
                     // Fallback for `zip` with a non-Array arg —
                     // matched after the typed `zip` arm above.
                     // CRuby coerces via `to_ary` / `each` for

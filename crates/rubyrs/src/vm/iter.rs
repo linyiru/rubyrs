@@ -2788,6 +2788,18 @@ impl Vm {
                     None => Value::Nil,
                 }))
             }
+            // Wrong-arity for block-form uniq — CRuby's uniq
+            // takes no positional args (just an optional
+            // block). Without this guard, `h.uniq(1) { ... }`
+            // falls through and surfaces as NoMethodError.
+            (Value::Hash(_), "uniq", many) if !many.is_empty() => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        many.len(),
+                    ),
+                }));
+            }
             // `h.zip(*args) { |tuple| ... }` block form is out
             // of subset. Without this guard the block would be
             // silently ignored: dispatch routes block-given to
