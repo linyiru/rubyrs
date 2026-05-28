@@ -963,24 +963,41 @@ fn temp_dir_guard_cleans_up_on_panic_unwind() {
     let leaked_path: std::path::PathBuf = {
         let mut captured = None;
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            let (guard, dir, _probe) = alloc_tempdir("panic-cleanup");
+            // `_guard` (the `_` prefix suppresses the
+            // unused-variables lint but the binding still OWNS
+            // the value) lives to closure scope-end and its Drop
+            // fires on the unwind path. That ownership IS the
+            // contract under test; an earlier draft had a
+            // separate `let _alive = &guard;` line which was a
+            // no-op for lifetime — caught in PR #283 review.
+            let (_guard, dir, _probe) = alloc_tempdir("panic-cleanup");
             captured = Some(dir.clone());
-            // Sanity: dir exists right after creation.
             assert!(dir.exists(), "tempdir should exist after alloc");
-            // Keep the guard alive across the panic so its Drop
-            // fires on the unwind path (the contract under test).
-            let _alive = &guard;
             panic!("simulated test failure");
         }));
         captured.expect("inner closure should have stashed the path before panicking")
     };
     // After the catch_unwind boundary the guard has been dropped
     // (unwind drops bindings in reverse declaration order); the
-    // directory must be gone.
-    assert!(
-        !leaked_path.exists(),
-        "TempDirGuard::drop did not clean up after panic — leaked {leaked_path:?}",
-    );
+    // directory must be gone. If it isn't, surface the underlying
+    // io::Error from a second remove_dir_all attempt so the
+    // failure message points at the real root cause (EACCES,
+    // ENOSPC, etc.) rather than just claiming "Drop didn't run".
+    if leaked_path.exists() {
+        match std::fs::remove_dir_all(&leaked_path) {
+            Ok(()) => panic!(
+                "TempDirGuard::drop did not run on unwind path: {leaked_path:?} \
+                 still existed after catch_unwind but was deletable on second attempt — \
+                 Drop semantics regression",
+            ),
+            Err(e) => panic!(
+                "TempDirGuard::drop did not clean up after panic: {leaked_path:?} \
+                 still exists; second remove_dir_all attempt also failed with {e:?} — \
+                 the original Drop failure was likely the same root cause (EACCES / \
+                 ENOSPC / EBUSY) and was silently swallowed by Drop's `let _ = ...`",
+            ),
+        }
+    }
 }
 
 #[test]
