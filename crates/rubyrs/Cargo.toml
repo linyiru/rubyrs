@@ -122,6 +122,28 @@ trace-startup = []
 # Zero-cost when off: `IcStats` is a ZST and `record_hit` /
 # `record_miss` compile to nothing.
 ic-stats = []
+# `_fiber` enables Tier-2 cooperative concurrency primitives
+# (`Fiber.new`, `Fiber.yield`, `Fiber#resume`, `Fiber.current`,
+# `Fiber#alive?`). Per ADR 0017 §"Out of Tier 1" Fiber is Tier 2
+# (`language` feature group); ADR 0019 v3 places it in the
+# `rubyrs-language` crate-split with `_fiber` as its feature flag.
+# This wire-up is the pre-split form (feature flag inside
+# `rubyrs` itself) — when `rubyrs-language` extracts in ADR 0018
+# Phase 1, the gate moves with it.
+#
+# Default OFF — matches ADR 0017's "deferred until a real use
+# case" guidance; the first real consumer is `_http_server`'s
+# A3β async-streaming path (ADR 0023). Embedders wanting
+# streaming responses opt in to both features. Tier 1 builds
+# (no Fiber) keep working unchanged: any `Fiber` constant
+# reference raises NameError, matching the bignum-off /
+# regex-off shape.
+#
+# Cost when on: new `FiberObject` heap variant + ~11 Vm fields
+# touched by the snapshot swap. No per-request perf impact when
+# no Fiber is allocated; allocating a Fiber pays one heap slot
+# + the snapshot size (mostly empty Vecs that grow on yield).
+_fiber = []
 # `_http_server` enables the inbound HTTP server battery per
 # ADR 0022 v4. Pulls in hyper + tokio (current-thread runtime)
 # + http-body-util + bytes for the wire-protocol side; the
