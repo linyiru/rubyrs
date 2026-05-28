@@ -5,8 +5,10 @@
 //! here. Today this module holds:
 //!
 //!   - `ensure_sandbox_cwd` — `require` I/O sandbox setup.
-//!   - `Caps` + `run_with_caps` — the iteration body both targets
-//!     reduce down to. New targets that want different cap
+//!   - `Caps` + `fuzz_init(caps)` + `run(data)` — the iteration
+//!     body both targets reduce down to. `fuzz_init` seeds the
+//!     cached `Runtime` once per process; `run` does the per-
+//!     iter reset+eval. New targets that want different cap
 //!     settings can add another `Caps` preset rather than
 //!     reproducing the full UTF-8-gate + Config-build + eval shape.
 //!
@@ -21,10 +23,11 @@ use std::time::Duration;
 thread_local! {
     /// Per-process cached Runtime. Each cargo-fuzz target compiles
     /// to its own binary, so each binary's process gets its own
-    /// `FUZZ_RT`. `RefCell<Option<...>>` lazy-inits on first call
-    /// to `run_with_caps`, then every subsequent iteration takes
-    /// `&mut Runtime` and calls `reset()` instead of paying the
-    /// ~3-6 ms preamble rebuild every iter.
+    /// `FUZZ_RT`. `fuzz_init(caps)` seeds the slot once;
+    /// subsequent `run(data)` calls take the Runtime out via
+    /// `Option::take`, eval against it, and put it back — so the
+    /// preamble (~3-6 ms) is paid once per process and every
+    /// iter past the first reuses it.
     ///
     /// Lives in `thread_local!` because `Runtime` isn't `Send` /
     /// `Sync` (Rc<RefCell<...>> everywhere). libfuzzer is single-
@@ -39,9 +42,11 @@ thread_local! {
 /// longer per iteration.
 ///
 /// `Copy` because the struct is three POD fields (~24 bytes) and
-/// `run_with_caps` takes `Caps` by value at every iteration — the
-/// implicit move-on-call is cheap and lets the helper signature
-/// stay value-typed without callers reaching for `&` / `.clone()`.
+/// `fuzz_init` takes `Caps` by value (called once per process,
+/// but every iter past the first ignores the arg cheaply since
+/// `fuzz_init` is idempotent). The Copy lets fuzz_target! bodies
+/// pass `Caps::tight()` / `Caps::loose()` without callers
+/// reaching for `&` / `.clone()`.
 #[derive(Copy, Clone)]
 pub struct Caps {
     pub fuel: u64,
@@ -74,7 +79,7 @@ impl Caps {
 }
 
 /// Build the Config used to construct the cached Runtime.
-/// Called once per fuzz process via `get_or_insert_with`.
+/// Called once per fuzz process inside `fuzz_init`.
 /// `Config::fuel` is per-eval (re-anchored by `Runtime::eval`
 /// from `Runtime::fuel_budget` on every call), so the harness
 /// doesn't need to re-stamp the budget per iteration.
@@ -133,14 +138,22 @@ pub fn fuzz_init(caps: Caps) {
 /// Ignores the `Result` (script errors are expected; only Rust
 /// panics fail the iteration).
 ///
-/// `mem::take`-ing the Runtime out of the `RefCell` during eval
-/// keeps `FUZZ_RT` un-borrowed while `Runtime::eval` runs. If a
-/// future `host_fn` registered on the cached Runtime captures
-/// `FUZZ_RT` and tries to read it from inside script-callable
-/// Rust code, the inner `borrow_mut` no longer collides — there
-/// is no outer borrow held. Pre-PR the outer `borrow_mut` was
-/// held for the whole eval scope, so any such re-entrancy would
-/// panic with `already borrowed`.
+/// `Option::take`-ing the Runtime out of the `RefCell` during
+/// eval drops the outer `borrow_mut` before `Runtime::eval`
+/// starts. A future `host_fn` registered on the cached Runtime
+/// that captures `FUZZ_RT` and reaches for it from inside
+/// script-callable Rust code can now `borrow_mut` the cell
+/// successfully — but will find the slot **empty** (`None`),
+/// because the active Runtime is held in this stack frame's
+/// local for the duration of eval. The host_fn callback must
+/// handle that — e.g. early-return — rather than expecting a
+/// Runtime to be present.
+///
+/// Pre-PR the outer `borrow_mut` was held for the whole eval
+/// scope, so any such re-entrancy would panic with
+/// `already borrowed`. The new shape trades that panic for an
+/// explicit "slot is empty mid-eval" contract, which is
+/// recoverable by the caller.
 ///
 /// Fuel handling note: `Config::fuel` is per-eval — every
 /// `Runtime::eval` re-anchors `vm.fuel` from the host's
@@ -162,11 +175,12 @@ pub fn run(data: &[u8]) {
         // it would need a separate fuzz target.
         Err(_) => return,
     };
-    // Take the Runtime OUT of FUZZ_RT for the duration of eval.
-    // Any re-entrant access to FUZZ_RT (today: none — no host_fn
-    // is registered; future-proof: a host_fn capturing FUZZ_RT
-    // could touch the cell while we hold rt as a local) sees an
-    // empty slot, not an already-borrowed RefCell.
+    // `Option::take` the Runtime out of FUZZ_RT for the duration
+    // of eval. Any re-entrant access to FUZZ_RT (today: none, no
+    // host_fn is registered; future-proof: a host_fn capturing
+    // FUZZ_RT could borrow_mut the cell while we hold rt as a
+    // local) sees an EMPTY SLOT, not an already-borrowed RefCell
+    // — see the run() doc for the resulting contract.
     let mut rt = FUZZ_RT.with(|cell| {
         cell.borrow_mut()
             .take()
