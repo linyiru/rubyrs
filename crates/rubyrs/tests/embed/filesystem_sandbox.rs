@@ -699,3 +699,59 @@ fn allowlist_panics_on_nonexistent_traversal_prefix() {
         ..Default::default()
     });
 }
+
+#[test]
+fn allowlist_forces_file_expand_path_into_lexical_mode() {
+    // Under bool=true + allowed_paths=Some, File.expand_path
+    // must NOT touch the host cwd or call canonicalize — both
+    // would leak FS state outside the allowlist scope. With no
+    // base arg and a relative input, the result should be root-
+    // anchored (`/<resolved>`), not cwd-anchored.
+    let (dir, _) = alloc_tempdir("expand-lexical");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let v = rt.eval(r#"File.expand_path("foo/bar")"#, "test.rb").unwrap();
+    let s = match &v {
+        rubyrs::Value::Str(s) => s.to_string_lossy(),
+        other => panic!("expected Str, got {other:?}"),
+    };
+    // Must NOT contain the host cwd (the leak the pre-fix code
+    // produced). Must be absolute and lexically resolved.
+    assert_eq!(s, "/foo/bar", "expected root-anchored lexical form, got {s:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[cfg(unix)]
+fn allowlist_file_expand_path_does_not_follow_symlinks() {
+    // Pre-fix, canonicalize would resolve a symlink-laden input
+    // even under allowlist mode, leaking the target path.
+    // Verify the post-fix lexical-only mode returns the input as
+    // written (after `..` collapse), with no symlink resolution.
+    use std::os::unix::fs::symlink;
+    let (allowed, _) = alloc_tempdir("expand-symlink");
+    let target_dir = allowed.join("real");
+    std::fs::create_dir_all(&target_dir).expect("mkdir real");
+    let link = allowed.join("link");
+    let _ = std::fs::remove_file(&link);
+    symlink(&target_dir, &link).expect("symlink");
+
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    let script = format!(r#"File.expand_path({:?})"#, link.to_string_lossy());
+    let v = rt.eval(&script, "test.rb").unwrap();
+    let s = match &v {
+        rubyrs::Value::Str(s) => s.to_string_lossy(),
+        other => panic!("expected Str, got {other:?}"),
+    };
+    // Returned path is the symlink itself (lexical), NOT the
+    // resolved target. Proves canonicalize didn't run.
+    assert_eq!(s, link.to_string_lossy(), "expected un-canonicalized lexical form");
+    let _ = std::fs::remove_dir_all(&allowed);
+}
