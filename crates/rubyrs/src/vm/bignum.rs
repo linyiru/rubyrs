@@ -112,6 +112,27 @@ use crate::vm::PinGuard;
 /// `2**64` and `2**64 + 1` onto the same Float bit pattern (the
 /// ULP at that magnitude is 2^(64-52)=4096), making
 /// `(2**64 + 1) == (2**64).to_f` wrongly return true. CRuby's
+/// Lossy `BigInt → f64` with **sign-preserving** fallback. `num-bigint`'s
+/// `ToPrimitive::to_f64` is currently total (always `Some`, saturating to
+/// `±f64::INFINITY` for over-magnitude inputs), so the `None` branch is
+/// unreachable today. The explicit sign-aware fallback matters as
+/// belt-and-suspenders against a future `num-bigint` upgrade: bare
+/// `.unwrap_or(f64::INFINITY)` would silently emit `+Inf` for a negative
+/// receiver, diverging from CRuby's `-Inf`. Used by `Numeric#coerce`
+/// (and any future BigInt × Float promotion site that needs the same
+/// guarantee).
+#[cfg(feature = "bignum")]
+pub(crate) fn bigint_to_f64_sign_preserving(bigint: &num_bigint::BigInt) -> f64 {
+    use num_traits::ToPrimitive;
+    bigint.to_f64().unwrap_or_else(|| {
+        if bigint.sign() == num_bigint::Sign::Minus {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        }
+    })
+}
+
 /// `rb_big_eq` short-circuits on NaN / infinity / non-integral
 /// floats and otherwise compares against a losslessly-constructed
 /// BigInt; mirror that.
@@ -2315,5 +2336,31 @@ impl Vm {
             _ => return None,
         };
         Some(self.bigint_to_value(result))
+    }
+}
+
+#[cfg(all(test, feature = "bignum"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bigint_to_f64_sign_preserving_round_trips_in_range() {
+        // The Some-branch covers every magnitude that fits f64 — both
+        // sign cases should round-trip cleanly.
+        let pos = num_bigint::BigInt::from(123_456_789_012_345_i64);
+        let neg = num_bigint::BigInt::from(-123_456_789_012_345_i64);
+        assert_eq!(bigint_to_f64_sign_preserving(&pos), 123_456_789_012_345.0);
+        assert_eq!(bigint_to_f64_sign_preserving(&neg), -123_456_789_012_345.0);
+    }
+
+    #[test]
+    fn bigint_to_f64_sign_preserving_handles_saturation() {
+        // num-bigint's to_f64 saturates over-magnitude BigInts to
+        // ±INFINITY in the Some branch — verify the sign is correct
+        // there (this is the path that actually fires today).
+        let huge_pos: num_bigint::BigInt = num_bigint::BigInt::from(2).pow(2000);
+        let huge_neg = -&huge_pos;
+        assert_eq!(bigint_to_f64_sign_preserving(&huge_pos), f64::INFINITY);
+        assert_eq!(bigint_to_f64_sign_preserving(&huge_neg), f64::NEG_INFINITY);
     }
 }
