@@ -197,9 +197,16 @@ impl Vm {
         if prefixes.iter().any(|prefix| resolved.starts_with(prefix)) {
             return Ok(());
         }
+        // Trap message embeds the ORIGINAL script-supplied input
+        // (`path`), not the cwd-joined `resolved`. If a script
+        // catches the IOError/LoadError, it learns only what it
+        // already typed — not the host process's cwd, which would
+        // otherwise leak via `e.message` to script code that has
+        // no other way to read cwd (`Dir.pwd` isn't implemented,
+        // chdir doesn't exist).
         let msg = format!(
             "{op} blocked: path {:?} outside Config::allowed_paths",
-            resolved,
+            path,
         );
         Err(self.trap(match kind {
             PathTrapKind::Io => RubyError::IOError { msg },

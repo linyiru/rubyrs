@@ -885,3 +885,35 @@ fn allowlist_require_pre_empts_absolute_path_outside_scope() {
     );
     let _ = std::fs::remove_dir_all(&allowed);
 }
+
+#[test]
+fn allowlist_trap_message_does_not_leak_cwd() {
+    // Pre-fix the trap message embedded the cwd-joined absolute
+    // path, so a script catching IOError could read the host's
+    // cwd via `e.message`. Post-fix, the message embeds only the
+    // ORIGINAL input the script supplied. A relative-path trap
+    // must mention the relative path verbatim and NOT contain
+    // the cwd prefix.
+    let (allowed, _) = alloc_tempdir("trap-msg-cwd");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    let cwd = std::env::current_dir().expect("cwd readable").to_string_lossy().into_owned();
+    let err = rt
+        .eval(r#"File.read("rel-secret.txt")"#, "test.rb")
+        .unwrap_err();
+    let RubyError::Uncaught { message, .. } = &err.err else {
+        panic!("expected Uncaught, got {:?}", err.err);
+    };
+    assert!(
+        message.contains("rel-secret.txt"),
+        "message should mention the script's input, got {message:?}",
+    );
+    assert!(
+        !message.contains(&cwd),
+        "message must NOT contain host cwd {cwd:?}, got {message:?}",
+    );
+    let _ = std::fs::remove_dir_all(&allowed);
+}
