@@ -667,9 +667,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (pinned to rust-toolchain.toml)
+        # Mirror the wasm job's pattern (.github/workflows/ci.yml:124-141)
+        # rather than using `@stable`. Cargo runs under rust-toolchain.toml's
+        # pin (1.95), so installing `llvm-tools-preview` on stable would land
+        # the component on a channel cargo doesn't use; cargo-llvm-cov
+        # currently self-heals by rustup-component-add'ing on first run
+        # under 1.95, but pinning here is the explicit contract and avoids
+        # the implicit fallback.
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.95"
           components: llvm-tools-preview
 
       - name: Install Ruby (oracle for diff tests)
@@ -723,9 +731,12 @@ jobs:
       - name: Upload LCOV artifact
         # Available for download from the Actions UI so reviewers can
         # inspect the per-line picture when investigating a regression.
-        # Kept for 30 days (default).
+        # The actions/upload-artifact@v4 default is 90 days (or org-
+        # configured), not 30 — set retention-days explicitly so the
+        # contract matches docs/COVERAGE.md and this workflow comment.
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lcov-${{ github.run_id }}
           path: lcov.info
+          retention-days: 30
