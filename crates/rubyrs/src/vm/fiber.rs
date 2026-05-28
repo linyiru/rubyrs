@@ -293,12 +293,17 @@ pub(crate) struct FiberStashGuard<'a> {
     /// The fiber's snapshot, currently held by the guard
     /// (the FiberObject's RefCell slot has a placeholder).
     /// `Drop` captures the current Vm state into this and
-    /// then puts it back into the FiberObject.
+    /// then puts it back into the FiberObject (looked up
+    /// fresh via `fiber_id` at Drop time).
     fiber_snap_holder: FiberSnapshot,
-    /// Borrow on the FiberObject — needed at `Drop` to
-    /// restore the snapshot. `&'a` (shared) suffices
-    /// because we only access the `RefCell` interior.
-    fiber: &'a FiberObject,
+    /// ObjId of the heap slot holding the FiberObject —
+    /// NOT a `&FiberObject` reference, because holding one
+    /// alongside `&mut Vm` would alias with the heap (which
+    /// `Vm` owns). The guard re-borrows the fiber via the
+    /// `Vm`'s heap on Drop. The slot itself is pinned for
+    /// the guard's lifetime by the borrow chain: any GC
+    /// happens through `&mut Vm` which the guard owns.
+    fiber_id: crate::value::ObjId,
 }
 
 impl<'a> FiberStashGuard<'a> {
@@ -307,22 +312,27 @@ impl<'a> FiberStashGuard<'a> {
     /// `vm.frames` / `vm.stack` / etc. are the fiber's; the
     /// fiber's `snapshot` slot is temporarily empty.
     ///
-    /// **Panics**: if `fiber.snapshot` is already borrowed
-    /// (RefCell guard). In practice this would mean a P1c
-    /// bytecode bug — the snapshot RefCell should only be
-    /// touched by `install` and `Drop`.
+    /// **Panics**:
+    /// - if `fiber.snapshot` is already borrowed (RefCell
+    ///   guard) — in practice indicates a P1c bytecode bug
+    /// - if `fiber_id` doesn't point at a `HeapObj::Fiber`
+    ///   slot — ICE caller-error.
     #[allow(dead_code)] // P1c calls this
     pub(crate) fn install(
         vm: &'a mut crate::vm::Vm,
-        fiber: &'a FiberObject,
+        fiber_id: crate::value::ObjId,
     ) -> Self {
         // Move the fiber's snapshot OUT of its RefCell
-        // (leave an empty placeholder). The guard then
-        // owns the snapshot for the resume duration.
-        let mut fiber_snap = std::mem::replace(
-            &mut *fiber.snapshot.borrow_mut(),
-            FiberSnapshot::empty(),
-        );
+        // (leave an empty placeholder). The borrow on the
+        // heap is released after this scope so we can
+        // freely use &mut vm below.
+        let mut fiber_snap = {
+            let fiber = vm.heap.fiber(fiber_id);
+            std::mem::replace(
+                &mut *fiber.snapshot.borrow_mut(),
+                FiberSnapshot::empty(),
+            )
+        };
         // Stash the Vm's current state into a fresh empty
         // snapshot. After this, `vm_stash` carries the old
         // Vm state and `vm.*` is empty.
@@ -336,7 +346,7 @@ impl<'a> FiberStashGuard<'a> {
             vm,
             vm_stash,
             fiber_snap_holder: fiber_snap,
-            fiber,
+            fiber_id,
         }
     }
 }
@@ -344,7 +354,7 @@ impl<'a> FiberStashGuard<'a> {
 impl Drop for FiberStashGuard<'_> {
     /// Restore the Vm to its pre-install state and write
     /// the fiber's new (post-bytecode) state back into its
-    /// `snapshot` slot.
+    /// `snapshot` slot (looked up fresh via `fiber_id`).
     ///
     /// Runs on BOTH normal scope exit AND panic — the panic
     /// safety guarantee. After Drop returns, the Vm is in
@@ -366,13 +376,15 @@ impl Drop for FiberStashGuard<'_> {
         //    and `vm_stash` is empty.
         self.vm_stash.swap_with_vm(self.vm);
         // 3. Write the post-execution state back into the
-        //    FiberObject. The empty placeholder we left in
-        //    `install` is replaced.
+        //    FiberObject's RefCell. Fresh heap lookup;
+        //    the slot is still alive because the guard
+        //    has held `&mut Vm` through the resume.
         let new_snapshot = std::mem::replace(
             &mut self.fiber_snap_holder,
             FiberSnapshot::empty(),
         );
-        *self.fiber.snapshot.borrow_mut() = new_snapshot;
+        let fiber = self.vm.heap.fiber(self.fiber_id);
+        *fiber.snapshot.borrow_mut() = new_snapshot;
     }
 }
 
@@ -503,6 +515,8 @@ mod tests {
     /// pre-install state. The fiber's snapshot now
     /// carries whatever ended up in the Vm during
     /// "execution" (here: a single test value we pushed).
+    /// P1c.2a: now allocates the fiber through the heap +
+    /// uses ObjId-based install — the production shape.
     #[test]
     fn install_then_drop_restores_vm_and_saves_fiber_state() {
         let mut vm_owned = crate::vm::Vm::new(vec![], crate::intern::Interner::new());
@@ -511,9 +525,12 @@ mod tests {
         vm.stack.push(crate::value::Value::Int(99));
         let pre_install_stack_len = vm.stack.len();
 
-        let fiber = FiberObject::new(crate::value::ObjId(0));
+        // Allocate fiber through the heap. body_block ObjId
+        // doesn't need to point at a real Block for this
+        // test — only the snapshot swap is exercised.
+        let fiber_id = vm.heap.alloc_fiber(crate::value::ObjId(0));
         {
-            let guard = FiberStashGuard::install(vm, &fiber);
+            let guard = FiberStashGuard::install(vm, fiber_id);
             // Inside the guard: vm.stack should be EMPTY
             // (fiber's snapshot was empty).
             assert_eq!(guard.vm.stack.len(), 0, "fiber start = empty stack");
@@ -528,7 +545,7 @@ mod tests {
             other => panic!("expected sentinel Int(99), got {other:?}"),
         }
         // Fiber's snapshot captured the pushed value.
-        let snap = fiber.snapshot.borrow();
+        let snap = vm.heap.fiber(fiber_id).snapshot.borrow();
         assert_eq!(snap.stack.len(), 1, "fiber snapshot retains the push");
         match &snap.stack[0] {
             crate::value::Value::Int(n) => assert_eq!(*n, 7),
@@ -537,13 +554,18 @@ mod tests {
     }
 
     /// P1b: panic mid-execution. Drop fires during unwind,
-    /// restoring the Vm. This is the load-bearing safety
-    /// guarantee — a panic in a host fn must not leave the
-    /// Vm in a hybrid (half-fiber) state for the next
-    /// request.
+    /// restoring the Vm. Load-bearing safety guarantee —
+    /// a panic in a host fn must not leave the Vm in a
+    /// hybrid (half-fiber) state for the next request.
+    /// P1c.2a: ObjId-based; raw pointer + AssertUnwindSafe
+    /// pattern retained because Vm doesn't impl
+    /// UnwindSafe.
     #[test]
     fn install_panic_in_bytecode_still_restores_vm() {
         let mut vm_owned = crate::vm::Vm::new(vec![], crate::intern::Interner::new());
+        // Allocate fiber BEFORE taking the raw pointer so
+        // the heap mutation is recorded.
+        let fiber_id = vm_owned.heap.alloc_fiber(crate::value::ObjId(0));
         let vm_ptr = &mut vm_owned as *mut crate::vm::Vm;
         // Pre-install state for verification.
         unsafe {
@@ -551,11 +573,10 @@ mod tests {
         }
         let pre_panic_stack_len = unsafe { (*vm_ptr).stack.len() };
 
-        let fiber = FiberObject::new(crate::value::ObjId(0));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // SAFETY: single-threaded test; no aliasing.
             let vm = unsafe { &mut *vm_ptr };
-            let guard = FiberStashGuard::install(vm, &fiber);
+            let guard = FiberStashGuard::install(vm, fiber_id);
             // Simulate bytecode making changes...
             guard.vm.stack.push(crate::value::Value::Int(123));
             guard.vm.stack.push(crate::value::Value::Int(456));
@@ -661,24 +682,24 @@ mod tests {
     /// fiber's snapshot captured at first-drop is visible
     /// on the next install. Pins the "FiberStashGuard
     /// round-trips correctly through the FiberObject"
-    /// contract that P1c will rely on for `Fiber.yield;
-    /// fiber.resume` cycles.
+    /// contract that P1c.2 relies on for `Fiber.yield;
+    /// fiber.resume` cycles. P1c.2a: ObjId-based.
     #[test]
     fn two_consecutive_resumes_preserve_fiber_state() {
         let mut vm_owned = crate::vm::Vm::new(vec![], crate::intern::Interner::new());
         let vm = &mut vm_owned;
-        let fiber = FiberObject::new(crate::value::ObjId(0));
+        let fiber_id = vm.heap.alloc_fiber(crate::value::ObjId(0));
 
         // First "resume": push two values, drop.
         {
-            let guard = FiberStashGuard::install(vm, &fiber);
+            let guard = FiberStashGuard::install(vm, fiber_id);
             guard.vm.stack.push(crate::value::Value::Int(1));
             guard.vm.stack.push(crate::value::Value::Int(2));
         }
         // Second "resume": expect the fiber's stack to
         // start with [1, 2] (from the first drop's save).
         {
-            let guard = FiberStashGuard::install(vm, &fiber);
+            let guard = FiberStashGuard::install(vm, fiber_id);
             assert_eq!(
                 guard.vm.stack.len(),
                 2,
@@ -696,7 +717,7 @@ mod tests {
         }
         // Third install: expect [1, 2, 3].
         {
-            let guard = FiberStashGuard::install(vm, &fiber);
+            let guard = FiberStashGuard::install(vm, fiber_id);
             assert_eq!(guard.vm.stack.len(), 3);
         }
     }
