@@ -2662,6 +2662,147 @@ impl Vm {
         Ok(ClassOutcome::NotHandled { args, recv })
     }
 
+        /// `Op::CallKw*` entry — the compiler emits this for call
+        /// sites whose trailing arg came from `KeywordHashNode`
+        /// (`foo(k: v)` sugar). Peek at the trailing Hash on the
+        /// stack; if the call targets a primitive that consumes
+        /// the kwarg (currently only `Integer#round(half:)` /
+        /// `Float#round(half:)`), dispatch the kwarg-aware path
+        /// directly. Otherwise fall through to `do_call`, which
+        /// continues to treat the trailing Hash as a positional
+        /// arg — preserves today's behaviour for user-defined
+        /// methods (whose `invoke_method` already pops the Hash
+        /// when the proto declares kw_params) and for primitives
+        /// that genuinely take a positional Hash.
+        pub(crate) fn do_call_kw(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
+            // Only `round` is kwarg-aware today, AND only for
+            // Int/Float receivers with a supported arg shape.
+            // Every other shape — user-defined `C#round(half:)`,
+            // 2+ positional args, non-Integer precision, BigInt
+            // receiver — must fall back to `do_call` so the
+            // existing primitive arms (arity ArgumentError, TypeError
+            // for non-Integer precision) AND user-method dispatch
+            // still fire. The trailing Hash travels as positional in
+            // that path, identical to pre-CallKw behaviour.
+            let name = self.interner.resolve(name_id).clone();
+            if &*name != "round" {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            // Peek receiver + trailing arg WITHOUT disturbing the
+            // stack — the fallback `do_call` needs the stack intact.
+            if argc == 0 {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            let stack_len = self.stack.len();
+            let trailing = self.stack[stack_len - 1].clone();
+            let Value::Hash(hash_id) = trailing else {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            };
+            // Receiver position: if `no_recv` it's the frame self;
+            // else it's stack[stack_len - argc - 1].
+            let recv_peek = if no_recv {
+                self.frames.last().expect("ICE: do_call_kw no frames").self_val.clone()
+            } else {
+                if stack_len < argc + 1 {
+                    return self.do_call(name_id, argc, no_recv, cache_id);
+                }
+                self.stack[stack_len - argc - 1].clone()
+            };
+            if !matches!(recv_peek, Value::Int(_) | Value::Float(_)) {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            // Positional arg shape — only `[]` (no precision) and
+            // `[Int]` (single Integer precision) are supported by
+            // the kwarg helpers. Anything else (arity > 1,
+            // non-Integer precision, BigInt precision) is left to
+            // the regular round arm in numeric.rs which has the
+            // existing ArgumentError / TypeError / BigInt guards.
+            let positional_argc = argc - 1; // exclude the kwargs Hash
+            if positional_argc > 1 {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            if positional_argc == 1 {
+                let precision = &self.stack[stack_len - 2];
+                if !matches!(precision, Value::Int(_)) {
+                    return self.do_call(name_id, argc, no_recv, cache_id);
+                }
+            }
+            // Resolve the :half kwarg. CRuby raises
+            // `ArgumentError: unknown keyword: :foo` for unknown
+            // keys, `ArgumentError: invalid rounding mode: foo`
+            // for unknown values.
+            let half_sym = self.interner.intern("half");
+            let pairs: Vec<(Value, Value)> = self.heap.hash(hash_id).clone();
+            let mut mode = crate::vm::numeric::HalfMode::Up;
+            for (k, v) in &pairs {
+                match k {
+                    Value::Sym(s) if *s == half_sym => {
+                        match v {
+                            Value::Sym(vsym) => {
+                                let name = self.interner.resolve(*vsym).to_string();
+                                mode = match name.as_str() {
+                                    "up" => crate::vm::numeric::HalfMode::Up,
+                                    "down" => crate::vm::numeric::HalfMode::Down,
+                                    "even" => crate::vm::numeric::HalfMode::Even,
+                                    other => {
+                                        return Err(self.trap(RubyError::ArgumentError {
+                                            msg: format!("invalid rounding mode: {}", other),
+                                        }));
+                                    }
+                                };
+                            }
+                            _ => {
+                                return Err(self.trap(RubyError::ArgumentError {
+                                    msg: "invalid rounding mode: (non-symbol)".to_string(),
+                                }));
+                            }
+                        }
+                    }
+                    Value::Sym(s) => {
+                        let key = self.interner.resolve(*s).to_string();
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("unknown keyword: :{}", key),
+                        }));
+                    }
+                    _ => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "non-symbol key in keyword arguments".to_string(),
+                        }));
+                    }
+                }
+            }
+            // Stack consume — receiver + positional + kwargs Hash.
+            // Guards above guarantee shape is one of:
+            //   - (Int|Float, [])
+            //   - (Int|Float, [Int])
+            let _kwargs_hash = self.stack.pop().expect("ICE: kwargs hash");
+            let pos_args: Vec<Value> = {
+                let split = self.stack.len() - positional_argc;
+                self.stack.drain(split..).collect()
+            };
+            let recv = if no_recv {
+                self.frames.last().expect("ICE: do_call_kw no frames").self_val.clone()
+            } else {
+                self.stack.pop().expect("ICE: do_call_kw recv")
+            };
+            let result = match (&recv, pos_args.as_slice()) {
+                (Value::Int(a), []) => crate::vm::numeric::int_round_with_half(*a, 0, mode),
+                (Value::Int(a), [Value::Int(n)]) => {
+                    crate::vm::numeric::int_round_with_half(*a, *n, mode)
+                }
+                (Value::Float(a), []) => {
+                    crate::vm::numeric::float_round_with_half(*a, 0, mode)
+                        .map_err(|e| self.trap(e))?
+                }
+                (Value::Float(a), [Value::Int(n)]) => {
+                    crate::vm::numeric::float_round_with_half(*a, *n, mode)
+                        .map_err(|e| self.trap(e))?
+                }
+                _ => unreachable!("guards above limit recv+args to Int/Float × [] | [Int]"),
+            };
+            self.stack.push(result);
+            Ok(())
+        }
         pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-

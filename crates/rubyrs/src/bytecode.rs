@@ -158,6 +158,17 @@ pub(crate) enum Op {
     /// Args: name SymId, argc, per-call-site inline-cache slot id.
     Call(SymId, u8, u16),
     CallNoRecv(SymId, u8, u16),
+    /// Variant of `Call` / `CallNoRecv` for call sites that the
+    /// compiler determined have a trailing kwargs hash (i.e. the
+    /// last arg originated from a `KeywordHashNode`, the `foo(a: 1)`
+    /// sugar — distinct from `foo({a: 1})` which is a positional
+    /// Hash). `argc` includes the trailing Hash; the dispatcher
+    /// pops it into a dedicated kwargs channel before invoking
+    /// `primitive_call` / user method dispatch so primitive arms
+    /// can read keyword arguments instead of having to inspect
+    /// the trailing positional Hash heuristically.
+    CallKw(SymId, u8, u16),
+    CallKwNoRecv(SymId, u8, u16),
     /// `foo(*args)` — single-splat call. Pops the args Array
     /// (which must be `Value::Array`) and uses its elements as
     /// the positional args. Argc is dynamic. Receiver above

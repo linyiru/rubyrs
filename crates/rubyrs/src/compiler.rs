@@ -499,7 +499,7 @@ fn compile_multiwrite_arm(
             for (i, target) in targets.iter().enumerate() {
                 b.emit(Op::Dup);
                 b.emit(Op::LoadConstInt(i as i64));
-                emit_method_call(b, bracket_id, 1, true, false, cc);
+                emit_method_call(b, bracket_id, 1, true, false, false, cc);
                 emit_store(b, interner, target);
             }
         }
@@ -509,20 +509,20 @@ fn compile_multiwrite_arm(
             for (i, target) in targets.iter().enumerate().take(s) {
                 b.emit(Op::Dup);
                 b.emit(Op::LoadConstInt(i as i64));
-                emit_method_call(b, bracket_id, 1, true, false, cc);
+                emit_method_call(b, bracket_id, 1, true, false, false, cc);
                 emit_store(b, interner, target);
             }
             b.emit(Op::Dup);
             b.emit(Op::LoadConstInt(s as i64));
             b.emit(Op::LoadConstInt(post as i64));
-            emit_method_call(b, splat_id, 2, true, false, cc);
+            emit_method_call(b, splat_id, 2, true, false, false, cc);
             emit_store(b, interner, &targets[s]);
             for j in 0..post {
                 b.emit(Op::Dup);
                 b.emit(Op::LoadConstInt(j as i64));
                 b.emit(Op::LoadConstInt(s as i64));
                 b.emit(Op::LoadConstInt(post as i64));
-                emit_method_call(b, post_id, 3, true, false, cc);
+                emit_method_call(b, post_id, 3, true, false, false, cc);
                 emit_store(b, interner, &targets[s + 1 + j]);
             }
         }
@@ -629,6 +629,7 @@ fn compile_call_arm(
     receiver: &Option<Box<SExpr>>,
     name: &str,
     args: &[SExpr],
+    kwargs_trailing: bool,
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
     cc: &mut u32,
@@ -656,8 +657,7 @@ fn compile_call_arm(
                     node: Expr::Call {
                         receiver: Some(Box::new(args[0].clone())),
                         name: "new".to_string(),
-                        args: args[1..].to_vec(),
-                    },
+                        args: args[1..].to_vec(), kwargs_trailing: false },
                 };
                 compile_expr(b, &new_call, protos, interner, cc);
             }
@@ -683,7 +683,7 @@ fn compile_call_arm(
     if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
     for a in args { compile_expr(b, a, protos, interner, cc); }
     let argc = args.len() as u8;
-    emit_method_call(b, name_id, argc, has_recv, false, cc);
+    emit_method_call(b, name_id, argc, has_recv, false, kwargs_trailing, cc);
 }
 
 /// Allocate a fresh inline-cache id and emit the appropriate
@@ -696,15 +696,24 @@ fn emit_method_call(
     argc: u8,
     has_recv: bool,
     has_block: bool,
+    has_kwargs: bool,
     cc: &mut u32,
 ) {
     let cid = *cc as u16;
     *cc += 1;
-    let op = match (has_recv, has_block) {
-        (true, false) => Op::Call(name, argc, cid),
-        (false, false) => Op::CallNoRecv(name, argc, cid),
-        (true, true) => Op::CallBlock(name, argc, cid),
-        (false, true) => Op::CallNoRecvBlock(name, argc, cid),
+    // Block + kwargs combination is not yet wired — `Op::CallBlock*`
+    // has no parallel CallKwBlock variant. For now `has_kwargs &&
+    // has_block` falls back to the non-kw block op; the trailing
+    // Hash travels as a positional arg, same shape as before this
+    // PR. Tracked as follow-up alongside the kwarg-consuming
+    // primitive surface.
+    let op = match (has_recv, has_block, has_kwargs) {
+        (true, false, false)  => Op::Call(name, argc, cid),
+        (false, false, false) => Op::CallNoRecv(name, argc, cid),
+        (true, false, true)   => Op::CallKw(name, argc, cid),
+        (false, false, true)  => Op::CallKwNoRecv(name, argc, cid),
+        (true, true, _)  => Op::CallBlock(name, argc, cid),
+        (false, true, _) => Op::CallNoRecvBlock(name, argc, cid),
     };
     b.emit(op);
 }
@@ -866,7 +875,7 @@ fn compile_stmt(
     b.current_span = e.span;
     match &e.node {
         Expr::LVarWrite(name, val) => {
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+            if let Expr::Call { receiver: Some(r), name: op, args , .. } = &val.node
                 && op == "+" && args.len() == 1
                     && let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
@@ -886,7 +895,7 @@ fn compile_stmt(
             b.emit(Op::StoreLocal(slot));
         }
         Expr::IVarWrite(name, val) => {
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+            if let Expr::Call { receiver: Some(r), name: op, args , .. } = &val.node
                 && op == "+" && args.len() == 1
                     && let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
@@ -976,7 +985,7 @@ pub(crate) fn compile_expr(
                         Expr::StrLit(_) => compile_expr(b, p, protos, interner, cc),
                         _ => {
                             compile_expr(b, p, protos, interner, cc);
-                            emit_method_call(b, to_s, 0, true, false, cc);
+                            emit_method_call(b, to_s, 0, true, false, false, cc);
                         }
                     }
                     if idx > 0 {
@@ -1002,7 +1011,7 @@ pub(crate) fn compile_expr(
                         Expr::StrLit(_) => compile_expr(b, p, protos, interner, cc),
                         _ => {
                             compile_expr(b, p, protos, interner, cc);
-                            emit_method_call(b, to_s, 0, true, false, cc);
+                            emit_method_call(b, to_s, 0, true, false, false, cc);
                         }
                     }
                     if idx > 0 {
@@ -1024,7 +1033,7 @@ pub(crate) fn compile_expr(
             // Fast path: `name = name + 1` — extremely common in `while i < N`
             // counters and `each` accumulators. Compile to a single `IncLocal`
             // that does the read-modify-write in place.
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+            if let Expr::Call { receiver: Some(r), name: op, args , .. } = &val.node
                 && op == "+" && args.len() == 1
                     && let (Expr::LVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
@@ -1046,7 +1055,7 @@ pub(crate) fn compile_expr(
         }
         Expr::IVarWrite(name, val) => {
             // Fast path: @name = @name + 1
-            if let Expr::Call { receiver: Some(r), name: op, args } = &val.node
+            if let Expr::Call { receiver: Some(r), name: op, args , .. } = &val.node
                 && op == "+" && args.len() == 1
                     && let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
@@ -1200,8 +1209,8 @@ pub(crate) fn compile_expr(
         Expr::While { cond, body, post } => {
             compile_while_arm(b, cond, body, *post, protos, interner, cc);
         }
-        Expr::Call { receiver, name, args } => {
-            compile_call_arm(b, receiver, name, args, protos, interner, cc);
+        Expr::Call { receiver, name, args, kwargs_trailing } => {
+            compile_call_arm(b, receiver, name, args, *kwargs_trailing, protos, interner, cc);
         }
         Expr::Def { name, params, defaults, rest, kw_params, kw_rest, block_param, receiver, body } => {
             compile_def_arm(
@@ -1319,7 +1328,7 @@ pub(crate) fn compile_expr(
             b.emit(Op::CreateBlock(block_proto_idx as u32, param_start, n_params, rest_slot));
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
-            emit_method_call(b, name_id, argc, has_recv, true, cc);
+            emit_method_call(b, name_id, argc, has_recv, true, false, cc);
         }
         Expr::CallWithBlockArg { receiver, name, args, block_arg } => {
             // `foo(&proc_value)`. Same stack shape as CallWithBlock
@@ -1337,7 +1346,7 @@ pub(crate) fn compile_expr(
             compile_expr(b, block_arg, protos, interner, cc);
             for a in args { compile_expr(b, a, protos, interner, cc); }
             let argc = args.len() as u8;
-            emit_method_call(b, name_id, argc, has_recv, true, cc);
+            emit_method_call(b, name_id, argc, has_recv, true, false, cc);
         }
         Expr::Return(val) => {
             // CRuby `return` has two scoping rules depending on the

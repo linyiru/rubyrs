@@ -99,6 +99,114 @@ pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Half-rounding mode selected by `Integer#round(half:)` /
+/// `Float#round(half:)` kwarg. CRuby default is `:up` (away
+/// from zero); `:down` rounds toward zero, `:even` is banker's
+/// rounding (round-half-to-even). Resolved at the dispatcher
+/// boundary (where the interner is available) and threaded into
+/// `int_round_with_half` / `float_round_with_half`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HalfMode { Up, Down, Even }
+
+/// `Integer#round(n, half: mode)` implementation. `n <= 0` is
+/// what actually rounds (positive precision returns self for
+/// Int receivers — there are no fractional digits to discard).
+pub(crate) fn int_round_with_half(a: i64, n: i64, mode: HalfMode) -> Value {
+    if n >= 0 {
+        return Value::Int(a);
+    }
+    // Mirror the existing `Integer#round` arm: i128 widens cleanly
+    // up to |n| <= 38 (10^38 fits i128); above that 10^|n|
+    // overflows i128 too — return self (Int 0 magnitude case is
+    // the only sane fallback at that precision without bignum).
+    // Use `unsigned_abs()` so `n == i64::MIN` doesn't panic in
+    // debug under `-n`.
+    let abs_n_u64 = n.unsigned_abs();
+    if abs_n_u64 > 38 {
+        return Value::Int(a);
+    }
+    let abs_n = abs_n_u64 as u32;
+    let p = 10i128.pow(abs_n);
+    let a128 = a as i128;
+    let q = a128 / p;
+    let r = a128 % p;
+    let abs_r = r.abs();
+    let bump = match mode {
+        HalfMode::Up => abs_r * 2 >= p,
+        HalfMode::Down => abs_r * 2 > p,
+        HalfMode::Even => {
+            if abs_r * 2 != p {
+                abs_r * 2 > p
+            } else {
+                q % 2 != 0
+            }
+        }
+    };
+    let rounded = if bump {
+        if r >= 0 { (q + 1) * p } else { (q - 1) * p }
+    } else {
+        q * p
+    };
+    if let Ok(v) = i64::try_from(rounded) {
+        Value::Int(v)
+    } else {
+        // Overflowed i64 — leave to the normal round arm /
+        // bignum_primitive promotion path. Returning the original
+        // value here is a fallback; the dispatcher should have
+        // already cfg-routed BigInt magnitudes elsewhere.
+        Value::Int(a)
+    }
+}
+
+/// `Float#round(n, half: mode)` implementation.
+pub(crate) fn float_round_with_half(a: f64, n: i64, mode: HalfMode) -> Result<Value, RubyError> {
+    if (a.is_nan() || a.is_infinite()) && n <= 0 {
+        return Err(RubyError::FloatDomainError {
+            msg: float_domain_label(a).to_string(),
+        });
+    }
+    let round_one = |x: f64| -> f64 {
+        match mode {
+            HalfMode::Up => x.round(),
+            HalfMode::Down => {
+                // Toward zero on half: floor(|x|+0.5) ≤ x ? +ceil : -ceil
+                let s = if x >= 0.0 { 1.0 } else { -1.0 };
+                let mag = x.abs();
+                let frac = mag - mag.floor();
+                if frac > 0.5 { s * mag.ceil() }
+                else if frac < 0.5 { s * mag.floor() }
+                else { s * mag.floor() }
+            }
+            HalfMode::Even => {
+                let s = if x >= 0.0 { 1.0 } else { -1.0 };
+                let mag = x.abs();
+                let floor = mag.floor();
+                let frac = mag - floor;
+                if frac > 0.5 { s * (floor + 1.0) }
+                else if frac < 0.5 { s * floor }
+                else {
+                    // banker's: ties round to nearest even
+                    if (floor as i64) % 2 == 0 { s * floor } else { s * (floor + 1.0) }
+                }
+            }
+        }
+    };
+    if n == 0 {
+        Ok(Value::Int(round_one(a) as i64))
+    } else if n > 0 {
+        let p = 10f64.powi((n).min(15) as i32);
+        Ok(Value::Float(round_one(a * p) / p))
+    } else {
+        // `unsigned_abs()` so `n == i64::MIN` doesn't panic in
+        // debug. Clamp the i32 exponent at 18 (10^18 ≈ 1e18, the
+        // largest power that gives a non-degenerate `Int` answer
+        // for any finite f64 receiver).
+        let abs_n = n.unsigned_abs().min(18) as i32;
+        let p = 10f64.powi(abs_n);
+        Ok(Value::Int((round_one(a / p) * p) as i64))
+    }
+}
+
 /// Try the Int / Float / mixed-numeric arms. Returns
 /// `Ok(Some(v))` on a handled call, `Ok(None)` if the receiver
 /// or method shape doesn't match and `primitive_call` should
