@@ -482,25 +482,29 @@ pub(crate) fn string_call(
         }
         // `String#squeeze` — collapse consecutive runs of the same
         // character. With a char-set arg, only chars in the set
-        // are squeezed. Char-set ranges (`"a-z"`) and ^-negation
-        // are NOT expanded here — the selector is treated as a
-        // literal char set. `tr` and `count` got the full
-        // `parse_tr_set` expansion in PR #255; squeeze still
-        // takes the conservative path and can migrate later.
-        // Documented in SUBSET.md.
+        // are squeezed. Char-set selectors go through the shared
+        // `parse_count_selector` (which delegates to `parse_tr_set`),
+        // so range shorthand (`"a-z"`) and `^`-negation work and the
+        // `TR_SET_MAX_CHARS` DoS cap applies. Membership XORs
+        // against the negation flag.
         (Value::Str(a), "squeeze", rest) if rest.is_empty()
             || (rest.len() == 1 && matches!(rest[0], Value::Str(_))) => {
             let a_str = a.to_string_lossy();
-            let set: Option<Vec<char>> = match rest.first() {
+            let parsed: Option<(std::collections::HashSet<char>, bool)> = match rest.first() {
                 None => None,
-                Some(Value::Str(s)) => Some(s.to_string_lossy().chars().collect()),
+                Some(Value::Str(s)) => {
+                    let s_ref = s.to_string_lossy();
+                    Some(parse_count_selector(&s_ref).map_err(|msg| {
+                        RubyError::ArgumentError { msg: msg.to_string() }
+                    })?)
+                }
                 _ => unreachable!(),
             };
             let mut out = String::with_capacity(a_str.len());
             let mut prev: Option<char> = None;
             for ch in a_str.chars() {
-                let in_set = match &set {
-                    Some(s) => s.contains(&ch),
+                let in_set = match &parsed {
+                    Some((set, negated)) => set.contains(&ch) != *negated,
                     None => true,
                 };
                 if in_set && Some(ch) == prev {

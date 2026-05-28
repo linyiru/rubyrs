@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 112 |
-| Examples in corpus | 572 |
-| Skipped `it` traces | 157 |
+| Files | 113 |
+| Examples in corpus | 578 |
+| Skipped `it` traces | 159 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 1 |
 | `fixture` | 51 |
-| `method-not-implemented` | 87 |
+| `method-not-implemented` | 89 |
 | `mock` | 18 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -44,7 +44,7 @@ Find blocks unlocked by a future feature with e.g.
 | Integer | 29 | 254 | 22 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
-| String | 19 | 88 | 28 |
+| String | 20 | 94 | 30 |
 | UnboundMethod | 4 | 18 | 0 |
 
 ## Files
@@ -154,6 +154,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_rjust_spec.rb` | String#rjust | `core/string/rjust_spec.rb` | 4 | 1 |
 | `string_rstrip_spec.rb` | String#rstrip | `core/string/rstrip_spec.rb` | 3 | 1 |
 | `string_size_spec.rb` | String#size | `core/string/size_spec.rb` | 1 | 0 |
+| `string_squeeze_spec.rb` | String#squeeze | `core/string/squeeze_spec.rb` | 6 | 2 |
 | `string_start_with_spec.rb` | String#start_with? | `core/string/start_with_spec.rb + shared/string/start_with.rb` | 3 | 7 |
 | `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 2 | 6 |
 | `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 8 | 0 |
