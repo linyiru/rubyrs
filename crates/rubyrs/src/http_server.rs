@@ -544,7 +544,80 @@ pub(crate) fn build_rack_env(
 /// stage 6 wires that.
 /// `(status, headers, body)` — the components a marshaled
 /// Rack response decomposes into for hyper.
-pub(crate) type MarshaledResponse = (u16, Vec<(String, String)>, bytes::Bytes);
+pub(crate) type MarshaledResponse = (u16, Vec<(String, String)>, HttpServerBody);
+
+// ===== P2b.2b.2: HttpServerBody enum — buffered ↔ streaming =====
+
+/// Unified body type for `_http_server` responses. Two
+/// variants:
+///
+/// - `Buffered(Full<Bytes>)` — A3α / P2b.1 path. The
+///   entire body is collected into Bytes before hyper
+///   starts pumping; one frame, then EOF.
+///
+/// - `Streaming(FiberResponseBody)` — P2b.2b.3 path
+///   (cfg(_fiber)). Each yielded chunk becomes one
+///   hyper frame; Fiber return signals EOF.
+///
+/// Implements `hyper::body::Body` by dispatching to the
+/// active variant. Error types unify under `BoxError`
+/// (Full's Infallible maps trivially).
+pub(crate) enum HttpServerBody {
+    Buffered(Full<bytes::Bytes>),
+    #[cfg(feature = "_fiber")]
+    #[allow(dead_code)] // P2b.2b.3 constructs this variant
+    Streaming(FiberResponseBody),
+}
+
+impl HttpServerBody {
+    /// Convenience constructor for the buffered case.
+    pub(crate) fn buffered(bytes: bytes::Bytes) -> Self {
+        Self::Buffered(Full::new(bytes))
+    }
+
+    /// Convenience constructor for the streaming case.
+    /// cfg(_fiber)-gated.
+    #[cfg(feature = "_fiber")]
+    #[allow(dead_code)] // P2b.2b.3 caller
+    pub(crate) fn streaming(fiber_id: crate::value::ObjId) -> Self {
+        Self::Streaming(FiberResponseBody::new(fiber_id))
+    }
+}
+
+impl hyper::body::Body for HttpServerBody {
+    type Data = bytes::Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        match self.get_mut() {
+            Self::Buffered(full) => {
+                // Full<Bytes>::poll_frame returns
+                // Poll<Option<Result<Frame, Infallible>>>;
+                // map Infallible → BoxError (unreachable).
+                std::pin::Pin::new(full).poll_frame(cx).map(|opt| {
+                    opt.map(|r| {
+                        r.map_err(|never| match never {})
+                    })
+                })
+            }
+            #[cfg(feature = "_fiber")]
+            Self::Streaming(stream) => {
+                std::pin::Pin::new(stream).poll_frame(cx)
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Buffered(full) => full.is_end_stream(),
+            #[cfg(feature = "_fiber")]
+            Self::Streaming(stream) => stream.is_end_stream(),
+        }
+    }
+}
 
 // ===== P2b.2b.1: FiberResponseBody — hyper Body wrapping a Fiber =====
 
@@ -1044,7 +1117,7 @@ pub(crate) fn marshal_rack_response(
         }
     }
 
-    Ok((status, headers, bytes::Bytes::from(body_bytes)))
+    Ok((status, headers, HttpServerBody::buffered(bytes::Bytes::from(body_bytes))))
 }
 
 #[allow(dead_code)] // Used by stage 4c.2 test + the stage 4c.3 per-request handler when that lands.
@@ -1078,15 +1151,15 @@ pub(crate) fn call_ruby_block_sync(
 /// request gets a 200 OK with a fixed plain-text body
 /// regardless of method/path/headers. Stage 3 swaps this
 /// for a Ruby-block invocation; the signature stays the
-/// same shape (`async fn(Request<Incoming>) -> Result<Response<Full<Bytes>>, _>`).
+/// same shape (`async fn(Request<Incoming>) -> Result<Response<HttpServerBody>, _>`).
 async fn handle_hardcoded(
     _req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>, Infallible> {
+) -> Result<Response<HttpServerBody>, Infallible> {
     let body = Bytes::from_static(b"Hello from rubyrs!\n");
     Ok(Response::builder()
         .status(200)
         .header("Content-Type", "text/plain; charset=utf-8")
-        .body(Full::new(body))
+        .body(HttpServerBody::buffered(body))
         .expect("hardcoded response is well-formed"))
 }
 
@@ -1196,7 +1269,7 @@ async fn handle_request_with_app(
     per_request_fuel: Option<u64>,
     max_request_body_bytes: usize,
     per_request_io_deadline: Option<std::time::Duration>,
-) -> Result<Response<Full<Bytes>>, Infallible> {
+) -> Result<Response<HttpServerBody>, Infallible> {
     use crate::value::Value;
     use http_body_util::Limited;
 
@@ -1375,7 +1448,9 @@ async fn handle_request_with_app(
             for (k, v) in headers {
                 builder = builder.header(k, v);
             }
-            builder.body(Full::new(body)).unwrap_or_else(|e| {
+            // body is already an HttpServerBody (buffered
+            // today; streaming wired in P2b.2b.3).
+            builder.body(body).unwrap_or_else(|e| {
                 error_response(500, format!("response builder failed: {e}"))
             })
         }
@@ -1389,11 +1464,11 @@ async fn handle_request_with_app(
 /// every internal/marshaling failure. PoC stage 4c.3 -- the
 /// embedder-supplied `on_error` config field (ADR 0022 v5)
 /// is wired in stage 6.
-fn error_response(status: u16, msg: String) -> Response<Full<Bytes>> {
+fn error_response(status: u16, msg: String) -> Response<HttpServerBody> {
     Response::builder()
         .status(status)
         .header("Content-Type", "text/plain; charset=utf-8")
-        .body(Full::new(Bytes::from(msg)))
+        .body(HttpServerBody::buffered(Bytes::from(msg)))
         .expect("error response is well-formed")
 }
 
