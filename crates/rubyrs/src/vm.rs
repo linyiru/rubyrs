@@ -43,10 +43,9 @@ pub(crate) use vm_ptr::with_vm_ptr_set;
 // `current_vm_ptr` is the read-side used by host fn bodies
 // that re-enter the Vm. _http_server battery's per-request
 // handler uses this to access &mut Vm without the host fn
-// signature itself needing to carry one. Only `#[cfg(test)]`
-// today (stage 4b verification test); the production
-// per-request handler (stage 4c+) will drop the cfg gate.
-#[cfg(all(feature = "_http_server", test))]
+// signature itself needing to carry one. Stage 4c.3 uses
+// this in production code path (handle_request_with_app).
+#[cfg(feature = "_http_server")]
 pub(crate) use vm_ptr::current_vm_ptr;
 
 // `iter::BlockStep` is the result of `step_block`. The

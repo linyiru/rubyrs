@@ -24,7 +24,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
@@ -212,6 +212,129 @@ pub(crate) fn build_rack_env(
 /// allocations, it must pin the `Value::Block(id)` first
 /// via the existing `PinGuard` shape — see iter.rs:140
 /// for the pattern.
+/// Marshal a Rack triplet `[status, headers, body]` back into
+/// HTTP-response components for hyper.
+///
+/// Stage 4c.3 of Phase H1 PoC. Expects the result of
+/// `call_ruby_block_sync(app, [env])` — a `Value` that
+/// SHOULD be a `Value::Array(id)` holding 3 elements.
+///
+/// ## Triplet shape (per Rack SPEC v1.6)
+///
+/// - **status**: `Value::Int` (HTTP status code, typically
+///   100..=599). Negative values + values > u16::MAX trap.
+/// - **headers**: `Value::Hash` with `String => String`
+///   pairs. (Future-spec extension: `String => Array<String>`
+///   for repeated headers like `Set-Cookie`; PoC v1 supports
+///   single-value only.)
+/// - **body**: `Value::Array` of `String`s. Iterated to a
+///   single contiguous byte buffer (per ADR 0022 v4
+///   "buffered response body" decision; streaming via
+///   chunked transfer is Phase H3 + Fiber).
+///
+/// ## Error mapping
+///
+/// Any structural mismatch returns `Err(String)` — caller
+/// (`handle_request_with_app`) maps to HTTP 500 with the
+/// message as the response body. PoC doesn't yet route
+/// through the `on_error` config field (ADR 0022 v5);
+/// stage 6 wires that.
+/// `(status, headers, body)` — the components a marshaled
+/// Rack response decomposes into for hyper.
+pub(crate) type MarshaledResponse = (u16, Vec<(String, String)>, bytes::Bytes);
+
+#[allow(dead_code)] // Used by stage 4c.3 handler when wired.
+pub(crate) fn marshal_rack_response(
+    vm: &crate::vm::Vm,
+    app_result: crate::value::Value,
+) -> Result<MarshaledResponse, String> {
+    use crate::value::Value;
+
+    let arr_id = match app_result {
+        Value::Array(id) => id,
+        other => return Err(format!(
+            "Rack app must return Array<status, headers, body>; got {}",
+            other.type_name(),
+        )),
+    };
+    let arr = vm.heap.array(arr_id);
+    if arr.len() != 3 {
+        return Err(format!(
+            "Rack app Array must have exactly 3 elements (status, headers, body); got {}",
+            arr.len(),
+        ));
+    }
+    let status = match &arr[0] {
+        Value::Int(n) => {
+            if *n < 0 || *n > u16::MAX as i64 {
+                return Err(format!(
+                    "Rack status must be 0..=65535; got {n}",
+                ));
+            }
+            *n as u16
+        }
+        other => return Err(format!(
+            "Rack status must be Integer; got {}",
+            other.type_name(),
+        )),
+    };
+    let headers_id = match &arr[1] {
+        Value::Hash(id) => *id,
+        other => return Err(format!(
+            "Rack headers must be Hash; got {}",
+            other.type_name(),
+        )),
+    };
+    let body_arr_id = match &arr[2] {
+        Value::Array(id) => *id,
+        other => return Err(format!(
+            "Rack body must be Array<String>; got {} (streaming bodies need Fiber, Phase H3)",
+            other.type_name(),
+        )),
+    };
+
+    // Headers — Hash<String, String> only in PoC v1.
+    let header_pairs = vm.heap.hash(headers_id);
+    let mut headers: Vec<(String, String)> = Vec::with_capacity(header_pairs.len());
+    for (k, v) in header_pairs {
+        let key_str = match k {
+            Value::Str(s) => s.to_string_lossy(),
+            other => return Err(format!(
+                "Rack header name must be String; got {}",
+                other.type_name(),
+            )),
+        };
+        let val_str = match v {
+            Value::Str(s) => s.to_string_lossy(),
+            other => return Err(format!(
+                "Rack header value must be String (Array<String> for repeated headers not yet supported); got {} for key {:?}",
+                other.type_name(), key_str,
+            )),
+        };
+        headers.push((key_str, val_str));
+    }
+
+    // Body — Array<String> only in PoC v1. Concatenate to
+    // a single Bytes for hyper's Full<Bytes> response.
+    let body_chunks = vm.heap.array(body_arr_id);
+    let total_len: usize = body_chunks.iter().map(|v| match v {
+        Value::Str(s) => s.content.borrow().len(),
+        _ => 0,
+    }).sum();
+    let mut body_bytes = Vec::with_capacity(total_len);
+    for chunk in body_chunks {
+        match chunk {
+            Value::Str(s) => body_bytes.extend_from_slice(&s.content.borrow()),
+            other => return Err(format!(
+                "Rack body Array elements must be String; got {} in body",
+                other.type_name(),
+            )),
+        }
+    }
+
+    Ok((status, headers, bytes::Bytes::from(body_bytes)))
+}
+
 #[allow(dead_code)] // Used by stage 4c.2 test + the stage 4c.3 per-request handler when that lands.
 pub(crate) fn call_ruby_block_sync(
     vm: &mut crate::vm::Vm,
@@ -332,6 +455,186 @@ pub(crate) fn run_blocking(
     }))
 }
 
+/// Per-request handler that calls a Ruby block with the
+/// Rack env hash and marshals the triplet back to a hyper
+/// response.
+///
+/// Stage 4c.3 of Phase H1 PoC. Combines:
+///   1. `build_rack_env` — synthesise env from request parts
+///   2. `call_ruby_block_sync` — invoke the app with `[env]`
+///   3. `marshal_rack_response` — Rack triplet → hyper
+///
+/// Returns 500 with a plain-text error message for any
+/// marshaling failure (non-Array result, wrong-arity Array,
+/// non-Integer status, non-String body chunk, etc.) — the
+/// `on_error` ADR 0022 v5 hook isn't wired until stage 6.
+///
+/// **Vm access**: takes `block_id` + `listener_addr` by value;
+/// retrieves `&mut Vm` from `current_vm_ptr()` for the
+/// synchronous block of (env-build + call + marshal). Per
+/// ADR 0013, this is time-disjoint with the outer
+/// `invoke_host_fn`'s `&mut Vm` borrow.
+async fn handle_request_with_app(
+    req: Request<Incoming>,
+    block_id: crate::value::ObjId,
+    listener_addr: SocketAddr,
+    peer_addr: SocketAddr,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    use crate::value::Value;
+
+    // Phase A: buffer request body (no Vm access; pure async I/O)
+    let (parts, body) = req.into_parts();
+    let body_bytes_full = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return Ok(error_response(400, format!("body read failed: {e}")));
+        }
+    };
+
+    // Extract request fields we need for env construction.
+    // hyper's URI is already path-decoded; query is raw per
+    // Rack SPEC. Headers preserved as (name, value-bytes)
+    // tuples — `build_rack_env` lossy-decodes values that
+    // aren't valid UTF-8.
+    let method_str = parts.method.as_str().to_string();
+    let path_str = parts.uri.path().to_string();
+    let query_str = parts.uri.query().unwrap_or("").to_string();
+    let headers_vec: Vec<(String, Vec<u8>)> = parts.headers.iter()
+        .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+        .collect();
+    let body_vec: Vec<u8> = body_bytes_full.to_vec();
+
+    // Phase B: synchronous Vm work — build env, call block,
+    // marshal response. No .await between these steps so the
+    // VmBorrow contract (ADR 0022 v5) holds: while the Vm is
+    // borrowed, control does not yield back to the tokio
+    // executor.
+    let response_components = {
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            // Should never happen — the outer host fn
+            // dispatched through `with_vm_ptr_set`. Defence-
+            // in-depth.
+            return Ok(error_response(
+                500,
+                "internal: CURRENT_VM_PTR null inside _http_server handler".to_string(),
+            ));
+        }
+        // SAFETY: ADR 0013 contract. Outer `&mut Vm` parked
+        // by `invoke_host_fn`; we re-borrow time-disjointly
+        // inside this synchronous block. No .await reached
+        // while the borrow is live.
+        let vm = unsafe { &mut *ptr };
+
+        let env_id = build_rack_env(
+            vm,
+            &method_str,
+            &path_str,
+            &query_str,
+            &headers_vec,
+            &body_vec,
+            listener_addr,
+            peer_addr,
+            "http",  // PoC stage 4c.3: HTTPS via _http_server_tls battery (H5)
+        );
+        let env_val = Value::Hash(env_id);
+
+        match call_ruby_block_sync(vm, block_id, vec![env_val]) {
+            Ok(app_result) => marshal_rack_response(vm, app_result),
+            Err(trap) => Err(format!("Rack app raised: {:?}", trap.err)),
+        }
+    };
+    // VmBorrow scope ends; Phase C can resume tokio await.
+
+    // Phase C: marshal to hyper response.
+    let response = match response_components {
+        Ok((status, headers, body)) => {
+            let mut builder = Response::builder().status(status);
+            for (k, v) in headers {
+                builder = builder.header(k, v);
+            }
+            builder.body(Full::new(body)).unwrap_or_else(|e| {
+                error_response(500, format!("response builder failed: {e}"))
+            })
+        }
+        Err(msg) => error_response(500, msg),
+    };
+    Ok(response)
+}
+
+/// Build a plain-text error response with the given status
+/// and message body. Used by `handle_request_with_app` for
+/// every internal/marshaling failure. PoC stage 4c.3 -- the
+/// embedder-supplied `on_error` config field (ADR 0022 v5)
+/// is wired in stage 6.
+fn error_response(status: u16, msg: String) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .body(Full::new(Bytes::from(msg)))
+        .expect("error response is well-formed")
+}
+
+/// Variant of `serve_until_shutdown` that invokes a Ruby
+/// block per request instead of returning a hardcoded
+/// response. Caller supplies the block_id; the listener's
+/// connection handlers all close over the same block.
+async fn serve_with_app_until_shutdown(
+    listener: TcpListener,
+    block_id: crate::value::ObjId,
+    listener_addr: SocketAddr,
+    mut shutdown: oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => return Ok(()),
+            accept = listener.accept() => {
+                let (stream, peer_addr) = accept?;
+                let io = TokioIo::new(stream);
+                tokio::task::spawn_local(async move {
+                    let svc = service_fn(move |req| {
+                        handle_request_with_app(req, block_id, listener_addr, peer_addr)
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        }
+    }
+}
+
+/// Bind + serve via a Ruby app block for at most `duration`
+/// seconds, then auto-shut. Returns the actual bound addr.
+///
+/// Stage 4c.3 entry point — wired into the
+/// `__rubyrs_http_serve_with_app(addr, secs, app)` host fn
+/// via `register_host_fns`.
+pub(crate) fn run_blocking_for_duration_with_app(
+    addr: SocketAddr,
+    duration: std::time::Duration,
+    block_id: crate::value::ObjId,
+) -> std::io::Result<SocketAddr> {
+    let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let local = LocalSet::new();
+    let bound = rt.block_on(local.run_until(async move {
+        let listener = TcpListener::bind(addr).await?;
+        let listener_addr = listener.local_addr()?;
+        tokio::select! {
+            res = serve_with_app_until_shutdown(
+                listener, block_id, listener_addr, shutdown_rx,
+            ) => res?,
+            _ = tokio::time::sleep(duration) => {}
+        }
+        Ok::<_, std::io::Error>(listener_addr)
+    }))?;
+    Ok(bound)
+}
+
 /// Bind + serve hardcoded responses for at most `duration`,
 /// then return. Stage 3 PoC entry point — used by the Ruby-
 /// side `__rubyrs_http_serve_hardcoded(addr, secs)` host fn.
@@ -437,6 +740,54 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         //     "127.0.0.1:0", 1
         //   )
         // gives "127.0.0.1:54321" after the server returns.
+        Ok(Value::Str(std::rc::Rc::new(
+            crate::value::RStr::new(bound.to_string()),
+        )))
+    });
+
+    rt.register_fn("__rubyrs_http_serve_with_app", |args| {
+        // Argument shape:
+        //   (bind_addr: String, duration_secs: Integer, app: Block/Lambda)
+        let (addr_str, duration_secs, block_id) = match args {
+            [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
+                (addr.to_string_lossy(), *secs, *id)
+            }
+            _ => {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda)"
+                            .to_string(),
+                    },
+                    backtrace: vec![],
+                });
+            }
+        };
+
+        if duration_secs < 0 {
+            return Err(Trap {
+                err: RubyError::ArgumentError {
+                    msg: format!("duration_secs must be non-negative, got {duration_secs}"),
+                },
+                backtrace: vec![],
+            });
+        }
+
+        let addr: SocketAddr = addr_str.parse().map_err(|e| Trap {
+            err: RubyError::ArgumentError {
+                msg: format!("invalid bind address '{addr_str}': {e}"),
+            },
+            backtrace: vec![],
+        })?;
+
+        let duration = Duration::from_secs(duration_secs as u64);
+        let bound = run_blocking_for_duration_with_app(addr, duration, block_id)
+            .map_err(|e| Trap {
+                err: RubyError::RuntimeError {
+                    msg: format!("http_serve_with_app: {e}"),
+                },
+                backtrace: vec![],
+            })?;
+
         Ok(Value::Str(std::rc::Rc::new(
             crate::value::RStr::new(bound.to_string()),
         )))
@@ -694,6 +1045,203 @@ mod tests {
             raise "unknown key should return nil" \
                 unless env["NONEXISTENT_KEY"].nil?
         "#, "stage_4c1_check.rb").expect("env hash Ruby-side assertions all hold");
+    }
+
+    /// Stage 4c.3 end-to-end smoke test: Ruby block runs
+    /// per HTTP request, env hash gets through, response
+    /// triplet marshals back to a real hyper response.
+    ///
+    /// Setup:
+    ///   - Client thread connects to the server mid-flight
+    ///     (after 200ms delay so the server's bind + accept
+    ///     loop is up), sends a GET / with a custom header,
+    ///     reads the response.
+    ///   - Server runs for 1 second invoking a Ruby lambda
+    ///     that constructs a response from the env hash.
+    ///
+    /// The Ruby block echoes parts of the env back in the
+    /// response body — the test verifies the env was built
+    /// correctly AND that the response marshaling worked AND
+    /// that custom headers in the response Hash come through.
+    #[test]
+    fn ruby_app_serves_real_request_end_to_end() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18091";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(
+                b"GET /users/42?verbose=1 HTTP/1.1\r\n\
+                  Host: example.com:18091\r\n\
+                  User-Agent: rubyrs-test/0.1\r\n\
+                  Connection: close\r\n\r\n",
+            ).expect("write request");
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).expect("read response");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // Ruby app block echoes back several env entries +
+        // sets a custom response header. Validates that:
+        //   - PATH_INFO + QUERY_STRING + REQUEST_METHOD
+        //     made it into env
+        //   - HTTP_HOST + HTTP_USER_AGENT prefixing works
+        //   - REMOTE_ADDR / REMOTE_PORT populated
+        //   - Response Hash<String, String> headers go out
+        //   - Response body Array<String> concatenates
+        rt.eval(&format!(r#"
+            app = ->(env) {{
+              body = "method=#{{env['REQUEST_METHOD']}};" +
+                     "path=#{{env['PATH_INFO']}};" +
+                     "query=#{{env['QUERY_STRING']}};" +
+                     "host=#{{env['HTTP_HOST']}};" +
+                     "ua=#{{env['HTTP_USER_AGENT']}};" +
+                     "remote=#{{env['REMOTE_ADDR']}};"
+              [200, {{
+                "Content-Type" => "text/plain; charset=utf-8",
+                "X-Rubyrs-Echo" => "1",
+              }}, [body]]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "stage_4c3_e2e.rb").expect("Ruby app served requests");
+
+        let response_text = client_thread.join().expect("client thread did not panic");
+
+        assert!(
+            response_text.contains("HTTP/1.1 200 OK"),
+            "expected 200 OK, got:\n{response_text}",
+        );
+        assert!(
+            response_text.to_lowercase().contains("content-type: text/plain"),
+            "expected Content-Type header from app, got:\n{response_text}",
+        );
+        assert!(
+            response_text.to_lowercase().contains("x-rubyrs-echo: 1"),
+            "expected custom X-Rubyrs-Echo header, got:\n{response_text}",
+        );
+        // Body assertions — confirm env got built correctly
+        // AND that the block's interpolation came through
+        assert!(
+            response_text.contains("method=GET;"),
+            "expected env REQUEST_METHOD=GET in body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("path=/users/42;"),
+            "expected env PATH_INFO=/users/42 in body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("query=verbose=1;"),
+            "expected env QUERY_STRING=verbose=1 in body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("host=example.com:18091;"),
+            "expected env HTTP_HOST in body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("ua=rubyrs-test/0.1;"),
+            "expected env HTTP_USER_AGENT in body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("remote=127.0.0.1;"),
+            "expected env REMOTE_ADDR=127.0.0.1 in body, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 4c.3 edge case: Ruby app returns non-Array.
+    /// Verifies the marshaling layer produces a 500 + error
+    /// message rather than panicking or sending a malformed
+    /// response.
+    #[test]
+    fn ruby_app_non_array_result_yields_500() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18092";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(
+                b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            ).expect("write");
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).expect("read");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // App returns a String instead of [status, headers, body]
+        // — should land 500 + msg containing "must return Array"
+        rt.eval(&format!(r#"
+            app = ->(env) {{ "this is not an Array" }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "stage_4c3_non_array.rb").expect("server ran (app misbehaved)");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 500"),
+            "expected 500 for non-Array result, got:\n{response_text}",
+        );
+        assert!(
+            response_text.to_lowercase().contains("must return array"),
+            "expected error message about Array, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 4c.3 edge case: Ruby app raises an exception.
+    /// Verifies the trap propagates → 500 with the
+    /// exception message in the body.
+    #[test]
+    fn ruby_app_raises_yields_500_with_message() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18093";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(
+                b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            ).expect("write");
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).expect("read");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            app = ->(env) {{ raise "kaboom inside app" }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "stage_4c3_raises.rb").expect("server ran (app raised)");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 500"),
+            "expected 500 for raise, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("kaboom inside app"),
+            "expected raise message in body, got:\n{response_text}",
+        );
     }
 
     /// Stage 4c.2 verification: invoke a Ruby block from
