@@ -2741,6 +2741,22 @@ fn integer_chr_basic() {
             other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
         }
     }
+    // CRuby uses the literal "bignum out of char range" message
+    // for BigInt-recv `chr`. Pin the message text — interpolating
+    // the BigInt's decimal expansion would diverge from CRuby AND
+    // bypass `check_bigint_to_s_cap`, so this also serves as the
+    // DoS-shape regression guard.
+    #[cfg(feature = "bignum")]
+    {
+        let err = rt.eval("(2**64).chr", "chr_msg.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, message, .. } => {
+                assert_eq!(class_name, "RangeError");
+                assert_eq!(message, "bignum out of char range");
+            }
+            other => panic!("expected RangeError, got {:?}", other),
+        }
+    }
     // respond_to? should report true on both Int and BigInt
     // receivers (whitelist guard in lookup.rs).
     let buf = SharedBuf::new();

@@ -1992,13 +1992,18 @@ impl Vm {
                     }
                     // `BigInt#chr` — any `Value::BigInt` is by the
                     // canonical-BigInt invariant outside i64 range,
-                    // therefore necessarily outside 0..=255. Surface
-                    // the same RangeError shape as the Int-recv arm
-                    // in `numeric.rs` so a caller iterating across
-                    // mixed magnitudes sees a uniform error message.
+                    // therefore necessarily outside 0..=255. CRuby
+                    // uses the literal message "bignum out of char
+                    // range" (not the interpolated value) here, so
+                    // we match that exactly. Bonus: avoids
+                    // materialising the BigInt's full decimal
+                    // expansion into the error payload — the
+                    // sibling to_s arms guard against that via
+                    // `check_bigint_to_s_cap`, but the chr error
+                    // path didn't need the value at all.
                     "chr" => {
                         return Err(self.trap(RubyError::RangeError {
-                            msg: format!("{} out of char range", b),
+                            msg: "bignum out of char range".to_string(),
                         }));
                     }
                     "zero?" => return Ok(Some(Value::Bool(b.sign() == Sign::NoSign))),
