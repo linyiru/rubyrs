@@ -1476,7 +1476,7 @@ impl Vm {
             return Err(self.trap(RubyError::NoMethodError {
                 kind: crate::error::NoMethodErrorKind::Private,
                 method: name.to_string(),
-                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
             }));
         }
         if vis == Visibility::Protected && !bypass_visibility {
@@ -1498,7 +1498,7 @@ impl Vm {
                 return Err(self.trap(RubyError::NoMethodError {
                     kind: crate::error::NoMethodErrorKind::Protected,
                     method: name.to_string(),
-                    recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
+                    recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
                 }));
             }
         }
@@ -3568,7 +3568,7 @@ impl Vm {
             }
             return Err(self.trap(RubyError::NoMethodError {
                 kind: crate::error::NoMethodErrorKind::Missing,
-                method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
+                method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
             }));
         }
 
@@ -5334,7 +5334,7 @@ impl Vm {
         }
         Err(self.trap(RubyError::NoMethodError {
             kind: crate::error::NoMethodErrorKind::Missing,
-            method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
+            method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
         }))
     }
 
@@ -6884,7 +6884,7 @@ impl Vm {
             }
             return Err(self.trap(RubyError::NoMethodError {
                 kind: crate::error::NoMethodErrorKind::Missing,
-                method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
+                method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
             }));
         }
         let recv = recv.expect("ICE: receiver missing for block call");
@@ -7072,7 +7072,7 @@ impl Vm {
         }
         Err(self.trap(RubyError::NoMethodError {
             kind: crate::error::NoMethodErrorKind::Missing,
-            method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
+            method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
         }))
     }
 

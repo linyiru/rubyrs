@@ -87,3 +87,23 @@ rescue NoMethodError => e
   e.message.start_with?("undefined method") ? "spoof-blocked" : "spoof-LEAKED-#{e.message}"
 end
 puts "spoof=#{err}"
+
+## Shape 6: missing-method NoMethodError on an Object instance
+## also renders the receiver as "an instance of <ClassName>"
+## (CRuby 3.3+), matching the visibility-error shape. Pre-fix
+## the visibility sites used the rich descriptor but the
+## missing-method sites kept the generic "Object" type tag,
+## producing inconsistent receiver wording on the SAME object.
+## (code-review #291 round 2.)
+## Substring check (not full message) — rubyrs uses backtick +
+## apostrophe quoting (`undefined method `X'`) while CRuby 3.4
+## uses both apostrophes ('X'); the receiver descriptor is
+## what this shape pins.
+class Bare; end
+err = begin
+  Bare.new.no_such_method
+  "no-raise"
+rescue NoMethodError => e
+  e.message.include?("for an instance of Bare") ? "instance-shape" : "wrong-#{e.message}"
+end
+puts "missing-on-instance=#{err}"
