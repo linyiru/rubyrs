@@ -505,6 +505,22 @@ pub(crate) struct Vm {
     /// transitively apply — anything that method itself calls
     /// runs through the normal check.
     pub(crate) bypass_visibility_once: bool,
+    /// Builtin reflection metadata for the synth Methods that
+    /// `Kernel.instance_method(:foo)` returns. Looked up by the
+    /// `instance_method` arm when the receiver is Kernel.
+    ///
+    /// Kept OUT of `Kernel.methods` deliberately: putting them on
+    /// the actual chain would re-find them during regular dispatch
+    /// (`obj.class` etc.) and re-invoke the synth on every call,
+    /// creating either recursion or a spurious user-override
+    /// signal. The registry is consulted only for the introspection
+    /// surface (`instance_method` / `methods` if we ever add it),
+    /// not for dispatch.
+    pub(crate) kernel_builtin_metas: std::collections::HashMap<crate::intern::SymId, std::rc::Rc<crate::value::BuiltinMeta>>,
+    /// Cached `Kernel` SymId, set at install time. `kernel_builtin_method`
+    /// uses this for O(1) HashMap lookup into `classes` instead of a
+    /// linear name-string walk.
+    pub(crate) kernel_class_sym: Option<crate::intern::SymId>,
     /// Cached index into `protos` of the callable→Block
     /// forwarder. Lazily built on first `&callable` coercion in
     /// `do_call_block` (BoundMethod, CurriedProc, ...). The
@@ -634,6 +650,8 @@ impl Vm {
             pending_loop_transfer: None,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
+            kernel_builtin_metas: std::collections::HashMap::new(),
+            kernel_class_sym: None,
         }
     }
 

@@ -431,6 +431,42 @@ pub struct Method {
     /// `def name ... end` have `None` here and follow the normal
     /// fresh-locals path.
     pub(crate) closure: Option<MethodClosure>,
+    /// `Some` for synthesised builtin methods installed on
+    /// Kernel/Object (and similar primitive-host classes) so
+    /// `Kernel.instance_method(:class).arity` / `.parameters` /
+    /// `.source_location` return real values instead of the
+    /// `proto_idx`-derived defaults. The `proto_idx` field on
+    /// these Methods points at a dummy proto (index 0) and is
+    /// never read — the builtin payload supplies introspection
+    /// metadata directly, and invocation short-circuits in
+    /// `invoke_method_with_block` to re-enter `do_call` with the
+    /// primitive name so the inline dispatch fires.
+    pub(crate) builtin: Option<std::rc::Rc<BuiltinMeta>>,
+}
+
+/// Metadata for a synthesised builtin Method installed on
+/// Kernel etc. so reflection sees realistic shape. Mirrors the
+/// fields the arity/parameters/source_location dispatch arms
+/// would otherwise derive from a real bytecode `Proto`.
+#[derive(Debug)]
+pub struct BuiltinMeta {
+    /// The primitive method name (e.g. `:class`, `:nil?`,
+    /// `:respond_to?`). Invocation pushes receiver+args onto the
+    /// stack and re-enters `do_call(name_id, ...)` so the inline
+    /// primitive dispatch handles it.
+    pub(crate) name_id: crate::intern::SymId,
+    /// CRuby `Method#arity` value. Negative means "variadic":
+    /// `-(required + 1)` per CRuby's encoding.
+    pub(crate) arity: i64,
+    /// CRuby `Method#parameters` shape: list of (kind, name)
+    /// pairs where kind is `"req"`, `"opt"`, `"rest"`, etc.
+    pub(crate) parameters: Vec<(&'static str, Option<String>)>,
+    /// `Method#source_location` label. CRuby reports things like
+    /// `"<internal:kernel>"` for C-implemented methods; we mirror.
+    pub(crate) source_label: &'static str,
+    /// Line on the source label. CRuby uses real C-file line
+    /// numbers; we use `0` as a stable placeholder.
+    pub(crate) source_line: i64,
 }
 
 #[derive(Debug, Clone, Copy)]

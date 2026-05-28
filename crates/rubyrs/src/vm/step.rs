@@ -1112,6 +1112,7 @@ impl Vm {
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
                     closure: None,
+                builtin: None,
                 });
                 if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
@@ -1151,6 +1152,7 @@ impl Vm {
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
                     closure: None,
+                builtin: None,
                 });
                 if let Some(cls) = self.class_stack.last() {
                     cls.singleton_methods.borrow_mut().insert(name_id, m);
@@ -1201,6 +1203,7 @@ impl Vm {
                     defining_class: Some(Rc::downgrade(&sc)),
                     visibility: std::cell::Cell::new(Visibility::Public),
                     closure: None,
+                builtin: None,
                 });
                 sc.methods.borrow_mut().insert(name_id, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
@@ -1604,6 +1607,7 @@ impl Vm {
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                builtin: None,
                 });
                 if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
@@ -1667,6 +1671,7 @@ impl Vm {
                     defining_class: Some(Rc::downgrade(&sc)),
                     visibility: std::cell::Cell::new(Visibility::Public),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
+                builtin: None,
                 });
                 sc.methods.borrow_mut().insert(name_id, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
