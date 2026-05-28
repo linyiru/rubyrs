@@ -1219,6 +1219,7 @@ impl Vm {
                             Ok(CallableOutcome::Handled)
                         }
                         Value::UnboundMethod(_) => Err(self.trap(RubyError::NoMethodError {
+                            kind: crate::error::NoMethodErrorKind::Missing,
                             method: "receiver".into(),
                             recv_type: std::borrow::Cow::Borrowed("UnboundMethod"),
                         })),
@@ -1475,8 +1476,9 @@ impl Vm {
         );
         if vis == Visibility::Private && !bypass_visibility && !self_recv {
             return Err(self.trap(RubyError::NoMethodError {
-                method: format!("private method '{name}' called"),
-                recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
+                kind: crate::error::NoMethodErrorKind::Private,
+                method: name.to_string(),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
             }));
         }
         if vis == Visibility::Protected && !bypass_visibility {
@@ -1496,12 +1498,57 @@ impl Vm {
             };
             if !allowed {
                 return Err(self.trap(RubyError::NoMethodError {
-                    method: format!("protected method '{name}' called"),
-                    recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
+                    kind: crate::error::NoMethodErrorKind::Protected,
+                    method: name.to_string(),
+                    recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
                 }));
             }
         }
         Ok(())
+    }
+
+    /// CRuby-shape receiver description for NoMethodError-style
+    /// messages. Object instances render as
+    /// `"an instance of <ClassName>"` (matches CRuby 3.3+); all
+    /// other Value variants fall back to `Value::type_name()`.
+    /// Used by the private/protected visibility error sites so
+    /// scripts asserting on the message text see the same words
+    /// as CRuby. (TRY_RUNS pass-10 layer #5.)
+    pub(crate) fn recv_desc_for_error(&self, recv: &Value) -> String {
+        match recv {
+            Value::Object(id) => {
+                // `real_class_of` skips the eigenclass shell.
+                // `class_of` would return the singleton class
+                // when one has been installed (e.g. via
+                // `def obj.foo`), rendering the error as
+                // "an instance of #<Class:#<Inner>>" — never
+                // what a script wants to see. (Copilot review
+                // #291 round 1.)
+                //
+                // Known gap: CRuby switches *format* when a
+                // singleton is installed — it inspects the
+                // receiver with its memory address
+                // ("for #<Inner:0x000…>") instead of using
+                // "an instance of …". That would require us to
+                // mirror `Object#inspect` here, including the
+                // memory-address suffix. Tier-1 ships the
+                // simpler "an instance of <real class>" form;
+                // a script that asserts on the inspect-form
+                // wording for singleton-bearing receivers
+                // sees a known divergence we accept until a
+                // real consumer needs it.
+                // `try_real_class_of` is the fallible variant
+                // so a corrupt `Value::Object(id)` reaching
+                // here doesn't panic the host on the failure
+                // path — falls back to the generic type tag.
+                // (Code-review #291 round 2.)
+                match self.heap.try_real_class_of(*id) {
+                    Some(cls) => format!("an instance of {}", cls.name),
+                    None => recv.type_name().to_string(),
+                }
+            }
+            other => other.type_name().to_string(),
+        }
     }
 
     /// Class-receiver introspection arms — the second Class
@@ -1593,6 +1640,7 @@ impl Vm {
                         cls.name.clone()
                     };
                     return Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
                         method: "superclass".to_string(),
                         recv_type: std::borrow::Cow::Owned(format!("module {}", label)),
                     }));
@@ -3521,7 +3569,8 @@ impl Vm {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
-                method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
+                kind: crate::error::NoMethodErrorKind::Missing,
+                method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
             }));
         }
 
@@ -5382,7 +5431,8 @@ impl Vm {
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
-            method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
+            kind: crate::error::NoMethodErrorKind::Missing,
+            method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
         }))
     }
 
@@ -6931,7 +6981,8 @@ impl Vm {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
-                method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
+                kind: crate::error::NoMethodErrorKind::Missing,
+                method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
             }));
         }
         let recv = recv.expect("ICE: receiver missing for block call");
@@ -7118,7 +7169,8 @@ impl Vm {
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
-            method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
+            kind: crate::error::NoMethodErrorKind::Missing,
+            method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
         }))
     }
 

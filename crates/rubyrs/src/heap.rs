@@ -271,6 +271,22 @@ impl Heap {
             _ => panic!("ICE: real_class_of called on non-Object slot"),
         }
     }
+    /// Fallible variant of `real_class_of`. Returns `None` if
+    /// the slot is dead or doesn't carry an Object payload —
+    /// the panic-ing accessor's "ICE" cases. Used by error-path
+    /// formatting (e.g. `recv_desc_for_error`) so a corrupt
+    /// `Value::Object(id)` turns a NoMethodError into the next-
+    /// best string instead of aborting the host on the failure
+    /// path. (Code-review #291 round 2.)
+    pub(crate) fn try_real_class_of(&self, id: ObjId) -> Option<Rc<crate::value::Class>> {
+        let idx = id.0 as usize;
+        if idx >= self.slots.len() { return None; }
+        match &self.slots[idx] {
+            Slot::Live(HeapObj::Instance(i)) => Some(i.class.clone()),
+            Slot::Live(HeapObj::TypedData(d)) => Some(d.class.clone()),
+            _ => None,
+        }
+    }
     /// Lazily install + return the singleton class for an Object.
     /// Idempotent: returns the same `Rc<Class>` on subsequent calls.
     /// The synthesised class has `superclass = i.class.clone()` so
