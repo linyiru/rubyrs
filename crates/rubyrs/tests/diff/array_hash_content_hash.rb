@@ -40,6 +40,14 @@ puts({a: 1, b: 2}.hash == {b: 2, a: 1}.hash)
 puts({a: 1}.hash != {a: 2}.hash)
 puts({a: 1}.hash != {b: 1}.hash)
 
+# Hash — pair-internal swap must perturb (regression guard for
+# the cycle-2 XOR-collision finding). A bare `kh ^ vh` per pair
+# would collide `{1=>2,2=>1}` with `{1=>1,2=>2}` because both
+# reduce to `acc = 0` despite being `!=`. The combinator now
+# mixes key and value non-symmetrically (`kh*31 + vh`).
+puts({1 => 2, 2 => 1}.hash != {1 => 1, 2 => 2}.hash)
+puts({1 => 2, 2 => 1}.hash == {2 => 1, 1 => 2}.hash)
+
 # Mixed nesting
 puts({a: [1, 2]}.hash == {a: [1, 2]}.hash)
 puts([{x: 1}, {y: 2}].hash == [{x: 1}, {y: 2}].hash)

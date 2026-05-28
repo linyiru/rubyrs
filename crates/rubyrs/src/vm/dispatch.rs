@@ -7206,10 +7206,15 @@ fn object_hash_inner(
             }
         }
         // Hash#hash is order-INsensitive — `{a:1,b:2}.hash ==
-        // {b:2,a:1}.hash` because the two hashes are `==`. Use
-        // XOR-of-(key_hash XOR value_hash) so pair order can't
-        // affect the result. Length still participates so
-        // empty-vs-full disambiguates.
+        // {b:2,a:1}.hash` because the two hashes are `==`. We
+        // XOR a per-pair combinator across pairs so pair order
+        // can't affect the result, but the combinator itself
+        // mixes key and value non-symmetrically (mul-then-add)
+        // so a swap of key/value *within* a pair perturbs the
+        // result. A bare `kh ^ vh` per pair would collide
+        // structurally: e.g. `{1=>2, 2=>1}` and `{1=>1, 2=>2}`
+        // both reduce to `acc = 0` despite being `!=`. Length
+        // still participates so empty-vs-full disambiguates.
         Value::Hash(id) => {
             10u8.hash(&mut h);
             if !visited.insert(*id) {
@@ -7221,7 +7226,14 @@ fn object_hash_inner(
                 for (k, val) in &pairs {
                     let kh = object_hash_inner(k, heap, visited);
                     let vh = object_hash_inner(val, heap, visited);
-                    acc ^= kh ^ vh;
+                    // (kh * 31 + vh) — non-commutative in kh,vh
+                    // so swapping key with value changes the
+                    // pair's contribution; XOR across pairs
+                    // keeps overall ordering irrelevant.
+                    let pair_h = (kh as i128)
+                        .wrapping_mul(31)
+                        .wrapping_add(vh as i128) as i64;
+                    acc ^= pair_h;
                 }
                 acc.hash(&mut h);
                 visited.remove(id);
