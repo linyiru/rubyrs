@@ -4659,7 +4659,17 @@ impl Vm {
             | "sprintf" | "format" | "eval"
         ) && let Some(res) = self.builtin_call(name.as_ref(), &args) {
             let v = res?;
-            self.stack.push(v);
+            // Mirror the flag handling in the no_recv builtin
+            // path (see line 452-459): `eval` clears
+            // `suppress_call_result_push` when an outer rescue
+            // has unwound past it; unconditionally pushing the
+            // result corrupts the rescue handler's stack
+            // (Copilot review #267 round 1).
+            if self.suppress_call_result_push {
+                self.suppress_call_result_push = false;
+            } else {
+                self.stack.push(v);
+            }
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
