@@ -619,10 +619,10 @@ pub(crate) fn string_call(
                     else { out.push(*to_chars.last().unwrap()); }
                 }
             }
-            check(out.len())?;
             let new_bytes = out.into_bytes();
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
+                check(new_bytes.len())?;
                 *a.borrow_mut() = new_bytes;
                 Some(Value::Str(a.clone()))
             }
@@ -693,10 +693,10 @@ pub(crate) fn string_call(
                 out.push(ch);
                 prev = Some(ch);
             }
-            check(out.len())?;
             let new_bytes = out.into_bytes();
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
+                check(new_bytes.len())?;
                 *a.borrow_mut() = new_bytes;
                 Some(Value::Str(a.clone()))
             }

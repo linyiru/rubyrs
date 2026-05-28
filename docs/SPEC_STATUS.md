@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 117 |
-| Examples in corpus | 643 |
-| Skipped `it` traces | 142 |
+| Files | 118 |
+| Examples in corpus | 650 |
+| Skipped `it` traces | 143 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 1 |
 | `fixture` | 53 |
-| `method-not-implemented` | 69 |
+| `method-not-implemented` | 70 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -44,7 +44,7 @@ Find blocks unlocked by a future feature with e.g.
 | Integer | 33 | 288 | 28 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
-| String | 20 | 112 | 21 |
+| String | 21 | 119 | 22 |
 | UnboundMethod | 4 | 18 | 0 |
 
 ## Files
@@ -147,6 +147,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_center_spec.rb` | String#center | `core/string/center_spec.rb` | 4 | 2 |
 | `string_chars_spec.rb` | String#chars | `core/string/chars_spec.rb + shared/chars.rb` | 2 | 3 |
 | `string_count_spec.rb` | String#count | `core/string/count_spec.rb` | 7 | 0 |
+| `string_downcase_spec.rb` | String#downcase | `core/string/downcase_spec.rb` | 7 | 1 |
 | `string_empty_spec.rb` | String#empty? | `core/string/empty_spec.rb` | 5 | 0 |
 | `string_end_with_spec.rb` | String#end_with? | `core/string/end_with_spec.rb + shared/string/end_with.rb` | 3 | 3 |
 | `string_gsub_spec.rb` | String#gsub with pattern and replacement | `core/string/gsub_spec.rb` | 9 | 0 |
