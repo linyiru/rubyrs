@@ -1091,6 +1091,51 @@ impl Vm {
         Some(Self::materialise_builtin_method(meta, &cls))
     }
 
+    /// Walk `cls`'s ancestor chain looking for a registered
+    /// Kernel or BasicObject builtin matching `name_id`. Used by
+    /// `instance_method` when the live method table misses: a
+    /// user class that inherits Kernel via include (i.e. any
+    /// `class User; end` since PR #256) should surface `#class`,
+    /// `#nil?`, etc. through reflection just like
+    /// `Kernel.instance_method(:class)` does directly. Without
+    /// this walk, only the direct Kernel/BasicObject receivers
+    /// would hit the registry.
+    ///
+    /// Returns None if `cls` doesn't transitively include Kernel
+    /// AND doesn't transitively inherit from BasicObject — i.e.
+    /// the unusual case of a class whose chain bypasses both
+    /// roots (BasicObject subclasses opt out of Kernel; that's
+    /// the only way to lose both).
+    pub(crate) fn builtin_method_via_ancestor_chain(
+        &self,
+        cls: &Rc<Class>,
+        name_id: SymId,
+    ) -> Option<Rc<Method>> {
+        // Kernel first — most-common: every Object descendant
+        // includes Kernel transitively, so this branch handles
+        // the vast majority of user classes.
+        if let Some(ksym) = self.kernel_class_sym
+            && let Some(kernel) = self.classes.get(&ksym)
+            && class_is_a(cls, kernel)
+        {
+            if let Some(m) = self.kernel_builtin_method(name_id) {
+                return Some(m);
+            }
+        }
+        // BasicObject — root for everything that inherits Object,
+        // also for opt-out classes (`class X < BasicObject; end`)
+        // that skip Kernel entirely.
+        if let Some(bsym) = self.basic_object_class_sym
+            && let Some(bo) = self.classes.get(&bsym)
+            && class_is_a(cls, bo)
+        {
+            if let Some(m) = self.basic_object_builtin_method(name_id) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
     /// Shared materialisation for both Kernel and BasicObject
     /// builtin Method records. Synthesises a Method with the meta
     /// as the introspection payload, a placeholder `proto_idx = 0`

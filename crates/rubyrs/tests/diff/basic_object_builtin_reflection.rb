@@ -48,6 +48,41 @@ puts iev.arity                                     # -1
 snd = BasicObject.instance_method(:__send__)
 puts snd.arity                                     # -1
 
+# --- Inherited reflection: User → Object → includes Kernel ---
+# Predates this PR (registry was originally direct-receiver-only)
+# but adopted from the cycle-6 code-review finding. A user class
+# that inherits Kernel via the standard `class User; end` (post
+# PR #256's default-superclass-to-Object) should surface the
+# Kernel synth via `User.instance_method(:class)` — the
+# reflection should look identical to calling on Kernel directly.
+class User; end
+m_inh = User.instance_method(:class)
+puts m_inh.arity                                  # 0
+puts m_inh.owner                                  # Kernel
+puts m_inh.parameters.inspect                     # []
+
+# Multi-level: Sub → User → Object → Kernel chain
+class Sub < User; end
+m_sub = Sub.instance_method(:class)
+puts m_sub.arity                                  # 0
+puts m_sub.owner                                  # Kernel
+
+# BasicObject-only opt-out: skips Kernel entirely, but BO
+# reflection still works
+class MinReceiver < BasicObject; end
+m_min = MinReceiver.instance_method(:__id__)
+puts m_min.arity                                  # 0
+puts m_min.owner                                  # BasicObject
+
+# Inherited reflection does not invent methods — non-registered
+# names still raise NameError on user classes.
+begin
+  User.instance_method(:totally_made_up_method_xyz)
+  puts "no raise (BAD)"
+rescue NameError
+  puts "NameError on unregistered name"
+end
+
 # --- bind_call: equal? routes through the universal arm ---
 # `equal?` has a universal inline dispatch arm so bind_call
 # works end-to-end. Other BasicObject methods (e.g. `__id__`)

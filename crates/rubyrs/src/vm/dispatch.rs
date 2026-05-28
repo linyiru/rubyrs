@@ -1936,18 +1936,17 @@ impl Vm {
                 // Kernel.methods deliberately so regular dispatch
                 // doesn't re-find it; the registry lives only for
                 // this introspection surface.
+                // User-defined methods on the class table win —
+                // reopening Kernel/BasicObject to shadow `class` /
+                // `equal?` / etc. should surface that method
+                // through reflection, not the synth metadata.
+                // Registry is the fallback when the live table
+                // misses, and the ancestor-chain walk lets
+                // inherited reflection (`User.instance_method(:class)`
+                // → Kernel synth via Object→Kernel include chain)
+                // work the same as the direct case.
                 let snapshot = self.lookup_method_uncached(&cls, *sid)
-                    .or_else(|| match cls.name.as_str() {
-                        // User-defined methods on the class table
-                        // win — reopening Kernel/BasicObject to
-                        // shadow `class` / `equal?` / etc. should
-                        // surface that method through reflection,
-                        // not the synth metadata. Registry is the
-                        // fallback when the live table misses.
-                        "Kernel" => self.kernel_builtin_method(*sid),
-                        "BasicObject" => self.basic_object_builtin_method(*sid),
-                        _ => None,
-                    });
+                    .or_else(|| self.builtin_method_via_ancestor_chain(&cls, *sid));
                 if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                     let mname = self.interner.resolve(*sid).to_string();
                     return Err(self.trap(RubyError::NameError {
@@ -1984,17 +1983,11 @@ impl Vm {
                         }));
                     }
                     let sid = self.interner.intern(raw);
-                    // Same Kernel/BasicObject registry consultation
-                    // as the Symbol-form arm above. Live table
-                    // takes precedence so user redefinitions
-                    // (`module Kernel; def class; ...`) shadow
-                    // the synth metadata.
+                    // Same registry consultation as the Symbol-form
+                    // arm above — live table first, then ancestor-
+                    // chain walk so inherited reflection works.
                     let snapshot = self.lookup_method_uncached(&cls, sid)
-                        .or_else(|| match cls.name.as_str() {
-                            "Kernel" => self.kernel_builtin_method(sid),
-                            "BasicObject" => self.basic_object_builtin_method(sid),
-                            _ => None,
-                        });
+                        .or_else(|| self.builtin_method_via_ancestor_chain(&cls, sid));
                     if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method '{}' for class '{}'", raw, cls.name),
