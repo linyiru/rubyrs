@@ -664,3 +664,38 @@ fn allowlist_blocks_cext_via_symlink_target() {
     let _ = std::fs::remove_dir_all(&allowed);
     let _ = std::fs::remove_dir_all(&sibling);
 }
+
+#[test]
+#[should_panic(expected = "cannot be canonicalized")]
+fn allowlist_panics_on_relative_prefix() {
+    // A relative prefix is unusable as a sandbox boundary: per-op
+    // resolution joins inputs with cwd to absolute form, so
+    // `starts_with("gemroot")` against an absolute resolved input
+    // is always false. Pre-fix this silently produced a dead
+    // sandbox where every legitimate op trapped. Post-fix:
+    // apply_config panics with a clear diagnostic so the host
+    // sees the misconfig immediately.
+    let _rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![std::path::PathBuf::from("gemroot")]),
+        ..Default::default()
+    });
+}
+
+#[test]
+#[should_panic(expected = "cannot be canonicalized")]
+fn allowlist_panics_on_nonexistent_traversal_prefix() {
+    // A nonexistent prefix with `..` segments is the silent-widen
+    // case: pre-fix, `lexically_resolve_path` collapsed `..` and
+    // stored a BROADER path than the host typed (e.g.
+    // `/nonexistent/x/../../etc` became `/etc`, granting access
+    // to the host's /etc tree). Post-fix: apply_config refuses
+    // any prefix that can't be canonicalized.
+    let _rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![std::path::PathBuf::from(
+            "/nonexistent-rubyrs-test-prefix/x/../../etc",
+        )]),
+        ..Default::default()
+    });
+}

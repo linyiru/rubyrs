@@ -259,6 +259,14 @@ pub struct Config {
     /// gemspec exactly that scope — `apply_config` canonicalizes
     /// each entry once, so the host doesn't have to.
     ///
+    /// Prefixes must be absolute paths that exist on disk at
+    /// `apply_config` time. A relative or nonexistent prefix
+    /// panics with a diagnostic explaining why; this is
+    /// intentional — silently misconfiguring the sandbox (either
+    /// widening it by collapsing `..`, or dead-ending it by
+    /// leaving the prefix relative) is worse than refusing to
+    /// start.
+    ///
     /// Path matching is by `starts_with` on the canonicalized
     /// `allowed_paths` entries. The input path is lexically
     /// resolved (relative inputs joined with cwd; `..`/`.`
@@ -644,10 +652,13 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
 /// Pure lexical resolve of a path — collapses `.` and `..`
 /// segments without touching the filesystem. The single shared
 /// implementation behind:
-///   - `Config::allowed_paths` canonicalize-fallback when the
-///     host-supplied prefix doesn't exist on disk
 ///   - per-op allowlist check input normalization
 ///   - `File.expand_path`'s sandbox-on lexical-only path
+///
+/// NOT used as an `apply_config`-time fallback for non-
+/// canonicalizable prefixes: collapsing `..` there silently
+/// WIDENED the allowlist (e.g. `/gems/x/../../etc` → `/etc`),
+/// so that path now panics instead. See `apply_config`.
 ///
 /// Absolute paths stay absolute; relative paths stay relative
 /// (the caller decides whether to join with cwd first).
@@ -996,14 +1007,31 @@ impl Runtime {
         // Canonicalize each allowed prefix once at apply_config
         // time. The per-op `check_path_in_allowlist` lexically
         // resolves the input and does `starts_with` against the
-        // already-canonical entries — no per-op syscall. If a
-        // host-supplied prefix can't be canonicalized (path
-        // doesn't exist), fall back to lexical collapse so an
-        // ENOENT-on-prefix doesn't silently widen the allowlist.
+        // already-canonical entries — no per-op syscall.
+        //
+        // Fail loudly if any prefix can't be canonicalized. The
+        // earlier silent fallback to `lexically_resolve_path` had
+        // two failure modes: (a) it collapsed `..` segments, so a
+        // host-supplied nonexistent path like
+        // `/gems/x/../../etc` widened to `/etc`; (b) it left
+        // relative inputs relative, but per-op resolution joins
+        // with cwd → absolute, so `starts_with("subdir")` on an
+        // absolute path is always false and the sandbox went
+        // silently dead. Panic-with-context lets the host fix
+        // their config; a misconfigured sandbox is strictly worse
+        // than no startup.
         self.vm.allowed_paths = cfg.allowed_paths.map(|prefixes| {
             prefixes
                 .into_iter()
-                .map(|p| std::fs::canonicalize(&p).unwrap_or_else(|_| lexically_resolve_path(&p)))
+                .map(|p| std::fs::canonicalize(&p).unwrap_or_else(|e| {
+                    panic!(
+                        "Config::allowed_paths prefix {:?} cannot be canonicalized ({}). \
+                         Prefixes must be absolute paths that exist on disk; \
+                         relative or nonexistent inputs are rejected to avoid silently \
+                         widening or dead-ending the sandbox.",
+                        p, e,
+                    )
+                }))
                 .collect()
         });
     }
