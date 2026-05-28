@@ -860,6 +860,25 @@ impl Value {
             },
             Value::Sym(id) => format!(":{}", interner.resolve(*id)),
             Value::Nil => "nil".into(),
+            // Range#inspect joins the endpoints via `#inspect`, not
+            // `#to_s` — so String endpoints come out quoted
+            // (`("a".."z").inspect == "\"a\"..\"z\""`). Endless /
+            // beginless (`(1..)`, `(..5)`) render the missing
+            // endpoint as empty, matching CRuby. The Range#to_s
+            // arm in `to_display` above already uses `to_display`
+            // on the endpoints, which naturally renders Strings
+            // unquoted and Nil endpoints empty.
+            Value::Range(id) => {
+                let r = heap.range(*id);
+                let sep = if r.exclusive { "..." } else { ".." };
+                let endpoint = |v: &Value| -> String {
+                    match v {
+                        Value::Nil => String::new(),
+                        _ => v.to_inspect(heap, interner),
+                    }
+                };
+                format!("{}{}{}", endpoint(&r.begin), sep, endpoint(&r.end))
+            }
             _ => self.to_display(heap, interner),
         }
     }

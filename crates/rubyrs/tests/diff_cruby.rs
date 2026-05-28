@@ -88,6 +88,7 @@ fn run_diff(name: &str) {
 #[test] fn ensure_basics() { run_diff("ensure_basics"); }
 #[test] fn control_flow() { run_diff("control_flow"); }
 #[test] fn range_basics() { run_diff("range_basics"); }
+#[test] fn range_to_s_inspect() { run_diff("range_to_s_inspect"); }
 #[test] fn enumerable_filter() { run_diff("enumerable_filter"); }
 #[test] fn enumerable_aggregate() { run_diff("enumerable_aggregate"); }
 #[test] fn int_string_basics() { run_diff("int_string_basics"); }

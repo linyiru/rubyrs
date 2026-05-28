@@ -4677,6 +4677,24 @@ impl Vm {
         // but also BoundMethod / UnboundMethod / CurriedProc /
         // future heap variants we add without a custom default.
         if (&*name == "to_s" || &*name == "inspect") && args.is_empty() {
+            // Range has no primitive to_s/inspect arm of its own.
+            // Without this short-circuit the universal
+            // `#<Range:0xHEX>` form below would silently win for
+            // Range and diverge from CRuby. `to_display` /
+            // `to_inspect` in heap.rs already render Range with
+            // the correct endpoint-quoting and endless/beginless
+            // handling — funnel through them so the Array#inspect
+            // path (which also calls `to_inspect`) stays
+            // consistent.
+            if matches!(&recv, Value::Range(_)) {
+                let rendered = if &*name == "inspect" {
+                    recv.to_inspect(&self.heap, &self.interner)
+                } else {
+                    recv.to_display(&self.heap, &self.interner)
+                };
+                self.stack.push(Value::new_str(rendered));
+                return Ok(());
+            }
             let cls_name = match self.class_of(&recv) {
                 Value::Class(c) => c.name.clone(),
                 _ => "Object".to_string(),
