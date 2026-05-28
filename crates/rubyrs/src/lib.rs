@@ -660,6 +660,37 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
     }
 }
 
+/// Extract a human-readable message from a [`std::panic::catch_unwind`]
+/// payload. Rust's panic payload shape depends on what the call site
+/// passed in — verified empirically against current rustc:
+///
+///   - `panic!("string literal")` and `panic!("fmt {}", 42)` (where
+///     the format arguments are statically resolvable) box a
+///     `&'static str`.
+///   - `panic!("{}", dynamic_string)` and
+///     `std::panic::panic_any::<String>(s)` box a `String`.
+///   - Other `panic_any(custom)` shapes box opaquely; the message
+///     text isn't recoverable. We log the payload's type id so a
+///     host can at least correlate against its own panic site.
+///
+/// Both `String` and `&'static str` branches are exercised by tests
+/// in `tests/embed/error_handling.rs` (the dynamic-format-args case
+/// is the one keeping the `String` branch from looking like dead
+/// code to a future maintainer).
+///
+/// Takes `&(dyn Any + Send)` rather than `&Box<dyn Any + Send>` so
+/// the helper only needs the payload reference — sidesteps Clippy's
+/// `borrowed_box` lint under the workspace's `-D warnings` policy.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s.to_string()
+    } else {
+        format!("<non-string panic payload, type_id = {:?}>", payload.type_id())
+    }
+}
+
 /// Pure lexical resolve of a path — collapses `.` and `..`
 /// segments without touching the filesystem. The single shared
 /// implementation behind:
@@ -732,9 +763,9 @@ impl PreambleLiftedSettings {
             // truth — `vm.fuel` is just a per-eval working
             // counter `eval()` overwrites from `fuel_budget` at
             // entry. Lifting `fuel_budget` to None means the
-            // preamble's internal `self.eval(...)` calls anchor
-            // `vm.fuel = None` (unlimited) for the duration of
-            // the guarded scope.
+            // preamble's internal `self.eval_inner(...)` calls
+            // anchor `vm.fuel = None` (unlimited) for the
+            // duration of the guarded scope.
             fuel: rt.fuel_budget.take(),
             max_frames: rt.vm.max_frames.take(),
             max_symbols: rt.vm.max_symbols.take(),
@@ -1547,11 +1578,46 @@ impl Runtime {
     pub fn __test_vm_protos_len(&self) -> usize {
         self.vm.protos.len()
     }
+    /// Inspect per-eval working state. The eval-entry cleanup
+    /// guarantees these are zeroed before each eval; tests assert
+    /// they're ALSO zeroed after the catch_unwind Err arm runs, so
+    /// host inspection between failed eval and next eval sees a
+    /// clean Runtime.
+    #[doc(hidden)]
+    pub fn __test_vm_frames_len(&self) -> usize {
+        self.vm.frames.len()
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_stack_len(&self) -> usize {
+        self.vm.stack.len()
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_pinned_len(&self) -> usize {
+        self.vm.pinned.len()
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_fuel(&self) -> Option<u64> {
+        self.vm.fuel
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_deadline_at_is_some(&self) -> bool {
+        self.vm.deadline_at.is_some()
+    }
 
     /// Bootstrap the built-in Ruby class hierarchy (currently just
     /// exceptions) by `eval`-ing a small Ruby preamble. Done with the
     /// runtime's own machinery so the resulting classes look identical
     /// to user-defined ones (no special-cased C structs).
+    ///
+    /// Calls `eval_inner` directly rather than the public `eval`,
+    /// bypassing the panic→Trap catch boundary. An ICE inside the
+    /// preamble is rubyrs-itself-is-broken, not a user-recoverable
+    /// shape — the original `.unwrap()` panic message and file:line
+    /// should reach the host unchanged. Routing through `eval` would
+    /// wrap the panic into a `RubyError::RuntimeError` Trap, and the
+    /// `.expect("ICE: failed to load X preamble")` below would then
+    /// panic AGAIN with the wrapped trap text — double-encoded
+    /// diagnostic that buries the original site.
     fn load_preamble(&mut self) {
         // Exception hierarchy first — other preamble fragments below
         // (and any user code that raises during their load) need
@@ -1559,7 +1625,7 @@ impl Runtime {
         // Lives in its own file per the random.rb / time.rb pattern:
         // larger, structurally distinct from the class-stub block
         // below, and meaty enough that editor support pays off.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/exceptions.rb"),
             "<rubyrs:preamble:exceptions>",
         )
@@ -1568,7 +1634,7 @@ impl Runtime {
         // exceptions and the remaining preamble (which contains
         // `class X < Object` shapes) so the constant resolves at
         // class-definition time.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/object.rb"),
             "<rubyrs:preamble:object>",
         )
@@ -1587,7 +1653,7 @@ impl Runtime {
         // `class X < Comparable` shape (or `is_a?(Comparable)`
         // predicate) inside the remaining preamble fragments
         // resolves at definition time.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/comparable.rb"),
             "<rubyrs:preamble:comparable>",
         )
@@ -1599,7 +1665,7 @@ impl Runtime {
         // here (regex-off builds simply never call into
         // materialize_match_data, but loading the empty preamble
         // string is cheap).
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/match_data.rb"),
             "<rubyrs:preamble:match_data>",
         )
@@ -1607,7 +1673,7 @@ impl Runtime {
         // Mutex — single-threaded no-op shim. Tier 1 has no OS
         // threads, so the entire lock surface degenerates to
         // "run the block / no-op".
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/mutex.rb"),
             "<rubyrs:preamble:mutex>",
         )
@@ -1616,7 +1682,7 @@ impl Runtime {
         // `Thread.current.object_id` is modeled (tilt uses it to
         // suffix compiled-method names). See preamble/thread.rb
         // for the divergence surface.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/thread.rb"),
             "<rubyrs:preamble:thread>",
         )
@@ -1816,7 +1882,7 @@ RUBY_ENGINE = "ruby".freeze
 ## this `PREAMBLE` eval; the full rationale lives in the
 ## externalised file's header.
 "#;
-        self.eval(PREAMBLE, "<rubyrs:preamble>")
+        self.eval_inner(PREAMBLE, "<rubyrs:preamble>")
             .expect("ICE: failed to load built-in exception preamble");
         // Enumerable — empty stub so `class Foo; include
         // Enumerable; def each; ...; end; end` doesn't crash.
@@ -1824,7 +1890,7 @@ RUBY_ENGINE = "ruby".freeze
         // remaining inline fragments references the Enumerable
         // constant; user code reaching for `include Enumerable`
         // resolves it on demand.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/enumerable.rb"),
             "<rubyrs:preamble:enumerable>",
         )
@@ -1836,7 +1902,7 @@ RUBY_ENGINE = "ruby".freeze
         // ADR 0017 row 131 puts the seeded mode in Tier 1, so
         // this loads unconditionally — not gated behind
         // `--features stdlib`.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/random.rb"),
             "<rubyrs:preamble:random>",
         )
@@ -1847,7 +1913,7 @@ RUBY_ENGINE = "ruby".freeze
         // (ADR 0017 row 131). Loaded after Random so the
         // module's `Random.new(0)` default initialisation can
         // resolve the constant.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/securerandom.rb"),
             "<rubyrs:preamble:securerandom>",
         )
@@ -1858,7 +1924,7 @@ RUBY_ENGINE = "ruby".freeze
         // in `perf/time_microbench_results.md`. Loaded
         // unconditionally; default no-injection makes `Time.now`
         // raise (ADR 0017 Rule 1 deterministic-default).
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/time.rb"),
             "<rubyrs:preamble:time>",
         )
@@ -1897,6 +1963,16 @@ RUBY_ENGINE = "ruby".freeze
     /// a single slot per name. Class- or instance-attached methods
     /// installed by a C extension live in independent dispatch tables
     /// and are NOT affected by this call.
+    ///
+    /// Panic behaviour: an unwinding panic inside the closure is
+    /// caught at the [`Runtime::eval`] boundary and converted to a
+    /// [`RubyError::RuntimeError`] Trap whose message preserves the
+    /// panic payload (see `Runtime::eval`'s panic-safety section).
+    /// Don't reach for `panic!` to abort the host process from
+    /// inside a callback — it won't unwind out of `eval`. Use a
+    /// `Trap` return for recoverable errors, or `std::process::exit`
+    /// (or similar OS-level abort) if you really need the process
+    /// dead.
     pub fn register_fn<F>(&mut self, name: &str, f: F)
     where
         F: Fn(&[Value]) -> Result<Value, Trap> + 'static,
@@ -1923,6 +1999,11 @@ RUBY_ENGINE = "ruby".freeze
     /// (same slot as [`Runtime::register_fn`]). Class- or instance-
     /// attached methods installed by a C extension live in independent
     /// dispatch tables and are NOT affected by this call.
+    ///
+    /// Panic behaviour is identical to
+    /// [`Runtime::register_fn`]: unwinding panics in the closure are
+    /// caught at the [`Runtime::eval`] boundary and converted to a
+    /// [`RubyError::RuntimeError`] Trap.
     pub fn register_fn_v2<F>(&mut self, name: &str, f: F)
     where
         F: Fn(&HostCtx, &[Value]) -> Result<Value, Trap> + 'static,
@@ -1934,7 +2015,86 @@ RUBY_ENGINE = "ruby".freeze
     /// Parse, compile, and run a Ruby source. The returned value is the
     /// final expression of the script; embedders can ignore it for
     /// statements with no return value.
+    ///
+    /// Panic safety: the body is wrapped in [`std::panic::catch_unwind`],
+    /// so an UNWINDING panic anywhere below this entry point — an
+    /// ICE-class `panic!`/`.unwrap()`/`.expect()` in the VM, a host-fn
+    /// callback (registered via [`Runtime::register_fn`] or
+    /// [`Runtime::register_fn_v2`]) that panics — is converted to a
+    /// [`Trap`] with [`RubyError::RuntimeError`] carrying the panic
+    /// payload. The host's call site sees an ordinary `Err`, not an
+    /// unwind, which matters for two cases:
+    ///
+    ///   1. Embedders calling `eval` from `extern "C"` (without
+    ///      `-unwind`) — a panic crossing that boundary is undefined
+    ///      behaviour. Catching here makes the public API FFI-safe by
+    ///      default.
+    ///   2. Long-running host loops (rubund batch evaluation,
+    ///      `_http_server` request handlers) that need to survive a
+    ///      single bad script without crashing the process.
+    ///
+    /// What this does NOT catch: ABORTING panics (allocation OOM via
+    /// `handle_alloc_error` defaults to abort, and any build with
+    /// `panic = "abort"` skips unwinding entirely), nor signals
+    /// (SIGSEGV from a misbehaving cext, SIGKILL from OOM-killer).
+    /// Hosts that need to survive those need an OS-level supervisor
+    /// — the catch here is a Rust-language-level safety net, not a
+    /// process-wide one.
+    ///
+    /// State guarantee is best-effort: every existing RAII guard
+    /// (notably [`PreambleLiftGuard`] for sandbox caps) still runs on
+    /// the unwind path, so externally-visible caps stay intact. The
+    /// internal Vm state, however, may be left mid-execution (operand
+    /// stack partially populated, frames partially torn down). The
+    /// next `eval` clears those before running, so subsequent calls
+    /// on the same Runtime are safe; if you don't trust the residue,
+    /// call [`Runtime::reset`] or drop and rebuild.
     pub fn eval(&mut self, source: &str, filename: &str) -> Result<Value, Trap> {
+        // The actual work lives in `eval_inner`. This thin wrapper
+        // only adds the panic→Trap conversion so the inner body stays
+        // free of `catch_unwind` ceremony.
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let outcome = catch_unwind(AssertUnwindSafe(|| self.eval_inner(source, filename)));
+        match outcome {
+            Ok(result) => result,
+            Err(payload) => {
+                // Snapshot the backtrace BEFORE clearing frames.
+                // `Vm::trap` walks `self.vm.frames` and emits one
+                // `TrapFrame` per stack frame with filename/method/
+                // span resolved at the IP where execution last was —
+                // for a panic, that's the line where the host_fn (or
+                // VM op) panicked, threaded back up through every
+                // Ruby method on the call stack. Without this, every
+                // panic-derived Trap had `backtrace: vec![]` and
+                // `format_trap` fell into its "no frames" branch,
+                // losing the script-level location entirely.
+                //
+                // Mirror the rest of eval_inner's post-run cleanup
+                // (lines 2114-2120). On the unwind path that cleanup
+                // never ran, leaving vm.fuel / vm.deadline_at set to
+                // the eval's anchor values and frames / stack /
+                // pinned potentially mid-execution. The Err-arm
+                // cleanup is idempotent with the next eval's entry-
+                // clear, so this is a strict upgrade: state is clean
+                // the instant the host receives Err, not "eventually".
+                let trap = self.vm.trap(RubyError::RuntimeError {
+                    msg: format!(
+                        "host-side panic during eval: {}",
+                        panic_payload_message(payload.as_ref()),
+                    ),
+                });
+                self.vm.fuel = None;
+                self.vm.deadline_at = None;
+                self.vm.frames.clear();
+                self.vm.stack.clear();
+                self.vm.pinned.clear();
+                self.vm.clear_control_flow_signals();
+                Err(trap)
+            }
+        }
+    }
+
+    fn eval_inner(&mut self, source: &str, filename: &str) -> Result<Value, Trap> {
         let filename_rc: Rc<str> = Rc::from(filename);
         let source_rc: Rc<str> = Rc::from(source);
         // Single source-of-truth map on the Vm. Backtrace

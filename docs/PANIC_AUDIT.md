@@ -13,6 +13,17 @@ integration lands.) It exists for two reasons:
    `Trap`. With rubund evaluating arbitrary `*.gemspec` files
    from rubygems.org, every panic path is one hostile input
    away from killing the host process.
+
+   `Runtime::eval` wraps its body in `std::panic::catch_unwind`
+   and converts any caught panic into a `RubyError::RuntimeError`
+   Trap. This is a SAFETY NET, not a license to leave panic
+   sites in place — embedders calling `eval` from `extern "C"`
+   would hit UB without it, but a converted panic still surfaces
+   as a user-visible Trap and STILL counts as a bug to fix at
+   the audit budget. The conversion makes ICE-class panics
+   recoverable in a long-running host (request loop / batch
+   evaluator survives), but the audit policy ("every site needs
+   a class + justification, counts only go down") is unchanged.
 2. **CI guards against regression.** The
    [`panic-budget`](../.github/workflows/ci.yml) workflow job
    counts `panic!` + `.unwrap()` + `.expect(` per file and
