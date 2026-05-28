@@ -71,11 +71,46 @@ class A5
   end
 end
 A5.define_singleton(:default_encoding, proc { "utf-8" })
-A5.define_singleton(:add_charset, proc { ["application/json", "text/html"] })
+## Close the Array over a local so the proc returns the SAME
+## object on every call — this is what sinatra's `set
+## :add_charset, [...]` actually does (the array literal is
+## captured in the setter's closure). Pre-fix this fixture
+## passed `proc { [literal] }`, which allocates fresh each
+## call and silently masks any mutation regression
+## (code-review #253 round 1 #5).
+charset_arr = ["application/json", "text/html"]
+A5.define_singleton(:add_charset, proc { charset_arr })
 puts "sinatra-shape-1=#{A5.default_encoding.inspect}"
 puts "sinatra-shape-2=#{A5.add_charset.inspect}"
 ## `set :add_charset, [...]` then `settings.add_charset << x`
 ## requires the getter Proc to return an Array that supports
-## mutation visible through subsequent reads.
+## mutation visible through subsequent reads — the actual
+## sinatra/base.rb:1965 idiom `settings.add_charset <<
+## %r{^text/}` would fail otherwise.
 A5.add_charset << "image/svg+xml"
 puts "sinatra-shape-mutation=#{A5.add_charset.inspect}"
+puts "sinatra-shape-identity=#{A5.add_charset.equal?(A5.add_charset)}"
+
+## `super` from inside a singleton method defined via
+## `singleton_class.class_eval` requires `defining_class` to
+## point at the underlying real class (not the eigenclass
+## shell, which isn't in any superclass chain). This PR fixes
+## the `defining_class` plumbing (code-review #253 round 1 #1)
+## but `super` from inside a `define_method`-installed block
+## is a separate Tier-1 gap; once that lands the fixture can
+## pin the end-to-end behavior. For now we only pin the
+## `defining_class` directly via the Method's reported class.
+class Parent6
+  def self.greet
+    "parent"
+  end
+end
+class Child6 < Parent6
+end
+Child6.singleton_class.class_eval do
+  def shouted_greet
+    "CHILD"
+  end
+end
+puts "parsed-def-on-shell=#{Child6.shouted_greet.inspect}"
+puts "parent-still-reachable=#{Parent6.greet.inspect}"

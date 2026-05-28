@@ -5479,7 +5479,14 @@ impl Vm {
                     params,
                     proto_idx,
                     fixed_arity: None,
-                    defining_class: Some(std::rc::Rc::downgrade(&target_cls)),
+                    // When `target_cls` is an eigenclass shell from
+                    // `Class#singleton_class`, the install redirects
+                    // into the underlying real class's
+                    // singleton_methods; `defining_class` has to
+                    // resolve to the same real class so `super`
+                    // walks the right ancestor chain.
+                    // (Code-review #253 round 1 #1.)
+                    defining_class: Some(std::rc::Rc::downgrade(&target_cls.effective_install_class())),
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                 });

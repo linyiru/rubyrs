@@ -354,6 +354,21 @@ impl Class {
             self.methods.borrow_mut().insert(name, m);
         }
     }
+
+    /// Returns the Rc the install paths should record as
+    /// `Method.defining_class` for a method being installed via
+    /// this class. For an eigenclass-shell, that's the underlying
+    /// real class — so `super` lookups walk the real class's
+    /// singleton-method ancestor chain instead of the synthetic
+    /// shell (which isn't in any superclass chain). For every
+    /// other Class, it's `self`. (Code-review #253 round 1 #1.)
+    pub(crate) fn effective_install_class(self: &Rc<Self>) -> Rc<Self> {
+        self.singleton_target
+            .borrow()
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
+            .unwrap_or_else(|| self.clone())
+    }
 }
 
 #[derive(Debug)]
