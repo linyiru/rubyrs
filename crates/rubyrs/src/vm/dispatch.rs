@@ -4626,6 +4626,85 @@ impl Vm {
             self.stack.push(c);
             return Ok(());
         }
+        // `Object#object_id` / `BasicObject#__id__` — universal,
+        // no args. Returns a stable integer that's unique per
+        // value within this Vm session. CRuby exact values aren't
+        // observable beyond `==` checks, so our encoding diverges
+        // from CRuby but preserves the contract:
+        //   - Heap-managed (Object/Array/Hash/Block/Range/...):
+        //     ObjId.0 shifted up by 4 + type tag (so an Array
+        //     with ObjId 0 doesn't collide with an Object with
+        //     ObjId 0).
+        //   - Int: `n * 2 + 1` (CRuby's Integer tag encoding —
+        //     keeps integer ids odd, distinct from heap ids).
+        //   - Sym: SymId.0 * 8 + 0x14 (matches CRuby's symbol
+        //     tag offset 0x14; multiplied to avoid collision
+        //     with small Bool/Nil values).
+        //   - Bool true/false, Nil: CRuby's exact 20 / 0 / 8.
+        //   - Float: f64-bit-pattern hash, mapped into the
+        //     heap-id range so duplicate float literals share
+        //     ids (CRuby parity for inline floats).
+        //   - Class / BoundMethod / UnboundMethod / CurriedProc:
+        //     same Rc-pointer / ObjId encoding.
+        if (&*name == "object_id" || &*name == "__id__") && args.is_empty() {
+            let id = object_id_for(&recv);
+            self.stack.push(Value::Int(id));
+            return Ok(());
+        }
+        // `Object#frozen?` — universal, no args. Returns false
+        // for plain user-class instances (we don't model the
+        // freeze bit on Value::Object). Most primitive types have
+        // their own `frozen?` handler earlier in dispatch (Str,
+        // Array, etc.); this arm catches Object and Class
+        // receivers where there's no primitive arm.
+        if &*name == "frozen?" && args.is_empty() {
+            self.stack.push(Value::Bool(false));
+            return Ok(());
+        }
+        // `Object#to_s` / `Object#inspect` — universal default.
+        // For plain Object instances, CRuby renders as
+        // `"#<ClassName:0xADDR>"`. We can't expose real addresses
+        // (sandbox), so use the object_id hex form. Primitive
+        // arms for Str/Int/Sym/Array/Hash run earlier in dispatch
+        // and shadow this; only Object / Class instances fall
+        // through here.
+        if (&*name == "to_s" || &*name == "inspect") && args.is_empty() {
+            let cls_name = match self.class_of(&recv) {
+                Value::Class(c) => c.name.clone(),
+                _ => "Object".to_string(),
+            };
+            let oid = object_id_for(&recv);
+            let s = format!("#<{}:0x{:016x}>", cls_name, oid);
+            self.stack.push(Value::new_str(s));
+            return Ok(());
+        }
+        // `Object#hash` — universal, no args. Returns an integer
+        // hash. For value types (Int/Str/Sym/Bool/Nil), hash by
+        // content so `{1 => :a}[1] == :a` works. For heap objects
+        // where equality is identity, hash by object_id.
+        if &*name == "hash" && args.is_empty() {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            match &recv {
+                Value::Int(n) => n.hash(&mut h),
+                Value::Float(f) => f.to_bits().hash(&mut h),
+                Value::Str(s) => s.with_str_lossy(|raw| raw.hash(&mut h)),
+                Value::Sym(sid) => sid.0.hash(&mut h),
+                Value::Bool(b) => b.hash(&mut h),
+                Value::Nil => 0u8.hash(&mut h),
+                // Heap-managed / classes / blocks / methods —
+                // identity hash via object_id. CRuby Array/Hash
+                // override `hash` to recurse over contents; ours
+                // doesn't yet (documented gap — `Array#==`
+                // works content-wise but `{[1] => :a}[[1]]`
+                // would miss).
+                _ => object_id_for(&recv).hash(&mut h),
+            }
+            // Take the low 63 bits to stay in positive i64 range.
+            let v = (h.finish() & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+            self.stack.push(Value::Int(v));
+            return Ok(());
+        }
         // `Object#respond_to?(name)` — pure feature detection, no
         // invocation. Goes last so user classes that override
         // `respond_to?` (we don't support that yet, but conceptually)
@@ -6803,4 +6882,73 @@ fn is_valid_ivar_name(s: &str) -> bool {
     // Remaining: letter / digit / `_`. Rejects `@foo?`, `@foo=`,
     // `@foo!`, `@foo-bar`.
     bytes[2..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// Compute a stable, session-unique integer id for any
+/// `Value`. Backs both `Object#object_id` and
+/// `BasicObject#__id__`. CRuby exact values aren't observable
+/// beyond equality checks (`a.object_id == b.object_id`), so
+/// this encoding diverges from CRuby's exact tags but preserves
+/// the contract: same value → same id, distinct values →
+/// distinct ids.
+///
+/// Encoding (LSB-tagged to avoid cross-type collisions):
+///   - Int n:     `n * 2 + 1`     (CRuby's Integer tag)
+///   - Sym sid:   `sid * 8 + 0x14` (CRuby's Symbol tag offset)
+///   - true:      20              (CRuby 3.x)
+///   - false:     0               (CRuby 3.x)
+///   - nil:       4               (CRuby 3.x — was 8 in 2.x)
+///   - Float f:   f.to_bits() canonicalized to i64 range
+///   - All heap-managed values (Object/Array/Hash/Block/Range/
+///     Str/Regex/BoundMethod/UnboundMethod/CurriedProc): the
+///     underlying ObjId shifted up by 4 + a small per-type
+///     offset, so `Array.new.object_id != Object.new.object_id`
+///     even when their ObjIds happen to coincide.
+///   - Class: the Rc pointer cast to integer, masked into the
+///     positive i64 range.
+pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
+    use crate::value::Value;
+    fn heap_id(raw: u32, type_offset: i64) -> i64 {
+        // raw is at most u32::MAX, shifting by 4 stays inside
+        // i64. Type offset distinguishes Array(0)/Hash(1)/...
+        // from each other when their ObjIds collide.
+        ((raw as i64) << 4) | type_offset
+    }
+    match v {
+        Value::Int(n) => n.wrapping_mul(2).wrapping_add(1),
+        Value::Bool(true) => 20,
+        Value::Bool(false) => 0,
+        Value::Nil => 4,
+        Value::Sym(sid) => (sid.0 as i64) * 8 + 0x14,
+        Value::Float(f) => {
+            // Bit-pattern; mask to positive i64. Two literals
+            // with the same bit pattern (including +0.0/-0.0
+            // distinction) share an id.
+            (f.to_bits() & 0x7FFF_FFFF_FFFF_FFFF) as i64
+        }
+        Value::Str(s) => {
+            // Strings are Rc'd, not ObjId-tracked. Use the Rc
+            // pointer as identity — distinct String allocations
+            // get distinct ids; aliased Rc clones share an id
+            // (closer to CRuby than ObjId would be, since
+            // CRuby's frozen string literals are also shared).
+            (std::rc::Rc::as_ptr(s) as usize as i64) & 0x7FFF_FFFF_FFFF_FFFF
+        }
+        Value::Object(id) => heap_id(id.0, 3),
+        Value::Array(id) => heap_id(id.0, 4),
+        Value::Hash(id) => heap_id(id.0, 5),
+        Value::Range(id) => heap_id(id.0, 6),
+        Value::Block(id) => heap_id(id.0, 7),
+        Value::BoundMethod(id) => heap_id(id.0, 8),
+        Value::UnboundMethod(id) => heap_id(id.0, 9),
+        Value::CurriedProc(id) => heap_id(id.0, 10),
+        #[cfg(feature = "regex")]
+        Value::Regex(_) => 11, // regex is Rc-owned, no ObjId — use type tag
+        #[cfg(feature = "bignum")]
+        Value::BigInt(id) => heap_id(id.0, 12),
+        Value::Class(c) => {
+            // Rc pointer as identity. Cast to usize then mask.
+            (std::rc::Rc::as_ptr(c) as usize as i64) & 0x7FFF_FFFF_FFFF_FFFF
+        }
+    }
 }
