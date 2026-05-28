@@ -1928,6 +1928,30 @@ impl Vm {
         if !recv_is_bigint && !arg_is_bigint {
             return Ok(None);
         }
+        // `BigInt#chr` arity / 1-arg guards — sibling to the
+        // numeric.rs arms for the Int receiver. The 0-arg happy
+        // path is handled by the `args.is_empty()` block below
+        // (which routes to RangeError via the canonical-BigInt
+        // invariant). 1+ arg shapes need explicit handling here
+        // because the `args.is_empty()` block won't fire and
+        // bignum_primitive would otherwise return `Ok(None)` →
+        // NoMethodError, contradicting respond_to?(:chr) = true.
+        if name == "chr" && recv_is_bigint && args.len() > 1 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args.len(),
+                ),
+            }));
+        }
+        if name == "chr" && recv_is_bigint && args.len() == 1 {
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Encoding",
+                    crate::vm::numeric::type_name_for_coerce(&args[0]),
+                ),
+            }));
+        }
         // Phase A heap-read operations — only meaningful on a BigInt
         // receiver (Int#to_s already handled by numeric_call).
         if recv_is_bigint && args.is_empty()

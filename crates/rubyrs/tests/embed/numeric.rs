@@ -2723,6 +2723,15 @@ fn integer_chr_basic() {
         ("(2**64).chr", "RangeError"),
         #[cfg(feature = "bignum")]
         ("(-(2**64)).chr", "RangeError"),
+        // BigInt-recv arity/1-arg coherence with respond_to?
+        // — previously `(2**64).chr("UTF-8")` fell through
+        // bignum_primitive and raised NoMethodError.
+        #[cfg(feature = "bignum")]
+        ("(2**64).chr(\"UTF-8\")", "TypeError"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).chr(nil)", "TypeError"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).chr(1, 2)", "ArgumentError"),
     ] {
         let err = rt.eval(script, "chr_err.rb").unwrap_err();
         match err.err {
