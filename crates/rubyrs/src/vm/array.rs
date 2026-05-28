@@ -83,11 +83,103 @@ impl Vm {
                             Some(a.remove(0))
                         }
                     }
+                    // `Array#shift(n)` — remove and return the
+                    // first n elements as a new Array. Mirrors
+                    // `Array#pop(n)` below. `n` larger than the
+                    // array clamps to the array length; `n == 0`
+                    // returns `[]`; empty array returns `[]`.
+                    //
+                    // GC discipline: do `maybe_gc` + `check_alloc`
+                    // + `alloc` BEFORE the drain. Once drained,
+                    // the elements live only in a Rust-local Vec
+                    // — the source Array no longer references them
+                    // — so a subsequent `maybe_gc` would sweep any
+                    // heap-bearing element. Allocating the result
+                    // Array first and synchronously moving drained
+                    // values into the heap-owned Vec keeps the
+                    // children rooted via the receiver pin until
+                    // they land in the result Array.
+                    ("shift", [Value::Int(n)]) => {
+                        let n_i = *n;
+                        if n_i < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        // wasm32 truncation guard — match the
+                        // first(n)/last(n) pattern.
+                        let n_usz = usize::try_from(n_i).unwrap_or(usize::MAX);
+                        let arr_len = self.heap.array(id).len();
+                        let take = n_usz.min(arr_len);
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let nid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(take)));
+                        let drained: Vec<Value> = g.vm.heap.array_mut(id).drain(0..take).collect();
+                        g.vm.heap.array_mut(nid).extend(drained);
+                        Some(Value::Array(nid))
+                    }
+                    #[cfg(feature = "bignum")]
+                    ("shift", [Value::BigInt(_)]) => {
+                        // Matches first(n)/last(n)'s BigInt arm —
+                        // raise RangeError rather than fall to the
+                        // wrong-arity catch-all (which would
+                        // mis-report the arity).
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
+                    ("shift", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 0..1)", many.len()),
+                        }));
+                    }
                     // `Array#pop` — remove and return the last
                     // element; `nil` if empty. In-place mutation.
                     ("pop", []) => {
                         let a = self.heap.array_mut(id);
                         Some(a.pop().unwrap_or(Value::Nil))
+                    }
+                    // `Array#pop(n)` — remove and return the last
+                    // n elements as a new Array (in original
+                    // order — `[1,2,3].pop(2) == [2, 3]`). Negative
+                    // n raises ArgumentError; n exceeding array
+                    // length clamps to the length. Same GC
+                    // discipline as `shift(n)` above — alloc the
+                    // result Array BEFORE the drain so drained
+                    // children stay rooted via the receiver pin
+                    // until they land in the heap-owned Vec.
+                    ("pop", [Value::Int(n)]) => {
+                        let n_i = *n;
+                        if n_i < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        let n_usz = usize::try_from(n_i).unwrap_or(usize::MAX);
+                        let arr_len = self.heap.array(id).len();
+                        let take = n_usz.min(arr_len);
+                        let split_at = arr_len - take;
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Array(id));
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let nid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(take)));
+                        let drained: Vec<Value> = g.vm.heap.array_mut(id).drain(split_at..).collect();
+                        g.vm.heap.array_mut(nid).extend(drained);
+                        Some(Value::Array(nid))
+                    }
+                    #[cfg(feature = "bignum")]
+                    ("pop", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
+                    ("pop", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 0..1)", many.len()),
+                        }));
                     }
                     // `Array#delete(obj)` — value-based delete.
                     // Removes EVERY element equal to `obj` (using
