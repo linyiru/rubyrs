@@ -405,27 +405,44 @@ pub(crate) fn string_call(
         // char in `from` maps to the same-index char in `to`; if
         // `to` is shorter, characters past its length map to its
         // LAST char (CRuby's "stretch" behaviour). If `to` is
-        // empty, those chars are deleted. Character-range syntax
-        // (`"a-z"`) is intentionally NOT expanded — flagged in
-        // SUBSET.md.
+        // empty, those chars are deleted.
+        //
+        // Both `from` and `to` go through `parse_tr_set`, which
+        // expands range shorthand (`a-z` → `[a, b, ..., z]`) and
+        // detects a leading `^` in `from` as set negation
+        // ("translate every char NOT in the set"). Under negation
+        // every translated char maps to `to`'s LAST char (or is
+        // deleted if `to` is empty), per CRuby.
         (Value::Str(a), "tr", [Value::Str(from), Value::Str(to)]) => {
             let a_ref = a.to_string_lossy();
             let from_ref = from.to_string_lossy();
             let to_ref = to.to_string_lossy();
-            let from_chars: Vec<char> = from_ref.chars().collect();
-            let to_chars: Vec<char> = to_ref.chars().collect();
+            let (from_chars, from_negated) = parse_tr_set(&from_ref);
+            let (to_chars, _) = parse_tr_set(&to_ref);
             let mut out = String::with_capacity(a_ref.len());
             for ch in a_ref.chars() {
-                if let Some(idx) = from_chars.iter().position(|c| *c == ch) {
-                    if to_chars.is_empty() {
-                        // Delete: skip this character entirely.
-                    } else if idx < to_chars.len() {
+                let in_set = from_chars.contains(&ch);
+                let translate = if from_negated { !in_set } else { in_set };
+                if !translate {
+                    out.push(ch);
+                    continue;
+                }
+                if to_chars.is_empty() {
+                    // Delete: skip this character entirely.
+                    continue;
+                }
+                if from_negated {
+                    // Every translated char maps to `to`'s LAST char.
+                    out.push(*to_chars.last().unwrap());
+                } else {
+                    // Position-based: same index in `to`, or last
+                    // char if `from` is longer than `to`.
+                    let idx = from_chars.iter().position(|c| *c == ch).unwrap();
+                    if idx < to_chars.len() {
                         out.push(to_chars[idx]);
                     } else {
                         out.push(*to_chars.last().unwrap());
                     }
-                } else {
-                    out.push(ch);
                 }
             }
             check(out.len())?;
@@ -1473,6 +1490,45 @@ impl Vm {
 /// inside the selector, octal forms) that real-world consumers
 /// rarely hit; we omit those here. Add as motivating cases
 /// appear.
+/// Order-preserving sibling of `parse_count_selector` used by
+/// `String#tr` (and ready for `squeeze` if it grows the same
+/// surface). Position matters here because tr maps each source-
+/// set position to the same dest-set position; using a HashSet
+/// would collapse the ordering and break the index-based
+/// mapping. Range / `^`-negation handling matches
+/// `parse_count_selector`.
+pub(crate) fn parse_tr_set(sel: &str) -> (Vec<char>, bool) {
+    let mut negate = false;
+    let mut chars: Vec<char> = sel.chars().collect();
+    if chars.first() == Some(&'^') && chars.len() > 1 {
+        negate = true;
+        chars.remove(0);
+    }
+    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 2 < chars.len() && chars[i + 1] == '-' {
+            let start = chars[i] as u32;
+            let end = chars[i + 2] as u32;
+            if start <= end {
+                for cp in start..=end {
+                    if let Some(c) = char::from_u32(cp) {
+                        out.push(c);
+                    }
+                }
+                i += 3;
+                continue;
+            }
+            // Reversed range — fall through and treat as 3
+            // literal chars (matches CRuby's behavior on e.g.
+            // `tr("z-a", ...)` which emits no translation).
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    (out, negate)
+}
+
 pub(crate) fn parse_count_selector(sel: &str) -> (std::collections::HashSet<char>, bool) {
     let mut negate = false;
     let mut chars: Vec<char> = sel.chars().collect();
