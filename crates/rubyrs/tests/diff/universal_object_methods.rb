@@ -54,7 +54,7 @@ class CCol; end
 puts 1.object_id == CCol.new.object_id            # false (Int 1 → 3 was = heap Object ObjId 0)
 puts true.object_id == :length.object_id          # false (true → 20 was = first interned Sym)
 puts 1.0.object_id == (-1.0).object_id            # false (sign-bit mask collapsed them)
-puts /a/.object_id != /b/.object_id               # true  (regex used constant id 11)
+puts /a/.object_id != /b/.object_id               # true  (distinct regex allocations must have distinct ids — was a single constant id before identity-based encoding)
 
 # Int overflow injectivity (cycle-3 review): naive
 # `n.wrapping_mul(2).wrapping_add(1)` collapses i64::MAX to 0

@@ -4662,8 +4662,11 @@ impl Vm {
         // (sandbox), so use the object_id hex form. Primitive
         // arms for Str/Int/Sym/Array/Hash run earlier in dispatch
         // and shadow this, and `Value::Class` is handled by
-        // `primitive_call` (vm/primitive.rs), so only plain
-        // `Object` instances actually fall through here.
+        // `primitive_call` (vm/primitive.rs). Any receiver type
+        // without a specialized `to_s`/`inspect` handler falls
+        // through here — that includes plain `Object` instances
+        // but also BoundMethod / UnboundMethod / CurriedProc /
+        // future heap variants we add without a custom default.
         if (&*name == "to_s" || &*name == "inspect") && args.is_empty() {
             let cls_name = match self.class_of(&recv) {
                 Value::Class(c) => c.name.clone(),
