@@ -3,6 +3,14 @@
 # the Enumerable any?/all?/none?/one? quad for Hash.
 
 describe "Hash#one?" do
+  it "without a block returns true iff the Hash has exactly one entry" do
+    # Every Hash entry is a truthy `[k, v]` pair, so the
+    # no-block Enumerable shape collapses to a size check.
+    assert_eq({}.one?, false)
+    assert_eq({a: 1}.one?, true)
+    assert_eq({a: 1, b: 2}.one?, false)
+  end
+
   it "returns true iff exactly one entry yields truthy" do
     h = {a: 1, b: 2, c: 3}
     assert_eq(h.one? { |k, v| v == 2 }, true)

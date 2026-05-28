@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 128 |
-| Examples in corpus | 744 |
+| Examples in corpus | 745 |
 | Skipped `it` traces | 150 |
 
 ### Skipped traces by category
@@ -40,7 +40,7 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 31 | 101 | 48 |
+| Hash | 31 | 102 | 48 |
 | Integer | 34 | 303 | 28 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
@@ -92,7 +92,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_merge_spec.rb` | Hash#merge | `core/hash/merge_spec.rb` | 1 | 6 |
 | `hash_min_by_spec.rb` | Hash#min_by | `core/enumerable/min_by_spec.rb` | 3 | 2 |
 | `hash_min_max_spec.rb` | Hash#min | `core/hash/{min,max}_spec.rb` | 5 | 2 |
-| `hash_one_spec.rb` | Hash#one? | `core/hash/one_spec.rb` | 4 | 0 |
+| `hash_one_spec.rb` | Hash#one? | `core/hash/one_spec.rb` | 5 | 0 |
 | `hash_partition_spec.rb` | Hash#partition | `core/hash/partition_spec.rb` | 5 | 0 |
 | `hash_select_spec.rb` | Hash#select | `core/hash/select_spec.rb + shared/select.rb` | 2 | 2 |
 | `hash_size_spec.rb` | Hash#size | `core/hash/size_spec.rb` | 3 | 0 |

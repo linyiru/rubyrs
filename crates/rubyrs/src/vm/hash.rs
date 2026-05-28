@@ -297,6 +297,12 @@ impl Vm {
                     // first n pairs as Array<[k, v]>. Mirrors
                     // Array#first; insertion order is the Hash's
                     // canonical iteration order.
+                    // `h.one?` (no block) — true iff the Hash
+                    // has exactly one entry. Every Hash entry is
+                    // truthy (a `[k, v]` pair), so the no-block
+                    // Enumerable shape collapses to a size check.
+                    // Block form lives in iter.rs.
+                    ("one?", []) => Some(Value::Bool(self.heap.hash(id).len() == 1)),
                     ("first", []) => {
                         let pairs = self.heap.hash(id);
                         if pairs.is_empty() { return Ok(Some(Value::Nil)); }
