@@ -84,6 +84,7 @@ puts 7.itself { raise "block must not run" }
 
 # Note: rubyrs's `then` / `yield_self` without a block raise
 # LocalJumpError, while CRuby returns an Enumerator. This
-# divergence is exercised by a rubyrs-only unit test in
-# crates/rubyrs/src/vm/dispatch.rs's test module instead of
-# this diff fixture so CRuby parity stays clean.
+# divergence is exercised by the rubyrs-only fixture
+# `crates/rubyrs/tests/fixtures/object_then_noblock_divergence.rb`
+# (wired through `tests/integration.rs::run_fixture`) instead
+# of this diff fixture, so CRuby parity stays clean here.
