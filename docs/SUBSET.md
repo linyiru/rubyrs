@@ -787,6 +787,122 @@ puts eval("x")                 # CRuby: 99; rubyrs: NameError
   shapes, the tilt-shape `class_eval(string)` with self-wrap,
   the file+line signature, and `module_eval` alias parity).
 
+### `Kernel#Array` / `Integer` / `Float` / `String` / `sprintf` / `format` reachable on every receiver
+
+```ruby
+class Plain; end
+Plain.new.Array([1, 2])   # CRuby: NoMethodError (private); rubyrs: [1, 2]
+Plain.new.Integer("42")   # CRuby: NoMethodError (private); rubyrs: 42
+Plain.new.respond_to?(:Array) # CRuby: false; rubyrs: false (matches)
+```
+
+- CRuby's `Kernel#Array` / `Integer` / `Float` / `String` /
+  `sprintf` / `format` are **private** instance methods on the
+  `Kernel` module (which is mixed into `Object`). The standard
+  ancestor chain finds them, but the private-visibility check
+  raises `NoMethodError (private method called)` when invoked
+  via an explicit receiver.
+- rubyrs `do_call` has a Kernel-fallback that routes these
+  six names to `builtin_call` when normal lookup AND
+  `method_missing` both miss. The fallback ignores
+  private-visibility — `obj.Array(...)` silently succeeds where
+  CRuby raises.
+- `respond_to?` still returns `false` for these names — CRuby
+  reaches the methods via the Kernel include (every Object is
+  Kernel-mixed), but `respond_to?` defaults to
+  `include_private: false`, which hides private methods. rubyrs
+  matches by reporting `false`. The divergence is the call
+  shape, not feature detection.
+- A user `method_missing` correctly wins over the fallback
+  (matches CRuby's "private NoMethodError → method_missing
+  intercepts" path); fixture `kernel_array_via_method.rb`
+  Shape 6 pins this.
+- `Kernel#eval` is intentionally NOT in the fallback set —
+  with-recv `obj.eval(...)` would silently discard the
+  receiver, which is surprise-driven; rubyrs raises
+  NoMethodError there.
+- Why: sinatra's `codes.flat_map(&method(:Array))`
+  (`sinatra/base.rb:1404`) captures `method(:Array)` from an
+  explicit receiver and re-dispatches through `BoundMethod#call`,
+  which lands in the with-recv path. Without the fallback the
+  framework load fails. Implementing real private-visibility
+  for Kernel methods uniformly would require a private-bit on
+  every method entry plus an explicit-receiver gate in
+  dispatch; the fallback is the pragmatic Tier-1 stub.
+- Tests: `crates/rubyrs/tests/diff/kernel_array_via_method.rb`
+  (8 shapes: direct, capture, &-conversion, sinatra-shape,
+  method_missing-wins, `obj.eval` NoMethodError,
+  `respond_to?` false).
+
+### `Module#define_method` 2-arg Proc form not implemented
+
+```ruby
+class Foo; end
+p = proc { |x| x * 2 }
+Foo.define_method(:double, p)
+# CRuby: installs :double; rubyrs: ArgumentError
+#   ("the 2-arg Proc/UnboundMethod form of `Module#define_method`
+#    is not yet supported by rubyrs Tier-1")
+Foo.define_method(:double) { |x| x * 2 }  # both: installs :double
+Foo.define_method               # both: ArgumentError (wrong arity)
+Foo.define_method(:x)           # both: ArgumentError (tried to create Proc without block)
+```
+
+- CRuby's `Module#define_method` accepts EITHER a block
+  (`define_method(:name) { ... }`) OR a Proc/Method/UnboundMethod
+  as a second positional argument
+  (`define_method(:name, proc_obj)`).
+- rubyrs Tier-1 only implements the block form. The 2-arg Proc
+  form raises a CRuby-shape `ArgumentError` ("the 2-arg
+  Proc/UnboundMethod form of Module#define_method is not yet
+  supported by rubyrs Tier-1"). The 0-arg and 3+-arg cases
+  raise standard wrong-arity ArgumentError matching CRuby.
+- Why: no current consumer surfaced the 2-arg form (sinatra's
+  `define_singleton` shape (`base.rb:1735`) uses
+  `define_method(name, &content)`, the `&`-conversion form
+  which IS the block path with a Proc as the block_arg).
+  Implementing the 2-arg form requires extracting the Proc's
+  proto/captures into an installable Method, parallel to the
+  existing closure-method install in `Op::DefMethodBlock`.
+- Tests: `crates/rubyrs/tests/diff/module_define_method.rb`
+  pins the CRuby-aligned arity errors (0-arg, 3+-arg wrong-arity;
+  1-arg "tried to create Proc object without a block"). The
+  2-arg form itself can't be pinned via a diff fixture — CRuby
+  installs the method and rubyrs raises ArgumentError, so the
+  outputs would diverge byte-for-byte by design. The Tier-1
+  divergence is verified via manual probe; the ArgumentError
+  message string is constructed in
+  `crates/rubyrs/src/vm/dispatch.rs` — `grep` for
+  `"the 2-arg Proc/UnboundMethod form of \`Module#define_method\`"`
+  to find the two emission sites (no-block arm in
+  `try_dispatch_class_intrinsics`; block-form arm in
+  `do_call_block`'s `define_method` intrinsic).
+
+### Kernel module functions reachable via `method(:name).call(...)` round-trip
+
+```ruby
+m = method(:Array)
+m.class                    # both: Method
+m.call([1, 2])             # both: [1, 2]
+m.call(nil)                # both: []
+[[1], [2]].flat_map(&m)    # both: [1, 2]
+```
+
+- `method(:Array)` (and similar for Integer/Float/String/sprintf/
+  format) produces a `BoundMethod` whose internal `snapshot` is
+  `None` (the regular class lookup misses the Kernel module
+  function). Subsequent `.call(args)` re-dispatches through
+  `BoundMethod#call`'s fallback path, which lands in
+  `do_call` with `no_recv=false` — where the Kernel-fallback
+  (documented above) routes to `builtin_call`.
+- The `&method(:Array)` block-arg form (sinatra's
+  `flat_map(&method(:Array))` shape) works through the same
+  pipeline — `&` builds a `<callable-forwarder>` synth block
+  that calls `m.call(elem)` per element.
+- `method(:eval)` resolves and `.call(src)` works (via the
+  no_recv path), but the with-recv form `obj.eval(...)` does
+  not (see Kernel#eval entry above).
+
 ## Deferred to outer tiers
 
 Features whose absence is a tier-assignment decision per
