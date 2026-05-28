@@ -149,5 +149,21 @@ describe "String#sub!" do
     s = "hi".freeze
     assert_raises("FrozenError") { s.sub!(/h/) { |m| m.upcase } }
   end
+
+  it "returns self on a Regexp match that produces byte-identical output" do
+    # Pins the `Cow::Borrowed` no-match contract relied on
+    # by the Regex `!` arm. The regex crate currently
+    # returns `Cow::Owned` whenever ANY match fires (even
+    # when the replacement equals the matched bytes), so
+    # `"a".sub!(/a/, "a")` should reach the Cow::Owned arm
+    # and return self — not nil. If a future regex-crate
+    # version ever flipped to Cow::Borrowed on
+    # match-with-identical-bytes as a perf optimisation,
+    # this assertion would flip to nil and break.
+    s = "a"
+    r = s.sub!(/a/, "a")
+    assert(r.equal?(s))
+    assert_eq(s, "a")
+  end
 end
 

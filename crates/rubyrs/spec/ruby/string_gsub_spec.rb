@@ -152,5 +152,14 @@ describe "String#gsub!" do
     s = "hi".freeze
     assert_raises("FrozenError") { s.gsub!(/h/) { |m| m.upcase } }
   end
+
+  it "returns self on a Regexp match that produces byte-identical output" do
+    # Symmetric Cow::Borrowed-contract pin for the gsub!
+    # path. See string_sub_spec.rb's pin for the rationale.
+    s = "a"
+    r = s.gsub!(/a/, "a")
+    assert(r.equal?(s))
+    assert_eq(s, "a")
+  end
 end
 
