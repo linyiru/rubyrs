@@ -8,8 +8,12 @@
 #     is alive (CRuby and rubyrs both reuse heap ids after
 #     GC/deallocation, so we promise "stable while live", not
 #     session-wide uniqueness)
-#   - `hash` — DefaultHasher (content-based for value types,
-#     identity-based for heap objects)
+#   - `hash` — content-based for value types, identity-based
+#     for heap objects. Integer/Float use `fnv1a_64` for
+#     cross-toolchain stability (vm/numeric.rs), String uses
+#     DefaultHasher over its raw bytes (vm/string.rs), and the
+#     universal Object#hash arm here uses DefaultHasher over
+#     each variant's bits with a per-variant type-tag salt.
 #   - `frozen?` — false on plain Object (we don't model freeze)
 #   - `to_s` / `inspect` — `#<ClassName:0xHEXID>` default form
 

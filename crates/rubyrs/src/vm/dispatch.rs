@@ -7025,12 +7025,19 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
             f.to_bits().hash(&mut h);
             (1i64 << 60) | ((h.finish() & 0x0FFF_FFFF_FFFF_FFFF) as i64)
         }
-        // Rc-backed values: use the raw pointer as identity. On
-        // typical 64-bit hosts the virtual address fits in 48
-        // bits, well within the 58-bit payload slot — no
-        // hashing, no collision risk for distinct allocations
-        // throughout their lifetime.
-        Value::Str(s) => heap_id(std::rc::Rc::as_ptr(s) as u64, 2),
+        // Rc-backed values (Str/Regex/Class): use the raw
+        // pointer as the *seed* for an opaque, per-process id,
+        // not as the id itself. A naive `Rc::as_ptr(s) as u64`
+        // would leak the host virtual address through
+        // `object_id` (and through the `to_s`/`inspect`
+        // fallback), weakening ASLR for embedders running
+        // untrusted Ruby code. Scrambling with a process-local
+        // RandomState keeps the identity contract (same Rc →
+        // same id while alive) but the resulting payload is
+        // not recoverable to the original address. ObjId-backed
+        // variants below already use opaque freelist indices,
+        // not addresses, so they don't need this treatment.
+        Value::Str(s) => heap_id(scramble_ptr(std::rc::Rc::as_ptr(s) as usize), 2),
         Value::Object(id) => heap_id(id.0 as u64, 3),
         Value::Array(id) => heap_id(id.0 as u64, 4),
         Value::Hash(id) => heap_id(id.0 as u64, 5),
@@ -7040,9 +7047,26 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
         Value::UnboundMethod(id) => heap_id(id.0 as u64, 9),
         Value::CurriedProc(id) => heap_id(id.0 as u64, 10),
         #[cfg(feature = "regex")]
-        Value::Regex(re) => heap_id(std::rc::Rc::as_ptr(re) as u64, 11),
+        Value::Regex(re) => heap_id(scramble_ptr(std::rc::Rc::as_ptr(re) as usize), 11),
         #[cfg(feature = "bignum")]
         Value::BigInt(id) => heap_id(id.0 as u64, 12),
-        Value::Class(c) => heap_id(std::rc::Rc::as_ptr(c) as u64, 13),
+        Value::Class(c) => heap_id(scramble_ptr(std::rc::Rc::as_ptr(c) as usize), 13),
     }
+}
+
+/// Scramble a raw pointer into an opaque, process-local u64
+/// suitable for embedding in `object_id`. Same pointer → same
+/// scrambled value within a process (so identity holds while
+/// the value is alive), but the host virtual address isn't
+/// recoverable from the result. Uses the std `RandomState`'s
+/// process-startup entropy as the hash key.
+fn scramble_ptr(ptr: usize) -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::sync::OnceLock;
+    static SEED: OnceLock<RandomState> = OnceLock::new();
+    let rs = SEED.get_or_init(RandomState::new);
+    let mut h = rs.build_hasher();
+    ptr.hash(&mut h);
+    h.finish()
 }
