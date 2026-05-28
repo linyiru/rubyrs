@@ -111,7 +111,16 @@ fn sub_str_str_core(a: &str, pat: &str, repl: &str) -> String {
 /// and `gsub!`.
 fn gsub_str_str_core(a: &str, pat: &str, repl: &str) -> String {
     if pat.is_empty() {
-        let mut s = String::with_capacity(repl.len() * (a.chars().count() + 1) + a.len());
+        // Avoid `chars().count()` for an exact pre-allocation
+        // (a full extra O(n) pass over the receiver). A
+        // length-byte upper-bound is `repl.len() * (a.len() + 1)
+        // + a.len()`, but that over-allocates wildly when `a` is
+        // long and `repl` is small. Pick a cheap initial
+        // capacity equal to `a.len() + repl.len()` instead — the
+        // String will grow at most a handful of times on the
+        // common short-repl path. Trade O(n) precount for at
+        // most log₂(n) reallocs.
+        let mut s = String::with_capacity(a.len() + repl.len());
         s.push_str(repl);
         for c in a.chars() {
             s.push(c);
