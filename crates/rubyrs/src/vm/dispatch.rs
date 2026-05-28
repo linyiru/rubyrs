@@ -1100,7 +1100,14 @@ impl Vm {
                 // is a placeholder; reading `self.protos[0].filename`
                 // would surface an unrelated file.
                 if let Some(meta) = &m.builtin {
-                    let filename_str = Value::new_str(meta.source_label.to_string());
+                    // `None` source_label → nil. CRuby's behavior
+                    // for some C-defined methods (e.g.
+                    // BasicObject's __id__).
+                    let Some(label) = meta.source_label else {
+                        self.stack.push(Value::Nil);
+                        return Ok(CallableOutcome::Handled);
+                    };
+                    let filename_str = Value::new_str(label.to_string());
                     self.maybe_gc();
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(meta.source_line)]));
@@ -1919,11 +1926,12 @@ impl Vm {
                 // Kernel.methods deliberately so regular dispatch
                 // doesn't re-find it; the registry lives only for
                 // this introspection surface.
-                let snapshot = if cls.name == "Kernel" {
-                    self.kernel_builtin_method(*sid)
-                        .or_else(|| self.lookup_method_uncached(&cls, *sid))
-                } else {
-                    self.lookup_method_uncached(&cls, *sid)
+                let snapshot = match cls.name.as_str() {
+                    "Kernel" => self.kernel_builtin_method(*sid)
+                        .or_else(|| self.lookup_method_uncached(&cls, *sid)),
+                    "BasicObject" => self.basic_object_builtin_method(*sid)
+                        .or_else(|| self.lookup_method_uncached(&cls, *sid)),
+                    _ => self.lookup_method_uncached(&cls, *sid),
                 };
                 if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                     let mname = self.interner.resolve(*sid).to_string();

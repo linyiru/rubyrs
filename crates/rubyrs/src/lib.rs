@@ -1276,6 +1276,7 @@ impl Runtime {
         // dispatch via the `builtin` short-circuit in
         // `invoke_method_with_block`.
         self.vm.install_kernel_builtins();
+        self.vm.install_basic_object_builtins();
         // Comparable mixin — comparison-operator fan-out from
         // `<=>`. Loaded ahead of the inline PREAMBLE so any
         // `class X < Comparable` shape (or `is_a?(Comparable)`

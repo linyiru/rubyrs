@@ -966,14 +966,15 @@ impl Vm {
             ("object_id", 0, &[], "<internal:kernel>"),
             ("itself", 0, &[], "<internal:kernel>"),
             // Single-arg type predicates (required positional,
-            // anonymous in CRuby's C-defined parameter list)
+            // anonymous in CRuby's C-defined parameter list).
+            // `equal?` and `__send__` are intentionally NOT here —
+            // CRuby defines them on BasicObject (not Kernel); see
+            // the BasicObject registry in `install_basic_object_builtins`.
             ("is_a?", 1, &[("req", None)], "<internal:kernel>"),
             ("kind_of?", 1, &[("req", None)], "<internal:kernel>"),
             ("instance_of?", 1, &[("req", None)], "<internal:kernel>"),
-            ("equal?", 1, &[("req", None)], "<internal:kernel>"),
             // Variadic dispatchers (CRuby: arity -1, params [[:rest]])
             ("send", -1, &[("rest", None)], "<internal:kernel>"),
-            ("__send__", -1, &[("rest", None)], "<internal:kernel>"),
             ("respond_to?", -1, &[("rest", None)], "<internal:kernel>"),
         ];
         for (name, arity, params, src_label) in entries {
@@ -991,10 +992,60 @@ impl Vm {
                 // rather than allocating + leaking. The leak in
                 // the prior version was a harmless drop-in until
                 // someone added a non-static label.
-                source_label: src_label,
+                source_label: Some(src_label),
                 source_line: 0,
             });
             self.kernel_builtin_metas.insert(name_id, meta);
+        }
+    }
+
+    /// BasicObject builtins — installed alongside Kernel's
+    /// (preamble/object.rb runs before this). The set mirrors
+    /// CRuby's `BasicObject.instance_methods(false)`:
+    ///   - `__id__` (alias of object_id)
+    ///   - `__send__` (private send variant)
+    ///   - `equal?` (identity comparison)
+    ///   - `instance_eval` / `instance_exec` (self-swap evaluators)
+    ///   - `==` / `!=` / `!` (universal operators)
+    ///
+    /// Same off-chain design as Kernel — stored in
+    /// `Vm.basic_object_builtin_metas`, consulted by the
+    /// `instance_method` arm when receiver is BasicObject.
+    pub(crate) fn install_basic_object_builtins(&mut self) {
+        let bo_sym = self.interner.intern("BasicObject");
+        if !self.classes.contains_key(&bo_sym) {
+            return;
+        }
+        self.basic_object_class_sym = Some(bo_sym);
+        // BasicObject methods report `source_location: nil` in
+        // CRuby (verified: `BasicObject.instance_method(:__id__)
+        // .source_location` returns nil, unlike Kernel which
+        // returns `["<internal:kernel>", N]`). Mirror by passing
+        // `None` for source_label.
+        let entries: &[(&str, i64, &[(&str, Option<&str>)])] = &[
+            ("__id__", 0, &[]),
+            ("!", 0, &[]),
+            ("equal?", 1, &[("req", None)]),
+            ("==", 1, &[("req", None)]),
+            ("!=", 1, &[("req", None)]),
+            ("__send__", -1, &[("rest", None)]),
+            ("instance_eval", -1, &[("rest", None)]),
+            ("instance_exec", -1, &[("rest", None)]),
+        ];
+        for (name, arity, params) in entries {
+            let name_id = self.interner.intern(name);
+            let parameters: Vec<(&'static str, Option<String>)> = params
+                .iter()
+                .map(|(k, n)| (*k, n.map(|s| s.to_string())))
+                .collect();
+            let meta = std::rc::Rc::new(BuiltinMeta {
+                name_id,
+                arity: *arity,
+                parameters,
+                source_label: None,
+                source_line: 0,
+            });
+            self.basic_object_builtin_metas.insert(name_id, meta);
         }
     }
 
@@ -1005,16 +1056,32 @@ impl Vm {
     /// table.
     pub(crate) fn kernel_builtin_method(&self, name_id: SymId) -> Option<Rc<Method>> {
         let meta = self.kernel_builtin_metas.get(&name_id)?.clone();
-        // `Method.params` is used by the fixed-arity fast path to
-        // size the locals vector. Anonymous CRuby-C params (the
-        // `None` name we install for `is_a?` / `send` / etc.)
-        // would shrink the Vec below the required-arg count and
-        // panic the fast path's `locals[i] = arg` write. Fill
-        // anonymous slots with stable placeholder names ("arg0",
-        // "arg1", ...) so the Vec is sized correctly even though
-        // the builtin short-circuit at the top of
-        // `invoke_method_with_block` should always bypass the fast
-        // path. Belt-and-braces.
+        let cls = self.classes.get(&self.kernel_class_sym?)?.clone();
+        Some(Self::materialise_builtin_method(meta, &cls))
+    }
+
+    /// Same as `kernel_builtin_method` but for the BasicObject
+    /// registry. Looked up by the `instance_method` arm when the
+    /// receiver is BasicObject.
+    pub(crate) fn basic_object_builtin_method(&self, name_id: SymId) -> Option<Rc<Method>> {
+        let meta = self.basic_object_builtin_metas.get(&name_id)?.clone();
+        let cls = self.classes.get(&self.basic_object_class_sym?)?.clone();
+        Some(Self::materialise_builtin_method(meta, &cls))
+    }
+
+    /// Shared materialisation for both Kernel and BasicObject
+    /// builtin Method records. Synthesises a Method with the meta
+    /// as the introspection payload, a placeholder `proto_idx = 0`
+    /// (never read because invoke_method_with_block short-
+    /// circuits on `builtin.is_some()`), and FixedArity sized
+    /// to match the meta's anonymous-or-named params. The
+    /// anonymous-param `arg{i}` placeholder names exist as a
+    /// belt-and-braces guard against the fixed-arity fast path
+    /// indexing into a too-small locals vector — the builtin
+    /// short-circuit should always bypass that fast path, but
+    /// the structural mismatch was a real footgun in the cycle-1
+    /// review.
+    fn materialise_builtin_method(meta: std::rc::Rc<BuiltinMeta>, cls: &Rc<Class>) -> Rc<Method> {
         let params_strings: Vec<String> = meta
             .parameters
             .iter()
@@ -1029,21 +1096,15 @@ impl Vm {
         } else {
             None
         };
-        // Direct SymId-keyed lookup — `Vm.classes` is a
-        // HashMap<SymId, Rc<Class>>, so this is O(1). The
-        // `kernel_class_sym` cache is populated during
-        // `install_kernel_builtins`; if absent, kernel hasn't
-        // been bootstrapped yet and we have no synth to return.
-        let kernel = self.classes.get(&self.kernel_class_sym?)?.clone();
-        Some(Rc::new(Method {
+        Rc::new(Method {
             params: params_strings,
-            proto_idx: 0, // never read — builtin short-circuit
+            proto_idx: 0,
             fixed_arity,
-            defining_class: Some(Rc::downgrade(&kernel)),
+            defining_class: Some(Rc::downgrade(cls)),
             visibility: std::cell::Cell::new(crate::value::Visibility::Public),
             closure: None,
             builtin: Some(meta),
-        }))
+        })
     }
 
     /// Shared `super` lookup for both `Op::Super` (positional args)
