@@ -1463,10 +1463,17 @@ fn integer_div_mod_floor_semantics() {
     ).expect("eval");
     let out = buf.snapshot();
     let lines: Vec<&str> = out.trim().split('\n').collect();
+    // Under bignum, i64::MIN/-1 promotes to BigInt 2^63. Under
+    // no-bignum, both paths wrap to i64::MIN per the documented
+    // wrapping-on-overflow convention (floor_div_i64's doc).
+    #[cfg(feature = "bignum")]
+    let imin_div_expected = "9223372036854775808";
+    #[cfg(not(feature = "bignum"))]
+    let imin_div_expected = "-9223372036854775808";
     assert_eq!(lines, vec![
         "3", "1", "-4", "3", "-4", "-3", "3", "-1",  // Int×Int sign combos
         "3", "3",                                      // method-call shape
-        "9223372036854775808", "9223372036854775808", // i64::MIN/-1 promote (both paths)
+        imin_div_expected, imin_div_expected,          // i64::MIN/-1 (promote or wrap)
         "3.0", "-3.0", "3.0", "3.0",                   // Float-involved
         "1.0",                                         // Infinity
     ]);
