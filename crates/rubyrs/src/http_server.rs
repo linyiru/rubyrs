@@ -1799,8 +1799,21 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             // accept loops cut short and return; waitpid
             // observes their exit; the supervisor's
             // deadline-check path lets the loop unwind.
-            const MAX_RESTARTS_WINDOW: usize = 5;
-            const RESTART_WINDOW_SECS: u64 = 60;
+            // FU5: env-var tunable — ops can tighten the
+            // guard for testing or specific deployments,
+            // and the FU5 subprocess test sets these to
+            // small values to trigger crash-loop reliably.
+            // Invalid / unset values fall back to defaults.
+            let max_restarts_window: usize = std::env::var("RUBYRS_PREFORK_MAX_RESTARTS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|&n: &usize| n > 0)
+                .unwrap_or(5);
+            let restart_window_secs: u64 = std::env::var("RUBYRS_PREFORK_RESTART_WINDOW_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|&n: &u64| n > 0)
+                .unwrap_or(60);
             let supervisor_start = std::time::Instant::now();
             let deadline = supervisor_start + Duration::from_secs(duration_secs as u64);
             let mut alive: Vec<libc::pid_t> = child_pids.clone();
@@ -1886,10 +1899,10 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
                     // Crash-loop guard: prune old entries,
                     // count recent restarts.
-                    restart_log.retain(|t| now.duration_since(*t).as_secs() < RESTART_WINDOW_SECS);
-                    if restart_log.len() >= MAX_RESTARTS_WINDOW {
+                    restart_log.retain(|t| now.duration_since(*t).as_secs() < restart_window_secs);
+                    if restart_log.len() >= max_restarts_window {
                         eprintln!(
-                            "rubyrs prefork: crash-loop detected ({} restarts in {RESTART_WINDOW_SECS}s); halting supervisor",
+                            "rubyrs prefork: crash-loop detected ({} restarts in {restart_window_secs}s); halting supervisor",
                             restart_log.len(),
                         );
                         crash_loop_tripped = true;

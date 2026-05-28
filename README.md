@@ -265,6 +265,18 @@ as Puma's `on_worker_boot`). Globals are cleared between requests
 by the per-request reset; persistent worker state should use class
 instance variables.
 
+**Supervisor env vars** (Stage 7d):
+
+- `RUBYRS_PREFORK_MAX_RESTARTS` — N restarts allowed inside the
+  crash-loop window before the supervisor halts (default 5).
+- `RUBYRS_PREFORK_RESTART_WINDOW_SECS` — sliding window for the
+  restart count (default 60). Restarts older than this are pruned.
+
+A child that crashes on `on_worker_boot` triggers a restart; if
+the same boot path keeps failing, the guard prevents fork-bombing.
+Defaults are conservative — production should leave them alone
+unless a known-good upstream regression needs a workaround.
+
 Build with: `cargo build --features _http_server -p rubyrs`. The
 feature adds ~12-18 MB stripped to the binary; off by default per
 ADR 0019 v3 Rule 3.

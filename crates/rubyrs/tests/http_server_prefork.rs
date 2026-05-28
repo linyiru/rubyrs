@@ -320,3 +320,93 @@ __rubyrs_http_serve_prefork("127.0.0.1:18162", 6, app, 2, { on_worker_boot: on_b
          stdout:\n{stdout}\nstderr:\n{stderr}",
     );
 }
+
+/// FU5: when children crash repeatedly in on_worker_boot,
+/// the supervisor's crash-loop guard fires after the
+/// configured number of restarts and halts (signals
+/// remaining workers + stops respawning). Uses the FU5
+/// env-var tunable `RUBYRS_PREFORK_MAX_RESTARTS=2` so the
+/// test reliably trips the guard in a few seconds.
+///
+/// Without the env knob, the default 5/60s window would
+/// require 5+ rapid restarts to test — fork/exec timing
+/// makes that flaky across environments.
+#[test]
+fn prefork_crash_loop_guard_halts_supervisor() {
+    let _guard = TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+
+    let tmp = std::env::temp_dir().join("rubyrs_prefork_crashloop.rb");
+    // Each child's on_worker_boot raises immediately;
+    // child exits 1; supervisor sees the death + restarts.
+    // After MAX_RESTARTS=2 successful restarts, the 3rd
+    // death trips the guard.
+    //
+    // Duration: 30s (long enough that the test must EXIT
+    // because of the guard, not the duration timer).
+    //
+    // All test markers live on stderr — the supervisor's
+    // own "child N on_worker_boot raised" + "restarted
+    // worker" + "crash-loop detected" lines give us
+    // enough observation surface without needing Ruby
+    // stdout (rubyrs has no STDOUT constant).
+    let script = r#"
+on_boot = ->(idx) { raise "deterministic boot failure for #{idx}" }
+app = ->(env) { [200, {}, ["unreachable"]] }
+__rubyrs_http_serve_prefork("127.0.0.1:18163", 30, app, 2, { on_worker_boot: on_boot })
+"#;
+    std::fs::write(&tmp, script).expect("write tmp driver");
+
+    let rubyrs_bin = env!("CARGO_BIN_EXE_rubyrs");
+    let started = std::time::Instant::now();
+    let child = Command::new(rubyrs_bin)
+        .arg(&tmp)
+        .env("RUBYRS_PREFORK_MAX_RESTARTS", "2")
+        // Window stays at default 60s — well above the
+        // ~few-seconds-per-restart cadence, so all 3
+        // restarts fall inside the same window.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubyrs binary");
+
+    let output = child.wait_with_output().expect("wait_with_output");
+    let elapsed = started.elapsed();
+    let _ = std::fs::remove_file(&tmp);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // Crash-loop trip must fire — guard log + bounded
+    // elapsed (well below the 30s duration timer).
+    assert!(
+        stderr.contains("crash-loop detected"),
+        "expected crash-loop diagnostic in stderr.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "expected guard to halt supervisor within 10s, took {elapsed:?}.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+    // Supervisor logs "restarted worker" once per
+    // successful respawn. With MAX_RESTARTS=2, expect
+    // exactly 2 such lines before the guard halts —
+    // the 3rd attempt is the one that trips.
+    let restart_count = stderr.matches("restarted worker").count();
+    assert!(
+        restart_count == 2,
+        "expected exactly 2 restarts before guard trips, got {restart_count}.\n\
+         stderr:\n{stderr}",
+    );
+    // Original children + restarts = at least 3 boot
+    // failures observed (initial 2 + 1 restart attempt;
+    // possibly 4 if the second restart also reached
+    // on_worker_boot before the guard observed its
+    // death). Bound at >=3 to avoid flakes from
+    // waitpid race ordering.
+    let boot_failures = stderr.matches("on_worker_boot raised").count();
+    assert!(
+        boot_failures >= 3,
+        "expected >=3 boot-failure log lines, got {boot_failures}.\n\
+         stderr:\n{stderr}",
+    );
+}
