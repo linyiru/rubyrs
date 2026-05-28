@@ -4119,7 +4119,8 @@ impl Vm {
                         // FloatDomainError < RangeError < StandardError,
                         // so `rescue FloatDomainError`, `rescue RangeError`,
                         // and a bare `rescue` all catch this (verified
-                        // in tests/embed/rescue.rs).
+                        // in tests/embed/numeric.rs's
+                        // `float_domain_error_class_and_rescue_chain`).
                         return Err(self.trap(RubyError::FloatDomainError {
                             msg: "NaN".to_string(),
                         }));
