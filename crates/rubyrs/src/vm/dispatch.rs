@@ -3098,6 +3098,9 @@ impl Vm {
                     ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
                         msg: format!("wrong constant name {}", name),
                     })),
+                    ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} does not refer to class/module", full_path),
+                    })),
                 }
                 return Ok(());
             }
@@ -3129,6 +3132,9 @@ impl Vm {
                     })),
                     ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
                         msg: format!("wrong constant name {}", name),
+                    })),
+                    ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} does not refer to class/module", full_path),
                     })),
                 }
             }
@@ -3828,6 +3834,9 @@ impl Vm {
                 ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
                     msg: format!("wrong constant name {}", name),
                 })),
+                ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} does not refer to class/module", full_path),
+                })),
             }
             return Ok(());
         }
@@ -3854,6 +3863,9 @@ impl Vm {
                 })),
                 ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
                     msg: format!("wrong constant name {}", name),
+                })),
+                ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} does not refer to class/module", full_path),
                 })),
             }
         }
@@ -6723,6 +6735,7 @@ impl Vm {
                 (start_cls.name.clone(), vec![path])
             };
         let mut current_value: Option<Value> = None;
+        let mut segments_remaining: usize = segments.len();
         for segment in segments {
             if !is_valid_const_name(segment) {
                 return ConstPathOutcome::WrongName { name: segment.to_string() };
@@ -6742,17 +6755,30 @@ impl Vm {
                 // this is the final segment.
                 scope_name = c.name.clone();
                 current_value = Some(Value::Class(c));
+                segments_remaining -= 1;
                 continue;
             }
             if let Some(v) = self.constants.get(&qid).cloned() {
+                segments_remaining -= 1;
+                // Non-class constants can't be a parent scope.
+                // CRuby's behavior when used as a middle segment:
+                //   `Foo::CONST::X` →
+                //   `TypeError: Foo::CONST::X does not refer to
+                //    class/module`
+                // (regardless of whether `Foo::X` would
+                // separately resolve). If we ARE the last segment
+                // the value is the legitimate result; otherwise
+                // the path is structurally invalid and we must
+                // raise the CRuby-shape TypeError instead of
+                // continuing the walk with the OLD scope_name
+                // (which would silently resolve to a sibling
+                // under `Foo` or surface as a wrong
+                // "uninitialized constant" NameError).
+                // (Code-review #277 round 6 #1.)
+                if segments_remaining > 0 {
+                    return ConstPathOutcome::NotClass { full_path: path.to_string() };
+                }
                 current_value = Some(v);
-                // Non-class constants can't be a parent scope —
-                // if there are more segments after this, the next
-                // lookup will fail. We let it fall through; the
-                // next `format!("{}::{}", scope_name, ...)` won't
-                // match anything because non-class consts don't
-                // contribute to the qualified-key namespace.
-                // (Rarely-exercised — Tier-1 simplification.)
                 continue;
             }
             return ConstPathOutcome::Missing { missing_qualified: lookup };
@@ -6955,6 +6981,16 @@ pub(crate) enum ConstPathOutcome {
     Missing { missing_qualified: String },
     /// Some name in the path was not a valid constant identifier.
     WrongName { name: String },
+    /// A middle segment of the path resolved to a non-class /
+    /// non-module value (e.g. `Foo::CONST::X` where `Foo::CONST`
+    /// is `42`). CRuby raises
+    /// `TypeError: <full_path> does not refer to class/module`.
+    /// Pre-fix the helper continued walking with the previous
+    /// scope, which could silently resolve to an unrelated
+    /// sibling (`Foo::X`) or surface as a misleading
+    /// `uninitialized constant` NameError. (Code-review #277
+    /// round 6 #1.)
+    NotClass { full_path: String },
 }
 
 fn is_primitive_class_name(name: &str) -> bool {

@@ -149,3 +149,34 @@ rescue NameError => e
   e.message.start_with?("uninitialized constant") ? "uninit" : "other-#{e.message}"
 end
 puts "str-path-missing=#{err}"
+
+## Shape 12: non-class middle segment raises TypeError, NOT
+## a silent resolution to a sibling under the previous scope.
+## Pre-fix the helper kept the old `scope_name` after a
+## non-class hit, so `Foo::CONST::X` could silently return
+## `Foo::X` (wrong value, no error) or report a misleading
+## "uninitialized constant Foo::X". CRuby raises
+## `TypeError: Foo::CONST::X does not refer to class/module`.
+## (code-review #277 round 6 #1.)
+module NonClassScope
+  CONST = 42
+  X = 99
+end
+err = begin
+  Object.const_get("NonClassScope::CONST::X")
+  "DID-NOT-RAISE"
+rescue TypeError => e
+  e.message.end_with?("does not refer to class/module") ? "TypeError" : "other-#{e.message}"
+end
+puts "non-class-middle-cg=#{err}"
+err = begin
+  Object.const_defined?("NonClassScope::CONST::X")
+  "no-raise"
+rescue TypeError => e
+  e.message.end_with?("does not refer to class/module") ? "TypeError" : "other-#{e.message}"
+end
+puts "non-class-middle-cd=#{err}"
+## Non-class as the FINAL segment still resolves (it's the
+## valid result, not a parent scope).
+puts "non-class-final-cg=#{Object.const_get("NonClassScope::CONST")}"
+puts "non-class-final-cd=#{Object.const_defined?("NonClassScope::CONST")}"
