@@ -158,9 +158,7 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     // resource trap via a bare `rescue` clause.
     ("ResourceExhausted", "Exception"),
     ("IOError", "StandardError"),
-    ("ScriptError", "Exception"),
     ("LoadError", "ScriptError"),
-    ("NotImplementedError", "ScriptError"),
 ];
 
 impl RubyError {
