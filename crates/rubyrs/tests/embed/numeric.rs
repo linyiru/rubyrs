@@ -1447,7 +1447,8 @@ fn integer_ceil_floor_round_truncate_basic() {
         ("(-1832).truncate(-2).inspect", "-1800"),
         // BigInt precision — accepted as no-op (positive sign;
         // canonical-BigInt invariant means |x| > i64::MAX so any
-        // BigInt is far past the 18-digit decline threshold).
+        // BigInt is far past the 38-digit i128 ceiling the
+        // Int-precision path uses).
         #[cfg(feature = "bignum")]
         ("123.round(2**64).inspect", "123"),
         #[cfg(feature = "bignum")]

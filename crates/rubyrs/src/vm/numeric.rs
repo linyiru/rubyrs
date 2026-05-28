@@ -506,9 +506,13 @@ pub(crate) fn numeric_call(
             // Widen to i128 so pow10 and the round-mode arithmetic
             // can't overflow for |n| <= 38 (i128 holds 10^38 with
             // room). Cast back to i64 at the end; under bignum we
-            // detect the truncation and defer for promotion;
-            // under no-bignum we wrap per the existing
-            // wrapping-on-overflow convention (same one +/-/* use).
+            // detect the truncation and decline (currently surfaces
+            // as NoMethodError since the negative-precision Int-recv
+            // BigInt promotion path isn't wired through
+            // bigint_primitive — tracked alongside the spec's
+            // method-not-implemented trace); under no-bignum we
+            // wrap per the existing wrapping-on-overflow convention
+            // (same one +/-/* use).
             let pow10: i128 = 10i128.pow(abs_n as u32);
             let a128 = *a as i128;
             let trunc_q = a128 / pow10;
