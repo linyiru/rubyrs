@@ -68,6 +68,115 @@ pub struct HttpServerConfig {
 #[allow(dead_code)] // Used once the Limited wrapper lands in stage 4.
 pub(crate) const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// Build a Rack SPEC v1.6 env Hash from request parts.
+///
+/// Stage 4c.1 of Phase H1 PoC. Constructs the Hash directly
+/// on the Vm's heap and returns the `ObjId` — caller wraps
+/// in `Value::Hash` for handing to the Ruby app's block.
+///
+/// **Caller MUST hold `&mut Vm`** — either the canonical
+/// `&mut self` (in tests / direct callers) or via the
+/// `current_vm_ptr()` re-borrow contract from ADR 0013 (in
+/// the per-request hyper handler, stage 4c.3).
+///
+/// ## What v1 includes
+///
+/// Per Rack SPEC + ADR 0022 v5 env hash construction:
+/// - CGI-style: REQUEST_METHOD / PATH_INFO / QUERY_STRING /
+///   SERVER_NAME / SERVER_PORT / SCRIPT_NAME / HTTP_VERSION
+/// - REMOTE_ADDR / REMOTE_PORT (v5; spec-optional but
+///   ubiquitous)
+/// - HTTP_<HEADER> for each request header (uppercase,
+///   dashes → underscores)
+/// - CONTENT_TYPE / CONTENT_LENGTH (no HTTP_ prefix, per spec)
+/// - rack.url_scheme
+/// - rack.multithread (false)
+/// - rack.multiprocess (true — anticipates pre-fork)
+/// - rack.run_once (false)
+///
+/// ## What v1 stubs with TODO
+///
+/// - `rack.input` → set to `Value::Nil`. Should be a
+///   StringIO-like wrapper around `body_bytes`; once stage
+///   4c.3 wires the per-request handler, StringIO comes from
+///   `stdlib_vendor/stringio.rb` per ADR 0022 v4. PoC apps
+///   that don't read the request body work today; ones that
+///   do see Nil instead of StringIO.
+/// - `rack.errors` → `Value::Nil`. Should be the stderr sink.
+/// - `rack.version` → `Value::Nil`. Should be `[1, 6]` Array.
+///   Real apps that check this for the protocol version see
+///   nil and may behave wrongly; documented as PoC gap.
+/// - Non-UTF-8 header values: lossy-decode only; the
+///   parallel `_BYTES` key from ADR 0022 v5 is deferred.
+#[allow(clippy::too_many_arguments)] // 9 args — every one carries request shape; reducing would just bag into a struct
+#[allow(dead_code)] // Used by stage 4c.1 test + the stage 4c.3 per-request handler when that lands.
+pub(crate) fn build_rack_env(
+    vm: &mut crate::vm::Vm,
+    method: &str,
+    path: &str,
+    query: &str,
+    headers: &[(String, Vec<u8>)],
+    _body_bytes: &[u8],
+    listener_addr: SocketAddr,
+    peer_addr: SocketAddr,
+    scheme: &str,
+) -> crate::value::ObjId {
+    use crate::heap::{HashObj, HeapObj};
+    use crate::value::Value;
+
+    let key = |s: &str| Value::new_str(s.to_string());
+    let val = |s: String| Value::new_str(s);
+
+    let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(20 + headers.len());
+
+    // CGI-style required keys
+    pairs.push((key("REQUEST_METHOD"), val(method.to_string())));
+    pairs.push((key("PATH_INFO"), val(path.to_string())));
+    pairs.push((key("QUERY_STRING"), val(query.to_string())));
+    pairs.push((key("SERVER_NAME"), val(listener_addr.ip().to_string())));
+    pairs.push((key("SERVER_PORT"), val(listener_addr.port().to_string())));
+    pairs.push((key("SCRIPT_NAME"), val(String::new())));
+    pairs.push((key("HTTP_VERSION"), val("HTTP/1.1".to_string())));
+
+    // ADR 0022 v5: explicit REMOTE_ADDR/REMOTE_PORT
+    pairs.push((key("REMOTE_ADDR"), val(peer_addr.ip().to_string())));
+    pairs.push((key("REMOTE_PORT"), val(peer_addr.port().to_string())));
+
+    // Headers — HTTP_<UPPER_NAME_WITH_DASHES_AS_UNDERSCORES>
+    // for everything except Content-Type / Content-Length
+    // which get the bare CGI names. Header values may be
+    // non-UTF-8 (HTTP allows Latin-1 by RFC 7230); we
+    // lossy-decode. Stage 4c.1 doesn't emit the parallel
+    // `_BYTES` key (ADR 0022 v5 deferred).
+    for (name, value_bytes) in headers {
+        let value_str = String::from_utf8_lossy(value_bytes).into_owned();
+        let name_upper = name.to_uppercase();
+        let env_key = match name_upper.as_str() {
+            "CONTENT-TYPE" => "CONTENT_TYPE".to_string(),
+            "CONTENT-LENGTH" => "CONTENT_LENGTH".to_string(),
+            _ => format!("HTTP_{}", name_upper.replace('-', "_")),
+        };
+        pairs.push((key(&env_key), val(value_str)));
+    }
+
+    // rack.* keys
+    pairs.push((key("rack.url_scheme"), val(scheme.to_string())));
+    pairs.push((key("rack.input"), Value::Nil));   // TODO stage 4c.3: StringIO
+    pairs.push((key("rack.errors"), Value::Nil));  // TODO stage 4c.3: stderr sink
+    pairs.push((key("rack.version"), Value::Nil)); // TODO stage 4c.3: [1, 6]
+    pairs.push((key("rack.multithread"), Value::Bool(false)));
+    pairs.push((key("rack.multiprocess"), Value::Bool(true)));
+    pairs.push((key("rack.run_once"), Value::Bool(false)));
+
+    // Allocate the Hash on the Vm heap. Note this triggers
+    // potential GC — caller MUST pin any `Value::Str` from
+    // an earlier allocation it intends to use after this
+    // call. Stage 4c.3's per-request handler builds env in
+    // a single synchronous block with no intervening
+    // allocations, so no GC roots issue arises.
+    vm.heap.alloc(HeapObj::Hash(HashObj::with_pairs(pairs)))
+}
+
 /// Hardcoded request handler — stage 2 placeholder. Every
 /// request gets a 200 OK with a fixed plain-text body
 /// regardless of method/path/headers. Stage 3 swaps this
@@ -388,6 +497,141 @@ mod tests {
         rt.block_on(async move {
             tokio::time::timeout(timeout, &mut rx).await.ok()?.ok()
         })
+    }
+
+    /// Stage 4c.1 verification: build a Rack env Hash from
+    /// synthetic inputs and hand it to Ruby, which asserts
+    /// every spec-mandated key is present with the
+    /// expected value.
+    ///
+    /// Uses a sentinel host fn that constructs the env via
+    /// `build_rack_env` and returns it as `Value::Hash` to
+    /// the calling Ruby script. The Ruby side iterates
+    /// expected keys / values; any divergence raises Ruby-
+    /// side and propagates out via `rt.eval`'s `Err`.
+    ///
+    /// Why route through Ruby for assertion rather than
+    /// pattern-matching the heap from Rust: the Hash
+    /// indexing path is the one a real Rack app will use.
+    /// Verifying via `env["REQUEST_METHOD"]` etc. covers
+    /// both the build_rack_env code AND the Vm's
+    /// Hash#[] dispatch with one test.
+    #[test]
+    fn build_rack_env_produces_spec_compliant_hash() {
+        use crate::value::Value;
+        use std::net::SocketAddr;
+        use std::rc::Rc;
+
+        // Captured pre-built inputs so the host fn closure
+        // doesn't need to parse from args — the test is
+        // about env shape, not arg passing. Wrap in Rc so
+        // the Fn (not FnMut) closure can clone.
+        let inputs = Rc::new((
+            "POST".to_string(),
+            "/users/42".to_string(),
+            "verbose=1".to_string(),
+            vec![
+                ("Host".to_string(), b"example.com:3000".to_vec()),
+                ("User-Agent".to_string(), b"curl/8.4".to_vec()),
+                ("Content-Type".to_string(), b"application/json".to_vec()),
+                ("Content-Length".to_string(), b"17".to_vec()),
+                // Header with non-UTF-8 byte (0xFE is not
+                // valid UTF-8 start). Lossy-decode produces
+                // U+FFFD; key still set under HTTP_X_LATIN1.
+                ("X-Latin1".to_string(), vec![0xFE, b'!']),
+            ],
+            b"{\"hello\":\"hi\"}".to_vec(), // body
+            "127.0.0.1:3000".parse::<SocketAddr>().unwrap(), // listener
+            "10.0.0.42:54321".parse::<SocketAddr>().unwrap(), // peer
+            "http".to_string(),
+        ));
+
+        let mut rt = crate::Runtime::new();
+        let captured = inputs.clone();
+        rt.register_fn("__sentinel_build_env", move |_args| {
+            let ptr = crate::vm::current_vm_ptr();
+            assert!(!ptr.is_null(), "vm ptr must be set");
+            // SAFETY: ADR 0013 — outer &mut Vm parked by
+            // invoke_host_fn; we re-borrow time-disjointly.
+            let vm = unsafe { &mut *ptr };
+            let id = super::build_rack_env(
+                vm,
+                &captured.0,
+                &captured.1,
+                &captured.2,
+                &captured.3,
+                &captured.4,
+                captured.5,
+                captured.6,
+                &captured.7,
+            );
+            Ok(Value::Hash(id))
+        });
+
+        // Ruby-side assertions cover:
+        //   - Each CGI-required key present + value matches
+        //   - HTTP_* prefixing applied (uppercase + dashes
+        //     → underscores)
+        //   - Content-Type / Content-Length use bare CGI
+        //     names (no HTTP_ prefix)
+        //   - REMOTE_ADDR / REMOTE_PORT separately set
+        //   - rack.url_scheme / rack.multithread /
+        //     rack.multiprocess / rack.run_once
+        //   - rack.input / rack.errors / rack.version
+        //     stubbed as nil (TODO docs as PoC gap)
+        //   - Non-UTF-8 header lossy-decoded (length > 0)
+        //   - Unknown key returns nil (Hash#[] miss)
+        rt.eval(r#"
+            env = __sentinel_build_env
+            raise "REQUEST_METHOD mismatch: #{env['REQUEST_METHOD'].inspect}" \
+                unless env["REQUEST_METHOD"] == "POST"
+            raise "PATH_INFO mismatch: #{env['PATH_INFO'].inspect}" \
+                unless env["PATH_INFO"] == "/users/42"
+            raise "QUERY_STRING mismatch: #{env['QUERY_STRING'].inspect}" \
+                unless env["QUERY_STRING"] == "verbose=1"
+            raise "SERVER_NAME mismatch: #{env['SERVER_NAME'].inspect}" \
+                unless env["SERVER_NAME"] == "127.0.0.1"
+            raise "SERVER_PORT mismatch: #{env['SERVER_PORT'].inspect}" \
+                unless env["SERVER_PORT"] == "3000"
+            raise "SCRIPT_NAME mismatch: #{env['SCRIPT_NAME'].inspect}" \
+                unless env["SCRIPT_NAME"] == ""
+            raise "HTTP_VERSION mismatch: #{env['HTTP_VERSION'].inspect}" \
+                unless env["HTTP_VERSION"] == "HTTP/1.1"
+            raise "REMOTE_ADDR mismatch: #{env['REMOTE_ADDR'].inspect}" \
+                unless env["REMOTE_ADDR"] == "10.0.0.42"
+            raise "REMOTE_PORT mismatch: #{env['REMOTE_PORT'].inspect}" \
+                unless env["REMOTE_PORT"] == "54321"
+            raise "HTTP_HOST mismatch: #{env['HTTP_HOST'].inspect}" \
+                unless env["HTTP_HOST"] == "example.com:3000"
+            raise "HTTP_USER_AGENT mismatch: #{env['HTTP_USER_AGENT'].inspect}" \
+                unless env["HTTP_USER_AGENT"] == "curl/8.4"
+            raise "CONTENT_TYPE mismatch: #{env['CONTENT_TYPE'].inspect}" \
+                unless env["CONTENT_TYPE"] == "application/json"
+            raise "CONTENT_LENGTH mismatch: #{env['CONTENT_LENGTH'].inspect}" \
+                unless env["CONTENT_LENGTH"] == "17"
+            raise "Content-Type should NOT be under HTTP_ prefix" \
+                if env.key?("HTTP_CONTENT_TYPE")
+            raise "HTTP_X_LATIN1 missing (non-UTF-8 header dropped?)" \
+                unless env["HTTP_X_LATIN1"].is_a?(String)
+            raise "HTTP_X_LATIN1 should have lossy-decoded content" \
+                unless env["HTTP_X_LATIN1"].length > 0
+            raise "rack.url_scheme mismatch: #{env['rack.url_scheme'].inspect}" \
+                unless env["rack.url_scheme"] == "http"
+            raise "rack.input should be nil (PoC stub)" \
+                unless env["rack.input"].nil?
+            raise "rack.errors should be nil (PoC stub)" \
+                unless env["rack.errors"].nil?
+            raise "rack.version should be nil (PoC stub)" \
+                unless env["rack.version"].nil?
+            raise "rack.multithread should be false" \
+                unless env["rack.multithread"] == false
+            raise "rack.multiprocess should be true" \
+                unless env["rack.multiprocess"] == true
+            raise "rack.run_once should be false" \
+                unless env["rack.run_once"] == false
+            raise "unknown key should return nil" \
+                unless env["NONEXISTENT_KEY"].nil?
+        "#, "stage_4c1_check.rb").expect("env hash Ruby-side assertions all hold");
     }
 
     /// Stage 4b verification: confirm that
