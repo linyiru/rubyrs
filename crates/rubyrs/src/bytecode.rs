@@ -486,8 +486,9 @@ impl BinOpKind {
             // `2^63` doesn't fit i64. Bignum builds return None
             // here so the caller's `bigint_arith` fallback promotes
             // to BigInt (matching CRuby parity). No-bignum builds
-            // wrap to `i64::MIN` per the existing wrapping
-            // convention (documented saturation). `% -1` is
+            // wrap to `i64::MIN` per the existing wrapping-on-
+            // overflow convention (the same one `+`/`-`/`*` use
+            // via `wrapping_*` under no-bignum). `% -1` is
             // always 0 — no overflow.
             #[cfg(feature = "bignum")]
             BinOpKind::Div => {
