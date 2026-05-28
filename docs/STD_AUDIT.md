@@ -162,7 +162,7 @@ the injected value:
 - **`std::sync::Arc` (4 sites total)** — investigated, all legitimate:
   - `vm.rs:404`, `lib.rs:190`, `main.rs:223` — `Config::time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>`. The `Send + Sync` bound is required for the public `Config` API to be `Send` (an embedder may construct Config in one thread, hand it to a Runtime on another). **Tag: `tier-2-host-io`** (legitimately public API surface). NOT dead code; keep as `Arc`.
   - `vm/iter.rs:2582` `Arc::new(Mutex::new(...))` — test-only code (inside `#[cfg(test)]` block); the test fixture's `Sink` adapter needs `Arc` so the test thread can read the captured buffer after `eval`. **Tag: `tier-2-host-io` (test-only)**. Keep.
-- **`std::panic` (1 site at `lib.rs:1670`)** — `use std::panic::{catch_unwind, AssertUnwindSafe}` is inside `#[cfg(test)] mod caps_guard_tests` testing `CapsGuard`'s drop-safety. Test-only, never reaches the production path. **Tag: `tier-2-host-io` (test-only)**. Keep.
+- **`std::panic` (1 site at `lib.rs:1858`)** — `use std::panic::{catch_unwind, AssertUnwindSafe}` is inside `#[cfg(test)] mod preamble_lift_guard_tests` testing `PreambleLiftGuard`'s drop-safety. Test-only, never reaches the production path. **Tag: `tier-2-host-io` (test-only)**. Keep.
 - **`STRESS_GC` env read at `lib.rs:206`** — RESOLVED by removing the env read from `Config::default()` (commit `<this PR>`). The library API no longer leaks host env into a public field. Subprocess-based tests (diff_cruby, cext_*) still pick up `STRESS_GC` via the CLI's explicit `main.rs::env_lookup` read.
 
 ## Phase 1 migration order
