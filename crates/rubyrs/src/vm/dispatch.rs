@@ -4611,14 +4611,12 @@ impl Vm {
                 }
                 #[cfg(feature = "bignum")]
                 (Value::Float(s), Value::BigInt(id)) => {
-                    use num_traits::ToPrimitive;
-                    let o_f = self.heap.bigint(*id).to_f64().unwrap_or(f64::INFINITY);
+                    let o_f = crate::vm::bignum::bigint_to_f64_sign_preserving(self.heap.bigint(*id));
                     (Value::Float(o_f), Value::Float(*s))
                 }
                 #[cfg(feature = "bignum")]
                 (Value::BigInt(id), Value::Float(_)) => {
-                    use num_traits::ToPrimitive;
-                    let s_f = self.heap.bigint(*id).to_f64().unwrap_or(f64::INFINITY);
+                    let s_f = crate::vm::bignum::bigint_to_f64_sign_preserving(self.heap.bigint(*id));
                     (arg.clone(), Value::Float(s_f))
                 }
                 (Value::Int(_), Value::Int(_)) => (arg.clone(), recv.clone()),

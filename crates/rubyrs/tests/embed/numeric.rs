@@ -2962,6 +2962,16 @@ fn numeric_coerce_basic() {
         // BigInt × Float — promote both to Float.
         #[cfg(feature = "bignum")]
         ("puts (2**64).coerce(2.5).inspect",        "[2.5, 1.8446744073709552e19]"),
+        // Over-magnitude BigInt × Float — `bigint_to_f64_sign_preserving`
+        // saturates to ±Infinity with the original BigInt's sign.
+        // Pinned here at the user boundary so a future num-bigint
+        // upgrade can't quietly flip negative-Inf to +Inf.
+        #[cfg(feature = "bignum")]
+        ("puts (2**2000).coerce(1.0).inspect",      "[1.0, Infinity]"),
+        #[cfg(feature = "bignum")]
+        ("puts (-(2**2000)).coerce(1.0).inspect",   "[1.0, -Infinity]"),
+        #[cfg(feature = "bignum")]
+        ("puts 1.0.coerce(-(2**2000)).inspect",     "[-Infinity, 1.0]"),
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));
