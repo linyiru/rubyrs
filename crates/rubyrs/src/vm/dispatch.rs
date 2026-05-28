@@ -4718,10 +4718,13 @@ impl Vm {
                 _ => { 7u8.hash(&mut h); object_id_for(&recv).hash(&mut h); }
             }
             // Return the full 64-bit hash as i64 — Ruby permits
-            // negative hashes and other #hash impls in this
-            // crate (Integer/Float/String) all return the
-            // unmasked `h.finish() as i64`. Masking here would
-            // drop 1 bit of entropy without benefit.
+            // negative hashes, and masking off the sign bit here
+            // would drop 1 bit of entropy without benefit. Other
+            // `#hash` impls in this crate likewise return the
+            // unmasked i64 cast (String uses DefaultHasher in
+            // `vm/string.rs`; Integer/Float use fnv1a_64 in
+            // `vm/numeric.rs` for cross-rustc stability — both
+            // still cast the full u64 to i64 without masking).
             let v = h.finish() as i64;
             self.stack.push(Value::Int(v));
             return Ok(());
