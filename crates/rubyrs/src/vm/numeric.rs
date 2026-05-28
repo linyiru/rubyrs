@@ -125,15 +125,16 @@ pub(crate) fn int_round_with_half(a: i64, n: i64, mode: HalfMode) -> Result<Valu
     }
     // Mirror the existing `Integer#round` arm: i128 widens cleanly
     // up to |n| <= 38 (10^38 fits i128); above that 10^|n|
-    // overflows i128 too — return self (the |n|-bigger-than-magnitude
-    // case rounds to 0 for non-zero a, but only when sign matches —
-    // for our scope this fallback only fires for unreachable cases
-    // under canonical i64 magnitudes).
+    // dwarfs any i64 magnitude, so the rounded result is 0 for
+    // every mode and every receiver — matches the main round arm
+    // (numeric.rs:506+) and CRuby (`123.round(-100) == 0`).
+    // Returning `Value::Int(a)` here used to leave the receiver
+    // unchanged, divergent from both.
     // Use `unsigned_abs()` so `n == i64::MIN` doesn't panic in
     // debug under `-n`.
     let abs_n_u64 = n.unsigned_abs();
     if abs_n_u64 > 38 {
-        return Ok(Value::Int(a));
+        return Ok(Value::Int(0));
     }
     let abs_n = abs_n_u64 as u32;
     let p = 10i128.pow(abs_n);

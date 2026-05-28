@@ -2743,34 +2743,56 @@ impl Vm {
             for (k, v) in &pairs {
                 match k {
                     Value::Sym(s) if *s == half_sym => {
-                        // CRuby accepts both `:up` and `"up"` here
-                        // (Symbol or String — to_str / to_sym
-                        // implicit coercion). Resolve either shape
-                        // to a borrowed &str so the comparison runs
-                        // without an extra allocation per dispatch.
-                        let mode_str: std::borrow::Cow<'_, str> = match v {
+                        // Mode resolution without per-dispatch allocation:
+                        // Symbol values match against the canonical SymId
+                        // (pre-interned once before the loop); String
+                        // values use `with_str_lossy` so the comparison
+                        // runs against borrowed `&str` instead of an
+                        // owned `String`. Non-Sym/Str values surface a
+                        // CRuby-shape "invalid rounding mode: <inspect>"
+                        // — using `to_inspect` instead of the class name
+                        // mirrors `Float#round` / `Numeric#round`'s
+                        // shape (e.g. `0` / `nil` / `1.5` instead of
+                        // `Integer` / `nil` / `Float`).
+                        let up_id = self.interner.intern("up");
+                        let down_id = self.interner.intern("down");
+                        let even_id = self.interner.intern("even");
+                        let resolved: Option<crate::vm::numeric::HalfMode> = match v {
                             Value::Sym(vsym) => {
-                                std::borrow::Cow::Owned(self.interner.resolve(*vsym).to_string())
+                                if *vsym == up_id { Some(crate::vm::numeric::HalfMode::Up) }
+                                else if *vsym == down_id { Some(crate::vm::numeric::HalfMode::Down) }
+                                else if *vsym == even_id { Some(crate::vm::numeric::HalfMode::Even) }
+                                else { None }
                             }
-                            Value::Str(s) => {
-                                std::borrow::Cow::Owned(s.to_string_lossy())
-                            }
+                            Value::Str(s) => s.with_str_lossy(|t| match t {
+                                "up" => Some(crate::vm::numeric::HalfMode::Up),
+                                "down" => Some(crate::vm::numeric::HalfMode::Down),
+                                "even" => Some(crate::vm::numeric::HalfMode::Even),
+                                _ => None,
+                            }),
                             _ => {
+                                let inspected = v.to_inspect(&self.heap, &self.interner);
                                 return Err(self.trap(RubyError::ArgumentError {
-                                    msg: format!(
-                                        "invalid rounding mode: {}",
-                                        crate::vm::numeric::type_name_for_coerce(v),
-                                    ),
+                                    msg: format!("invalid rounding mode: {}", inspected),
                                 }));
                             }
                         };
-                        mode = match mode_str.as_ref() {
-                            "up" => crate::vm::numeric::HalfMode::Up,
-                            "down" => crate::vm::numeric::HalfMode::Down,
-                            "even" => crate::vm::numeric::HalfMode::Even,
-                            other => {
+                        mode = match resolved {
+                            Some(m) => m,
+                            None => {
+                                // For unknown Symbol/String values
+                                // CRuby reports the bare name
+                                // (`invalid rounding mode: weird`);
+                                // for non-Sym/Str values the inspect
+                                // shape carries more information
+                                // (handled in the outer match arm).
+                                let label: String = match v {
+                                    Value::Sym(vsym) => self.interner.resolve(*vsym).to_string(),
+                                    Value::Str(s) => s.to_string_lossy(),
+                                    _ => unreachable!("non-Sym/Str handled by outer arm"),
+                                };
                                 return Err(self.trap(RubyError::ArgumentError {
-                                    msg: format!("invalid rounding mode: {}", other),
+                                    msg: format!("invalid rounding mode: {}", label),
                                 }));
                             }
                         };

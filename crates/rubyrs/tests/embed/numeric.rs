@@ -1568,6 +1568,34 @@ fn round_half_kwarg_dispatch() {
     ).expect("eval");
     assert_eq!(buf.snapshot().trim(), "user-down");
 
+    // (post-#284 polish) |n| > 38 returns 0, not the original
+    // receiver — matches the regular `Integer#round(-100)` arm.
+    for (script, expected) in [
+        ("puts 123.round(-100, half: :up)",   "0"),
+        ("puts 123.round(-100, half: :down)", "0"),
+        ("puts 123.round(-100, half: :even)", "0"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "round_half_large_n.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // (post-#284 polish) non-Symbol/String :half value reports
+    // the inspect shape rather than the class name.
+    for (script, expected_msg) in [
+        ("25.round(-1, half: 0)",   "invalid rounding mode: 0"),
+        ("25.round(-1, half: nil)", "invalid rounding mode: nil"),
+        ("25.round(-1, half: 1.5)", "invalid rounding mode: 1.5"),
+    ] {
+        let err = rt.eval(script, "round_half_inspect.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "ArgumentError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected ArgumentError for {:?}, got {:?}", script, other),
+        }
+    }
     // (c) CRuby parity — String value for the `:half` kwarg is
     //     accepted the same as the Symbol form.
     for (script, expected) in [
