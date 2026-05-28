@@ -122,6 +122,38 @@ intentionally — embedders building sandboxed DSL hosts
 benefit from the deterministic-by-default behaviour these
 omissions guarantee.
 
+## Install
+
+### As a library (recommended for v0.1.0)
+
+The canonical v0.1.0 release lives at the
+[`v0.1.0` git tag](https://github.com/linyiru/rubyrs/releases/tag/v0.1.0).
+Depend on it via Cargo's git dependency:
+
+```toml
+[dependencies]
+rubyrs = { git = "https://github.com/linyiru/rubyrs", tag = "v0.1.0" }
+```
+
+The crates.io entries (`rubyrs@0.1.0`, `rubyrs-cext@0.1.0`)
+were published 2026-05-25 as **name-registration placeholders**
+and predate the substantive v0.1.0 work (the ADR-driven
+architecture work, 263-fixture diff_cruby surface, OutputSink
+trait, untrusted-input cap model). They are intentionally NOT
+the canonical v0.1.0 — they exist only to reserve the names.
+A future `0.1.x` / `0.2.0` release will publish the real
+artifact to crates.io. For now, the git tag is the source of
+truth.
+
+### CLI from source
+
+```bash
+git clone https://github.com/linyiru/rubyrs --branch v0.1.0
+cd rubyrs
+cargo build --release
+./target/release/rubyrs your_script.rb
+```
+
 ## Build
 
 ```bash

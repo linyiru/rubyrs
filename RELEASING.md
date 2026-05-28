@@ -174,7 +174,20 @@ v0.1.0 --draft=false`) when ready to ship.
 
 ### 6. Publish to crates.io (optional, see policy above)
 
-For the first release, only these two:
+> **History note (v0.1.0)**: `rubyrs@0.1.0` and
+> `rubyrs-cext@0.1.0` were already published to crates.io
+> on 2026-05-25 as **name-registration placeholders**,
+> three days before the canonical v0.1.0 git tag was cut.
+> crates.io disallows re-publishing the same version, so
+> the canonical v0.1.0 is the git tag, not the crates.io
+> entry. README documents this in the "Install" section.
+>
+> **For v0.1.1 / v0.2.0 (the first real crates.io publish)**:
+> the placeholders satisfy the "name already taken"
+> precondition; the new version goes through the
+> commands below normally.
+
+For the (real, post-placeholder) first publish:
 
 ```bash
 cargo publish -p rubyrs-cext
@@ -184,8 +197,8 @@ cargo publish -p rubyrs
 ```
 
 The order matters: `rubyrs` declares
-`rubyrs-cext = { path = "...", version = "0.1.0", optional = true }`,
-so `rubyrs-cext = "0.1.0"` must already exist on crates.io
+`rubyrs-cext = { path = "...", version = "0.1.x", optional = true }`,
+so `rubyrs-cext = "0.1.x"` must already exist on crates.io
 for `cargo publish -p rubyrs` to resolve.
 
 If we decide to publish `rubyrs-gapscan` too:
@@ -194,6 +207,12 @@ If we decide to publish `rubyrs-gapscan` too:
 cargo publish -p rubyrs-gapscan
 # Depends on rubyrs; must run AFTER rubyrs is on crates.io.
 ```
+
+**Dry-run first**: `cargo publish --dry-run -p <crate>`
+verifies metadata + packaging without uploading. The first
+real publish should always go through dry-run; the dry-run
+also catches "version already exists on crates.io" before
+you wonder why the live publish failed.
 
 ### 7. Post-release
 
