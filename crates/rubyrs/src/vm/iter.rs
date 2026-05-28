@@ -2687,6 +2687,107 @@ impl Vm {
                 ]));
                 Some(Value::Array(pair_id))
             }
+            // `h.take_while { |pair| ... }` / `{ |k, v| ... }`
+            // — prefix where the block is truthy; stops at the
+            // first falsy return (block NOT invoked after).
+            // `h.drop_while { |pair| ... }` — suffix AFTER the
+            // crossing point; block invoked until the first
+            // falsy then the rest passes through unconditionally.
+            // Both yield a single `[k, v]` pair Array per entry
+            // (matches Hash#each / partition / one? convention).
+            (Value::Hash(id), "take_while" | "drop_while", []) => {
+                let id = *id;
+                let is_take = name == "take_while";
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(result_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                let mut crossed = false;
+                for (k, v) in snapshot {
+                    if crossed {
+                        // drop_while past the crossover: append
+                        // remaining pairs without invoking block.
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                        g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                        continue;
+                    }
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let r = match step? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    let truthy = r.is_truthy();
+                    if is_take {
+                        if truthy {
+                            g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                        } else {
+                            break;
+                        }
+                    } else {
+                        // drop_while: keep dropping until first
+                        // falsy, then collect THIS pair + rest.
+                        if !truthy {
+                            crossed = true;
+                            g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                        }
+                    }
+                }
+                Some(early.unwrap_or(Value::Array(result_id)))
+            }
+            // `h.find_index { |pair| ... }` — returns the Int
+            // index of the first entry whose block result is
+            // truthy, or nil. Same yield shape as one? /
+            // partition (single pair Array per entry).
+            (Value::Hash(id), "find_index", []) => {
+                let id = *id;
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut found: Option<i64> = None;
+                let mut early = None;
+                for (i, (k, v)) in snapshot.into_iter().enumerate() {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let r = match step? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    if r.is_truthy() { found = Some(i as i64); break; }
+                }
+                Some(early.unwrap_or_else(|| match found {
+                    Some(idx) => Value::Int(idx),
+                    None => Value::Nil,
+                }))
+            }
             // `h.count { |k, v| pred }` — count pairs whose block
             // result is truthy. Same shape as Array#count block,
             // but the per-iter pair is the `[k, v]` Array (yielded

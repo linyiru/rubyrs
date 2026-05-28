@@ -362,6 +362,71 @@ impl Vm {
                         let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
                         Some(Value::Array(aid))
                     }
+                    // `h.take(n)` — returns the first n entries as
+                    // Array<[k, v]>. Behaves like `first(n)`: caps
+                    // at hash size, rejects negative n with
+                    // ArgumentError, BigInt → RangeError. CRuby's
+                    // Hash#take comes from Enumerable.
+                    #[cfg(feature = "bignum")]
+                    ("take", [Value::BigInt(_)]) | ("drop", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
+                    ("take", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                msg: "attempt to take negative size".to_string(),
+                            }));
+                        }
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        let take = n_usz.min(self.heap.hash(id).len());
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)[..take].to_vec();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(take);
+                        for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            g.pin(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        Some(Value::Array(aid))
+                    }
+                    // `h.drop(n)` — returns entries AFTER the first n
+                    // as Array<[k, v]>. Negative n raises
+                    // ArgumentError; n ≥ size returns []. Mirrors
+                    // Array#drop semantics.
+                    ("drop", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                msg: "attempt to drop negative size".to_string(),
+                            }));
+                        }
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        let len = self.heap.hash(id).len();
+                        let skip = n_usz.min(len);
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)[skip..].to_vec();
+                        let remain = pairs.len();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(remain);
+                        for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            g.pin(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        Some(Value::Array(aid))
+                    }
                     // `h.min` / `h.max` (no block) — find min/max
                     // entry via lexicographic compare on the
                     // `[k, v]` pair (key first, value tiebreaker).
