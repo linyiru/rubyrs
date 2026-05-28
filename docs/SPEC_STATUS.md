@@ -13,16 +13,16 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 117 |
-| Examples in corpus | 625 |
-| Skipped `it` traces | 151 |
+| Examples in corpus | 643 |
+| Skipped `it` traces | 142 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
 | `divergent` | 1 |
-| `fixture` | 51 |
-| `method-not-implemented` | 80 |
+| `fixture` | 53 |
+| `method-not-implemented` | 69 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -44,7 +44,7 @@ Find blocks unlocked by a future feature with e.g.
 | Integer | 33 | 288 | 28 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
-| String | 20 | 94 | 30 |
+| String | 20 | 112 | 21 |
 | UnboundMethod | 4 | 18 | 0 |
 
 ## Files
@@ -153,17 +153,17 @@ Find blocks unlocked by a future feature with e.g.
 | `string_include_spec.rb` | String#include? with String | `core/string/include_spec.rb` | 8 | 0 |
 | `string_length_spec.rb` | String#length | `core/string/length_spec.rb` | 1 | 0 |
 | `string_ljust_spec.rb` | String#ljust | `core/string/ljust_spec.rb` | 4 | 1 |
-| `string_lstrip_spec.rb` | String#lstrip | `core/string/lstrip_spec.rb` | 3 | 1 |
-| `string_reverse_spec.rb` | String#reverse | `core/string/reverse_spec.rb` | 5 | 0 |
+| `string_lstrip_spec.rb` | String#lstrip | `core/string/lstrip_spec.rb` | 5 | 0 |
+| `string_reverse_spec.rb` | String#reverse | `core/string/reverse_spec.rb` | 7 | 0 |
 | `string_rjust_spec.rb` | String#rjust | `core/string/rjust_spec.rb` | 4 | 1 |
-| `string_rstrip_spec.rb` | String#rstrip | `core/string/rstrip_spec.rb` | 3 | 1 |
+| `string_rstrip_spec.rb` | String#rstrip | `core/string/rstrip_spec.rb` | 5 | 0 |
 | `string_size_spec.rb` | String#size | `core/string/size_spec.rb` | 1 | 0 |
-| `string_squeeze_spec.rb` | String#squeeze | `core/string/squeeze_spec.rb` | 6 | 2 |
+| `string_squeeze_spec.rb` | String#squeeze | `core/string/squeeze_spec.rb` | 9 | 1 |
 | `string_start_with_spec.rb` | String#start_with? | `core/string/start_with_spec.rb + shared/string/start_with.rb` | 3 | 7 |
-| `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 2 | 6 |
+| `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 6 | 2 |
 | `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 8 | 0 |
-| `string_tr_spec.rb` | String#tr | `core/string/tr_spec.rb` | 11 | 1 |
-| `string_upcase_spec.rb` | String#upcase | `core/string/upcase_spec.rb` | 5 | 2 |
+| `string_tr_spec.rb` | String#tr | `core/string/tr_spec.rb` | 14 | 0 |
+| `string_upcase_spec.rb` | String#upcase | `core/string/upcase_spec.rb` | 7 | 1 |
 | `unbound_method_arity_spec.rb` | UnboundMethod#arity | `core/unboundmethod/arity_spec.rb` | 4 | 0 |
 | `unbound_method_bind_call_spec.rb` | UnboundMethod#bind_call | `core/unboundmethod/bind_call_spec.rb` | 4 | 0 |
 | `unbound_method_bind_spec.rb` | UnboundMethod#bind | `core/unboundmethod/bind_spec.rb` | 4 | 0 |

@@ -24,6 +24,15 @@ describe "String#lstrip" do
     assert_eq("\000 \000hello\000 \000".lstrip, "hello\000 \000")
   end
 
-  # skipped (method-not-implemented): it "<lstrip! variants>"
-  #   String#lstrip! not in subset (7 upstream blocks).
+  describe "String#lstrip!" do
+    it "modifies self in place and returns self" do
+      s = "  hello"
+      assert(s.lstrip!.equal?(s))
+      assert_eq(s, "hello")
+    end
+
+    it "returns nil if no modifications were made" do
+      assert_eq("hello".lstrip!, nil)
+    end
+  end
 end

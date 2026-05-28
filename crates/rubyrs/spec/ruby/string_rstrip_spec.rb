@@ -24,6 +24,15 @@ describe "String#rstrip" do
     assert_eq("\x00 \x00hello\x00 \x00".rstrip, "\x00 \x00hello")
   end
 
-  # skipped (method-not-implemented): it "<rstrip! variants>"
-  #   String#rstrip! not in subset (8 upstream blocks).
+  describe "String#rstrip!" do
+    it "modifies self in place and returns self" do
+      s = "hello  "
+      assert(s.rstrip!.equal?(s))
+      assert_eq(s, "hello")
+    end
+
+    it "returns nil if no modifications were made" do
+      assert_eq("hello".rstrip!, nil)
+    end
+  end
 end
