@@ -1217,6 +1217,7 @@ impl Vm {
                             Ok(CallableOutcome::Handled)
                         }
                         Value::UnboundMethod(_) => Err(self.trap(RubyError::NoMethodError {
+                            kind: crate::error::NoMethodErrorKind::Missing,
                             method: "receiver".into(),
                             recv_type: std::borrow::Cow::Borrowed("UnboundMethod"),
                         })),
@@ -1473,7 +1474,8 @@ impl Vm {
         );
         if vis == Visibility::Private && !bypass_visibility && !self_recv {
             return Err(self.trap(RubyError::NoMethodError {
-                method: format!("private method '{name}' called"),
+                kind: crate::error::NoMethodErrorKind::Private,
+                method: name.to_string(),
                 recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
             }));
         }
@@ -1494,7 +1496,8 @@ impl Vm {
             };
             if !allowed {
                 return Err(self.trap(RubyError::NoMethodError {
-                    method: format!("protected method '{name}' called"),
+                    kind: crate::error::NoMethodErrorKind::Protected,
+                    method: name.to_string(),
                     recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
                 }));
             }
@@ -1628,6 +1631,7 @@ impl Vm {
                         cls.name.clone()
                     };
                     return Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
                         method: "superclass".to_string(),
                         recv_type: std::borrow::Cow::Owned(format!("module {}", label)),
                     }));
@@ -3556,6 +3560,7 @@ impl Vm {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
+                kind: crate::error::NoMethodErrorKind::Missing,
                 method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
             }));
         }
@@ -5321,6 +5326,7 @@ impl Vm {
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
+            kind: crate::error::NoMethodErrorKind::Missing,
             method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
         }))
     }
@@ -6870,6 +6876,7 @@ impl Vm {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
+                kind: crate::error::NoMethodErrorKind::Missing,
                 method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
             }));
         }
@@ -7057,6 +7064,7 @@ impl Vm {
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
+            kind: crate::error::NoMethodErrorKind::Missing,
             method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
         }))
     }

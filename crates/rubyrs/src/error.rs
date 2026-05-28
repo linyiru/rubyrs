@@ -59,10 +59,28 @@ pub(crate) fn format_prism_errors<'a>(
 
 /// A Ruby-visible error. Today this is the closed set rubyrs can produce;
 /// we'll grow it to a class hierarchy with the rescue-by-class feature.
+/// What kind of NoMethodError a trap site is constructing.
+/// `Missing` is the default "method not defined on receiver"
+/// shape; `Private` / `Protected` are the visibility-rejection
+/// shapes that render with a different CRuby message format
+/// ("private method 'X' called for …" instead of
+/// "undefined method `X' for …"). Carried as a structural tag
+/// on the error variant so the formatter doesn't have to
+/// (incorrectly) sniff prefix substrings out of the `method`
+/// field — a script-supplied method name like
+/// `obj.send(:"private method 'foo' called")` would otherwise
+/// be misclassified as a visibility error. (Code-review #291.)
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum NoMethodErrorKind {
+    Missing,
+    Private,
+    Protected,
+}
+
 #[derive(Debug)]
 pub enum RubyError {
     SyntaxError { msg: String },
-    NoMethodError { method: String, recv_type: std::borrow::Cow<'static, str> },
+    NoMethodError { kind: NoMethodErrorKind, method: String, recv_type: std::borrow::Cow<'static, str> },
     ArgumentError { msg: String },
     TypeError { msg: String },
     RuntimeError { msg: String },
@@ -294,24 +312,27 @@ impl RubyError {
             | RubyError::IOError { msg }
             | RubyError::LoadError { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),
-            RubyError::NoMethodError { method, recv_type } => {
-                // Visibility-error call sites
-                // (dispatch.rs:1475/1497) store a full-sentence
-                // form like "private method 'lookup' called" /
-                // "protected method 'foo' called" in `method`,
-                // because CRuby's error message uses a different
-                // shape for those cases ("private method 'X'
-                // called for <recv>" — not "undefined method
-                // 'X' for <recv>"). Detect that shape and skip
-                // the "undefined method" wrap. The missing-
-                // method form still uses the standard wrap.
-                // (TRY_RUNS pass-10 layer #5.)
-                if method.starts_with("private method ")
-                    || method.starts_with("protected method ")
-                {
-                    format!("{} for {}", method, recv_type)
-                } else {
-                    format!("undefined method `{}' for {}", method, recv_type)
+            RubyError::NoMethodError { kind, method, recv_type } => {
+                // CRuby uses three shapes for NoMethodError:
+                // - Missing: "undefined method `X' for <recv>"
+                // - Private: "private method 'X' called for <recv>"
+                // - Protected: "protected method 'X' called for <recv>"
+                // The variant carries the kind as a structural
+                // tag so a script-controlled `method` name (e.g.
+                // `obj.send(:"private method 'X' called")`) can't
+                // spoof a visibility shape from the missing-
+                // method trap site. (TRY_RUNS pass-10 layer #5;
+                // code-review #291 round 2.)
+                match kind {
+                    NoMethodErrorKind::Missing => {
+                        format!("undefined method `{}' for {}", method, recv_type)
+                    }
+                    NoMethodErrorKind::Private => {
+                        format!("private method '{}' called for {}", method, recv_type)
+                    }
+                    NoMethodErrorKind::Protected => {
+                        format!("protected method '{}' called for {}", method, recv_type)
+                    }
                 }
             }
         }

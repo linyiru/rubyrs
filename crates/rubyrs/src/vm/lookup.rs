@@ -1217,6 +1217,7 @@ impl Vm {
             Some(c) => c,
             None => {
                 return Err(self.trap(crate::error::RubyError::NoMethodError {
+                    kind: crate::error::NoMethodErrorKind::Missing,
                     method: "super called outside of method".to_string(),
                     recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
                 }));
@@ -1295,6 +1296,7 @@ impl Vm {
             return match m {
                 Some(m) => Ok((m, self_val)),
                 None => Err(self.trap(crate::error::RubyError::NoMethodError {
+                    kind: crate::error::NoMethodErrorKind::Missing,
                     method: format!("super: no superclass method `{}'",
                         self.interner.resolve(name_id)),
                     recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
@@ -1307,6 +1309,7 @@ impl Vm {
                 Value::Class(c) => c,
                 _ => {
                     return Err(self.trap(crate::error::RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
                         method: format!("super: no superclass method `{}'",
                             self.interner.resolve(name_id)),
                         recv_type: std::borrow::Cow::Borrowed(other.type_name()),
@@ -1325,6 +1328,7 @@ impl Vm {
         match m {
             Some(m) => Ok((m, self_val)),
             None => Err(self.trap(crate::error::RubyError::NoMethodError {
+                kind: crate::error::NoMethodErrorKind::Missing,
                 method: format!("super: no superclass method `{}'",
                     self.interner.resolve(name_id)),
                 recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),

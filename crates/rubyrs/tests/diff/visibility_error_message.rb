@@ -70,3 +70,20 @@ rescue NoMethodError => e
   e.message.start_with?("undefined method") ? "OK-undefined-shape" : "wrong-shape"
 end
 puts "missing-msg=#{err}"
+
+## Shape 5: spoof-resistance. A script-controlled method name
+## that happens to start with "private method " (the
+## visibility-error prefix) must STILL render under the
+## missing-method "undefined method" shape — visibility kind
+## is a structural tag on the error variant, not a string
+## prefix sniffed out of the method field. Pre-fix the
+## formatter used `method.starts_with("private method ")` so
+## `obj.send(:"private method 'X' called")` could misclassify
+## itself as a visibility error. (code-review #291 round 2.)
+err = begin
+  "abc".send("private method 'X' called")
+  "no-raise"
+rescue NoMethodError => e
+  e.message.start_with?("undefined method") ? "spoof-blocked" : "spoof-LEAKED-#{e.message}"
+end
+puts "spoof=#{err}"
