@@ -276,11 +276,48 @@ impl Vm {
     }
 
     pub(crate) fn collection_call_block(&mut self, recv: &Value, name: &str, args: &[Value], block: ObjId) -> Result<Option<Value>, Trap> {
+        // Object#itself with a block — CRuby ignores the block
+        // and returns the receiver unchanged. Sits next to the
+        // tap/then/yield_self block path so the universal-arm
+        // family stays together. (The no-block path is in
+        // dispatch.rs.)
+        //
+        // Known limitation: this short-circuit (and the existing
+        // tap/then/yield_self ones) shadow user-defined overrides
+        // because `collection_call_block` runs before user-method
+        // lookup in `do_call_block`. A user class that
+        // \`def itself; ... end\` won't see its body invoked when
+        // a block is attached. Fixing this requires the same
+        // user-override probe pattern used by the `send` arm in
+        // dispatch.rs (lines ~513-523) but applied uniformly to
+        // the whole Object-extras family — out of scope for this
+        // PR; tracked as Tier-2 follow-up.
+        if name == "itself" {
+            if !args.is_empty() {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
+                }));
+            }
+            return Ok(Some(recv.clone()));
+        }
         // Object#tap / #then / #yield_self — universal block
         // helpers. Yield `self` to the block; `tap` discards the
         // result and returns self (debug-style fluent chain),
         // `then` (and its `yield_self` alias) returns whatever
-        // the block returned (Kleisli-style transform).
+        // the block returned (Kleisli-style transform). Extra
+        // args are an ArgumentError on both arities (CRuby
+        // checks regardless of block presence).
+        if matches!(name, "tap" | "then" | "yield_self") && !args.is_empty() {
+            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
+                    args.len()
+                ),
+            }));
+        }
         if args.is_empty() && matches!(name, "tap" | "then" | "yield_self") {
             // step_block migration also surfaces a pre-existing
             // CRuby-parity gap: `1.tap { break :x }` was returning

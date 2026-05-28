@@ -5171,6 +5171,45 @@ impl Vm {
             self.stack.push(Value::Int(id));
             return Ok(());
         }
+        // Arity guard for the Object-extras family. All four
+        // take zero arguments; CRuby raises ArgumentError on
+        // extra args regardless of whether a block is present,
+        // so check before the per-method arms to keep the
+        // error type consistent. Without this guard
+        // `42.tap(1)` falls through to NoMethodError, hiding
+        // the real mistake.
+        if matches!(&*name, "itself" | "tap" | "then" | "yield_self") && !args.is_empty() {
+            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
+                    args.len()
+                ),
+            }));
+        }
+        // `Object#itself` — universal, no args. Returns the
+        // receiver unchanged. Common with `group_by(&:itself)`
+        // and other Symbol#to_proc idioms. CRuby ignores any
+        // attached block (`obj.itself { ... }` still returns
+        // obj); see the block-form fast path in
+        // `collection_call_block` (vm/iter.rs) for that case.
+        if &*name == "itself" && args.is_empty() {
+            self.stack.push(recv);
+            return Ok(());
+        }
+        // `Object#tap` / `#then` / `#yield_self` without a
+        // block — the block-taking forms are handled by
+        // `collection_call_block` (vm/iter.rs). Reaching this
+        // arm means no block was passed; CRuby raises
+        // LocalJumpError for `tap`, while `then`/`yield_self`
+        // would normally return an Enumerator. rubyrs has no
+        // Enumerator type yet, so for now both raise
+        // LocalJumpError uniformly — documented divergence,
+        // less surprising than silent NoMethodError.
+        if args.is_empty() && matches!(&*name, "tap" | "then" | "yield_self") {
+            return Err(self.trap(crate::error::RubyError::LocalJumpError {
+                msg: format!("no block given (yield)"),
+            }));
+        }
         // `Object#frozen?` — universal, no args.
         // CRuby treats all immediates (Integer, Float, Symbol,
         // true, false, nil) as always-frozen. Str/Array/Hash/Regex
