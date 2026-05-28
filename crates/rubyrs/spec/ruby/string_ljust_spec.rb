@@ -1,7 +1,7 @@
 # Adapted from ruby/spec core/string/ljust_spec.rb at upstream
-# commit 448cb340 (2026-05). Hand-translated — three baseline
-# shapes: default space pad, custom pad char, no-op when width
-# is shorter than self.
+# commit 448cb340 (2026-05). Hand-translated — four baseline
+# shapes: default space pad, custom pad string (single-char +
+# multi-char cycling), no-op when width is shorter than self.
 
 describe "String#ljust" do
   it "pads on the right with spaces when no pad string is given" do

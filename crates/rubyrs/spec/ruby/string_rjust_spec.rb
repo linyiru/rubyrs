@@ -1,6 +1,7 @@
 # Adapted from ruby/spec core/string/rjust_spec.rb at upstream
 # commit 448cb340 (2026-05). Hand-translated — mirror image of
-# string_ljust_spec.rb: pads on the LEFT with the given char.
+# string_ljust_spec.rb: pads on the LEFT with the given pad
+# string (single-char or multi-char cycling).
 
 describe "String#rjust" do
   it "pads on the left with spaces when no pad string is given" do

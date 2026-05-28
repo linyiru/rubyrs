@@ -1,7 +1,8 @@
 # Adapted from ruby/spec core/string/center_spec.rb at upstream
-# commit 448cb340 (2026-05). Hand-translated — three baseline
-# shapes: default space pad, custom pad char, no-op when width
-# is shorter than self.
+# commit 448cb340 (2026-05). Hand-translated — four baseline
+# shapes: default space pad, custom pad string, no-op when
+# width is shorter than self, and ArgumentError on a zero-width
+# pad string.
 
 describe "String#center" do
   it "pads with spaces when no pad string is given" do
