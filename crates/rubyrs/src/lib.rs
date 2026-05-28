@@ -281,6 +281,17 @@ pub struct Config {
     /// path); a host that wants symlink-tight scoping on `File.*`
     /// must ensure no symlinks under the allowed prefixes point
     /// outside them.
+    ///
+    /// Case sensitivity: `starts_with` is byte-exact. On case-
+    /// insensitive filesystems (macOS APFS default, Windows NTFS),
+    /// the canonicalized prefix preserves the on-disk case but
+    /// scripts may pass paths with different case. `File.*`,
+    /// which doesn't canonicalize its input, will reject those
+    /// legitimate paths with `IOError`. Hosts on such filesystems
+    /// should normalize script-supplied paths to the on-disk case
+    /// before they reach the gate (e.g., via the embedder's own
+    /// path-handling layer) or restrict to case-sensitive volumes
+    /// for the gem-root tree.
     pub allowed_paths: Option<Vec<std::path::PathBuf>>,
 }
 
