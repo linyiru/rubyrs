@@ -913,6 +913,22 @@ impl Vm {
                         Some(acc)
                     }
                     ("to_a", []) => Some(Value::Array(id)),
+                    // `arr.dup` / `arr.clone` — shallow copy. CRuby's
+                    // `clone` also preserves the frozen flag; Tier-1
+                    // Arrays don't model `freeze` beyond a no-op
+                    // (see line 41 above where `freeze` returns the
+                    // same id), so `dup` and `clone` are
+                    // indistinguishable here. Closes TRY_RUNS
+                    // pass-9.7d layer #26 — sinatra/base.rb:1534
+                    // (`get` handler) does `@conditions = conditions.dup`
+                    // to snapshot route conditions; without this arm
+                    // it raised NoMethodError.
+                    ("dup", []) | ("clone", []) => {
+                        let src = self.heap.array(id).clone();
+                        self.maybe_gc();
+                        let nid = self.heap.alloc(HeapObj::Array(src));
+                        Some(Value::Array(nid))
+                    }
                     ("inspect", []) => {
                         let s = Value::Array(id).to_inspect(&self.heap, &self.interner);
                         Some(Value::new_str(s))
