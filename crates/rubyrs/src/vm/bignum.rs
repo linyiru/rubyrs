@@ -1661,17 +1661,22 @@ impl Vm {
         // cases (Integer has no fractional digits to round past).
         // Negative precision with BigInt receiver would round to a
         // power-of-10 multiple — needs BigInt-aware modular
-        // arithmetic, deferred (matches the numeric.rs decline for
-        // |n| > 18 + the spec's method-not-implemented trace).
+        // arithmetic, deferred (same gap as the Int-recv path in
+        // numeric.rs, which uses i128 widening up to `|n| <= 38`
+        // but declines whenever the scaled result doesn't fit i64;
+        // see the spec's method-not-implemented trace for
+        // `10**70`-magnitude inputs).
         // BigInt precision: by the canonical-BigInt invariant
         // every Value::BigInt has |x| > i64::MAX, so any BigInt
-        // precision is huge. For positive sign, that's >> 18 (the
-        // numeric.rs decline boundary) — round to a multiple of
-        // 10^huge, which is no-op-or-zero for Integer self. We
-        // accept it as a no-op (same as `n >= 0` for Int).
-        // For negative sign, it would round past every digit, so
+        // precision is way past any meaningful digit boundary
+        // (far beyond the 38-digit i128 limit) — round to a
+        // multiple of 10^huge, which is no-op-or-zero for Integer
+        // self. We accept positive-sign BigInt precision as a
+        // no-op (same as `n >= 0` for Int). Negative-sign BigInt
+        // precision rounds past every digit, so
         // ceil/floor/round → 0 for positive self, -10^huge for
-        // negative — deferred alongside the |n| > 18 case.
+        // negative — deferred alongside the Int-recv negative-
+        // precision overflow case.
         // Fires for both Int and BigInt receivers since the
         // numeric.rs arm only matches Int precision.
         if matches!(recv, Value::Int(_) | Value::BigInt(_))

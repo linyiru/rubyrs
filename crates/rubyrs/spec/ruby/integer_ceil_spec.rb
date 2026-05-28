@@ -11,9 +11,16 @@
 #   the difference is moot — no cross-class comparisons here).
 # - `bignum_value` → `(2**64)`; bignum cases gated on `bignum_it`.
 # - skipped (method-not-implemented): the `10**70` / `10**100` /
-#   precision -20 / -50 cases need BigInt-aware rounding;
-#   numeric.rs declines past |n| == 18 and bignum_primitive
-#   doesn't yet implement these selectors. Tracked as follow-up.
+#   precision -20 / -50 cases need BigInt-aware rounding.
+#   numeric.rs's negative-precision arm uses i128 internally
+#   (`|n| <= 38` exact) but declines whenever the scaled
+#   `q * 10^|n|` doesn't fit i64 — so even small |n| like -19
+#   with non-zero receivers can land in the decline path. For
+#   |n| > 38, 10^|n| overflows i128 too, hard-decline. Both
+#   surface as NoMethodError today since bignum_primitive's
+#   ceil/floor/round/truncate arms only handle the
+#   0-arg / positive-precision no-ops on BigInt receivers.
+#   Tracked as follow-up.
 
 describe "Integer#ceil" do
   it "fixnum: returns self for to_i shape (no precision)" do
@@ -78,7 +85,9 @@ describe "Integer#ceil" do
   end
 
   # skipped (method-not-implemented): precision -20 / -50 needs
-  # BigInt-aware rounding (10^20 overflows i64). numeric.rs
-  # declines past |n| == 18; bignum_primitive doesn't yet
-  # implement these selectors.
+  # BigInt-aware rounding. numeric.rs computes in i128 up to
+  # |n| <= 38, but the scaled `q * 10^|n|` may not fit i64 (it
+  # certainly doesn't for `123.ceil(-20)` = 10^20), which
+  # currently surfaces as NoMethodError since bignum_primitive
+  # doesn't implement the negative-precision Int-recv path.
 end

@@ -14,7 +14,10 @@
 #   and precision -71 — needs BigInt-aware rounding.
 # - skipped (method-not-implemented): `min_long - 1` / `Float::INFINITY`
 #   / `1<<31` precision-bound RangeError. The bound-check would
-#   slot in beside the existing `|n| > 18` decline; deferred.
+#   slot in beside the existing i64-doesn't-fit decline path
+#   in numeric.rs (which today routes through the i128 widening
+#   up to `|n| <= 38` and then falls back to NoMethodError
+#   when the scaled result overflows i64). Deferred.
 
 describe "Integer#round" do
   it "fixnum: returns self for to_i shape" do
