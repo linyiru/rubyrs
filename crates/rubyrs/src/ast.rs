@@ -1476,11 +1476,14 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 // ("no anonymous block parameter"). rubyrs auto-
                 // creates the local slot on read (resolving to nil),
                 // so `inner(&)` degenerates to `inner(&nil)` — i.e.
-                // the call proceeds without a block. The callee
-                // either no-ops if it doesn't use the block, or
-                // raises NoMethodError on `nil.call` if it does.
-                // Documented in SUBSET.md; same observable failure,
-                // different diagnostic surface.
+                // the call proceeds without a block. The observable
+                // runtime outcome depends on the callee:
+                //   - ignores the block → silent success (the
+                //     real behavioral divergence; CRuby would
+                //     have caught this at parse time)
+                //   - calls `blk.call` → NoMethodError on nil.call
+                //   - uses `yield` → RuntimeError "no block given"
+                // Documented in docs/SUBSET.md.
                 if ba.expression().is_none() {
                     let block_arg = sp(node, Expr::LVarRead("&".to_string()));
                     return sp(node, Expr::CallWithBlockArg {

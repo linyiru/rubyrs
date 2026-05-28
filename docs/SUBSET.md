@@ -517,17 +517,26 @@ end
 ```
 
 - CRuby raises `SyntaxError: no anonymous block parameter` at
-  parse time.
+  parse time (unconditional, regardless of how the callee uses
+  the block).
 - rubyrs translates `inner(&)` to `inner(&local["&"])`, and the
   read auto-creates the slot as `nil`. The call degenerates to
-  `inner(&nil)` — i.e. proceeds without a block. The callee
-  no-ops if it doesn't use the block; if it calls the block,
-  rubyrs raises `NoMethodError` on `nil.call` at runtime.
+  `inner(&nil)` — i.e. proceeds without a block. The observable
+  runtime outcome depends on the callee:
+  - Callee ignores the block → call succeeds silently (no error).
+  - Callee invokes `blk.call` on its `&blk` parameter →
+    `NoMethodError: undefined method 'call' for NilClass`.
+  - Callee uses `yield` → `RuntimeError: no block given (yield)`.
 - Why: pushing this diagnostic up to parse time would require
   threading anonymous-block-availability through the AST
-  translator and SExpr context. The runtime behavior is still
-  a failure on the same call sites — same observable safety,
-  later diagnostic.
+  translator and SExpr context. The silent-success case for
+  block-ignoring callees IS a behavioral divergence — a typo
+  like `def bar; inner(&); end` where `inner` happens not to
+  use the block won't be caught. Accepted as a known cost of
+  the simpler implementation, since the common pass-through
+  wrapper pattern (the use case that motivates anonymous
+  forwarding in the first place) does call the block and
+  surfaces an error.
 - Test: `anon_block_forward` in `crates/rubyrs/tests/diff/`.
 
 ### `rescue` with an unresolved class name
