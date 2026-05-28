@@ -1738,7 +1738,38 @@ impl Vm {
             if self.method_return.is_none() {
                 break;
             }
+            // `eval` deliberately keeps the legacy "walk blocks,
+            // pop one method" unwind here — DO NOT mirror the
+            // layer-4 lexical-owner walk that
+            // `require_in_filescope` uses. CRuby's semantics for
+            // `return` originating in eval'd top-level code are
+            // "return from the method enclosing the eval call"
+            // (RUBY_TAG_RETURN propagates past the eval boundary),
+            // NOT "return from the eval'd <main>". A lexical-walk
+            // here whose owner_rc points at the eval's <main>
+            // locals would stop *at* eval's <main> and assign the
+            // return value back to the eval-call's caller — the
+            // wrong semantics. The legacy "pop one method"
+            // followed by escape-to-outer-dispatch correctly
+            // funnels return-from-eval through the enclosing
+            // method. (code-review #285 round 2 #1 — adopted as
+            // "no change" with documenting comment after we
+            // verified the lexical walk gave the wrong answer
+            // for `eval(\"outer_eval { return :b }\")`.)
+            //
+            // The dual-method-frame chain (`outer { lex { return } }`
+            // entirely inside eval) is intentionally accepted to
+            // mis-pop one frame in this path — a known Tier-1
+            // divergence vs CRuby that ships separately from
+            // layer #4 if it ever becomes load-bearing for a
+            // real script.
             let val = self.take_method_return().unwrap();
+            // `take_method_return` already cleared
+            // `method_return_locals` paired with the value — no
+            // dangling Rc to worry about on the escape branch
+            // below. (code-review #285 round 2 #2 — the field-pair
+            // invariant the helper enforces is what makes this
+            // legacy path safe to leave alone.)
             while let Some(f) = self.frames.last() {
                 if !f.is_block { break; }
                 if self.frames.len() <= depth_before + 1 {
