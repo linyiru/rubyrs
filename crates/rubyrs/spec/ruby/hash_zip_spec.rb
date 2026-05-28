@@ -36,6 +36,21 @@ describe "Hash#zip" do
     assert_eq({}.zip([1, 2, 3]), [])
   end
 
+  it "raises ArgumentError when called with a block (block form unsupported)" do
+    # Without this guard the block would be silently
+    # ignored (iter.rs has no zip arm, dispatch falls
+    # through to hash.rs's no-block arm). Explicit guard
+    # avoids the silent divergence.
+    assert_raises("ArgumentError") { {a: 1}.zip([10]) { |tuple| tuple } }
+  end
+
+  it "raises TypeError when given a non-Array arg" do
+    # CRuby would coerce a Range or Enumerator via
+    # `to_ary` / `each`; Tier-1 restricts to Array.
+    assert_raises("TypeError") { {a: 1}.zip(1..3) }
+    assert_raises("TypeError") { {a: 1}.zip(:sym) }
+  end
+
   # skipped (method-not-implemented): it "accepts a block (yields each tuple)" do
   #   `h.zip(args) { |tuple| ... }` — the block-form's
   #   return is nil and the block runs once per tuple.

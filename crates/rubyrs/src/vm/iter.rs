@@ -2788,6 +2788,19 @@ impl Vm {
                     None => Value::Nil,
                 }))
             }
+            // `h.zip(*args) { |tuple| ... }` block form is out
+            // of subset. Without this guard the block would be
+            // silently ignored: dispatch routes block-given to
+            // iter.rs first, sees no `zip` arm here, then falls
+            // through to hash.rs which DOES match the no-block
+            // arm and returns the result, discarding the block.
+            // Raise a clear "not supported" error instead.
+            (Value::Hash(_), "zip", _) => {
+                return Err(self.trap(crate::error::RubyError::ArgumentError {
+                    msg: "Hash#zip block form (yielding each tuple) is not supported \
+                          in this subset".to_string(),
+                }));
+            }
             // `h.uniq { |pair| key }` — block-form uniq.
             // Yields a single `[k, v]` pair Array per entry;
             // the block return is the uniqueness key (compared

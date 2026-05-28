@@ -21,6 +21,13 @@ describe "Hash#tally" do
     assert_eq({}.tally, {})
   end
 
+  it "raises ArgumentError when called with an arg (accumulating form unsupported)" do
+    # CRuby's Ruby 2.7+ `h.tally(target_hash)` form is out
+    # of subset. Explicit guard avoids the silent
+    # NoMethodError from respond_to? widening.
+    assert_raises("ArgumentError") { {a: 1}.tally({}) }
+  end
+
   # skipped (method-not-implemented): it "accepts a hash argument to fold into" do
   #   `h.tally(target_hash)` (Ruby 2.7+) merges counts into
   #   the given Hash. Out of subset; the no-arg form covers

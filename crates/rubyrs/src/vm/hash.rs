@@ -475,13 +475,15 @@ impl Vm {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                            g.pin(Value::Array(pid));
                             // Each pair Array is unique per
                             // iteration (Hash keys eql?-unique
                             // by definition), so we always push
                             // a fresh entry with count = 1
-                            // rather than re-scanning for an
-                            // existing key.
+                            // rather than re-scanning. After the
+                            // push the pair is reachable via the
+                            // pinned result Hash — no per-iter
+                            // pin needed (would grow pinned-set
+                            // O(n) for no benefit).
                             g.vm.heap.hash_mut(result_id).push((Value::Array(pid), Value::Int(1)));
                         }
                         Some(Value::Hash(result_id))
@@ -496,17 +498,23 @@ impl Vm {
                         let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
-                        let mut pair_ids: Vec<Value> = Vec::with_capacity(pairs.len());
+                        // Pre-alloc the result Array and pin it;
+                        // direct-push each pair into it rather
+                        // than accumulating in a Rust-local Vec
+                        // + per-iter pinning each pair Array.
+                        // Result Array roots all the pair Arrays
+                        // through the GC walker, so pinned-set
+                        // stays O(1) instead of O(n).
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(pairs.len())));
+                        g.pin(Value::Array(aid));
                         for (k, v) in pairs {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                            g.pin(Value::Array(pid));
-                            pair_ids.push(Value::Array(pid));
+                            g.vm.heap.array_mut(aid).push(Value::Array(pid));
                         }
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
                         Some(Value::Array(aid))
                     }
                     // `h.zip(*args)` — pairs each `[k, v]` entry
@@ -537,14 +545,27 @@ impl Vm {
                         for a in args_slice {
                             g.pin(a.clone());
                         }
-                        let mut result_ids: Vec<Value> = Vec::with_capacity(receiver_pairs.len());
+                        // Pre-alloc + pin the result Array;
+                        // direct-push each tuple. Once the
+                        // tuple is in the result Array it
+                        // transitively roots its pair_id child
+                        // too. Pinned-set stays O(1) instead of
+                        // O(n) per receiver entry.
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(receiver_pairs.len())));
+                        g.pin(Value::Array(aid));
                         for (i, (k, v)) in receiver_pairs.into_iter().enumerate() {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             // Build the per-entry tuple:
                             // [[k, v], arg1[i] || nil, arg2[i] || nil, ...]
                             let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
-                            g.pin(Value::Array(pair_id));
+                            // pair_id needs a brief pin only
+                            // while we're allocating the
+                            // tuple Array (one more maybe_gc
+                            // window).
+                            g.vm.pinned.push(Value::Array(pair_id));
                             let mut tuple: Vec<Value> = Vec::with_capacity(1 + arg_lists.len());
                             tuple.push(Value::Array(pair_id));
                             for list in &arg_lists {
@@ -553,13 +574,36 @@ impl Vm {
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             let tid = g.vm.heap.alloc(HeapObj::Array(tuple));
-                            g.pin(Value::Array(tid));
-                            result_ids.push(Value::Array(tid));
+                            g.vm.pinned.pop();
+                            // tid is now reachable via aid; no
+                            // per-iter pin needed for either.
+                            g.vm.heap.array_mut(aid).push(Value::Array(tid));
                         }
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let aid = g.vm.heap.alloc(HeapObj::Array(result_ids));
                         Some(Value::Array(aid))
+                    }
+                    // Fallback for `zip` with a non-Array arg —
+                    // matched after the typed `zip` arm above.
+                    // CRuby coerces via `to_ary` / `each` for
+                    // Enumerable args (Range / Enumerator);
+                    // we restrict to Array in Tier 1, so anything
+                    // else raises TypeError with a clear message
+                    // rather than falling through to NoMethodError.
+                    ("zip", _) => {
+                        return Err(self.trap(crate::error::RubyError::TypeError {
+                            msg: "Hash#zip in this subset only accepts Array arguments \
+                                  (Range / Enumerator args are Tier-2)".to_string(),
+                        }));
+                    }
+                    // `h.tally(target_hash)` — Ruby 2.7+
+                    // accumulating form is out of subset.
+                    // Without this guard, the 1-arg call falls
+                    // through to NoMethodError despite
+                    // respond_to?(:tally) returning true.
+                    ("tally", _) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: "Hash#tally with an accumulating Hash argument is not \
+                                  supported in this subset (Ruby 2.7+ form)".to_string(),
+                        }));
                     }
                     // Wrong-arity arm for take / drop — CRuby
                     // raises ArgumentError on the no-arg call
