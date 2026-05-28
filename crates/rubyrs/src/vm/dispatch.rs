@@ -6734,6 +6734,30 @@ impl Vm {
             } else {
                 (start_cls.name.clone(), vec![path])
             };
+        // CRuby reports the FULL original path in the
+        // wrong-name message when the structural issue is
+        // visible at parse time — specifically trailing `::`
+        // or triple-colon runs (`:::`). For deeper invalid
+        // segments inside an otherwise structurally-valid
+        // path (e.g. `Foo::lower`), CRuby reports just that
+        // segment. We approximate by detecting the structural
+        // shapes up front and returning WrongName with the
+        // full path; the per-segment loop below handles the
+        // segment-only cases.
+        //
+        // Caveats: CRuby's exact rule depends on path length
+        // and resolution success (`Foo::Bar::` with Foo
+        // missing reports `uninitialized constant Foo`
+        // because the walk fails before validation). We don't
+        // model that branch; accepted divergence — covered by
+        // Shape 13 of the fixture which exercises CRuby's
+        // canonical short-path shapes.
+        // (Code-review #277 round 6 #2.)
+        if split_on_double_colon
+            && (path.ends_with("::") || path.contains(":::"))
+        {
+            return ConstPathOutcome::WrongName { name: path.to_string() };
+        }
         let mut current_value: Option<Value> = None;
         let mut segments_remaining: usize = segments.len();
         for segment in segments {

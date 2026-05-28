@@ -180,3 +180,19 @@ puts "non-class-middle-cd=#{err}"
 ## valid result, not a parent scope).
 puts "non-class-final-cg=#{Object.const_get("NonClassScope::CONST")}"
 puts "non-class-final-cd=#{Object.const_defined?("NonClassScope::CONST")}"
+
+## Shape 13: WrongName reports the FULL original path
+## (CRuby pre-validates path syntax). Pre-fix the helper
+## reported only the offending segment, so `Foo::` raised
+## "wrong constant name " (empty) when Foo was defined or
+## "uninitialized constant Foo" (misleading) when undefined.
+## (code-review #277 round 6 #2.)
+%w[Foo:: :::Foo Foo::Bar:: foo lower::Bar].each do |bad|
+  err = begin
+    Object.const_get(bad)
+    "DID-NOT-RAISE"
+  rescue NameError => e
+    e.message
+  end
+  puts "wrong-#{bad}=#{err}"
+end
