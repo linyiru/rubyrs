@@ -103,7 +103,10 @@ pub(crate) fn string_call(
                     _ => return Ok(None), // Type-error path: let
                                           // generic dispatch handle.
                 };
-                parsed_sels.push(parse_count_selector(&s));
+                let parsed = parse_count_selector(&s).map_err(|msg| {
+                    crate::error::RubyError::ArgumentError { msg: msg.to_string() }
+                })?;
+                parsed_sels.push(parsed);
             }
             let total: i64 = a.with_str_lossy(|input| {
                 input.chars().filter(|c| {
@@ -1581,34 +1584,14 @@ pub(crate) fn parse_tr_set(sel: &str, allow_negation: bool) -> Result<(Vec<char>
     Ok((out, negate))
 }
 
-pub(crate) fn parse_count_selector(sel: &str) -> (std::collections::HashSet<char>, bool) {
-    let mut negate = false;
-    let mut chars: Vec<char> = sel.chars().collect();
-    if chars.first() == Some(&'^') && chars.len() > 1 {
-        negate = true;
-        chars.remove(0);
-    }
-    let mut set = std::collections::HashSet::new();
-    let mut i = 0;
-    while i < chars.len() {
-        // `a-z` range: middle `-` flanked by literals.
-        if i + 2 < chars.len() && chars[i + 1] == '-' {
-            let start = chars[i] as u32;
-            let end = chars[i + 2] as u32;
-            if start <= end {
-                for cp in start..=end {
-                    if let Some(c) = char::from_u32(cp) {
-                        set.insert(c);
-                    }
-                }
-                i += 3;
-                continue;
-            }
-        }
-        set.insert(chars[i]);
-        i += 1;
-    }
-    (set, negate)
+pub(crate) fn parse_count_selector(sel: &str) -> Result<(std::collections::HashSet<char>, bool), &'static str> {
+    // Single source of truth for the mini-set syntax + the
+    // TR_SET_MAX_CHARS DoS cap — delegate to parse_tr_set and
+    // dedupe into a HashSet (count doesn't need ordering, but
+    // tr does; the order-preserving Vec just gets collapsed
+    // here at no asymptotic cost).
+    let (chars, negate) = parse_tr_set(sel, true)?;
+    Ok((chars.into_iter().collect(), negate))
 }
 
 pub(crate) fn str_succ(s: &str) -> String {
