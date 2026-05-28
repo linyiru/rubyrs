@@ -2710,6 +2710,15 @@ fn integer_chr_basic() {
         ("1000.chr", "RangeError"),
         ("65.chr(\"UTF-8\")", "TypeError"),
         ("65.chr(nil)", "TypeError"),
+        // Regression guard: an Integer arg used to be silently
+        // shadowed by the broad `(Int, op, [Int])` arm and
+        // surface NoMethodError despite respond_to?(:chr) being
+        // true. Pin TypeError so the shadow doesn't re-emerge.
+        ("65.chr(0)", "TypeError"),
+        ("65.chr(-1)", "TypeError"),
+        // 2+-arg arity guard — without it 65.chr falls through
+        // to NoMethodError instead of CRuby's ArgumentError.
+        ("65.chr(\"UTF-8\", \"extra\")", "ArgumentError"),
         #[cfg(feature = "bignum")]
         ("(2**64).chr", "RangeError"),
         #[cfg(feature = "bignum")]
