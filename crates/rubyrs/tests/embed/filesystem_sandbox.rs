@@ -161,15 +161,16 @@ fn file_expand_path_returns_lexical_form_under_sandbox() {
         .unwrap();
     assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"/tmp/proj/foo.rb"));
 
-    // Without a base arg, sandboxed expand_path uses "." as
-    // the safe sentinel (no cwd leak). The component-collapse
-    // strips the leading `Component::CurDir`, leaving the bare
-    // filename — same shape `File.expand_path("foo.rb", ".")`
-    // returns in CRuby on a host with cwd unset / unreachable.
+    // Without a base arg, sandboxed expand_path uses `/` as the
+    // safe sentinel (no cwd leak). The lexical resolver joins
+    // it with the relative path, yielding an absolute string —
+    // matches CRuby's "expand_path always returns absolute"
+    // contract that gem code relies on (`$LOAD_PATH.unshift
+    // File.expand_path('lib', __dir__)`, etc.).
     let v = rt.eval(r#"File.expand_path("foo.rb")"#, "t.rb").unwrap();
     assert!(
-        matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"foo.rb"),
-        "expected 'foo.rb' (sentinel-base collapsed), got {:?}",
+        matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"/foo.rb"),
+        "expected '/foo.rb' (absolute via `/` sentinel base), got {:?}",
         v,
     );
 }

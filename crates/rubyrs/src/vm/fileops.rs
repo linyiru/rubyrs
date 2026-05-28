@@ -157,13 +157,16 @@ impl Vm {
                     // base, fall back to cwd — but only when the
                     // sandbox is off. With the sandbox on, the
                     // host's cwd is treated as host-FS state the
-                    // script shouldn't observe; return "." as a
-                    // safe sentinel matching the no-cwd
-                    // canonicalize-failed branch below.
+                    // script shouldn't observe. Use `/` as the
+                    // sentinel rather than `.` so the lexical
+                    // expansion still produces an ABSOLUTE path
+                    // (CRuby's contract for File.expand_path —
+                    // gems and `$LOAD_PATH.unshift` consumers
+                    // rely on the absolute-shape).
                     _ if self.allow_filesystem_io => std::env::current_dir()
                         .map(|d| d.to_string_lossy().into_owned())
                         .unwrap_or_else(|_| ".".to_string()),
-                    _ => ".".to_string(),
+                    _ => "/".to_string(),
                 };
                 let p_path = Path::new(&path);
                 let joined: PathBuf = if p_path.is_absolute() {
