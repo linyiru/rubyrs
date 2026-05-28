@@ -763,9 +763,9 @@ impl PreambleLiftedSettings {
             // truth — `vm.fuel` is just a per-eval working
             // counter `eval()` overwrites from `fuel_budget` at
             // entry. Lifting `fuel_budget` to None means the
-            // preamble's internal `self.eval(...)` calls anchor
-            // `vm.fuel = None` (unlimited) for the duration of
-            // the guarded scope.
+            // preamble's internal `self.eval_inner(...)` calls
+            // anchor `vm.fuel = None` (unlimited) for the
+            // duration of the guarded scope.
             fuel: rt.fuel_budget.take(),
             max_frames: rt.vm.max_frames.take(),
             max_symbols: rt.vm.max_symbols.take(),
@@ -1608,6 +1608,16 @@ impl Runtime {
     /// exceptions) by `eval`-ing a small Ruby preamble. Done with the
     /// runtime's own machinery so the resulting classes look identical
     /// to user-defined ones (no special-cased C structs).
+    ///
+    /// Calls `eval_inner` directly rather than the public `eval`,
+    /// bypassing the panic→Trap catch boundary. An ICE inside the
+    /// preamble is rubyrs-itself-is-broken, not a user-recoverable
+    /// shape — the original `.unwrap()` panic message and file:line
+    /// should reach the host unchanged. Routing through `eval` would
+    /// wrap the panic into a `RubyError::RuntimeError` Trap, and the
+    /// `.expect("ICE: failed to load X preamble")` below would then
+    /// panic AGAIN with the wrapped trap text — double-encoded
+    /// diagnostic that buries the original site.
     fn load_preamble(&mut self) {
         // Exception hierarchy first — other preamble fragments below
         // (and any user code that raises during their load) need
@@ -1615,7 +1625,7 @@ impl Runtime {
         // Lives in its own file per the random.rb / time.rb pattern:
         // larger, structurally distinct from the class-stub block
         // below, and meaty enough that editor support pays off.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/exceptions.rb"),
             "<rubyrs:preamble:exceptions>",
         )
@@ -1624,7 +1634,7 @@ impl Runtime {
         // exceptions and the remaining preamble (which contains
         // `class X < Object` shapes) so the constant resolves at
         // class-definition time.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/object.rb"),
             "<rubyrs:preamble:object>",
         )
@@ -1643,7 +1653,7 @@ impl Runtime {
         // `class X < Comparable` shape (or `is_a?(Comparable)`
         // predicate) inside the remaining preamble fragments
         // resolves at definition time.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/comparable.rb"),
             "<rubyrs:preamble:comparable>",
         )
@@ -1655,7 +1665,7 @@ impl Runtime {
         // here (regex-off builds simply never call into
         // materialize_match_data, but loading the empty preamble
         // string is cheap).
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/match_data.rb"),
             "<rubyrs:preamble:match_data>",
         )
@@ -1663,7 +1673,7 @@ impl Runtime {
         // Mutex — single-threaded no-op shim. Tier 1 has no OS
         // threads, so the entire lock surface degenerates to
         // "run the block / no-op".
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/mutex.rb"),
             "<rubyrs:preamble:mutex>",
         )
@@ -1672,7 +1682,7 @@ impl Runtime {
         // `Thread.current.object_id` is modeled (tilt uses it to
         // suffix compiled-method names). See preamble/thread.rb
         // for the divergence surface.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/thread.rb"),
             "<rubyrs:preamble:thread>",
         )
@@ -1872,7 +1882,7 @@ RUBY_ENGINE = "ruby".freeze
 ## this `PREAMBLE` eval; the full rationale lives in the
 ## externalised file's header.
 "#;
-        self.eval(PREAMBLE, "<rubyrs:preamble>")
+        self.eval_inner(PREAMBLE, "<rubyrs:preamble>")
             .expect("ICE: failed to load built-in exception preamble");
         // Enumerable — empty stub so `class Foo; include
         // Enumerable; def each; ...; end; end` doesn't crash.
@@ -1880,7 +1890,7 @@ RUBY_ENGINE = "ruby".freeze
         // remaining inline fragments references the Enumerable
         // constant; user code reaching for `include Enumerable`
         // resolves it on demand.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/enumerable.rb"),
             "<rubyrs:preamble:enumerable>",
         )
@@ -1892,7 +1902,7 @@ RUBY_ENGINE = "ruby".freeze
         // ADR 0017 row 131 puts the seeded mode in Tier 1, so
         // this loads unconditionally — not gated behind
         // `--features stdlib`.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/random.rb"),
             "<rubyrs:preamble:random>",
         )
@@ -1903,7 +1913,7 @@ RUBY_ENGINE = "ruby".freeze
         // (ADR 0017 row 131). Loaded after Random so the
         // module's `Random.new(0)` default initialisation can
         // resolve the constant.
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/securerandom.rb"),
             "<rubyrs:preamble:securerandom>",
         )
@@ -1914,7 +1924,7 @@ RUBY_ENGINE = "ruby".freeze
         // in `perf/time_microbench_results.md`. Loaded
         // unconditionally; default no-injection makes `Time.now`
         // raise (ADR 0017 Rule 1 deterministic-default).
-        self.eval(
+        self.eval_inner(
             include_str!("preamble/time.rb"),
             "<rubyrs:preamble:time>",
         )
@@ -1953,6 +1963,16 @@ RUBY_ENGINE = "ruby".freeze
     /// a single slot per name. Class- or instance-attached methods
     /// installed by a C extension live in independent dispatch tables
     /// and are NOT affected by this call.
+    ///
+    /// Panic behaviour: an unwinding panic inside the closure is
+    /// caught at the [`Runtime::eval`] boundary and converted to a
+    /// [`RubyError::RuntimeError`] Trap whose message preserves the
+    /// panic payload (see `Runtime::eval`'s panic-safety section).
+    /// Don't reach for `panic!` to abort the host process from
+    /// inside a callback — it won't unwind out of `eval`. Use a
+    /// `Trap` return for recoverable errors, or `std::process::exit`
+    /// (or similar OS-level abort) if you really need the process
+    /// dead.
     pub fn register_fn<F>(&mut self, name: &str, f: F)
     where
         F: Fn(&[Value]) -> Result<Value, Trap> + 'static,
@@ -1979,6 +1999,11 @@ RUBY_ENGINE = "ruby".freeze
     /// (same slot as [`Runtime::register_fn`]). Class- or instance-
     /// attached methods installed by a C extension live in independent
     /// dispatch tables and are NOT affected by this call.
+    ///
+    /// Panic behaviour is identical to
+    /// [`Runtime::register_fn`]: unwinding panics in the closure are
+    /// caught at the [`Runtime::eval`] boundary and converted to a
+    /// [`RubyError::RuntimeError`] Trap.
     pub fn register_fn_v2<F>(&mut self, name: &str, f: F)
     where
         F: Fn(&HostCtx, &[Value]) -> Result<Value, Trap> + 'static,
