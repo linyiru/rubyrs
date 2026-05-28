@@ -11,6 +11,16 @@ describe "Hash#flat_map" do
     assert_eq(h.flat_map { |k, v| [k, v] }, [:a, 1, :b, 2])
   end
 
+  it "yields a single [k, v] Array per entry (matches Hash#each)" do
+    # Single-param block should receive the whole pair, not
+    # just the key. CRuby yields a single Array; `|k, v|`
+    # auto-splats from it. Pins the convention pinned by
+    # the Hash#each implementation in vm/iter.rs.
+    h = {a: 1, b: 2}
+    pairs = h.flat_map { |pair| [pair] }
+    assert_eq(pairs, [[:a, 1], [:b, 2]])
+  end
+
   it "pushes non-Array block returns as single elements" do
     h = {a: 1, b: 2, c: 3}
     assert_eq(h.flat_map { |k, v| v * 2 }, [2, 4, 6])

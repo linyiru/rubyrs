@@ -1,15 +1,25 @@
 # Adapted from ruby/spec core/hash/sum_spec.rb at upstream
 # commit 448cb340 (2026-05). Hand-translated — baseline
 # shape covers the (k, v) yield, the default Int(0) seed,
-# and an explicit Int initial value. The no-block form
-# (`{}.sum`) raises in CRuby because Hash entries are
-# `[k, v]` pairs and adding Arrays-of-mixed-type to 0
-# doesn't make sense — out of subset here too.
+# and an explicit Int initial value. The no-block form on a
+# non-empty Hash (e.g. `{a: 1}.sum`) raises TypeError in
+# CRuby because it tries to add `[k, v]` pairs to 0 and
+# `0 + [:a, 1]` is undefined; `{}.sum` happens to return
+# the init (0) since there are no pairs to add. The
+# no-block form is out of subset here too — see the skip
+# at the bottom of the file.
 
 describe "Hash#sum" do
   it "yields each (k, v) and sums the block return values" do
     h = {a: 1, b: 2, c: 3}
     assert_eq(h.sum { |k, v| v }, 6)
+  end
+
+  it "yields a single [k, v] Array per entry (matches Hash#each)" do
+    # Single-param block should receive the whole pair, not
+    # just the key. `|k, v|` auto-splats from it.
+    h = {a: 1, b: 2, c: 3}
+    assert_eq(h.sum(0) { |pair| pair[1] }, 6)
   end
 
   it "supports an Int initial value" do
@@ -38,9 +48,9 @@ describe "Hash#sum" do
     assert_eq(out, :ss)
   end
 
-  # skipped (method-not-implemented): it "without a block, sums the [k, v] pairs directly" do
+  # skipped (method-not-implemented): it "without a block, raises TypeError on non-empty Hash" do
   #   `{a: 1}.sum` raises TypeError in CRuby because
-  #   `0 + [:a, 1]` is undefined; the no-block form only
-  #   works for Hashes-of-Numerics-pairs, which is an
-  #   edge case not modelled here.
+  #   `0 + [:a, 1]` is undefined; only works for
+  #   Hashes-of-Numerics-pairs, an edge case not modelled
+  #   here. (Empty Hash returns the init regardless.)
 end

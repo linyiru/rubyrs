@@ -2623,11 +2623,14 @@ impl Vm {
             // Array. Block return is ignored; `memo` is the
             // observable result. Same up-front pin discipline as
             // `Hash#count` above.
-            // `h.flat_map { |k, v| ... }` — like map then one-level
-            // flatten. CRuby: `{a:1,b:2}.flat_map { |k,v| [k,v] }`
-            // gives `[:a, 1, :b, 2]`. When the block return is an
-            // Array, its elements are spliced into the result;
-            // otherwise the value is pushed as-is.
+            // `h.flat_map { |pair| ... }` / `{ |k, v| ... }` —
+            // like map then one-level flatten. CRuby yields a
+            // single `[k, v]` Array per entry (matching
+            // Hash#each); single-param blocks receive the pair
+            // Array, two-param blocks get the destructured key
+            // and value via auto-splat. Passing `k` and `v` as
+            // separate args would bind a single-param `|pair|`
+            // to just the key.
             (Value::Hash(id), "flat_map", []) | (Value::Hash(id), "collect_concat", []) => {
                 let id = *id;
                 let mut g = PinGuard::new(self);
@@ -2648,7 +2651,13 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    let r = match g.vm.step_block(block, vec![k, v], pre_frames)? {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    g.vm.pinned.push(Value::Array(pair_id));
+                    let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
+                    g.vm.pinned.pop();
+                    let r = match step? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
@@ -2750,11 +2759,15 @@ impl Vm {
                 }
                 Some(early.unwrap_or(acc))
             }
-            // `h.sum { |k, v| expr }` — sums block return values.
-            // Default initial accumulator is Int(0) (CRuby). With
-            // an Int init, seed from there. Mirrors the Array#sum
-            // dispatch via `apply_int_promote` / `try_bigint_binop`
-            // so Bignum-of-sum cases work.
+            // `h.sum { |pair| expr }` / `{ |k, v| expr }` —
+            // sums block return values. Default initial
+            // accumulator is Int(0) (CRuby); an Int init seeds
+            // from there. Mirrors Array#sum's dispatch via
+            // `apply_int_promote` / `try_bigint_binop` so
+            // Bignum overflow promotion works. CRuby yields a
+            // single `[k, v]` Array per entry (matching
+            // Hash#each); see the flat_map comment above for
+            // the rationale.
             (Value::Hash(id), "sum", []) | (Value::Hash(id), "sum", [Value::Int(_)]) => {
                 let id = *id;
                 let init: i64 = match args { [Value::Int(n)] => *n, _ => 0 };
@@ -2771,6 +2784,10 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in &snapshot {
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                    g.vm.pinned.push(Value::Array(pair_id));
                     // Pin the running accumulator across the
                     // block invocation: once `apply_int_promote`
                     // / `try_bigint_binop` widens `acc` to a
@@ -2784,8 +2801,9 @@ impl Vm {
                     // pin push/pop in the all-Int hot path.
                     let acc_heap = acc.is_gc_heap_ref();
                     if acc_heap { g.vm.pinned.push(acc.clone()); }
-                    let step = g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames);
+                    let step = g.vm.step_block(block, vec![Value::Array(pair_id)], pre_frames);
                     if acc_heap { g.vm.pinned.pop(); }
+                    g.vm.pinned.pop();
                     let r = match step? {
                         BlockStep::MethodReturn => break,
                         BlockStep::Break(r) => { early = Some(r); break; }
