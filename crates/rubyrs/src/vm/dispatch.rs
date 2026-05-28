@@ -5009,6 +5009,108 @@ impl Vm {
                 self.stack.push(Value::new_str(rendered));
                 return Ok(());
             }
+            // BoundMethod / UnboundMethod: render
+            //   `#<Method: RecvClass#name(params)>`
+            //   `#<Method: RecvClass(DefiningClass)#name(params)>`
+            //   `#<UnboundMethod: DefiningClass#name(params)>`
+            // mirroring CRuby's form. The source-location suffix
+            // (`path:line`) CRuby tacks on is omitted — we don't
+            // track per-method definition location yet. Without
+            // this short-circuit the universal `#<Method:0xHEX>`
+            // fallback wins, losing the receiver/owner class and
+            // method name that defensive logging idioms rely on.
+            if let Value::BoundMethod(bid) = &recv {
+                let (recv_v, name_id, params, defining_rc) = {
+                    let (rv, nid, snap) = self.heap.bound_method_full(*bid);
+                    let params = snap
+                        .as_ref()
+                        .map(|m| format_method_params(&self.protos[m.proto_idx]))
+                        .unwrap_or_default();
+                    let defining_rc = snap
+                        .as_ref()
+                        .and_then(|m| m.defining_class.as_ref())
+                        .and_then(|w| w.upgrade());
+                    (rv.clone(), nid, params, defining_rc)
+                };
+                let method_name = self.interner.resolve(name_id).to_string();
+                // Singleton methods (`def obj.foo`): defining
+                // class IS the receiver's eigenclass shell. CRuby
+                // renders these as `#<RecvClass:0xHEX>.foo(...)`
+                // with a `.` separator instead of `#`. Detect by
+                // ptr-eq: `class_of(obj_id)` returns the eigenclass
+                // when one is installed, so if it matches the
+                // method's defining_class we're looking at a
+                // singleton method.
+                // Singleton iff: receiver has an eigenclass
+                // installed AND defining_class IS that
+                // eigenclass. The first conjunct distinguishes
+                // singleton methods from regular methods —
+                // without it, every method on a singleton-less
+                // object would also satisfy
+                // `class_of == defining_class`.
+                let is_singleton = match (&recv_v, &defining_rc) {
+                    (Value::Object(id), Some(def)) => {
+                        let cls = self.heap.class_of(*id);
+                        let real = self.heap.real_class_of(*id);
+                        !std::rc::Rc::ptr_eq(&cls, &real)
+                            && std::rc::Rc::ptr_eq(&cls, def)
+                    }
+                    _ => false,
+                };
+                let s = if is_singleton {
+                    // `#<Method: #<A:0xHEX>.foo(params)>` — receiver
+                    // rendered as its real class (skip the
+                    // eigenclass) plus a stable hex identity.
+                    let real_class = match &recv_v {
+                        Value::Object(id) => self.heap.real_class_of(*id).name.clone(),
+                        _ => "Object".to_string(),
+                    };
+                    let oid = object_id_for(&recv_v);
+                    format!(
+                        "#<Method: #<{}:0x{:016x}>.{}({})>",
+                        real_class, oid, method_name, params
+                    )
+                } else {
+                    let recv_class = match self.class_of(&recv_v) {
+                        Value::Class(c) => c.name.clone(),
+                        _ => "Object".to_string(),
+                    };
+                    let defining_name = defining_rc.map(|c| c.name.clone());
+                    let class_part = match defining_name {
+                        Some(d) if d != recv_class => format!("{}({})", recv_class, d),
+                        _ => recv_class,
+                    };
+                    format!("#<Method: {}#{}({})>", class_part, method_name, params)
+                };
+                self.stack.push(Value::new_str(s));
+                return Ok(());
+            }
+            if let Value::UnboundMethod(uid) = &recv {
+                let (class_name, name_id, params) = {
+                    let (cls, nid, snap) = self.heap.unbound_method_full(*uid);
+                    let params = snap
+                        .as_ref()
+                        .map(|m| format_method_params(&self.protos[m.proto_idx]))
+                        .unwrap_or_default();
+                    // CRuby prints the class where the method was
+                    // *defined*, not the class it was captured on:
+                    // `B.instance_method(:foo).inspect` shows
+                    // `A#foo` when foo is inherited from A. Fall
+                    // back to the captured class when the snap is
+                    // absent or the Weak ref has been collected.
+                    let defining = snap
+                        .as_ref()
+                        .and_then(|m| m.defining_class.as_ref())
+                        .and_then(|w| w.upgrade())
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| cls.name.clone());
+                    (defining, nid, params)
+                };
+                let method_name = self.interner.resolve(name_id).to_string();
+                let s = format!("#<UnboundMethod: {}#{}({})>", class_name, method_name, params);
+                self.stack.push(Value::new_str(s));
+                return Ok(());
+            }
             let cls_name = match self.class_of(&recv) {
                 Value::Class(c) => c.name.clone(),
                 _ => "Object".to_string(),
@@ -7592,6 +7694,78 @@ fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
         _ => { 7u8.hash(&mut h); object_id_for(v).hash(&mut h); }
     }
     h.finish() as i64
+}
+
+/// Render a `Proto`'s parameter list in the form CRuby's
+/// `Method#inspect` uses — required positional bare,
+/// optional positional with `=...`, rest with `*`, required
+/// keyword with `:`, optional keyword with `: ...`, kw-rest
+/// with `**`, block with `&`. Anonymous rest/kw-rest collapse
+/// to bare `*` / `**`. Layout of `Proto.params` (set up in
+/// `compile_def`):
+///   [0..n_total_pos)    positional (required + optional, in
+///                       source order); first
+///                       `n_required_positional` are required.
+///   if rest_param.is_some():  one slot for the rest name
+///   then len(kw_param_defaults) keyword slots
+///   if kw_rest_param.is_some(): one slot for the kw-rest name
+///   if block_param.is_some():   one slot for the block name
+/// Total derived by subtracting the tail counters from
+/// `params.len()`.
+fn format_method_params(proto: &crate::bytecode::Proto) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let n_total = proto.params.len();
+    let mut tail = 0usize;
+    if proto.rest_param.is_some() { tail += 1; }
+    tail += proto.kw_param_defaults.len();
+    if proto.kw_rest_param.is_some() { tail += 1; }
+    if proto.block_param.is_some() { tail += 1; }
+    let n_pos = n_total.saturating_sub(tail);
+    let n_req = (proto.n_required_positional as usize).min(n_pos);
+
+    for (i, name) in proto.params[..n_pos].iter().enumerate() {
+        if i < n_req {
+            parts.push(name.clone());
+        } else {
+            parts.push(format!("{}=...", name));
+        }
+    }
+    let mut idx = n_pos;
+    if let Some(rname) = &proto.rest_param {
+        // Anonymous `def f(*)` parses to an empty rest name;
+        // collapse to bare `*` to match CRuby.
+        parts.push(if rname.is_empty() {
+            "*".to_string()
+        } else {
+            format!("*{}", rname)
+        });
+        idx += 1;
+    }
+    for (i, default) in proto.kw_param_defaults.iter().enumerate() {
+        let kname = &proto.params[idx + i];
+        parts.push(match default {
+            None => format!("{}:", kname),
+            Some(_) => format!("{}: ...", kname),
+        });
+    }
+    idx += proto.kw_param_defaults.len();
+    if let Some(krname) = &proto.kw_rest_param {
+        // `def f(**)` compiles with a synthetic
+        // `__kw_rest_anon` slot name (compiler.rs:322) —
+        // collapse it back to bare `**` for inspect.
+        let is_anon = krname.is_empty() || krname == "__kw_rest_anon";
+        parts.push(if is_anon {
+            "**".to_string()
+        } else {
+            format!("**{}", krname)
+        });
+        idx += 1;
+    }
+    if let Some(bname) = &proto.block_param {
+        parts.push(format!("&{}", bname));
+    }
+    let _ = idx;
+    parts.join(", ")
 }
 
 /// Scramble a raw pointer into an opaque, process-local u64
