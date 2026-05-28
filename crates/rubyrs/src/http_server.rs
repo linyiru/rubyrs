@@ -546,6 +546,123 @@ pub(crate) fn build_rack_env(
 /// Rack response decomposes into for hyper.
 pub(crate) type MarshaledResponse = (u16, Vec<(String, String)>, bytes::Bytes);
 
+// ===== P2b.2b.1: FiberResponseBody — hyper Body wrapping a Fiber =====
+
+/// P2b.2b (ADR 0023 v2 §"_http_server integration"):
+/// hyper `Body` implementation that drives a request-scoped
+/// Fiber. Each `poll_frame` call acquires `&mut Vm` via
+/// CURRENT_VM_PTR (ADR 0013), invokes
+/// [`fiber::resume_fiber`], and returns the yielded chunk
+/// as `Frame::data(Bytes::from(chunk))`. When the Fiber
+/// returns, `poll_frame` returns `Poll::Ready(None)` to
+/// signal EOF.
+///
+/// **Drop is Vm-free** per P1d.3's contract. Holds only
+/// `ObjId(u32)` (Copy) + a `bool` — no destructor reaches
+/// into `&mut Vm`. The Fiber's heap slot becomes
+/// unreachable through this body but stays alive until
+/// the next GC cycle.
+///
+/// **Sync poll**: Fiber resumes synchronously inside
+/// `poll_frame`. If the Fiber body does CPU-heavy work
+/// between yields, the tokio task blocks. Acceptable for
+/// v1; future enhancement (cooperative yielding via
+/// per-op fuel check) lands in a follow-up if needed.
+///
+/// cfg(_fiber)-gated.
+#[cfg(feature = "_fiber")]
+#[allow(dead_code)] // P2b.2b.3 wires this into marshal_rack_response
+pub(crate) struct FiberResponseBody {
+    /// ObjId of the heap slot holding the Fiber driving
+    /// this body. Stored as ObjId (not Value) so Drop is
+    /// a no-op — the field is Copy + carries no destructor.
+    fiber_id: crate::value::ObjId,
+    /// `true` once the Fiber has returned or trapped.
+    /// Subsequent poll_frame calls return Ready(None)
+    /// without touching the Vm.
+    done: bool,
+}
+
+#[cfg(feature = "_fiber")]
+impl FiberResponseBody {
+    #[allow(dead_code)] // P2b.2b.3 caller
+    pub(crate) fn new(fiber_id: crate::value::ObjId) -> Self {
+        Self { fiber_id, done: false }
+    }
+}
+
+#[cfg(feature = "_fiber")]
+impl hyper::body::Body for FiberResponseBody {
+    type Data = bytes::Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        use crate::value::Value;
+        use crate::vm::fiber::{resume_fiber, FiberStep};
+
+        let this = self.get_mut();
+        if this.done {
+            return std::task::Poll::Ready(None);
+        }
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            // CURRENT_VM_PTR null = poll_frame called outside
+            // the host-fn scope that set it up. Shouldn't
+            // happen with the standard register_host_fns +
+            // tokio current-thread runtime arrangement, but
+            // we surface it as an Err for diagnostic clarity
+            // rather than panicking.
+            this.done = true;
+            let err: Self::Error = "FiberResponseBody.poll_frame: CURRENT_VM_PTR null — host fn scope ended before stream drained".into();
+            return std::task::Poll::Ready(Some(Err(err)));
+        }
+        // SAFETY: ADR 0013 contract — single-threaded
+        // current-thread tokio runtime; no other task
+        // holds &mut Vm while poll_frame runs.
+        let vm = unsafe { &mut *ptr };
+        match resume_fiber(vm, this.fiber_id, Value::Nil) {
+            Ok(FiberStep::Yielded(v)) => {
+                // Convert the yielded Value to Bytes.
+                // Body chunks must be String — Rack 3 SPEC.
+                let chunk_bytes = match &v {
+                    Value::Str(rs) => {
+                        let content = rs.content.borrow();
+                        bytes::Bytes::copy_from_slice(content.as_slice())
+                    }
+                    other => {
+                        this.done = true;
+                        let err: Self::Error = format!(
+                            "Rack streaming body must yield String chunks; got {}",
+                            other.type_name(),
+                        ).into();
+                        return std::task::Poll::Ready(Some(Err(err)));
+                    }
+                };
+                std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(chunk_bytes))))
+            }
+            Ok(FiberStep::Returned(_)) => {
+                this.done = true;
+                std::task::Poll::Ready(None)
+            }
+            Err(trap) => {
+                this.done = true;
+                let err: Self::Error = format!(
+                    "Rack streaming body raised: {}",
+                    trap.err.message(),
+                ).into();
+                std::task::Poll::Ready(Some(Err(err)))
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done
+    }
+}
+
 /// Parsed `options` Hash from the FU4 Hash-arg form of
 /// the serve host fns. Each field is `None`/`false` unless
 /// the user supplied a key with that name; the host fn
