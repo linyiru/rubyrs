@@ -1518,8 +1518,11 @@ const TR_SET_MAX_CHARS: usize = 65_536;
 /// order-preserving (char-vec, negate) pair. Supports CRuby's
 /// mini-syntax:
 /// - leading `^` (first char only) → negate the set
-/// - `a-z` → expand range inclusive (only when neither end is
-///   `^` itself; `^-` and `-^` stay literal)
+/// - `a-z` → expand range inclusive (any `x-y` where `x <= y`,
+///   including ranges whose endpoint is `^` like `A-^` — `^` is
+///   only special as the leading-position negation prefix)
+/// - reversed range (`z-a`) → no expansion; the three chars
+///   fall through as literals
 /// - everything else → literal char
 ///
 /// CRuby's tr-syntax has a few finer corners (backslash escapes
