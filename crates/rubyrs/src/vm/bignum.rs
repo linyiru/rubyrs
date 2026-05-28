@@ -1966,6 +1966,17 @@ impl Vm {
                             b.to_string().parse::<f64>().unwrap_or(f64::INFINITY)
                         )));
                     }
+                    // `BigInt#chr` — any `Value::BigInt` is by the
+                    // canonical-BigInt invariant outside i64 range,
+                    // therefore necessarily outside 0..=255. Surface
+                    // the same RangeError shape as the Int-recv arm
+                    // in `numeric.rs` so a caller iterating across
+                    // mixed magnitudes sees a uniform error message.
+                    "chr" => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: format!("{} out of char range", b),
+                        }));
+                    }
                     "zero?" => return Ok(Some(Value::Bool(b.sign() == Sign::NoSign))),
                     "positive?" => return Ok(Some(Value::Bool(b.sign() == Sign::Plus))),
                     "negative?" => return Ok(Some(Value::Bool(b.sign() == Sign::Minus))),

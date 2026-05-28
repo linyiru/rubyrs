@@ -12,17 +12,17 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 118 |
-| Examples in corpus | 650 |
-| Skipped `it` traces | 143 |
+| Files | 119 |
+| Examples in corpus | 658 |
+| Skipped `it` traces | 145 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 1 |
+| `divergent` | 2 |
 | `fixture` | 53 |
-| `method-not-implemented` | 70 |
+| `method-not-implemented` | 71 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 24 | 62 | 43 |
-| Integer | 33 | 288 | 28 |
+| Integer | 34 | 296 | 30 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 21 | 119 | 22 |
@@ -106,6 +106,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_bit_xor_spec.rb` | Integer#^ | `core/integer/bit_xor_spec.rb` | 11 | 0 |
 | `integer_case_compare_spec.rb` | Integer#=== | `core/integer/case_compare_spec.rb + core/integer/shared/equal.rb` | 9 | 1 |
 | `integer_ceil_spec.rb` | Integer#ceil | `core/integer/ceil_spec.rb + shared/to_i.rb + shared/integer_rounding.rb + shared/integer_ceil_precision.rb` | 10 | 1 |
+| `integer_chr_spec.rb` | Integer#chr | `core/integer/chr_spec.rb` | 8 | 2 |
 | `integer_comparison_spec.rb` | Integer#<=> | `core/integer/comparison_spec.rb` | 23 | 2 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |

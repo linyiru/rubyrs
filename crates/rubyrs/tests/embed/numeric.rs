@@ -2682,6 +2682,62 @@ fn pow_neg_exponent_minus_one_preserves_parity_beyond_f64_mantissa() {
     assert_eq!(buf.snapshot().trim(), "-1.0\n1.0");
 }
 
+#[test]
+fn integer_chr_basic() {
+    // Pin the 0..255 byte-form Integer#chr surface; spec coverage
+    // lives in spec/ruby/integer_chr_spec.rb. Cross-profile guard
+    // for the (a) happy path round-trips, (b) RangeError shape for
+    // out-of-range receivers, (c) TypeError for the unsupported
+    // 1-arg `chr(encoding)` form, (d) BigInt-recv routing through
+    // bignum_primitive's chr arm.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        ("65.chr", "A"),
+        ("0.chr.bytes.inspect", "[0]"),
+        ("127.chr.bytes.inspect", "[127]"),
+        ("128.chr.bytes.inspect", "[128]"),
+        ("255.chr.bytes.inspect", "[255]"),
+        ("65.chr.length.inspect", "1"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(&format!("puts {}", script), "chr.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    for (script, expected_class) in [
+        ("(-1).chr", "RangeError"),
+        ("256.chr", "RangeError"),
+        ("1000.chr", "RangeError"),
+        ("65.chr(\"UTF-8\")", "TypeError"),
+        ("65.chr(nil)", "TypeError"),
+        #[cfg(feature = "bignum")]
+        ("(2**64).chr", "RangeError"),
+        #[cfg(feature = "bignum")]
+        ("(-(2**64)).chr", "RangeError"),
+    ] {
+        let err = rt.eval(script, "chr_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+            }
+            other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+    // respond_to? should report true on both Int and BigInt
+    // receivers (whitelist guard in lookup.rs).
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval("puts 65.respond_to?(:chr)", "rt_int.rb").expect("eval");
+    assert_eq!(buf.snapshot().trim(), "true");
+    #[cfg(feature = "bignum")]
+    {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval("puts (2**64).respond_to?(:chr)", "rt_big.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), "true");
+    }
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_pow_bigint_exponent_traps() {

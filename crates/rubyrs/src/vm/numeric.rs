@@ -956,6 +956,21 @@ pub(crate) fn numeric_call(
             }
             Some(Value::new_str_bytes(vec![n as u8]))
         }
+        // `Integer#chr(encoding)` — CRuby widens the accepted range
+        // up to U+10FFFF and returns a multi-byte String tagged with
+        // the requested Encoding. We don't model the Tier 3/4
+        // Encoding object (ADR 0017), so no value the caller passes
+        // can satisfy "implicitly convertible to Encoding". Surface
+        // CRuby's TypeError shape rather than NoMethodError despite
+        // respond_to? returning true.
+        (Value::Int(_), "chr", [arg]) => {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Encoding",
+                    type_name_for_coerce(arg),
+                ),
+            });
+        }
 
         // `Float#eql?(other)` — type-strict equality. Only true
         // when `other` is also a Float and `==` agrees (so
