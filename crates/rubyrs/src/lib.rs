@@ -733,6 +733,44 @@ impl PostPreambleSnapshot {
             sources: rt.vm.sources.clone(),
         }
     }
+
+    /// Restore every baseline HashMap captured in this snapshot
+    /// to the live `Vm`. Bundles the four `clone_from` calls
+    /// (`classes`, `constants`, `toplevel_methods`, `sources`)
+    /// plus the per-class `RefCell` restoration loop into one
+    /// site, so `reset()` no longer has them scattered across
+    /// ~60 lines with unrelated volatile-state clears between.
+    ///
+    /// `clone_from` (not `= ...clone()`) reuses the destination
+    /// allocation across resets — the values are `Rc<...>` so
+    /// each "clone" is a refcount bump, not a deep copy. Per-
+    /// class state goes through `ClassStateSnapshot::restore_into`,
+    /// which itself uses `clone_from` on each `RefCell` field.
+    ///
+    /// A future field added to `PostPreambleSnapshot` for
+    /// "restore as map" duty should go here too, so the
+    /// "forgot one" risk of scattered restores is bounded to a
+    /// single function.
+    fn restore_baseline_maps_into(&self, vm: &mut vm::Vm) {
+        vm.classes.clone_from(&self.classes);
+        vm.constants.clone_from(&self.constants);
+        vm.toplevel_methods.clone_from(&self.toplevel_methods);
+        vm.sources.clone_from(&self.sources);
+        // Per-class state — `methods` alone wasn't enough since user
+        // code can also mutate `singleton_methods` (`def self.x`),
+        // `ivars` (`@x = ...` in a class body), `includes`
+        // (`include Mod`), `prepends`, `singleton_prepends`,
+        // `class_vars` (`@@x`), and `superclass`. Each one would
+        // leak across resets if the snapshot only covered methods.
+        // Iterate the live `vm.classes` (just clone_from'd from
+        // snapshot.classes above, so the keyset matches the
+        // captured snapshot exactly).
+        for (cls_name, cls) in &vm.classes {
+            if let Some(snap) = self.class_states.get(cls_name) {
+                snap.restore_into(cls);
+            }
+        }
+    }
 }
 
 impl ClassStateSnapshot {
@@ -1053,32 +1091,15 @@ impl Runtime {
         //     snapshot's keyset. Clone-and-replace is the only
         //     way to fully rewind.
         //
-        // Rc<Class> / Rc<Method> / Value::Str(Rc<...>) all clone
-        // by refcount bump, so the actual cost is HashMap copies
-        // (~hundreds of entries; sub-microsecond). `clone_from`
-        // (not `= ...clone()`) reuses the existing map's
-        // allocation across resets — matches the pattern
-        // `ClassStateSnapshot::restore_into` already uses for the
-        // per-class RefCells, and shaves allocator churn off the
-        // fuzz / per-request hot path.
-        self.vm.classes.clone_from(&snapshot.classes);
-        self.vm.constants.clone_from(&snapshot.constants);
-        self.vm.toplevel_methods.clone_from(&snapshot.toplevel_methods);
-        // --- Per-class state: replace EVERY mutable RefCell
-        //     field on each preamble Class with the snapshot's
-        //     captured value. ---
-        // `methods` alone wasn't enough — user code can also
-        // mutate `singleton_methods` (`def self.x`), `ivars`
-        // (`@x = ...` in a class body), `includes`
-        // (`include Mod`), `prepends`, `singleton_prepends`,
-        // `class_vars` (`@@x`), and `superclass`. Each one
-        // would leak across resets if the snapshot only
-        // covered methods.
-        for (cls_name, cls) in &self.vm.classes {
-            if let Some(snap) = snapshot.class_states.get(cls_name) {
-                snap.restore_into(cls);
-            }
-        }
+        // Restore all four baseline HashMaps (`classes` /
+        // `constants` / `toplevel_methods` / `sources`) plus the
+        // per-class `RefCell` fields in one shot. The previous
+        // shape inlined three of them here and the fourth
+        // (`sources`) ~60 lines later, interleaved with
+        // unrelated volatile-state clears — see
+        // `PostPreambleSnapshot::restore_baseline_maps_into`
+        // for the bundled rationale.
+        snapshot.restore_baseline_maps_into(&mut self.vm);
         // --- Literal caches keyed by user-time SymIds: clear. ---
         // `regex_cache` and `bigint_lit_cache` map compile-time-
         // interned SymIds to compiled regex / parsed BigInt
@@ -1118,10 +1139,10 @@ impl Runtime {
             self.vm.loaded_features.clear();
             self.vm.loaded_stdlib_stubs.clear();
         }
-        // Restore preamble filename→source-text so `Method#source_location`
-        // and trap backtraces on preamble methods keep resolving
-        // after reset; see `PostPreambleSnapshot::sources`.
-        self.vm.sources.clone_from(&snapshot.sources);
+        // (preamble filename→source-text map for `Method#source_location`
+        // and trap backtrace line lookup is now restored by
+        // `restore_baseline_maps_into` above alongside the other
+        // baseline HashMaps — see `PostPreambleSnapshot::sources`.)
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
