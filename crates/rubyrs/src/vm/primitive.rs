@@ -119,9 +119,12 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
             // (see `singleton_class` arm in dispatch.rs); detect
             // the shell via `singleton_target` and return nil
             // here to match CRuby. (Code-review #253 round 6 #1.)
-            if c.singleton_target.borrow().is_some() {
-                Some(Value::Nil)
-            } else if c.name.is_empty() {
+            // CRuby returns nil for anonymous classes AND for
+            // per-object singleton shells (the latter detected
+            // via `singleton_target`). Both branches collapse
+            // to Some(Value::Nil); named non-shell classes
+            // return the name.
+            if c.singleton_target.borrow().is_some() || c.name.is_empty() {
                 Some(Value::Nil)
             } else {
                 Some(Value::new_str(c.name.clone()))

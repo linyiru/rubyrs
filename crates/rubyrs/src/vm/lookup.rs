@@ -948,7 +948,14 @@ impl Vm {
         // BasicObject, not Kernel. `Kernel.instance_method(:instance_exec)`
         // raises NameError. Future BasicObject-builtins PR will
         // install it there.
-        let entries: &[(&str, i64, &[(&str, Option<&str>)], &str)] = &[
+        // Per-entry shape: (name, arity, param-list, defining-class).
+        // Param-list element shape: (param-name, optional-default).
+        // Aliased so clippy's type_complexity lint doesn't trip
+        // (the inline 4-tuple-with-nested-slice form was reading as
+        // dense without saving any ergonomics).
+        type KernelEntry<'a> =
+            (&'a str, i64, &'a [(&'a str, Option<&'a str>)], &'a str);
+        let entries: &[KernelEntry] = &[
             // Zero-arg metadata accessors
             ("class", 0, &[], "<internal:kernel>"),
             ("nil?", 0, &[], "<internal:kernel>"),
