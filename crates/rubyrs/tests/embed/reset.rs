@@ -107,6 +107,59 @@ fn reset_clears_user_methods_added_to_preamble_class() {
 }
 
 #[test]
+fn reset_clears_singleton_class_class_eval_installs() {
+    // PR #253 layer #23: `cls.singleton_class.class_eval do
+    // define_method(:x) { ... } end` redirects the install into
+    // `cls.singleton_methods` via the eigenclass shell. `reset()`
+    // drops the cached shell (sets `singleton_view = None` rather
+    // than preserving the Rc — which would preserve the shell's
+    // internal RefCells via the shared allocation, leaking
+    // session-time state into the post-reset baseline). The
+    // redirected method itself lands on `cls.singleton_methods`,
+    // which `reset()` snapshots and restores — both halves of the
+    // contract are exercised here. (Code-review #253 round 8 #2.)
+    let mut rt = Runtime::new();
+    // Use a preamble class — String survives reset (the class
+    // itself is part of the baseline); user-defined classes would
+    // be dropped wholesale, which doesn't isolate the
+    // singleton_view-drop behavior we want to verify.
+    rt.eval(
+        r#"
+        String.singleton_class.class_eval do
+          define_method(:rubyrs_layer_23_marker) { "marker-present" }
+        end
+        "#,
+        "install.rb",
+    ).expect("install via singleton_class.class_eval");
+    // Pre-reset: the redirected install dispatches via String's
+    // singleton-method chain.
+    let pre = rt.eval(
+        "String.rubyrs_layer_23_marker",
+        "use-pre.rb",
+    ).expect("call shell-installed method");
+    assert!(
+        matches!(&pre, rubyrs::Value::Str(s) if &*s.borrow() == b"marker-present"),
+        "expected marker-present before reset, got {:?}",
+        pre,
+    );
+    rt.reset();
+    // Post-reset: both the redirected method (via
+    // singleton_methods snapshot/restore) AND the cached shell
+    // (via singleton_view drop) are gone. Calling the method
+    // raises NoMethodError; rebuilding via `singleton_class`
+    // produces a fresh shell with a fresh identity.
+    let err = rt.eval(
+        "String.rubyrs_layer_23_marker",
+        "use-post.rb",
+    ).expect_err("singleton method gone");
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "NoMethodError"),
+        "expected NoMethodError-shape Uncaught post-reset, got {:?}",
+        err.err,
+    );
+}
+
+#[test]
 fn reset_preserves_preamble_source_locations() {
     // `Method#source_location` on preamble-defined methods
     // (e.g. `Exception#message`, defined in

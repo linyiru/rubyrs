@@ -667,35 +667,59 @@ Foo::BAR                       # CRuby: NameError; rubyrs: 1
   divergence is documented here rather than encoded as a passing
   diff).
 
-### `Class#singleton_class` returns the receiver (Tier 1 stub)
+### `Class#singleton_class` returns a redirecting eigenclass shell
 
 ```ruby
 class Foo; end
 Foo.singleton_class.equal?(Foo.singleton_class)  # CRuby: true; rubyrs: true
 Foo.singleton_class.class                        # CRuby: Class; rubyrs: Class
-Foo.singleton_class.name                         # CRuby: nil;   rubyrs: "Foo"
+Foo.singleton_class.name                         # CRuby: nil;   rubyrs: nil
+
+# Method installs redirect to Foo's singleton_methods:
+Foo.singleton_class.class_eval do
+  define_method(:greet) { "hi" }       # lands on Foo.singleton_methods
+  def shout; "HI"; end                 # ditto, via Op::DefMethod redirect
+  alias_method :hello, :greet          # ditto, source resolved via real class
+end
+Foo.greet   # => "hi"
+Foo.shout   # => "HI"
 ```
 
-- `Class#singleton_class` (and `Module#singleton_class`, same arm)
-  is implemented as a Tier 1 stub that returns the receiver itself.
-  The identity-invariant property
-  `X.singleton_class.equal?(X.singleton_class)` holds, which is the
-  property real consumers (e.g. MRI `lib/erb/compiler.rb`'s
-  `@_init = self.class.singleton_class` cache-invariant check at
-  lines 828 / 900) actually rely on.
-- Divergence: the real metaclass shape isn't visible. Methods called
-  on the result dispatch against the receiver, so singleton_methods
-  defined on `X` do NOT appear as `X.singleton_class.instance_methods`,
-  and `X.singleton_class.name` returns the original class name
-  instead of CRuby's `nil`.
+- **Real eigenclass shell since PR #253 (layer #23).** Previously a
+  Tier-1 stub that returned the receiver itself. The shell is a
+  separate `Class` object carrying a `singleton_target` weak ref back
+  to the real class; the three method-install paths (`Op::DefMethod`,
+  `Op::DefMethodBlock`, runtime `Module#define_method` arm) plus
+  `Op::AliasMethod` (source lookup + install) detect the shell and
+  redirect into the real class's `singleton_methods`. This makes
+  sinatra's `define_singleton` idiom (`singleton_class.class_eval do
+  define_method(name, &content) end`) work end-to-end.
+- Identity invariant
+  `X.singleton_class.equal?(X.singleton_class)` still holds via a
+  cached shell.
+- Cross-CRuby alignment: `X.singleton_class.name` now returns `nil`
+  (CRuby shape); `to_s` / `inspect` render `"#<Class:X>"`.
+- **Remaining divergence** — reflection on the shell itself: methods
+  installed via the shell are visible through `X`'s singleton dispatch
+  (`X.method_name`) but the shell's own `instance_methods` /
+  `method_defined?` / `include?` / `include` / `prepend` operate on the
+  shell's empty tables, NOT on the redirected installs. Sinatra and
+  the mainstream `singleton_class.class_eval` idiom don't probe the
+  shell reflectively, so this is documented divergence rather than a
+  bug. A future PR can mirror writes into the shell's tables (or
+  proxy the reflection methods) without breaking the redirect.
 - `Object#singleton_class` for non-Class receivers is not implemented
   in this arm and will raise NoMethodError.
-- Why: completes the ERB compile chain
-  (`ERB.new(...).src` runs end-to-end) without pulling the full
-  eigenclass model into the VM.
-- Test: `crates/rubyrs/tests/diff/class_singleton_class.rb` (locks
-  idempotency, `class is Class`, distinct singletons across classes,
-  the ERB-shape `@_init` cache invariant, and `respond_to?` parity).
+- `Runtime::reset()` drops the cached shell so any session-time
+  installs disappear; the shell rebuilds lazily on the next call.
+- Tests:
+  - `crates/rubyrs/tests/diff/class_singleton_class.rb` (idempotency,
+    `class is Class`, the ERB-shape `@_init` cache invariant,
+    `respond_to?` parity).
+  - `crates/rubyrs/tests/diff/singleton_class_class_eval.rb` (PR #253:
+    `define_method` install, parsed `def` install, identity, mutation
+    persistence in the sinatra `add_charset << x` shape, visibility
+    leak fix, `alias_method`, the `nil` name pin).
 
 ### `Kernel#eval` / `Class#class_eval(string)` skip caller scope
 
