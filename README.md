@@ -241,7 +241,7 @@ Multi-core via pre-fork (Stage 7, Unix only):
 on_worker_boot = ->(idx) { puts "[worker #{idx}] booted" }
 __rubyrs_http_serve_prefork(
   "127.0.0.1:9292", 60, app, 4,  # 4 workers
-  on_worker_boot,
+  { on_worker_boot: on_worker_boot, per_request_fuel: 1_000_000 },
 )
 ```
 

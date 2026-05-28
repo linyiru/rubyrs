@@ -78,6 +78,11 @@ __rubyrs_http_serve_prefork(
   DURATION,
   app,
   N_WORKERS,
-  on_worker_boot,
+  {
+    on_worker_boot: on_worker_boot,
+    # Other knobs (per_request_fuel, max_body_bytes,
+    # idle_timeout_ms, etc.) can go here — see
+    # SERVE_OPTION_KEYS in crates/rubyrs/src/http_server.rs.
+  },
 )
 puts "all workers exited cleanly"

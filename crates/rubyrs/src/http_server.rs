@@ -204,8 +204,8 @@ fn run_one_child_worker(
     addr: SocketAddr,
     duration_secs: i64,
     block_id: crate::value::ObjId,
-    on_worker_boot_id: Option<crate::value::ObjId>,
     worker_index: i64,
+    opts: ServeOptions,
 ) -> ! {
     use crate::value::Value;
 
@@ -222,7 +222,7 @@ fn run_one_child_worker(
     let result: Result<(), String> = (|| {
         let listener = bind_reuseport_v4(addr)
             .map_err(|e| format!("child {worker_index} bind: {e}"))?;
-        if let Some(boot_id) = on_worker_boot_id {
+        if let Some(boot_id) = opts.on_worker_boot_block {
             let ptr = crate::vm::current_vm_ptr();
             if ptr.is_null() {
                 return Err(format!("child {worker_index}: CURRENT_VM_PTR null"));
@@ -238,9 +238,19 @@ fn run_one_child_worker(
                 ))?;
         }
         let duration = std::time::Duration::from_secs(duration_secs as u64);
+        // FU4c: thread all security knobs from the parent's
+        // options Hash through to the child's serve loop.
+        // install_signal_handler is forced ON in the fork
+        // path so FU1 forwarding can cut serving short.
         run_blocking_for_duration_with_app_on_listener(
-            listener, duration, block_id, None, None,
-            DEFAULT_MAX_BODY_BYTES, None, None, None, true,
+            listener, duration, block_id,
+            opts.on_error_block,
+            opts.per_request_fuel,
+            opts.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES),
+            opts.io_deadline,
+            opts.max_headers,
+            opts.idle_timeout,
+            true,
         ).map_err(|e| format!("child {worker_index} serve: {e}"))?;
         Ok(())
     })();
@@ -528,9 +538,6 @@ pub(crate) fn build_rack_env(
 /// Rack response decomposes into for hyper.
 pub(crate) type MarshaledResponse = (u16, Vec<(String, String)>, bytes::Bytes);
 
-// FU4a: ServeOptions + parse_serve_options are wired into
-// the host fns in FU4b/c — `dead_code` allow stays until then.
-#[allow(dead_code)]
 /// Parsed `options` Hash from the FU4 Hash-arg form of
 /// the serve host fns. Each field is `None`/`false` unless
 /// the user supplied a key with that name; the host fn
@@ -554,7 +561,6 @@ pub(crate) struct ServeOptions {
 /// All option keys recognised by either serve host fn.
 /// Used in the "unknown key" error message so users see
 /// the full menu.
-#[allow(dead_code)]
 pub(crate) const SERVE_OPTION_KEYS: &[&str] = &[
     "per_request_fuel",
     "max_body_bytes",
@@ -566,7 +572,6 @@ pub(crate) const SERVE_OPTION_KEYS: &[&str] = &[
     "on_worker_boot",
 ];
 
-#[allow(dead_code)]
 fn arg_err(msg: impl Into<String>) -> crate::error::Trap {
     crate::error::Trap {
         err: crate::error::RubyError::ArgumentError { msg: msg.into() },
@@ -574,7 +579,6 @@ fn arg_err(msg: impl Into<String>) -> crate::error::Trap {
     }
 }
 
-#[allow(dead_code)]
 fn expect_non_neg_int(key: &str, value: &crate::value::Value) -> Result<i64, crate::error::Trap> {
     match value {
         crate::value::Value::Int(n) => {
@@ -590,7 +594,6 @@ fn expect_non_neg_int(key: &str, value: &crate::value::Value) -> Result<i64, cra
     }
 }
 
-#[allow(dead_code)]
 fn expect_bool_flag(key: &str, value: &crate::value::Value) -> Result<bool, crate::error::Trap> {
     match value {
         crate::value::Value::Int(0) => Ok(false),
@@ -604,7 +607,6 @@ fn expect_bool_flag(key: &str, value: &crate::value::Value) -> Result<bool, crat
     }
 }
 
-#[allow(dead_code)]
 fn expect_block(key: &str, value: &crate::value::Value) -> Result<crate::value::ObjId, crate::error::Trap> {
     match value {
         crate::value::Value::Block(id) => Ok(*id),
@@ -624,7 +626,6 @@ fn expect_block(key: &str, value: &crate::value::Value) -> Result<crate::value::
 /// String (Ruby idiom). Symbol values are resolved via
 /// the interner; String values use `to_string_lossy`.
 /// Anything else is an ArgumentError.
-#[allow(dead_code)]
 pub(crate) fn parse_serve_options(
     vm: &crate::vm::Vm,
     hash_id: crate::value::ObjId,
@@ -1593,24 +1594,41 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     // 7d, gated cfg(target_family = "unix"). On Windows,
     // N>=2 returns ArgumentError unconditionally — there's
     // no SO_REUSEPORT equivalent.
+    // FU4c: prefork accepts all option keys (incl. on_worker_boot).
+    // SERVE_OPTION_KEYS is the union set defined in FU4a.
     rt.register_fn("__rubyrs_http_serve_prefork", |args| {
-        let (addr_str, duration_secs, block_id, n_workers, on_worker_boot_id) = match args {
+        let (addr_str, duration_secs, block_id, n_workers, opts) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(n)] => {
-                (addr.to_string_lossy(), *secs, *id, *n, None)
+                (addr.to_string_lossy(), *secs, *id, *n, ServeOptions::default())
             }
-            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(n), Value::Block(boot_id)] => {
-                (addr.to_string_lossy(), *secs, *id, *n, Some(*boot_id))
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(n), Value::Hash(hash_id)] => {
+                let ptr = crate::vm::current_vm_ptr();
+                if ptr.is_null() {
+                    return Err(Trap {
+                        err: RubyError::RuntimeError {
+                            msg: "internal: CURRENT_VM_PTR null in __rubyrs_http_serve_prefork".to_string(),
+                        },
+                        backtrace: vec![],
+                    });
+                }
+                // SAFETY: ADR 0013 — &mut Vm parked by
+                // invoke_host_fn; shared borrow for parser
+                // interner lookups.
+                let vm = unsafe { &*ptr };
+                let parsed = parse_serve_options(vm, *hash_id, SERVE_OPTION_KEYS)?;
+                (addr.to_string_lossy(), *secs, *id, *n, parsed)
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_prefork(addr: String, duration_secs: Integer, app: Proc/Lambda, n_workers: Integer, on_worker_boot: Proc/Lambda = nil)"
+                        msg: "__rubyrs_http_serve_prefork(addr: String, duration_secs: Integer, app: Proc/Lambda, n_workers: Integer, options: Hash = {}) — options keys: per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms, on_error, on_worker_boot"
                             .to_string(),
                     },
                     backtrace: vec![],
                 });
             }
         };
+        let on_worker_boot_id = opts.on_worker_boot_block;
 
         if duration_secs < 0 {
             return Err(Trap {
@@ -1727,7 +1745,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                     // supervisor can reuse it. Never returns.
                     run_one_child_worker(
                         addr, duration_secs, block_id,
-                        on_worker_boot_id, worker_index,
+                        worker_index, opts.clone(),
                     );
                 } else {
                     // FU1: publish pid into the static
@@ -1888,7 +1906,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                         // initial fork.
                         run_one_child_worker(
                             addr, duration_secs, block_id,
-                            on_worker_boot_id, slot_idx as i64,
+                            slot_idx as i64, opts.clone(),
                         );
                     } else {
                         PREFORK_CHILD_PIDS[slot_idx]
@@ -1966,13 +1984,21 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
         let duration = Duration::from_secs(duration_secs as u64);
 
+        // FU4c: N=1 path also threads the options through.
         // Non-unix has no on_listener variant (cfg-gated);
         // fall back to the addr-taking entry. For N=1
         // this is semantically identical.
+        let max_body = opts.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES);
         #[cfg(unix)]
         let _serve_bound = run_blocking_for_duration_with_app_on_listener(
-            listener, duration, block_id, None, None,
-            DEFAULT_MAX_BODY_BYTES, None, None, None, false,
+            listener, duration, block_id,
+            opts.on_error_block,
+            opts.per_request_fuel,
+            max_body,
+            opts.io_deadline,
+            opts.max_headers,
+            opts.idle_timeout,
+            opts.install_signal_handler,
         ).map_err(|e| Trap {
             err: RubyError::RuntimeError {
                 msg: format!("http_serve_prefork: {e}"),
@@ -1987,8 +2013,14 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             // Windows isn't the Stage 7 target.
             drop(listener);
             run_blocking_for_duration_with_app(
-                addr, duration, block_id, None, None,
-                DEFAULT_MAX_BODY_BYTES, None, None, None, false,
+                addr, duration, block_id,
+                opts.on_error_block,
+                opts.per_request_fuel,
+                max_body,
+                opts.io_deadline,
+                opts.max_headers,
+                opts.idle_timeout,
+                opts.install_signal_handler,
             ).map_err(|e| Trap {
                 err: RubyError::RuntimeError {
                     msg: format!("http_serve_prefork: {e}"),
@@ -3868,7 +3900,7 @@ mod tests {
               [200, {{"Content-Type" => "text/plain"}}, [body]]
             }}
             on_boot = ->(idx) {{ WorkerState.boot!(idx) }}
-            __rubyrs_http_serve_prefork("{server_addr}", 1, app, 1, on_boot)
+            __rubyrs_http_serve_prefork("{server_addr}", 1, app, 1, {{ on_worker_boot: on_boot }})
         "#), "stage_7c_prefork_n1.rb").expect("server ran");
 
         let response_text = client_thread.join().expect("client thread");
@@ -3902,7 +3934,7 @@ mod tests {
         let result = rt.eval(r#"
             app = ->(env) { [200, {}, ["ok"]] }
             on_boot = ->(idx) { raise "db reconnect failed" }
-            __rubyrs_http_serve_prefork("127.0.0.1:18141", 5, app, 1, on_boot)
+            __rubyrs_http_serve_prefork("127.0.0.1:18141", 5, app, 1, { on_worker_boot: on_boot })
         "#, "stage_7c_boot_raises.rb");
         let elapsed = start.elapsed();
 
@@ -4016,6 +4048,26 @@ mod tests {
         assert!(
             msg.contains("n_workers must be >= 1"),
             "expected ArgumentError on N=0, got: {msg}",
+        );
+    }
+
+    /// FU4c: prefork accepts the full SERVE_OPTION_KEYS set
+    /// including on_worker_boot — but typos still surface.
+    #[test]
+    fn prefork_rejects_unknown_option_key() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            app = ->(env) { [200, {}, []] }
+            __rubyrs_http_serve_prefork("127.0.0.1:0", 0, app, 1, {
+              per_request_fuel: 100,
+              not_a_real_option: 42,
+            })
+        "#, "fu4c_unknown.rb").expect_err("should reject unknown key");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("unknown option 'not_a_real_option'"),
+            "got: {msg}",
         );
     }
 

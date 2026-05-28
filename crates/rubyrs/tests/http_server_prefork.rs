@@ -65,7 +65,7 @@ fn prefork_two_workers_boot_and_serve_via_subprocess() {
     let script = r#"
 on_boot = ->(idx) { puts "BOOTED #{idx}" }
 app = ->(env) { [200, {"Content-Type" => "text/plain"}, ["ok"]] }
-__rubyrs_http_serve_prefork("127.0.0.1:18160", 3, app, 2, on_boot)
+__rubyrs_http_serve_prefork("127.0.0.1:18160", 3, app, 2, { on_worker_boot: on_boot })
 "#;
     std::fs::write(&tmp, script).expect("write tmp driver");
 
@@ -137,7 +137,7 @@ fn prefork_signal_forwarding_cuts_serving_short() {
     let script = r#"
 on_boot = ->(idx) { puts "BOOTED #{idx}" }
 app = ->(env) { [200, {"Content-Type" => "text/plain"}, ["ok"]] }
-__rubyrs_http_serve_prefork("127.0.0.1:18161", 30, app, 2, on_boot)
+__rubyrs_http_serve_prefork("127.0.0.1:18161", 30, app, 2, { on_worker_boot: on_boot })
 "#;
     std::fs::write(&tmp, script).expect("write tmp driver");
 
@@ -248,7 +248,7 @@ fn prefork_restarts_killed_child() {
     let script = r#"
 on_boot = ->(idx) { puts "BOOTED #{idx}" }
 app = ->(env) { [200, {"Content-Type" => "text/plain"}, ["ok"]] }
-__rubyrs_http_serve_prefork("127.0.0.1:18162", 6, app, 2, on_boot)
+__rubyrs_http_serve_prefork("127.0.0.1:18162", 6, app, 2, { on_worker_boot: on_boot })
 "#;
     std::fs::write(&tmp, script).expect("write tmp driver");
 
