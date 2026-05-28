@@ -39,7 +39,9 @@ describe "String#squeeze" do
     assert_raises("ArgumentError") { "hello".squeeze("c-a") }
   end
 
-  # skipped (method-not-implemented): multi-arg intersection form
-  # (`"hello".squeeze("a-z", "^l")`). Single-arg only.
+  # skipped (method-not-implemented): it "squeezes the intersection of two or more args" do
+  #   Multi-arg intersection form (`"hello".squeeze("a-z", "^l")`).
+  #   rubyrs's squeeze arm only accepts 0 or 1 selector arg.
   # skipped (method-not-implemented): describe "String#squeeze!" do ... end
+  #   Destructive variant.
 end

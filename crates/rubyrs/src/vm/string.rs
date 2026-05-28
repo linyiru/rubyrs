@@ -483,10 +483,10 @@ pub(crate) fn string_call(
         // `String#squeeze` — collapse consecutive runs of the same
         // character. With a char-set arg, only chars in the set
         // are squeezed. Char-set selectors go through the shared
-        // `parse_tr_set` (same as `tr` / `count`), so range
-        // shorthand (`"a-z"`) and `^`-negation work and the
-        // `TR_SET_MAX_CHARS` DoS cap applies. The set membership
-        // check XORs against the negation flag.
+        // `parse_count_selector` (which delegates to `parse_tr_set`),
+        // so range shorthand (`"a-z"`) and `^`-negation work and the
+        // `TR_SET_MAX_CHARS` DoS cap applies. Membership XORs
+        // against the negation flag.
         (Value::Str(a), "squeeze", rest) if rest.is_empty()
             || (rest.len() == 1 && matches!(rest[0], Value::Str(_))) => {
             let a_str = a.to_string_lossy();
@@ -494,10 +494,9 @@ pub(crate) fn string_call(
                 None => None,
                 Some(Value::Str(s)) => {
                     let s_ref = s.to_string_lossy();
-                    let (chars, negated) = parse_tr_set(&s_ref, true).map_err(|msg| {
+                    Some(parse_count_selector(&s_ref).map_err(|msg| {
                         RubyError::ArgumentError { msg: msg.to_string() }
-                    })?;
-                    Some((chars.into_iter().collect(), negated))
+                    })?)
                 }
                 _ => unreachable!(),
             };
