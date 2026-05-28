@@ -474,21 +474,45 @@ pub(crate) fn run_blocking(
 /// synchronous block of (env-build + call + marshal). Per
 /// ADR 0013, this is time-disjoint with the outer
 /// `invoke_host_fn`'s `&mut Vm` borrow.
+#[allow(clippy::too_many_arguments)] // 6 args, each load-bearing per ADR 0022 v5
 async fn handle_request_with_app(
     req: Request<Incoming>,
     block_id: crate::value::ObjId,
     listener_addr: SocketAddr,
     peer_addr: SocketAddr,
     per_request_fuel: Option<u64>,
+    max_request_body_bytes: usize,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     use crate::value::Value;
+    use http_body_util::Limited;
 
-    // Phase A: buffer request body (no Vm access; pure async I/O)
+    // Phase A: buffer request body (no Vm access; pure async I/O).
+    //
+    // `Limited` short-circuits at the byte cap mid-stream
+    // instead of after the full collect — so a malicious
+    // client sending a 100GB body doesn't OOM the server
+    // before we even decide to reject. ADR 0022 v3 → v5
+    // identified the v4 pseudocode's "collect then check
+    // length" as a real DoS surface.
     let (parts, body) = req.into_parts();
-    let body_bytes_full = match body.collect().await {
+    let limited = Limited::new(body, max_request_body_bytes);
+    let body_bytes_full = match limited.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
-            return Ok(error_response(400, format!("body read failed: {e}")));
+            // The `Limited` error type is boxed; downcast to
+            // distinguish "too big" (413) from generic IO
+            // failures (400). The downcast target is the
+            // `LengthLimitError` type http-body-util uses
+            // internally.
+            let too_big = e.downcast_ref::<http_body_util::LengthLimitError>().is_some();
+            let (status, msg) = if too_big {
+                (413, format!(
+                    "Payload Too Large: request body exceeds {max_request_body_bytes} bytes",
+                ))
+            } else {
+                (400, format!("body read failed: {e}"))
+            };
+            return Ok(error_response(status, msg));
         }
     };
 
@@ -607,11 +631,13 @@ fn error_response(status: u16, msg: String) -> Response<Full<Bytes>> {
 /// block per request instead of returning a hardcoded
 /// response. Caller supplies the block_id; the listener's
 /// connection handlers all close over the same block.
+#[allow(clippy::too_many_arguments)] // 6 args; signature stays flat for stage-by-stage growth
 async fn serve_with_app_until_shutdown(
     listener: TcpListener,
     block_id: crate::value::ObjId,
     listener_addr: SocketAddr,
     per_request_fuel: Option<u64>,
+    max_request_body_bytes: usize,
     mut shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
     loop {
@@ -625,7 +651,7 @@ async fn serve_with_app_until_shutdown(
                     let svc = service_fn(move |req| {
                         handle_request_with_app(
                             req, block_id, listener_addr, peer_addr,
-                            per_request_fuel,
+                            per_request_fuel, max_request_body_bytes,
                         )
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
@@ -648,6 +674,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
     duration: std::time::Duration,
     block_id: crate::value::ObjId,
     per_request_fuel: Option<u64>,
+    max_request_body_bytes: usize,
 ) -> std::io::Result<SocketAddr> {
     let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -659,7 +686,9 @@ pub(crate) fn run_blocking_for_duration_with_app(
         let listener_addr = listener.local_addr()?;
         tokio::select! {
             res = serve_with_app_until_shutdown(
-                listener, block_id, listener_addr, per_request_fuel, shutdown_rx,
+                listener, block_id, listener_addr,
+                per_request_fuel, max_request_body_bytes,
+                shutdown_rx,
             ) => res?,
             _ = tokio::time::sleep(duration) => {}
         }
@@ -779,17 +808,18 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     });
 
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        // Argument shape (3 or 4 args):
-        //   (bind_addr: String, duration_secs: Integer, app: Block/Lambda)
-        //   (bind_addr: String, duration_secs: Integer, app: Block/Lambda, per_request_fuel: Integer)
+        // Argument shape (3 / 4 / 5 args, growing):
+        //   (addr, secs, app)
+        //   (addr, secs, app, per_request_fuel)
+        //   (addr, secs, app, per_request_fuel, max_body_bytes)
         //
-        // The 4-arg form (stage 5d) is the production shape:
-        // per-request fuel cap means a CPU-runaway request
-        // gets 503 + the worker survives. 3-arg form skips
-        // refill (vm.fuel persists from the prior eval).
-        let (addr_str, duration_secs, block_id, per_request_fuel) = match args {
+        // Each positional adds one more security knob. Per
+        // ADR 0022 v5 these will eventually move into a
+        // Hash arg (Bun-shape) to avoid 8-positional creep;
+        // PoC keeps positional for now.
+        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id, None)
+                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel)] => {
                 if *fuel < 0 {
@@ -800,12 +830,31 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                         backtrace: vec![],
                     });
                 }
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64))
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES)
+            }
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body)] => {
+                if *fuel < 0 {
+                    return Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: format!("per_request_fuel must be non-negative, got {fuel}"),
+                        },
+                        backtrace: vec![],
+                    });
+                }
+                if *max_body < 0 {
+                    return Err(Trap {
+                        err: RubyError::ArgumentError {
+                            msg: format!("max_body_bytes must be non-negative, got {max_body}"),
+                        },
+                        backtrace: vec![],
+                    });
+                }
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize)
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil)"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB)"
                             .to_string(),
                     },
                     backtrace: vec![],
@@ -831,7 +880,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
         let duration = Duration::from_secs(duration_secs as u64);
         let bound = run_blocking_for_duration_with_app(
-            addr, duration, block_id, per_request_fuel,
+            addr, duration, block_id, per_request_fuel, max_body_bytes,
         ).map_err(|e| Trap {
             err: RubyError::RuntimeError {
                 msg: format!("http_serve_with_app: {e}"),
@@ -1096,6 +1145,141 @@ mod tests {
             raise "unknown key should return nil" \
                 unless env["NONEXISTENT_KEY"].nil?
         "#, "stage_4c1_check.rb").expect("env hash Ruby-side assertions all hold");
+    }
+
+    /// Stage 6a: request body exceeding `max_body_bytes`
+    /// returns 413 Payload Too Large BEFORE the full body
+    /// is buffered. The `http_body_util::Limited` wrapper
+    /// short-circuits mid-stream — a 100 GB attacker upload
+    /// doesn't OOM the server even at a 100-byte cap.
+    ///
+    /// The test sends a 50 KB body against a 100-byte cap;
+    /// asserts the server replies 413 and (importantly)
+    /// that the app block is NEVER invoked (we'd see the
+    /// global side-effect if it were).
+    #[test]
+    fn oversized_request_body_yields_413_without_invoking_app() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18095";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            // 50 KB POST body — way above the 100-byte cap.
+            let big_body = "x".repeat(50_000);
+            let req = format!(
+                "POST /upload HTTP/1.1\r\n\
+                 Host: localhost\r\n\
+                 Content-Length: {}\r\n\
+                 Content-Type: application/octet-stream\r\n\
+                 Connection: close\r\n\r\n{}",
+                big_body.len(),
+                big_body,
+            );
+            client.write_all(req.as_bytes()).expect("write");
+            let mut response = Vec::new();
+            // Reading might fail with broken pipe if the
+            // server closes mid-upload after sending 413 —
+            // that's fine, we just want whatever response
+            // bytes we received.
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // App SHOULD NEVER be invoked for an oversized body.
+        // The lambda sets $reached = true; we check post-
+        // serve that it stayed false.
+        rt.eval(&format!(r#"
+            $reached = false
+            app = ->(env) {{
+              $reached = true
+              [200, {{}}, ["should never see this"]]
+            }}
+            # 4-arg shape: per_request_fuel = nil-equiv (omit), but
+            # we want max_body_bytes = 100 → use 5-arg form with
+            # per_request_fuel = 1_000_000 (well above any need).
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app, 1_000_000, 100)
+            # Post-serve assertion: app must NOT have run.
+            raise "app should not be invoked on 413 path; was reached" if $reached
+        "#), "stage_6a_oversized.rb").expect("server ran + app stayed cold");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 413"),
+            "expected 413 Payload Too Large, got:\n{response_text}",
+        );
+        assert!(
+            response_text.to_lowercase().contains("payload too large"),
+            "expected 413 reason in body, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 6a: a body UNDER the cap is accepted normally —
+    /// verifies the cap doesn't false-positive at the boundary.
+    /// Sends a 50-byte POST against a 1024-byte cap.
+    #[test]
+    fn within_cap_body_passes_through_to_app() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18096";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let body = "hello, world! (small body under cap)";
+            let req = format!(
+                "POST /echo HTTP/1.1\r\n\
+                 Host: localhost\r\n\
+                 Content-Length: {}\r\n\
+                 Content-Type: text/plain\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            client.write_all(req.as_bytes()).expect("write");
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).expect("read");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // App returns the request method + CONTENT_LENGTH so
+        // we can verify the request reached the handler.
+        rt.eval(&format!(r#"
+            app = ->(env) {{
+              body = "method=#{{env['REQUEST_METHOD']}};len=#{{env['CONTENT_LENGTH']}};"
+              [200, {{"Content-Type" => "text/plain"}}, [body]]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app, 1_000_000, 1024)
+        "#), "stage_6a_within_cap.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 OK, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("method=POST;"),
+            "expected method=POST in body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("len=36;"),
+            "expected len=36 in body (body string is 36 bytes), got:\n{response_text}",
+        );
     }
 
     /// Stage 5d integration: per_request_fuel cap +
