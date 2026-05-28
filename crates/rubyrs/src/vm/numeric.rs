@@ -111,19 +111,29 @@ pub(crate) enum HalfMode { Up, Down, Even }
 /// `Integer#round(n, half: mode)` implementation. `n <= 0` is
 /// what actually rounds (positive precision returns self for
 /// Int receivers — there are no fractional digits to discard).
-pub(crate) fn int_round_with_half(a: i64, n: i64, mode: HalfMode) -> Value {
+///
+/// Returns `Ok(Value::Int)` when the rounded value fits i64, and
+/// `Err(i128)` when it overflows — the caller (dispatcher) is in
+/// a position to promote the i128 into a `Value::BigInt` under
+/// bignum, or surface a CRuby-compatible RangeError otherwise.
+/// Bare `Value::Int(a)` silent fallback would have silently
+/// returned wrong magnitudes for `(-2**63).round(-1, half: :up)`
+/// and friends.
+pub(crate) fn int_round_with_half(a: i64, n: i64, mode: HalfMode) -> Result<Value, i128> {
     if n >= 0 {
-        return Value::Int(a);
+        return Ok(Value::Int(a));
     }
     // Mirror the existing `Integer#round` arm: i128 widens cleanly
     // up to |n| <= 38 (10^38 fits i128); above that 10^|n|
-    // overflows i128 too — return self (Int 0 magnitude case is
-    // the only sane fallback at that precision without bignum).
+    // overflows i128 too — return self (the |n|-bigger-than-magnitude
+    // case rounds to 0 for non-zero a, but only when sign matches —
+    // for our scope this fallback only fires for unreachable cases
+    // under canonical i64 magnitudes).
     // Use `unsigned_abs()` so `n == i64::MIN` doesn't panic in
     // debug under `-n`.
     let abs_n_u64 = n.unsigned_abs();
     if abs_n_u64 > 38 {
-        return Value::Int(a);
+        return Ok(Value::Int(a));
     }
     let abs_n = abs_n_u64 as u32;
     let p = 10i128.pow(abs_n);
@@ -147,14 +157,13 @@ pub(crate) fn int_round_with_half(a: i64, n: i64, mode: HalfMode) -> Value {
     } else {
         q * p
     };
-    if let Ok(v) = i64::try_from(rounded) {
-        Value::Int(v)
-    } else {
-        // Overflowed i64 — leave to the normal round arm /
-        // bignum_primitive promotion path. Returning the original
-        // value here is a fallback; the dispatcher should have
-        // already cfg-routed BigInt magnitudes elsewhere.
-        Value::Int(a)
+    match i64::try_from(rounded) {
+        Ok(v) => Ok(Value::Int(v)),
+        // Overflowed i64 — let the caller promote to BigInt.
+        // `(-2**63).round(-1, half: :up)` produces -9223372036854775810
+        // which doesn't fit i64. Pre-PR returned i64::MIN silently
+        // (just the input); now the dispatcher promotes correctly.
+        Err(_) => Err(rounded),
     }
 }
 

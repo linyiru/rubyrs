@@ -2684,8 +2684,14 @@ impl Vm {
             // for non-Integer precision) AND user-method dispatch
             // still fire. The trailing Hash travels as positional in
             // that path, identical to pre-CallKw behaviour.
-            let name = self.interner.resolve(name_id).clone();
-            if &*name != "round" {
+            // SymId compare instead of resolving + cloning the
+            // name on every CallKw dispatch — the `interner.intern`
+            // is amortised across the run (same id returned for the
+            // canonical "round" string), so a single == lookup
+            // beats a per-call heap allocation. Same pattern below
+            // for the `:half` key probe.
+            let round_id = self.interner.intern("round");
+            if name_id != round_id {
                 return self.do_call(name_id, argc, no_recv, cache_id);
             }
             // Peek receiver + trailing arg WITHOUT disturbing the
@@ -2737,26 +2743,37 @@ impl Vm {
             for (k, v) in &pairs {
                 match k {
                     Value::Sym(s) if *s == half_sym => {
-                        match v {
+                        // CRuby accepts both `:up` and `"up"` here
+                        // (Symbol or String — to_str / to_sym
+                        // implicit coercion). Resolve either shape
+                        // to a borrowed &str so the comparison runs
+                        // without an extra allocation per dispatch.
+                        let mode_str: std::borrow::Cow<'_, str> = match v {
                             Value::Sym(vsym) => {
-                                let name = self.interner.resolve(*vsym).to_string();
-                                mode = match name.as_str() {
-                                    "up" => crate::vm::numeric::HalfMode::Up,
-                                    "down" => crate::vm::numeric::HalfMode::Down,
-                                    "even" => crate::vm::numeric::HalfMode::Even,
-                                    other => {
-                                        return Err(self.trap(RubyError::ArgumentError {
-                                            msg: format!("invalid rounding mode: {}", other),
-                                        }));
-                                    }
-                                };
+                                std::borrow::Cow::Owned(self.interner.resolve(*vsym).to_string())
+                            }
+                            Value::Str(s) => {
+                                std::borrow::Cow::Owned(s.to_string_lossy())
                             }
                             _ => {
                                 return Err(self.trap(RubyError::ArgumentError {
-                                    msg: "invalid rounding mode: (non-symbol)".to_string(),
+                                    msg: format!(
+                                        "invalid rounding mode: {}",
+                                        crate::vm::numeric::type_name_for_coerce(v),
+                                    ),
                                 }));
                             }
-                        }
+                        };
+                        mode = match mode_str.as_ref() {
+                            "up" => crate::vm::numeric::HalfMode::Up,
+                            "down" => crate::vm::numeric::HalfMode::Down,
+                            "even" => crate::vm::numeric::HalfMode::Even,
+                            other => {
+                                return Err(self.trap(RubyError::ArgumentError {
+                                    msg: format!("invalid rounding mode: {}", other),
+                                }));
+                            }
+                        };
                     }
                     Value::Sym(s) => {
                         let key = self.interner.resolve(*s).to_string();
@@ -2785,10 +2802,35 @@ impl Vm {
             } else {
                 self.stack.pop().expect("ICE: do_call_kw recv")
             };
+            // i128 overflow → BigInt promotion under bignum, or a
+            // RangeError without it (matches CRuby's behaviour for
+            // overflow into a number that doesn't fit native int).
+            let promote_overflow = |this: &mut Vm, overflow: i128| -> Result<Value, Trap> {
+                #[cfg(feature = "bignum")]
+                {
+                    let b = num_bigint::BigInt::from(overflow);
+                    this.bigint_to_value(b)
+                }
+                #[cfg(not(feature = "bignum"))]
+                {
+                    let _ = overflow;
+                    Err(this.trap(RubyError::RangeError {
+                        msg: "rounded result out of i64 range".to_string(),
+                    }))
+                }
+            };
             let result = match (&recv, pos_args.as_slice()) {
-                (Value::Int(a), []) => crate::vm::numeric::int_round_with_half(*a, 0, mode),
+                (Value::Int(a), []) => {
+                    match crate::vm::numeric::int_round_with_half(*a, 0, mode) {
+                        Ok(v) => v,
+                        Err(over) => promote_overflow(self, over)?,
+                    }
+                }
                 (Value::Int(a), [Value::Int(n)]) => {
-                    crate::vm::numeric::int_round_with_half(*a, *n, mode)
+                    match crate::vm::numeric::int_round_with_half(*a, *n, mode) {
+                        Ok(v) => v,
+                        Err(over) => promote_overflow(self, over)?,
+                    }
                 }
                 (Value::Float(a), []) => {
                     crate::vm::numeric::float_round_with_half(*a, 0, mode)

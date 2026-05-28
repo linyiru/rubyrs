@@ -1567,6 +1567,49 @@ fn round_half_kwarg_dispatch() {
         "round_half_user.rb",
     ).expect("eval");
     assert_eq!(buf.snapshot().trim(), "user-down");
+
+    // (c) CRuby parity — String value for the `:half` kwarg is
+    //     accepted the same as the Symbol form.
+    for (script, expected) in [
+        ("puts 25.round(-1, half: \"up\")",   "30"),
+        ("puts 25.round(-1, half: \"down\")", "20"),
+        ("puts 35.round(-1, half: \"even\")", "40"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "round_half_str.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+
+    // (d) BigInt promotion on i64::MIN overflow — under the
+    //     bignum profile, `(-2**63).round(-1, half: :up)` produces
+    //     `-9223372036854775810` (doesn't fit i64). Pre-polish:
+    //     silently returned i64::MIN unchanged.
+    #[cfg(feature = "bignum")]
+    {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(
+            "puts ((-(2**63)).round(-1, half: :up)).inspect",
+            "round_half_bignum.rb",
+        ).expect("eval");
+        assert_eq!(buf.snapshot().trim(), "-9223372036854775810");
+    }
+    // (e) Under no-bignum, the same overflow raises RangeError
+    //     instead of silently truncating.
+    #[cfg(not(feature = "bignum"))]
+    {
+        let err = rt.eval(
+            "(-(2**63)).round(-1, half: :up)",
+            "round_half_nobignum.rb",
+        ).unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+                assert_eq!(class_name, "RangeError");
+            }
+            ref other => panic!("expected RangeError, got {:?}", other),
+        }
+    }
 }
 
 #[test]
