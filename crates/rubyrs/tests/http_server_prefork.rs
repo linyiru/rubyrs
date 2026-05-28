@@ -388,25 +388,143 @@ __rubyrs_http_serve_prefork("127.0.0.1:18163", 30, app, 2, { on_worker_boot: on_
          stdout:\n{stdout}\nstderr:\n{stderr}",
     );
     // Supervisor logs "restarted worker" once per
-    // successful respawn. With MAX_RESTARTS=2, expect
-    // exactly 2 such lines before the guard halts —
-    // the 3rd attempt is the one that trips.
+    // successful respawn. A2 makes the crash-loop guard
+    // per-slot, so with N=2 workers × MAX_RESTARTS=2 we
+    // expect 4 restarts total (2 per slot) before BOTH
+    // slots trip their guard. Pre-A2 (process-wide) was
+    // 2 restarts.
     let restart_count = stderr.matches("restarted worker").count();
     assert!(
-        restart_count == 2,
-        "expected exactly 2 restarts before guard trips, got {restart_count}.\n\
+        restart_count == 4,
+        "expected exactly 4 restarts before per-slot guard trips for both slots, got {restart_count}.\n\
          stderr:\n{stderr}",
     );
-    // Original children + restarts = at least 3 boot
-    // failures observed (initial 2 + 1 restart attempt;
-    // possibly 4 if the second restart also reached
-    // on_worker_boot before the guard observed its
-    // death). Bound at >=3 to avoid flakes from
-    // waitpid race ordering.
+    // A2: must see crash-loop log for BOTH slots —
+    // confirms per-slot tracking, not global.
+    assert!(
+        stderr.contains("crash-loop detected for slot 0"),
+        "expected slot-0 crash-loop diagnostic.\nstderr:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("crash-loop detected for slot 1"),
+        "expected slot-1 crash-loop diagnostic.\nstderr:\n{stderr}",
+    );
+    // At least one boot-failure log per worker — original
+    // 2 + 4 restart attempts = 6 boot failures expected,
+    // but waitpid race ordering can mask the last one or
+    // two. Bound at >=4 to avoid flakes.
     let boot_failures = stderr.matches("on_worker_boot raised").count();
     assert!(
-        boot_failures >= 3,
-        "expected >=3 boot-failure log lines, got {boot_failures}.\n\
+        boot_failures >= 4,
+        "expected >=4 boot-failure log lines, got {boot_failures}.\n\
+         stderr:\n{stderr}",
+    );
+}
+
+/// A2: one bad slot trips its OWN crash-loop guard but
+/// other slots keep serving normally. Pre-A2 (process-
+/// wide counting) would have halted the supervisor when
+/// the count hit MAX, taking down the healthy slot too.
+///
+/// Setup: 2 workers, idx==0's on_worker_boot raises,
+/// idx==1's succeeds + serves. With MAX_RESTARTS=2,
+/// slot 0 trips its guard after 2 restarts; slot 1
+/// keeps serving until the duration timer.
+#[test]
+fn prefork_per_slot_guard_isolates_bad_slot() {
+    let _guard = TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+
+    let tmp = std::env::temp_dir().join("rubyrs_prefork_per_slot.rb");
+    let script = r#"
+on_boot = ->(idx) {
+  if idx == 0
+    raise "slot 0 always fails"
+  end
+  # idx 1: silent success — no output to keep test
+  # observation simple.
+}
+app = ->(env) { [200, {"Content-Type" => "text/plain"}, ["ok"]] }
+__rubyrs_http_serve_prefork("127.0.0.1:18164", 5, app, 2, { on_worker_boot: on_boot })
+"#;
+    std::fs::write(&tmp, script).expect("write tmp driver");
+
+    let rubyrs_bin = env!("CARGO_BIN_EXE_rubyrs");
+    let started = std::time::Instant::now();
+    let child = Command::new(rubyrs_bin)
+        .arg(&tmp)
+        .env("RUBYRS_PREFORK_MAX_RESTARTS", "2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubyrs binary");
+
+    // Wait until slot 1's worker is serving (poll up to
+    // 4s). If we can't reach it, the test fails clearly.
+    let mut serving = false;
+    while started.elapsed() < Duration::from_secs(4) {
+        std::thread::sleep(Duration::from_millis(150));
+        if let Ok(mut c) = TcpStream::connect("127.0.0.1:18164") {
+            c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let _ = c.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let mut buf = Vec::new();
+            let _ = c.read_to_end(&mut buf);
+            if String::from_utf8_lossy(&buf).contains("HTTP/1.1 200") {
+                serving = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        serving,
+        "slot 1 never came up — A2 isolation broken (bad slot's guard may have halted everything)",
+    );
+
+    // Fire a few more requests to make sure slot 1 stays
+    // alive while slot 0 is tripping its guard.
+    let mut later_200s = 0;
+    for _ in 0..4 {
+        std::thread::sleep(Duration::from_millis(300));
+        if let Ok(mut c) = TcpStream::connect("127.0.0.1:18164") {
+            c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let _ = c.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let mut buf = Vec::new();
+            let _ = c.read_to_end(&mut buf);
+            if String::from_utf8_lossy(&buf).contains("HTTP/1.1 200") {
+                later_200s += 1;
+            }
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait_with_output");
+    let elapsed = started.elapsed();
+    let _ = std::fs::remove_file(&tmp);
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert!(
+        later_200s >= 2,
+        "slot 1 should keep serving while slot 0 trips its guard, got {later_200s} 200s in 4 follow-ups.\n\
+         stderr:\n{stderr}\nstdout:\n{stdout}",
+    );
+
+    // Slot 0 must trip its own guard.
+    assert!(
+        stderr.contains("crash-loop detected for slot 0"),
+        "expected slot-0 crash-loop diagnostic.\nstderr:\n{stderr}",
+    );
+    // Slot 1 must NOT trip — it's healthy throughout.
+    assert!(
+        !stderr.contains("crash-loop detected for slot 1"),
+        "slot 1 should not trip its guard.\nstderr:\n{stderr}",
+    );
+
+    // Process exits via duration timer (5s), not via a
+    // global halt. Bound at <8s with slack for waitpid /
+    // shutdown cleanup.
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "expected exit via duration timer (~5s), took {elapsed:?}.\n\
          stderr:\n{stderr}",
     );
 }

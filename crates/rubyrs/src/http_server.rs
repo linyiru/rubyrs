@@ -1825,8 +1825,17 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             let supervisor_start = std::time::Instant::now();
             let deadline = supervisor_start + Duration::from_secs(duration_secs as u64);
             let mut alive: Vec<libc::pid_t> = child_pids.clone();
-            let mut restart_log: Vec<std::time::Instant> = Vec::new();
-            let mut crash_loop_tripped = false;
+            // A2: per-slot crash-loop state. Each worker_index
+            // gets its own restart history + tripped flag.
+            // One bad slot (e.g. its on_worker_boot depends
+            // on a slot-specific resource that fails for
+            // that index) no longer kills the whole pool —
+            // it stops respawning while other slots keep
+            // serving. Matches Puma/Unicorn supervisor
+            // behavior.
+            let n_slots = n_workers as usize;
+            let mut restart_logs: Vec<Vec<std::time::Instant>> = vec![Vec::new(); n_slots];
+            let mut tripped: Vec<bool> = vec![false; n_slots];
 
             while !alive.is_empty() {
                 let now = std::time::Instant::now();
@@ -1899,24 +1908,29 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                     PREFORK_CHILD_PIDS[slot_idx]
                         .store(0, std::sync::atomic::Ordering::SeqCst);
 
-                    if crash_loop_tripped {
-                        // Already in shutdown mode; don't
-                        // restart, just reap remaining.
+                    // A2: per-slot tripped check. The slot
+                    // we just reaped may have tripped its
+                    // own guard on a prior iteration; if so,
+                    // don't respawn it. Other slots stay
+                    // alive and continue serving.
+                    if tripped[slot_idx] {
                         continue;
                     }
 
-                    // Crash-loop guard: prune old entries,
-                    // count recent restarts.
-                    restart_log.retain(|t| now.duration_since(*t).as_secs() < restart_window_secs);
-                    if restart_log.len() >= max_restarts_window {
+                    // A2: per-slot crash-loop guard. Prune
+                    // this slot's old entries + count recent
+                    // restarts for this slot only.
+                    let slot_log = &mut restart_logs[slot_idx];
+                    slot_log.retain(|t| now.duration_since(*t).as_secs() < restart_window_secs);
+                    if slot_log.len() >= max_restarts_window {
                         eprintln!(
-                            "rubyrs prefork: crash-loop detected ({} restarts in {restart_window_secs}s); halting supervisor",
-                            restart_log.len(),
+                            "rubyrs prefork: crash-loop detected for slot {slot_idx} ({} restarts in {restart_window_secs}s); stopping respawn for this slot",
+                            slot_log.len(),
                         );
-                        crash_loop_tripped = true;
-                        for &cpid in &alive {
-                            unsafe { libc::kill(cpid, libc::SIGTERM); }
-                        }
+                        tripped[slot_idx] = true;
+                        // Do NOT SIGTERM other alive workers
+                        // — they're independent slots that
+                        // might be perfectly healthy.
                         continue;
                     }
 
@@ -1944,7 +1958,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                         PREFORK_CHILD_PIDS[slot_idx]
                             .store(new_pid, std::sync::atomic::Ordering::SeqCst);
                         alive.push(new_pid);
-                        restart_log.push(now);
+                        restart_logs[slot_idx].push(now);
                         eprintln!(
                             "rubyrs prefork: restarted worker {slot_idx} (was pid {reaped} exit {exit_code}); new pid {new_pid}",
                         );
