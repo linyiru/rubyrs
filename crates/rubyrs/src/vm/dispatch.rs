@@ -2675,26 +2675,58 @@ impl Vm {
         /// when the proto declares kw_params) and for primitives
         /// that genuinely take a positional Hash.
         pub(crate) fn do_call_kw(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
-            // Only `round` is kwarg-aware today. For everything
-            // else the trailing Hash travels as positional —
-            // identical to pre-CallKw behaviour, so user code
-            // that passed a literal Hash isn't blocked.
+            // Only `round` is kwarg-aware today, AND only for
+            // Int/Float receivers with a supported arg shape.
+            // Every other shape — user-defined `C#round(half:)`,
+            // 2+ positional args, non-Integer precision, BigInt
+            // receiver — must fall back to `do_call` so the
+            // existing primitive arms (arity ArgumentError, TypeError
+            // for non-Integer precision) AND user-method dispatch
+            // still fire. The trailing Hash travels as positional in
+            // that path, identical to pre-CallKw behaviour.
             let name = self.interner.resolve(name_id).clone();
             if &*name != "round" {
                 return self.do_call(name_id, argc, no_recv, cache_id);
             }
+            // Peek receiver + trailing arg WITHOUT disturbing the
+            // stack — the fallback `do_call` needs the stack intact.
             if argc == 0 {
                 return self.do_call(name_id, argc, no_recv, cache_id);
             }
-            // Trailing arg should be the kwargs Hash. Peek without
-            // disturbing the stack until we've confirmed we can
-            // handle this dispatch — otherwise the fallthrough to
-            // do_call needs the stack intact.
-            let trailing_idx = self.stack.len() - 1;
-            let trailing = self.stack[trailing_idx].clone();
+            let stack_len = self.stack.len();
+            let trailing = self.stack[stack_len - 1].clone();
             let Value::Hash(hash_id) = trailing else {
                 return self.do_call(name_id, argc, no_recv, cache_id);
             };
+            // Receiver position: if `no_recv` it's the frame self;
+            // else it's stack[stack_len - argc - 1].
+            let recv_peek = if no_recv {
+                self.frames.last().expect("ICE: do_call_kw no frames").self_val.clone()
+            } else {
+                if stack_len < argc + 1 {
+                    return self.do_call(name_id, argc, no_recv, cache_id);
+                }
+                self.stack[stack_len - argc - 1].clone()
+            };
+            if !matches!(recv_peek, Value::Int(_) | Value::Float(_)) {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            // Positional arg shape — only `[]` (no precision) and
+            // `[Int]` (single Integer precision) are supported by
+            // the kwarg helpers. Anything else (arity > 1,
+            // non-Integer precision, BigInt precision) is left to
+            // the regular round arm in numeric.rs which has the
+            // existing ArgumentError / TypeError / BigInt guards.
+            let positional_argc = argc - 1; // exclude the kwargs Hash
+            if positional_argc > 1 {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+            if positional_argc == 1 {
+                let precision = &self.stack[stack_len - 2];
+                if !matches!(precision, Value::Int(_)) {
+                    return self.do_call(name_id, argc, no_recv, cache_id);
+                }
+            }
             // Resolve the :half kwarg. CRuby raises
             // `ArgumentError: unknown keyword: :foo` for unknown
             // keys, `ArgumentError: invalid rounding mode: foo`
@@ -2739,23 +2771,20 @@ impl Vm {
                     }
                 }
             }
-            // Pop the kwargs Hash + positional args + receiver
-            // off the stack to call the helper. The recv-shape
-            // mirrors do_call's split.
+            // Stack consume — receiver + positional + kwargs Hash.
+            // Guards above guarantee shape is one of:
+            //   - (Int|Float, [])
+            //   - (Int|Float, [Int])
             let _kwargs_hash = self.stack.pop().expect("ICE: kwargs hash");
-            let positional_argc = argc - 1; // exclude the kwargs Hash
-            let split = self.stack.len() - positional_argc;
-            let pos_args: Vec<Value> = self.stack.drain(split..).collect();
+            let pos_args: Vec<Value> = {
+                let split = self.stack.len() - positional_argc;
+                self.stack.drain(split..).collect()
+            };
             let recv = if no_recv {
                 self.frames.last().expect("ICE: do_call_kw no frames").self_val.clone()
             } else {
                 self.stack.pop().expect("ICE: do_call_kw recv")
             };
-            // Dispatch — for now only Int and Float receivers.
-            // Anything else falls back to NoMethodError-shape via
-            // a re-dispatch that pushes everything back; simpler
-            // initial scope: return ArgumentError if the receiver
-            // isn't Numeric (so misuse is loud).
             let result = match (&recv, pos_args.as_slice()) {
                 (Value::Int(a), []) => crate::vm::numeric::int_round_with_half(*a, 0, mode),
                 (Value::Int(a), [Value::Int(n)]) => {
@@ -2769,12 +2798,7 @@ impl Vm {
                     crate::vm::numeric::float_round_with_half(*a, *n, mode)
                         .map_err(|e| self.trap(e))?
                 }
-                _ => {
-                    return Err(self.trap(RubyError::NoMethodError {
-                        method: format!("round(half:) on {}", recv.type_name()),
-                        recv_type: std::borrow::Cow::Owned(recv.type_name().to_string()),
-                    }));
-                }
+                _ => unreachable!("guards above limit recv+args to Int/Float × [] | [Int]"),
             };
             self.stack.push(result);
             Ok(())

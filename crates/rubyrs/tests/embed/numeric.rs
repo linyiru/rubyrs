@@ -1530,6 +1530,43 @@ fn round_half_kwarg_dispatch() {
             ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
         }
     }
+
+    // Fall-through cases — do_call_kw must NOT intercept these
+    // shapes; the regular round arm / user-method dispatch must
+    // still fire so existing arity / TypeError guards aren't
+    // bypassed.
+    //
+    // (a) Unsupported arity — `25.round(1, 2, half: :up)` should
+    //     surface CRuby's ArgumentError, not NoMethodError.
+    //     `:sym` precision falls back to the regular arm too —
+    //     it surfaces ArgumentError ("wrong number of arguments")
+    //     in the current MVP because the fallback path treats the
+    //     kwargs Hash as a second positional arg; a fully kwarg-
+    //     aware shape would need to peel the Hash off first and
+    //     surface TypeError for the bad precision. Acceptable for
+    //     MVP — both shapes are loud, both rescue under
+    //     `StandardError`.
+    for (script, expected_class) in [
+        ("25.round(1, 2, half: :up)", "ArgumentError"),
+        ("25.round(:sym, half: :up)", "ArgumentError"),
+    ] {
+        let err = rt.eval(script, "round_half_fall.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+            }
+            ref other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+    // (b) User-defined `C#round(half:)` must reach the user
+    //     method, not be shadowed by the primitive kwarg path.
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "class C; def round(half:); \"user-#{half}\"; end; end; puts C.new.round(half: :down)",
+        "round_half_user.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot().trim(), "user-down");
 }
 
 #[test]
