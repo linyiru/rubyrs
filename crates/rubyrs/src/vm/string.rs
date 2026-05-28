@@ -431,13 +431,20 @@ pub(crate) fn string_call(
                     msg: msg.to_string(),
                 }),
             };
+            // Pre-build a `char → index` lookup so the per-input-
+            // char hot loop is O(1) instead of O(from_chars.len()).
+            // For large expanded sets (`tr("a-z", ...)` etc.) the
+            // prior `position()` scan would be O(n*m). Earliest-
+            // index wins on duplicate chars in `from` — matches
+            // the position() semantics it replaces.
+            let mut from_index: std::collections::HashMap<char, usize> =
+                std::collections::HashMap::with_capacity(from_chars.len());
+            for (i, c) in from_chars.iter().enumerate() {
+                from_index.entry(*c).or_insert(i);
+            }
             let mut out = String::with_capacity(a_ref.len());
             for ch in a_ref.chars() {
-                // Single linear scan: `position` returns Some(idx)
-                // iff `ch` is in the set, so we can drive both
-                // the membership test and the index lookup from
-                // one walk.
-                let idx_opt = from_chars.iter().position(|c| *c == ch);
+                let idx_opt = from_index.get(&ch).copied();
                 let translate = if from_negated { idx_opt.is_none() } else { idx_opt.is_some() };
                 if !translate {
                     out.push(ch);
@@ -1535,7 +1542,12 @@ pub(crate) fn parse_tr_set(sel: &str, allow_negation: bool) -> Result<(Vec<char>
     if negate {
         chars.remove(0);
     }
-    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+    // Bound the initial capacity by `TR_SET_MAX_CHARS` so a
+    // long selector (post-cap, before expansion) doesn't trigger
+    // an oversized allocation. The output length is bounded by
+    // the per-step length checks below.
+    let initial_cap = chars.len().min(TR_SET_MAX_CHARS);
+    let mut out: Vec<char> = Vec::with_capacity(initial_cap);
     let mut i = 0;
     while i < chars.len() {
         if i + 2 < chars.len() && chars[i + 1] == '-' {
@@ -1554,9 +1566,11 @@ pub(crate) fn parse_tr_set(sel: &str, allow_negation: bool) -> Result<(Vec<char>
                 i += 3;
                 continue;
             }
-            // Reversed range — fall through and treat as 3
-            // literal chars (matches CRuby's behavior on e.g.
-            // `tr("z-a", ...)` which emits no translation).
+            // Reversed range (e.g. `z-a`) — no range expansion.
+            // The three chars (`z`, `-`, `a`) are pushed as
+            // literals by the fall-through below, so a `-` in
+            // the input still translates positionally if `to`
+            // has a corresponding char.
         }
         if out.len() >= TR_SET_MAX_CHARS {
             return Err("invalid range in string transliteration (set too large)");
