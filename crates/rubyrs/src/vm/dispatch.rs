@@ -578,7 +578,7 @@ impl Vm {
         // (sinatra/base.rb:1810) reads `block.arity` to size
         // the route block's positional bindings. (TRY_RUNS
         // layer #24.)
-        if let Value::Block(_) = &recv
+        if matches!(&recv, Value::Block(_) | Value::CurriedProc(_))
             && name == "arity" && !args.is_empty() {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
@@ -592,6 +592,19 @@ impl Vm {
             };
             let arity = if has_rest { -(n_required + 1) } else { n_required };
             self.stack.push(Value::Int(arity));
+            return Ok(CallableOutcome::Handled);
+        }
+        // `CurriedProc#arity` — CRuby returns -1 for any curried
+        // proc/lambda regardless of remaining required slots
+        // (the curried wrapper accepts a variable number of args
+        // per `.call` site as the partial application grows).
+        // Without this arm, `proc { |a| }.curry.arity` falls
+        // through to NoMethodError even though `Proc#arity`
+        // works — inconsistent now that the Block arm exists.
+        // (Copilot review #263 round 3.)
+        if let Value::CurriedProc(_) = &recv
+            && name == "arity" && args.is_empty() {
+            self.stack.push(Value::Int(-1));
             return Ok(CallableOutcome::Handled);
         }
         // `Object#method(:name)` — capture (recv, name_id) into a

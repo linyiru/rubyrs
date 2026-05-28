@@ -70,3 +70,15 @@ puts "shape-other=#{shape_of(proc { |a, b| })}"
 ## matches CRuby (Copilot review #263 round 1).
 err = begin; proc { }.arity(1); "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
 puts "arity-with-arg=#{err}"
+
+## `CurriedProc#arity` — CRuby returns -1 for any curried
+## proc/lambda regardless of remaining slots; the curried
+## wrapper accepts variable per-call args as partial
+## application grows. (Copilot review #263 round 3.)
+curried = proc { |a, b, c| [a, b, c] }.curry
+puts "curried-arity=#{curried.arity}"
+puts "curried-class=#{curried.class}"
+puts "curried-respond-to=#{curried.respond_to?(:arity)}"
+puts "curried-partial-arity=#{curried[1].arity}"
+err = begin; curried.arity(1); "DID-NOT-RAISE"; rescue ArgumentError => e; "ArgumentError"; end
+puts "curried-arity-with-arg=#{err}"
