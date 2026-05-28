@@ -115,16 +115,21 @@ pub(crate) fn int_round_with_half(a: i64, n: i64, mode: HalfMode) -> Value {
     if n >= 0 {
         return Value::Int(a);
     }
-    // |n| > 18 → 10^|n| overflows i64; under bignum the
-    // existing numeric_call/bignum_primitive path handles it
-    // (this helper is only reached for the i64-fits-i64 cases
-    // the regular round arm covers).
-    let abs_n = (-n).min(18) as u32;
+    // Mirror the existing `Integer#round` arm: i128 widens cleanly
+    // up to |n| <= 38 (10^38 fits i128); above that 10^|n|
+    // overflows i128 too — return self (Int 0 magnitude case is
+    // the only sane fallback at that precision without bignum).
+    // Use `unsigned_abs()` so `n == i64::MIN` doesn't panic in
+    // debug under `-n`.
+    let abs_n_u64 = n.unsigned_abs();
+    if abs_n_u64 > 38 {
+        return Value::Int(a);
+    }
+    let abs_n = abs_n_u64 as u32;
     let p = 10i128.pow(abs_n);
     let a128 = a as i128;
     let q = a128 / p;
     let r = a128 % p;
-    let half = p / 2;
     let abs_r = r.abs();
     let bump = match mode {
         HalfMode::Up => abs_r * 2 >= p,
@@ -192,7 +197,12 @@ pub(crate) fn float_round_with_half(a: f64, n: i64, mode: HalfMode) -> Result<Va
         let p = 10f64.powi((n).min(15) as i32);
         Ok(Value::Float(round_one(a * p) / p))
     } else {
-        let p = 10f64.powi((-n).min(18) as i32);
+        // `unsigned_abs()` so `n == i64::MIN` doesn't panic in
+        // debug. Clamp the i32 exponent at 18 (10^18 ≈ 1e18, the
+        // largest power that gives a non-degenerate `Int` answer
+        // for any finite f64 receiver).
+        let abs_n = n.unsigned_abs().min(18) as i32;
+        let p = 10f64.powi(abs_n);
         Ok(Value::Int((round_one(a / p) * p) as i64))
     }
 }
