@@ -528,7 +528,10 @@ impl Vm {
                 "+" | "*" | "%" | "<" | "<=" | ">" | ">=" |
                 "length" | "size" | "empty?" |
                 "upcase" | "downcase" | "reverse" |
+                "upcase!" | "downcase!" | "reverse!" |
                 "strip" | "lstrip" | "rstrip" |
+                "strip!" | "lstrip!" | "rstrip!" |
+                "tr!" | "squeeze!" |
                 "center" | "ljust" | "rjust" |
                 "include?" | "start_with?" | "end_with?" |
                 "to_i" | "to_f" | "chars" | "split" | "to_sym" |

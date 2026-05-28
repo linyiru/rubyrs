@@ -139,6 +139,53 @@ pub(crate) fn string_call(
         (Value::Str(a), "upcase", []) => Some(Value::new_str(a.to_string_lossy().to_uppercase())),
         (Value::Str(a), "downcase", []) => Some(Value::new_str(a.to_string_lossy().to_lowercase())),
         (Value::Str(a), "reverse", []) => Some(Value::new_str(a.to_string_lossy().chars().rev().collect::<String>())),
+        // Destructive `!` siblings — mutate the receiver in
+        // place and return self when changed, nil when the
+        // input already matched the result. The frozen check
+        // mirrors the mutating arms further down (`<<` /
+        // `concat` etc.). Length-changing mutations honour
+        // `max_value_bytes` via `check`.
+        (Value::Str(a), "upcase!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes = a.to_string_lossy().to_uppercase().into_bytes();
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
+        (Value::Str(a), "downcase!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes = a.to_string_lossy().to_lowercase().into_bytes();
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
+        (Value::Str(a), "reverse!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes: Vec<u8> = a.to_string_lossy().chars().rev().collect::<String>().into_bytes();
+            // reverse! always mutates (even when palindrome —
+            // CRuby returns self, not nil, for reverse!).
+            check(new_bytes.len())?;
+            *a.borrow_mut() = new_bytes;
+            Some(Value::Str(a.clone()))
+        }
         // `String#succ` / `#next` — Ruby's "alphanumeric successor".
         // We support the common single-letter case (`'a'.succ == 'b'`,
         // `'Z'.succ == 'AA'`) plus the general "rightmost alnum
@@ -267,6 +314,51 @@ pub(crate) fn string_call(
         (Value::Str(a), "rstrip", []) => Some(Value::new_str(
             a.to_string_lossy().trim_end_matches(strip_ws_or_nul).to_string()
         )),
+        // Destructive strip siblings — return self on change,
+        // nil otherwise. The frozen check + check() guard mirror
+        // the other `!` variants in this file.
+        (Value::Str(a), "strip!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes = a.to_string_lossy().trim_matches(strip_ws_or_nul).to_string().into_bytes();
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
+        (Value::Str(a), "lstrip!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes = a.to_string_lossy().trim_start_matches(strip_ws_or_nul).to_string().into_bytes();
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
+        (Value::Str(a), "rstrip!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes = a.to_string_lossy().trim_end_matches(strip_ws_or_nul).to_string().into_bytes();
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
         // PR #53 review #3: use with_str_lossy (Cow-backed) so the
         // valid-UTF-8 hot path is zero-alloc — only the invalid-
         // UTF-8 branch allocates. to_string_lossy() unconditionally
@@ -480,6 +572,53 @@ pub(crate) fn string_call(
             check(out.len())?;
             Some(Value::new_str(out))
         }
+        // `String#tr!` — destructive sibling of `tr`. Runs the
+        // same translation logic but mutates the receiver in
+        // place, returning self on change and nil when the
+        // result matches the input. Forwards parse errors
+        // (reversed range, set too large) as ArgumentError.
+        (Value::Str(a), "tr!", [Value::Str(from), Value::Str(to)]) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let a_ref = a.to_string_lossy();
+            let from_ref = from.to_string_lossy();
+            let to_ref = to.to_string_lossy();
+            let (from_chars, from_negated) = parse_tr_set(&from_ref, true).map_err(|msg| {
+                RubyError::ArgumentError { msg: msg.to_string() }
+            })?;
+            let (to_chars, _) = parse_tr_set(&to_ref, false).map_err(|msg| {
+                RubyError::ArgumentError { msg: msg.to_string() }
+            })?;
+            let mut from_index: std::collections::HashMap<char, usize> =
+                std::collections::HashMap::with_capacity(from_chars.len());
+            for (i, c) in from_chars.iter().enumerate() {
+                from_index.insert(*c, i);
+            }
+            let mut out = String::with_capacity(a_ref.len());
+            for ch in a_ref.chars() {
+                let idx_opt = from_index.get(&ch).copied();
+                let translate = if from_negated { idx_opt.is_none() } else { idx_opt.is_some() };
+                if !translate { out.push(ch); continue; }
+                if to_chars.is_empty() { continue; }
+                if from_negated {
+                    out.push(*to_chars.last().unwrap());
+                } else {
+                    let idx = idx_opt.unwrap();
+                    if idx < to_chars.len() { out.push(to_chars[idx]); }
+                    else { out.push(*to_chars.last().unwrap()); }
+                }
+            }
+            check(out.len())?;
+            let new_bytes = out.into_bytes();
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
         // `String#squeeze` — collapse consecutive runs of the same
         // character. With a char-set arg, only chars in the set
         // are squeezed. Char-set selectors go through the shared
@@ -515,6 +654,44 @@ pub(crate) fn string_call(
             }
             check(out.len())?;
             Some(Value::new_str(out))
+        }
+        // `String#squeeze!` — destructive sibling of `squeeze`.
+        (Value::Str(a), "squeeze!", rest) if rest.is_empty()
+            || (rest.len() == 1 && matches!(rest[0], Value::Str(_))) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let a_str = a.to_string_lossy();
+            let parsed: Option<(std::collections::HashSet<char>, bool)> = match rest.first() {
+                None => None,
+                Some(Value::Str(s)) => {
+                    let s_ref = s.to_string_lossy();
+                    Some(parse_count_selector(&s_ref).map_err(|msg| {
+                        RubyError::ArgumentError { msg: msg.to_string() }
+                    })?)
+                }
+                _ => unreachable!(),
+            };
+            let mut out = String::with_capacity(a_str.len());
+            let mut prev: Option<char> = None;
+            for ch in a_str.chars() {
+                let in_set = match &parsed {
+                    Some((set, negated)) => set.contains(&ch) != *negated,
+                    None => true,
+                };
+                if in_set && Some(ch) == prev { continue; }
+                out.push(ch);
+                prev = Some(ch);
+            }
+            check(out.len())?;
+            let new_bytes = out.into_bytes();
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
         }
         (Value::Str(a), "start_with?", [Value::Str(b)]) => {
             Some(Value::Bool(a.with_str_lossy(|sa| b.with_str_lossy(|sb| sa.starts_with(sb)))))
