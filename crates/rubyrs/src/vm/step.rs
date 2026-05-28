@@ -1599,7 +1599,14 @@ impl Vm {
                 });
                 sc.methods.borrow_mut().insert(name_id, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
-                self.stack.push(Value::Nil);
+                // CRuby: `define_singleton_method(:foo) { … }`
+                // evaluates to `:foo`. Mirrors the same alignment
+                // applied to `Op::DefMethodBlock` above; both
+                // intercepts are emitted by compiler.rs for the
+                // literal-symbol+block compile-time fast-path and
+                // should return the same value as the runtime-
+                // dispatch path.
+                self.stack.push(Value::Sym(name_id));
             }
             Op::DefClass(name_id, p_idx, qual_id) | Op::DefModule(name_id, p_idx, qual_id) => {
                 // `DefModule` distinguishes the source keyword

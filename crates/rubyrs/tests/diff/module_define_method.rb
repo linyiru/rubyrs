@@ -214,3 +214,14 @@ rescue NoMethodError => e
   e.message.include?("private method") ? "private-as-expected" : "other-NoMethodError"
 end
 puts "bare-recv-vis=#{err}"
+
+## `define_singleton_method` return value — CRuby returns the
+## Symbol, matching `define_method`. Pinned alongside
+## `define_method` so the two compile-time intercepts
+## (Op::DefMethodBlock + Op::DefObjectSingletonMethodBlock)
+## stay in sync. (code-review #245 round 7 #2.)
+class SingletonRet; end
+obj = SingletonRet.new
+ret = obj.define_singleton_method(:hello) { "hi" }
+puts "define-singleton-method-ret=#{ret.inspect}"
+puts "define-singleton-method-call=#{obj.hello.inspect}"
