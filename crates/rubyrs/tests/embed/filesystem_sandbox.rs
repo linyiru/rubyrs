@@ -306,9 +306,19 @@ fn ioerror_is_rescuable_in_script() {
 /// collide with structurally similar tests if anyone changes the
 /// naming scheme).
 ///
-/// Holding the guard binding is enough to keep cleanup alive —
-/// callers conventionally name it `_guard` (or `_g`) to make it
-/// obvious the binding is for its destructor, not its value.
+/// Binding convention: each call site binds the guard as
+/// `_guard_<tag>` where `<tag>` matches the tempdir tag passed to
+/// `alloc_tempdir` (with `-` slugified to `_`). The `_` prefix
+/// suppresses the `unused_variables` lint; the per-tag suffix
+/// keeps multi-tempdir tests legible at the binding site — you
+/// can see at a glance which guard goes with which tempdir.
+///
+/// (Rust does NOT early-drop a binding when a later `let` shadows
+/// it — both live to end of scope and drop in reverse declaration
+/// order, verified empirically — so reusing a plain `_guard` name
+/// across multiple `alloc_tempdir` calls would still be correct
+/// for cleanup. The per-tag naming is for human readability and
+/// to keep the call site close to its destructor on a quick read.)
 struct TempDirGuard {
     path: std::path::PathBuf,
 }
@@ -326,9 +336,12 @@ impl Drop for TempDirGuard {
 /// non-canonical prefix would silently slip past `starts_with` on
 /// macOS where `/tmp` is a symlink to `/private/tmp`.
 ///
-/// Conventional binding: `let (_guard, dir, probe) = alloc_tempdir(...)`.
-/// The guard MUST be bound (not dropped via `_`) for cleanup to
-/// span the test scope.
+/// Conventional binding: `let (_guard_<tag>, dir, probe) =
+/// alloc_tempdir("<tag>");` — e.g. `_guard_read_inside` for tag
+/// `"read-inside"`. The `_`-prefixed name MUST be bound (not
+/// dropped via a single `_`) for cleanup to span the test scope.
+/// See `TempDirGuard`'s docstring for the per-tag naming
+/// rationale.
 fn alloc_tempdir(tag: &str) -> (TempDirGuard, std::path::PathBuf, std::path::PathBuf) {
     let raw = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("rubyrs-allowlist-{tag}-{}", std::process::id()));
