@@ -167,6 +167,23 @@ pub struct Config {
     /// cfg(_fiber)-gated.
     #[cfg(feature = "_fiber")]
     pub max_live_fibers: Option<usize>,
+    /// P1e.2 (ADR 0023 v2 §"Risks" #2): cap on the frame depth a
+    /// single Fiber can reach while executing. Without this, one
+    /// Fiber could deepen its frame stack to OOM while staying
+    /// under both `max_frames` (which counts the resumer's
+    /// frames, which are stashed during resume) and `max_live`
+    /// (each Frame isn't its own heap object).
+    ///
+    /// Enforced inside `check_frames()` — when
+    /// `vm.current_fiber_id.is_some()`, the effective cap is
+    /// `min(max_frames, max_fiber_frame_depth)`. Excess depth
+    /// raises `ResourceExhausted` matching `max_frames`'s shape.
+    ///
+    /// Default `None` (unlimited; only `max_frames` applies).
+    ///
+    /// cfg(_fiber)-gated.
+    #[cfg(feature = "_fiber")]
+    pub max_fiber_frame_depth: Option<usize>,
     /// If `Some(d)`, an `eval` call that runs longer than `d`
     /// wall-clock time returns a `ResourceExhausted` trap. Checked
     /// every 1024 ops (cheap and precise enough for the host-side
@@ -352,6 +369,8 @@ impl Default for Config {
             max_value_bytes: None,
             #[cfg(feature = "_fiber")]
             max_live_fibers: None,
+            #[cfg(feature = "_fiber")]
+            max_fiber_frame_depth: None,
             deadline: None,
             env: None,
             pid: None,
@@ -1073,6 +1092,7 @@ impl Runtime {
         #[cfg(feature = "_fiber")]
         {
             self.vm.max_live_fibers = cfg.max_live_fibers;
+            self.vm.max_fiber_frame_depth = cfg.max_fiber_frame_depth;
         }
         self.vm.env_override = cfg.env;
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);

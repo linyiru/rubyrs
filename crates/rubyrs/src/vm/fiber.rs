@@ -1322,6 +1322,64 @@ mod tests {
         }
     }
 
+    // ===== P1e.2: max_fiber_frame_depth cap =====
+
+    /// P1e.2: a Fiber that recurses past
+    /// `Config::max_fiber_frame_depth` traps with
+    /// ResourceExhausted. The cap fires ONLY when
+    /// `current_fiber_id.is_some()`; resumer-side recursion
+    /// goes through the regular `max_frames` cap.
+    #[test]
+    fn max_fiber_frame_depth_traps_runaway_recursion() {
+        let mut cfg = crate::Config::default();
+        // Tight cap so the trap fires after just a few
+        // frames. Plenty of headroom for the body's outer
+        // proc frame (counts as 1) + the rec method
+        // frames (counts as +1 per call).
+        cfg.max_fiber_frame_depth = Some(10);
+        let mut rt = crate::Runtime::with_config(cfg);
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r##"
+            def rec(n)
+              rec(n + 1)
+            end
+            body = proc { rec(0) }
+            fib = __rubyrs_fiber_new(body)
+            __rubyrs_fiber_resume(fib, nil)
+        "##, "p1e2_runaway.rb").expect_err("expected fiber depth trap");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("fiber stack level too deep"),
+            "expected fiber depth trap, got: {msg}",
+        );
+    }
+
+    /// P1e.2: a top-level (NON-fiber) recursion does NOT
+    /// trip the fiber cap, only `max_frames`. Same code
+    /// outside a fiber must reach the normal cap (which
+    /// is unlimited by default) without firing the fiber-
+    /// specific trap.
+    #[test]
+    fn max_fiber_frame_depth_does_not_trip_outside_fiber() {
+        let mut cfg = crate::Config::default();
+        cfg.max_fiber_frame_depth = Some(5);
+        let mut rt = crate::Runtime::with_config(cfg);
+        super::register_host_fns(&mut rt);
+        // Outside any fiber: shallow recursion is fine.
+        // Cap=5 should not trip on a 20-deep call.
+        let r = rt.eval(r##"
+            def rec(n)
+              return n if n >= 20
+              rec(n + 1)
+            end
+            rec(0)
+        "##, "p1e2_outside.rb").expect("non-fiber recursion should not trip cap");
+        match r {
+            Value::Int(20) => {}
+            other => panic!("expected Int(20), got {other:?}"),
+        }
+    }
+
     /// P1e.1: cap = None (default) doesn't gate
     /// allocation — happy path regression guard.
     #[test]

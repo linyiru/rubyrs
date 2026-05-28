@@ -636,6 +636,12 @@ pub(crate) struct Vm {
     /// cfg(_fiber)-gated.
     #[cfg(feature = "_fiber")]
     pub(crate) max_live_fibers: Option<usize>,
+    /// P1e.2 cap mirror — see `Config::max_fiber_frame_depth`.
+    /// Enforced inside `check_frames()` when
+    /// `current_fiber_id.is_some()`. `None` = unlimited.
+    /// cfg(_fiber)-gated.
+    #[cfg(feature = "_fiber")]
+    pub(crate) max_fiber_frame_depth: Option<usize>,
     /// Builtin reflection metadata for the synth Methods that
     /// `Kernel.instance_method(:foo)` returns. Looked up by the
     /// `instance_method` arm when the receiver is Kernel.
@@ -806,6 +812,8 @@ impl Vm {
             cext_depth: 0,
             #[cfg(feature = "_fiber")]
             max_live_fibers: None,
+            #[cfg(feature = "_fiber")]
+            max_fiber_frame_depth: None,
             kernel_builtin_metas: std::collections::HashMap::new(),
             kernel_class_sym: None,
             basic_object_builtin_metas: std::collections::HashMap::new(),

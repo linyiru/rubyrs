@@ -97,6 +97,25 @@ impl Vm {
                     msg: format!("stack level too deep ({} frames, max {})", self.frames.len(), max),
                 }));
             }
+        // P1e.2 (ADR 0023 v2): when inside a Fiber, enforce
+        // the per-Fiber frame cap too. Without this a Fiber
+        // could deepen its frame stack to OOM while staying
+        // under `max_frames` (which counts the resumer's
+        // frames — stashed during resume) and `max_live`
+        // (Frames aren't separate heap objects).
+        #[cfg(feature = "_fiber")]
+        if self.current_fiber_id.is_some()
+            && let Some(max) = self.max_fiber_frame_depth
+            && self.frames.len() >= max
+        {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!(
+                    "fiber stack level too deep ({} frames, fiber max {})",
+                    self.frames.len(),
+                    max,
+                ),
+            }));
+        }
         Ok(())
     }
 
