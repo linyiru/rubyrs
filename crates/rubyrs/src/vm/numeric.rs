@@ -479,7 +479,10 @@ pub(crate) fn numeric_call(
             if *n < 0 =>
         {
             // Negative precision: round to a multiple of 10^|n|.
-            let abs_n = (-*n) as u64;
+            // Use `unsigned_abs` to avoid the `-(i64::MIN)` panic
+            // that `(-*n) as u64` would hit in debug builds when
+            // someone passes i64::MIN as the precision.
+            let abs_n = n.unsigned_abs();
             if abs_n > 18 {
                 // 10^19 overflows i64; defer to bignum path (which
                 // isn't implemented for these selectors yet).

@@ -1663,6 +1663,33 @@ impl Vm {
         // power-of-10 multiple — needs BigInt-aware modular
         // arithmetic, deferred (matches the numeric.rs decline for
         // |n| > 18 + the spec's method-not-implemented trace).
+        // BigInt precision: by the canonical-BigInt invariant
+        // every Value::BigInt has |x| > i64::MAX, so any BigInt
+        // precision is huge. For positive sign, that's >> 18 (the
+        // numeric.rs decline boundary) — round to a multiple of
+        // 10^huge, which is no-op-or-zero for Integer self. We
+        // accept it as a no-op (same as `n >= 0` for Int).
+        // For negative sign, it would round past every digit, so
+        // ceil/floor/round → 0 for positive self, -10^huge for
+        // negative — deferred alongside the |n| > 18 case.
+        // Fires for both Int and BigInt receivers since the
+        // numeric.rs arm only matches Int precision.
+        if matches!(recv, Value::Int(_) | Value::BigInt(_))
+            && matches!(name, "ceil" | "floor" | "round" | "truncate")
+            && let [Value::BigInt(prec_id)] = args
+        {
+            use num_bigint::Sign;
+            let prec = self.heap.bigint(*prec_id);
+            if prec.sign() != Sign::Minus {
+                // Positive (or zero — but canonical invariant
+                // excludes BigInt(0)) BigInt precision: no-op.
+                return Ok(Some(recv.clone()));
+            }
+            // Negative huge precision: defer with NoMethodError so
+            // it surfaces as missing rather than wrong-answer.
+            return Ok(None);
+        }
+        // Existing arm: BigInt receiver with 0-arg or Int precision.
         if matches!(recv, Value::BigInt(_))
             && matches!(name, "ceil" | "floor" | "round" | "truncate")
         {

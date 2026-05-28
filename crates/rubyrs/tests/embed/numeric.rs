@@ -1445,6 +1445,15 @@ fn integer_ceil_floor_round_truncate_basic() {
         ("249.round(-2).inspect", "200"),
         ("1832.truncate(-2).inspect", "1800"),
         ("(-1832).truncate(-2).inspect", "-1800"),
+        // BigInt precision — accepted as no-op (positive sign;
+        // canonical-BigInt invariant means |x| > i64::MAX so any
+        // BigInt is far past the 18-digit decline threshold).
+        #[cfg(feature = "bignum")]
+        ("123.round(2**64).inspect", "123"),
+        #[cfg(feature = "bignum")]
+        ("123.ceil(2**64).inspect", "123"),
+        #[cfg(feature = "bignum")]
+        ("(2**100).floor(2**64).inspect", "1267650600228229401496703205376"),
     ] {
         let buf = SharedBuf::new();
         rt.set_stdout(Box::new(buf.clone()));
