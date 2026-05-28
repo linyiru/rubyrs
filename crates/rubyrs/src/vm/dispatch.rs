@@ -3091,6 +3091,19 @@ impl Vm {
                 // `Object.const_defined?(:Tilt)` must look up the
                 // BARE "Tilt" key. Other classes use the
                 // qualified `Cls::Name` form.
+                // CRuby validates constant names BEFORE lookup:
+                // the name must begin with an ASCII uppercase
+                // letter (constants in Ruby always start
+                // capitalised). Names like "foo" or "" raise
+                // `NameError: wrong constant name <name>`,
+                // distinct from the "uninitialized constant"
+                // path for valid-but-absent names.
+                // (Copilot review #277 round 3.)
+                if !is_valid_const_name(&const_name) {
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", const_name),
+                    }));
+                }
                 let lookup = if cls.name == "Object" {
                     const_name.clone()
                 } else {
@@ -3131,6 +3144,11 @@ impl Vm {
                         msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                     })),
                 };
+                if !is_valid_const_name(&const_name) {
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", const_name),
+                    }));
+                }
                 let lookup = if cls.name == "Object" {
                     const_name.clone()
                 } else {
@@ -3843,6 +3861,13 @@ impl Vm {
                     msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                 })),
             };
+            // CRuby-shape malformed-name check — see no_recv arm.
+            // (Copilot review #277 round 3.)
+            if !is_valid_const_name(&const_name) {
+                return Err(self.trap(RubyError::NameError {
+                    msg: format!("wrong constant name {}", const_name),
+                }));
+            }
             let lookup = if cls.name == "Object" {
                 const_name.clone()
             } else {
@@ -3873,6 +3898,11 @@ impl Vm {
                     msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                 })),
             };
+            if !is_valid_const_name(&const_name) {
+                return Err(self.trap(RubyError::NameError {
+                    msg: format!("wrong constant name {}", const_name),
+                }));
+            }
             let lookup = if cls.name == "Object" {
                 const_name.clone()
             } else {
@@ -6894,6 +6924,22 @@ impl Vm {
             builtin: None,
         })
     }
+}
+
+/// CRuby's constant-name validation rule: the bare name must
+/// start with an ASCII uppercase letter and contain only
+/// `[A-Za-z0-9_]`. Empty names are rejected. Used by
+/// `Module#const_defined?` / `Module#const_get` to raise the
+/// CRuby-shape `NameError("wrong constant name <name>")`
+/// distinct from `"uninitialized constant"` (which is for
+/// valid-but-absent names). (Copilot review #277 round 3.)
+fn is_valid_const_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn is_primitive_class_name(name: &str) -> bool {

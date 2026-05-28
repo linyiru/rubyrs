@@ -94,3 +94,32 @@ rescue NameError
   "NameError"
 end
 puts "interner-safe=#{err}"
+
+## Shape 9: malformed constant names raise NameError with the
+## CRuby-shape "wrong constant name <name>" message —
+## distinct from "uninitialized constant" (which is for
+## valid-but-absent names). CRuby's rule: first char must be
+## ASCII uppercase; remainder must be alphanumeric / `_`.
+## (code-review #277 round 3.)
+%w[foo a X-Y].each do |bad|
+  err = begin
+    Object.const_defined?(bad)
+    "no-raise"
+  rescue NameError => e
+    e.message.start_with?("wrong constant name") ? "wrong-name" : "other-NameError"
+  end
+  puts "malformed-cd-#{bad}=#{err}"
+end
+err = begin
+  Object.const_get("foo")
+  "no-raise"
+rescue NameError => e
+  e.message.start_with?("wrong constant name") ? "wrong-name" : "other-NameError"
+end
+puts "malformed-cg=#{err}"
+
+## Shape 10: valid names still work (regression-prevention
+## for the validation gate).
+puts "valid-Foo=#{Object.const_defined?("Foo")}"
+puts "valid-CONST=#{Foo.const_defined?("CONST")}"
+puts "valid-with-num=#{Object.const_defined?("Foo")}"  # Foo isn't capitalised differently — just a sanity probe
