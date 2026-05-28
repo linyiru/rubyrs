@@ -28,16 +28,14 @@ describe "Hash#one?" do
   it "short-circuits after a second truthy yield" do
     # Once two truthies are seen, the answer is fixed at
     # false. Block should not be invoked for remaining
-    # entries.
+    # entries. The implementation increments a counter on
+    # each truthy yield and breaks the moment `count > 1`,
+    # so for an all-truthy predicate over `[1, 2, 3, 4]`
+    # the block runs EXACTLY twice (iter 1 sets count=1,
+    # iter 2 sets count=2 and breaks before the rest).
     h = {a: 1, b: 2, c: 3, d: 4}
     count = 0
     h.one? { |k, v| count = count + 1; v >= 1 }
-    # Block runs for the first 3 entries (1, 2, 3 are all
-    # truthy ≥ 1; on the 3rd hit count == 2 and the loop
-    # exits before the 4th). Tolerant assertion: count is
-    # at most 3 (early exit) and at least 2 (need two
-    # truthies to disprove "exactly one").
-    assert(count >= 2)
-    assert(count <= 3)
+    assert_eq(count, 2)
   end
 end

@@ -17,11 +17,20 @@ describe "Hash#min" do
   end
 
   it "uses element-wise pair comparison (key first, value tiebreaker)" do
-    # Same key short-circuits to value compare. Since Hash
-    # keys are unique this only matters across different
-    # Hashes; verify the lexicographic order directly.
-    h = {b: 1, a: 2}
-    assert_eq(h.min, [:a, 2])
+    # Hash key uniqueness is by `eql?`, not `<=>` — so two
+    # distinct keys CAN compare Equal via `<=>` (e.g. `1`
+    # and `1.0` are eql?-distinct but `1 <=> 1.0 == 0`).
+    # When the key compare yields Equal, the value
+    # compare kicks in as the tiebreaker.
+    #
+    # Here both `1` and `1.0` coexist as keys; min picks
+    # the entry whose VALUE compares smaller after the
+    # key tie:
+    #   key:   1 <=> 1.0     → 0 (Equal)
+    #   value: :first <=> :second → -1 (Less)
+    # → min == [1, :first].
+    h = {1 => :first, 1.0 => :second}
+    assert_eq(h.min, [1, :first])
   end
 
   # skipped (method-not-implemented): it "with a block uses block as the comparator" do
