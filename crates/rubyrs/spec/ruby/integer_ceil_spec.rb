@@ -64,7 +64,7 @@ describe "Integer#ceil" do
     assert_eq(0.ceil(-10), 0)
   end
 
-  it "precision is negative: returns Integer equal to self if precision.abs trailing zeros" do
+  it "precision is negative: returns Integer equal to self if self has precision.abs trailing zeros" do
     assert_eq(10.ceil(-1), 10)
     assert_eq(100.ceil(-1), 100)
     assert_eq(100.ceil(-2), 100)

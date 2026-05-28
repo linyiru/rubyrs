@@ -1673,10 +1673,17 @@ impl Vm {
         // multiple of 10^huge, which is no-op-or-zero for Integer
         // self. We accept positive-sign BigInt precision as a
         // no-op (same as `n >= 0` for Int). Negative-sign BigInt
-        // precision rounds past every digit, so
-        // ceil/floor/round → 0 for positive self, -10^huge for
-        // negative — deferred alongside the Int-recv negative-
-        // precision overflow case.
+        // precision rounds past every digit, with per-op/sign
+        // splits matching the |n| > 38 logic in numeric.rs:
+        //   - truncate, round: always 0 (|self| << half of 10^|n|)
+        //   - ceil with self <= 0: 0
+        //   - ceil with self > 0:  +10^|n| (needs BigInt)
+        //   - floor with self >= 0: 0
+        //   - floor with self < 0:  -10^|n| (needs BigInt)
+        // Currently deferred uniformly (returns None → NoMethodError)
+        // alongside the Int-recv negative-precision overflow path;
+        // a future refinement could mirror numeric.rs's zero-result
+        // shortcut and only defer the two genuine BigInt cases.
         // Fires for both Int and BigInt receivers since the
         // numeric.rs arm only matches Int precision.
         if matches!(recv, Value::Int(_) | Value::BigInt(_))
