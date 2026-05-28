@@ -918,11 +918,21 @@ impl Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             // Numeric coercion: CRuby treats `5 == 5.0` as `true`.
-            // NaN never equals anything, including itself —
-            // f64::==-on-NaN already gives `false`, so the comparison
-            // via `as f64` does the right thing.
-            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
-            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+            // Routes through `int_cmp_float_lossless` (numeric.rs)
+            // so `|i| > 2^53` doesn't collapse onto the demoted
+            // f64 bit pattern — same fix the BinOp `==` path got
+            // in PR #237, mirrored here so `===` (via ruby_eq)
+            // stays an alias of `==` for large integers.
+            // `cmp == Some(Equal)` returns false for NaN
+            // (helper returns None) — matches CRuby `5 == NaN`.
+            (Value::Int(a), Value::Float(b)) => {
+                crate::vm::int_cmp_float_lossless(*a, *b)
+                    == Some(std::cmp::Ordering::Equal)
+            }
+            (Value::Float(a), Value::Int(b)) => {
+                crate::vm::int_cmp_float_lossless(*b, *a)
+                    == Some(std::cmp::Ordering::Equal)
+            }
             (Value::Str(a), Value::Str(b)) => *a.borrow() == *b.borrow(),
             (Value::Sym(a), Value::Sym(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -971,6 +981,30 @@ impl Value {
             #[cfg(feature = "bignum")]
             (Value::Int(a), Value::BigInt(b)) => {
                 &num_bigint::BigInt::from(*a) == heap.bigint(*b)
+            }
+            // BigInt × Float — lossless compare, mirroring the
+            // BinOp `==` path (PR #230). Routes through the same
+            // `bigint_equals_float_lossless` helper. Examples:
+            //   `(2**64) === (2**64).to_f` → true (2^64 is exactly
+            //     representable as f64; both sides denote the same
+            //     integer value).
+            //   `(2**64 + 1) === (2**64).to_f` → false (the LHS
+            //     BigInt is 2^64 + 1; the RHS Float exactly denotes
+            //     2^64 — so the integer values differ by 1).
+            //   `(2**64) === 1.5` → false (fractional Float never
+            //     equals an integer).
+            //   BigInt × NaN / ±inf → false.
+            // Without these arms, the comparison fell through to
+            // `_ => false` since ruby_eq had no BigInt × Float
+            // coverage — diverging from CRuby's `===` which
+            // delegates to value `==`.
+            #[cfg(feature = "bignum")]
+            (Value::BigInt(a), Value::Float(b)) => {
+                crate::vm::bigint_equals_float_lossless(heap.bigint(*a), *b)
+            }
+            #[cfg(feature = "bignum")]
+            (Value::Float(a), Value::BigInt(b)) => {
+                crate::vm::bigint_equals_float_lossless(heap.bigint(*b), *a)
             }
             _ => false,
         }

@@ -19,17 +19,10 @@
 #   argument is not an Integer" and "returns the result of
 #   'other == self' as a boolean" tests — both require mspec's
 #   mock library.
-# - skipped (divergent): "BigInt × Float of the same value" leg.
-#   rubyrs's `===` for BigInt × Float routes through
-#   `Value::ruby_eq` (heap.rs), which has no BigInt×Float match
-#   arm at all — the comparison falls through to the catch-all
-#   `_ => false`, so `(2**64) === (2**64).to_f` returns false
-#   instead of CRuby's true. (The BigInt arms in ruby_eq cover
-#   BigInt×BigInt and BigInt↔Int; grep heap.rs for
-#   `Value::BigInt`-binding arms inside `ruby_eq`.) The BinOp `==`
-#   path doesn't have this gap (PR #230 added
-#   `bigint_equals_float_lossless`); the follow-up is wiring that
-#   same helper into `ruby_eq`.
+# `ruby_eq`'s BigInt×Float arms (heap.rs) now route through the
+# same `bigint_equals_float_lossless` helper PR #230 added for
+# the BinOp `==` path, so `(2**64) === (2**64).to_f` returns
+# true (2^64 is exact in f64) and the divergent skip is gone.
 
 describe "Integer#===" do
   it "fixnum: returns true if self has the same Integer value as other" do
@@ -83,20 +76,13 @@ describe "Integer#===" do
     assert_eq(bn === 9.01, false)
   end
 
-  # skipped (divergent): "bignum: returns true when comparing
-  # with a Float of the same numeric value" — `(2**64) ===
-  # (2**64).to_f` should be true (2^64 is exact in f64) but
-  # rubyrs's ruby_eq has no BigInt×Float arm (the BigInt arms
-  # in heap.rs cover BigInt×BigInt and BigInt↔Int only), so
-  # the comparison falls through to `_ => false`. The BinOp ==
-  # path was fixed in PR #230 via bigint_equals_float_lossless;
-  # extending that to ruby_eq is the follow-up. Without it,
-  # this assertion fails.
-  #
-  # bignum_it "bignum: returns true when comparing with a Float of the same numeric value" do
-  #   bn = 2**64
-  #   assert_eq(bn === bn.to_f, true)
-  # end
+  bignum_it "bignum: returns true when comparing with a Float of the same numeric value" do
+    bn = 2**64
+    # 2^64 is exact in f64 (power of 2 below f64's exponent ceiling),
+    # so the lossless ruby_eq path treats the BigInt and the Float
+    # as equal — matching the BinOp `==` semantics PR #230 pinned.
+    assert_eq(bn === bn.to_f, true)
+  end
 
   # skipped (mock): "calls 'other == self' if the given argument
   # is not an Integer" + "returns the result of 'other == self'

@@ -116,7 +116,7 @@ use crate::vm::PinGuard;
 /// floats and otherwise compares against a losslessly-constructed
 /// BigInt; mirror that.
 #[cfg(feature = "bignum")]
-fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool {
+pub(crate) fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool {
     use num_traits::FromPrimitive;
     // NaN, +inf, -inf: never equal to a finite integer.
     if !float.is_finite() {
@@ -149,12 +149,12 @@ fn bigint_equals_float_lossless(bigint: &num_bigint::BigInt, float: f64) -> bool
 /// CRuby-parity lossless three-way comparison between a BigInt
 /// and a Float.
 ///
-/// Scope: BigInt × Float only. Int × Float (Fixnum range) still
-/// demotes the Int to f64 in numeric.rs's Int×Float arm, so
-/// e.g. `(2**62 + 1) <=> (2**62).to_f` currently returns 0
-/// instead of CRuby's 1 — fixing that would require an Int-side
-/// lossless path with i64-vs-f64 mantissa-bit reasoning, tracked
-/// as a follow-up.
+/// Scope: BigInt × Float only. Int × Float (Fixnum range) is
+/// covered by the sibling `numeric::int_cmp_float_lossless`
+/// (added in PR #237), which handles `(2**62 + 1) <=>
+/// (2**62).to_f` correctly. Both helpers share the same shape:
+/// NaN → None, ±inf → Less/Greater, finite via truncation +
+/// fractional-sign disambiguation.
 ///
 /// Returns:
 /// - `None` for NaN (CRuby's `bigint <=> nan` returns `nil`;
