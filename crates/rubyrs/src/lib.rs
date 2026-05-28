@@ -1851,7 +1851,7 @@ mod preamble_lift_guard_tests {
     /// need to simulate the panic to prove the guarantee holds
     /// if it ever did.
     #[test]
-    fn caps_guard_restores_on_panic_in_guarded_scope() {
+    fn preamble_lift_guard_restores_on_panic_in_guarded_scope() {
         let mut rt = Runtime::new();
         // Stamp recognisable cap values so the assertion can
         // distinguish "restored" from "default". `fuel_budget`
@@ -1897,7 +1897,7 @@ mod preamble_lift_guard_tests {
     /// guard's normal-exit Drop also restores correctly (i.e.
     /// we're not relying on the panic to trigger restore).
     #[test]
-    fn caps_guard_restores_on_normal_scope_exit() {
+    fn preamble_lift_guard_restores_on_normal_scope_exit() {
         let mut rt = Runtime::new();
         rt.fuel_budget = Some(999);
         {
