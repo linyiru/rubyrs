@@ -1966,9 +1966,19 @@ impl Vm {
         //   1 arg, none → ArgumentError "tried to create Proc
         //                 object without a block"
         //   2 args      → Proc/UnboundMethod install form, NOT yet
-        //                 supported — fall through to standard
-        //                 dispatch (NoMethodError) so the
-        //                 "not implemented" signal is clear.
+        //                 supported in rubyrs Tier-1; raise an
+        //                 ArgumentError that names the actual
+        //                 cause. (code-review #245 round 7 #3 —
+        //                 previously fell through to NoMethodError,
+        //                 which misleadingly claimed the method
+        //                 was undefined when dispatch actually
+        //                 reached this arm. NotImplementedError
+        //                 would be more semantically accurate but
+        //                 RubyError lacks a registered variant for
+        //                 it, and Uncaught is by design not
+        //                 catchable by `rescue` — ArgumentError
+        //                 with an explicit "not yet supported"
+        //                 message is the best catchable shape.)
         //   3+ args     → ArgumentError "wrong number of arguments
         //                 (given N, expected 1..2)"
         match args.len() {
@@ -1978,7 +1988,9 @@ impl Vm {
             1 => return Err(self.trap(RubyError::ArgumentError {
                 msg: "tried to create Proc object without a block".into(),
             })),
-            2 => { /* fall through */ }
+            2 => return Err(self.trap(RubyError::ArgumentError {
+                msg: "the 2-arg Proc/UnboundMethod form of `Module#define_method` is not yet supported by rubyrs Tier-1".into(),
+            })),
             n => return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
             })),
@@ -5234,9 +5246,8 @@ impl Vm {
                 // across both arms (PR #245 Copilot round 6 #1).
                 match args.len() {
                     1 => {}
-                    2 => return Err(self.trap(RubyError::NoMethodError {
-                        method: "define_method".into(),
-                        recv_type: "Class",
+                    2 => return Err(self.trap(RubyError::ArgumentError {
+                        msg: "the 2-arg Proc/UnboundMethod form of `Module#define_method` is not yet supported by rubyrs Tier-1".into(),
                     })),
                     n => return Err(self.trap(RubyError::ArgumentError {
                         msg: format!("wrong number of arguments (given {}, expected 1..2)", n),

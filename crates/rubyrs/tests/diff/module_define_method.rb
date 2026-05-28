@@ -164,7 +164,11 @@ end
 ## collapse the two error classes.
 ##   - 0 args      → "wrong number of arguments (given 0, expected 1..2)"
 ##   - 1 arg/none  → "tried to create Proc object without a block"
-##   - 2 args      → 2-arg Proc form not supported; NoMethodError
+##   - 2 args      → 2-arg Proc form not supported; ArgumentError
+##                   with explicit "not yet supported" wording
+##                   (code-review #245 round 7 #3 — pre-fix this
+##                   raised NoMethodError, which lied about the
+##                   actual cause)
 ##   - 3+ args     → "wrong number of arguments (given N, expected 1..2)"
 class Arity; end
 err = begin; Arity.define_method; "DID-NOT-RAISE"; rescue ArgumentError => e; e.message; end
