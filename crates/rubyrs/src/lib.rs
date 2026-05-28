@@ -619,15 +619,19 @@ struct ResourceCaps {
     // preamble keeps Runtime construction time observably
     // independent of the host's stress_gc choice.
     stress_gc: bool,
-    // `allow_filesystem_io` is a capability, not a budget — lifted
-    // here on the same "preamble is internal infrastructure, host
-    // caps don't constrain it" principle. Current preamble
-    // fragments are baked in via `include_str!` so they don't
-    // touch the FS, but lifting future-proofs the case where a
-    // preamble addition would want to read a file (e.g., a
-    // platform-specific config) at construction time regardless
-    // of the host's sandbox setting.
-    allow_filesystem_io: bool,
+    // NOTE: `allow_filesystem_io` is NOT in ResourceCaps. The
+    // other fields here are budgets / pure-performance settings
+    // where lifting during preamble is safe and pragmatic
+    // (preamble is internal infrastructure, host caps don't
+    // need to apply). `allow_filesystem_io` is a *capability* —
+    // a sandbox host setting `false` is making a security
+    // contract that no script-driven path reaches the host FS.
+    // Lifting it during preamble would weaken that contract:
+    // a future preamble fragment that accidentally adds
+    // `require '...'` or `File.read(...)` would silently
+    // succeed when the host configured the sandbox off,
+    // instead of loudly trapping at construction. Loud failure
+    // is the safer default for a security cap.
 }
 
 impl ResourceCaps {
@@ -650,9 +654,6 @@ impl ResourceCaps {
             max_live: rt.vm.heap.max_live.take(),
             deadline: rt.deadline.take(),
             stress_gc: std::mem::replace(&mut rt.vm.stress_gc, false),
-            // Lift to `true` during preamble — see field comment
-            // for the "preamble is internal" rationale.
-            allow_filesystem_io: std::mem::replace(&mut rt.vm.allow_filesystem_io, true),
         }
     }
 
@@ -667,7 +668,9 @@ impl ResourceCaps {
         rt.vm.heap.max_live = self.max_live;
         rt.deadline = self.deadline;
         rt.vm.stress_gc = self.stress_gc;
-        rt.vm.allow_filesystem_io = self.allow_filesystem_io;
+        // `allow_filesystem_io` deliberately not restored here —
+        // it's not in ResourceCaps (host's security cap is
+        // honoured during preamble too, see struct doc).
     }
 }
 
