@@ -407,6 +407,29 @@ impl Vm {
                         Some(Ok(Value::Array(id)))
                     }
                     Value::Array(_) => Some(Ok(args[0].clone())),
+                    // `Array(hash)` → pair-array via `Hash#to_a`.
+                    // CRuby converts `{a: 1, b: 2}` to
+                    // `[[:a, 1], [:b, 2]]`. (TRY_RUNS layer #25
+                    // pre-existing gap surfaced by the fixture.)
+                    Value::Hash(hid) => {
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(*hid).iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let mut g = PinGuard::new(self);
+                        for (k, v) in &pairs {
+                            g.pin(k.clone());
+                            g.pin(v.clone());
+                        }
+                        g.vm.maybe_gc();
+                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
+                        let mut entries: Vec<Value> = Vec::with_capacity(pairs.len());
+                        for (k, v) in pairs {
+                            let pair_id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![k, v]));
+                            entries.push(Value::Array(pair_id));
+                        }
+                        let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(entries));
+                        Some(Ok(Value::Array(id)))
+                    }
                     _ => {
                         // GC rooting: `args` was drained out of
                         // `self.stack` in `do_call`, so `args[0]` is

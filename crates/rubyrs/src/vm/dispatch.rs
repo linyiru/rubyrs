@@ -4638,7 +4638,28 @@ impl Vm {
             self.stack.push(Value::Bool(yes));
             return Ok(());
         }
-        if self.try_method_missing(&recv, name_id, args, None)? {
+        if self.try_method_missing(&recv, name_id, args.clone(), None)? {
+            return Ok(());
+        }
+        // Kernel module-function fallback: CRuby's `Kernel#Array`,
+        // `Kernel#Integer`, `Kernel#Float`, `Kernel#String`,
+        // `Kernel#sprintf`, `Kernel#format`, `Kernel#eval` are
+        // module functions — defined as private instance methods
+        // on Kernel which is included in Object, so they're
+        // reachable as `recv.Array(...)` from any object (though
+        // CRuby normally enforces private-method visibility, which
+        // we don't model uniformly here). Sinatra's
+        // `codes.flat_map(&method(:Array))` (sinatra/base.rb:1404)
+        // captures `method(:Array)` from an explicit receiver
+        // (self=Sinatra::Base, a Class) and re-dispatches through
+        // BoundMethod#call, landing here. Without this fallback
+        // the call surfaces as NoMethodError. (TRY_RUNS layer #25.)
+        if matches!(name.as_ref(),
+            "Array" | "Integer" | "Float" | "String"
+            | "sprintf" | "format" | "eval"
+        ) && let Some(res) = self.builtin_call(name.as_ref(), &args) {
+            let v = res?;
+            self.stack.push(v);
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
