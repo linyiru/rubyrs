@@ -238,6 +238,32 @@ pub struct Config {
     /// that processes untrusted Ruby leave the default; the
     /// filesystem is off-limits.
     pub allow_filesystem_io: bool,
+    /// Path-level narrowing on top of `allow_filesystem_io`. The
+    /// two fields compose as a layered sandbox:
+    ///
+    /// | `allow_filesystem_io` | `allowed_paths` | Behaviour |
+    /// |---|---|---|
+    /// | `false` | (any) | All FS-touching ops trap. `allowed_paths` is ignored. |
+    /// | `true` | `None` (default) | Fully open — same as the bool-only mode. |
+    /// | `true` | `Some(prefixes)` | Open, but each FS op's resolved path must start with one of `prefixes`; otherwise traps. |
+    ///
+    /// Use case: a host like rubund evaluates untrusted gemspecs
+    /// that may legitimately do `File.read("Gemfile.lock")` or
+    /// `require_relative "lib/version"`, but must NOT escape
+    /// the gem root. `Config { allow_filesystem_io: true,
+    /// allowed_paths: Some(vec![gem_root.canonicalize()?]), .. }`
+    /// gives the gemspec exactly that scope.
+    ///
+    /// Path matching is by `starts_with` on the canonicalized
+    /// `allowed_paths` entries vs the lexically-resolved input
+    /// path (relative inputs joined with cwd; `..`/`.` collapsed
+    /// before the prefix check). This defends against simple
+    /// traversal (`/allowed/../../etc/passwd` resolves outside
+    /// the prefix); symlink escapes are NOT defended (a host
+    /// that wants symlink-tight scoping must canonicalize the
+    /// allowed prefixes itself, AND ensure no symlinks under
+    /// them point outside).
+    pub allowed_paths: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Default for Config {
@@ -277,6 +303,11 @@ impl Default for Config {
             // / __dir__ cannot reach the host filesystem. The CLI
             // binary opts in explicitly via `Config { allow_filesystem_io: true, .. }`.
             allow_filesystem_io: false,
+            // No path-level narrowing by default — `allow_filesystem_io`
+            // already covers the secure-by-default case. Hosts that
+            // want scoped FS access (rubund evaluating gemspecs in a
+            // gem root, for instance) opt in by setting Some(prefixes).
+            allowed_paths: None,
         }
     }
 }
@@ -598,6 +629,33 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
         let p = std::ptr::addr_of_mut!(WIZER_RUNTIME);
         (*p).take()
     }
+}
+
+/// Pure lexical resolve of a path — collapses `.` and `..`
+/// segments without touching the filesystem. The single shared
+/// implementation behind:
+///   - `Config::allowed_paths` canonicalize-fallback when the
+///     host-supplied prefix doesn't exist on disk
+///   - per-op allowlist check input normalization
+///   - `File.expand_path`'s sandbox-on lexical-only path
+///
+/// Absolute paths stay absolute; relative paths stay relative
+/// (the caller decides whether to join with cwd first).
+///
+/// `..` from the root is a no-op (matches POSIX `cd /..` and
+/// CRuby's `File.expand_path("..", "/")` semantics — returns
+/// `/`, not an error).
+pub(crate) fn lexically_resolve_path(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut resolved = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => { resolved.pop(); }
+            Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
 }
 
 /// Subset of Runtime+Vm settings that get **lifted during
@@ -925,6 +983,19 @@ impl Runtime {
         self.vm.time_now = cfg.time_now;
         self.deadline = cfg.deadline;
         self.vm.allow_filesystem_io = cfg.allow_filesystem_io;
+        // Canonicalize each allowed prefix once at apply_config
+        // time. The per-op `check_path_in_allowlist` lexically
+        // resolves the input and does `starts_with` against the
+        // already-canonical entries — no per-op syscall. If a
+        // host-supplied prefix can't be canonicalized (path
+        // doesn't exist), fall back to lexical collapse so an
+        // ENOENT-on-prefix doesn't silently widen the allowlist.
+        self.vm.allowed_paths = cfg.allowed_paths.map(|prefixes| {
+            prefixes
+                .into_iter()
+                .map(|p| std::fs::canonicalize(&p).unwrap_or_else(|_| lexically_resolve_path(&p)))
+                .collect()
+        });
     }
 
     /// Rewind the Runtime to its post-preamble state — every class,

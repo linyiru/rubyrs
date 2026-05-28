@@ -881,7 +881,7 @@ impl Vm {
         // shared object from disk and call its rb_init. Under
         // `Config::allow_filesystem_io: false` that capability
         // is off, traps with LoadError before any `dlopen`.
-        self.check_load_allowed("cext_require")?;
+        self.check_load_allowed("cext_require", None)?;
 
         // Auto-extension: `require "foo"` resolves "foo.dylib" / "foo.so"
         // / "foo.bundle" depending on host. Matches CRuby's behaviour for

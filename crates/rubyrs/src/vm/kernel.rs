@@ -681,7 +681,7 @@ impl Vm {
                             // also gates internally — this surface-level
                             // check fires first with a clearer
                             // `op = "require"` message.
-                            if let Err(t) = self.check_load_allowed("require") {
+                            if let Err(t) = self.check_load_allowed("require", None) {
                                 return Some(Err(t));
                             }
                             #[cfg(feature = "cext")]
@@ -742,7 +742,7 @@ impl Vm {
                 // fallback owns a String. `to_string_lossy()` would
                 // allocate unconditionally.
                 [Value::Str(path)] => Some(
-                    self.check_load_allowed("require_relative")
+                    self.check_load_allowed("require_relative", None)
                         .and_then(|()| path.with_str_lossy(|s| self.require_relative(s))),
                 ),
                 // Distinguish type mismatch from arity: CRuby raises

@@ -244,6 +244,11 @@ fn main() {
         // POLA. Embed users that want a sandbox leave the
         // `Config::allow_filesystem_io: false` default.
         allow_filesystem_io: true,
+        // CLI binary: no path narrowing — `rubyrs script.rb`
+        // behaves like `ruby script.rb` and can touch any path
+        // the shell can. Embed users wanting scope (rubund for
+        // gemspec evaluation, etc.) supply Some(prefixes).
+        allowed_paths: None,
     };
 
     // wasi-wizer fast path: if the binary was put through

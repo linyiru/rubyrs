@@ -18,6 +18,17 @@ use std::rc::Rc;
 use crate::error::{RubyError, Span, Trap, TrapFrame};
 use crate::value::Value;
 
+/// Discriminator for `check_path_in_allowlist` — which trap class
+/// to raise on a scope violation. Filesystem ops want `IOError`
+/// (script-side `rescue IOError` catches FS failures), load ops
+/// (require/require_relative/cext_require) want `LoadError`
+/// (`rescue LoadError` catches "feature unavailable").
+#[derive(Clone, Copy)]
+enum PathTrapKind {
+    Io,
+    Load,
+}
+
 use super::{vec_nil, Frame, Vm};
 
 impl Vm {
@@ -91,37 +102,108 @@ impl Vm {
 
     /// Gate every script-callable filesystem-touching site
     /// (excluding `require`-class loaders — see
-    /// `check_load_allowed` for those). When
-    /// `Config::allow_filesystem_io` is `false` (the secure-by-
-    /// default), returns an `IOError`-class trap so a sandboxed
-    /// script that calls `File.read(...)`, `File.exist?(...)`,
-    /// etc. cannot reach the host filesystem. The error
-    /// `class_name` is `IOError` so `rescue IOError` catches it
-    /// like CRuby's own filesystem errors.
+    /// `check_load_allowed` for those). Two-layer check:
+    ///
+    /// 1. **Capability** (`Config::allow_filesystem_io`). If
+    ///    `false`, traps unconditionally with `IOError` — sandbox
+    ///    is shut.
+    /// 2. **Scope** (`Config::allowed_paths`). When the cap is
+    ///    `Some(prefixes)` AND the caller passes
+    ///    `path: Some(target)`, the target is lexically resolved
+    ///    (joined with cwd if relative, `..`/`.` collapsed) and
+    ///    must start with one of `prefixes`; otherwise traps
+    ///    with `IOError`. `path: None` skips the scope check —
+    ///    used by call sites that gate before path resolution
+    ///    is available.
     ///
     /// `op` is the user-visible operation name for the trap
-    /// message ("File.read", "File.size", ...) so a trapped
-    /// script gets a clear diagnostic.
-    pub(crate) fn check_filesystem_io_allowed(&self, op: &str) -> Result<(), Trap> {
-        if self.allow_filesystem_io {
-            return Ok(());
+    /// message ("File.read", "File.size", ...).
+    pub(crate) fn check_filesystem_io_allowed(
+        &self,
+        op: &str,
+        path: Option<&std::path::Path>,
+    ) -> Result<(), Trap> {
+        if !self.allow_filesystem_io {
+            return Err(self.trap(RubyError::IOError {
+                msg: format!(
+                    "{op} blocked: filesystem I/O disabled by Config::allow_filesystem_io"
+                ),
+            }));
         }
-        Err(self.trap(RubyError::IOError {
-            msg: format!("{op} blocked: filesystem I/O disabled by Config::allow_filesystem_io"),
-        }))
+        if let Some(p) = path {
+            self.check_path_in_allowlist(op, p, PathTrapKind::Io)?;
+        }
+        Ok(())
     }
 
     /// Gate `require` / `require_relative` / `cext_require`.
-    /// Same `Config::allow_filesystem_io` capability, but raises
-    /// `LoadError` to match CRuby's `require` failure class so
-    /// scripts using `rescue LoadError` catch the sandbox trap
-    /// the same way they'd catch a missing-file `require`.
-    pub(crate) fn check_load_allowed(&self, op: &str) -> Result<(), Trap> {
-        if self.allow_filesystem_io {
+    /// Same two-layer check as `check_filesystem_io_allowed`,
+    /// but the scope-violation trap class is `LoadError` so
+    /// `rescue LoadError` catches it like CRuby's
+    /// require-failure exception.
+    pub(crate) fn check_load_allowed(
+        &self,
+        op: &str,
+        path: Option<&std::path::Path>,
+    ) -> Result<(), Trap> {
+        if !self.allow_filesystem_io {
+            return Err(self.trap(RubyError::LoadError {
+                msg: format!(
+                    "{op} blocked: filesystem I/O disabled by Config::allow_filesystem_io"
+                ),
+            }));
+        }
+        if let Some(p) = path {
+            self.check_path_in_allowlist(op, p, PathTrapKind::Load)?;
+        }
+        Ok(())
+    }
+
+    /// Internal: check a target path against `vm.allowed_paths`.
+    /// No-op when `allowed_paths: None` (no narrowing configured).
+    /// When `Some(prefixes)`, lexically resolves the target
+    /// (joining with cwd if relative, collapsing `..`/`.`) and
+    /// requires `starts_with` against at least one prefix.
+    ///
+    /// Path matching is prefix-only on lexical form. Symlinks
+    /// that point outside the allowed prefixes are NOT defended
+    /// at this layer — the contract is documented in
+    /// `Config::allowed_paths`.
+    fn check_path_in_allowlist(
+        &self,
+        op: &str,
+        path: &std::path::Path,
+        kind: PathTrapKind,
+    ) -> Result<(), Trap> {
+        let Some(prefixes) = self.allowed_paths.as_ref() else {
+            return Ok(());
+        };
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            // Relative path — join with cwd. The host already
+            // enabled `allow_filesystem_io: true`, so the cwd
+            // syscall is consistent with that capability. If
+            // cwd lookup fails (sandboxed container, no perms),
+            // fall back to the bare relative path — the
+            // `starts_with` will then fail against any absolute
+            // prefix, trapping safely.
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(path),
+                Err(_) => path.to_path_buf(),
+            }
+        };
+        let resolved = crate::lexically_resolve_path(&joined);
+        if prefixes.iter().any(|prefix| resolved.starts_with(prefix)) {
             return Ok(());
         }
-        Err(self.trap(RubyError::LoadError {
-            msg: format!("{op} blocked: filesystem I/O disabled by Config::allow_filesystem_io"),
+        let msg = format!(
+            "{op} blocked: path {:?} outside Config::allowed_paths",
+            resolved,
+        );
+        Err(self.trap(match kind {
+            PathTrapKind::Io => RubyError::IOError { msg },
+            PathTrapKind::Load => RubyError::LoadError { msg },
         }))
     }
 

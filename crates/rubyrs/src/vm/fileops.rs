@@ -29,7 +29,7 @@ impl Vm {
         };
         Ok(Some(match (name, args) {
             ("read", [p]) => {
-                self.check_filesystem_io_allowed("File.read")?;
+                self.check_filesystem_io_allowed("File.read", None)?;
                 let path = path_arg(p)?;
                 // L3-G follow-up: read raw bytes, not UTF-8-validated
                 // String. msgpack/protobuf/binary-protocol fixtures
@@ -60,7 +60,7 @@ impl Vm {
                 }
             }
             ("write", [p, body]) => {
-                self.check_filesystem_io_allowed("File.write")?;
+                self.check_filesystem_io_allowed("File.write", None)?;
                 let path = path_arg(p)?;
                 let contents: Vec<u8> = match body {
                     Value::Str(s) => s.content.borrow().clone(),
@@ -87,7 +87,7 @@ impl Vm {
                     "file?" => "File.file?",
                     _ => unreachable!(),
                 };
-                self.check_filesystem_io_allowed(op)?;
+                self.check_filesystem_io_allowed(op, None)?;
                 let path = path_arg(p)?;
                 let exists = std::fs::metadata(&path)
                     .map(|m| if name == "file?" { m.is_file() } else { true })
@@ -95,13 +95,13 @@ impl Vm {
                 Value::Bool(exists)
             }
             ("directory?", [p]) => {
-                self.check_filesystem_io_allowed("File.directory?")?;
+                self.check_filesystem_io_allowed("File.directory?", None)?;
                 let path = path_arg(p)?;
                 let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
                 Value::Bool(is_dir)
             }
             ("size", [p]) => {
-                self.check_filesystem_io_allowed("File.size")?;
+                self.check_filesystem_io_allowed("File.size", None)?;
                 let path = path_arg(p)?;
                 match std::fs::metadata(&path) {
                     Ok(m) => Value::Int(m.len() as i64),
