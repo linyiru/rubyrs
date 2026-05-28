@@ -427,6 +427,31 @@ impl Vm {
                         let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
                         Some(Value::Array(aid))
                     }
+                    // `h.find_index(target)` — Int insertion-order
+                    // index of the first entry whose `[k, v]`
+                    // pair `==` the target, or nil. CRuby's
+                    // positional form on Hash (inherited from
+                    // Enumerable). The block form lives in
+                    // iter.rs.
+                    ("find_index", [target]) => {
+                        let target = target.clone();
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        for (i, (k, v)) in pairs.iter().enumerate() {
+                            // Compare via a fresh [k, v] pair
+                            // Array using ruby_eq. Allocating a
+                            // throwaway pair per iter is the
+                            // simplest path; the receiver pin
+                            // happens implicitly because we
+                            // never call maybe_gc inside the
+                            // loop (ruby_eq is read-only).
+                            let pid = self.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                            let pair = Value::Array(pid);
+                            if pair.ruby_eq(&target, &self.heap) {
+                                return Ok(Some(Value::Int(i as i64)));
+                            }
+                        }
+                        Some(Value::Nil)
+                    }
                     // Wrong-arity arm for take / drop — CRuby
                     // raises ArgumentError on the no-arg call
                     // (`h.take` / `h.drop` without an Int). The

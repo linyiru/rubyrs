@@ -13,8 +13,8 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 132 |
-| Examples in corpus | 783 |
-| Skipped `it` traces | 151 |
+| Examples in corpus | 785 |
+| Skipped `it` traces | 150 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 2 |
 | `fixture` | 53 |
-| `method-not-implemented` | 77 |
+| `method-not-implemented` | 76 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -40,7 +40,7 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 35 | 140 | 49 |
+| Hash | 35 | 142 | 48 |
 | Integer | 34 | 303 | 28 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
@@ -83,7 +83,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_empty_spec.rb` | Hash#empty? | `core/hash/empty_spec.rb` | 2 | 0 |
 | `hash_except_spec.rb` | Hash#except | `core/hash/except_spec.rb` | 3 | 1 |
 | `hash_fetch_spec.rb` | Hash#fetch | `core/hash/fetch_spec.rb` | 5 | 1 |
-| `hash_find_index_spec.rb` | Hash#find_index | `core/hash/find_index_spec.rb` | 6 | 1 |
+| `hash_find_index_spec.rb` | Hash#find_index | `core/hash/find_index_spec.rb` | 8 | 0 |
 | `hash_first_spec.rb` | Hash#first | `core/hash/first_spec.rb` | 7 | 0 |
 | `hash_flat_map_spec.rb` | Hash#flat_map | `core/hash/flat_map_spec.rb` | 6 | 1 |
 | `hash_group_by_spec.rb` | Hash#group_by | `core/enumerable/group_by_spec.rb + core/hash/group_by_spec.rb` | 2 | 2 |

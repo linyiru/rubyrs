@@ -35,8 +35,14 @@ describe "Hash#find_index" do
     assert_eq(out, :early)
   end
 
-  # skipped (method-not-implemented): it "with an argument compares each entry via ==" do
-  #   CRuby's `h.find_index(target)` compares each entry
-  #   `<=> target`. Out of subset — block form covers the
-  #   common case.
+  it "with an Array argument compares each entry via == on the [k, v] pair" do
+    h = {a: 1, b: 2, c: 3}
+    assert_eq(h.find_index([:a, 1]), 0)
+    assert_eq(h.find_index([:b, 2]), 1)
+    assert_eq(h.find_index([:z, 99]), nil)
+  end
+
+  it "returns nil for the target form on an empty Hash" do
+    assert_eq({}.find_index([:a, 1]), nil)
+  end
 end
