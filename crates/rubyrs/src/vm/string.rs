@@ -1499,18 +1499,6 @@ impl Vm {
     }
 }
 
-/// Ruby's `String#succ` / `#next` — the "alphanumeric successor".
-/// Walks right-to-left looking for the first alnum char, increments
-/// it; on rollover ('z'→'a', 'Z'→'A', '9'→'0') carries into the
-/// next char left. If the leftmost alnum rolls over, a new char of
-/// the same class is prepended ('z' → 'aa', '9' → '10', 'Az' → 'Ba'
-/// — wait actually 'Az' → 'Ba'? Yes: carry pushes 'A'→'B').
-///
-/// Used both directly (`String#succ` primitive) and by Range#each
-/// over String endpoints for the canonical `('a'..'z').to_a`
-/// iteration. CRuby's full spec covers a few more edge cases
-/// (bracketed-string forms, all-non-alnum) which we don't reach
-/// in the subset; those return the input unchanged.
 /// Hard cap on the expanded char count for a single tr set.
 /// Well above any legitimate human-written usage (full ASCII +
 /// punctuation + a few BMP runs is < 1k chars; the full Unicode
@@ -1605,6 +1593,18 @@ pub(crate) fn parse_count_selector(sel: &str) -> Result<(std::collections::HashS
     Ok((chars.into_iter().collect(), negate))
 }
 
+/// Ruby's `String#succ` / `#next` — the "alphanumeric successor".
+/// Walks right-to-left looking for the first alnum char, increments
+/// it; on rollover ('z'→'a', 'Z'→'A', '9'→'0') carries into the
+/// next char left. If the leftmost alnum rolls over, a new char of
+/// the same class is prepended ('z' → 'aa', '9' → '10', 'Az' → 'Ba'
+/// — wait actually 'Az' → 'Ba'? Yes: carry pushes 'A'→'B').
+///
+/// Used both directly (`String#succ` primitive) and by Range#each
+/// over String endpoints for the canonical `('a'..'z').to_a`
+/// iteration. CRuby's full spec covers a few more edge cases
+/// (bracketed-string forms, all-non-alnum) which we don't reach
+/// in the subset; those return the input unchanged.
 pub(crate) fn str_succ(s: &str) -> String {
     if s.is_empty() {
         return String::new();
