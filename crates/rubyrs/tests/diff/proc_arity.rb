@@ -41,11 +41,10 @@ puts "lambda-rest=#{lambda { |*a| a }.arity}"
 ## by feature-detection idioms before the actual call.
 puts "respond-to=#{proc { }.respond_to?(:arity)}"
 
-## Shape 7: a Proc captured via Method#to_proc round-trips
-## through arity — sinatra's `block.arity` for a route handler
+## Shape 7: a Proc stored in a local round-trips through
+## arity — sinatra's `block.arity` for a route handler
 ## defined as `get('/'){ ... }` works regardless of whether
-## the route was registered via a literal block or a
-## stored Proc.
+## the handler runs inline or via a stored Proc.
 square = proc { |n| n * n }
 puts "stored-proc=#{square.arity}"
 puts "stored-proc-call=#{square.call(5)}"
