@@ -85,9 +85,10 @@ fn swapcase_ascii(s: &str) -> String {
 
 /// `String#sub` core — first-match string replacement.
 /// Empty pattern prepends `repl` (CRuby quirk). Shared by
-/// `sub` / `sub!` so the destructive arm can compare the
-/// computed result against the original to decide between
-/// mutate-and-return-self vs return-nil.
+/// `sub` / `sub!`. The destructive arm gates nil-vs-self on
+/// match presence (`pat.is_empty() || a.contains(pat)`) at
+/// the call site — this helper just produces the rewritten
+/// string and is oblivious to the destructive contract.
 fn sub_str_str_core(a: &str, pat: &str, repl: &str) -> String {
     if pat.is_empty() {
         let mut s = String::with_capacity(repl.len() + a.len());
