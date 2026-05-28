@@ -375,7 +375,13 @@ fn syntax_error_via_require_relative_is_human_readable() {
         "require_relative {:?}",
         path_no_ext.to_string_lossy(),
     );
-    let mut rt = Runtime::new();
+    // `Runtime::new()` defaults to `allow_filesystem_io: false`
+    // since the secure-by-default sandbox landed; this test needs
+    // require_relative to actually reach the temp file, so opt in.
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        ..Default::default()
+    });
     let err = rt.eval(&snippet, "(syntax_err_via_require)").unwrap_err();
     // Cleanup before assertions so a failing assertion still
     // leaves /tmp tidy.

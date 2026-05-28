@@ -2696,13 +2696,23 @@ impl Vm {
                 let fname = self.frames.last()
                     .map(|f| self.protos[f.proto_idx].filename.to_string())
                     .unwrap_or_default();
-                let dir = match std::fs::canonicalize(&fname) {
-                    Ok(real) => real.parent()
+                // With the FS sandbox on, skip the canonicalize
+                // syscall — return the lexical parent directly,
+                // matching the fallback the existing `Err(_) =>`
+                // arm already takes when canonicalize fails.
+                let dir = if self.allow_filesystem_io {
+                    match std::fs::canonicalize(&fname) {
+                        Ok(real) => real.parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| ".".to_string()),
+                        Err(_) => Path::new(&fname).parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| ".".to_string()),
+                    }
+                } else {
+                    Path::new(&fname).parent()
                         .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| ".".to_string()),
-                    Err(_) => Path::new(&fname).parent()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| ".".to_string()),
+                        .unwrap_or_else(|| ".".to_string())
                 };
                 self.stack.push(Value::new_str(dir));
                 return Ok(());

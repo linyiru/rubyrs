@@ -89,6 +89,42 @@ impl Vm {
         Ok(())
     }
 
+    /// Gate every script-callable filesystem-touching site
+    /// (excluding `require`-class loaders — see
+    /// `check_load_allowed` for those). When
+    /// `Config::allow_filesystem_io` is `false` (the secure-by-
+    /// default), returns an `IOError`-class trap so a sandboxed
+    /// script that calls `File.read(...)`, `File.exist?(...)`,
+    /// etc. cannot reach the host filesystem. The error
+    /// `class_name` is `IOError` so `rescue IOError` catches it
+    /// like CRuby's own filesystem errors.
+    ///
+    /// `op` is the user-visible operation name for the trap
+    /// message ("File.read", "File.size", ...) so a trapped
+    /// script gets a clear diagnostic.
+    pub(crate) fn check_filesystem_io_allowed(&self, op: &str) -> Result<(), Trap> {
+        if self.allow_filesystem_io {
+            return Ok(());
+        }
+        Err(self.trap(RubyError::IOError {
+            msg: format!("{op} blocked: filesystem I/O disabled by Config::allow_filesystem_io"),
+        }))
+    }
+
+    /// Gate `require` / `require_relative` / `cext_require`.
+    /// Same `Config::allow_filesystem_io` capability, but raises
+    /// `LoadError` to match CRuby's `require` failure class so
+    /// scripts using `rescue LoadError` catch the sandbox trap
+    /// the same way they'd catch a missing-file `require`.
+    pub(crate) fn check_load_allowed(&self, op: &str) -> Result<(), Trap> {
+        if self.allow_filesystem_io {
+            return Ok(());
+        }
+        Err(self.trap(RubyError::LoadError {
+            msg: format!("{op} blocked: filesystem I/O disabled by Config::allow_filesystem_io"),
+        }))
+    }
+
     /// Build a Trap with a backtrace snapshot taken at the current frame stack.
     pub(crate) fn trap(&self, err: RubyError) -> Trap {
         let mut bt = Vec::with_capacity(self.frames.len());

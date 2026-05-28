@@ -238,6 +238,12 @@ fn main() {
                 }
             }
         })),
+        // CLI binary is the canonical "run untrusted-ish but
+        // trusted-enough Ruby" host — File.* / require /
+        // require_relative MUST work, matching `ruby script.rb`'s
+        // POLA. Embed users that want a sandbox leave the
+        // `Config::allow_filesystem_io: false` default.
+        allow_filesystem_io: true,
     };
 
     // wasi-wizer fast path: if the binary was put through

@@ -546,6 +546,9 @@ impl Vm {
             // opt in by mutating `$LOAD_PATH` themselves.
             "require" => match args {
                 [Value::Str(path)] => {
+                    if let Err(t) = self.check_load_allowed("require") {
+                        return Some(Err(t));
+                    }
                     #[cfg(not(target_os = "wasi"))]
                     {
                         let path_str = path.to_string_lossy();
@@ -717,7 +720,10 @@ impl Vm {
                 // the valid-UTF-8 hot path, only the invalid-UTF-8
                 // fallback owns a String. `to_string_lossy()` would
                 // allocate unconditionally.
-                [Value::Str(path)] => Some(path.with_str_lossy(|s| self.require_relative(s))),
+                [Value::Str(path)] => Some(
+                    self.check_load_allowed("require_relative")
+                        .and_then(|()| path.with_str_lossy(|s| self.require_relative(s))),
+                ),
                 // Distinguish type mismatch from arity: CRuby raises
                 // TypeError for `require_relative :sym`, ArgumentError
                 // for the wrong count. Reporting just "got 1" hides

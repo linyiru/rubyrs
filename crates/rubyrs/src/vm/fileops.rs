@@ -30,6 +30,7 @@ impl Vm {
         Ok(Some(match (name, args) {
             ("read", [p]) => {
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.read")?;
                 // L3-G follow-up: read raw bytes, not UTF-8-validated
                 // String. msgpack/protobuf/binary-protocol fixtures
                 // are not valid UTF-8; the previous read_to_string
@@ -60,6 +61,7 @@ impl Vm {
             }
             ("write", [p, body]) => {
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.write")?;
                 let contents: Vec<u8> = match body {
                     Value::Str(s) => s.content.borrow().clone(),
                     _ => body.to_display(&self.heap, &self.interner).into_bytes(),
@@ -73,6 +75,7 @@ impl Vm {
             }
             ("exist?", [p]) | ("exists?", [p]) | ("file?", [p]) => {
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed(&format!("File.{name}"))?;
                 let exists = std::fs::metadata(&path)
                     .map(|m| if name == "file?" { m.is_file() } else { true })
                     .unwrap_or(false);
@@ -80,11 +83,13 @@ impl Vm {
             }
             ("directory?", [p]) => {
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.directory?")?;
                 let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
                 Value::Bool(is_dir)
             }
             ("size", [p]) => {
                 let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.size")?;
                 match std::fs::metadata(&path) {
                     Ok(m) => Value::Int(m.len() as i64),
                     Err(e) => return Err(self.trap(RubyError::RuntimeError {
@@ -135,9 +140,17 @@ impl Vm {
                 let path = path_arg(p)?;
                 let base: String = match args.get(1) {
                     Some(Value::Str(s)) => s.to_string_lossy(),
-                    _ => std::env::current_dir()
+                    // When the host explicitly didn't supply a
+                    // base, fall back to cwd — but only when the
+                    // sandbox is off. With the sandbox on, the
+                    // host's cwd is treated as host-FS state the
+                    // script shouldn't observe; return "." as a
+                    // safe sentinel matching the no-cwd
+                    // canonicalize-failed branch below.
+                    _ if self.allow_filesystem_io => std::env::current_dir()
                         .map(|d| d.to_string_lossy().into_owned())
                         .unwrap_or_else(|_| ".".to_string()),
+                    _ => ".".to_string(),
                 };
                 let p_path = Path::new(&path);
                 let joined: PathBuf = if p_path.is_absolute() {
@@ -162,9 +175,16 @@ impl Vm {
                 // If the path exists, prefer `canonicalize`'s
                 // symlink-resolved form (matches CRuby on
                 // existent files); otherwise return the
-                // lexically resolved form.
-                let final_path = std::fs::canonicalize(&resolved)
-                    .unwrap_or(resolved);
+                // lexically resolved form. When the FS sandbox
+                // is on (`Config::allow_filesystem_io: false`),
+                // skip the canonicalize syscall entirely — the
+                // lexical form is what CRuby would return for a
+                // non-existent path, and it's filesystem-free.
+                let final_path = if self.allow_filesystem_io {
+                    std::fs::canonicalize(&resolved).unwrap_or(resolved)
+                } else {
+                    resolved
+                };
                 Value::new_str(final_path.to_string_lossy().into_owned())
             }
             _ => return Ok(None),

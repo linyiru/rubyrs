@@ -205,6 +205,34 @@ pub struct Config {
     /// explicitly. Deterministic-test hosts inject a fixed
     /// `|| (1_700_000_000, 0)` closure for reproducible output.
     pub time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
+    /// Filesystem-access capability gate. When `false` (the
+    /// secure-by-default), every script-callable path that
+    /// touches the filesystem traps with `IOError` /
+    /// `LoadError` instead of executing the syscall. Covers:
+    ///
+    /// - `File.read` / `.write` / `.exist?` / `.exists?` /
+    ///   `.file?` / `.directory?` / `.size` — class methods
+    ///   that read or write the FS.
+    /// - `File.expand_path` — falls back to its lexical-only
+    ///   path (matches CRuby's behaviour for non-existent
+    ///   paths) instead of calling `canonicalize`.
+    /// - `__dir__` — falls back to the lexical parent instead
+    ///   of `canonicalize`-ing the source filename.
+    /// - `require` / `require_relative` / `cext_require` —
+    ///   load paths trap with `LoadError`, so a sandboxed
+    ///   script cannot pull in new code from disk.
+    ///
+    /// Pure-lexical operations (`File.basename`, `File.dirname`,
+    /// `File.extname`) are not gated — they're string
+    /// manipulation that happens to operate on path-shaped
+    /// input. `STDIN` / `STDOUT` / `STDERR` are not "filesystem
+    /// I/O" in the sandbox sense and remain available.
+    ///
+    /// The CLI binary `rubyrs` opts in by setting `true`. Fuzz
+    /// harnesses, sandbox / gemspec evaluators, and any embed
+    /// that processes untrusted Ruby leave the default; the
+    /// filesystem is off-limits.
+    pub allow_filesystem_io: bool,
 }
 
 impl Default for Config {
@@ -239,6 +267,11 @@ impl Default for Config {
             env: None,
             pid: None,
             time_now: None,
+            // Secure-by-default: library embedders evaluating
+            // untrusted Ruby get a sandbox where File.* / require
+            // / __dir__ cannot reach the host filesystem. The CLI
+            // binary opts in explicitly via `Config { allow_filesystem_io: true, .. }`.
+            allow_filesystem_io: false,
         }
     }
 }
@@ -586,6 +619,15 @@ struct ResourceCaps {
     // preamble keeps Runtime construction time observably
     // independent of the host's stress_gc choice.
     stress_gc: bool,
+    // `allow_filesystem_io` is a capability, not a budget — lifted
+    // here on the same "preamble is internal infrastructure, host
+    // caps don't constrain it" principle. Current preamble
+    // fragments are baked in via `include_str!` so they don't
+    // touch the FS, but lifting future-proofs the case where a
+    // preamble addition would want to read a file (e.g., a
+    // platform-specific config) at construction time regardless
+    // of the host's sandbox setting.
+    allow_filesystem_io: bool,
 }
 
 impl ResourceCaps {
@@ -608,6 +650,9 @@ impl ResourceCaps {
             max_live: rt.vm.heap.max_live.take(),
             deadline: rt.deadline.take(),
             stress_gc: std::mem::replace(&mut rt.vm.stress_gc, false),
+            // Lift to `true` during preamble — see field comment
+            // for the "preamble is internal" rationale.
+            allow_filesystem_io: std::mem::replace(&mut rt.vm.allow_filesystem_io, true),
         }
     }
 
@@ -622,6 +667,7 @@ impl ResourceCaps {
         rt.vm.heap.max_live = self.max_live;
         rt.deadline = self.deadline;
         rt.vm.stress_gc = self.stress_gc;
+        rt.vm.allow_filesystem_io = self.allow_filesystem_io;
     }
 }
 
@@ -824,6 +870,7 @@ impl Runtime {
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
         self.vm.time_now = cfg.time_now;
         self.deadline = cfg.deadline;
+        self.vm.allow_filesystem_io = cfg.allow_filesystem_io;
     }
 
     /// Rewind the Runtime to its post-preamble state — every class,

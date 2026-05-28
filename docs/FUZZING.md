@@ -178,39 +178,52 @@ sees the connection.
 
 ## Known limits + future work
 
-One concrete gap remains on the table.
+No outstanding gaps from the initial fuzz-tier rollout — see
+"Historical: closed gaps" below for the three items that motivated
+the embed-API work surrounding the harness.
 
-### Filesystem sandbox covers `require` only
-
-`ensure_sandbox_cwd` moves the process cwd into a tempdir, which
-makes `require '<relative>'` and `require_relative '...'` look
-up against an empty directory. It does **not** intercept:
-
-- `File.open(absolute_path)` / `IO.read(absolute_path)` —
-  absolute paths ignore cwd.
-- `Dir.glob('/etc/*')` — same.
-- `__FILE__` / `__dir__` resolved against the host's repo
-  layout.
-- `require '<absolute>'` (rare but a real Ruby shape).
-
-Libfuzzer's coverage-guided mutation will eventually walk into
-the `vm/fileops.rs` arms via byte sequences shaped like
-`File.open(...)`. When that happens, the sandbox is irrelevant.
-
-The right fix is `Config { allow_filesystem_io: bool }` (or
-stricter, `allowed_paths: Option<Vec<PathBuf>>`) honoured
-uniformly across every I/O sink in `vm/`. Same need lives in
-`rubund`, which evaluates untrusted gemspecs; landing the API
-there benefits both consumers and removes the cwd-tempdir trick
-as a per-consumer rediscovery.
+A future `allowed_paths: Option<Vec<PathBuf>>` allowlist (stricter
+than the current bool flag) is a possible follow-up if rubund's
+gemspec-evaluator use case ever needs scoped FS access — `Config {
+allow_filesystem_io: true, allowed_paths: Some(vec![gem_root]) }`
+shape. Out of scope until a real consumer needs it.
 
 ## Historical: closed gaps
 
-The next two sections describe gaps that were closed during the
+The next three sections describe gaps that were closed during the
 initial fuzz-harness rollout. They're kept here as anchors for
 the follow-up work they motivated — re-flagging the same items
 as "future work" would be misleading. New gaps belong above
 under "Known limits + future work".
+
+### ~~Filesystem sandbox covers `require` only~~ — fixed in PR (current)
+
+`ensure_sandbox_cwd` moves the process cwd into a tempdir, which
+made `require '<relative>'` look up against an empty directory but
+didn't intercept absolute-path File.* / IO.read / Dir.glob /
+`__FILE__` / `__dir__` / `require '<absolute>'`. Libfuzzer's
+coverage-guided mutation would eventually walk into the
+`vm/fileops.rs` arms via byte sequences shaped like
+`File.open(...)`; when that happened, the cwd sandbox would be
+irrelevant.
+
+Closed by `Config::allow_filesystem_io: bool` (secure-by-default
+`false`) gating every script-callable FS sink at the embed-API
+layer: `File.read` / `.write` / `.exist?` / `.exists?` / `.file?` /
+`.directory?` / `.size` (→ `IOError`), `require` /
+`require_relative` / `cext_require` (→ `LoadError`), `__dir__`
+(falls back to lexical Path::parent), `File.expand_path` (falls
+back to lexical resolution, no canonicalize syscall and no cwd
+leak). Pure-lexical methods (`basename` / `dirname` / `extname`)
+are not gated — they're string manipulation on path-shaped input.
+
+The cwd-tempdir trick in `ensure_sandbox_cwd` stays as
+defense-in-depth at the syscall layer, but the cap is the
+load-bearing sandbox now.
+
+Tests: `tests/embed/filesystem_sandbox.rs` (12 cases covering
+each gated method, the lexical fallbacks, mid-life `apply_config`
+tighten, and `rescue IOError` from script code).
 
 ### ~~Runtime preamble rebuilt every iteration~~ — fixed in PR #212 + adoption PR
 

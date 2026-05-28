@@ -26,6 +26,8 @@ mod dispatch_quirks;
 mod equality;
 #[path = "embed/error_handling.rs"]
 mod error_handling;
+#[path = "embed/filesystem_sandbox.rs"]
+mod filesystem_sandbox;
 #[path = "embed/gc.rs"]
 mod gc;
 #[path = "embed/misc.rs"]

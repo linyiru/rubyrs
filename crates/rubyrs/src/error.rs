@@ -102,6 +102,19 @@ pub enum RubyError {
     /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
     /// when a Runtime was configured with caps for untrusted scripts.
     ResourceExhausted { msg: String },
+    /// Filesystem I/O blocked by the
+    /// `Config::allow_filesystem_io: false` sandbox cap. Raised by
+    /// `Vm::check_filesystem_io_allowed` from every File.* class
+    /// method, by `__dir__` (when canonicalize is gated), and by
+    /// anything else that touches the host filesystem outside the
+    /// `require` family. Rescuable via `rescue IOError`.
+    IOError { msg: String },
+    /// `require` / `require_relative` / `cext_require` blocked by
+    /// the FS sandbox cap. Distinct from `IOError` so scripts can
+    /// `rescue LoadError` for "feature unavailable" without
+    /// catching every File.* failure. Raised by
+    /// `Vm::check_load_allowed`.
+    LoadError { msg: String },
     /// A Ruby-level `raise` whose exception class wasn't caught by any
     /// `rescue` clause on the call stack. Carries the script's class
     /// name and message so the host can log/format whatever it likes,
@@ -144,6 +157,10 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     // ADR 0008: hosts must not be able to swallow their own
     // resource trap via a bare `rescue` clause.
     ("ResourceExhausted", "Exception"),
+    ("IOError", "StandardError"),
+    ("ScriptError", "Exception"),
+    ("LoadError", "ScriptError"),
+    ("NotImplementedError", "ScriptError"),
 ];
 
 impl RubyError {
@@ -242,6 +259,8 @@ impl RubyError {
             RubyError::ZeroDivisionError { .. } => "ZeroDivisionError",
             RubyError::RangeError { .. } => "RangeError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
+            RubyError::IOError { .. } => "IOError",
+            RubyError::LoadError { .. } => "LoadError",
             // Uncaught carries the actual class name from the script's
             // exception object; static-class machinery doesn't apply.
             // Hosts that want the Ruby-level class name should pattern-
@@ -262,7 +281,9 @@ impl RubyError {
             | RubyError::LocalJumpError { msg }
             | RubyError::ZeroDivisionError { msg }
             | RubyError::RangeError { msg }
-            | RubyError::ResourceExhausted { msg } => msg.clone(),
+            | RubyError::ResourceExhausted { msg }
+            | RubyError::IOError { msg }
+            | RubyError::LoadError { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),
             RubyError::NoMethodError { method, recv_type } => {
                 format!("undefined method `{}' for {}", method, recv_type)

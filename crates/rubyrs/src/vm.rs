@@ -412,6 +412,13 @@ pub(crate) struct Vm {
     pub(crate) pinned: Vec<Value>,
     pub(crate) stdout: Box<dyn std::io::Write>,
     pub(crate) stress_gc: bool,
+    /// Mirror of `Config::allow_filesystem_io`. Set by
+    /// `apply_config` (and the preamble snapshot path); read by
+    /// every script-callable FS-touching site via
+    /// `Vm::check_filesystem_io_allowed`. `false` (the default)
+    /// makes File.*/require/__dir__ trap; `true` lets them
+    /// through.
+    pub(crate) allow_filesystem_io: bool,
     /// Per-eval working counter; `Some(0)` means exhausted, `None`
     /// means unlimited. Re-anchored at each `Runtime::eval` entry
     /// from `Runtime::fuel_budget` (which `apply_config` writes
@@ -613,6 +620,10 @@ impl Vm {
             // into `Config.stress_gc`, and reaches the Vm via
             // `apply_config`.
             stress_gc: false,
+            // Secure-by-default — matches Config::default's
+            // `allow_filesystem_io: false`. CLI / FS-needing
+            // embedders flip this via `apply_config`.
+            allow_filesystem_io: false,
             fuel: None,
             max_frames: None,
             deadline_at: None,
