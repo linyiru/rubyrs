@@ -412,6 +412,14 @@ impl Vm {
                     // `[[:a, 1], [:b, 2]]`. (TRY_RUNS layer #25
                     // pre-existing gap surfaced by the fixture.)
                     Value::Hash(hid) => {
+                        // Pattern mirrors `Hash#to_a` (vm/hash.rs):
+                        // per-pair `maybe_gc` and pinning of the
+                        // freshly-allocated pair_id so a future
+                        // refactor making `heap.alloc` GC-triggering
+                        // doesn't sweep accumulated entries. K/V
+                        // sources are pinned up front; each new
+                        // pair_id is pinned as it's built. Layer #25
+                        // code-review follow-up.
                         let pairs: Vec<(Value, Value)> = self.heap.hash(*hid).iter()
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
@@ -420,13 +428,17 @@ impl Vm {
                             g.pin(k.clone());
                             g.pin(v.clone());
                         }
-                        g.vm.maybe_gc();
-                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
                         let mut entries: Vec<Value> = Vec::with_capacity(pairs.len());
                         for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
                             let pair_id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![k, v]));
-                            entries.push(Value::Array(pair_id));
+                            let pair_val = Value::Array(pair_id);
+                            g.pin(pair_val.clone());
+                            entries.push(pair_val);
                         }
+                        g.vm.maybe_gc();
+                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
                         let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(entries));
                         Some(Ok(Value::Array(id)))
                     }

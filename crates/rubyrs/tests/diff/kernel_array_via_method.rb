@@ -48,3 +48,42 @@ puts "class-method=#{Container.combine(1, [2, 3], nil, 4).inspect}"
 puts "method-integer=#{method(:Integer).call('42').inspect}"
 puts "method-float=#{method(:Float).call('3.14').inspect}"
 puts "method-string=#{method(:String).call(42).inspect}"
+
+## Shape 6: `method_missing` wins over the Kernel fallback —
+## CRuby's `Kernel#Array` is private, so `obj.Array(x)` raises
+## NoMethodError-private, which method_missing intercepts.
+## (code-review #267 #1.)
+class WithMM
+  def method_missing(name, *args)
+    "mm:#{name}:#{args.inspect}"
+  end
+end
+puts "mm-array=#{WithMM.new.Array(1).inspect}"
+puts "mm-integer=#{WithMM.new.Integer('42').inspect}"
+
+## Shape 7: `obj.eval(...)` with explicit receiver raises
+## NoMethodError (Kernel#eval is private; the receiver would
+## be silently discarded). The `method(:eval).call(src)`
+## roundtrip still works via the no_recv path. (code-review
+## #267 #3.)
+err = begin
+  Object.new.eval("1 + 1")
+  "DID-NOT-RAISE"
+rescue NoMethodError
+  "NoMethodError"
+end
+puts "obj-eval=#{err}"
+
+## Shape 8: `respond_to?` returns false for all 7 Kernel
+## module functions on a non-Kernel-mixin receiver. Matches
+## CRuby — these are private instance methods on Kernel, and
+## `respond_to?` excludes privates by default. Documented
+## divergence: rubyrs's fallback in `do_call` succeeds on
+## these calls anyway (no private-method visibility model)
+## when no method_missing intercepts, where CRuby raises
+## NoMethodError-private. (code-review #267 #4 ended up as a
+## false flag — the consistency CRuby exhibits is "false /
+## NoMethodError-private", not "true / call succeeds".)
+%i[Array Integer Float String sprintf format eval].each do |n|
+  puts "respond-#{n}=#{Object.new.respond_to?(n)}"
+end
