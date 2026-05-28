@@ -171,3 +171,20 @@ class A9; end
   end
   puts "#{shape}=#{err}"
 end
+
+## Shell's ancestor chain reaches the real class's superclass
+## tower — pinned to prevent regression of pre-PR behavior
+## (the Tier-1 stub returned the receiver itself, so
+## `A.singleton_class.ancestors.include?(Object)` was true
+## via A's chain). The new shell keeps this by pointing
+## `shell.superclass` at the real class's superclass. Not
+## CRuby's exact metaclass tower
+## (`#<Class:A> < #<Class:Object> < … < Class`) but a
+## reasonable Tier-1 approximation. (Code-review #253 round
+## 9 #2.) The exact superclass name diverges between rubyrs
+## (`Object`) and CRuby (`#<Class:Object>`); pin only the
+## behavior idioms care about.
+class A10
+end
+puts "shell-anc-includes-Object=#{A10.singleton_class.ancestors.include?(Object)}"
+puts "shell-superclass-nonnil=#{!A10.singleton_class.superclass.nil?}"

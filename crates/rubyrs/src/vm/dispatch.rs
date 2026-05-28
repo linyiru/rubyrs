@@ -1544,13 +1544,29 @@ impl Vm {
                     if let Some(existing) = slot.as_ref() {
                         existing.clone()
                     } else {
+                        // Point the shell's superclass at the real
+                        // class's own superclass so
+                        // `A.singleton_class.ancestors.include?(Object)`
+                        // and `A.singleton_class.superclass`
+                        // both behave reasonably for code that
+                        // walks the metaclass chain — matches the
+                        // pre-PR Tier-1 stub's effective behavior
+                        // (the stub returned the receiver itself,
+                        // so `.superclass` was the real class's
+                        // superclass). NOT CRuby's exact metaclass
+                        // tower (`#<Class:A> < #<Class:Object> <
+                        // … < Class`), but a close-enough Tier-1
+                        // approximation that doesn't regress the
+                        // common idiom. (Code-review #253 round 9
+                        // #2.)
+                        let shell_superclass = cls.superclass.borrow().clone();
                         let v = std::rc::Rc::new(crate::value::Class {
                             name: format!("#<Class:{}>", cls.name),
                             is_module: false,
                             ivars: std::cell::RefCell::new(HashMap::new()),
                             methods: std::cell::RefCell::new(HashMap::new()),
                             singleton_methods: std::cell::RefCell::new(HashMap::new()),
-                            superclass: std::cell::RefCell::new(None),
+                            superclass: std::cell::RefCell::new(shell_superclass),
                             includes: std::cell::RefCell::new(Vec::new()),
                             prepends: std::cell::RefCell::new(Vec::new()),
                             singleton_prepends: std::cell::RefCell::new(Vec::new()),
