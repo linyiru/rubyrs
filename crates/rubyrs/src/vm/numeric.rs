@@ -379,6 +379,14 @@ pub(crate) fn numeric_call(
                         msg: "divided by 0".to_string(),
                     });
                 }
+                // `i64::MIN / -1` overflows: result is 2^63 which
+                // doesn't fit i64. Under bignum decline so the
+                // method-call dispatch falls through to
+                // `bigint_arith` for promotion. Under no-bignum
+                // wrap (matches the existing wrapping convention
+                // for `+`/`-`/`*` overflow).
+                #[cfg(feature = "bignum")]
+                if *a == i64::MIN && *b == -1 { return Ok(None); }
                 Some(Value::Int(floor_div_i64(*a, *b)))
             }
             "%" => {
@@ -918,9 +926,12 @@ fn try_int_shl_lossless(a: i64, shift: i64) -> Option<i64> {
 /// `floor(a/b)` (not truncating toward zero like Rust's `/`),
 /// so e.g. `(-13) / 4` is -4 (Rust: -3) and `13 / (-4)` is -4
 /// (Rust: -3). Uses `wrapping_div` to side-step the
-/// `i64::MIN / -1` overflow panic — that exact pair promotes to
-/// BigInt elsewhere; here it wraps quietly to i64::MIN, which
-/// the BigInt promotion path replaces before the user sees it.
+/// `i64::MIN / -1` overflow panic — for that exact pair this
+/// returns `i64::MIN` (the wrapping result). Callers under
+/// `bignum` short-circuit before reaching this helper (returning
+/// None so `bigint_arith` promotes to a BigInt 2^63); under
+/// no-bignum the wrapping result surfaces, matching the existing
+/// wrapping-on-overflow convention for `+`/`-`/`*`.
 ///
 /// Caller must ensure `b != 0` (ZeroDivisionError fires upstream).
 pub(crate) fn floor_div_i64(a: i64, b: i64) -> i64 {
@@ -949,18 +960,30 @@ pub(crate) fn floor_mod_i64(a: i64, b: i64) -> i64 {
 }
 
 /// CRuby-style floor modulus on f64. CRuby's `Numeric#%` for
-/// Float matches `floor(a/b)` semantics too: sign of `r` follows
+/// Float matches `floor(a/b)` semantics: sign of `r` follows
 /// sign of `b`. Rust's `f64::%` truncates toward zero, so
-/// `(-13.0) % 4.0` is `-1.0` in Rust but `3.0` in CRuby. Use
-/// `rem_euclid` for the magnitude then flip sign per `b`.
+/// `(-13.0) % 4.0` is `-1.0` in Rust but `3.0` in CRuby.
+///
+/// Mirrors the i64 helper's shape: compute `r = a % b` (Rust's
+/// truncating rem), then add `b` if `r` and `b` have opposite
+/// signs. This avoids the `0.0 * Infinity = NaN` trap of the
+/// `a - (a/b).floor() * b` formulation: `1.0 % Infinity` is 1.0
+/// here (CRuby parity), not NaN.
+///
+/// NaN / NaN-propagation: if either operand is NaN, Rust's `%`
+/// returns NaN, the sign comparison short-circuits (NaN < 0 is
+/// false on both sides), and we return NaN — matches CRuby.
 pub(crate) fn floor_mod_f64(a: f64, b: f64) -> f64 {
-    // f64::rem_euclid already gives "non-negative remainder of
-    // a/|b|" for finite b; for negative b we then need to subtract
-    // |b| to land in (b, 0].
-    let r = a - (a / b).floor() * b;
-    // Above can produce -0.0 when a / b is integral; CRuby emits
-    // +0.0 in that case. Normalise.
-    if r == 0.0 { 0.0 } else { r }
+    let r = a % b;
+    if r != 0.0 && (r < 0.0) != (b < 0.0) {
+        r + b
+    } else if r == 0.0 {
+        // f64::% can yield -0.0 when the quotient is integral;
+        // CRuby emits +0.0. Normalise.
+        0.0
+    } else {
+        r
+    }
 }
 
 /// CRuby-parity lossless three-way comparison between an Int

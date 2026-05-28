@@ -481,6 +481,20 @@ impl BinOpKind {
             // fast path stay in lock-step. See
             // `crate::vm::numeric::floor_div_i64` /
             // `floor_mod_i64`.
+            //
+            // `i64::MIN / -1` is the one overflow case: the result
+            // `2^63` doesn't fit i64. Bignum builds return None
+            // here so the caller's `bigint_arith` fallback promotes
+            // to BigInt (matching CRuby parity). No-bignum builds
+            // wrap to `i64::MIN` per the existing wrapping
+            // convention (documented saturation). `% -1` is
+            // always 0 — no overflow.
+            #[cfg(feature = "bignum")]
+            BinOpKind::Div => {
+                if a == i64::MIN && b == -1 { return None; }
+                Value::Int(crate::vm::floor_div_i64(a, b))
+            }
+            #[cfg(not(feature = "bignum"))]
             BinOpKind::Div => Value::Int(crate::vm::floor_div_i64(a, b)),
             BinOpKind::Mod => Value::Int(crate::vm::floor_mod_i64(a, b)),
             BinOpKind::Lt => Value::Bool(a < b),
