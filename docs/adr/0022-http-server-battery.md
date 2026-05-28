@@ -2,13 +2,45 @@
 
 ## Status
 
-Proposed (2026-05-27). **v5** — fifth revision, adding 4
-DX / observability features derived from a Bun.serve API
-analysis. v1 (commit `88564485`), v2 (commit `ea92dec1`),
-v3 (commit `ccf9f4c7`), v4 (commit `2e24f153`) kept in git
-history. First Tier 3 native battery ADR per
+Proposed (2026-05-27). **v6** — sixth revision, syncing
+the ADR to ground truth after Phase H1 PoC stages 6 + 7
+plus the FU1-6 follow-ups and the A1-3 polish round. The
+Hash-arg refactor (FU4) is the most user-visible change;
+the supervisor (FU2 + A2) and signal forwarding (FU1)
+together make pre-fork production-shape. v1 (commit
+`88564485`), v2 (`ea92dec1`), v3 (`ccf9f4c7`), v4
+(`2e24f153`), v5 (`5e9cab6c`) kept in git history. First
+Tier 3 native battery ADR per
 [ADR 0019 v3](0019-tier2-tier3-boundary.md) Rule 7;
 establishes the template for subsequent battery ADRs.
+
+**v5 → v6 changes** (Stage 7 + FU + A round; see also the
+"v6 — Stage 7 + FU + A outcomes" subsection further down
+for the full change matrix):
+
+- **Stage 7 pre-fork shipped**: `bind_reuseport_v4` + libc::fork
+  supervisor + `run_one_child_worker` extracted helper.
+- **FU1 signal forwarding**: static `PREFORK_CHILD_PIDS`
+  AtomicI32 table + sigaction handler with SA_RESTART;
+  children get `install_signal_handler=true` forced ON.
+- **FU2 + A2 supervisor**: non-blocking `waitpid(-1, WNOHANG)`
+  poll; **per-slot** crash-loop counting (A2 lifted FU2's
+  process-wide counter); shutdown flag coordination.
+- **FU3 macOS investigation**: Darwin has no
+  `SO_REUSEPORT_LB` (verified against libc 0.2.169+);
+  documented as dev-only.
+- **FU4abc Hash-arg refactor**: 10 positional args
+  collapsed to `(addr, secs, app, options_hash)`. Bun
+  parity. `ServeOptions` + `parse_serve_options` parser
+  with typo guard + per-host-fn restricted key set.
+- **FU5 env-var tunables**: `RUBYRS_PREFORK_MAX_RESTARTS`
+  + `RUBYRS_PREFORK_RESTART_WINDOW_SECS`.
+- **FU6 nil-as-absent**: `parse_serve_options` skips
+  `Value::Nil` instead of type-erroring.
+- **A1 FreeBSD `SO_REUSEPORT_LB`** wired (kernel hash-LB).
+- **A3α iterable body**: `marshal_rack_response` accepts
+  Array OR any object responding to `to_a`. True async
+  streaming (A3β) deferred.
 
 **v4 → v5 additions** (Bun.serve-derived):
 - `idle_timeout` config field — connection keep-alive cap,
@@ -1205,7 +1237,231 @@ from H3.
 - Multi-threaded tokio; Vms still single-threaded
   individually
 
-## What changes vs ADR 0022 v4 (this revision is v5)
+## v6 — Stage 7 + FU + A outcomes
+
+This revision documents what landed between v5 (Stage 6 era)
+and v6 — the Stage 7 pre-fork series plus 6 follow-ups
+(FU1-6) plus the A1-3 hardening round. All of these are
+ON master and tested; this section is post-hoc
+documentation of decisions made, not new proposals.
+
+### Stage 7 — pre-fork multi-core (Unix)
+
+**Layered implementation**:
+
+| Sub-stage | Function added | Test surface |
+|-----------|---------------|--------------|
+| 7a | `bind_reuseport_v4(addr) -> io::Result<std::net::TcpListener>` (cfg(unix) only) | 3 unit tests (dual-bind, port 0, privileged port rejection) |
+| 7b | `run_blocking_for_duration_with_app_on_listener(std_listener, ...)` — runtime built post-handoff inside this fn | 1 in-process test via custom host fn |
+| 7c | `__rubyrs_http_serve_prefork(addr, secs, app, n_workers, options)` N=1 path | 5 unit tests (boot invoked, raise aborts, no-boot serves, N≥2 rejected, N<1 rejected) |
+| 7d | Real `libc::fork()` for N≥2 + waitpid; child uses `libc::exit()` not Rust unwind | 1 subprocess test (forking inside cargo test would kill the runner) |
+| 7e | `examples/prefork_server.rb` + README "HTTP server battery" section + platform matrix | manual smoke + docs |
+
+**Fork-safety contract** (Stage 7d):
+
+1. Parent forks N times via `libc::fork()` at most once per
+   slot for initial setup.
+2. Each child IMMEDIATELY resets SIGINT/SIGTERM to
+   `SIG_DFL` (parent's forwarding handler is COW-inherited
+   but its pid table is now stale in the child's copy).
+3. Child calls `bind_reuseport_v4(addr)` — must be
+   POST-fork because the listener FD shouldn't be shared
+   across processes (each child gets its own FD pointing
+   at the same `(addr, port)`).
+4. Child builds tokio runtime via
+   `run_blocking_for_duration_with_app_on_listener` —
+   runtime MUST be built post-fork because tokio's
+   kqueue/epoll FD is a shared kernel object that
+   produces non-deterministic event delivery if inherited.
+5. Child terminates via `libc::exit(code)`, NOT Rust
+   unwind. Rust drop handlers are mostly fork-safe but
+   Apple's CoreFoundation/dispatch cluster is officially
+   fork-unsafe; `libc::exit` short-circuits all of that.
+6. Child flushes stdout/stderr explicitly before
+   `libc::exit` — that path skips Rust's normal drop-time
+   flush, so piped subprocess stdouts (fully-buffered)
+   would otherwise drop output.
+
+**Platform matrix (Stage 7 + A1)**:
+
+| Platform | Single-process | Pre-fork N≥2 | Reason |
+|----------|---------------|--------------|--------|
+| Linux 3.9+ | ✅ | ✅ | `SO_REUSEPORT` implies kernel hash-LB |
+| FreeBSD | ✅ | ✅ (since A1) | `SO_REUSEPORT_LB=0x10000` wired explicitly via `socket2::set_reuse_port_lb` |
+| macOS / Darwin | ✅ | ⚠️ dev-only | No `SO_REUSEPORT_LB`; kernel routes to most-recent listener; CoreFoundation/dispatch fork-unsafe |
+| Windows | ✅ | ❌ | No `fork(2)`; no SO_REUSEPORT equivalent. N≥2 returns ArgumentError. |
+
+### FU1 — active SIGINT/SIGTERM forwarding
+
+**Problem v5/Stage 7d had**: parent relied on process-
+group-default propagation. `Command::spawn()` doesn't
+detach pgroup by default — external `kill <parent_pid>`
+from a process manager that doesn't know about the
+grandchildren wouldn't propagate to workers.
+
+**Design**:
+
+- `PREFORK_CHILD_PIDS: [AtomicI32; 64]` static, size-capped
+  (`MAX_PREFORK_WORKERS=64` covers any realistic CPU
+  count). AtomicI32 because the sig handler reads the
+  table; lock-free reads are async-signal-safe.
+- `prefork_forward_signal(sig)` sigaction handler walks
+  the table + calls `libc::kill(pid, sig)` for each
+  non-zero slot. `kill(2)` is on POSIX §2.4.3's async-
+  signal-safe list.
+- `install_prefork_signal_handlers()` sets
+  `sa_sigaction = prefork_forward_signal` for SIGINT +
+  SIGTERM, flags = `SA_RESTART` so the parent's blocking
+  waitpid resumes after the handler (instead of failing
+  with EINTR).
+- Children get `install_signal_handler=true` forced ON
+  in the fork path so their tokio accept loop's
+  `select!` cuts short on the forwarded signal — they
+  don't wait for the duration timer.
+- Parent's `PREFORK_SHUTDOWN_REQUESTED: AtomicBool` is
+  set by the handler. The FU2 supervisor checks this
+  flag and skips restart for any child that exits
+  AFTER shutdown — without this, every signal-forwarded
+  clean exit would look like a crash.
+
+**Subprocess test** (`prefork_signal_forwarding_cuts_serving_short`):
+sends SIGTERM to parent's pid alone (NOT pgroup), asserts
+binary exits within 5s (vs the 30s duration timer).
+
+### FU2 + A2 — restart-on-crash supervisor
+
+**FU2 baseline** (process-wide):
+
+- Replaced blocking `waitpid(cpid, 0)` per-child with
+  `waitpid(-1, WNOHANG)` poll loop + 50ms backoff.
+- When a child exits before deadline: fork replacement
+  into the same slot (`PREFORK_CHILD_PIDS[slot_idx]`).
+- `restart_log: Vec<Instant>` tracked restart times;
+  pruned entries older than 60s.
+- If 5 restarts happened within the 60s window:
+  "halt the supervisor" (SIGTERM remaining workers,
+  stop respawning).
+- Deadline respect: once `duration_secs` from supervisor
+  start elapsed, SIGTERM remaining + reap + exit.
+
+**A2 refinement** (per-slot):
+
+- `restart_log` became `restart_logs: Vec<Vec<Instant>>`
+  indexed by worker_index. `crash_loop_tripped: bool`
+  became `tripped: Vec<bool>` indexed by slot.
+- A bad slot now trips ITS OWN guard; other slots keep
+  serving until their own guard trips or duration expires.
+- Diagnostic changed from "halting supervisor" to
+  "crash-loop detected for slot N; stopping respawn for
+  this slot" — captures the per-slot semantic.
+- Matches Puma/Unicorn behavior where one bad worker
+  doesn't kill the pool.
+
+**FU5 env-var tunables**: `RUBYRS_PREFORK_MAX_RESTARTS` +
+`RUBYRS_PREFORK_RESTART_WINDOW_SECS`. Read once at
+supervisor entry; invalid / zero / unset values fall
+back to 5 / 60. Lets ops tighten the guard for known-bad
+deployments AND lets the FU5 subprocess test trip the
+guard with `MAX_RESTARTS=2` reliably.
+
+**Subprocess tests** (FU2 + A2 combined):
+
+- `prefork_restarts_killed_child` — SIGKILL one worker
+  via `pgrep -P`; assert supervisor logs "restarted
+  worker" + ≥3 total BOOTED markers.
+- `prefork_crash_loop_guard_halts_supervisor` (FU5) —
+  with `MAX_RESTARTS=2`, both workers crash on boot;
+  expect 4 restarts (2 per slot, per-slot semantic from
+  A2) before both slots trip; binary exits < 10s.
+- `prefork_per_slot_guard_isolates_bad_slot` (A2) —
+  idx==0 crashes, idx==1 succeeds; slot 0 trips its
+  guard while slot 1 keeps serving 200s. Process exits
+  via duration timer, not via global halt.
+
+### FU3 — macOS SO_REUSEPORT distribution investigation
+
+**Result**: no code change possible. Verified against
+`libc 0.2.169+ unix/bsd/apple/mod.rs`: Darwin exposes
+ONLY `SO_REUSEPORT = 0x0200`. There is NO
+`SO_REUSEPORT_LB` constant — the FreeBSD kernel-LB
+variant doesn't exist in Apple's BSD fork. Multiple
+binds succeed but the kernel routes new connections to
+the most-recently-bound listener.
+
+**Documented**:
+
+- `bind_reuseport_v4` doc-comment per-platform breakdown
+- README HTTP server platform table (4 platforms with
+  concrete notes per row)
+- `examples/prefork_server.rb` doc-block
+
+For users wanting kernel-LB on macOS: deploy on Linux,
+put nginx/HAProxy in front, or implement userspace
+FD-passing from parent to children via Unix domain
+sockets (out of PoC scope).
+
+### FU4 — Hash-arg refactor
+
+**Problem v5 had**: `__rubyrs_http_serve_with_app` grew
+to 10 positional arities (3/4/5/6/7/8/9/10 args) over
+Stages 6 + 7. Each new knob added an arity branch.
+
+**FU4abc solution**:
+
+- `ServeOptions` struct carrying all 8 knobs (Optional /
+  bool) — single source of truth.
+- `parse_serve_options(vm, hash_id, allowed_keys)` walks
+  the Hash via `vm.heap.hash(id)`, resolves Symbol keys
+  via `vm.interner.resolve()`, also accepts String keys.
+- `allowed_keys` restricts per host fn — `with_app`
+  rejects `on_worker_boot`, `prefork` accepts all.
+- Unknown key → ArgumentError listing every accepted key
+  (typo guard). Type mismatch → ArgumentError naming the
+  key + expected type.
+- `__rubyrs_http_serve_with_app` shape: `(addr, secs,
+  app)` for all defaults OR `(addr, secs, app,
+  options_hash)`. Same shape for prefork (+`n_workers`).
+- Net diff: -67 lines across both host fns vs the
+  positional matcher.
+
+**FU4c side benefit**: prefork now actually threads all
+security knobs through to each child's serve loop. Pre-
+FU4c, prefork hardcoded None / false for everything;
+embedders couldn't set per-request fuel etc. on a
+prefork server.
+
+### FU6 — nil-as-absent
+
+`parse_serve_options` skips per-key extraction when the
+value is `Value::Nil`. Common Ruby idiom — keys coming
+from another Hash often arrive as nil when not set
+(`cfg[:on_error]` returns nil if not configured).
+Unknown-key typo guard still fires; only the value-
+type check is softened.
+
+### A3α — iterable body via to_a
+
+`marshal_rack_response` now accepts body that's either
+an Array OR any object responding to `to_a`. The to_a
+method is looked up via `vm.lookup_method_uncached` and
+invoked via `invoke_method` + `dispatch_until` — same
+sync-invocation pattern as `step_block`. Returned Array
+goes through the existing chunk-concatenation path.
+
+Signature change: `marshal_rack_response(&mut Vm, ...)`
+(was `&Vm`) — method invocation needs mut. Both callers
+already had `&mut Vm` from CURRENT_VM_PTR.
+
+**A3β (true async streaming) deferred**: requires Fiber
++ !Send Vm bridge with chunk-by-chunk yielding. Lands as
+a separate ADR.
+
+**Known gap**: rubyrs's `include Enumerable` is an empty
+stub today, so user classes can't inherit `to_a` from
+Enumerable. They must define `to_a` explicitly. Tracked
+as a SUBSET.md gap, not a Stage 7 / A3 blocker.
+
+## What changes vs ADR 0022 v4 (preserved from v5 — historical)
 
 Narrow patch — 4 DX / observability additions derived from
 a Bun.serve API surface analysis. No design reframes; no
@@ -1277,9 +1533,30 @@ additive.
 
 ## Revision log
 
-- **2026-05-27 — v5 (this revision).** Bun.serve API analysis
-  surfaced 4 DX / observability gaps in v4. v5 closes them
-  additively:
+- **2026-05-28 — v6 (this revision).** Post-hoc sync of the
+  ADR to ground truth after Phase H1 PoC Stage 7 (pre-fork
+  multi-core) + 6 follow-ups (FU1-6) + 3 hardening items
+  (A1-3). See the "v6 — Stage 7 + FU + A outcomes" section
+  above for the full change matrix. Highlights:
+  - Stage 7a-e: SO_REUSEPORT listener + std-listener-handoff
+    entry + `__rubyrs_http_serve_prefork` (N=1 then real
+    libc::fork for N≥2) + example
+  - FU1: async-signal-safe parent SIGINT/SIGTERM forwarding
+    via `PREFORK_CHILD_PIDS` AtomicI32 table + sigaction
+  - FU2 + A2: non-blocking waitpid poll + per-slot crash-
+    loop counting (one bad slot doesn't kill the pool)
+  - FU3: macOS lacks `SO_REUSEPORT_LB`, documented
+  - FU4abc: 10 positional args collapsed to Hash-arg
+    `(addr, secs, app, options_hash)` via `ServeOptions` +
+    `parse_serve_options` with typo guard
+  - FU5: env-var tunables for crash-loop thresholds
+  - FU6: parser treats nil-valued keys as absent
+  - A1: FreeBSD `SO_REUSEPORT_LB` wired (kernel hash-LB)
+  - A3α: `marshal_rack_response` accepts to_a-shaped bodies;
+    A3β (true async streaming) deferred
+
+- **2026-05-27 — v5.** Bun.serve API analysis surfaced 4
+  DX / observability gaps in v4. v5 closed them additively:
   - `HttpServerConfig::idle_timeout` field (10s default,
     matches Bun.serve; max 255s) — distinct from
     `per_request_io_deadline`; closes slow-loris idle-
