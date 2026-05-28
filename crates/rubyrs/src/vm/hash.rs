@@ -362,6 +362,114 @@ impl Vm {
                         let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
                         Some(Value::Array(aid))
                     }
+                    // `h.take(n)` — returns the first n entries as
+                    // Array<[k, v]>. Behaves like `first(n)`: caps
+                    // at hash size, rejects negative n with
+                    // ArgumentError, BigInt → RangeError. CRuby's
+                    // Hash#take comes from Enumerable.
+                    #[cfg(feature = "bignum")]
+                    ("take", [Value::BigInt(_)]) | ("drop", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
+                    ("take", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                msg: "attempt to take negative size".to_string(),
+                            }));
+                        }
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        let take = n_usz.min(self.heap.hash(id).len());
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)[..take].to_vec();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(take);
+                        for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            g.pin(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        Some(Value::Array(aid))
+                    }
+                    // `h.drop(n)` — returns entries AFTER the first n
+                    // as Array<[k, v]>. Negative n raises
+                    // ArgumentError; n ≥ size returns []. Mirrors
+                    // Array#drop semantics.
+                    ("drop", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                msg: "attempt to drop negative size".to_string(),
+                            }));
+                        }
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        let len = self.heap.hash(id).len();
+                        let skip = n_usz.min(len);
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)[skip..].to_vec();
+                        let remain = pairs.len();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(remain);
+                        for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            g.pin(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        Some(Value::Array(aid))
+                    }
+                    // `h.find_index(target)` — Int insertion-order
+                    // index of the first entry whose `[k, v]`
+                    // pair `==` the target, or nil. CRuby's
+                    // positional form on Hash (inherited from
+                    // Enumerable). The block form lives in
+                    // iter.rs.
+                    ("find_index", [target]) => {
+                        let target = target.clone();
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        for (i, (k, v)) in pairs.iter().enumerate() {
+                            // Compare via a fresh [k, v] pair
+                            // Array using ruby_eq. Allocating a
+                            // throwaway pair per iter is the
+                            // simplest path; the receiver pin
+                            // happens implicitly because we
+                            // never call maybe_gc inside the
+                            // loop (ruby_eq is read-only).
+                            let pid = self.heap.alloc(HeapObj::Array(vec![k.clone(), v.clone()]));
+                            let pair = Value::Array(pid);
+                            if pair.ruby_eq(&target, &self.heap) {
+                                return Ok(Some(Value::Int(i as i64)));
+                            }
+                        }
+                        Some(Value::Nil)
+                    }
+                    // Wrong-arity arm for take / drop — CRuby
+                    // raises ArgumentError on the no-arg call
+                    // (`h.take` / `h.drop` without an Int). The
+                    // BigInt and Int arms above already match
+                    // the supported shapes; this catches `[]`
+                    // and any non-Int/BigInt arg shape, raising
+                    // a clear "wrong number of arguments" error
+                    // instead of falling through to a
+                    // misleading NoMethodError despite
+                    // respond_to? returning true.
+                    ("take" | "drop", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 1)",
+                                many.len(),
+                            ),
+                        }));
+                    }
                     // `h.min` / `h.max` (no block) — find min/max
                     // entry via lexicographic compare on the
                     // `[k, v]` pair (key first, value tiebreaker).
