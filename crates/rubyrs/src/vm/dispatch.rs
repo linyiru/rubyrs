@@ -3077,52 +3077,28 @@ impl Vm {
                         msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                     }));
                 }
-                let const_name = match &args[0] {
-                    Value::Sym(s) => self.interner.resolve(*s).to_string(),
-                    Value::Str(s) => s.to_string_lossy(),
+                // CRuby splits the path on `::` for String args
+                // but treats Symbol args as bare names
+                // (`:"Foo::Bar"` raises wrong-name).
+                // `resolve_const_path` centralises validation,
+                // intern-cap gating, and per-segment walk.
+                // (Copilot review #277 round 4 #3.)
+                let (const_name, split) = match &args[0] {
+                    Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
+                    Value::Str(s) => (s.to_string_lossy(), true),
                     other => return Err(self.trap(RubyError::TypeError {
                         msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                     })),
                 };
-                // Top-level constants live under the bare SymId
-                // in `self.classes` / `self.constants`. Object
-                // is the rooting scope (CRuby: top-level consts
-                // are constants of Object), so probing
-                // `Object.const_defined?(:Tilt)` must look up the
-                // BARE "Tilt" key. Other classes use the
-                // qualified `Cls::Name` form.
-                // CRuby validates constant names BEFORE lookup:
-                // the name must begin with an ASCII uppercase
-                // letter (constants in Ruby always start
-                // capitalised). Names like "foo" or "" raise
-                // `NameError: wrong constant name <name>`,
-                // distinct from the "uninitialized constant"
-                // path for valid-but-absent names.
-                // (Copilot review #277 round 3.)
-                if !is_valid_const_name(&const_name) {
-                    return Err(self.trap(RubyError::NameError {
-                        msg: format!("wrong constant name {}", const_name),
-                    }));
+                let cls_clone = cls.clone();
+                let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+                match outcome {
+                    ConstPathOutcome::Found(_) => self.stack.push(Value::Bool(true)),
+                    ConstPathOutcome::Missing { .. } => self.stack.push(Value::Bool(false)),
+                    ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", name),
+                    })),
                 }
-                let lookup = if cls.name == "Object" {
-                    const_name.clone()
-                } else {
-                    format!("{}::{}", cls.name, const_name)
-                };
-                // Gate the intern so untrusted code probing
-                // unique missing names (`Object.const_defined?("X#{i}")`)
-                // can't grow the interner past `Config::max_symbols`.
-                // A non-interned key cannot match any registered
-                // class/constant — return false directly. Same
-                // pattern as `parse_send_target` (line 363-376).
-                // (Copilot review #277 round 1.)
-                if !self.interner.contains(&lookup) {
-                    self.stack.push(Value::Bool(false));
-                    return Ok(());
-                }
-                let qid = self.interner.intern(&lookup);
-                let found = self.classes.contains_key(&qid) || self.constants.contains_key(&qid);
-                self.stack.push(Value::Bool(found));
                 return Ok(());
             }
             // `Mod.const_get(:Const [, inherit])` — paired with
@@ -3137,44 +3113,24 @@ impl Vm {
                         msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                     }));
                 }
-                let const_name = match &args[0] {
-                    Value::Sym(s) => self.interner.resolve(*s).to_string(),
-                    Value::Str(s) => s.to_string_lossy(),
+                let (const_name, split) = match &args[0] {
+                    Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
+                    Value::Str(s) => (s.to_string_lossy(), true),
                     other => return Err(self.trap(RubyError::TypeError {
                         msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                     })),
                 };
-                if !is_valid_const_name(&const_name) {
-                    return Err(self.trap(RubyError::NameError {
-                        msg: format!("wrong constant name {}", const_name),
-                    }));
+                let cls_clone = cls.clone();
+                let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+                match outcome {
+                    ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
+                    ConstPathOutcome::Missing { missing_qualified } => return Err(self.trap(RubyError::NameError {
+                        msg: format!("uninitialized constant {}", missing_qualified),
+                    })),
+                    ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", name),
+                    })),
                 }
-                let lookup = if cls.name == "Object" {
-                    const_name.clone()
-                } else {
-                    format!("{}::{}", cls.name, const_name)
-                };
-                // Gate the intern (see const_defined? above) —
-                // a non-interned key can't be a registered
-                // constant, so raise NameError without
-                // growing the interner.
-                if !self.interner.contains(&lookup) {
-                    return Err(self.trap(RubyError::NameError {
-                        msg: format!("uninitialized constant {}", lookup),
-                    }));
-                }
-                let qid = self.interner.intern(&lookup);
-                if let Some(c) = self.classes.get(&qid).cloned() {
-                    self.stack.push(Value::Class(c));
-                    return Ok(());
-                }
-                if let Some(v) = self.constants.get(&qid).cloned() {
-                    self.stack.push(v);
-                    return Ok(());
-                }
-                return Err(self.trap(RubyError::NameError {
-                    msg: format!("uninitialized constant {}", lookup),
-                }));
             }
             // `private_constant` / `public_constant` /
             // `deprecate_constant` accept any number of symbol args
@@ -3854,34 +3810,25 @@ impl Vm {
                     msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                 }));
             }
-            let const_name = match &args[0] {
-                Value::Sym(s) => self.interner.resolve(*s).to_string(),
-                Value::Str(s) => s.to_string_lossy(),
+            // String args walked via `::`; Symbol args treated as
+            // bare names — see `resolve_const_path` doc.
+            // (Copilot review #277 round 4 #3.)
+            let (const_name, split) = match &args[0] {
+                Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
+                Value::Str(s) => (s.to_string_lossy(), true),
                 other => return Err(self.trap(RubyError::TypeError {
                     msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                 })),
             };
-            // CRuby-shape malformed-name check — see no_recv arm.
-            // (Copilot review #277 round 3.)
-            if !is_valid_const_name(&const_name) {
-                return Err(self.trap(RubyError::NameError {
-                    msg: format!("wrong constant name {}", const_name),
-                }));
+            let cls_clone = cls.clone();
+            let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+            match outcome {
+                ConstPathOutcome::Found(_) => self.stack.push(Value::Bool(true)),
+                ConstPathOutcome::Missing { .. } => self.stack.push(Value::Bool(false)),
+                ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
+                    msg: format!("wrong constant name {}", name),
+                })),
             }
-            let lookup = if cls.name == "Object" {
-                const_name.clone()
-            } else {
-                format!("{}::{}", cls.name, const_name)
-            };
-            // Same intern-cap gate as the no_recv arm above —
-            // see that arm's comment. (Copilot review #277 round 1.)
-            if !self.interner.contains(&lookup) {
-                self.stack.push(Value::Bool(false));
-                return Ok(());
-            }
-            let qid = self.interner.intern(&lookup);
-            let found = self.classes.contains_key(&qid) || self.constants.contains_key(&qid);
-            self.stack.push(Value::Bool(found));
             return Ok(());
         }
         if &*name == "const_get"
@@ -3891,40 +3838,24 @@ impl Vm {
                     msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
                 }));
             }
-            let const_name = match &args[0] {
-                Value::Sym(s) => self.interner.resolve(*s).to_string(),
-                Value::Str(s) => s.to_string_lossy(),
+            let (const_name, split) = match &args[0] {
+                Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
+                Value::Str(s) => (s.to_string_lossy(), true),
                 other => return Err(self.trap(RubyError::TypeError {
                     msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
                 })),
             };
-            if !is_valid_const_name(&const_name) {
-                return Err(self.trap(RubyError::NameError {
-                    msg: format!("wrong constant name {}", const_name),
-                }));
+            let cls_clone = cls.clone();
+            let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+            match outcome {
+                ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
+                ConstPathOutcome::Missing { missing_qualified } => return Err(self.trap(RubyError::NameError {
+                    msg: format!("uninitialized constant {}", missing_qualified),
+                })),
+                ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
+                    msg: format!("wrong constant name {}", name),
+                })),
             }
-            let lookup = if cls.name == "Object" {
-                const_name.clone()
-            } else {
-                format!("{}::{}", cls.name, const_name)
-            };
-            if !self.interner.contains(&lookup) {
-                return Err(self.trap(RubyError::NameError {
-                    msg: format!("uninitialized constant {}", lookup),
-                }));
-            }
-            let qid = self.interner.intern(&lookup);
-            if let Some(c) = self.classes.get(&qid).cloned() {
-                self.stack.push(Value::Class(c));
-                return Ok(());
-            }
-            if let Some(v) = self.constants.get(&qid).cloned() {
-                self.stack.push(v);
-                return Ok(());
-            }
-            return Err(self.trap(RubyError::NameError {
-                msg: format!("uninitialized constant {}", lookup),
-            }));
         }
         if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
             && let Value::Class(_) = &recv {
@@ -6762,6 +6693,76 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
 }
 
 impl Vm {
+    /// Resolves a constant path from a starting class. Behavior
+    /// matches CRuby's `Module#const_get` / `Module#const_defined?`
+    /// dispatch:
+    ///   - If the arg is a Symbol, the path is treated as a single
+    ///     bare name (no `::` splitting). `:"Foo::Bar"` raises
+    ///     `wrong constant name Foo::Bar`.
+    ///   - If the arg is a String, `::` separators split the path
+    ///     and each segment is walked. A leading `::` rebases to
+    ///     the toplevel (Object). Each segment is validated via
+    ///     `is_valid_const_name` before lookup.
+    ///   - The interner-cap guard applies at every lookup: a
+    ///     non-interned qualified key returns Missing without
+    ///     calling `intern` (defends `Config::max_symbols`).
+    /// (Copilot review #277 round 4 #3.)
+    pub(crate) fn resolve_const_path(
+        &mut self,
+        start_cls: &std::rc::Rc<crate::value::Class>,
+        path: &str,
+        split_on_double_colon: bool,
+    ) -> ConstPathOutcome {
+        let (mut scope_name, segments): (String, Vec<&str>) =
+            if split_on_double_colon && path.starts_with("::") {
+                // Leading `::` rebases to Object's toplevel scope.
+                ("Object".to_string(), path[2..].split("::").collect())
+            } else if split_on_double_colon && path.contains("::") {
+                (start_cls.name.clone(), path.split("::").collect())
+            } else {
+                (start_cls.name.clone(), vec![path])
+            };
+        let mut current_value: Option<Value> = None;
+        for segment in segments {
+            if !is_valid_const_name(segment) {
+                return ConstPathOutcome::WrongName { name: segment.to_string() };
+            }
+            let lookup = if scope_name == "Object" {
+                segment.to_string()
+            } else {
+                format!("{}::{}", scope_name, segment)
+            };
+            if !self.interner.contains(&lookup) {
+                return ConstPathOutcome::Missing { missing_qualified: lookup };
+            }
+            let qid = self.interner.intern(&lookup);
+            if let Some(c) = self.classes.get(&qid).cloned() {
+                // Update scope_name for the NEXT step's qualified
+                // lookup, and remember the value we'd return if
+                // this is the final segment.
+                scope_name = c.name.clone();
+                current_value = Some(Value::Class(c));
+                continue;
+            }
+            if let Some(v) = self.constants.get(&qid).cloned() {
+                current_value = Some(v);
+                // Non-class constants can't be a parent scope —
+                // if there are more segments after this, the next
+                // lookup will fail. We let it fall through; the
+                // next `format!("{}::{}", scope_name, ...)` won't
+                // match anything because non-class consts don't
+                // contribute to the qualified-key namespace.
+                // (Rarely-exercised — Tier-1 simplification.)
+                continue;
+            }
+            return ConstPathOutcome::Missing { missing_qualified: lookup };
+        }
+        match current_value {
+            Some(v) => ConstPathOutcome::Found(v),
+            None => ConstPathOutcome::Missing { missing_qualified: path.to_string() },
+        }
+    }
+
     /// CRuby-shape arity for a Proto: required positional count
     /// when the signature is fully fixed; `-(required + 1)`
     /// otherwise. Used by `Method#arity` and
@@ -6940,6 +6941,20 @@ fn is_valid_const_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Outcome of `resolve_const_path` (a single helper that
+/// powers both `const_defined?` and `const_get`).
+pub(crate) enum ConstPathOutcome {
+    /// Path resolved to this Value (Class or other constant).
+    Found(Value),
+    /// Every name in the path was valid, but some step missed.
+    /// `missing_qualified` is the qualified key in CRuby's
+    /// `uninitialized constant Foo::Bar` shape for error
+    /// reporting.
+    Missing { missing_qualified: String },
+    /// Some name in the path was not a valid constant identifier.
+    WrongName { name: String },
 }
 
 fn is_primitive_class_name(name: &str) -> bool {

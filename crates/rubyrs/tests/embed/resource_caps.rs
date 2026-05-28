@@ -237,6 +237,74 @@ fn interner_cap_traps_to_sym_in_loop() {
 }
 
 #[test]
+fn const_defined_misses_do_not_grow_interner() {
+    // PR #277 layer #2 — `Module#const_defined?` / `Module#const_get`
+    // must not intern arbitrary lookup keys on misses. Without
+    // the `interner.contains(&lookup)` gate added in #277 round 1,
+    // probing 100 unique constant names (each a fresh string)
+    // would intern 100 new symbols and exceed `Config::max_symbols`.
+    // Verified here by setting a tight cap and confirming the
+    // probes neither raise nor grow the interner.
+    let mut rt0 = Runtime::new();
+    rt0.eval("", "warmup.rb").unwrap();
+    let baseline = rt0.symbol_count();
+    let mut rt = Runtime::with_config(Config {
+        max_symbols: Some(baseline + 5),
+        ..Default::default()
+    });
+    // 100 unique misses — would blow the 5-symbol budget if the
+    // gate were absent.
+    rt.eval(
+        r#"
+        i = 0
+        while i < 100
+          Object.const_defined?("Missing#{i}")
+          i = i + 1
+        end
+        "#,
+        "const_misses.rb",
+    ).expect("const_defined? misses must not trap");
+    // Confirm the interner actually didn't grow — the only fresh
+    // symbol the script interns is "i" (and possibly format-string
+    // literals from to_s); the const lookup itself contributes
+    // nothing because `contains` is read-only.
+    let after = rt.symbol_count();
+    assert!(
+        after - baseline <= 5,
+        "interner grew by {} symbols (cap was 5); the const_defined? gate isn't holding",
+        after - baseline,
+    );
+    // Parallel check for const_get — misses should raise NameError
+    // (CRuby shape) without interning. The 100 misses should
+    // collectively NOT grow the interner.
+    let baseline2 = rt.symbol_count();
+    rt.eval(
+        r#"
+        i = 0
+        while i < 100
+          begin
+            Object.const_get("Missing#{i}")
+          rescue NameError
+            # expected — discard
+          end
+          i = i + 1
+        end
+        "#,
+        "const_get_misses.rb",
+    ).expect("const_get misses must rescue cleanly");
+    let after2 = rt.symbol_count();
+    // Allow up to 3 fresh symbols for the loop locals
+    // (`i`, possibly `Object`/`NameError` if not pre-interned).
+    // The point is that 100 unique miss probes contribute ZERO
+    // new symbols beyond the loop's own.
+    assert!(
+        after2 - baseline2 <= 3,
+        "const_get misses grew the interner by {} (expected ≤3 for loop locals)",
+        after2 - baseline2,
+    );
+}
+
+#[test]
 fn interner_cap_traps_symbol_succ_in_loop() {
     // `Symbol#succ` re-interns the successor name and was
     // previously bypassing the cap that `String#to_sym` honours.

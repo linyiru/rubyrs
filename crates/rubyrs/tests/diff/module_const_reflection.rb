@@ -122,4 +122,30 @@ puts "malformed-cg=#{err}"
 ## for the validation gate).
 puts "valid-Foo=#{Object.const_defined?("Foo")}"
 puts "valid-CONST=#{Foo.const_defined?("CONST")}"
-puts "valid-with-num=#{Object.const_defined?("Foo")}"  # Foo isn't capitalised differently — just a sanity probe
+## Names with embedded digits — exercises the alphanumeric
+## branch of `is_valid_const_name` (Copilot review #277 round 4 #2).
+class Foo2; end
+puts "valid-with-digit=#{Object.const_defined?("Foo2")}"
+puts "valid-mixed=#{Object.const_defined?("Foo")}"
+
+## Shape 11: String-arg const paths split on `::` (CRuby);
+## Symbol args treat `::` as part of a bare name and raise
+## wrong-name. (Copilot review #277 round 4 #3.)
+puts "str-path-cd=#{Object.const_defined?("Foo::Bar")}"
+puts "str-path-cg=#{Object.const_get("Foo::Bar").inspect}"
+puts "str-leading-colons=#{Object.const_get("::Foo").inspect}"
+err = begin
+  Object.const_get(:"Foo::Bar")
+  "no-raise"
+rescue NameError => e
+  e.message.start_with?("wrong constant name") ? "wrong-name" : "other"
+end
+puts "sym-with-colons=#{err}"
+## Missing-segment NameError reports the qualified key.
+err = begin
+  Object.const_get("Foo::NoSuch")
+  "no-raise"
+rescue NameError => e
+  e.message.start_with?("uninitialized constant") ? "uninit" : "other-#{e.message}"
+end
+puts "str-path-missing=#{err}"
