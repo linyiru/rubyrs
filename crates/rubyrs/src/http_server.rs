@@ -68,6 +68,58 @@ pub struct HttpServerConfig {
 #[allow(dead_code)] // Used once the Limited wrapper lands in stage 4.
 pub(crate) const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// Bind a TCP listener with `SO_REUSEADDR + SO_REUSEPORT`
+/// set, returning a `std::net::TcpListener` (NOT tokio's —
+/// the tokio runtime must be built post-`fork(2)` in each
+/// child per ADR 0022 v3 §"Multi-core scaling", so we keep
+/// the listener in std form until each worker converts it
+/// inside its own runtime).
+///
+/// `SO_REUSEPORT` (Linux 3.9+, BSDs incl. macOS) lets
+/// multiple processes bind the same `(addr, port)` —
+/// the kernel hash-distributes incoming connections across
+/// the bound sockets. This is the foundational primitive
+/// for Stage 7 pre-fork: each child opens its own listener
+/// on the same port, no cross-child socket sharing or
+/// accept-thundering-herd.
+///
+/// `SO_REUSEADDR` is set alongside to allow rapid restarts
+/// (TIME_WAIT skip), matching Puma's listener defaults.
+///
+/// On non-Unix targets returns `Unsupported` — Windows
+/// has no equivalent kernel-level load-balancing primitive
+/// and Stage 7 N>=2 is gated off there. See ADR 0022 v3.
+#[cfg(unix)]
+#[allow(dead_code)] // wired up in 7b refactor + 7c/7d prefork host fn
+pub(crate) fn bind_reuseport_v4(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let domain = match addr {
+        SocketAddr::V4(_) => Domain::IPV4,
+        SocketAddr::V6(_) => Domain::IPV6,
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    // Backlog 1024 matches Puma's default and is high
+    // enough that bursts don't fall off the SYN queue
+    // before the worker can accept. Linux clamps to
+    // `net.core.somaxconn` (default 4096), so 1024 is
+    // safe everywhere.
+    socket.listen(1024)?;
+    Ok(socket.into())
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub(crate) fn bind_reuseport_v4(_addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "SO_REUSEPORT pre-fork is Unix-only (no Windows equivalent); use N=1 single-process mode",
+    ))
+}
+
 /// Build a Rack SPEC v1.6 env Hash from request parts.
 ///
 /// Stage 4c.1 of Phase H1 PoC. Constructs the Hash directly
@@ -2730,6 +2782,76 @@ mod tests {
         assert!(
             response_text.contains("Hello from rubyrs!"),
             "expected hardcoded body, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 7a: two listeners can bind the same
+    /// `(addr, port)` simultaneously when both have
+    /// SO_REUSEPORT set — the foundational primitive for
+    /// pre-fork multi-core scaling. Without SO_REUSEPORT
+    /// the second bind would fail with EADDRINUSE.
+    ///
+    /// This test only exercises the primitive — it does
+    /// NOT prove kernel-level load balancing across the
+    /// two listeners (that requires multi-process
+    /// observation, which lives in Stage 7d's manual
+    /// verification).
+    #[cfg(unix)]
+    #[test]
+    fn bind_reuseport_allows_two_listeners_on_same_port() {
+        use std::net::SocketAddr;
+
+        // Pick a fixed port outside the range used by the
+        // other http_server tests (18080-18120).
+        let addr: SocketAddr = "127.0.0.1:18130".parse().unwrap();
+
+        let l1 = super::bind_reuseport_v4(addr).expect("first listener binds");
+        let l2 = super::bind_reuseport_v4(addr).expect(
+            "second listener should also bind via SO_REUSEPORT — \
+             if this fails the setsockopt path isn't taking effect",
+        );
+
+        // Both must report the same local addr to prove
+        // they're sharing the kernel's listening socket
+        // group (not silently rebound to a different port).
+        let a1 = l1.local_addr().unwrap();
+        let a2 = l2.local_addr().unwrap();
+        assert_eq!(a1.port(), addr.port(), "first listener port mismatch");
+        assert_eq!(a2.port(), addr.port(), "second listener port mismatch");
+    }
+
+    /// Stage 7a: SO_REUSEPORT works for `:0` (kernel-
+    /// assigned port). Two listeners on `:0` get different
+    /// ports — that's expected, the kernel assigns each
+    /// independently — but each individual bind succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn bind_reuseport_works_with_zero_port() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let l = super::bind_reuseport_v4(addr).expect("zero-port listener binds");
+        let assigned = l.local_addr().unwrap();
+        assert_ne!(
+            assigned.port(),
+            0,
+            "kernel should have assigned a non-zero port",
+        );
+    }
+
+    /// Stage 7a: bind to an invalid address surfaces as
+    /// an io::Error rather than panicking. Sanity check
+    /// for the error-propagation path.
+    #[cfg(unix)]
+    #[test]
+    fn bind_reuseport_rejects_in_use_privileged_port() {
+        use std::net::SocketAddr;
+        // Privileged port (<1024) — unprivileged test
+        // process can't bind. Expect Err.
+        let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let result = super::bind_reuseport_v4(addr);
+        assert!(
+            result.is_err(),
+            "expected bind to privileged port 80 to fail as non-root, got Ok",
         );
     }
 }

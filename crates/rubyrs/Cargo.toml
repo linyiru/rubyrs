@@ -139,6 +139,7 @@ _http_server = [
     "dep:http-body-util",
     "dep:bytes",
     "dep:http",
+    "dep:socket2",
 ]
 
 [dependencies]
@@ -156,6 +157,11 @@ tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "signal", "
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
+# Stage 7: SO_REUSEPORT listener binds for pre-fork
+# multi-core scaling. tokio + std::net only expose
+# SO_REUSEADDR; the kernel-hash-LB SO_REUSEPORT path
+# requires raw setsockopt, which socket2 wraps portably.
+socket2 = { version = "0.5", features = ["all"], optional = true }
 # Brings `num_integer::Integer::div_rem` into scope so we can do
 # one division step (returning quotient + remainder) instead of
 # separate `/` and `%` divisions inside `Integer#digits`'s loop.
