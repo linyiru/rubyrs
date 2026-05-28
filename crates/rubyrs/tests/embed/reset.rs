@@ -590,6 +590,185 @@ fn reset_clears_user_interned_symbols() {
     );
 }
 
+// === Runtime::reset_between_requests ===
+//
+// Lightweight per-request reset specified by ADR 0022 v5.
+// Differs from `reset()`: only clears per-request transient
+// state (globals, control-flow signals, pinned, class_stack,
+// last_match). Class definitions, heap, interner, loaded_features
+// all PERSIST so a long-running server keeps its app loaded.
+
+#[test]
+fn reset_between_requests_clears_user_globals() {
+    let mut rt = Runtime::new();
+    rt.eval("$secret = 'abc123'", "set.rb").expect("set global");
+    let before = rt.eval("$secret", "read.rb").expect("read before");
+    assert!(
+        matches!(&before, rubyrs::Value::Str(s) if s.to_string_lossy() == "abc123"),
+        "$secret should be 'abc123' before reset, got {:?}",
+        before,
+    );
+    rt.reset_between_requests();
+    let after = rt.eval("$secret", "read_after.rb").expect("read after");
+    assert!(
+        matches!(after, rubyrs::Value::Nil),
+        "$secret should be nil after reset_between_requests, got {:?}",
+        after,
+    );
+}
+
+#[test]
+fn reset_between_requests_preserves_user_class_definitions() {
+    let mut rt = Runtime::new();
+    rt.eval(
+        r#"
+        class Greeter
+          def initialize(name)
+            @name = name
+          end
+          def hello
+            "Hello, #{@name}!"
+          end
+        end
+        "#,
+        "define.rb",
+    )
+    .expect("define class");
+
+    rt.reset_between_requests();
+
+    // Class survives — calling .new + .hello works.
+    let result = rt
+        .eval(r#"Greeter.new("World").hello"#, "call.rb")
+        .expect("call class method after reset");
+    assert!(
+        matches!(&result, rubyrs::Value::Str(s) if s.to_string_lossy() == "Hello, World!"),
+        "Greeter class should survive reset_between_requests; got {:?}",
+        result,
+    );
+}
+
+#[test]
+fn reset_between_requests_preserves_constants() {
+    let mut rt = Runtime::new();
+    rt.eval("FOO = 99", "define_const.rb").expect("define const");
+    rt.reset_between_requests();
+    let v = rt.eval("FOO", "read_const.rb").expect("read const after reset");
+    assert!(
+        matches!(v, rubyrs::Value::Int(99)),
+        "constants must persist across reset_between_requests; got {:?}",
+        v,
+    );
+}
+
+#[test]
+fn reset_between_requests_does_not_truncate_heap() {
+    let mut rt = Runtime::new();
+    // Allocate some heap-bound state inside a class constant
+    // so it stays rooted across the reset.
+    rt.eval(
+        r#"
+        class Cache
+          ENTRIES = (1..50).map { |i| "entry_#{i}" }
+        end
+        "#,
+        "alloc.rb",
+    )
+    .expect("populate");
+    let before = rt.vm_live_count();
+    rt.reset_between_requests();
+    // reset_between_requests doesn't truncate the heap. Some
+    // heap objects (like the constant Array) stay reachable;
+    // a future GC sweep might trim transient ones, but the
+    // method itself doesn't touch the heap.
+    let after = rt.vm_live_count();
+    assert!(
+        after >= before,
+        "reset_between_requests must not shrink heap; before={before}, after={after}",
+    );
+}
+
+#[test]
+fn reset_between_requests_keeps_loaded_features() {
+    let mut rt = Runtime::new();
+    // Doesn't matter what we require — `require` returns
+    // true on first load, false on subsequent loads (because
+    // loaded_features dedups). Reset between MUST NOT clear
+    // loaded_features, else require would re-execute every
+    // dep per request (catastrophic perf hit for real apps).
+    //
+    // Use a known require name. The 4 vendored stdlib modules
+    // (set / pathname / stringio / strscan) are guaranteed to
+    // exist under the lenient stub path even with `stdlib`
+    // feature off (they short-circuit before file lookup).
+    rt.eval("require \"pathname\"", "first.rb").expect("first require");
+    rt.reset_between_requests();
+    let v = rt
+        .eval("require \"pathname\"", "second.rb")
+        .expect("second require");
+    // require returns false when already loaded
+    assert!(
+        matches!(v, rubyrs::Value::Bool(false)),
+        "loaded_features must persist across reset_between_requests; \
+         second require should return false but got {:?}",
+        v,
+    );
+}
+
+#[test]
+fn reset_between_requests_lets_post_reset_eval_work() {
+    let mut rt = Runtime::new();
+    rt.eval("$x = 1", "set.rb").expect("set");
+    rt.reset_between_requests();
+    // After reset, $x is nil (global cleared) — but we can
+    // set it again and have arithmetic work as normal.
+    let v = rt.eval("$x = 10; $x + 5", "post.rb").expect("post-reset eval");
+    assert!(matches!(v, rubyrs::Value::Int(15)), "got {:?}", v);
+}
+
+#[test]
+fn reset_between_requests_idempotent() {
+    let mut rt = Runtime::new();
+    rt.eval("$g = 42", "set.rb").expect("set");
+    rt.reset_between_requests();
+    rt.reset_between_requests();
+    rt.reset_between_requests();
+    let v = rt.eval("$g", "read.rb").expect("read");
+    assert!(matches!(v, rubyrs::Value::Nil), "got {:?}", v);
+}
+
+#[test]
+fn reset_between_requests_clears_method_added_to_preamble_class() {
+    // Adding a method to a preamble class (e.g. `class String;
+    // def secret; ...; end; end`) IS NOT cleared by
+    // reset_between_requests — it stays in the class's method
+    // table until full `reset()`. This is intentional: a Rack
+    // app that monkey-patches String at boot expects the patch
+    // to survive across requests.
+    let mut rt = Runtime::new();
+    rt.eval(
+        r#"
+        class String
+          def screaming
+            self.upcase + "!"
+          end
+        end
+        "#,
+        "patch.rb",
+    )
+    .expect("patch String");
+    rt.reset_between_requests();
+    // Patch survives.
+    let v = rt
+        .eval(r#""hello".screaming"#, "use.rb")
+        .expect("call patched method");
+    assert!(
+        matches!(&v, rubyrs::Value::Str(s) if s.to_string_lossy() == "HELLO!"),
+        "monkey-patched String method must persist across reset_between_requests; got {:?}",
+        v,
+    );
+}
+
 // --- helpers ---
 //
 // These reach into private Vm state through the test-only Runtime

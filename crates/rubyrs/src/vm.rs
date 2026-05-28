@@ -45,7 +45,12 @@ pub(crate) use vm_ptr::with_vm_ptr_set;
 // handler uses this to access &mut Vm without the host fn
 // signature itself needing to carry one. Stage 4c.3 uses
 // this in production code path (handle_request_with_app).
-#[cfg(feature = "_http_server")]
+// Also used by `Runtime::reset_between_requests` for a
+// cext-invariant debug_assert.
+#[cfg(any(
+    all(feature = "cext", not(target_os = "wasi")),
+    feature = "_http_server",
+))]
 pub(crate) use vm_ptr::current_vm_ptr;
 
 // `iter::BlockStep` is the result of `step_block`. The

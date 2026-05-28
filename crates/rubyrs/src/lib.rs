@@ -1207,6 +1207,118 @@ impl Runtime {
         self.vm.method_gen = snapshot.method_gen.wrapping_add(1);
     }
 
+    /// Lightweight per-request reset between recurring `eval`
+    /// contexts (HTTP request handlers, fuzz loop iterations,
+    /// REPL evaluation rounds). Clears VM control-flow + per-
+    /// request transient state WITHOUT touching the heap,
+    /// class definitions, interner, inline caches, or
+    /// `$LOADED_FEATURES` — those persist across requests by
+    /// design.
+    ///
+    /// Specified in [ADR 0022 v5](docs/adr/0022-http-server-battery.md)
+    /// under "Runtime::reset_between_requests() — complete
+    /// field spec" as the per-request cleanup the
+    /// `_http_server` battery calls before each `app.call(env)`
+    /// invocation.
+    ///
+    /// ## What clears (per-request transient state)
+    ///
+    /// - `vm.stack` — leftover operand stack from a trapped
+    ///   prior request
+    /// - `vm.frames` — control-frame stack
+    /// - `vm.method_return` / `vm.pending_loop_transfer` /
+    ///   `vm.break_signaled` — control-flow signals
+    /// - `vm.suppress_call_result_push` /
+    ///   `vm.bypass_visibility_once` — call-protocol flags
+    /// - `vm.pinned` — GC roots a cext call may have left
+    ///   pinned (not clearing causes a slow leak — pinned
+    ///   refs keep their targets reachable)
+    /// - `vm.class_stack` / `vm.class_visibility_stack` —
+    ///   class-body context (a trapped class-body eval can
+    ///   leave these populated)
+    /// - `vm.globals` — user-set `$foo` global variables
+    ///   (clearing prevents request-N's auth token /
+    ///   user id from leaking to request-N+1)
+    /// - `#[cfg(feature = "regex")] vm.last_match` — regex
+    ///   `$~` and the derived `$&` / `$'` / `` $` `` / `$1`..`$N`
+    ///   magic globals (computed on-demand from `last_match`
+    ///   per vm.rs:373-382)
+    ///
+    /// ## What stays (cross-request state by design)
+    ///
+    /// - `vm.classes` / `vm.constants` — class & const
+    ///   definitions persist (that's how Rack apps stay
+    ///   alive between requests)
+    /// - `vm.heap` — heap (GC handles dead objects via
+    ///   mark-sweep; user globals were the only reachable
+    ///   root specific to per-request state)
+    /// - `vm.interner` — symbol table (truncating would
+    ///   break long-lived host_fns / cext registries keyed
+    ///   by SymId)
+    /// - `vm.method_gen` / `vm.call_caches` — inline-cache
+    ///   state (clearing would invalidate every call site
+    ///   every request, ~100× perf hit)
+    /// - `vm.loaded_features` — `$LOADED_FEATURES`
+    ///   (`require` dedup; re-executing every required
+    ///   file per request is the wrong behaviour)
+    /// - `vm.cext_class_methods` / `vm.cext_instance_methods`
+    ///   / `vm.host_fns` — registry tables
+    /// - `vm.fuel_budget` — embedder-supplied lifetime
+    ///   fuel cap (per-request fuel goes through
+    ///   `refill_fuel` instead, which arrives in a
+    ///   sibling commit)
+    ///
+    /// ## Cext invariant assertion (debug only)
+    ///
+    /// Debug-asserts `CURRENT_VM_PTR.is_null()` — calling
+    /// this from inside a cext callback (where the TLS
+    /// pointer is still set) is a programmer error;
+    /// release builds elide the check.
+    ///
+    /// ## Cost
+    ///
+    /// O(n) where n = sum of cleared vec lengths. For a
+    /// typical request that returned cleanly:
+    /// stack/frames/pinned/class_stack are empty (eval
+    /// drained them), globals is small. Realistic per-call
+    /// cost: microseconds.
+    pub fn reset_between_requests(&mut self) {
+        // Cext invariant: no cext callback should be in
+        // flight when we're between requests. If it were,
+        // CURRENT_VM_PTR would still be set.
+        #[cfg(any(
+            all(feature = "cext", not(target_os = "wasi")),
+            feature = "_http_server",
+        ))]
+        {
+            debug_assert!(
+                crate::vm::current_vm_ptr().is_null(),
+                "reset_between_requests called while CURRENT_VM_PTR is set \
+                 (cext callback or per-request handler still active?)",
+            );
+        }
+
+        // Per-request transient state — all cleared.
+        self.vm.stack.clear();
+        self.vm.frames.clear();
+        self.vm.pinned.clear();
+        self.vm.class_stack.clear();
+        self.vm.class_visibility_stack.clear();
+        self.vm.globals.clear();
+        // The existing helper already covers 5 control-flow
+        // fields — reuse it so this method doesn't drift if
+        // a new signal is added.
+        self.vm.clear_control_flow_signals();
+
+        #[cfg(feature = "regex")]
+        {
+            // Clearing last_match also clears $&, $', $`,
+            // $1..$N (per vm.rs:373-382 docs: those are
+            // computed on-demand from last_match).
+            self.vm.last_match = None;
+        }
+    }
+
     // Internal-only inspectors: let integration tests in
     // `tests/embed/reset.rs` assert on `vm.heap.live_count` and
     // `vm.interner.len()` without making those fields part of the
