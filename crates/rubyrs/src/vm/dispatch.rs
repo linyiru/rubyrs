@@ -1062,12 +1062,22 @@ impl Vm {
                 self.stack.push(Value::Int(h));
                 return Ok(CallableOutcome::Handled);
             }
-        // `m.source_location` — `[filename, lineno]` for user-
-        // defined methods; `nil` for builtins (no Method record
-        // in any class). Lineno is computed from the proto's
-        // first op_span via the Vm-side `sources` mirror; falls
-        // back to 0 if the source text isn't available (rare —
-        // synthesised protos for forwarders / preamble eval).
+        // `m.source_location` — three shapes:
+        //   - User-defined methods: `[filename, lineno]` derived
+        //     from the proto's first op_span via the Vm-side
+        //     `sources` mirror; falls back to lineno 0 if the
+        //     source text isn't available (rare — synthesised
+        //     protos for forwarders / preamble eval).
+        //   - Synth builtins with `source_label = Some(label)`
+        //     (Kernel reflection records): `[label, line]` where
+        //     label is the static "<internal:kernel>" string and
+        //     line is the meta's placeholder.
+        //   - Synth builtins with `source_label = None`
+        //     (BasicObject reflection records): `nil`. CRuby
+        //     reports nil for these C-defined methods even though
+        //     the Kernel set returns a label — we mirror.
+        //   - Methods with no snapshot (none-of-the-above
+        //     fallback): `nil`.
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
             && name == "source_location" && args.is_empty() {
                 // Prefer the snapshot Method so introspection

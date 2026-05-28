@@ -949,8 +949,13 @@ impl Vm {
         // BasicObject, not Kernel. `Kernel.instance_method(:instance_exec)`
         // raises NameError; the registered version lives in
         // `install_basic_object_builtins` below.
-        // Per-entry shape: (name, arity, param-list, defining-class).
-        // Param-list element shape: (param-name, optional-default).
+        // Per-entry shape: (method-name, arity, parameters,
+        // source_label). The parameters slice mirrors
+        // `BuiltinMeta.parameters` — each element is (kind, name)
+        // where kind is "req"/"opt"/"rest"/"keyrest"/"block" and
+        // name is `Some(...)` for a Ruby-source-visible name or
+        // `None` to surface as anonymous in `Method#parameters`
+        // (CRuby's C-defined methods report anonymous names).
         // Aliased so clippy's type_complexity lint doesn't trip
         // (the inline 4-tuple-with-nested-slice form was reading as
         // dense without saving any ergonomics).
