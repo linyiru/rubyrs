@@ -92,6 +92,7 @@ fn run_diff(name: &str) {
 #[test] fn range_hash() { run_diff("range_hash"); }
 #[test] fn method_inspect_format() { run_diff("method_inspect_format"); }
 #[test] fn method_inspect_singleton() { run_diff("method_inspect_singleton"); }
+#[test] fn method_inspect_params() { run_diff("method_inspect_params"); }
 #[test] fn enumerable_filter() { run_diff("enumerable_filter"); }
 #[test] fn enumerable_aggregate() { run_diff("enumerable_aggregate"); }
 #[test] fn int_string_basics() { run_diff("int_string_basics"); }

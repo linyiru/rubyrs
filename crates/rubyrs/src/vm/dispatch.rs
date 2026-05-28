@@ -4710,7 +4710,7 @@ impl Vm {
                     let (rv, nid, snap) = self.heap.bound_method_full(*bid);
                     let params = snap
                         .as_ref()
-                        .map(|m| m.params.join(", "))
+                        .map(|m| format_method_params(&self.protos[m.proto_idx]))
                         .unwrap_or_default();
                     let defining_rc = snap
                         .as_ref()
@@ -4776,7 +4776,7 @@ impl Vm {
                     let (cls, nid, snap) = self.heap.unbound_method_full(*uid);
                     let params = snap
                         .as_ref()
-                        .map(|m| m.params.join(", "))
+                        .map(|m| format_method_params(&self.protos[m.proto_idx]))
                         .unwrap_or_default();
                     // CRuby prints the class where the method was
                     // *defined*, not the class it was captured on:
@@ -7231,6 +7231,78 @@ fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
         _ => { 7u8.hash(&mut h); object_id_for(v).hash(&mut h); }
     }
     h.finish() as i64
+}
+
+/// Render a `Proto`'s parameter list in the form CRuby's
+/// `Method#inspect` uses — required positional bare,
+/// optional positional with `=...`, rest with `*`, required
+/// keyword with `:`, optional keyword with `: ...`, kw-rest
+/// with `**`, block with `&`. Anonymous rest/kw-rest collapse
+/// to bare `*` / `**`. Layout of `Proto.params` (set up in
+/// `compile_def`):
+///   [0..n_total_pos)    positional (required + optional, in
+///                       source order); first
+///                       `n_required_positional` are required.
+///   if rest_param.is_some():  one slot for the rest name
+///   then len(kw_param_defaults) keyword slots
+///   if kw_rest_param.is_some(): one slot for the kw-rest name
+///   if block_param.is_some():   one slot for the block name
+/// Total derived by subtracting the tail counters from
+/// `params.len()`.
+fn format_method_params(proto: &crate::bytecode::Proto) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let n_total = proto.params.len();
+    let mut tail = 0usize;
+    if proto.rest_param.is_some() { tail += 1; }
+    tail += proto.kw_param_defaults.len();
+    if proto.kw_rest_param.is_some() { tail += 1; }
+    if proto.block_param.is_some() { tail += 1; }
+    let n_pos = n_total.saturating_sub(tail);
+    let n_req = (proto.n_required_positional as usize).min(n_pos);
+
+    for (i, name) in proto.params[..n_pos].iter().enumerate() {
+        if i < n_req {
+            parts.push(name.clone());
+        } else {
+            parts.push(format!("{}=...", name));
+        }
+    }
+    let mut idx = n_pos;
+    if let Some(rname) = &proto.rest_param {
+        // Anonymous `def f(*)` parses to an empty rest name;
+        // collapse to bare `*` to match CRuby.
+        parts.push(if rname.is_empty() {
+            "*".to_string()
+        } else {
+            format!("*{}", rname)
+        });
+        idx += 1;
+    }
+    for (i, default) in proto.kw_param_defaults.iter().enumerate() {
+        let kname = &proto.params[idx + i];
+        parts.push(match default {
+            None => format!("{}:", kname),
+            Some(_) => format!("{}: ...", kname),
+        });
+    }
+    idx += proto.kw_param_defaults.len();
+    if let Some(krname) = &proto.kw_rest_param {
+        // `def f(**)` compiles with a synthetic
+        // `__kw_rest_anon` slot name (compiler.rs:322) —
+        // collapse it back to bare `**` for inspect.
+        let is_anon = krname.is_empty() || krname == "__kw_rest_anon";
+        parts.push(if is_anon {
+            "**".to_string()
+        } else {
+            format!("**{}", krname)
+        });
+        idx += 1;
+    }
+    if let Some(bname) = &proto.block_param {
+        parts.push(format!("&{}", bname));
+    }
+    let _ = idx;
+    parts.join(", ")
 }
 
 /// Scramble a raw pointer into an opaque, process-local u64
