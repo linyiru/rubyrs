@@ -1,0 +1,57 @@
+# Universal ancestor hierarchy: BasicObject → Object (Kernel mixed
+# in). Real classes now appear in the chain instead of the previous
+# isolated-Object stub. Locks the parity for the new structure
+# introduced when preamble/object.rb was rewritten to use the full
+# `class BasicObject; end; module Kernel; end; class Object <
+# BasicObject; include Kernel; end` form.
+#
+# Knock-on effect: `Module#superclass` now raises NoMethodError
+# (CRuby parity), and reflection-heavy code that walks
+# `obj.class.ancestors` sees the same shape CRuby produces.
+
+# --- Object's full ancestor chain ---
+puts Object.ancestors.inspect                  # [Object, Kernel, BasicObject]
+puts Object.superclass                         # BasicObject
+puts BasicObject.superclass.inspect            # nil (root)
+
+# --- Kernel is a Module included in Object ---
+puts Kernel.is_a?(Module)                      # true
+puts Kernel.is_a?(Class)                       # false
+puts Kernel.ancestors.inspect                  # [Kernel]
+puts Object.include?(Kernel)                   # true
+
+# --- User classes inherit the chain transitively ---
+class UserA
+end
+puts UserA.ancestors.inspect                   # [UserA, Object, Kernel, BasicObject]
+puts UserA.new.is_a?(Object)                   # true
+puts UserA.new.is_a?(Kernel)                   # true (Kernel is in chain)
+puts UserA.new.is_a?(BasicObject)              # true (root)
+
+# --- Class with explicit parent — chain extends ---
+class UserB < UserA
+end
+puts UserB.ancestors.inspect                   # [UserB, UserA, Object, Kernel, BasicObject]
+puts UserB.new.is_a?(UserA)                    # true
+puts UserB.new.is_a?(Object)                   # true
+
+# --- Module#superclass raises NoMethodError ---
+module SomeModule
+end
+begin
+  SomeModule.superclass
+  puts "no raise (BAD)"
+rescue NoMethodError
+  puts "Module#superclass raises NoMethodError"
+end
+
+# --- BasicObject.ancestors is just [BasicObject] ---
+puts BasicObject.ancestors.inspect             # [BasicObject]
+
+# --- Class < BasicObject explicit form bypasses Object ---
+# (User code can opt out of Kernel/Object by inheriting from
+# BasicObject directly — e.g. DSL receivers that want maximal
+# method_missing coverage)
+class MinimalReceiver < BasicObject
+end
+puts MinimalReceiver.ancestors.inspect         # [MinimalReceiver, BasicObject]

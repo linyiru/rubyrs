@@ -1411,6 +1411,17 @@ impl Vm {
                 }))
             }
             ("superclass", []) => {
+                // CRuby: `Module#superclass` raises NoMethodError
+                // because modules don't have a superclass chain
+                // (Class < Module but Module has no parent slot).
+                // BasicObject has no parent and returns nil. User
+                // classes return their parent.
+                if cls.is_module {
+                    return Err(self.trap(RubyError::NoMethodError {
+                        method: "superclass".to_string(),
+                        recv_type: "Module",
+                    }));
+                }
                 let v = match cls.superclass.borrow().clone() {
                     Some(p) => Value::Class(p),
                     None => Value::Nil,

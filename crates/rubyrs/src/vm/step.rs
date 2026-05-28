@@ -1622,7 +1622,16 @@ impl Vm {
                 let name_str_check = self.interner.resolve(if qual_id.0 == u32::MAX { name_id } else { qual_id }).to_string();
                 let parent = if explicit_parent.is_some() {
                     explicit_parent
-                } else if is_module || name_str_check == "Object" {
+                } else if is_module
+                    || name_str_check == "Object"
+                    || name_str_check == "BasicObject"
+                {
+                    // Modules don't have a superclass; Object and
+                    // BasicObject sit at/near the root of the chain
+                    // (BasicObject is the root with no parent; Object
+                    // inherits from BasicObject via the explicit
+                    // `class Object < BasicObject` form in
+                    // preamble/object.rb). Either way, no default.
                     None
                 } else {
                     self.classes.get(&object_sym).cloned()

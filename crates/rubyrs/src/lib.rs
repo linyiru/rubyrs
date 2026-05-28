@@ -1285,27 +1285,21 @@ class File
 end
 ## `class Mutex; ... end` (single-threaded no-op shim) is loaded
 ## from `preamble/mutex.rb` BEFORE this `PREAMBLE` eval.
-## Kernel — sentinel class (CRuby's Kernel is a Module included in
-## Object). We don't model Modules, but real codebases use
-## `Kernel.instance_method(:class).bind(scope).call` for a stable
-## handle to a method that gets invoked many times later (tilt
-## does this at template.rb:238 to cache `:class` once at boot).
-## `is_primitive_class_name` lists Kernel so
-## `Class#instance_method` synthesises an UnboundMethod, and
-## UnboundMethod#bind skips its is-a check when the captured class
-## is Kernel — every value is_a Kernel in CRuby semantics, so the
-## downstream `do_call` routes the method name to the receiver's
-## normal method dispatch as if called directly.
+## Kernel is now defined as a real Module in `preamble/object.rb`
+## (mixed into Object via `class Object < BasicObject; include
+## Kernel; end`), so the inline stub here was removed — keeping
+## both would re-define Kernel as a class and corrupt its
+## superclass chain. The is_primitive_class_name / bind-skip
+## machinery still works because Kernel's name is the same
+## sentinel; the receiver is just a Module now instead of a
+## Class.
 ##
-## DIVERGENCE: in CRuby, an UnboundMethod captured from Kernel
-## bypasses receiver-overridden methods (so `bind(liar).call`
-## returns the real `#class` even if `liar` defines its own).
-## We route through normal do_call — the override wins. Tilt's
-## scope objects don't override `#class`, so the practical impact
-## is metaprogramming-only; would need a "skip user methods"
-## flag on Kernel-derived BoundMethods to fix.
-class Kernel
-end
+## DIVERGENCE (preserved): in CRuby, an UnboundMethod captured
+## from Kernel bypasses receiver-overridden methods (so
+## `bind(liar).call` returns the real `#class` even if `liar`
+## defines its own). We route through normal do_call — the
+## override wins. Tilt's scope objects don't override `#class`,
+## so the practical impact is metaprogramming-only.
 ## Encoding — minimal stub for codebases that use the encoding
 ## API (ERB's compiler does at lib/erb/compiler.rb:317 / :461
 ## to detect the source encoding from a magic comment). rubyrs
