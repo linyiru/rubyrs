@@ -928,6 +928,15 @@ impl Vm {
                 msg: format!("require_relative: cannot find {} ({})", target.display(), e),
             })),
         };
+        // Allowlist scope: bool gate already fired at the dispatch
+        // arm (check_load_allowed("require_relative", None) before
+        // path string handling, F6 ordering). This second call
+        // re-runs the bool gate (no-op when already passed) and
+        // additionally rejects canon paths outside any configured
+        // `Config::allowed_paths` prefix. Canon was already
+        // symlink-resolved by `std::fs::canonicalize`, so we get
+        // a true post-resolution prefix check.
+        self.check_load_allowed("require_relative", Some(&canon))?;
         self.load_ruby_source_from_canon(canon)
     }
 
@@ -1114,6 +1123,12 @@ impl Vm {
                 }));
             }
         };
+        // Allowlist scope: at this point `allow_filesystem_io: true`
+        // (the dispatch arm short-circuited the .rb probe to false
+        // otherwise). Canon is the symlink-resolved on-disk path —
+        // reject if outside any `Config::allowed_paths` prefix.
+        // Trap is LoadError, matching `require`'s error class.
+        self.check_load_allowed("require", Some(&canon))?;
         self.load_ruby_source_from_canon(canon)
     }
 

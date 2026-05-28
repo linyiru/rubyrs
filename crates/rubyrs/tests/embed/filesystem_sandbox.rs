@@ -480,3 +480,124 @@ fn allowlist_with_multiple_prefixes() {
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);
 }
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_permits_require_inside_prefix() {
+    // `require <absolute-path>` resolves through ruby_source_candidates →
+    // canonicalize → my new `check_load_allowed("require", Some(canon))`.
+    // Inside the allowlist prefix → load proceeds.
+    let (dir, _probe) = alloc_tempdir("require-inside");
+    let lib_path = dir.join("hello_lib.rb");
+    std::fs::write(&lib_path, "HELLO_LIB_LOADED = true").expect("write lib");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(
+        r#"require {:?}; HELLO_LIB_LOADED"#,
+        lib_path.with_extension("").to_string_lossy()
+    );
+    let v = rt.eval(&script, "test.rb").unwrap();
+    assert!(matches!(v, rubyrs::Value::Bool(true)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_blocks_require_outside_prefix() {
+    // Plant a real .rb file outside the allowlist prefix. Sandbox
+    // is open (bool=true), but `allowed_paths` restricts to
+    // `prefix_dir`. `require` must trap LoadError because canon
+    // resolves outside that prefix.
+    let (prefix_dir, _) = alloc_tempdir("require-outside-allowed");
+    let (sibling_dir, _) = alloc_tempdir("require-outside-target");
+    let outside_lib = sibling_dir.join("evil_lib.rb");
+    std::fs::write(&outside_lib, "EVIL_LOADED = true").expect("write evil");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![prefix_dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(
+        r#"require {:?}"#,
+        outside_lib.with_extension("").to_string_lossy()
+    );
+    let err = rt.eval(&script, "test.rb").unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "LoadError"
+            && message.contains("outside Config::allowed_paths")),
+        "expected LoadError outside-allowlist, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&prefix_dir);
+    let _ = std::fs::remove_dir_all(&sibling_dir);
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_permits_require_relative_inside_prefix() {
+    // `require_relative` anchors to the eval'd source file's
+    // directory. By passing the source filename as a path INSIDE
+    // the allowlist tempdir, require_relative resolves siblings
+    // there. Verify the canonicalize-then-scope path succeeds.
+    let (dir, _) = alloc_tempdir("require-relative-inside");
+    let lib_path = dir.join("rel_target.rb");
+    std::fs::write(&lib_path, "REL_TARGET_LOADED = true").expect("write target");
+    // The script is "called from" caller.rb inside dir, so
+    // require_relative "rel_target" → dir/rel_target.rb.
+    let caller_path = dir.join("caller.rb");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    let v = rt
+        .eval(
+            r#"require_relative "rel_target"; REL_TARGET_LOADED"#,
+            caller_path.to_str().unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(v, rubyrs::Value::Bool(true)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_blocks_require_relative_traversal() {
+    // require_relative with `..` traversal that escapes the
+    // allowlist prefix. Canonicalize resolves the `..` to an
+    // absolute path outside the prefix, so the scope gate must
+    // trap LoadError. The target file has to exist for canon to
+    // succeed (otherwise we'd hit the "cannot find" trap first
+    // and never reach the scope gate — the gate only triggers on
+    // a real escape attempt to an existing file).
+    let (dir, _) = alloc_tempdir("require-relative-traversal-allowed");
+    let (sibling_dir, _) = alloc_tempdir("require-relative-traversal-target");
+    let outside = sibling_dir.join("escape.rb");
+    std::fs::write(&outside, "ESCAPED = true").expect("write escape");
+    let caller_path = dir.join("caller.rb");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![dir.clone()]),
+        ..Default::default()
+    });
+    // From dir/caller.rb, `../<sibling>/escape` walks out of dir.
+    let sibling_name = sibling_dir.file_name().unwrap().to_string_lossy();
+    let script = format!(
+        r#"require_relative "../{}/escape""#,
+        sibling_name
+    );
+    let err = rt.eval(&script, caller_path.to_str().unwrap()).unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "LoadError"
+            && message.contains("outside Config::allowed_paths")),
+        "expected LoadError on traversal, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&sibling_dir);
+}
