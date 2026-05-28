@@ -20,7 +20,7 @@
 
 #![cfg(not(target_os = "wasi"))]
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -40,9 +40,17 @@ unsafe extern "C" {
     fn rubyrs_jmp_raise(class_id: u64, msg: *const std::ffi::c_char) -> !;
 }
 
-fn current_vm_ptr() -> *mut Vm {
-    CURRENT_VM_PTR.with(|c| c.get())
-}
+// `current_vm_ptr` / `with_vm_ptr_set` / `CURRENT_VM_PTR` /
+// `VmPtrGuard` moved to `super::vm_ptr` so the
+// `_http_server` battery (which doesn't depend on cext) can
+// use the same machinery. Cext code imports them from there.
+//
+// `CURRENT_VM_PTR` itself is only referenced in the test
+// module below — gate the import accordingly so non-test
+// builds don't trip `-D unused_imports`.
+pub(crate) use super::vm_ptr::{current_vm_ptr, with_vm_ptr_set};
+#[cfg(test)]
+pub(crate) use super::vm_ptr::CURRENT_VM_PTR;
 
 
 /// RAII guard around `rubyrs_cext::enter()` / `leave()`. Normal path
@@ -133,58 +141,8 @@ impl Drop for TypedDataCallbackGuard {
 }
 
 
-// Thread-local raw pointer to the currently-active Vm during a
-// host-fn call. Set by `do_call` (via `with_vm_ptr_set`) before
-// invoking entries from `host_fns` / `cext_class_methods`, cleared
-// after. Read by `cext_dispatch` when installing the `rb_funcallv`
-// callback so re-entrant C-to-Ruby calls dispatch on the right Vm.
-//
-// SAFETY / BORROW ALIASING NOTE — this deliberately routes around
-// Rust's borrow checker. When `do_call` invokes a host fn, `&mut
-// self` is held for the duration of that call. If the host fn
-// re-enters the Vm via `rb_funcallv`, the callback dereferences
-// this raw pointer to obtain a fresh `&mut Vm`, aliasing the outer
-// borrow. Stacked Borrows considers this UB; Tree Borrows is more
-// permissive. In practice the two `&mut`s are time-disjoint (only
-// one is used at any instant). Documented here so a future
-// contributor doesn't "fix" it by sprinkling `&mut self` borrows
-// that violate the invariant. See ADR (forthcoming) for the
-// safer-but-bigger refactor that would move Vm into an
-// `UnsafeCell`-flavoured container.
-//
-// Wasi-gated for the same reason `cext_dispatch` is: the cext path
-// is unreachable when there's no dynamic loader.
-thread_local! {
-    pub(crate) static CURRENT_VM_PTR: Cell<*mut Vm> = const { Cell::new(std::ptr::null_mut()) };
-}
-
-/// RAII guard that restores [`CURRENT_VM_PTR`] to its previous value
-/// when dropped — runs the restore on **every** scope exit, including
-/// panic unwinding. Without this guard, a panic inside the host fn
-/// (e.g. from arg interning before `cext_dispatch` installs its
-/// `with_caught_unwind` boundary) would leave a stale Vm pointer in
-/// `CURRENT_VM_PTR`; a subsequent host-fn call would then dereference
-/// it as a fresh `*mut Vm`, hitting use-after-free or worse.
-struct VmPtrGuard {
-    prev: *mut Vm,
-}
-
-impl Drop for VmPtrGuard {
-    fn drop(&mut self) {
-        CURRENT_VM_PTR.with(|c| c.set(self.prev));
-    }
-}
-
-/// Run `f` with [`CURRENT_VM_PTR`] set to `vm_ptr`, restoring the
-/// previous value (likely null) on **all** exit paths — normal return
-/// or panic unwinding — via [`VmPtrGuard`]. Save/restore lets nested
-/// cext calls (rb_funcallv → another host fn) work without the inner
-/// call clobbering the outer's pointer.
-pub(crate) fn with_vm_ptr_set<R>(vm_ptr: *mut Vm, f: impl FnOnce() -> R) -> R {
-    let prev = CURRENT_VM_PTR.with(|c| c.replace(vm_ptr));
-    let _guard = VmPtrGuard { prev };
-    f()
-}
+// CURRENT_VM_PTR / VmPtrGuard / with_vm_ptr_set definitions
+// moved to `super::vm_ptr` — see `pub(crate) use` above.
 
 
 
