@@ -83,11 +83,62 @@ impl Vm {
                             Some(a.remove(0))
                         }
                     }
+                    // `Array#shift(n)` — remove and return the
+                    // first n elements as a new Array. Mirrors
+                    // `Array#pop(n)` below. `n` larger than the
+                    // array clamps to the array length; `n == 0`
+                    // returns `[]`; empty array returns `[]`.
+                    ("shift", [Value::Int(n)]) => {
+                        let n_i = *n;
+                        if n_i < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        let a = self.heap.array_mut(id);
+                        let take = (n_i as usize).min(a.len());
+                        let drained: Vec<Value> = a.drain(0..take).collect();
+                        self.maybe_gc();
+                        self.check_alloc()?;
+                        let nid = self.heap.alloc(HeapObj::Array(drained));
+                        Some(Value::Array(nid))
+                    }
+                    ("shift", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 0..1)", many.len()),
+                        }));
+                    }
                     // `Array#pop` — remove and return the last
                     // element; `nil` if empty. In-place mutation.
                     ("pop", []) => {
                         let a = self.heap.array_mut(id);
                         Some(a.pop().unwrap_or(Value::Nil))
+                    }
+                    // `Array#pop(n)` — remove and return the last
+                    // n elements as a new Array (in original
+                    // order — `[1,2,3].pop(2) == [2, 3]`). Negative
+                    // n raises ArgumentError; n exceeding array
+                    // length clamps to the length.
+                    ("pop", [Value::Int(n)]) => {
+                        let n_i = *n;
+                        if n_i < 0 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: "negative array size".into(),
+                            }));
+                        }
+                        let a = self.heap.array_mut(id);
+                        let take = (n_i as usize).min(a.len());
+                        let split_at = a.len() - take;
+                        let drained: Vec<Value> = a.drain(split_at..).collect();
+                        self.maybe_gc();
+                        self.check_alloc()?;
+                        let nid = self.heap.alloc(HeapObj::Array(drained));
+                        Some(Value::Array(nid))
+                    }
+                    ("pop", many) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 0..1)", many.len()),
+                        }));
                     }
                     // `Array#delete(obj)` — value-based delete.
                     // Removes EVERY element equal to `obj` (using
