@@ -70,15 +70,33 @@ to capture its measured % into the baseline (same command as above).
 
 ## What's excluded and why
 
-- `crates/*/tests/**` — test files themselves aren't covered by their own
-  tests. (cargo-llvm-cov measures coverage OF library code BY tests; the
-  test files don't appear in the LCOV output, but the script also defends
-  against any that slip through.)
-- Third-party deps (`registry/`, git deps) — cargo-llvm-cov emits these
-  when `--workspace` pulls them; the script filters to `crates/` only.
-- Generated code: none currently. If we add build-script-generated source
-  in the future, exclude via `.cargo/config.toml` `[env]` overrides or by
-  filename match in the ratchet script.
+The ratchet walks `crates/*/src/**/*.rs` and requires every file to be
+EITHER in `files` (with a coverage baseline) OR in `excluded_files`
+(with a one-line reason). Anything outside both is a new source file
+the host forgot to register.
+
+The current `excluded_files` entries fall into two shapes:
+
+- **Static-only modules**: no executable lines for LCOV to instrument.
+  Example: `crates/rubyrs/src/_cext_link_keep_alive.rs` (`#[used] static`
+  declarations to defeat linker DCE on the cext ABI).
+- **Feature-gated modules**: not compiled on the default CI build.
+  Examples: `http_server.rs` (`_http_server` feature), `stdlib_vendor.rs`
+  (`stdlib` feature), `vm/cext_wasi.rs` (`target_os = "wasi"`).
+
+Adding a new source file to one of these shapes? Add it to
+`excluded_files` with a brief reason. The PR diff shows the addition.
+
+Other categories the script silently skips (no baseline entry needed):
+
+- `crates/*/tests/**` — test files measure coverage OF library code,
+  not OF themselves.
+- `crates/*/examples/**`, `crates/*/benches/**`, `build.rs` — not part
+  of the workspace coverage target.
+- `crates/rubyrs/fuzz/**` — separate cargo package, not in the main
+  coverage run.
+- Third-party deps (`registry/`, git deps) — filtered to `crates/`
+  only.
 
 ## Why not a single whole-crate % gate?
 
