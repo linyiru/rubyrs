@@ -449,14 +449,18 @@ impl BinOpKind {
         })
     }
     /// Applies the op against two i64 operands. Returns `Some(v)`
-    /// for the in-range result; returns `None` only when the
-    /// `bignum` feature is on AND an Add/Sub/Mul would overflow
-    /// i64 — the caller promotes to BigInt in that case. With
-    /// `bignum` off the arms fall back to `wrapping_*` so callers
-    /// can keep an unconditional `.unwrap()` on the return.
-    /// Div/Mod still use `wrapping_*` either way because the only
-    /// overflow case (`i64::MIN / -1`) is documented divergence
-    /// from CRuby either way; comparison arms cannot overflow.
+    /// for the in-range result; returns `None` when the caller
+    /// must promote to BigInt. With `bignum` on, `None` fires for:
+    /// (a) Add/Sub/Mul overflow (via `checked_*`), and
+    /// (b) `Div` on `i64::MIN / -1` (result is 2^63, doesn't fit
+    /// i64). With `bignum` off, Add/Sub/Mul fall back to
+    /// `wrapping_*` and the Div overflow case wraps to `i64::MIN`
+    /// per the existing wrapping-on-overflow convention — both
+    /// paths always return `Some(...)`. Div/Mod implement CRuby's
+    /// floor-division semantics via `floor_div_i64` /
+    /// `floor_mod_i64` (sign of remainder matches divisor);
+    /// `% -1` is always 0 so Mod can't overflow. Comparison arms
+    /// cannot overflow.
     pub(crate) fn apply_int(self, a: i64, b: i64) -> Option<Value> {
         #[cfg(feature = "bignum")]
         let arith = |a: i64, b: i64, op: fn(i64, i64) -> Option<i64>| op(a, b);
