@@ -931,7 +931,7 @@ pub(crate) fn marshal_rack_response(
             other.type_name(),
         )),
     };
-    let arr = vm.heap.array(arr_id);
+    let arr: Vec<Value> = vm.heap.array(arr_id).clone();
     if arr.len() != 3 {
         return Err(format!(
             "Rack app Array must have exactly 3 elements (status, headers, body); got {}",
@@ -959,6 +959,90 @@ pub(crate) fn marshal_rack_response(
             other.type_name(),
         )),
     };
+
+    // P2b.2b.3 (ADR 0023 v2): parse headers UP-FRONT so the
+    // streaming branch below can early-return with a
+    // ready-built (status, headers, streaming_body) tuple
+    // without duplicating header parsing across the
+    // streaming + buffered paths.
+    let header_pairs = vm.heap.hash(headers_id).clone();
+    let mut headers: Vec<(String, String)> = Vec::with_capacity(header_pairs.len());
+    for (k, v) in &header_pairs {
+        let key_str = match k {
+            Value::Str(s) => s.to_string_lossy(),
+            other => return Err(format!(
+                "Rack header name must be String; got {}",
+                other.type_name(),
+            )),
+        };
+        let val_str = match v {
+            Value::Str(s) => s.to_string_lossy(),
+            other => return Err(format!(
+                "Rack header value must be String (Array<String> for repeated headers not yet supported); got {} for key {:?}",
+                other.type_name(), key_str,
+            )),
+        };
+        headers.push((key_str, val_str));
+    }
+
+    // P2b.2b.3 (cfg(_fiber)) — streaming branch. When the
+    // body responds to `each` or `call` AND the `_fiber`
+    // feature is on, route through the make-fiber Ruby
+    // helper (P2b.2a) and return a streaming HttpServerBody
+    // immediately. Each chunk yielded by the fiber becomes
+    // one hyper Frame; fiber return signals EOF.
+    //
+    // The buffered each/call path (P2b.1) only fires when
+    // `_fiber` is off OR the body is Array-shape.
+    #[cfg(feature = "_fiber")]
+    if !matches!(&arr[2], Value::Array(_)) {
+        let body_val_for_streaming = arr[2].clone();
+        let class_val = vm.class_of(&body_val_for_streaming);
+        if let Value::Class(cls) = &class_val {
+            let each_sym = vm.interner.intern("each");
+            let call_sym = vm.interner.intern("call");
+            let has_each = vm.lookup_method_uncached(cls, each_sym).is_some();
+            let has_call = vm.lookup_method_uncached(cls, call_sym).is_some();
+            if has_each || has_call {
+                let make_helper_name = if has_each {
+                    "__rubyrs_http_make_each_fiber"
+                } else {
+                    "__rubyrs_http_make_call_fiber"
+                };
+                let make_sym = vm.interner.intern(make_helper_name);
+                let helper = vm.toplevel_methods.get(&make_sym).cloned();
+                if let Some(method) = helper {
+                    let pre_frames = vm.frames.len();
+                    vm.invoke_method(method, Value::Nil, vec![body_val_for_streaming.clone()])
+                        .map_err(|trap| format!(
+                            "Rack streaming body via `{make_helper_name}` raised: {}",
+                            trap.err.message(),
+                        ))?;
+                    vm.dispatch_until(pre_frames).map_err(|trap| format!(
+                        "Rack streaming body via `{make_helper_name}` raised during dispatch: {}",
+                        trap.err.message(),
+                    ))?;
+                    let fiber_val = vm.stack.pop().unwrap_or(Value::Nil);
+                    let fiber_id = match fiber_val {
+                        Value::Object(id) if matches!(
+                            vm.heap.get(id),
+                            crate::heap::HeapObj::Fiber(_)
+                        ) => id,
+                        other => return Err(format!(
+                            "`{make_helper_name}` must return Fiber; got {}",
+                            other.type_name(),
+                        )),
+                    };
+                    return Ok((status, headers, HttpServerBody::streaming(fiber_id)));
+                }
+                // Streaming preamble missing (cfg shouldn't
+                // hit this — _fiber implies the streaming
+                // helpers were eval'd). Fall through to
+                // P2b.1 buffered path for safety.
+            }
+        }
+    }
+
     // A3 / P2a body detection table per ADR 0023 v2
     // §"Detection order":
     //
@@ -1078,26 +1162,8 @@ pub(crate) fn marshal_rack_response(
         }
     };
 
-    // Headers — Hash<String, String> only in PoC v1.
-    let header_pairs = vm.heap.hash(headers_id);
-    let mut headers: Vec<(String, String)> = Vec::with_capacity(header_pairs.len());
-    for (k, v) in header_pairs {
-        let key_str = match k {
-            Value::Str(s) => s.to_string_lossy(),
-            other => return Err(format!(
-                "Rack header name must be String; got {}",
-                other.type_name(),
-            )),
-        };
-        let val_str = match v {
-            Value::Str(s) => s.to_string_lossy(),
-            other => return Err(format!(
-                "Rack header value must be String (Array<String> for repeated headers not yet supported); got {} for key {:?}",
-                other.type_name(), key_str,
-            )),
-        };
-        headers.push((key_str, val_str));
-    }
+    // Headers — parsed up-front before body detection
+    // (P2b.2b.3). See top of marshal_rack_response.
 
     // Body — Array<String> only in PoC v1. Concatenate to
     // a single Bytes for hyper's Full<Bytes> response.
@@ -1756,6 +1822,17 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     use crate::value::Value;
     use crate::error::Trap;
     use std::time::Duration;
+
+    // P2b.2b.3: streaming each/call paths in
+    // marshal_rack_response need the Fiber host fns
+    // (`__rubyrs_fiber_new` / `_yield` / `_resume`).
+    // Auto-register them so embedders enabling
+    // `_http_server + _fiber` get streaming "for free"
+    // without remembering the order-of-registration
+    // contract documented near the streaming preamble
+    // below. Idempotent — re-registration overwrites.
+    #[cfg(feature = "_fiber")]
+    crate::vm::fiber::register_host_fns(rt);
 
     rt.register_fn("__rubyrs_http_serve_hardcoded", |args| {
         // Argument shape: (bind_addr: String, duration_secs: Integer)
@@ -4131,9 +4208,131 @@ mod tests {
             response_text.contains("HTTP/1.1 200"),
             "expected 200 for call-only body (P2b.1 wired), got:\n{response_text}",
         );
+        // Under `_fiber` (P2b.2b.3) the two writes arrive as
+        // separate chunked frames (`6\r\nhello_\r\n5\r\nworld\r\n`)
+        // — the concatenated bytes never appear in the
+        // wire-level response. Under buffered (`_fiber`
+        // off) it's a single chunk `hello_world`. Check
+        // both writes appear individually, which is true
+        // for both paths.
         assert!(
-            response_text.contains("hello_world"),
-            "both writes must be served (concatenated), got:\n{response_text}",
+            response_text.contains("hello_") && response_text.contains("world"),
+            "both writes must appear in response, got:\n{response_text}",
+        );
+    }
+
+    /// P2b.2b.3: under `_fiber`, each-shape body routes
+    /// through the streaming Fiber path → hyper emits each
+    /// `yield`ed chunk as a separate HTTP/1.1 chunked frame.
+    /// Wire-level check: `chunk_a` and `chunk_b` must NOT
+    /// be adjacent (buffered would concatenate them), they
+    /// must be separated by chunked-encoding metadata
+    /// (`\r\n<hex-size>\r\n`).
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2b2b3_each_streams_chunks_as_separate_frames() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18130";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class EachStream
+              def each
+                yield "chunk_a"
+                yield "chunk_b"
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, EachStream.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "p2b2b3_each_streams.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("chunk_a") && response_text.contains("chunk_b"),
+            "both chunks must be present, got:\n{response_text}",
+        );
+        // Streaming wire-level proof: the two chunks must
+        // arrive in separate chunked frames, not as a
+        // single concatenated `chunk_achunk_b`.
+        assert!(
+            !response_text.contains("chunk_achunk_b"),
+            "P2b.2b.3 streaming must NOT concatenate chunks (that would mean buffered fallback fired), got:\n{response_text}",
+        );
+    }
+
+    /// P2b.2b.3: same wire-level check for `call`-shape
+    /// bodies — each `stream.write` becomes its own frame.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2b2b3_call_streams_writes_as_separate_frames() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18131";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class CallStream
+              def call(stream)
+                stream.write("alpha_")
+                stream.write("beta")
+                stream.close
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, CallStream.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 1, app)
+        "#), "p2b2b3_call_streams.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("alpha_") && response_text.contains("beta"),
+            "both writes must be present, got:\n{response_text}",
+        );
+        assert!(
+            !response_text.contains("alpha_beta"),
+            "P2b.2b.3 streaming must NOT concatenate writes, got:\n{response_text}",
         );
     }
 
