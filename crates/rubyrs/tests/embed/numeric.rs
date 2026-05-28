@@ -2852,6 +2852,26 @@ fn float_domain_error_class_and_rescue_chain() {
         }
     }
 
+    // Kernel#Integer parity — `Integer(Float::NAN)` and
+    // `Integer(Float::INFINITY)` previously raised TypeError,
+    // divergent from CRuby AND inconsistent with `Float#to_i`
+    // (which this PR routes through FloatDomainError). Pin
+    // the unified shape so the two surfaces stay aligned.
+    for (script, expected_msg) in [
+        ("Integer(0.0/0.0)",   "NaN"),
+        ("Integer(1.0/0.0)",   "Infinity"),
+        ("Integer(-1.0/0.0)",  "-Infinity"),
+    ] {
+        let err = rt.eval(script, "fde_kernel_integer.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "FloatDomainError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected Uncaught FloatDomainError for {:?}, got {:?}", script, other),
+        }
+    }
+
     // Positive-precision branch returns a Float and propagates
     // NaN/Inf cleanly — matches CRuby (e.g. `Float::NAN.round(2)`
     // returns NaN, not a trap). Pin so a future "trap on any
