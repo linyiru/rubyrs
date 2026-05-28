@@ -482,21 +482,46 @@ async fn handle_request_with_app(
     peer_addr: SocketAddr,
     per_request_fuel: Option<u64>,
     max_request_body_bytes: usize,
+    per_request_io_deadline: Option<std::time::Duration>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     use crate::value::Value;
     use http_body_util::Limited;
 
     // Phase A: buffer request body (no Vm access; pure async I/O).
     //
-    // `Limited` short-circuits at the byte cap mid-stream
-    // instead of after the full collect — so a malicious
-    // client sending a 100GB body doesn't OOM the server
-    // before we even decide to reject. ADR 0022 v3 → v5
-    // identified the v4 pseudocode's "collect then check
-    // length" as a real DoS surface.
+    // Two protective layers stacked here:
+    //   1. `Limited` short-circuits at `max_request_body_bytes`
+    //      mid-stream — bounds memory regardless of how much
+    //      the client claims to be sending.
+    //   2. `tokio::time::timeout` (stage 6b) bounds wall-clock
+    //      spent reading the body — defends against slow-
+    //      upload attacks where a client claims a large
+    //      Content-Length and dribbles bytes to hold the
+    //      connection + handler reservation idle.
+    //
+    // The deadline ONLY covers the async I/O phase, not the
+    // Ruby app's CPU work in Phase B. Per ADR 0022 v5: tokio
+    // cannot preempt a synchronous Ruby block. CPU-bound
+    // Ruby is bounded by per_request_fuel (stage 5d).
     let (parts, body) = req.into_parts();
     let limited = Limited::new(body, max_request_body_bytes);
-    let body_bytes_full = match limited.collect().await {
+    let collect_future = limited.collect();
+    let collect_result = match per_request_io_deadline {
+        Some(deadline) => match tokio::time::timeout(deadline, collect_future).await {
+            Ok(inner) => inner,
+            Err(_elapsed) => {
+                return Ok(error_response(
+                    504,
+                    format!(
+                        "Gateway Timeout: request body read exceeded {} ms",
+                        deadline.as_millis(),
+                    ),
+                ));
+            }
+        },
+        None => collect_future.await,
+    };
+    let body_bytes_full = match collect_result {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
             // The `Limited` error type is boxed; downcast to
@@ -638,6 +663,7 @@ async fn serve_with_app_until_shutdown(
     listener_addr: SocketAddr,
     per_request_fuel: Option<u64>,
     max_request_body_bytes: usize,
+    per_request_io_deadline: Option<std::time::Duration>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
     loop {
@@ -652,6 +678,7 @@ async fn serve_with_app_until_shutdown(
                         handle_request_with_app(
                             req, block_id, listener_addr, peer_addr,
                             per_request_fuel, max_request_body_bytes,
+                            per_request_io_deadline,
                         )
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
@@ -675,6 +702,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
     block_id: crate::value::ObjId,
     per_request_fuel: Option<u64>,
     max_request_body_bytes: usize,
+    per_request_io_deadline: Option<std::time::Duration>,
 ) -> std::io::Result<SocketAddr> {
     let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -688,6 +716,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
             res = serve_with_app_until_shutdown(
                 listener, block_id, listener_addr,
                 per_request_fuel, max_request_body_bytes,
+                per_request_io_deadline,
                 shutdown_rx,
             ) => res?,
             _ = tokio::time::sleep(duration) => {}
@@ -808,53 +837,59 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     });
 
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        // Argument shape (3 / 4 / 5 args, growing):
+        // Argument shape (3 / 4 / 5 / 6 args, growing):
         //   (addr, secs, app)
         //   (addr, secs, app, per_request_fuel)
         //   (addr, secs, app, per_request_fuel, max_body_bytes)
+        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms)
         //
         // Each positional adds one more security knob. Per
         // ADR 0022 v5 these will eventually move into a
         // Hash arg (Bun-shape) to avoid 8-positional creep;
         // PoC keeps positional for now.
-        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes) = match args {
+        //
+        // Negative-value checks are factored into a helper
+        // so each arity branch stays a one-liner.
+        let check_non_negative = |label: &str, n: i64| -> Result<(), Trap> {
+            if n < 0 {
+                Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: format!("{label} must be non-negative, got {n}"),
+                    },
+                    backtrace: vec![],
+                })
+            } else {
+                Ok(())
+            }
+        };
+        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES)
+                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel)] => {
-                if *fuel < 0 {
-                    return Err(Trap {
-                        err: RubyError::ArgumentError {
-                            msg: format!("per_request_fuel must be non-negative, got {fuel}"),
-                        },
-                        backtrace: vec![],
-                    });
-                }
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES)
+                check_non_negative("per_request_fuel", *fuel)?;
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body)] => {
-                if *fuel < 0 {
-                    return Err(Trap {
-                        err: RubyError::ArgumentError {
-                            msg: format!("per_request_fuel must be non-negative, got {fuel}"),
-                        },
-                        backtrace: vec![],
-                    });
-                }
-                if *max_body < 0 {
-                    return Err(Trap {
-                        err: RubyError::ArgumentError {
-                            msg: format!("max_body_bytes must be non-negative, got {max_body}"),
-                        },
-                        backtrace: vec![],
-                    });
-                }
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize)
+                check_non_negative("per_request_fuel", *fuel)?;
+                check_non_negative("max_body_bytes", *max_body)?;
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None)
+            }
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms)] => {
+                check_non_negative("per_request_fuel", *fuel)?;
+                check_non_negative("max_body_bytes", *max_body)?;
+                check_non_negative("io_deadline_ms", *io_ms)?;
+                let deadline = if *io_ms == 0 {
+                    None  // 0 disables the deadline; matches Bun.serve idle_timeout=0 idiom
+                } else {
+                    Some(Duration::from_millis(*io_ms as u64))
+                };
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, deadline)
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB)"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0)"
                             .to_string(),
                     },
                     backtrace: vec![],
@@ -880,7 +915,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
         let duration = Duration::from_secs(duration_secs as u64);
         let bound = run_blocking_for_duration_with_app(
-            addr, duration, block_id, per_request_fuel, max_body_bytes,
+            addr, duration, block_id, per_request_fuel, max_body_bytes, io_deadline,
         ).map_err(|e| Trap {
             err: RubyError::RuntimeError {
                 msg: format!("http_serve_with_app: {e}"),
@@ -1145,6 +1180,139 @@ mod tests {
             raise "unknown key should return nil" \
                 unless env["NONEXISTENT_KEY"].nil?
         "#, "stage_4c1_check.rb").expect("env hash Ruby-side assertions all hold");
+    }
+
+    /// Stage 6b: slow-body upload triggers 504 Gateway
+    /// Timeout BEFORE the app block is invoked. The
+    /// `tokio::time::timeout` wrapping `limited.collect()`
+    /// bounds wall-clock spent reading the body — defends
+    /// against slow-loris-shape attacks where a client
+    /// claims a large Content-Length then dribbles bytes
+    /// to hold the handler reservation.
+    ///
+    /// Test shape:
+    ///   - Client sends headers with Content-Length: 100
+    ///     then writes only 10 bytes and then PAUSES
+    ///     (without closing). hyper's body collect waits
+    ///     for the remaining 90 bytes; deadline fires.
+    ///   - Server returns 504; app block never invoked.
+    ///   - Deadline = 300ms; client holds connection ~1s.
+    #[test]
+    fn slow_body_upload_triggers_504_timeout() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18097";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            // Claim 100-byte body, send 10, pause.
+            client.write_all(
+                b"POST /slow HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 100\r\n\
+                  Content-Type: application/octet-stream\r\n\
+                  Connection: close\r\n\r\n\
+                  ten_byte_!",
+            ).expect("write headers + partial body");
+            // Hold the connection open — let the server's
+            // I/O deadline fire while waiting for the
+            // remaining 90 bytes.
+            thread::sleep(Duration::from_millis(800));
+            // Try to read whatever response the server
+            // already sent. Broken-pipe / EOF is fine —
+            // we just want the response bytes.
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        // 6-arg form: fuel=1M, max_body=10K, io_deadline=300ms
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            $reached = false
+            app = ->(env) {{
+              $reached = true
+              [200, {{}}, ["should never reach this"]]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app, 1_000_000, 10_000, 300)
+            raise "app must NOT run when io_deadline fires; was reached" if $reached
+        "#), "stage_6b_slow_body.rb").expect("server ran + app stayed cold");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 504"),
+            "expected 504 Gateway Timeout for slow upload, got:\n{response_text}",
+        );
+        assert!(
+            response_text.to_lowercase().contains("gateway timeout"),
+            "expected gateway timeout in body, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("300 ms") || response_text.contains("300ms"),
+            "expected deadline value in body, got:\n{response_text}",
+        );
+    }
+
+    /// Stage 6b: when `io_deadline_ms = 0` (or arg omitted),
+    /// no I/O timeout — slow uploads complete normally.
+    /// Verifies the disable-by-zero idiom works.
+    #[test]
+    fn io_deadline_zero_disables_timeout() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18098";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(
+                b"POST /slow HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 20\r\n\
+                  Content-Type: application/octet-stream\r\n\
+                  Connection: close\r\n\r\n\
+                  ten_byte_!",
+            ).expect("write headers + partial");
+            // ~400ms slow body — would normally trip 300ms
+            // deadline; with disable-by-zero, no trip.
+            thread::sleep(Duration::from_millis(400));
+            client.write_all(b"final_10b!").expect("write rest");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        // io_deadline_ms = 0 → no timeout
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, ["body_len=#{{env['CONTENT_LENGTH']}}"]]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app, 1_000_000, 10_000, 0)
+        "#), "stage_6b_disable_timeout.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 OK (no timeout when io_deadline=0), got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("body_len=20"),
+            "expected body_len=20 (full body received), got:\n{response_text}",
+        );
     }
 
     /// Stage 6a: request body exceeding `max_body_bytes`
