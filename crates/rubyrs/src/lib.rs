@@ -2033,35 +2033,38 @@ RUBY_ENGINE = "ruby".freeze
         match outcome {
             Ok(result) => result,
             Err(payload) => {
-                // Mirror the post-run cleanup eval_inner does (lines
-                // 2114-2120). On the unwind path that cleanup never
-                // ran, leaving vm.fuel / vm.deadline_at set to the
-                // eval's anchor values and frames / stack / pinned
-                // potentially mid-execution. Without this Err-arm
-                // cleanup, a host that catches the Trap and inspects
-                // Runtime state without calling eval again sees
-                // stale residue — and the docstring contract that
-                // those fields are "undefined-meaning at eval exit"
-                // is broken on the new exit shape.
+                // Snapshot the backtrace BEFORE clearing frames.
+                // `Vm::trap` walks `self.vm.frames` and emits one
+                // `TrapFrame` per stack frame with filename/method/
+                // span resolved at the IP where execution last was —
+                // for a panic, that's the line where the host_fn (or
+                // VM op) panicked, threaded back up through every
+                // Ruby method on the call stack. Without this, every
+                // panic-derived Trap had `backtrace: vec![]` and
+                // `format_trap` fell into its "no frames" branch,
+                // losing the script-level location entirely.
                 //
-                // Idempotent with the next eval's entry-clear, so
-                // this is a strict upgrade: state is clean the
-                // instant the host receives Err, not "eventually".
+                // Mirror the rest of eval_inner's post-run cleanup
+                // (lines 2114-2120). On the unwind path that cleanup
+                // never ran, leaving vm.fuel / vm.deadline_at set to
+                // the eval's anchor values and frames / stack /
+                // pinned potentially mid-execution. The Err-arm
+                // cleanup is idempotent with the next eval's entry-
+                // clear, so this is a strict upgrade: state is clean
+                // the instant the host receives Err, not "eventually".
+                let trap = self.vm.trap(RubyError::RuntimeError {
+                    msg: format!(
+                        "host-side panic during eval: {}",
+                        panic_payload_message(payload.as_ref()),
+                    ),
+                });
                 self.vm.fuel = None;
                 self.vm.deadline_at = None;
                 self.vm.frames.clear();
                 self.vm.stack.clear();
                 self.vm.pinned.clear();
                 self.vm.clear_control_flow_signals();
-                Err(Trap {
-                    err: RubyError::RuntimeError {
-                        msg: format!(
-                            "host-side panic during eval: {}",
-                            panic_payload_message(payload.as_ref()),
-                        ),
-                    },
-                    backtrace: vec![],
-                })
+                Err(trap)
             }
         }
     }

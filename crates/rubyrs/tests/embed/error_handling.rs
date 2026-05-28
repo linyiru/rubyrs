@@ -666,3 +666,44 @@ fn host_fn_panic_leaves_runtime_state_clean() {
     assert_eq!(rt.__test_vm_stack_len(), 0, "vm.stack should be drained after panic");
     assert_eq!(rt.__test_vm_pinned_len(), 0, "vm.pinned should be drained after panic");
 }
+
+#[test]
+fn panic_trap_populates_backtrace_with_script_location() {
+    // The Trap built from a caught panic captures the in-flight
+    // vm.frames as a TrapFrame backtrace, so format_trap can
+    // render CRuby-style "file:line:in method:" lines pointing at
+    // where in script code the panicking host_fn was invoked from.
+    // Pre-fix every panic-derived Trap had backtrace: vec![] and
+    // format_trap fell into its no-frames branch — script location
+    // was unrecoverable.
+    let mut rt = Runtime::new();
+    rt.register_fn("explode", |_| panic!("host fn boom"));
+    let err = rt
+        .eval(
+            "def caller_method\n  explode\nend\ncaller_method",
+            "script.rb",
+        )
+        .unwrap_err();
+
+    // Backtrace must be non-empty — at least one frame for the
+    // top-level eval scope.
+    assert!(
+        !err.backtrace.is_empty(),
+        "panic-derived Trap should carry frames; got empty backtrace",
+    );
+
+    // format_trap should now print something useful — at minimum
+    // it must mention the eval filename. The exact frame structure
+    // depends on Vm internals (one frame per Ruby method on the
+    // stack) but the filename in the top frame is the eval source
+    // for our top-level entry.
+    let formatted = rt.format_trap(&err);
+    assert!(
+        formatted.contains("script.rb"),
+        "format_trap should mention the script filename; got {formatted:?}",
+    );
+    assert!(
+        formatted.contains("host fn boom"),
+        "format_trap should preserve the panic payload; got {formatted:?}",
+    );
+}
