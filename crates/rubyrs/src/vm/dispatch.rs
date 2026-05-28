@@ -1474,7 +1474,7 @@ impl Vm {
         if vis == Visibility::Private && !bypass_visibility && !self_recv {
             return Err(self.trap(RubyError::NoMethodError {
                 method: format!("private method '{name}' called"),
-                recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
             }));
         }
         if vis == Visibility::Protected && !bypass_visibility {
@@ -1495,11 +1495,28 @@ impl Vm {
             if !allowed {
                 return Err(self.trap(RubyError::NoMethodError {
                     method: format!("protected method '{name}' called"),
-                    recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
+                    recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
                 }));
             }
         }
         Ok(())
+    }
+
+    /// CRuby-shape receiver description for NoMethodError-style
+    /// messages. Object instances render as
+    /// `"an instance of <ClassName>"` (matches CRuby 3.3+); all
+    /// other Value variants fall back to `Value::type_name()`.
+    /// Used by the private/protected visibility error sites so
+    /// scripts asserting on the message text see the same words
+    /// as CRuby. (TRY_RUNS pass-10 layer #5.)
+    pub(crate) fn recv_desc_for_error(&self, recv: &Value) -> String {
+        match recv {
+            Value::Object(id) => {
+                let cls = self.heap.class_of(*id);
+                format!("an instance of {}", cls.name)
+            }
+            other => other.type_name().to_string(),
+        }
     }
 
     /// Class-receiver introspection arms — the second Class

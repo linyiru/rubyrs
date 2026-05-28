@@ -163,6 +163,7 @@ fn run_diff(name: &str) {
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }
 #[test] fn visibility() { run_diff("visibility"); }
+#[test] fn visibility_error_message() { run_diff("visibility_error_message"); }
 #[test] fn raise_two_arg() { run_diff("raise_two_arg"); }
 #[test] fn user_sort() { run_diff("user_sort"); }
 #[test] fn hash_enumerable() { run_diff("hash_enumerable"); }

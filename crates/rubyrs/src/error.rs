@@ -295,7 +295,24 @@ impl RubyError {
             | RubyError::LoadError { msg } => msg.clone(),
             RubyError::Uncaught { message, .. } => message.clone(),
             RubyError::NoMethodError { method, recv_type } => {
-                format!("undefined method `{}' for {}", method, recv_type)
+                // Visibility-error call sites
+                // (dispatch.rs:1475/1497) store a full-sentence
+                // form like "private method 'lookup' called" /
+                // "protected method 'foo' called" in `method`,
+                // because CRuby's error message uses a different
+                // shape for those cases ("private method 'X'
+                // called for <recv>" — not "undefined method
+                // 'X' for <recv>"). Detect that shape and skip
+                // the "undefined method" wrap. The missing-
+                // method form still uses the standard wrap.
+                // (TRY_RUNS pass-10 layer #5.)
+                if method.starts_with("private method ")
+                    || method.starts_with("protected method ")
+                {
+                    format!("{} for {}", method, recv_type)
+                } else {
+                    format!("undefined method `{}' for {}", method, recv_type)
+                }
             }
         }
     }
