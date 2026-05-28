@@ -320,12 +320,39 @@ fn ioerror_is_rescuable_in_script() {
 /// across multiple `alloc_tempdir` calls would still be correct
 /// for cleanup. The per-tag naming is for human readability and
 /// to keep the call site close to its destructor on a quick read.)
+///
+/// Why not `tempfile::TempDir`? The `tempfile` crate already
+/// lives in the workspace (used by `crates/rubyrs/fuzz`) and
+/// provides the same RAII contract with battle-tested Windows
+/// EBUSY-retry, symlink-loop, and NFS-flake handling. The
+/// deliberate trade-off here is keeping the helper to 6 lines
+/// with zero rubyrs dev-deps: the tests in this file create
+/// short-lived dirs on Unix-only paths (the few Windows-flavour
+/// concerns don't apply), so the bespoke guard is enough. If a
+/// future test ever stresses tempdir reuse on Windows or hits a
+/// Drop edge case, switch to `tempfile` as a dev-dependency and
+/// retire this struct — don't re-implement what's already
+/// upstream.
 struct TempDirGuard {
     path: std::path::PathBuf,
 }
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
+        // `remove_dir_all` is O(tree-size) and runs SYNCHRONOUSLY
+        // on the test thread. Current callers create tiny dirs
+        // (one probe file each), so per-test cleanup is ms-scale.
+        // If a future test ever stages large fixtures (hundreds
+        // of fake gems for a require-resolution stress, etc.),
+        // either accept the synchronous teardown cost OR move
+        // cleanup off the test thread; don't silently leave the
+        // helper as the catch-all for arbitrary-sized fixtures.
+        //
+        // Errors are intentionally ignored: Drop must not panic
+        // during unwind, and a leaked tempdir is non-fatal. The
+        // panic-unwind regression test below explicitly re-tries
+        // `remove_dir_all` on failure to surface the underlying
+        // io::Error so silent swallowing doesn't mask CI flakes.
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
