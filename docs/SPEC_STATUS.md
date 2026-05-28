@@ -13,14 +13,14 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 112 |
-| Examples in corpus | 565 |
-| Skipped `it` traces | 159 |
+| Examples in corpus | 569 |
+| Skipped `it` traces | 157 |
 
 ### Skipped traces by category
 
 | Category | Count |
 |---|---|
-| `divergent` | 3 |
+| `divergent` | 1 |
 | `fixture` | 51 |
 | `method-not-implemented` | 87 |
 | `mock` | 18 |
@@ -44,7 +44,7 @@ Find blocks unlocked by a future feature with e.g.
 | Integer | 29 | 254 | 22 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
-| String | 19 | 81 | 30 |
+| String | 19 | 85 | 28 |
 | UnboundMethod | 4 | 18 | 0 |
 
 ## Files
@@ -157,7 +157,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_start_with_spec.rb` | String#start_with? | `core/string/start_with_spec.rb + shared/string/start_with.rb` | 3 | 7 |
 | `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 2 | 6 |
 | `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 8 | 0 |
-| `string_tr_spec.rb` | String#tr | `core/string/tr_spec.rb` | 4 | 3 |
+| `string_tr_spec.rb` | String#tr | `core/string/tr_spec.rb` | 8 | 1 |
 | `string_upcase_spec.rb` | String#upcase | `core/string/upcase_spec.rb` | 5 | 2 |
 | `unbound_method_arity_spec.rb` | UnboundMethod#arity | `core/unboundmethod/arity_spec.rb` | 4 | 0 |
 | `unbound_method_bind_call_spec.rb` | UnboundMethod#bind_call | `core/unboundmethod/bind_call_spec.rb` | 4 | 0 |
