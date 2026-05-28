@@ -520,6 +520,12 @@ fn host_fn_panic_with_static_str_payload_is_preserved() {
     // — otherwise static-str panics surface as
     // `<non-string panic payload>`, which would lose actionable
     // diagnostic info in the most common shape.
+    //
+    // Note (per Copilot review on PR #279): even
+    // `panic!("fmt {}", x)` with a statically-resolvable format
+    // arg ends up as `&'static str` — only TRULY dynamic content
+    // (`panic!("{}", dynamic_string)`) produces a `String`
+    // payload. See the sibling test below.
     let mut rt = Runtime::new();
     rt.register_fn("explode", |_| {
         panic!("static literal payload");
@@ -531,6 +537,39 @@ fn host_fn_panic_with_static_str_payload_is_preserved() {
     assert!(
         msg.contains("static literal payload"),
         "static-str payload should be preserved, got {msg:?}",
+    );
+}
+
+#[test]
+fn host_fn_panic_with_owned_string_payload_uses_string_branch() {
+    // Locks in coverage of the `payload.downcast_ref::<String>()`
+    // branch — without this test, only the `&'static str` branch
+    // is exercised and a future maintainer could remove the
+    // String arm as "dead code" (per Copilot review on PR #279,
+    // where the earlier docstring inaccurately claimed
+    // `panic!("msg")` was a String payload).
+    //
+    // The String branch fires when the panic payload's content
+    // is determined at runtime — `panic!("{}", String::from(...))`
+    // OR `std::panic::panic_any::<String>(s)`. Both shapes appear
+    // in real code: `expect_or_panic!` macros that interpolate
+    // runtime data, or anyhow-style errors via `panic_any`.
+    let mut rt = Runtime::new();
+    rt.register_fn("explode", |_| {
+        let dynamic = format!("runtime-{}", 42);
+        panic!("{}", dynamic);
+    });
+    let err = rt.eval(r#"explode"#, "test.rb").unwrap_err();
+    let rubyrs::RubyError::RuntimeError { msg } = &err.err else {
+        panic!("expected RuntimeError, got {:?}", err.err);
+    };
+    assert!(
+        msg.contains("runtime-42"),
+        "String payload (dynamic content) should be preserved, got {msg:?}",
+    );
+    assert!(
+        !msg.contains("non-string panic payload"),
+        "must hit the String branch, not the fallback; got {msg:?}",
     );
 }
 

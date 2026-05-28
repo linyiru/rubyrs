@@ -661,12 +661,22 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
 }
 
 /// Extract a human-readable message from a [`std::panic::catch_unwind`]
-/// payload. `panic!("msg")` / `panic!("{} ...", x)` boxes a `String`;
-/// `panic!("static str")` boxes a `&'static str`. Other payload types
-/// (custom error structs panicked with `panic_any`) lose their text,
-/// but we still want SOMETHING in the Trap message rather than a
-/// silent `<unknown>` — log the payload's type id so a host can
-/// at least correlate against its own panic site.
+/// payload. Rust's panic payload shape depends on what the call site
+/// passed in — verified empirically against current rustc:
+///
+///   - `panic!("string literal")` and `panic!("fmt {}", 42)` (where
+///     the format arguments are statically resolvable) box a
+///     `&'static str`.
+///   - `panic!("{}", dynamic_string)` and
+///     `std::panic::panic_any::<String>(s)` box a `String`.
+///   - Other `panic_any(custom)` shapes box opaquely; the message
+///     text isn't recoverable. We log the payload's type id so a
+///     host can at least correlate against its own panic site.
+///
+/// Both `String` and `&'static str` branches are exercised by tests
+/// in `tests/embed/error_handling.rs` (the dynamic-format-args case
+/// is the one keeping the `String` branch from looking like dead
+/// code to a future maintainer).
 ///
 /// Takes `&(dyn Any + Send)` rather than `&Box<dyn Any + Send>` so
 /// the helper only needs the payload reference — sidesteps Clippy's
