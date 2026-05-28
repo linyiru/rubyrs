@@ -767,11 +767,16 @@ impl Vm {
         let v = self.method_return.take();
         if v.is_some() {
             self.pending_loop_transfer = None;
-            // `method_return_locals` is consumed paired with the
-            // value; clear it here so a future return doesn't
-            // accidentally inherit the old owner identity.
-            self.method_return_locals = None;
         }
+        // Always clear `method_return_locals` — the field-pair
+        // invariant says it lives and dies with `method_return`,
+        // and unconditional clear here is the cheapest way to
+        // close the no-op-take leak window: a caller that takes
+        // while `method_return` is already None (e.g. after
+        // `clear_control_flow_signals` left a stale Rc behind in
+        // some hypothetical future code path) still leaves the
+        // VM in a consistent state. (code-review #285 round 2 #4.)
+        self.method_return_locals = None;
         v
     }
 
@@ -855,6 +860,13 @@ impl Vm {
     pub(crate) fn clear_control_flow_signals(&mut self) {
         self.break_signaled = false;
         self.method_return = None;
+        // Paired with `method_return` — see field doc. Without
+        // this, a Runtime::reset between requests would leave a
+        // stale Rc pinning the previous request's locals Vec
+        // alive, AND silently violate the
+        // `method_return.is_some() ⇔ method_return_locals.is_some()`
+        // invariant. (code-review #285 round 2 #3.)
+        self.method_return_locals = None;
         self.pending_loop_transfer = None;
         self.suppress_call_result_push = false;
         self.bypass_visibility_once = false;
