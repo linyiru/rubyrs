@@ -355,6 +355,42 @@ pub(crate) fn numeric_call(
                 ),
             });
         }
+        // ceil/floor/round/truncate accept 0..1 args (precision).
+        // 2+ args raises ArgumentError matching CRuby.
+        (Value::Int(_), "ceil" | "floor" | "round" | "truncate", args_slice)
+            if args_slice.len() > 1 =>
+        {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    args_slice.len(),
+                ),
+            });
+        }
+        // Non-Integer precision arg for ceil/floor/round/truncate:
+        // CRuby raises TypeError "no implicit conversion of X into Integer".
+        #[cfg(feature = "bignum")]
+        (Value::Int(_), "ceil" | "floor" | "round" | "truncate", [other])
+            if !matches!(other, Value::Int(_) | Value::BigInt(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
+        #[cfg(not(feature = "bignum"))]
+        (Value::Int(_), "ceil" | "floor" | "round" | "truncate", [other])
+            if !matches!(other, Value::Int(_)) =>
+        {
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into Integer",
+                    type_name_for_coerce(other),
+                ),
+            });
+        }
         // Bit-mask predicates — Int × Int happy path. CRuby
         // semantics (two's-complement masking, works for negatives):
         //   allbits?(m): (i & m) == m  — every set bit of m is set in i
@@ -415,6 +451,76 @@ pub(crate) fn numeric_call(
         // does — matching parity is more important than absolute
         // precision (BigInt path uses num_traits::ToPrimitive for
         // a similar approximation).
+        // `Integer#ceil` / `#floor` / `#round` / `#truncate` —
+        // CRuby's Integer-side counterparts to Float's. All four
+        // accept an optional precision arg:
+        //   - 0-arg: returns self (Integer has no fractional part)
+        //   - n > 0: returns self (no digits to keep past the
+        //     decimal point on an Integer)
+        //   - n < 0: rounds to a multiple of 10^|n| using the
+        //     selector's rounding mode (ceil → +∞, floor → -∞,
+        //     round → half-away-from-zero, truncate → toward 0).
+        //
+        // Under bignum the `10**|n|` computation overflows i64 at
+        // |n| >= 19 and the result can also overflow. Those cases
+        // decline here so bigint_primitive can promote — though
+        // current bigint dispatch doesn't yet handle these
+        // selectors (tracked as method-not-implemented in the
+        // associated specs for `10**70`-magnitude inputs).
+        (Value::Int(a), "ceil" | "floor" | "round" | "truncate", []) => {
+            Some(Value::Int(*a))
+        }
+        (Value::Int(a), "ceil" | "floor" | "round" | "truncate", [Value::Int(n)])
+            if *n >= 0 =>
+        {
+            Some(Value::Int(*a))
+        }
+        (Value::Int(a), op @ ("ceil" | "floor" | "round" | "truncate"), [Value::Int(n)])
+            if *n < 0 =>
+        {
+            // Negative precision: round to a multiple of 10^|n|.
+            let abs_n = (-*n) as u64;
+            if abs_n > 18 {
+                // 10^19 overflows i64; defer to bignum path (which
+                // isn't implemented for these selectors yet).
+                #[cfg(feature = "bignum")]
+                { return Ok(None); }
+                #[cfg(not(feature = "bignum"))]
+                { return Ok(Some(Value::Int(0))); }
+            }
+            let pow10 = 10i64.pow(abs_n as u32);
+            // Truncating div + rem keeps the sign of `r` matching
+            // the dividend (Rust's wrapping_*). The rounding-mode
+            // adjustment below derives ceil/floor/round from the
+            // truncated quotient.
+            let trunc_q = a.wrapping_div(pow10);
+            let trunc_r = a.wrapping_rem(pow10);
+            let half = pow10 / 2;
+            let q = match op {
+                "truncate" => trunc_q,
+                "floor" => if trunc_r < 0 { trunc_q - 1 } else { trunc_q },
+                "ceil"  => if trunc_r > 0 { trunc_q + 1 } else { trunc_q },
+                "round" => {
+                    // CRuby default: round half-away-from-zero
+                    // (`25.round(-1) == 30`, `-25.round(-1) == -30`).
+                    if trunc_r >= half        { trunc_q + 1 }
+                    else if trunc_r <= -half  { trunc_q - 1 }
+                    else                       { trunc_q }
+                }
+                _ => unreachable!(),
+            };
+            // Multiplication can overflow at i64 boundary (e.g.
+            // `(2**62).round(-1)` near i64::MAX). Decline here so
+            // bignum can promote; under no-bignum saturate via
+            // wrapping (acceptable per existing convention).
+            match q.checked_mul(pow10) {
+                Some(v) => Some(Value::Int(v)),
+                #[cfg(feature = "bignum")]
+                None => return Ok(None),
+                #[cfg(not(feature = "bignum"))]
+                None => Some(Value::Int(q.wrapping_mul(pow10))),
+            }
+        }
         (Value::Int(a), "fdiv", [Value::Int(b)]) => {
             Some(Value::Float((*a as f64) / (*b as f64)))
         }

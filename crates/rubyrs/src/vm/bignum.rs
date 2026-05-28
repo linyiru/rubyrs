@@ -1656,6 +1656,38 @@ impl Vm {
                 ),
             }));
         }
+        // `ceil` / `floor` / `round` / `truncate` on BigInt receiver:
+        // these are no-ops on Integer for 0-arg and positive-precision
+        // cases (Integer has no fractional digits to round past).
+        // Negative precision with BigInt receiver would round to a
+        // power-of-10 multiple — needs BigInt-aware modular
+        // arithmetic, deferred (matches the numeric.rs decline for
+        // |n| > 18 + the spec's method-not-implemented trace).
+        if matches!(recv, Value::BigInt(_))
+            && matches!(name, "ceil" | "floor" | "round" | "truncate")
+        {
+            match args {
+                [] => return Ok(Some(recv.clone())),
+                [Value::Int(n)] if *n >= 0 => return Ok(Some(recv.clone())),
+                [Value::Int(_)] => return Ok(None),  // negative precision: defer
+                [other] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            crate::vm::numeric::type_name_for_coerce(other),
+                        ),
+                    }));
+                }
+                _ => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+            }
+        }
         // Bitwise shifts `<<` / `>>`. Fires for any Integer recv +
         // any Integer arg, including the Int×Int overflow path
         // (`1 << 64`) that numeric.rs declined under bignum. Sits

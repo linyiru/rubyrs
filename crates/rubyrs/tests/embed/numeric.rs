@@ -1417,6 +1417,58 @@ fn bigint_eq_float_is_lossless() {
 }
 
 #[test]
+fn integer_ceil_floor_round_truncate_basic() {
+    // Pin the 4 new Integer rounding methods. Spec coverage lives in
+    // spec/ruby/integer_{ceil,floor,round,truncate}_spec.rb; this is
+    // the cross-profile embed guard for arity/TypeError dispatch and
+    // a few key negative-precision answers.
+    let mut rt = rubyrs::Runtime::new();
+    for (script, expected) in [
+        // 0-arg: returns self
+        ("10.ceil.inspect", "10"),
+        ("(-15).floor.inspect", "-15"),
+        ("10.round.inspect", "10"),
+        ("10.truncate.inspect", "10"),
+        // Positive precision: returns self
+        ("123.ceil(10).inspect", "123"),
+        ("123.floor(10).inspect", "123"),
+        ("(-123).round(5).inspect", "-123"),
+        ("123.truncate(7).inspect", "123"),
+        // Negative precision
+        ("123.ceil(-1).inspect", "130"),
+        ("123.ceil(-2).inspect", "200"),
+        ("(-123).ceil(-1).inspect", "-120"),
+        ("123.floor(-1).inspect", "120"),
+        ("(-123).floor(-1).inspect", "-130"),
+        ("250.round(-2).inspect", "300"),
+        ("(-250).round(-2).inspect", "-300"),
+        ("249.round(-2).inspect", "200"),
+        ("1832.truncate(-2).inspect", "1800"),
+        ("(-1832).truncate(-2).inspect", "-1800"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(&format!("puts {}", script), "round.rb").expect("eval");
+        assert_eq!(buf.snapshot().trim(), expected, "for {:?}", script);
+    }
+    // Errors
+    for (script, expected_class) in [
+        ("42.round(\"4\")", "TypeError"),
+        ("42.round(nil)", "TypeError"),
+        ("42.round(1, 2)", "ArgumentError"),
+        ("42.ceil(:sym)", "TypeError"),
+    ] {
+        let err = rt.eval(script, "round_err.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { class_name, .. } => {
+                assert_eq!(class_name, expected_class, "for {:?}", script);
+            }
+            other => panic!("expected {} for {:?}, got {:?}", expected_class, script, other),
+        }
+    }
+}
+
+#[test]
 fn integer_divmod_fdiv_gcd_lcm_basic() {
     // Quick happy-path + error pin for the 4 methods landed in this
     // batch. Spec coverage lives in spec/ruby/integer_{divmod,fdiv,
