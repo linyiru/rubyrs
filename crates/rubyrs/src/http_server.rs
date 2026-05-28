@@ -528,7 +528,186 @@ pub(crate) fn build_rack_env(
 /// Rack response decomposes into for hyper.
 pub(crate) type MarshaledResponse = (u16, Vec<(String, String)>, bytes::Bytes);
 
-#[allow(dead_code)] // Used by stage 4c.3 handler when wired.
+// FU4a: ServeOptions + parse_serve_options are wired into
+// the host fns in FU4b/c — `dead_code` allow stays until then.
+#[allow(dead_code)]
+/// Parsed `options` Hash from the FU4 Hash-arg form of
+/// the serve host fns. Each field is `None`/`false` unless
+/// the user supplied a key with that name; the host fn
+/// falls back to its established default for `None`.
+///
+/// Field set matches the 10 positional args of the
+/// pre-FU4 `__rubyrs_http_serve_with_app` + the
+/// `on_worker_boot` Block from `__rubyrs_http_serve_prefork`.
+#[derive(Default, Clone)]
+pub(crate) struct ServeOptions {
+    pub(crate) per_request_fuel: Option<u64>,
+    pub(crate) max_body_bytes: Option<usize>,
+    pub(crate) io_deadline: Option<std::time::Duration>,
+    pub(crate) max_headers: Option<usize>,
+    pub(crate) install_signal_handler: bool,
+    pub(crate) idle_timeout: Option<std::time::Duration>,
+    pub(crate) on_error_block: Option<crate::value::ObjId>,
+    pub(crate) on_worker_boot_block: Option<crate::value::ObjId>,
+}
+
+/// All option keys recognised by either serve host fn.
+/// Used in the "unknown key" error message so users see
+/// the full menu.
+#[allow(dead_code)]
+pub(crate) const SERVE_OPTION_KEYS: &[&str] = &[
+    "per_request_fuel",
+    "max_body_bytes",
+    "io_deadline_ms",
+    "max_headers",
+    "install_signal_handler",
+    "idle_timeout_ms",
+    "on_error",
+    "on_worker_boot",
+];
+
+#[allow(dead_code)]
+fn arg_err(msg: impl Into<String>) -> crate::error::Trap {
+    crate::error::Trap {
+        err: crate::error::RubyError::ArgumentError { msg: msg.into() },
+        backtrace: vec![],
+    }
+}
+
+#[allow(dead_code)]
+fn expect_non_neg_int(key: &str, value: &crate::value::Value) -> Result<i64, crate::error::Trap> {
+    match value {
+        crate::value::Value::Int(n) => {
+            if *n < 0 {
+                Err(arg_err(format!("option '{key}' must be non-negative, got {n}")))
+            } else {
+                Ok(*n)
+            }
+        }
+        _ => Err(arg_err(format!(
+            "option '{key}' must be an Integer, got {value:?}"
+        ))),
+    }
+}
+
+#[allow(dead_code)]
+fn expect_bool_flag(key: &str, value: &crate::value::Value) -> Result<bool, crate::error::Trap> {
+    match value {
+        crate::value::Value::Int(0) => Ok(false),
+        crate::value::Value::Int(1) => Ok(true),
+        crate::value::Value::Int(n) => Err(arg_err(format!(
+            "option '{key}' must be 0 or 1, got {n}"
+        ))),
+        _ => Err(arg_err(format!(
+            "option '{key}' must be 0 or 1, got {value:?}"
+        ))),
+    }
+}
+
+#[allow(dead_code)]
+fn expect_block(key: &str, value: &crate::value::Value) -> Result<crate::value::ObjId, crate::error::Trap> {
+    match value {
+        crate::value::Value::Block(id) => Ok(*id),
+        _ => Err(arg_err(format!(
+            "option '{key}' must be a Proc/Lambda, got {value:?}"
+        ))),
+    }
+}
+
+/// Walk the options Hash and produce a typed `ServeOptions`.
+/// `allowed_keys` restricts which keys are valid for the
+/// calling host fn — e.g. `__rubyrs_http_serve_with_app`
+/// rejects `on_worker_boot` (only meaningful for prefork),
+/// while `__rubyrs_http_serve_prefork` accepts all.
+///
+/// Per ADR 0022 v5 + Bun parity: keys can be Symbol OR
+/// String (Ruby idiom). Symbol values are resolved via
+/// the interner; String values use `to_string_lossy`.
+/// Anything else is an ArgumentError.
+#[allow(dead_code)]
+pub(crate) fn parse_serve_options(
+    vm: &crate::vm::Vm,
+    hash_id: crate::value::ObjId,
+    allowed_keys: &[&str],
+) -> Result<ServeOptions, crate::error::Trap> {
+    use crate::heap::HeapObj;
+    use crate::value::Value;
+
+    let hash_obj = match vm.heap.get(hash_id) {
+        HeapObj::Hash(h) => h,
+        _ => return Err(arg_err("options must be a Hash")),
+    };
+
+    let mut opts = ServeOptions::default();
+    for (key, value) in &hash_obj.pairs {
+        let key_str: String = match key {
+            Value::Sym(sym) => vm.interner.resolve(*sym).to_string(),
+            Value::Str(rs) => rs.to_string_lossy(),
+            _ => {
+                return Err(arg_err(format!(
+                    "options Hash keys must be Symbol or String, got {key:?}"
+                )));
+            }
+        };
+
+        if !allowed_keys.contains(&key_str.as_str()) {
+            let allowed = allowed_keys.join(", ");
+            return Err(arg_err(format!(
+                "unknown option '{key_str}' (accepted: {allowed})"
+            )));
+        }
+
+        match key_str.as_str() {
+            "per_request_fuel" => {
+                let n = expect_non_neg_int(&key_str, value)?;
+                // 0 = no per-request limit (use the worker's
+                // lifetime budget). Same as omitting the key.
+                opts.per_request_fuel = if n == 0 { None } else { Some(n as u64) };
+            }
+            "max_body_bytes" => {
+                let n = expect_non_neg_int(&key_str, value)?;
+                // 0 isn't useful (every body would 413); keep
+                // it as "use 16MB default" by mapping to None,
+                // matching the pre-FU4 positional convention.
+                opts.max_body_bytes = if n == 0 { None } else { Some(n as usize) };
+            }
+            "io_deadline_ms" => {
+                let n = expect_non_neg_int(&key_str, value)?;
+                opts.io_deadline = if n == 0 {
+                    None
+                } else {
+                    Some(std::time::Duration::from_millis(n as u64))
+                };
+            }
+            "max_headers" => {
+                let n = expect_non_neg_int(&key_str, value)?;
+                opts.max_headers = if n == 0 { None } else { Some(n as usize) };
+            }
+            "install_signal_handler" => {
+                opts.install_signal_handler = expect_bool_flag(&key_str, value)?;
+            }
+            "idle_timeout_ms" => {
+                let n = expect_non_neg_int(&key_str, value)?;
+                opts.idle_timeout = if n == 0 {
+                    None
+                } else {
+                    Some(std::time::Duration::from_millis(n as u64))
+                };
+            }
+            "on_error" => {
+                opts.on_error_block = Some(expect_block(&key_str, value)?);
+            }
+            "on_worker_boot" => {
+                opts.on_worker_boot_block = Some(expect_block(&key_str, value)?);
+            }
+            // Unreachable: allowed_keys gate above filtered
+            // every other case to the "unknown option" Err.
+            _ => unreachable!(),
+        }
+    }
+    Ok(opts)
+}
+
 pub(crate) fn marshal_rack_response(
     vm: &crate::vm::Vm,
     app_result: crate::value::Value,
@@ -3500,6 +3679,152 @@ mod tests {
         assert!(
             response_text.contains("Hello from rubyrs!"),
             "expected hardcoded body, got:\n{response_text}",
+        );
+    }
+
+    // FU4a: parser tests use a one-shot host fn that calls
+    // `parse_serve_options` directly (with CURRENT_VM_PTR
+    // already set by `invoke_host_fn`). The fn returns Nil
+    // on success or raises ArgumentError on failure; tests
+    // assert via the eval result.
+    //
+    // For happy-path inspection, we serialise the parsed
+    // ServeOptions into a String the test can pattern-match.
+
+    fn register_parse_probe(rt: &mut crate::Runtime, allowed_keys: &'static [&'static str]) {
+        use crate::error::{RubyError, Trap};
+        use crate::value::Value;
+        rt.register_fn("__test_parse_options", move |args| {
+            let hash_id = match args {
+                [Value::Hash(id)] => *id,
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__test_parse_options(hash)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            let ptr = crate::vm::current_vm_ptr();
+            // SAFETY: CURRENT_VM_PTR set by host fn dispatcher.
+            let vm = unsafe { &mut *ptr };
+            let opts = super::parse_serve_options(vm, hash_id, allowed_keys)?;
+            // Render the parsed options as a String the test
+            // can grep for. Bool/None render as literal text.
+            let s = format!(
+                "fuel={:?} body={:?} io={:?} maxh={:?} sig={} idle={:?} on_err={} on_boot={}",
+                opts.per_request_fuel,
+                opts.max_body_bytes,
+                opts.io_deadline,
+                opts.max_headers,
+                opts.install_signal_handler,
+                opts.idle_timeout,
+                opts.on_error_block.is_some(),
+                opts.on_worker_boot_block.is_some(),
+            );
+            Ok(Value::Str(std::rc::Rc::new(crate::value::RStr::new(s))))
+        });
+    }
+
+    /// FU4a: parse_serve_options happy-path. Hash with
+    /// every accepted Symbol key, mixed-typed values,
+    /// round-trips into a ServeOptions with the expected
+    /// fields populated.
+    #[test]
+    fn parse_serve_options_happy_path_with_all_keys() {
+        let mut rt = crate::Runtime::new();
+        register_parse_probe(&mut rt, super::SERVE_OPTION_KEYS);
+        let result = rt.eval(r#"
+            on_err = ->(env, klass, msg) { [500, {}, [msg]] }
+            on_boot = ->(idx) { idx }
+            __test_parse_options({
+              per_request_fuel: 100_000,
+              max_body_bytes: 8_192,
+              io_deadline_ms: 250,
+              max_headers: 32,
+              install_signal_handler: 1,
+              idle_timeout_ms: 5000,
+              on_error: on_err,
+              on_worker_boot: on_boot,
+            })
+        "#, "fu4a_happy.rb").expect("eval ok");
+        let s = match &result {
+            crate::value::Value::Str(rs) => rs.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        assert!(s.contains("fuel=Some(100000)"), "got: {s}");
+        assert!(s.contains("body=Some(8192)"), "got: {s}");
+        assert!(s.contains("io=Some(250ms)"), "got: {s}");
+        assert!(s.contains("maxh=Some(32)"), "got: {s}");
+        assert!(s.contains("sig=true"), "got: {s}");
+        assert!(s.contains("idle=Some(5s)"), "got: {s}");
+        assert!(s.contains("on_err=true"), "got: {s}");
+        assert!(s.contains("on_boot=true"), "got: {s}");
+    }
+
+    /// FU4a: unknown key returns ArgumentError with the full
+    /// accepted-key list.
+    #[test]
+    fn parse_serve_options_rejects_unknown_key() {
+        let mut rt = crate::Runtime::new();
+        register_parse_probe(&mut rt, super::SERVE_OPTION_KEYS);
+        let err = rt.eval(r#"
+            __test_parse_options({ per_request_fuel: 100, bogus_knob: 42 })
+        "#, "fu4a_unknown.rb").expect_err("expected error");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("unknown option 'bogus_knob'"), "got: {msg}");
+        assert!(msg.contains("per_request_fuel"), "key list missing: {msg}");
+    }
+
+    /// FU4a: type-mismatched value names the offending key.
+    #[test]
+    fn parse_serve_options_rejects_type_mismatch() {
+        let mut rt = crate::Runtime::new();
+        register_parse_probe(&mut rt, super::SERVE_OPTION_KEYS);
+        let err = rt.eval(r#"
+            __test_parse_options({ per_request_fuel: "ten thousand" })
+        "#, "fu4a_typemismatch.rb").expect_err("expected error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("per_request_fuel") && msg.contains("Integer"),
+            "expected key name + 'Integer' in msg, got: {msg}",
+        );
+    }
+
+    /// FU4a: String keys are equivalent to Symbol keys —
+    /// Ruby Hash literal idiom (`"key" => v` vs `key: v`).
+    #[test]
+    fn parse_serve_options_accepts_string_keys() {
+        let mut rt = crate::Runtime::new();
+        register_parse_probe(&mut rt, super::SERVE_OPTION_KEYS);
+        let result = rt.eval(r#"
+            __test_parse_options({ "per_request_fuel" => 42 })
+        "#, "fu4a_string_keys.rb").expect("eval ok");
+        let s = match &result {
+            crate::value::Value::Str(rs) => rs.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        assert!(s.contains("fuel=Some(42)"), "got: {s}");
+    }
+
+    /// FU4a: restricted key set (e.g. with_app rejecting
+    /// `on_worker_boot`) surfaces a proper error.
+    #[test]
+    fn parse_serve_options_respects_allowed_keys_subset() {
+        // with_app's key set — no on_worker_boot.
+        const WITH_APP_KEYS: &[&str] = &[
+            "per_request_fuel", "max_body_bytes", "io_deadline_ms", "max_headers",
+            "install_signal_handler", "idle_timeout_ms", "on_error",
+        ];
+        let mut rt = crate::Runtime::new();
+        register_parse_probe(&mut rt, WITH_APP_KEYS);
+        let err = rt.eval(r#"
+            on_boot = ->(idx) { idx }
+            __test_parse_options({ on_worker_boot: on_boot })
+        "#, "fu4a_subset.rb").expect_err("expected error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("unknown option 'on_worker_boot'"),
+            "with_app subset must reject on_worker_boot, got: {msg}",
         );
     }
 
