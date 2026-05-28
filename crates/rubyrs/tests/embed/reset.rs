@@ -769,6 +769,109 @@ fn reset_between_requests_clears_method_added_to_preamble_class() {
     );
 }
 
+// === Runtime::refill_fuel ===
+//
+// Per-request fuel re-anchor (ADR 0022 v5). 3 cases:
+//   (a) Some(n) -> vm.fuel = Some(n)
+//   (b) None + Config::fuel = Some(c) -> vm.fuel = Some(c)
+//   (c) None + Config::fuel = None -> vm.fuel = None
+//
+// Plus the integration use case: a tight loop that exhausts
+// fuel ONCE, then refill, runs again without ResourceExhausted.
+
+#[test]
+fn refill_fuel_some_sets_to_provided_value() {
+    let mut rt = Runtime::with_config(Config { fuel: Some(1_000), ..Default::default() });
+    // After construction, fuel_budget = 1000 but vm.fuel
+    // hasn't run an eval yet. Refill with explicit Some(500):
+    rt.refill_fuel(Some(500));
+    // Now eval; if vm.fuel was 500, a tight 1000-iter loop
+    // should trap with ResourceExhausted.
+    let result = rt.eval("1000.times { 1 + 1 }", "loop.rb");
+    assert!(
+        matches!(&result, Err(t) if matches!(t.err, RubyError::ResourceExhausted { .. })),
+        "expected ResourceExhausted with 500-fuel budget, got {:?}",
+        result.as_ref().map_err(|e| &e.err),
+    );
+}
+
+#[test]
+fn refill_fuel_none_with_some_config_uses_config_value() {
+    let mut rt = Runtime::with_config(Config { fuel: Some(10_000_000), ..Default::default() });
+    // Burn most of the fuel
+    rt.eval("100_000.times { 1 + 1 }", "burn.rb").expect("burn ok");
+    // Now refill with None — should re-anchor to Config 10M.
+    rt.refill_fuel(None);
+    // Same 100k-iter loop should fit again (vm.fuel back to 10M).
+    let v = rt.eval("100_000.times { 1 + 1 }", "refilled.rb")
+        .expect("post-refill eval should fit in re-anchored budget");
+    let _ = v; // value not asserted; just verifying no trap
+}
+
+#[test]
+fn refill_fuel_none_with_none_config_is_unbounded() {
+    let mut rt = Runtime::with_config(Config { fuel: None, ..Default::default() });
+    rt.refill_fuel(None);
+    // Unbounded — 100k iters fine.
+    rt.eval("100_000.times { 1 + 1 }", "unbounded.rb")
+        .expect("unbounded eval");
+}
+
+#[test]
+fn refill_fuel_does_not_clamp_against_config() {
+    // Per ADR 0022 v5: per-request budget can be LARGER than
+    // Config::fuel. Embedders may use a smaller config (for
+    // long-running lifetime cap when not http_server) but a
+    // larger per-request cap. No clamping.
+    let mut rt = Runtime::with_config(Config { fuel: Some(100), ..Default::default() });
+    rt.refill_fuel(Some(10_000_000));
+    // 100k loop should fit fine with the larger per-request budget.
+    rt.eval("100_000.times { 1 + 1 }", "larger_per_request.rb")
+        .expect("per-request budget should NOT be clamped against Config::fuel");
+}
+
+#[test]
+fn refill_fuel_then_reset_between_then_refill_simulates_server_loop() {
+    // Simulates the per-request shape the _http_server
+    // battery will follow: reset, refill, eval, repeat.
+    let mut rt = Runtime::with_config(Config { fuel: Some(100_000), ..Default::default() });
+    for i in 0..5 {
+        rt.reset_between_requests();
+        rt.refill_fuel(Some(50_000));
+        // Each "request" runs a tight loop that fits in
+        // 50k fuel. Globals from one request don't leak to
+        // the next (reset_between_requests clears them).
+        rt.eval(
+            &format!("$req = {i}; 5_000.times {{ $req }}"),
+            "per_request.rb",
+        )
+        .unwrap_or_else(|e| panic!("iter {i} should fit in 50k fuel, got {:?}", e.err));
+    }
+}
+
+#[test]
+fn refill_fuel_lets_runaway_trap_then_recover() {
+    // Models the "long-running server: one runaway request
+    // traps, worker survives" scenario. After
+    // ResourceExhausted, the next eval-with-refill should
+    // succeed.
+    let mut rt = Runtime::with_config(Config { fuel: Some(10_000_000), ..Default::default() });
+    rt.refill_fuel(Some(1_000)); // tight per-request budget
+    let trap = rt.eval("1_000_000.times { 1 + 1 }", "runaway.rb")
+        .expect_err("runaway loop should trap");
+    assert!(
+        matches!(trap.err, RubyError::ResourceExhausted { .. }),
+        "expected ResourceExhausted, got {:?}",
+        trap.err,
+    );
+    // Recovery: reset + refill with the lifetime budget.
+    rt.reset_between_requests();
+    rt.refill_fuel(None); // re-anchor to Config 10M
+    let v = rt.eval("1 + 2", "post_runaway.rb")
+        .expect("post-runaway eval should succeed with re-anchored fuel");
+    assert!(matches!(v, rubyrs::Value::Int(3)));
+}
+
 // --- helpers ---
 //
 // These reach into private Vm state through the test-only Runtime

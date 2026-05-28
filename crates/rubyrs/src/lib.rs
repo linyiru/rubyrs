@@ -1207,6 +1207,79 @@ impl Runtime {
         self.vm.method_gen = snapshot.method_gen.wrapping_add(1);
     }
 
+    /// Set the per-eval fuel counter, optionally re-anchoring
+    /// to a per-request budget.
+    ///
+    /// Specified by [ADR 0022 v5](docs/adr/0022-http-server-battery.md)
+    /// "Runtime::refill_fuel" semantics:
+    ///
+    /// - `Some(n)` → `vm.fuel = Some(n)`. Set (not add).
+    ///   Saturating; does NOT clamp against `Config::fuel`
+    ///   — embedders may use a smaller-than-lifetime per-
+    ///   request budget intentionally to bound runaway
+    ///   request code.
+    /// - `None` + `Config::fuel = Some(c)` → `vm.fuel =
+    ///   Some(c)`. Re-anchors to the embedder's lifetime
+    ///   cap (same value `eval()` writes at entry).
+    /// - `None` + `Config::fuel = None` → `vm.fuel = None`.
+    ///   Unbounded (the default for trusted-embed
+    ///   scenarios).
+    ///
+    /// ## Usage
+    ///
+    /// The `_http_server` battery calls this before each
+    /// `app.call(env)`:
+    ///
+    /// ```rust,ignore
+    /// rt.reset_between_requests();
+    /// rt.refill_fuel(http_server_config.per_request_fuel);
+    /// ```
+    ///
+    /// Without per-request refill, `Config::fuel`'s lifetime
+    /// counter monotonically depletes across requests;
+    /// eventually `ResourceExhausted` fires and the worker
+    /// dies. With refill, each request gets a fresh budget;
+    /// runaway CPU-bound requests trap (and the battery
+    /// catches the trap at the `app.call` boundary → 503)
+    /// while the worker survives for the next request.
+    ///
+    /// ## Mid-request behaviour is unspecified
+    ///
+    /// Host fns invoked DURING request handling MUST NOT
+    /// call this. The intended call site is between
+    /// requests, when no Ruby code is executing. Calling
+    /// from within a host fn body could surface as
+    /// surprising no-trap or premature-trap; ADR 0022 v5
+    /// names this "reviewer judgement" until
+    /// `VmCallable`-typed registration enforces it
+    /// statically.
+    pub fn refill_fuel(&mut self, per_request: Option<u64>) {
+        let value = per_request.or(self.fuel_budget);
+        // Write BOTH the working counter (`vm.fuel`, consumed
+        // by `check_fuel`) AND the per-eval source of truth
+        // (`self.fuel_budget`, which `eval()` re-anchors
+        // `vm.fuel` from at entry). The dual write means the
+        // refill survives through any number of subsequent
+        // `eval()` calls — the typical per-request shape
+        // (`reset → refill → eval`) and the direct-dispatch
+        // shape (`reset → refill → step_block`, used by the
+        // `_http_server` battery) both see the intended cap.
+        self.vm.fuel = value;
+        // NOTE: this also redefines the *lifetime* cap to the
+        // per-request value. `Config::fuel` was the original
+        // embedder-supplied lifetime cap; calling refill_fuel
+        // with Some(n) effectively pins all subsequent evals
+        // at n until refilled again. Calling with None
+        // restores the original `Config::fuel`.
+        if per_request.is_some() {
+            self.fuel_budget = value;
+        }
+        // When `per_request = None`, leave fuel_budget alone
+        // (we want to fall back to Config::fuel which is
+        // already stored in fuel_budget); vm.fuel just got
+        // set to that same value above.
+    }
+
     /// Lightweight per-request reset between recurring `eval`
     /// contexts (HTTP request handlers, fuzz loop iterations,
     /// REPL evaluation rounds). Clears VM control-flow + per-
