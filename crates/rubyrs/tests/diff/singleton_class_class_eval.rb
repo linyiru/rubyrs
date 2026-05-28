@@ -38,6 +38,12 @@ sc1 = A3.singleton_class
 sc2 = A3.singleton_class
 puts "identity=#{sc1.equal?(sc2)}"
 puts "view-class=#{sc1.class.name}"
+## CRuby: `A.singleton_class.name` is `nil` even though
+## `to_s` / `inspect` render "#<Class:A>". rubyrs stores the
+## display name in `Class.name` for diagnostics; the
+## `Class#name` primitive detects the shell and returns nil
+## to match CRuby. (Code-review #253 round 6 #1.)
+puts "shell-name=#{sc1.name.inspect}"
 
 ## Shape 4: the eigenclass shell is NOT the class itself —
 ## installs on the shell DON'T land on the underlying class's

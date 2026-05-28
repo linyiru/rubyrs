@@ -112,7 +112,16 @@ pub(crate) fn primitive_call(recv: &Value, name: &str, args: &[Value], max_value
         //     does — that's a non-deterministic side that ADR 0017
         //     keeps out of Tier 1.
         (Value::Class(c), "name", []) => {
-            if c.name.is_empty() {
+            // CRuby's `A.singleton_class.name` is `nil` for any
+            // eigenclass-shell, even though its `to_s`/`inspect`
+            // renders "#<Class:A>". rubyrs stores the shell's
+            // display name in the `name` field for diagnostics
+            // (see `singleton_class` arm in dispatch.rs); detect
+            // the shell via `singleton_target` and return nil
+            // here to match CRuby. (Code-review #253 round 6 #1.)
+            if c.singleton_target.borrow().is_some() {
+                Some(Value::Nil)
+            } else if c.name.is_empty() {
                 Some(Value::Nil)
             } else {
                 Some(Value::new_str(c.name.clone()))
