@@ -92,37 +92,51 @@ def load_baseline(path: Path) -> dict:
         return json.load(fh)
 
 
-def discover_source_files(repo_root: Path) -> set[str]:
-    """Return repo-relative paths of every `crates/*/src/**/*.rs` source file.
+def is_ratchet_source(rel: str) -> bool:
+    """True iff `rel` (repo-relative path) is a source file the ratchet
+    measures. Single source of truth for "what counts as a source file" —
+    used by both the LCOV ingest filter and the source-tree walker, so
+    the two can't drift.
 
     Skips:
-      - `tests/`, `examples/`, `benches/`, build scripts (`build.rs`) — these
-        produce no library-coverage records.
+      - Paths outside `crates/` (third-party deps).
       - `target/` — compiler output.
-      - `fuzz/` — separate cargo package, not part of the main workspace
-        coverage run.
+      - `tests/`, `examples/`, `benches/` — not library code.
+        (`cargo llvm-cov --all-targets` CAN emit records for these; the
+        cargo-llvm-cov default skips most of them, but Copilot review on
+        PR #274 noted the ratchet's filter has to be defensive here.)
+      - `build.rs` — build scripts.
+      - `fuzz/` — separate cargo package.
+    """
+    if not rel.startswith("crates/"):
+        return False
+    if "/target/" in rel:
+        return False
+    if "/tests/" in rel or "/examples/" in rel or "/benches/" in rel:
+        return False
+    if rel.endswith("/build.rs"):
+        return False
+    if "/fuzz/" in rel:
+        return False
+    if "/src/" not in rel:
+        return False
+    return True
 
-    The result is the set we expect to see ACCOUNTED FOR by the baseline:
-    every entry must be either in `files` (measured by LCOV with a coverage
-    baseline) OR in `excluded_files` (explicitly declared as having no
-    executable lines / behind a feature flag CI doesn't enable). Anything
-    that's neither is a new source file the host forgot to register.
+
+def discover_source_files(repo_root: Path) -> set[str]:
+    """Walk `crates/*/src/**/*.rs` and return every file matching
+    `is_ratchet_source`. The result is what we expect to see ACCOUNTED
+    FOR by the baseline: every entry must be either in `files` (measured
+    by LCOV with a coverage baseline) OR in `excluded_files` (explicitly
+    declared as having no executable lines / behind a feature flag CI
+    doesn't enable). Anything that's neither is a new source file the
+    host forgot to register.
     """
     out: set[str] = set()
-    crates = repo_root / "crates"
-    for p in crates.rglob("*.rs"):
+    for p in (repo_root / "crates").rglob("*.rs"):
         rel = str(p.relative_to(repo_root))
-        if "/target/" in rel:
-            continue
-        if "/tests/" in rel or "/examples/" in rel or "/benches/" in rel:
-            continue
-        if rel.endswith("/build.rs"):
-            continue
-        if "/fuzz/" in rel:
-            continue
-        if "/src/" not in rel:
-            continue
-        out.add(rel)
+        if is_ratchet_source(rel):
+            out.add(rel)
     return out
 
 
@@ -157,16 +171,18 @@ def main() -> int:
         return 2
 
     coverage = parse_lcov(args.lcov)
-    # Filter to repo-relative paths (drops third-party deps).
+    # Filter to repo-relative paths and apply the same source-file filter
+    # the tree-walker uses (single source of truth — `is_ratchet_source`).
+    # This drops third-party deps, plus examples/benches/build.rs records
+    # `cargo llvm-cov --all-targets` may emit for them — Copilot review on
+    # PR #274 caught the asymmetry where the LCOV ingest admitted these
+    # while `discover_source_files` excluded them, so a measured example
+    # would trip "missing from baseline" against a baseline that
+    # legitimately omitted it.
     rel = {}
     for path, (hit, found) in coverage.items():
         norm = normalize(path, args.repo_root)
-        # Only ratchet files under our crates/. Excludes registry/index/git
-        # dep paths LCOV may emit when --workspace pulls them in, plus any
-        # test files that slip through (cargo llvm-cov by default measures
-        # coverage OF library code BY tests, so test files shouldn't appear
-        # — but defensive filter for sub-crate test trees).
-        if norm.startswith("crates/") and "/tests/" not in norm:
+        if is_ratchet_source(norm):
             rel[norm] = (hit, found, pct(hit, found))
 
     baseline = load_baseline(args.baseline)
