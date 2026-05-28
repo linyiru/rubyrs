@@ -2871,7 +2871,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
-                    | "autoload" | "private_constant" | "public_constant"
+                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
                     | "class_eval" | "module_eval"
@@ -3041,6 +3041,102 @@ impl Vm {
                 }
                 self.stack.push(Value::Nil);
                 return Ok(());
+            }
+            // `autoload?(:Const [, inherit])` — CRuby returns the
+            // file path string if `:Const` is set for autoload on
+            // this module, else nil. Since `autoload` is itself a
+            // no-op stub (rubyrs doesn't model lazy loading), the
+            // registry is always empty and `autoload?` always
+            // returns nil. tilt's `mapping.rb:362` calls
+            // `scope.autoload?(n)` inside `constant_defined?` —
+            // expects nil so the second `const_defined?` check
+            // proceeds. (TRY_RUNS pass-10 layer #1.)
+            if &*name == "autoload?"
+                && let Value::Class(_) = &self_val {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    }));
+                }
+                self.stack.push(Value::Nil);
+                return Ok(());
+            }
+            // `Mod.const_defined?(:Const [, inherit])` — looks up
+            // the qualified name in `self.classes` (Class/Module
+            // table) AND `self.constants` (other Value constants).
+            // tilt's `mapping.rb:361-365` walks `Tilt::Backend` etc.
+            // via `scope.const_defined?(n)`. The `inherit` arg is
+            // accepted for arity parity but Tier-1 doesn't model
+            // ancestor const lookup — `Foo::Bar` only resolves on
+            // Foo itself, not its includes/superclass chain.
+            // (TRY_RUNS pass-10 layer #2.)
+            if &*name == "const_defined?"
+                && let Value::Class(cls) = &self_val {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    }));
+                }
+                // CRuby splits the path on `::` for String args
+                // but treats Symbol args as bare names
+                // (`:"Foo::Bar"` raises wrong-name).
+                // `resolve_const_path` centralises validation,
+                // intern-cap gating, and per-segment walk.
+                // (Copilot review #277 round 4 #3.)
+                let (const_name, split) = match &args[0] {
+                    Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
+                    Value::Str(s) => (s.to_string_lossy(), true),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                    })),
+                };
+                let cls_clone = cls.clone();
+                let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+                match outcome {
+                    ConstPathOutcome::Found(_) => self.stack.push(Value::Bool(true)),
+                    ConstPathOutcome::Missing { .. } => self.stack.push(Value::Bool(false)),
+                    ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", name),
+                    })),
+                    ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} does not refer to class/module", full_path),
+                    })),
+                }
+                return Ok(());
+            }
+            // `Mod.const_get(:Const [, inherit])` — paired with
+            // const_defined?. Returns the actual Class/Value
+            // constant if defined; raises NameError otherwise.
+            // tilt's `constant_defined?` walk calls `scope.const_get(n)`
+            // after the `const_defined?` check passes.
+            if &*name == "const_get"
+                && let Value::Class(cls) = &self_val {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    }));
+                }
+                let (const_name, split) = match &args[0] {
+                    Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
+                    Value::Str(s) => (s.to_string_lossy(), true),
+                    other => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                    })),
+                };
+                let cls_clone = cls.clone();
+                let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+                match outcome {
+                    ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
+                    ConstPathOutcome::Missing { missing_qualified } => return Err(self.trap(RubyError::NameError {
+                        msg: format!("uninitialized constant {}", missing_qualified),
+                    })),
+                    ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", name),
+                    })),
+                    ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} does not refer to class/module", full_path),
+                    })),
+                }
             }
             // `private_constant` / `public_constant` /
             // `deprecate_constant` accept any number of symbol args
@@ -3695,6 +3791,83 @@ impl Vm {
             }
             self.stack.push(Value::Nil);
             return Ok(());
+        }
+        // `Foo.autoload?(:Bar)` — explicit-receiver parallel of
+        // the no_recv arm above. Returns nil since the registry
+        // is always empty (autoload is a no-op stub).
+        if &*name == "autoload?"
+            && let Value::Class(_) = &recv {
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                }));
+            }
+            self.stack.push(Value::Nil);
+            return Ok(());
+        }
+        // `Foo.const_defined?(:Bar)` — explicit-receiver parallel.
+        // tilt's actual call site is
+        // `scope.const_defined?(n)` where scope is reached via the
+        // `inject(Object)` walk in `constant_defined?`.
+        if &*name == "const_defined?"
+            && let Value::Class(cls) = &recv {
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                }));
+            }
+            // String args walked via `::`; Symbol args treated as
+            // bare names — see `resolve_const_path` doc.
+            // (Copilot review #277 round 4 #3.)
+            let (const_name, split) = match &args[0] {
+                Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
+                Value::Str(s) => (s.to_string_lossy(), true),
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                })),
+            };
+            let cls_clone = cls.clone();
+            let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+            match outcome {
+                ConstPathOutcome::Found(_) => self.stack.push(Value::Bool(true)),
+                ConstPathOutcome::Missing { .. } => self.stack.push(Value::Bool(false)),
+                ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
+                    msg: format!("wrong constant name {}", name),
+                })),
+                ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} does not refer to class/module", full_path),
+                })),
+            }
+            return Ok(());
+        }
+        if &*name == "const_get"
+            && let Value::Class(cls) = &recv {
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                }));
+            }
+            let (const_name, split) = match &args[0] {
+                Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
+                Value::Str(s) => (s.to_string_lossy(), true),
+                other => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                })),
+            };
+            let cls_clone = cls.clone();
+            let outcome = self.resolve_const_path(&cls_clone, &const_name, split);
+            match outcome {
+                ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
+                ConstPathOutcome::Missing { missing_qualified } => return Err(self.trap(RubyError::NameError {
+                    msg: format!("uninitialized constant {}", missing_qualified),
+                })),
+                ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
+                    msg: format!("wrong constant name {}", name),
+                })),
+                ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
+                    msg: format!("{} does not refer to class/module", full_path),
+                })),
+            }
         }
         if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
             && let Value::Class(_) = &recv {
@@ -6206,7 +6379,7 @@ impl Vm {
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
                     | "constants"
-                    | "autoload" | "private_constant" | "public_constant"
+                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "singleton_class"
                     | "class_eval" | "module_eval"
@@ -6532,6 +6705,114 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
 }
 
 impl Vm {
+    /// Resolves a constant path from a starting class. Behavior
+    /// matches CRuby's `Module#const_get` / `Module#const_defined?`
+    /// dispatch:
+    ///   - If the arg is a Symbol, the path is treated as a single
+    ///     bare name (no `::` splitting). `:"Foo::Bar"` raises
+    ///     `wrong constant name Foo::Bar`.
+    ///   - If the arg is a String, `::` separators split the path
+    ///     and each segment is walked. A leading `::` rebases to
+    ///     the toplevel (Object). Each segment is validated via
+    ///     `is_valid_const_name` before lookup.
+    ///   - The interner-cap guard applies at every lookup: a
+    ///     non-interned qualified key returns Missing without
+    ///     calling `intern` (defends `Config::max_symbols`).
+    /// (Copilot review #277 round 4 #3.)
+    pub(crate) fn resolve_const_path(
+        &mut self,
+        start_cls: &std::rc::Rc<crate::value::Class>,
+        path: &str,
+        split_on_double_colon: bool,
+    ) -> ConstPathOutcome {
+        let (mut scope_name, segments): (String, Vec<&str>) =
+            if split_on_double_colon && path.starts_with("::") {
+                // Leading `::` rebases to Object's toplevel scope.
+                ("Object".to_string(), path[2..].split("::").collect())
+            } else if split_on_double_colon && path.contains("::") {
+                (start_cls.name.clone(), path.split("::").collect())
+            } else {
+                (start_cls.name.clone(), vec![path])
+            };
+        // CRuby reports the FULL original path in the
+        // wrong-name message when the structural issue is
+        // visible at parse time — specifically trailing `::`
+        // or triple-colon runs (`:::`). For deeper invalid
+        // segments inside an otherwise structurally-valid
+        // path (e.g. `Foo::lower`), CRuby reports just that
+        // segment. We approximate by detecting the structural
+        // shapes up front and returning WrongName with the
+        // full path; the per-segment loop below handles the
+        // segment-only cases.
+        //
+        // Caveats: CRuby's exact rule depends on path length
+        // and resolution success (`Foo::Bar::` with Foo
+        // missing reports `uninitialized constant Foo`
+        // because the walk fails before validation). We don't
+        // model that branch; accepted divergence — covered by
+        // Shape 13 of the fixture which exercises CRuby's
+        // canonical short-path shapes.
+        // (Code-review #277 round 6 #2.)
+        if split_on_double_colon
+            && (path.ends_with("::") || path.contains(":::"))
+        {
+            return ConstPathOutcome::WrongName { name: path.to_string() };
+        }
+        let mut current_value: Option<Value> = None;
+        let mut segments_remaining: usize = segments.len();
+        for segment in segments {
+            if !is_valid_const_name(segment) {
+                return ConstPathOutcome::WrongName { name: segment.to_string() };
+            }
+            let lookup = if scope_name == "Object" {
+                segment.to_string()
+            } else {
+                format!("{}::{}", scope_name, segment)
+            };
+            if !self.interner.contains(&lookup) {
+                return ConstPathOutcome::Missing { missing_qualified: lookup };
+            }
+            let qid = self.interner.intern(&lookup);
+            if let Some(c) = self.classes.get(&qid).cloned() {
+                // Update scope_name for the NEXT step's qualified
+                // lookup, and remember the value we'd return if
+                // this is the final segment.
+                scope_name = c.name.clone();
+                current_value = Some(Value::Class(c));
+                segments_remaining -= 1;
+                continue;
+            }
+            if let Some(v) = self.constants.get(&qid).cloned() {
+                segments_remaining -= 1;
+                // Non-class constants can't be a parent scope.
+                // CRuby's behavior when used as a middle segment:
+                //   `Foo::CONST::X` →
+                //   `TypeError: Foo::CONST::X does not refer to
+                //    class/module`
+                // (regardless of whether `Foo::X` would
+                // separately resolve). If we ARE the last segment
+                // the value is the legitimate result; otherwise
+                // the path is structurally invalid and we must
+                // raise the CRuby-shape TypeError instead of
+                // continuing the walk with the OLD scope_name
+                // (which would silently resolve to a sibling
+                // under `Foo` or surface as a wrong
+                // "uninitialized constant" NameError).
+                // (Code-review #277 round 6 #1.)
+                if segments_remaining > 0 {
+                    return ConstPathOutcome::NotClass { full_path: path.to_string() };
+                }
+                current_value = Some(v);
+                continue;
+            }
+            return ConstPathOutcome::Missing { missing_qualified: lookup };
+        }
+        match current_value {
+            Some(v) => ConstPathOutcome::Found(v),
+            None => ConstPathOutcome::Missing { missing_qualified: path.to_string() },
+        }
+    }
+
     /// CRuby-shape arity for a Proto: required positional count
     /// when the signature is fully fixed; `-(required + 1)`
     /// otherwise. Used by `Method#arity` and
@@ -6694,6 +6975,46 @@ impl Vm {
             builtin: None,
         })
     }
+}
+
+/// CRuby's constant-name validation rule: the bare name must
+/// start with an ASCII uppercase letter and contain only
+/// `[A-Za-z0-9_]`. Empty names are rejected. Used by
+/// `Module#const_defined?` / `Module#const_get` to raise the
+/// CRuby-shape `NameError("wrong constant name <name>")`
+/// distinct from `"uninitialized constant"` (which is for
+/// valid-but-absent names). (Copilot review #277 round 3.)
+fn is_valid_const_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Outcome of `resolve_const_path` (a single helper that
+/// powers both `const_defined?` and `const_get`).
+pub(crate) enum ConstPathOutcome {
+    /// Path resolved to this Value (Class or other constant).
+    Found(Value),
+    /// Every name in the path was valid, but some step missed.
+    /// `missing_qualified` is the qualified key in CRuby's
+    /// `uninitialized constant Foo::Bar` shape for error
+    /// reporting.
+    Missing { missing_qualified: String },
+    /// Some name in the path was not a valid constant identifier.
+    WrongName { name: String },
+    /// A middle segment of the path resolved to a non-class /
+    /// non-module value (e.g. `Foo::CONST::X` where `Foo::CONST`
+    /// is `42`). CRuby raises
+    /// `TypeError: <full_path> does not refer to class/module`.
+    /// Pre-fix the helper continued walking with the previous
+    /// scope, which could silently resolve to an unrelated
+    /// sibling (`Foo::X`) or surface as a misleading
+    /// `uninitialized constant` NameError. (Code-review #277
+    /// round 6 #1.)
+    NotClass { full_path: String },
 }
 
 fn is_primitive_class_name(name: &str) -> bool {
