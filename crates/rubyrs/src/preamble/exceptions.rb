@@ -50,6 +50,19 @@ class ScriptError < Exception
 end
 class NotImplementedError < ScriptError
 end
+## LoadError — CRuby's exception for `require` / `require_relative`
+## / `load` failure. `rescue LoadError` is the idiomatic catch
+## for "feature not available", and the FS-sandbox cap
+## (`Config::allow_filesystem_io: false`) raises this when
+## load-class methods are gated off (see vm/gc.rs::check_load_allowed).
+class LoadError < ScriptError
+end
+## IOError — CRuby's exception for File / IO failures.
+## `rescue IOError` is the idiomatic catch for FS errors;
+## raised by the FS-sandbox cap when File class methods are
+## gated off (see vm/gc.rs::check_filesystem_io_allowed).
+class IOError < StandardError
+end
 class IndexError < StandardError
 end
 class KeyError < IndexError

@@ -559,7 +559,16 @@ impl Vm {
                         // resolve to `<root>/rack/show_exceptions.rb`
                         // without forcing the script to spell out
                         // `require_relative` paths.
-                        let rb_found = self.find_ruby_source_candidate(&path_str);
+                        //
+                        // Under the FS sandbox (`Config::allow_filesystem_io:
+                        // false`), skip the probe — it'd touch the host FS
+                        // before any Ruby-level resolution decides whether
+                        // the load is in-process (stub / constant-satisfied)
+                        // or actually wants disk. The downstream `cext_require`
+                        // fallback gates separately; the stub / satisfied
+                        // branches run unblocked because they don't touch FS.
+                        let rb_found = self.allow_filesystem_io
+                            && self.find_ruby_source_candidate(&path_str);
                         if rb_found {
                             Some(self.require_ruby(&path_str))
                         } else if is_stdlib_stub_name(&path_str) {
@@ -662,6 +671,19 @@ impl Vm {
                             self.loaded_stdlib_stubs.insert(path_str.to_string());
                             Some(Ok(Value::Bool(true)))
                         } else {
+                            // Reached the FS-touching cext fallback —
+                            // gate the sandbox here, not at the dispatch
+                            // entry. Stub / satisfied-by-constant branches
+                            // above are in-process and bypass the gate;
+                            // under sandbox-on they let scripts use
+                            // `require 'uri'`-style feature detection
+                            // without tripping LoadError. `cext_require`
+                            // also gates internally — this surface-level
+                            // check fires first with a clearer
+                            // `op = "require"` message.
+                            if let Err(t) = self.check_load_allowed("require") {
+                                return Some(Err(t));
+                            }
                             #[cfg(feature = "cext")]
                             { Some(self.cext_require(&path_str)) }
                             #[cfg(not(feature = "cext"))]
@@ -719,7 +741,10 @@ impl Vm {
                 // the valid-UTF-8 hot path, only the invalid-UTF-8
                 // fallback owns a String. `to_string_lossy()` would
                 // allocate unconditionally.
-                [Value::Str(path)] => Some(path.with_str_lossy(|s| self.require_relative(s))),
+                [Value::Str(path)] => Some(
+                    self.check_load_allowed("require_relative")
+                        .and_then(|()| path.with_str_lossy(|s| self.require_relative(s))),
+                ),
                 // Distinguish type mismatch from arity: CRuby raises
                 // TypeError for `require_relative :sym`, ArgumentError
                 // for the wrong count. Reporting just "got 1" hides
@@ -738,7 +763,14 @@ impl Vm {
                 }))),
             },
             #[cfg(target_os = "wasi")]
-            "require_relative" => Some(Err(self.trap(RubyError::RuntimeError {
+            "require_relative" => Some(Err(self.trap(RubyError::LoadError {
+                // LoadError, not RuntimeError — matches the non-wasi
+                // `check_load_allowed` trap class and the
+                // `Config::allow_filesystem_io` rustdoc's
+                // "rescue LoadError" promise. A wasi-target script
+                // doing `rescue LoadError` for "feature unavailable"
+                // now catches this trap the same way it would catch
+                // the sandbox cap's LoadError.
                 msg: "require_relative: file I/O not available on wasm32-wasi".into(),
             }))),
             // `Kernel#eval(string [, _binding, _file, _line])` —

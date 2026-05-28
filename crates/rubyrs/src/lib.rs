@@ -210,6 +210,34 @@ pub struct Config {
     /// explicitly. Deterministic-test hosts inject a fixed
     /// `|| (1_700_000_000, 0)` closure for reproducible output.
     pub time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
+    /// Filesystem-access capability gate. When `false` (the
+    /// secure-by-default), every script-callable path that
+    /// touches the filesystem traps with `IOError` /
+    /// `LoadError` instead of executing the syscall. Covers:
+    ///
+    /// - `File.read` / `.write` / `.exist?` / `.exists?` /
+    ///   `.file?` / `.directory?` / `.size` — class methods
+    ///   that read or write the FS.
+    /// - `File.expand_path` — falls back to its lexical-only
+    ///   path (matches CRuby's behaviour for non-existent
+    ///   paths) instead of calling `canonicalize`.
+    /// - `__dir__` — falls back to the lexical parent instead
+    ///   of `canonicalize`-ing the source filename.
+    /// - `require` / `require_relative` / `cext_require` —
+    ///   load paths trap with `LoadError`, so a sandboxed
+    ///   script cannot pull in new code from disk.
+    ///
+    /// Pure-lexical operations (`File.basename`, `File.dirname`,
+    /// `File.extname`) are not gated — they're string
+    /// manipulation that happens to operate on path-shaped
+    /// input. `STDIN` / `STDOUT` / `STDERR` are not "filesystem
+    /// I/O" in the sandbox sense and remain available.
+    ///
+    /// The CLI binary `rubyrs` opts in by setting `true`. Fuzz
+    /// harnesses, sandbox / gemspec evaluators, and any embed
+    /// that processes untrusted Ruby leave the default; the
+    /// filesystem is off-limits.
+    pub allow_filesystem_io: bool,
 }
 
 impl Default for Config {
@@ -244,6 +272,11 @@ impl Default for Config {
             env: None,
             pid: None,
             time_now: None,
+            // Secure-by-default: library embedders evaluating
+            // untrusted Ruby get a sandbox where File.* / require
+            // / __dir__ cannot reach the host filesystem. The CLI
+            // binary opts in explicitly via `Config { allow_filesystem_io: true, .. }`.
+            allow_filesystem_io: false,
         }
     }
 }
@@ -591,6 +624,19 @@ struct ResourceCaps {
     // preamble keeps Runtime construction time observably
     // independent of the host's stress_gc choice.
     stress_gc: bool,
+    // NOTE: `allow_filesystem_io` is NOT in ResourceCaps. The
+    // other fields here are budgets / pure-performance settings
+    // where lifting during preamble is safe and pragmatic
+    // (preamble is internal infrastructure, host caps don't
+    // need to apply). `allow_filesystem_io` is a *capability* —
+    // a sandbox host setting `false` is making a security
+    // contract that no script-driven path reaches the host FS.
+    // Lifting it during preamble would weaken that contract:
+    // a future preamble fragment that accidentally adds
+    // `require '...'` or `File.read(...)` would silently
+    // succeed when the host configured the sandbox off,
+    // instead of loudly trapping at construction. Loud failure
+    // is the safer default for a security cap.
 }
 
 impl ResourceCaps {
@@ -627,6 +673,9 @@ impl ResourceCaps {
         rt.vm.heap.max_live = self.max_live;
         rt.deadline = self.deadline;
         rt.vm.stress_gc = self.stress_gc;
+        // `allow_filesystem_io` deliberately not restored here —
+        // it's not in ResourceCaps (host's security cap is
+        // honoured during preamble too, see struct doc).
     }
 }
 
@@ -853,6 +902,7 @@ impl Runtime {
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
         self.vm.time_now = cfg.time_now;
         self.deadline = cfg.deadline;
+        self.vm.allow_filesystem_io = cfg.allow_filesystem_io;
     }
 
     /// Rewind the Runtime to its post-preamble state — every class,
@@ -882,8 +932,16 @@ impl Runtime {
     /// - Compiled bytecode (`vm.protos`) and host-registered
     ///   functions (`vm.host_fns`).
     /// - Resource caps (`max_frames`, `max_heap_objects`,
-    ///   `max_symbols`, `max_value_bytes`) and host state
-    ///   (`env`, `pid`, `time_now`, `stress_gc`, `stdout`).
+    ///   `max_symbols`, `max_value_bytes`,
+    ///   `allow_filesystem_io`) and host state (`env`, `pid`,
+    ///   `time_now`, `stress_gc`, `stdout`). All of these are
+    ///   carried forward as-is — reset does NOT roll Config
+    ///   back to whatever was in effect at construction time.
+    ///   A host that has called `apply_config` mid-life to
+    ///   change the sandbox / cap shape keeps the most recent
+    ///   apply_config's values after reset; to re-anchor to
+    ///   construction-time Config, call `apply_config(original_cfg)`
+    ///   explicitly after reset.
     /// - `Config::fuel` and `Config::deadline` are per-`eval`:
     ///   each `eval` re-anchors `vm.fuel` from `fuel_budget`
     ///   and `vm.deadline_at` from `deadline` at entry, so
