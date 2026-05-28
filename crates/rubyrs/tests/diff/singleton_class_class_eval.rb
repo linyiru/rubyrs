@@ -91,15 +91,17 @@ A5.add_charset << "image/svg+xml"
 puts "sinatra-shape-mutation=#{A5.add_charset.inspect}"
 puts "sinatra-shape-identity=#{A5.add_charset.equal?(A5.add_charset)}"
 
-## `super` from inside a singleton method defined via
-## `singleton_class.class_eval` requires `defining_class` to
-## point at the underlying real class (not the eigenclass
-## shell, which isn't in any superclass chain). This PR fixes
-## the `defining_class` plumbing (code-review #253 round 1 #1)
-## but `super` from inside a `define_method`-installed block
-## is a separate Tier-1 gap; once that lands the fixture can
-## pin the end-to-end behavior. For now we only pin the
-## `defining_class` directly via the Method's reported class.
+## `def name; …; end` inside `singleton_class.class_eval`
+## installs as a singleton method (parallel to the
+## `define_method` shape above — both routes through
+## `install_method`). This PR also fixes the `defining_class`
+## plumbing so it points at the underlying real class
+## (code-review #253 round 1 #1), but `super` from inside a
+## `define_method`-installed block is a separate Tier-1 gap
+## not exercised here; once that lands the fixture can pin
+## end-to-end super behavior. The Parent6/Child6 setup below
+## just verifies the parsed-`def` path on the shell and that
+## the parent's existing singleton method is still reachable.
 class Parent6
   def self.greet
     "parent"
@@ -131,3 +133,14 @@ A7.singleton_class.class_eval do
 end
 puts "alias-on-shell=#{A7.hi.inspect}"
 puts "alias-preserves-original=#{A7.greet.inspect}"
+
+## Aliasing a BUILT-IN class method (e.g. `:name`) inside
+## `singleton_class.class_eval` must also resolve through the
+## underlying real class's primitive whitelist — pre-fix the
+## whitelist probe ran with the shell's "#<Class:…>" name and
+## never matched. (Code-review #253 round 3 #1.)
+class A8; end
+A8.singleton_class.class_eval do
+  alias_method :class_name, :name
+end
+puts "alias-builtin-on-shell=#{A8.class_name.inspect}"

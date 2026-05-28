@@ -1256,13 +1256,37 @@ impl Vm {
                         // arities other than 0 also forward
                         // correctly.
                         let cls_ref = self.class_stack.last().cloned();
-                        if let Some(cls) = &cls_ref
-                            && self.primitive_class_responds_to(&cls.name, old_id) {
-                            let synth = self.synth_primitive_forwarder(cls, old_id);
-                            cls.install_method(new_id, synth);
-                            self.method_gen = self.method_gen.wrapping_add(1);
-                            self.stack.push(Value::Nil);
-                            return Ok(true);
+                        // Eigenclass-shell case: probe the underlying
+                        // real class for both the primitive-sentinel
+                        // whitelist (e.g. aliasing `:name` works
+                        // because Class.name is in the whitelist
+                        // even though "Foo" isn't a primitive class
+                        // name) AND the Class-method whitelist via
+                        // `responds_to(Value::Class(real), …)`. The
+                        // install still routes through the shell's
+                        // `install_method`, which redirects into
+                        // `real.singleton_methods`. (Code-review
+                        // #253 round 3 #1.)
+                        let probe_cls = cls_ref.as_ref().and_then(|c| {
+                            c.singleton_target
+                                .borrow()
+                                .as_ref()
+                                .and_then(std::rc::Weak::upgrade)
+                        });
+                        let shell_class_whitelist_hit = probe_cls
+                            .as_ref()
+                            .map(|real| self.responds_to(&Value::Class(real.clone()), old_id))
+                            .unwrap_or(false);
+                        if let Some(cls) = &cls_ref {
+                            let primitive_hit = self.primitive_class_responds_to(&cls.name, old_id);
+                            if primitive_hit || shell_class_whitelist_hit {
+                                let forwarder_cls = probe_cls.as_ref().unwrap_or(cls);
+                                let synth = self.synth_primitive_forwarder(forwarder_cls, old_id);
+                                cls.install_method(new_id, synth);
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                                self.stack.push(Value::Nil);
+                                return Ok(true);
+                            }
                         }
                         // CRuby raises NameError ("undefined method ...")
                         // when `alias_method`'s source name isn't found
