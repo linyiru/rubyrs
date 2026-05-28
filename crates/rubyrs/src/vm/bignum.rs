@@ -1484,6 +1484,28 @@ impl Vm {
         {
             return Ok(Some(v));
         }
+        // `Int#/` overflow promotion: `i64::MIN / -1` mathematically
+        // equals 2^63, which doesn't fit i64. The expression form
+        // (Op::BinOp) handles this in step.rs via apply_int's
+        // `None => bigint_arith(...)` fallback, but the method-call
+        // shape (`(-9223372036854775808).send(:/, -1)`,
+        // `(-2**63)./(-1)` via define_method etc.) routes through
+        // numeric_call (which also returns None for this combo)
+        // and would otherwise fall through to NoMethodError. Catch
+        // it here and promote so the two surfaces stay in lock-step.
+        // No corresponding `%` hook needed — anything % -1 is
+        // mathematically always 0, no overflow.
+        if args.len() == 1 && name == "/"
+            && let (Value::Int(a), Value::Int(b)) = (recv, &args[0])
+            && *a == i64::MIN && *b == -1
+            && let Some(v) = self.bigint_arith(
+                crate::bytecode::BinOpKind::Div,
+                recv,
+                &args[0],
+            )
+        {
+            return Ok(Some(v?));
+        }
         // Bitwise binary `&` / `|` / `^` on Integer × Integer where
         // at least one operand is BigInt. numeric.rs's `(Int, op,
         // [Int])` arm handles the pure Int × Int case; this fires

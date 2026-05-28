@@ -1443,6 +1443,13 @@ fn integer_div_mod_floor_semantics() {
          # Method-call shape — cold path through numeric.rs\n\
          puts (13.send(:/, 4))            # 3\n\
          puts ((-13).send(:%, 4))         # 3\n\
+         # i64::MIN / -1 overflow promotion. The expression form\n\
+         # works via apply_int's None → bigint_arith fallback;\n\
+         # the method-call shape goes through numeric_call which\n\
+         # also returns None, so bigint_primitive needs an explicit\n\
+         # promotion hook (added per /code-review on PR #254).\n\
+         puts ((-9223372036854775808) / -1).inspect           # 9223372036854775808\n\
+         puts ((-9223372036854775808).send(:/, -1)).inspect   # 9223372036854775808 (lock-step)\n\
          # Float × Float — same floor semantics\n\
          puts ((-13.0) % 4.0)             # 3.0\n\
          puts (13.0 % (-4.0))             # -3.0\n\
@@ -1459,6 +1466,7 @@ fn integer_div_mod_floor_semantics() {
     assert_eq!(lines, vec![
         "3", "1", "-4", "3", "-4", "-3", "3", "-1",  // Int×Int sign combos
         "3", "3",                                      // method-call shape
+        "9223372036854775808", "9223372036854775808", // i64::MIN/-1 promote (both paths)
         "3.0", "-3.0", "3.0", "3.0",                   // Float-involved
         "1.0",                                         // Infinity
     ]);
