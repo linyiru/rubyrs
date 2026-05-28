@@ -218,6 +218,56 @@ Run the example:
 cargo run --release -p rubyrs --example embed
 ```
 
+## HTTP server battery (preview)
+
+`_http_server` is an opt-in Phase H1 PoC of a Rack-shape HTTP
+server hosted inside the rubyrs runtime — Rust front (`hyper 1.x`
++ `tokio` current_thread), Ruby app handler. The full design
+lives in [docs/adr/0022-http-server-battery.md](docs/adr/0022-http-server-battery.md).
+
+Single process:
+
+```ruby
+app = ->(env) {
+  [200, {"Content-Type" => "text/plain"}, ["hello from rubyrs"]]
+}
+# (addr, duration_secs, app[, per_request_fuel, max_body, ...])
+__rubyrs_http_serve_with_app("127.0.0.1:9292", 60, app)
+```
+
+Multi-core via pre-fork (Stage 7, Unix only):
+
+```ruby
+on_worker_boot = ->(idx) { puts "[worker #{idx}] booted" }
+__rubyrs_http_serve_prefork(
+  "127.0.0.1:9292", 60, app, 4,  # 4 workers
+  on_worker_boot,
+)
+```
+
+See [crates/rubyrs/examples/prefork_server.rb](crates/rubyrs/examples/prefork_server.rb)
+for a runnable example.
+
+**Platform support** (per ADR 0022 v3 §"Multi-core scaling"):
+
+| Platform   | Single-process | Pre-fork N≥2                                |
+|------------|---------------|---------------------------------------------|
+| Linux      | ✅            | ✅ — kernel hash-balanced SO_REUSEPORT       |
+| macOS      | ✅            | ⚠️  dev-only (Apple frameworks fork-unsafe; SO_REUSEPORT distribution OS-dependent) |
+| Windows    | ✅            | ❌ no fork(2) or SO_REUSEPORT equivalent     |
+
+**Vm state across fork**: class defs, method tables, constants, and
+host fn closures inherit via copy-on-write. File descriptors opened
+pre-fork ARE shared kernel FDs — DB connections, logfile handles
+etc. MUST be closed and reopened in `on_worker_boot` (same discipline
+as Puma's `on_worker_boot`). Globals are cleared between requests
+by the per-request reset; persistent worker state should use class
+instance variables.
+
+Build with: `cargo build --features _http_server -p rubyrs`. The
+feature adds ~12-18 MB stripped to the binary; off by default per
+ADR 0019 v3 Rule 3.
+
 ## Status
 
 Experimental. See [docs/SUBSET.md](docs/SUBSET.md) for what works today
