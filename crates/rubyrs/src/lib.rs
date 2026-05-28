@@ -1186,6 +1186,14 @@ impl Runtime {
             "<rubyrs:preamble:object>",
         )
             .expect("ICE: failed to load Object preamble");
+        // Synthesise builtin Method records on Kernel for the
+        // inline-handled primitives (`class`, `nil?`, `respond_to?`,
+        // ...). The records carry real arity / parameters /
+        // source_location metadata so reflection sees the same
+        // shape as CRuby; invocation routes back through inline
+        // dispatch via the `builtin` short-circuit in
+        // `invoke_method_with_block`.
+        self.vm.install_kernel_builtins();
         // Comparable mixin — comparison-operator fan-out from
         // `<=>`. Loaded ahead of the inline PREAMBLE so any
         // `class X < Comparable` shape (or `is_a?(Comparable)`

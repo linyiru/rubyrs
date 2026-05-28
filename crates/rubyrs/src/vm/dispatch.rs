@@ -1094,6 +1094,19 @@ impl Vm {
                     Some(m) => m,
                     None => { self.stack.push(Value::Nil); return Ok(CallableOutcome::Handled); }
                 };
+                // Builtin Methods carry their own source_location
+                // label (e.g. `"<internal:kernel>"`) rather than a
+                // real proto's filename. The proto_idx on a builtin
+                // is a placeholder; reading `self.protos[0].filename`
+                // would surface an unrelated file.
+                if let Some(meta) = &m.builtin {
+                    let filename_str = Value::new_str(meta.source_label.to_string());
+                    self.maybe_gc();
+                    self.check_alloc()?;
+                    let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(meta.source_line)]));
+                    self.stack.push(Value::Array(id));
+                    return Ok(CallableOutcome::Handled);
+                }
                 let proto = &self.protos[m.proto_idx];
                 let filename = proto.filename.clone();
                 let first_offset = proto.op_spans.first().map(|s| s.byte_offset).unwrap_or(0);
@@ -1197,6 +1210,15 @@ impl Vm {
                 // remove_method that strips the live entry.
                 let m_opt = snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id));
                 let (arity, params_info) = match m_opt {
+                    // Builtin Methods (synthesised on Kernel etc.)
+                    // carry their introspection metadata directly —
+                    // their `proto_idx` is a placeholder. Read from
+                    // `builtin` before falling back to the
+                    // proto-derived path.
+                    Some(ref m) if m.builtin.is_some() => {
+                        let meta = m.builtin.as_ref().unwrap();
+                        (meta.arity, meta.parameters.clone())
+                    }
                     Some(m) => {
                         let proto = &self.protos[m.proto_idx];
                         let n_req_pos = proto.n_required_positional as usize;
@@ -1828,7 +1850,21 @@ impl Vm {
                 // `compile_template_method` does exactly that —
                 // captures, then removes from the class table,
                 // then bind_call's the captured handle.
-                let snapshot = self.lookup_method_uncached(&cls, *sid);
+                //
+                // Kernel builtin synth check: when the receiver is
+                // Kernel and the name matches a registered
+                // builtin (`:class`, `:nil?`, `:is_a?`, ...),
+                // synthesise a Method carrying reflection metadata
+                // (arity/parameters/source_location). Kept off
+                // Kernel.methods deliberately so regular dispatch
+                // doesn't re-find it; the registry lives only for
+                // this introspection surface.
+                let snapshot = if cls.name == "Kernel" {
+                    self.kernel_builtin_method(*sid)
+                        .or_else(|| self.lookup_method_uncached(&cls, *sid))
+                } else {
+                    self.lookup_method_uncached(&cls, *sid)
+                };
                 if snapshot.is_none() && !is_primitive_class_name(&cls.name) {
                     let mname = self.interner.resolve(*sid).to_string();
                     return Err(self.trap(RubyError::NameError {
@@ -3250,6 +3286,12 @@ impl Vm {
         // class name via `class_of` and try `lookup_method_cached`
         // on it. Skip Object (its own arm below handles that) and
         // Class (Class.new etc. handled by the earlier arm).
+        //
+        // `skip_builtin_kernel_lookup_once`: when a synth Kernel
+        // Method re-enters `do_call` to dispatch the primitive,
+        // skip this fallback so we don't re-find the same synth on
+        // the chain (Kernel is now mixed into Object — every
+        // primitive walks through it). Consume the flag once.
         if !matches!(&recv, Value::Object(_) | Value::Class(_))
             && let Value::Class(cls) = self.class_of(&recv)
             && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
@@ -4370,6 +4412,33 @@ impl Vm {
 
 
     pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
+        // Builtin-method short-circuit: synthesised Methods on
+        // Kernel (and any future host class with similar
+        // reflection records) carry a `builtin: Some(...)` payload
+        // that supplies introspection metadata. Their `proto_idx`
+        // is a placeholder (`0`) and must not be executed as
+        // bytecode — re-enter `do_call`/`do_call_block` with the
+        // primitive's real name so the inline arm handles dispatch
+        // (`obj.class`, `obj.is_a?(X)`, ...).
+        if let Some(meta) = &m.builtin {
+            // Synth Method dispatch routes back through `do_call`
+            // with the primitive's real name. The synth lives only
+            // in `Vm.kernel_builtin_metas` (not on Kernel.methods),
+            // so the chain-walking sites below won't re-find it
+            // and we don't need a skip flag — `obj.class`'s normal
+            // inline arm fires naturally.
+            let name_id = meta.name_id;
+            let argc = args.len();
+            self.stack.push(self_val);
+            if let Some(bid) = block {
+                self.stack.push(Value::Block(bid));
+                for a in args { self.stack.push(a); }
+                return self.do_call_block(name_id, argc, /*no_recv=*/false, u16::MAX);
+            } else {
+                for a in args { self.stack.push(a); }
+                return self.do_call(name_id, argc, /*no_recv=*/false, u16::MAX);
+            }
+        }
         // `define_method`-installed methods carry a captured Rc and
         // diverge from the normal fresh-locals path: their frame
         // *shares* `captured` with the lexical scope that created
@@ -6159,6 +6228,7 @@ impl Vm {
             defining_class: Some(Rc::downgrade(cls)),
             visibility: std::cell::Cell::new(crate::value::Visibility::Public),
             closure: None,
+            builtin: None,
         })
     }
 }
