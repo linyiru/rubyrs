@@ -1110,25 +1110,49 @@ impl Vm {
     #[cfg(not(target_os = "wasi"))]
     pub(crate) fn require_ruby(&mut self, path_str: &str) -> Result<Value, Trap> {
         let candidates = self.ruby_source_candidates(path_str);
-        let canon_opt = candidates.iter().find_map(|c| std::fs::canonicalize(c).ok());
-        let canon = match canon_opt {
+        // Walk candidates picking the first that BOTH canonicalizes
+        // AND, when an allowlist is configured, lies inside it. The
+        // earlier `find_map(canonicalize.ok())` picked the first
+        // canon-success and only THEN scope-checked, so a symlink-
+        // poisoned earlier candidate (e.g. `caller_dir/helpers.rb`
+        // is a symlink to `/usr/share/foo/helpers.rb`) would mask a
+        // legitimate later candidate (e.g. `caller_dir/../helpers.rb`
+        // inside the allowlist) and trap LoadError.
+        //
+        // When no allowlist is configured the check_load_allowed
+        // call short-circuits at the bool gate (already known true
+        // here — the dispatch arm short-circuited the .rb probe
+        // otherwise) and the loop matches the original behaviour.
+        let mut tried: Vec<String> = Vec::with_capacity(candidates.len());
+        let mut canon: Option<std::path::PathBuf> = None;
+        for c in &candidates {
+            tried.push(c.display().to_string());
+            let Ok(resolved) = std::fs::canonicalize(c) else { continue };
+            if self.check_load_allowed("require", Some(&resolved)).is_ok() {
+                canon = Some(resolved);
+                break;
+            }
+        }
+        let canon = match canon {
             Some(c) => c,
             None => {
-                let tried = candidates.iter()
-                    .map(|c| c.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                // No candidate satisfied both canon and scope.
+                // Re-run the scope check on the first canon-
+                // succeeding candidate so the caller gets the
+                // descriptive LoadError when the failure is scope
+                // (not "cannot find") — preserves the diagnostic
+                // shape the test suite relies on.
+                if let Some(resolved) = candidates.iter().find_map(|c| std::fs::canonicalize(c).ok()) {
+                    self.check_load_allowed("require", Some(&resolved))?;
+                    // Unreachable: check above returned Err in
+                    // the loop, must return Err here too.
+                    unreachable!("scope re-check changed verdict")
+                }
                 return Err(self.trap(RubyError::RuntimeError {
-                    msg: format!("require: cannot find {} (tried: {})", path_str, tried),
+                    msg: format!("require: cannot find {} (tried: {})", path_str, tried.join(", ")),
                 }));
             }
         };
-        // Allowlist scope: at this point `allow_filesystem_io: true`
-        // (the dispatch arm short-circuited the .rb probe to false
-        // otherwise). Canon is the symlink-resolved on-disk path —
-        // reject if outside any `Config::allowed_paths` prefix.
-        // Trap is LoadError, matching `require`'s error class.
-        self.check_load_allowed("require", Some(&canon))?;
         self.load_ruby_source_from_canon(canon)
     }
 

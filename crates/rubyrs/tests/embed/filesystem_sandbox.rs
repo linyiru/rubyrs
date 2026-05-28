@@ -791,3 +791,60 @@ fn allowlist_dunder_dir_does_not_canonicalize_symlinks() {
     assert_eq!(s, allowed.to_string_lossy(), "__dir__ should not follow symlinks under allowlist");
     let _ = std::fs::remove_dir_all(&allowed);
 }
+
+#[test]
+#[cfg(all(not(target_os = "wasi"), unix))]
+fn allowlist_require_walks_candidates_past_symlink_poisoned_one() {
+    // Defends require_ruby's candidate walk against the
+    // "first-canon-wins masks a legitimate later candidate"
+    // shape. Layout:
+    //   - caller is /allowed1/caller.rb
+    //   - /allowed1/sib.rb is a SYMLINK pointing to /outside/sib.rb
+    //     (canonicalize succeeds but the target is outside scope)
+    //   - /load_dir/sib.rb is a REAL file inside scope
+    //   - $LOAD_PATH includes /load_dir
+    //
+    // Pre-fix, find_map(canonicalize.ok()) picked candidate[1]
+    // (the caller-dir hit) — canon resolved to /outside/sib.rb,
+    // scope check failed → require traps LoadError even though
+    // /load_dir/sib.rb is a legitimate match further down.
+    // Post-fix: walk skips out-of-scope canon hits and finds the
+    // /load_dir entry.
+    use std::os::unix::fs::symlink;
+    let (allowed1, _) = alloc_tempdir("require-walk-caller");
+    let (load_dir, _) = alloc_tempdir("require-walk-loadpath");
+    let (outside, _) = alloc_tempdir("require-walk-outside");
+
+    let outside_lib = outside.join("sib.rb");
+    std::fs::write(&outside_lib, "POISONED = true").expect("write outside");
+    let caller_sib = allowed1.join("sib.rb");
+    let _ = std::fs::remove_file(&caller_sib);
+    symlink(&outside_lib, &caller_sib).expect("symlink poison");
+
+    let good_lib = load_dir.join("sib.rb");
+    std::fs::write(&good_lib, "WALKED = true").expect("write good");
+
+    let caller = allowed1.join("caller.rb");
+
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        // Both `allowed1` (where the caller and the poisoned
+        // symlink live) and `load_dir` are in scope, but the
+        // symlink TARGET (outside/sib.rb) is not. The walk must
+        // skip the poisoned candidate and find load_dir's entry.
+        allowed_paths: Some(vec![allowed1.clone(), load_dir.clone()]),
+        ..Default::default()
+    });
+    let script = format!(
+        r#"$LOAD_PATH.unshift({:?}); require "sib"; defined?(WALKED) == "constant""#,
+        load_dir.to_string_lossy(),
+    );
+    let v = rt.eval(&script, caller.to_str().unwrap()).unwrap();
+    assert!(
+        matches!(v, rubyrs::Value::Bool(true)),
+        "expected the in-scope $LOAD_PATH candidate to be picked (WALKED defined); got {v:?}",
+    );
+    let _ = std::fs::remove_dir_all(&allowed1);
+    let _ = std::fs::remove_dir_all(&load_dir);
+    let _ = std::fs::remove_dir_all(&outside);
+}
