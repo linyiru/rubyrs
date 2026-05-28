@@ -562,6 +562,25 @@ pub(crate) struct Vm {
     /// transitively apply — anything that method itself calls
     /// runs through the normal check.
     pub(crate) bypass_visibility_once: bool,
+    /// P1c.2 (ADR 0023) — fiber yield signaling slot.
+    ///
+    /// `Fiber.yield(v)` sets this to `Some(v)` and returns
+    /// control via the next dispatch iteration. The
+    /// `dispatch_until` loop checks this at the top of every
+    /// iteration alongside `method_return` — when Some, the
+    /// loop exits early so `resume_fiber` can observe the
+    /// yield + save the suspended snapshot.
+    ///
+    /// `resume_fiber` clears this to None before driving and
+    /// `take()`s it after the loop exits. None at all other
+    /// times. Cleared by the FiberSnapshot swap on resume,
+    /// so the bool semantics also survive yield/resume
+    /// cycles cleanly.
+    ///
+    /// cfg(_fiber)-gated — Tier 1 builds never carry this
+    /// field.
+    #[cfg(feature = "_fiber")]
+    pub(crate) fiber_yield_pending: Option<Value>,
     /// Builtin reflection metadata for the synth Methods that
     /// `Kernel.instance_method(:foo)` returns. Looked up by the
     /// `instance_method` arm when the receiver is Kernel.
@@ -724,6 +743,8 @@ impl Vm {
             pending_loop_transfer: None,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
+            #[cfg(feature = "_fiber")]
+            fiber_yield_pending: None,
             kernel_builtin_metas: std::collections::HashMap::new(),
             kernel_class_sym: None,
             basic_object_builtin_metas: std::collections::HashMap::new(),

@@ -598,6 +598,33 @@ mod tests {
         }
     }
 
+    // ===== P1c.2b: vm.fiber_yield_pending field + dispatch_until extension =====
+
+    /// P1c.2b: the yield signaling slot exists on a
+    /// freshly-constructed Vm and defaults to `None`. The
+    /// end-to-end "Fiber.yield exits dispatch_until" path
+    /// requires real bytecode to exercise — lands in
+    /// P1c.2c. This commit only adds the infrastructure;
+    /// this test verifies the field's default + the
+    /// surface for setting it.
+    #[test]
+    fn fiber_yield_pending_defaults_to_none_and_can_be_set() {
+        let mut vm = crate::vm::Vm::new(vec![], crate::intern::Interner::new());
+        assert!(
+            vm.fiber_yield_pending.is_none(),
+            "fresh Vm must have fiber_yield_pending = None",
+        );
+        vm.fiber_yield_pending = Some(crate::value::Value::Int(42));
+        match vm.fiber_yield_pending.take() {
+            Some(crate::value::Value::Int(n)) => assert_eq!(n, 42),
+            other => panic!("expected Some(Int(42)), got {other:?}"),
+        }
+        assert!(
+            vm.fiber_yield_pending.is_none(),
+            "take() clears the slot",
+        );
+    }
+
     // ===== P1c.1: HeapObj::Fiber + alloc_fiber + GC mark =====
 
     /// P1c.1: heap allocation path — `Heap::alloc_fiber`

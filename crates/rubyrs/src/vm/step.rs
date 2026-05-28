@@ -360,6 +360,17 @@ impl Vm {
             // signal to its own caller. Running more ops here
             // would burn fuel inside a frame about to be discarded.
             if self.method_return.is_some() { return Ok(()); }
+            // P1c.2 (ADR 0023): Fiber.yield(v) sets this slot
+            // and we exit so `resume_fiber` can observe the
+            // suspension. Same shape as method_return — the
+            // driver above us reads the flag, stashes value
+            // + state, then returns control to whoever called
+            // `resume_fiber`. Without this check the bytecode
+            // would just continue past the yield point as if
+            // nothing happened, defeating cooperative
+            // suspension.
+            #[cfg(feature = "_fiber")]
+            if self.fiber_yield_pending.is_some() { return Ok(()); }
             let (proto_idx, ip) = {
                 let f = self.frames.last().expect("ICE: dispatch_until no frame");
                 (f.proto_idx, f.ip)
