@@ -216,9 +216,10 @@ under "Known limits + future work".
 
 PR #212 landed `Runtime::reset()` which rewinds a Runtime to
 its post-preamble baseline without re-running the preamble.
-The harness in `crates/rubyrs/fuzz/src/lib.rs::run_with_caps`
-now caches a single `Runtime` in `thread_local!<RefCell<...>>`
-and calls `rt.reset()` at the top of each iteration. Measured
+The harness in `crates/rubyrs/fuzz/src/lib.rs` (`fuzz_init` +
+`run` since PR #251) caches a single `Runtime` in
+`thread_local!<RefCell<...>>` and calls `rt.reset()` at the top
+of each iteration. Measured
 ~107× speedup over the pre-adoption fresh-Runtime-per-iter
 shape on the headline workload (`[1,2,3,4,5].map { |x| x*2 }.length`,
 500 iters: 712 µs/iter → 6.6 µs/iter). cargo-fuzz's harness

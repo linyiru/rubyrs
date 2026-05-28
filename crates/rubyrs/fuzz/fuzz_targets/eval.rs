@@ -1,7 +1,7 @@
 //! Full VM eval fuzz target.
 //!
-//! Same iteration body as `parse.rs` (see `rubyrs_fuzz::run_with_caps`
-//! and `src/lib.rs`'s module doc) but called with `Caps::loose()`:
+//! Same iteration body as `parse.rs` (see `rubyrs_fuzz::run` and
+//! `src/lib.rs`'s module doc) but seeded with `Caps::loose()`:
 //! 500k fuel, 128 frames, 4096 heap objs — 10× the tight budget.
 //! Stresses dispatch, GC, method lookup, and the primitive method
 //! registry. A new VM ICE will surface here first.
@@ -15,8 +15,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rubyrs_fuzz::{run_with_caps, Caps};
+use rubyrs_fuzz::{fuzz_init, run, Caps};
 
 fuzz_target!(|data: &[u8]| {
-    run_with_caps(data, Caps::loose());
+    // `fuzz_init` is idempotent — first iter constructs the
+    // cached Runtime under loose caps, every subsequent iter
+    // is a no-op.
+    fuzz_init(Caps::loose());
+    run(data);
 });
