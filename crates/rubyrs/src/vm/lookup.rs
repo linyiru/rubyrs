@@ -533,7 +533,9 @@ impl Vm {
                 "+" | "*" | "%" | "<" | "<=" | ">" | ">=" |
                 "length" | "size" | "empty?" |
                 "upcase" | "downcase" | "reverse" |
+                "capitalize" | "swapcase" |
                 "upcase!" | "downcase!" | "reverse!" |
+                "capitalize!" | "swapcase!" |
                 "strip" | "lstrip" | "rstrip" |
                 "strip!" | "lstrip!" | "rstrip!" |
                 "tr!" | "squeeze!" |

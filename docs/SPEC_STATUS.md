@@ -12,9 +12,9 @@ count below is also the passing count.
 
 | Metric | Count |
 |---|---|
-| Files | 119 |
-| Examples in corpus | 658 |
-| Skipped `it` traces | 145 |
+| Files | 121 |
+| Examples in corpus | 676 |
+| Skipped `it` traces | 147 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 2 |
 | `fixture` | 53 |
-| `method-not-implemented` | 71 |
+| `method-not-implemented` | 73 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -44,7 +44,7 @@ Find blocks unlocked by a future feature with e.g.
 | Integer | 34 | 296 | 30 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
-| String | 21 | 119 | 22 |
+| String | 23 | 137 | 24 |
 | UnboundMethod | 4 | 18 | 0 |
 
 ## Files
@@ -145,6 +145,7 @@ Find blocks unlocked by a future feature with e.g.
 | `method_to_proc_spec.rb` | Method#to_proc | `core/method/to_proc_spec.rb` | 7 | 0 |
 | `method_unbind_spec.rb` | Method#unbind | `core/method/unbind_spec.rb` | 4 | 0 |
 | `singleton_method_spec.rb` | def obj.name | `core/basicobject/singleton_method_spec.rb + core/kernel/define_singleton_method_spec.rb` | 7 | 0 |
+| `string_capitalize_spec.rb` | String#capitalize | `core/string/capitalize_spec.rb` | 9 | 1 |
 | `string_center_spec.rb` | String#center | `core/string/center_spec.rb` | 4 | 2 |
 | `string_chars_spec.rb` | String#chars | `core/string/chars_spec.rb + shared/chars.rb` | 2 | 3 |
 | `string_count_spec.rb` | String#count | `core/string/count_spec.rb` | 7 | 0 |
@@ -164,6 +165,7 @@ Find blocks unlocked by a future feature with e.g.
 | `string_start_with_spec.rb` | String#start_with? | `core/string/start_with_spec.rb + shared/string/start_with.rb` | 3 | 7 |
 | `string_strip_spec.rb` | String#strip | `core/string/strip_spec.rb` | 6 | 2 |
 | `string_sub_spec.rb` | String#sub with pattern, replacement | `core/string/sub_spec.rb` | 8 | 0 |
+| `string_swapcase_spec.rb` | String#swapcase | `core/string/swapcase_spec.rb` | 9 | 1 |
 | `string_tr_spec.rb` | String#tr | `core/string/tr_spec.rb` | 14 | 0 |
 | `string_upcase_spec.rb` | String#upcase | `core/string/upcase_spec.rb` | 7 | 1 |
 | `unbound_method_arity_spec.rb` | UnboundMethod#arity | `core/unboundmethod/arity_spec.rb` | 4 | 0 |
