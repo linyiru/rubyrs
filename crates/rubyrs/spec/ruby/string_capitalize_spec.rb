@@ -26,6 +26,16 @@ describe "String#capitalize" do
     assert_eq(s, "hello")
   end
 
+  it "raises ArgumentError on any positional arg (option forms unsupported)" do
+    # CRuby's `String#capitalize` takes an optional Unicode
+    # case-mapping option symbol — we don't implement the
+    # option form (ADR 0020 Tier-2 Encoding) so any arg
+    # surfaces as `wrong number of arguments` rather than
+    # falling through to NoMethodError.
+    assert_raises("ArgumentError") { "hi".capitalize(:ascii) }
+    assert_raises("ArgumentError") { "hi".capitalize(:turkic) }
+  end
+
   # skipped (method-not-implemented): it "respects the Unicode case-mapping options" do
   #   Option forms `capitalize(:ascii)` / `:turkic` /
   #   `:lithuanian` / `:fold`. Tier-2 Encoding work (ADR 0020).

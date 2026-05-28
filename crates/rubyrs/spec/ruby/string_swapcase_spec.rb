@@ -27,6 +27,16 @@ describe "String#swapcase" do
     assert_eq(s, "Hello")
   end
 
+  it "raises ArgumentError on any positional arg (option forms unsupported)" do
+    # CRuby's `String#swapcase` takes an optional Unicode
+    # case-mapping option symbol — we don't implement the
+    # option form (ADR 0020 Tier-2 Encoding) so any arg
+    # surfaces as `wrong number of arguments` rather than
+    # falling through to NoMethodError.
+    assert_raises("ArgumentError") { "Hi".swapcase(:ascii) }
+    assert_raises("ArgumentError") { "Hi".swapcase(:turkic) }
+  end
+
   # skipped (method-not-implemented): it "respects the Unicode case-mapping options" do
   #   Option forms `swapcase(:ascii)` / `:turkic` /
   #   `:lithuanian` / `:fold`. Tier-2 Encoding work (ADR 0020).

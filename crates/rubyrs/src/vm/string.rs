@@ -178,6 +178,20 @@ pub(crate) fn string_call(
         (Value::Str(a), "swapcase", []) => Some(Value::new_str(
             a.with_str_lossy(swapcase_ascii)
         )),
+        // Wrong-arity arms: CRuby accepts an optional Unicode
+        // case-mapping option symbol (`:ascii` / `:turkic` /
+        // `:lithuanian` / `:fold`); we don't support the option
+        // form (ADR 0020 Tier-2 Encoding), so any positional
+        // arg raises ArgumentError with the standard "wrong
+        // number of arguments" shape. Without these arms the
+        // dispatcher falls through to NoMethodError, which lies
+        // about feature availability since `respond_to?` returns
+        // true for these names.
+        (Value::Str(_), "capitalize" | "swapcase" | "capitalize!" | "swapcase!", many) if !many.is_empty() => {
+            return Err(RubyError::ArgumentError {
+                msg: format!("wrong number of arguments (given {}, expected 0)", many.len()),
+            });
+        }
         // Destructive `!` siblings — mutate the receiver in
         // place and return self when changed, nil when the
         // input already matched the result. The frozen check
