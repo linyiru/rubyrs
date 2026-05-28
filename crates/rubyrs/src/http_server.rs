@@ -2273,6 +2273,98 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         "##,
         "<rubyrs_http_server_preamble>",
     ).expect("rubyrs http_server preamble (P2b.1) must compile");
+
+    // P2b.2a (ADR 0023): A3β streaming-mode helpers. Each
+    // chunk yielded becomes one Fiber.yield, which suspends
+    // the body's iteration and lets the resumer (P2b.2b's
+    // hyper BoxBody poll_frame) drain the chunk to the wire
+    // before requesting the next.
+    //
+    // Requires `_fiber` AND the Fiber host fns
+    // (`__rubyrs_fiber_new` etc.) to be registered on the
+    // Runtime BEFORE this preamble runs. Embedders wanting
+    // A3β streaming MUST call `register_fiber_host_fns`
+    // before `register_host_fns` (this fn) — the test
+    // pattern documents the contract.
+    //
+    // Cfg-gated on `_fiber`. With the feature off, the
+    // streaming code is absent + marshal_rack_response
+    // falls through to P2b.1's buffered each / call path.
+    #[cfg(feature = "_fiber")]
+    let _ = rt.eval(
+        r##"
+            # `RubyrsStreamingStream` — the streaming counterpart
+            # to `RubyrsBufferedStream`. Each `write(chunk)`
+            # suspends the calling Fiber via `__rubyrs_fiber_yield`,
+            # handing the chunk to the resumer. The resumer drains
+            # the chunk to the socket and resumes the Fiber, at
+            # which point `write` returns and `body.call` continues.
+            #
+            # Method set mirrors the 6-method Rack 3 contract
+            # (write / << / flush / close / close_write / closed?)
+            # but `close`'s "no more chunks" semantic falls out of
+            # the body proc's natural return — P2b.2b's poll_frame
+            # observes Fiber returning and emits EOF.
+            class RubyrsStreamingStream
+              def initialize
+                @closed = false
+              end
+
+              def write(chunk)
+                raise IOError, "stream closed" if @closed
+                __rubyrs_fiber_yield(chunk)
+                chunk.respond_to?(:bytesize) ? chunk.bytesize : chunk.to_s.bytesize
+              end
+
+              def <<(chunk)
+                write(chunk)
+                self
+              end
+
+              def flush
+                # No-op. Each `write` already yields the chunk
+                # to the resumer, so the buffer is effectively
+                # flushed per-write. Rack 3 SPEC requires
+                # `flush` MUST NOT raise.
+              end
+
+              def close
+                @closed = true
+              end
+
+              def close_write
+                close
+              end
+
+              def closed?
+                @closed
+              end
+            end
+
+            # `__rubyrs_http_make_each_fiber(body) -> Fiber`
+            # Wraps `body.each { |c| Fiber.yield(c) }` in a Fiber
+            # so the resumer can drive iteration one chunk at a
+            # time. Returns the Fiber for hyper BoxBody to resume.
+            def __rubyrs_http_make_each_fiber(body)
+              __rubyrs_fiber_new(proc {
+                body.each { |chunk| __rubyrs_fiber_yield(chunk) }
+              })
+            end
+
+            # `__rubyrs_http_make_call_fiber(body) -> Fiber`
+            # Wraps `body.call(stream)` in a Fiber where `stream`
+            # is a `RubyrsStreamingStream`. Each `stream.write`
+            # suspends the Fiber; the resumer drains the chunk.
+            # Body returning ends the Fiber, signaling EOF.
+            def __rubyrs_http_make_call_fiber(body)
+              __rubyrs_fiber_new(proc {
+                stream = RubyrsStreamingStream.new
+                body.call(stream)
+              })
+            end
+        "##,
+        "<rubyrs_http_server_fiber_preamble>",
+    ).expect("rubyrs http_server Fiber streaming preamble (P2b.2a) must compile");
 }
 
 #[cfg(test)]
@@ -3582,6 +3674,111 @@ mod tests {
             response_text.contains("chunk-a") && response_text.contains("chunk-b"),
             "expected both chunks in body, got:\n{response_text}",
         );
+    }
+
+    // ===== P2b.2a: A3β streaming preamble (Fiber-driven) =====
+
+    /// P2b.2a: `__rubyrs_http_make_each_fiber` wraps a
+    /// body's each in a Fiber that yields one chunk per
+    /// resume. P2b.2b's hyper BoxBody poll_frame will
+    /// drive this Fiber; for P2b.2a, the test drives it
+    /// directly via `__rubyrs_fiber_resume` and verifies
+    /// the chunk-per-resume semantic that streaming
+    /// depends on.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2b2a_make_each_fiber_yields_chunks_per_resume() {
+        use crate::value::Value;
+        let mut rt = crate::Runtime::new();
+        // Order matters: Fiber host fns first, then
+        // http_server preamble (which references the Fiber
+        // host fns in its streaming helpers).
+        crate::register_fiber_host_fns(&mut rt);
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            class ThreeChunks
+              def each
+                yield "a"
+                yield "b"
+                yield "c"
+              end
+            end
+            fib = __rubyrs_http_make_each_fiber(ThreeChunks.new)
+            r1 = __rubyrs_fiber_resume(fib, nil)
+            r2 = __rubyrs_fiber_resume(fib, nil)
+            r3 = __rubyrs_fiber_resume(fib, nil)
+            r4 = __rubyrs_fiber_resume(fib, nil)   # body returns; resume gets the body's return value (nil for each)
+            "#{r1}/#{r2}/#{r3}/#{r4.nil? ? 'nil' : r4}"
+        "##, "p2b2a_each_fiber.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "a/b/c/nil"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P2b.2a: `__rubyrs_http_make_call_fiber` wraps a
+    /// body.call(stream) in a Fiber where stream.write
+    /// suspends. Drives the Fiber via direct resume,
+    /// confirms each write yields its chunk + body
+    /// return signals EOF.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2b2a_make_call_fiber_yields_per_stream_write() {
+        use crate::value::Value;
+        let mut rt = crate::Runtime::new();
+        crate::register_fiber_host_fns(&mut rt);
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            class WriteTwice
+              def call(stream)
+                stream.write("first_")
+                stream.write("second")
+              end
+            end
+            fib = __rubyrs_http_make_call_fiber(WriteTwice.new)
+            r1 = __rubyrs_fiber_resume(fib, nil)
+            r2 = __rubyrs_fiber_resume(fib, nil)
+            # Third resume picks up after the second
+            # `stream.write` returns; the body returns its
+            # last expression (`stream.write("second")`'s
+            # return value, which is the chunk's bytesize).
+            r3 = __rubyrs_fiber_resume(fib, nil)
+            "#{r1}/#{r2}/#{r3}"
+        "##, "p2b2a_call_fiber.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "first_/second/6"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P2b.2a: `RubyrsStreamingStream` honors the close /
+    /// closed? / flush methods. write-after-close raises
+    /// IOError — exercised by trying to write after close
+    /// inside an each-iteration Fiber pattern. (Direct
+    /// stream.write call wouldn't catch — see commit
+    /// message; rubyrs's Fiber-body raise surfaces as
+    /// Uncaught at the resume boundary.)
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2b2a_streaming_stream_basic_contract() {
+        use crate::value::Value;
+        let mut rt = crate::Runtime::new();
+        crate::register_fiber_host_fns(&mut rt);
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            stream = RubyrsStreamingStream.new
+            before_closed = stream.closed?
+            stream.flush  # no-op MUST NOT raise
+            stream.close
+            after_closed = stream.closed?
+            stream.close_write  # idempotent close synonym
+            still_closed = stream.closed?
+            "#{before_closed}/#{after_closed}/#{still_closed}"
+        "##, "p2b2a_contract.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), "false/true/true"),
+            other => panic!("expected Str, got {other:?}"),
+        }
     }
 
     /// P2b.1: detection order Array → each → call → to_a.
