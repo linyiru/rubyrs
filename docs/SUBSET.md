@@ -871,9 +871,12 @@ Foo.define_method(:x)           # both: ArgumentError (tried to create Proc with
   installs the method and rubyrs raises ArgumentError, so the
   outputs would diverge byte-for-byte by design. The Tier-1
   divergence is verified via manual probe; the ArgumentError
-  message wording is asserted in
-  `crates/rubyrs/src/vm/dispatch.rs` review history (#245
-  round 6 / round 7).
+  message string is constructed in
+  `crates/rubyrs/src/vm/dispatch.rs` — `grep` for
+  `"the 2-arg Proc/UnboundMethod form of \`Module#define_method\`"`
+  to find the two emission sites (no-block arm in
+  `try_dispatch_class_intrinsics`; block-form arm in
+  `do_call_block`'s `define_method` intrinsic).
 
 ### Kernel module functions reachable via `method(:name).call(...)` round-trip
 
