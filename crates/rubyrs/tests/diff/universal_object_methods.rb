@@ -4,7 +4,10 @@
 # "reflection-only" gap left by PR #264 (BasicObject reflection).
 #
 # Newly universal arms in this PR:
-#   - `object_id` / `__id__` — stable session-unique integer
+#   - `object_id` / `__id__` — stable integer while the value
+#     is alive (CRuby and rubyrs both reuse heap ids after
+#     GC/deallocation, so we promise "stable while live", not
+#     session-wide uniqueness)
 #   - `hash` — DefaultHasher (content-based for value types,
 #     identity-based for heap objects)
 #   - `frozen?` — false on plain Object (we don't model freeze)
@@ -29,7 +32,12 @@ puts "abc".hash == "abc".hash                      # true (content)
 puts :foo.hash == :foo.hash                        # true
 puts 1.hash != 2.hash                              # true
 
-# --- frozen? on plain Object ---
+# --- frozen? — true for immediates (CRuby semantics), false
+#     for plain Object instances (we don't model freeze yet) ---
+puts 42.frozen?                                    # true
+puts :foo.frozen?                                  # true
+puts nil.frozen?                                   # true
+puts true.frozen?                                  # true
 puts Object.new.frozen?                            # false
 
 # --- to_s / inspect on plain Object ---

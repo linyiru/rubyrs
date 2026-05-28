@@ -4646,14 +4646,23 @@ impl Vm {
             self.stack.push(Value::Int(id));
             return Ok(());
         }
-        // `Object#frozen?` — universal, no args. Returns false
-        // for plain user-class instances (we don't model the
-        // freeze bit on Value::Object). Most primitive types have
-        // their own `frozen?` handler earlier in dispatch (Str,
-        // Array, etc.); this arm catches Object and Class
-        // receivers where there's no primitive arm.
+        // `Object#frozen?` — universal, no args.
+        // CRuby treats all immediates (Integer, Float, Symbol,
+        // true, false, nil) as always-frozen. Str/Array/Hash/Regex
+        // have their own primitive arms earlier in dispatch and
+        // never reach here. For plain user-class instances we
+        // return false (we don't model a freeze bit on
+        // Value::Object yet).
         if &*name == "frozen?" && args.is_empty() {
-            self.stack.push(Value::Bool(false));
+            let frozen = matches!(
+                &recv,
+                Value::Int(_)
+                    | Value::Float(_)
+                    | Value::Sym(_)
+                    | Value::Bool(_)
+                    | Value::Nil
+            );
+            self.stack.push(Value::Bool(frozen));
             return Ok(());
         }
         // `Object#to_s` / `Object#inspect` — universal default.
@@ -6911,12 +6920,19 @@ fn is_valid_ivar_name(s: &str) -> bool {
     bytes[2..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
-/// Compute a stable, session-unique integer id for any
-/// `Value`. Backs both `Object#object_id` and
-/// `BasicObject#__id__`. CRuby exact values aren't observable
-/// beyond equality checks (`a.object_id == b.object_id`), so
-/// this encoding diverges from CRuby's exact tags but preserves
-/// the contract: same value → same id, distinct values →
+/// Compute a stable integer id for any `Value`. Backs both
+/// `Object#object_id` and `BasicObject#__id__`. Ids are
+/// stable for a value while that value is alive; CRuby also
+/// reuses heap `object_id` values after GC, and our heap
+/// encoding likewise can reuse ids after deallocation
+/// (`Heap::alloc` reissues entries from a freelist; Rc
+/// pointer identities can also reappear). So we promise
+/// "stable while alive", not session-wide uniqueness. CRuby
+/// exact values aren't observable beyond equality checks
+/// (`a.object_id == b.object_id`), so this encoding diverges
+/// from CRuby's exact tags but preserves the contract: same
+/// (live) value → same id, distinct (simultaneously live)
+/// values →
 /// distinct ids (best-effort — Float encoding hashes 64 bits
 /// into 60 with collision-resistance ~2^30 distinct floats;
 /// distinct floats can in principle collide).
