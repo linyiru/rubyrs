@@ -151,7 +151,7 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes = a.to_string_lossy().to_uppercase().into_bytes();
+            let new_bytes = a.with_str_lossy(|s| s.to_uppercase().into_bytes());
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
@@ -165,7 +165,7 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes = a.to_string_lossy().to_lowercase().into_bytes();
+            let new_bytes = a.with_str_lossy(|s| s.to_lowercase().into_bytes());
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
@@ -179,9 +179,11 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes: Vec<u8> = a.to_string_lossy().chars().rev().collect::<String>().into_bytes();
             // reverse! always mutates (even when palindrome —
             // CRuby returns self, not nil, for reverse!).
+            let new_bytes: Vec<u8> = a.with_str_lossy(|s|
+                s.chars().rev().collect::<String>().into_bytes()
+            );
             check(new_bytes.len())?;
             *a.borrow_mut() = new_bytes;
             Some(Value::Str(a.clone()))
@@ -323,7 +325,9 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes = a.to_string_lossy().trim_matches(strip_ws_or_nul).to_string().into_bytes();
+            let new_bytes = a.with_str_lossy(|s|
+                s.trim_matches(strip_ws_or_nul).as_bytes().to_vec()
+            );
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
@@ -337,7 +341,9 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes = a.to_string_lossy().trim_start_matches(strip_ws_or_nul).to_string().into_bytes();
+            let new_bytes = a.with_str_lossy(|s|
+                s.trim_start_matches(strip_ws_or_nul).as_bytes().to_vec()
+            );
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
@@ -351,7 +357,9 @@ pub(crate) fn string_call(
                     msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
                 });
             }
-            let new_bytes = a.to_string_lossy().trim_end_matches(strip_ws_or_nul).to_string().into_bytes();
+            let new_bytes = a.with_str_lossy(|s|
+                s.trim_end_matches(strip_ws_or_nul).as_bytes().to_vec()
+            );
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
