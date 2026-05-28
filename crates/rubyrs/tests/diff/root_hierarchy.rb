@@ -41,8 +41,14 @@ end
 begin
   SomeModule.superclass
   puts "no raise (BAD)"
-rescue NoMethodError
+rescue NoMethodError => e
   puts "Module#superclass raises NoMethodError"
+  # The error message includes the module name and the lowercase
+  # word "module" (CRuby's exact format). We assert via `include?`
+  # since the quote-style around the method name differs slightly
+  # between rubyrs (backtick) and CRuby (straight quote) — a
+  # pre-existing pretty-printing divergence not specific to this PR.
+  puts e.message.include?("module SomeModule")    # true
 end
 
 # --- BasicObject.ancestors is just [BasicObject] ---

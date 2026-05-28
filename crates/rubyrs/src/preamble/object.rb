@@ -11,9 +11,9 @@
 #     don't — the dispatch arm can raise NoMethodError on
 #     `module M; end; M.superclass` like CRuby does.
 #   - Lays the groundwork for synthesising `Kernel.instance_method(:class)`
-#     etc. later — the Kernel module now exists as a real Class
-#     with a methods table where builtin Method records can be
-#     installed.
+#     etc. later — Kernel now exists as a real Module (backed by
+#     the VM's Class shell with `is_module: true`) with a methods
+#     table where builtin Method records can be installed.
 #
 # Currently `Kernel` and `BasicObject` are empty stubs — their
 # method tables don't carry the inline-handled primitives yet.

@@ -1064,7 +1064,7 @@ impl Vm {
                         }
                         Value::UnboundMethod(_) => Err(self.trap(RubyError::NoMethodError {
                             method: "receiver".into(),
-                            recv_type: "UnboundMethod",
+                            recv_type: std::borrow::Cow::Borrowed("UnboundMethod"),
                         })),
                         _ => unreachable!(),
                     };
@@ -1329,7 +1329,7 @@ impl Vm {
         if vis == Visibility::Private && !bypass_visibility && !self_recv {
             return Err(self.trap(RubyError::NoMethodError {
                 method: format!("private method '{name}' called"),
-                recv_type: recv.type_name(),
+                recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
             }));
         }
         if vis == Visibility::Protected && !bypass_visibility {
@@ -1350,7 +1350,7 @@ impl Vm {
             if !allowed {
                 return Err(self.trap(RubyError::NoMethodError {
                     method: format!("protected method '{name}' called"),
-                    recv_type: recv.type_name(),
+                    recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
                 }));
             }
         }
@@ -1417,9 +1417,14 @@ impl Vm {
                 // BasicObject has no parent and returns nil. User
                 // classes return their parent.
                 if cls.is_module {
+                    // CRuby formats this as
+                    // "undefined method 'superclass' for module M",
+                    // i.e. lowercase "module" + the actual name.
+                    // Carry the dynamic name through `recv_type`'s
+                    // owned-Cow form so we match CRuby exactly.
                     return Err(self.trap(RubyError::NoMethodError {
                         method: "superclass".to_string(),
-                        recv_type: "Module",
+                        recv_type: std::borrow::Cow::Owned(format!("module {}", cls.name)),
                     }));
                 }
                 let v = match cls.superclass.borrow().clone() {
@@ -2828,7 +2833,7 @@ impl Vm {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
-                method: name.to_string(), recv_type: self_val.type_name(),
+                method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
             }));
         }
 
@@ -4134,7 +4139,7 @@ impl Vm {
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
-            method: name.to_string(), recv_type: recv.type_name(),
+            method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
         }))
     }
 
@@ -5507,7 +5512,7 @@ impl Vm {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
-                method: name.to_string(), recv_type: self_val.type_name(),
+                method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
             }));
         }
         let recv = recv.expect("ICE: receiver missing for block call");
@@ -5675,7 +5680,7 @@ impl Vm {
             return Ok(());
         }
         Err(self.trap(RubyError::NoMethodError {
-            method: name.to_string(), recv_type: recv.type_name(),
+            method: name.to_string(), recv_type: std::borrow::Cow::Borrowed(recv.type_name()),
         }))
     }
 

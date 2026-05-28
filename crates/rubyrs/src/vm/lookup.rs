@@ -896,7 +896,7 @@ impl Vm {
             None => {
                 return Err(self.trap(crate::error::RubyError::NoMethodError {
                     method: "super called outside of method".to_string(),
-                    recv_type: self_val.type_name(),
+                    recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
                 }));
             }
         };
@@ -975,7 +975,7 @@ impl Vm {
                 None => Err(self.trap(crate::error::RubyError::NoMethodError {
                     method: format!("super: no superclass method `{}'",
                         self.interner.resolve(name_id)),
-                    recv_type: self_val.type_name(),
+                    recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
                 })),
             };
         }
@@ -987,7 +987,7 @@ impl Vm {
                     return Err(self.trap(crate::error::RubyError::NoMethodError {
                         method: format!("super: no superclass method `{}'",
                             self.interner.resolve(name_id)),
-                        recv_type: other.type_name(),
+                        recv_type: std::borrow::Cow::Borrowed(other.type_name()),
                     }));
                 }
             },
@@ -1005,7 +1005,7 @@ impl Vm {
             None => Err(self.trap(crate::error::RubyError::NoMethodError {
                 method: format!("super: no superclass method `{}'",
                     self.interner.resolve(name_id)),
-                recv_type: self_val.type_name(),
+                recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
             })),
         }
     }
