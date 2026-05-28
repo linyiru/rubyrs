@@ -19,8 +19,9 @@ anywhere from `77.0%` upward.
 ## Running locally
 
 ```sh
-# One-shot install
-cargo install cargo-llvm-cov --locked
+# One-shot install — pin matches the CI version so local + CI
+# measurements use the same tool.
+cargo install cargo-llvm-cov --locked --version 0.8.7
 
 # Measure
 cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
@@ -30,6 +31,12 @@ python3 scripts/coverage_ratchet.py \
     --lcov lcov.info \
     --baseline crates/rubyrs/coverage_baseline.json
 ```
+
+The pinned version lives in `.github/workflows/ci.yml` and is
+embedded in the coverage job's cache key. Bumping it should be a
+deliberate PR: install the new version locally, regenerate
+baselines via `--update`, and commit the JSON diff so reviewers
+can see whether the version change shifted any per-file numbers.
 
 The HTML report (handy for finding uncovered lines) is one extra flag:
 

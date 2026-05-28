@@ -700,13 +700,30 @@ jobs:
           # an INSTRUMENTED build (rustc-LLVM-cov flags differ), so its
           # target/ artifacts shouldn't share with the release-built test
           # job's cache or each would invalidate the other's.
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-coverage-
+          #
+          # The pinned cargo-llvm-cov version is embedded in the key so a
+          # version bump (below) bust-invalidates the cache and forces a
+          # fresh install on the next run. Without this, a cache hit would
+          # serve the OLD binary indefinitely even after the workflow's
+          # version pin moved.
+          key: ${{ runner.os }}-cargo-coverage-llvm-cov-0.8.7-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-llvm-cov-0.8.7-
 
       - name: Install cargo-llvm-cov
+        # Version is PINNED so the coverage measurement tool is the same
+        # binary across runs. The ratchet compares per-file line% against
+        # an in-tree baseline — if cargo-llvm-cov instrumentation or
+        # LCOV-emission semantics change (between releases, or by the
+        # CI picking up "whatever's latest on crates.io" on a cache miss),
+        # the baselines would shift without anyone touching the code.
+        # Bumping this pin should be a deliberate PR that also reruns
+        # `--update` against the new tool's output.
+        #
+        # 0.8.7 is the version that produced the seeded
+        # crates/rubyrs/coverage_baseline.json; keep them in lockstep.
         run: |
           if ! command -v cargo-llvm-cov >/dev/null; then
-            cargo install cargo-llvm-cov --locked
+            cargo install cargo-llvm-cov --locked --version 0.8.7
           fi
           cargo llvm-cov --version
 
