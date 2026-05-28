@@ -912,13 +912,14 @@ impl Vm {
     /// The set covers the common reflection targets: zero-arg
     /// metadata accessors (`class`, `nil?`, `frozen?`, `to_s`,
     /// `inspect`, `hash`, `object_id`, `itself`), single-arg type
-    /// predicates (`is_a?`, `kind_of?`, `instance_of?`, `equal?`),
-    /// and the variadic dispatchers (`send`, `__send__`,
-    /// `respond_to?`). `instance_exec` is intentionally absent —
-    /// CRuby defines it on BasicObject, not Kernel; future
-    /// BasicObject-builtins follow-up installs it there. Methods
-    /// NOT in this set continue through the primitive-sentinel
-    /// `instance_method` path with `proto_idx`-default reflection.
+    /// predicates (`is_a?`, `kind_of?`, `instance_of?`), and the
+    /// variadic dispatchers (`send`, `respond_to?`).
+    /// `equal?`, `__send__`, `instance_exec`, `instance_eval`,
+    /// `==`, `!=`, `!`, `__id__` are intentionally absent — CRuby
+    /// defines them on BasicObject; see
+    /// `install_basic_object_builtins`. Methods NOT in either set
+    /// continue through the primitive-sentinel `instance_method`
+    /// path with `proto_idx`-default reflection.
     pub(crate) fn install_kernel_builtins(&mut self) {
         let kernel_sym = self.interner.intern("Kernel");
         // Defensive: preamble/object.rb must load before this. If
@@ -953,8 +954,13 @@ impl Vm {
         // Aliased so clippy's type_complexity lint doesn't trip
         // (the inline 4-tuple-with-nested-slice form was reading as
         // dense without saving any ergonomics).
-        type KernelEntry<'a> =
-            (&'a str, i64, &'a [(&'a str, Option<&'a str>)], &'a str);
+        //
+        // `&'static str` everywhere: makes the no-allocation /
+        // no-leak guarantee explicit at the type level so a
+        // future edit can't accidentally introduce a non-static
+        // label that BuiltinMeta would have to leak to store.
+        type KernelEntry =
+            (&'static str, i64, &'static [(&'static str, Option<&'static str>)], &'static str);
         let entries: &[KernelEntry] = &[
             // Zero-arg metadata accessors
             ("class", 0, &[], "<internal:kernel>"),
@@ -1003,7 +1009,8 @@ impl Vm {
     /// (preamble/object.rb runs before this). The set mirrors
     /// CRuby's `BasicObject.instance_methods(false)`:
     ///   - `__id__` (alias of object_id)
-    ///   - `__send__` (private send variant)
+    ///   - `__send__` (public-receiver-only send variant —
+    ///     reserved name CRuby guarantees user code can't shadow)
     ///   - `equal?` (identity comparison)
     ///   - `instance_eval` / `instance_exec` (self-swap evaluators)
     ///   - `==` / `!=` / `!` (universal operators)
@@ -1022,7 +1029,14 @@ impl Vm {
         // .source_location` returns nil, unlike Kernel which
         // returns `["<internal:kernel>", N]`). Mirror by passing
         // `None` for source_label.
-        let entries: &[(&str, i64, &[(&str, Option<&str>)])] = &[
+        // `&'static str` everywhere + type alias — same shape as
+        // install_kernel_builtins, minus the source-label slot
+        // (BasicObject methods uniformly report `nil` for
+        // source_location). Alias keeps clippy's type_complexity
+        // lint quiet for symmetry with KernelEntry.
+        type BasicObjectEntry =
+            (&'static str, i64, &'static [(&'static str, Option<&'static str>)]);
+        let entries: &[BasicObjectEntry] = &[
             ("__id__", 0, &[]),
             ("!", 0, &[]),
             ("equal?", 1, &[("req", None)]),
