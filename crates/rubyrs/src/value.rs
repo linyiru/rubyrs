@@ -279,6 +279,30 @@ pub struct Class {
     /// to install an "after-freeze" guard layer in front of the
     /// class's own `register` / `lazy_map`.
     pub(crate) singleton_prepends: RefCell<Vec<Rc<Class>>>,
+    /// Lazy eigenclass shell returned by `Class#singleton_class`.
+    /// `None` until the first call; subsequent calls return the
+    /// same `Rc` so identity comparisons (`A.singleton_class.equal?(A.singleton_class)`)
+    /// hold. The shell's `singleton_target` weak-points back at
+    /// this Class so the 3 method-install paths
+    /// (`Op::DefMethod` / `Op::DefMethodBlock` / runtime
+    /// `Module#define_method`) can redirect installs from the
+    /// shell's `methods` table to this Class's
+    /// `singleton_methods`. That redirect is the whole point —
+    /// `cls.singleton_class.class_eval { def foo; …; end }` and
+    /// `cls.singleton_class.class_eval { define_method(:foo) { … } }`
+    /// install `:foo` so `cls.foo` dispatches via the existing
+    /// singleton-method lookup. Sinatra's `define_singleton`
+    /// idiom (base.rb:1735) and the `set` getter installer
+    /// (base.rb:1349-ish) both rely on this. Layer #23 of the
+    /// TRY_RUNS pass series.
+    pub(crate) singleton_view: RefCell<Option<Rc<Class>>>,
+    /// When this Class is itself the eigenclass-shell returned
+    /// by some other Class's `singleton_class`, this weak ref
+    /// points back at the real Class so method installs into
+    /// `self.methods` can be redirected to
+    /// `singleton_target.singleton_methods`. `None` on every
+    /// "real" Class. See `singleton_view` above.
+    pub(crate) singleton_target: RefCell<Option<std::rc::Weak<Class>>>,
     /// Class variables (`@@foo`) defined on this class. Tier 1
     /// simplification: stored directly on the class (no
     /// hierarchy walk on read/write), so subclass `@@foo` and
@@ -306,6 +330,30 @@ pub struct Class {
     /// non-cext build.
     #[cfg(feature = "cext")]
     pub(crate) cext_alloc_func: Cell<Option<rubyrs_cext::OpaqueFn>>,
+}
+
+impl Class {
+    /// Install `m` under `name` into the appropriate method table.
+    /// When `self` is an eigenclass-shell (built lazily by
+    /// `Class#singleton_class`), redirect the install into the
+    /// underlying real class's `singleton_methods` table so the
+    /// real class's `Foo.method_name` dispatch finds it. Otherwise
+    /// insert into the regular instance-methods table. Used by
+    /// every `def` / `define_method` install path so all three
+    /// behave consistently inside
+    /// `cls.singleton_class.class_eval { … }`. Layer #23.
+    pub(crate) fn install_method(self: &Rc<Self>, name: SymId, m: Rc<Method>) {
+        if let Some(target) = self
+            .singleton_target
+            .borrow()
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
+        {
+            target.singleton_methods.borrow_mut().insert(name, m);
+        } else {
+            self.methods.borrow_mut().insert(name, m);
+        }
+    }
 }
 
 #[derive(Debug)]

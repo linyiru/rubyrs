@@ -142,6 +142,7 @@ fn run_diff(name: &str) {
 #[test] fn class_self_visibility() { run_diff("class_self_visibility"); }
 #[test] fn env_nested_lookup() { run_diff("env_nested_lookup"); }
 #[test] fn module_define_method() { run_diff("module_define_method"); }
+#[test] fn singleton_class_class_eval() { run_diff("singleton_class_class_eval"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }

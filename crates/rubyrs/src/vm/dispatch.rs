@@ -1517,10 +1517,40 @@ impl Vm {
                 self.stack.push(result);
                 Ok(true)
             }
-            // Tier 1 stub — return receiver itself.
-            // See docs/SUBSET.md for the metaclass divergence.
+            // Lazy eigenclass-shell. The shell carries
+            // `singleton_target = Some(Weak(cls))`, which the 3
+            // method-install paths consult to redirect installs
+            // into `cls.singleton_methods` instead of the shell's
+            // own `methods` table. Subsequent calls reuse the
+            // cached shell so `A.singleton_class.equal?(A.singleton_class)`
+            // holds. Layer #23 of TRY_RUNS pass series.
             ("singleton_class", []) => {
-                self.stack.push(Value::Class(cls));
+                let view = {
+                    let mut slot = cls.singleton_view.borrow_mut();
+                    if let Some(existing) = slot.as_ref() {
+                        existing.clone()
+                    } else {
+                        let v = std::rc::Rc::new(crate::value::Class {
+                            name: format!("#<Class:{}>", cls.name),
+                            is_module: false,
+                            ivars: std::cell::RefCell::new(HashMap::new()),
+                            methods: std::cell::RefCell::new(HashMap::new()),
+                            singleton_methods: std::cell::RefCell::new(HashMap::new()),
+                            superclass: std::cell::RefCell::new(None),
+                            includes: std::cell::RefCell::new(Vec::new()),
+                            prepends: std::cell::RefCell::new(Vec::new()),
+                            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                            singleton_view: std::cell::RefCell::new(None),
+                            singleton_target: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&cls))),
+                            class_vars: std::cell::RefCell::new(HashMap::new()),
+                            #[cfg(feature = "cext")]
+                            cext_alloc_func: std::cell::Cell::new(None),
+                        });
+                        *slot = Some(v.clone());
+                        v
+                    }
+                };
+                self.stack.push(Value::Class(view));
                 Ok(true)
             }
             ("instance_methods", args_)
@@ -2040,6 +2070,8 @@ impl Vm {
             includes: std::cell::RefCell::new(Vec::new()),
             prepends: std::cell::RefCell::new(Vec::new()),
             singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_view: std::cell::RefCell::new(None),
+            singleton_target: std::cell::RefCell::new(None),
             class_vars: std::cell::RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
@@ -5296,6 +5328,8 @@ impl Vm {
                 includes: std::cell::RefCell::new(Vec::new()),
                 prepends: std::cell::RefCell::new(Vec::new()),
                 singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_view: std::cell::RefCell::new(None),
+                singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(HashMap::new()),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
@@ -5449,7 +5483,7 @@ impl Vm {
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                 });
-                target_cls.methods.borrow_mut().insert(name_sym, m);
+                target_cls.install_method(name_sym, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Sym(name_sym));
                 return Ok(());

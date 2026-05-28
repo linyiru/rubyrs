@@ -1105,7 +1105,7 @@ impl Vm {
                     visibility: std::cell::Cell::new(vis),
                     closure: None,
                 });
-                if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
+                if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 // Conservatively invalidate the inline cache — any previous
                 // cache entry could in theory be made stale by this definition.
@@ -1534,7 +1534,7 @@ impl Vm {
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                 });
-                if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
+                if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 self.method_gen = self.method_gen.wrapping_add(1);
                 // `Op::DefMethodBlock` is emitted ONLY for the
@@ -1674,6 +1674,8 @@ impl Vm {
                     includes: RefCell::new(Vec::new()),
                     prepends: RefCell::new(Vec::new()),
                     singleton_prepends: RefCell::new(Vec::new()),
+                    singleton_view: RefCell::new(None),
+                    singleton_target: RefCell::new(None),
                     class_vars: RefCell::new(HashMap::new()),
                     #[cfg(feature = "cext")]
                     cext_alloc_func: std::cell::Cell::new(None),

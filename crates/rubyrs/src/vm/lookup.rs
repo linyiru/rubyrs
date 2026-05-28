@@ -1114,6 +1114,8 @@ mod tests {
             includes: RefCell::new(Vec::new()),
             prepends: RefCell::new(Vec::new()),
             singleton_prepends: RefCell::new(Vec::new()),
+            singleton_view: RefCell::new(None),
+            singleton_target: RefCell::new(None),
             superclass: RefCell::new(superclass),
             class_vars: RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]
