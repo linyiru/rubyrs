@@ -150,14 +150,29 @@ __rubyrs_http_serve_prefork("127.0.0.1:18161", 30, app, 2, on_boot)
         .expect("spawn rubyrs binary");
     let parent_pid = child.id() as i32;
 
-    // Let the parent fork + both children bind. 800ms
-    // matches the boot-and-serve test's slack.
-    std::thread::sleep(Duration::from_millis(800));
-
-    // Verify it's actually serving before we signal it —
-    // otherwise we don't know if SIGTERM hit a live
-    // process group or one still in setup.
-    let resp = http_get("127.0.0.1:18161", "/p");
+    // Poll for serving up to 4 seconds — the boot path
+    // can take >800ms under load (cold cargo cache,
+    // parallel test threads). Failure here means the
+    // children never bound; succeeds as soon as we see
+    // a 200.
+    let mut resp = String::new();
+    let serve_check_start = std::time::Instant::now();
+    while serve_check_start.elapsed() < Duration::from_secs(4) {
+        std::thread::sleep(Duration::from_millis(150));
+        if let Ok(mut client) = TcpStream::connect("127.0.0.1:18161") {
+            client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let _ = client.write_all(
+                b"GET /p HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            );
+            let mut buf = Vec::new();
+            let _ = client.read_to_end(&mut buf);
+            let body = String::from_utf8_lossy(&buf).into_owned();
+            if body.contains("HTTP/1.1 200") {
+                resp = body;
+                break;
+            }
+        }
+    }
     assert!(
         resp.contains("HTTP/1.1 200"),
         "expected 200 before SIGTERM, got:\n{resp}",
@@ -198,6 +213,110 @@ __rubyrs_http_serve_prefork("127.0.0.1:18161", 30, app, 2, on_boot)
     assert!(
         stdout.contains("BOOTED 0") && stdout.contains("BOOTED 1"),
         "expected both workers to have booted before signal.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+}
+
+/// FU2: kill one child mid-flight with SIGKILL; the
+/// supervisor must fork a replacement so the worker pool
+/// stays at N. We assert the relevant "BOOTED" marker
+/// appears TWICE in stdout (original + restart) and a
+/// stderr "restarted worker" diagnostic confirms the
+/// supervisor saw the death.
+///
+/// Uses `pgrep -P <parent_pid>` to find a child to kill —
+/// portable on macOS + Linux. If pgrep is unavailable
+/// (alpine, bsd boxes without procps), the test is
+/// skipped via a runtime check.
+#[test]
+fn prefork_restarts_killed_child() {
+    let _guard = TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+
+    // Bail if pgrep isn't available.
+    if Command::new("pgrep").arg("--version").output().is_err()
+        && Command::new("pgrep").arg("-P").arg("1").output().is_err()
+    {
+        eprintln!("test skipped: pgrep not available");
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join("rubyrs_prefork_restart.rb");
+    // 6-second duration — long enough that the supervisor
+    // is mid-loop when we kill a worker, and the
+    // restart's on_worker_boot has time to print BEFORE
+    // the duration fires.
+    let script = r#"
+on_boot = ->(idx) { puts "BOOTED #{idx}" }
+app = ->(env) { [200, {"Content-Type" => "text/plain"}, ["ok"]] }
+__rubyrs_http_serve_prefork("127.0.0.1:18162", 6, app, 2, on_boot)
+"#;
+    std::fs::write(&tmp, script).expect("write tmp driver");
+
+    let rubyrs_bin = env!("CARGO_BIN_EXE_rubyrs");
+    let child = Command::new(rubyrs_bin)
+        .arg(&tmp)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubyrs binary");
+    let parent_pid = child.id() as i32;
+
+    // Wait until serving (poll up to 4s).
+    let started_at = std::time::Instant::now();
+    let mut got_200 = false;
+    while started_at.elapsed() < Duration::from_secs(4) {
+        std::thread::sleep(Duration::from_millis(150));
+        if let Ok(mut c) = TcpStream::connect("127.0.0.1:18162") {
+            c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let _ = c.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let mut buf = Vec::new();
+            let _ = c.read_to_end(&mut buf);
+            if String::from_utf8_lossy(&buf).contains("HTTP/1.1 200") {
+                got_200 = true;
+                break;
+            }
+        }
+    }
+    assert!(got_200, "server never came up before the kill probe");
+
+    // Find one of the child pids via pgrep -P.
+    let pgrep = Command::new("pgrep")
+        .args(["-P", &parent_pid.to_string()])
+        .output()
+        .expect("run pgrep");
+    let pgrep_out = String::from_utf8_lossy(&pgrep.stdout);
+    let victim: i32 = pgrep_out
+        .lines()
+        .filter_map(|l| l.trim().parse::<i32>().ok())
+        .next()
+        .expect("pgrep returned no children");
+
+    // SIGKILL — bypass the child's tokio signal handler so
+    // it looks like a hard crash, not a graceful shutdown.
+    // The supervisor must observe the death and respawn.
+    unsafe { libc::kill(victim, libc::SIGKILL); }
+
+    // Wait for binary to finish naturally (duration timer).
+    let output = child.wait_with_output().expect("wait_with_output");
+    let _ = std::fs::remove_file(&tmp);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // The supervisor must have logged a restart.
+    assert!(
+        stderr.contains("restarted worker"),
+        "expected 'restarted worker' diagnostic in stderr; supervisor missed the crash.\n\
+         stderr:\n{stderr}\nstdout:\n{stdout}",
+    );
+
+    // The replacement child's on_worker_boot must have
+    // run — at least 3 BOOTED lines total (original 0 +
+    // original 1 + restart of whichever died).
+    let booted_count = stdout.matches("BOOTED ").count();
+    assert!(
+        booted_count >= 3,
+        "expected >=3 BOOTED markers (2 initial + 1 restart), got {booted_count}.\n\
          stdout:\n{stdout}\nstderr:\n{stderr}",
     );
 }

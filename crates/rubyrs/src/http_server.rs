@@ -155,9 +155,21 @@ static PREFORK_CHILD_PIDS: [std::sync::atomic::AtomicI32; MAX_PREFORK_WORKERS] =
     const { std::sync::atomic::AtomicI32::new(0) },
 ];
 
+/// Set by the SIGINT/SIGTERM handler to tell the FU2
+/// supervisor "do NOT restart exited children — we asked
+/// them to die." Without this, the supervisor can't
+/// distinguish a clean-shutdown exit from a crash and
+/// would keep respawning workers we just SIGTERMed.
+///
+/// AtomicBool is async-signal-safe (lock-free atomic
+/// store is on POSIX §2.4.3's safe list in practice).
+#[cfg(target_family = "unix")]
+static PREFORK_SHUTDOWN_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Signal-handler entry point that forwards SIGINT/SIGTERM
 /// to all known prefork children. Must remain async-
-/// signal-safe — only `kill(2)` + atomic loads here.
+/// signal-safe — only `kill(2)` + atomic stores here.
 ///
 /// Without this, external `kill <parent_pid>` (e.g., from
 /// a process manager that doesn't know about the
@@ -165,6 +177,7 @@ static PREFORK_CHILD_PIDS: [std::sync::atomic::AtomicI32; MAX_PREFORK_WORKERS] =
 /// and they'd serve until their duration timer expired.
 #[cfg(target_family = "unix")]
 extern "C" fn prefork_forward_signal(sig: libc::c_int) {
+    PREFORK_SHUTDOWN_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
     for slot in PREFORK_CHILD_PIDS.iter() {
         let pid = slot.load(std::sync::atomic::Ordering::SeqCst);
         if pid > 0 {
@@ -173,6 +186,82 @@ extern "C" fn prefork_forward_signal(sig: libc::c_int) {
             unsafe { libc::kill(pid, sig); }
         }
     }
+}
+
+/// Child-side entry: bind a SO_REUSEPORT listener, run
+/// on_worker_boot (if supplied), serve until duration or
+/// signal. Never returns — always `libc::exit()`s, matching
+/// Stage 7d's fork-safety contract. Extracted here so the
+/// FU2 restart-on-crash supervisor can re-invoke a fresh
+/// worker into the same slot when a previous one dies.
+///
+/// On a clean serve completion, exit 0. On bind / boot /
+/// serve error, print a diagnostic to inherited stderr
+/// and exit 1 — the parent observes via WEXITSTATUS but
+/// the exit reason isn't structured.
+#[cfg(target_family = "unix")]
+fn run_one_child_worker(
+    addr: SocketAddr,
+    duration_secs: i64,
+    block_id: crate::value::ObjId,
+    on_worker_boot_id: Option<crate::value::ObjId>,
+    worker_index: i64,
+) -> ! {
+    use crate::value::Value;
+
+    // FU1: reset SIGINT/SIGTERM to defaults before tokio's
+    // runtime installs its own. The parent's forwarding
+    // handler was inherited but the child's COW copy of
+    // the pid table is stale; tokio overwrites these once
+    // serving starts.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+    }
+
+    let result: Result<(), String> = (|| {
+        let listener = bind_reuseport_v4(addr)
+            .map_err(|e| format!("child {worker_index} bind: {e}"))?;
+        if let Some(boot_id) = on_worker_boot_id {
+            let ptr = crate::vm::current_vm_ptr();
+            if ptr.is_null() {
+                return Err(format!("child {worker_index}: CURRENT_VM_PTR null"));
+            }
+            // SAFETY: same Vm pointer as parent pre-fork;
+            // COW means we now own the child's copy.
+            let vm = unsafe { &mut *ptr };
+            let idx_val = Value::Int(worker_index);
+            call_ruby_block_sync(vm, boot_id, vec![idx_val])
+                .map_err(|trap| format!(
+                    "child {worker_index} on_worker_boot raised: {}",
+                    trap.err.message(),
+                ))?;
+        }
+        let duration = std::time::Duration::from_secs(duration_secs as u64);
+        run_blocking_for_duration_with_app_on_listener(
+            listener, duration, block_id, None, None,
+            DEFAULT_MAX_BODY_BYTES, None, None, None, true,
+        ).map_err(|e| format!("child {worker_index} serve: {e}"))?;
+        Ok(())
+    })();
+    let exit_code = match result {
+        Ok(()) => 0,
+        Err(msg) => {
+            eprintln!("rubyrs prefork: {msg}");
+            1
+        }
+    };
+    // Flush stdio buffers before libc::exit — that path
+    // skips Rust's normal drop handlers, so a piped
+    // stdout (fully-buffered, common in subprocess
+    // pipelines) would otherwise drop the BOOTED/etc
+    // markers the parent expects.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: end of child's responsibility. libc::exit
+    // skips Rust drop handlers — fork-safe per ADR 0022 v3.
+    unsafe { libc::exit(exit_code) };
 }
 
 /// Install the SIGINT + SIGTERM forwarding handler. Idempotent
@@ -1518,6 +1607,11 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             for slot in PREFORK_CHILD_PIDS.iter() {
                 slot.store(0, std::sync::atomic::Ordering::SeqCst);
             }
+            // FU2: clear shutdown flag from any prior
+            // invocation. Set by the sig handler when a
+            // SIGINT/SIGTERM arrives — supervisor then
+            // skips restart.
+            PREFORK_SHUTDOWN_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
             install_prefork_signal_handlers();
 
             let mut child_pids: Vec<libc::pid_t> = Vec::with_capacity(n_workers as usize);
@@ -1545,79 +1639,13 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                     });
                 } else if pid == 0 {
                     // ===== Child process =====
-                    //
-                    // New address space (COW of parent).
-                    // Vm heap + class defs + host fn
-                    // closures came along. Tokio runtime
-                    // was NOT inherited — each child builds
-                    // its own inside on_listener.
-                    //
-                    // FU1: reset SIGINT/SIGTERM to defaults
-                    // before tokio's runtime registers its
-                    // own. The parent's forwarding handler
-                    // was inherited but it would walk the
-                    // parent's pid table (now stale in the
-                    // child's COW copy) and try to signal
-                    // pids — at best harmless ESRCH, at
-                    // worst confusing if recycled. Tokio
-                    // installs its own handlers via
-                    // `install_signal_handler=true` below.
-                    unsafe {
-                        libc::signal(libc::SIGINT, libc::SIG_DFL);
-                        libc::signal(libc::SIGTERM, libc::SIG_DFL);
-                    }
-                    //
-                    // CRITICAL: must call libc::exit() at
-                    // the end rather than returning from
-                    // Rust. Returning would unwind + drop
-                    // the Vm + run destructors — most are
-                    // fork-safe but a few (Apple framework
-                    // cluster on macOS) aren't. exit()
-                    // short-circuits all of that.
-                    let child_result: Result<(), String> = (|| {
-                        let listener = bind_reuseport_v4(addr)
-                            .map_err(|e| format!("child {worker_index} bind: {e}"))?;
-                        if let Some(boot_id) = on_worker_boot_id {
-                            let ptr = crate::vm::current_vm_ptr();
-                            if ptr.is_null() {
-                                return Err(format!("child {worker_index}: CURRENT_VM_PTR null"));
-                            }
-                            // SAFETY: same Vm pointer as parent
-                            // pre-fork; COW means we now own
-                            // the child's copy of that memory.
-                            let vm = unsafe { &mut *ptr };
-                            let idx_val = Value::Int(worker_index);
-                            call_ruby_block_sync(vm, boot_id, vec![idx_val])
-                                .map_err(|trap| format!(
-                                    "child {worker_index} on_worker_boot raised: {}",
-                                    trap.err.message(),
-                                ))?;
-                        }
-                        let duration = Duration::from_secs(duration_secs as u64);
-                        // FU1: install_signal_handler=true
-                        // wires tokio::signal::ctrl_c()
-                        // (SIGINT) + sigterm into the
-                        // child's accept loop's `select!`,
-                        // so a forwarded signal cuts short
-                        // serving rather than the duration
-                        // timer being the only exit.
-                        run_blocking_for_duration_with_app_on_listener(
-                            listener, duration, block_id, None, None,
-                            DEFAULT_MAX_BODY_BYTES, None, None, None, true,
-                        ).map_err(|e| format!("child {worker_index} serve: {e}"))?;
-                        Ok(())
-                    })();
-                    let exit_code = match child_result {
-                        Ok(()) => 0,
-                        Err(msg) => {
-                            eprintln!("rubyrs prefork: {msg}");
-                            1
-                        }
-                    };
-                    // SAFETY: end of child's responsibility.
-                    // libc::exit skips Rust drop handlers —
-                    // exactly what we want for fork-safety.
-                    unsafe { libc::exit(exit_code) };
+                    // Body extracted to `run_one_child_worker`
+                    // (top of this module) so FU2's restart
+                    // supervisor can reuse it. Never returns.
+                    run_one_child_worker(
+                        addr, duration_secs, block_id,
+                        on_worker_boot_id, worker_index,
+                    );
                 } else {
                     // FU1: publish pid into the static
                     // table BEFORE pushing into the Vec.
@@ -1632,26 +1660,163 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 }
             }
 
-            // ===== Parent: waitpid loop =====
+            // ===== Parent: FU2 supervisor poll loop =====
             //
-            // SIGINT/SIGTERM to the parent (Ctrl+C, k8s
-            // termination, systemd unit stop, manual
-            // kill <parent_pid>) fires the FU1 handler,
-            // which `kill()`s each child with the same
-            // signal. With install_signal_handler=true,
-            // each child's accept loop cuts short and
-            // returns; their tokio runtimes drop in-flight
-            // requests cleanly and they exit 0. Parent's
-            // SA_RESTART-flagged waitpid resumes and reaps
-            // them.
+            // Non-blocking `waitpid(-1, WNOHANG)` polls
+            // for ANY child exit; when one is reaped, we
+            // look up its worker slot via PREFORK_CHILD_PIDS
+            // and (subject to deadline + crash-loop guard)
+            // fork a replacement into the same slot. The
+            // pool stays at N workers across crash events.
             //
-            // No restart-on-crash supervision in 7d; lands
-            // as FU2. A failed child exits with code 1;
-            // parent observes via WEXITSTATUS but doesn't
-            // act on it.
-            for &cpid in &child_pids {
+            // Deadline respect: once `duration_secs` from
+            // entry has elapsed, the supervisor stops
+            // restarting + reaps remaining workers (they
+            // exit on their own duration timer or via the
+            // FU1 signal forwarding path).
+            //
+            // Crash-loop guard: if MAX_RESTARTS_WINDOW
+            // restarts happen within RESTART_WINDOW_SECS,
+            // print a diagnostic + signal-shutdown the
+            // remaining workers. Prevents fork-bombing the
+            // host on a deterministic boot failure.
+            //
+            // SIGINT/SIGTERM to the parent fires the FU1
+            // handler, which kills each child. With
+            // install_signal_handler=true in each child,
+            // accept loops cut short and return; waitpid
+            // observes their exit; the supervisor's
+            // deadline-check path lets the loop unwind.
+            const MAX_RESTARTS_WINDOW: usize = 5;
+            const RESTART_WINDOW_SECS: u64 = 60;
+            let supervisor_start = std::time::Instant::now();
+            let deadline = supervisor_start + Duration::from_secs(duration_secs as u64);
+            let mut alive: Vec<libc::pid_t> = child_pids.clone();
+            let mut restart_log: Vec<std::time::Instant> = Vec::new();
+            let mut crash_loop_tripped = false;
+
+            while !alive.is_empty() {
+                let now = std::time::Instant::now();
+                // FU2: SIGINT/SIGTERM arrived — the
+                // forwarding handler already killed each
+                // alive child; just reap them and exit
+                // without restarting. The blocking
+                // waitpids are bounded because the
+                // children received the signal already.
+                if PREFORK_SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+                    for &cpid in &alive {
+                        let mut status = 0;
+                        unsafe { libc::waitpid(cpid, &mut status, 0); }
+                    }
+                    alive.clear();
+                    break;
+                }
+                if now >= deadline {
+                    // Deadline reached — signal remaining,
+                    // reap, exit loop. Children's own
+                    // duration timer would also fire, but
+                    // SIGTERM ensures fast cleanup.
+                    for &cpid in &alive {
+                        unsafe { libc::kill(cpid, libc::SIGTERM); }
+                    }
+                    for &cpid in &alive {
+                        let mut status = 0;
+                        unsafe { libc::waitpid(cpid, &mut status, 0); }
+                    }
+                    alive.clear();
+                    break;
+                }
+
+                // Non-blocking reap. WNOHANG returns 0 if
+                // no exited child is pending; we then
+                // sleep briefly + retry.
                 let mut status = 0;
-                unsafe { libc::waitpid(cpid, &mut status, 0); }
+                let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+                if reaped == 0 {
+                    // No exits yet; back off. 50ms is the
+                    // crash-detection latency upper bound;
+                    // small enough to feel responsive,
+                    // large enough not to thrash CPU.
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                if reaped < 0 {
+                    // ECHILD = no more children; treat as
+                    // empty alive list (defensive).
+                    alive.clear();
+                    break;
+                }
+
+                // Remove the exited pid from alive.
+                if let Some(pos) = alive.iter().position(|&p| p == reaped) {
+                    alive.remove(pos);
+                }
+
+                // Look up worker slot. Either find the
+                // index that held this pid, or if the pid
+                // was already cleared (race with parallel
+                // restart) skip — no double-restart.
+                let exit_code = (status >> 8) & 0xff;
+                let slot = PREFORK_CHILD_PIDS.iter()
+                    .position(|s| s.load(std::sync::atomic::Ordering::SeqCst) == reaped);
+                if let Some(slot_idx) = slot {
+                    // Always clear the slot so the FU1
+                    // forwarding handler doesn't try to
+                    // SIGTERM the stale (recycled) pid.
+                    PREFORK_CHILD_PIDS[slot_idx]
+                        .store(0, std::sync::atomic::Ordering::SeqCst);
+
+                    if crash_loop_tripped {
+                        // Already in shutdown mode; don't
+                        // restart, just reap remaining.
+                        continue;
+                    }
+
+                    // Crash-loop guard: prune old entries,
+                    // count recent restarts.
+                    restart_log.retain(|t| now.duration_since(*t).as_secs() < RESTART_WINDOW_SECS);
+                    if restart_log.len() >= MAX_RESTARTS_WINDOW {
+                        eprintln!(
+                            "rubyrs prefork: crash-loop detected ({} restarts in {RESTART_WINDOW_SECS}s); halting supervisor",
+                            restart_log.len(),
+                        );
+                        crash_loop_tripped = true;
+                        for &cpid in &alive {
+                            unsafe { libc::kill(cpid, libc::SIGTERM); }
+                        }
+                        continue;
+                    }
+
+                    // Restart only if we're not past the
+                    // deadline (race-safe re-check).
+                    if std::time::Instant::now() >= deadline {
+                        continue;
+                    }
+
+                    let new_pid = unsafe { libc::fork() };
+                    if new_pid < 0 {
+                        eprintln!(
+                            "rubyrs prefork: failed to restart worker {slot_idx} (was pid {reaped} exit {exit_code}): {}",
+                            std::io::Error::last_os_error(),
+                        );
+                        continue;
+                    } else if new_pid == 0 {
+                        // Restarted child — same path as
+                        // initial fork.
+                        run_one_child_worker(
+                            addr, duration_secs, block_id,
+                            on_worker_boot_id, slot_idx as i64,
+                        );
+                    } else {
+                        PREFORK_CHILD_PIDS[slot_idx]
+                            .store(new_pid, std::sync::atomic::Ordering::SeqCst);
+                        alive.push(new_pid);
+                        restart_log.push(now);
+                        eprintln!(
+                            "rubyrs prefork: restarted worker {slot_idx} (was pid {reaped} exit {exit_code}); new pid {new_pid}",
+                        );
+                    }
+                }
             }
 
             // Return the input addr as the "bound" — each
