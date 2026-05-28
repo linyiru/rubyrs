@@ -40,7 +40,11 @@ pub(crate) use bignum::bigint_equals_float_lossless;
 // PoC stage 4a). Re-export from here so both the cext bridge
 // and the `_http_server` battery's dispatch path find it via
 // `super::with_vm_ptr_set`.
-#[cfg(any(all(feature = "cext", not(target_os = "wasi")), feature = "_http_server"))]
+#[cfg(any(
+    all(feature = "cext", not(target_os = "wasi")),
+    feature = "_http_server",
+    feature = "_fiber",
+))]
 pub(crate) use vm_ptr::with_vm_ptr_set;
 // `current_vm_ptr` is the read-side used by host fn bodies
 // that re-enter the Vm. _http_server battery's per-request
@@ -52,6 +56,7 @@ pub(crate) use vm_ptr::with_vm_ptr_set;
 #[cfg(any(
     all(feature = "cext", not(target_os = "wasi")),
     feature = "_http_server",
+    feature = "_fiber",
 ))]
 pub(crate) use vm_ptr::current_vm_ptr;
 

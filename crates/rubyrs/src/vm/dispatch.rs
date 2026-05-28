@@ -266,6 +266,7 @@ impl Vm {
                 #[cfg(any(
                     all(feature = "cext", not(target_os = "wasi")),
                     feature = "_http_server",
+                    feature = "_fiber",
                 ))]
                 {
                     let vm_ptr: *mut Vm = self;
@@ -274,6 +275,7 @@ impl Vm {
                 #[cfg(not(any(
                     all(feature = "cext", not(target_os = "wasi")),
                     feature = "_http_server",
+                    feature = "_fiber",
                 )))]
                 { host(args) }
             }

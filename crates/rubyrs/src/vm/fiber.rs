@@ -388,6 +388,239 @@ impl Drop for FiberStashGuard<'_> {
     }
 }
 
+// ===== P1c.2c: resume_fiber + host fns =====
+
+/// Result of a single resume step.
+#[derive(Debug)]
+#[allow(dead_code)] // consumed by host fns in this module
+pub(crate) enum FiberStep {
+    /// Fiber called `Fiber.yield(v)` — the value flows
+    /// back to the resumer.
+    Yielded(Value),
+    /// Fiber's body returned normally with the given value.
+    Returned(Value),
+}
+
+/// Drive one resume of a Fiber. Either runs to the next
+/// `Fiber.yield(v)` and returns `Yielded(v)`, runs to body
+/// completion and returns `Returned(v)`, or surfaces a
+/// Trap (which also marks the Fiber as `Returned`).
+///
+/// State transitions:
+///
+/// - On entry: Created → Running, Suspended → Running
+/// - On Yielded exit: Running → Suspended
+/// - On Returned exit OR Trap: Running → Returned
+///
+/// **Error cases** (return Err, fiber state unchanged):
+/// - Resume on `Returned` — "dead fiber called"
+/// - Resume on `Running` — "double resume"
+///
+/// First-resume semantics: `invoke_block(body, [arg])` is
+/// called to push the body frame, then dispatch_until
+/// drives until yield / return. The block receives `arg`
+/// as its first parameter.
+///
+/// Subsequent-resume semantics: the previous Op::Call to
+/// the yield host fn left a placeholder Nil on the stack
+/// (its "return value"); pop it and push `arg` so the
+/// bytecode picks up `arg` as `Fiber.yield`'s actual
+/// return value (CRuby parity).
+#[allow(dead_code)] // P1c.2c host fns + future P2b consume this
+pub(crate) fn resume_fiber(
+    vm: &mut crate::vm::Vm,
+    fiber_id: crate::value::ObjId,
+    arg: Value,
+) -> Result<FiberStep, crate::error::Trap> {
+    use crate::error::{RubyError, Trap};
+
+    let initial_state = *vm.heap.fiber(fiber_id).state.borrow();
+    match initial_state {
+        FiberState::Returned => {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "FiberError: dead fiber called".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
+        FiberState::Running => {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "FiberError: double resume (fiber already running)".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
+        _ => {}
+    }
+
+    let body_block_id = vm.heap.fiber(fiber_id).body_block;
+    let is_first_resume = matches!(initial_state, FiberState::Created);
+    *vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Running;
+
+    let guard = FiberStashGuard::install(vm, fiber_id);
+    let pre_depth = 0usize; // fiber's outside frame count is 0 by definition
+
+    // Prepare the entry-state for dispatch_until.
+    let prep_result = if is_first_resume {
+        guard.vm.invoke_block(body_block_id, vec![arg])
+    } else {
+        // The previous yield host fn pushed a placeholder
+        // Value onto the operand stack (the host fn's
+        // return value as Op::Call sees it). Replace it
+        // with `arg` so the bytecode's StoreLocal /
+        // continuation sees `arg` as the yield's return.
+        guard.vm.stack.pop();
+        guard.vm.stack.push(arg);
+        Ok(())
+    };
+    if let Err(trap) = prep_result {
+        // Resume itself couldn't even start. Mark fiber as
+        // Returned (terminal failure) — same shape as a body
+        // panic.
+        *guard.vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Returned;
+        return Err(trap);
+    }
+
+    guard.vm.fiber_yield_pending = None;
+    let dispatch_result = guard.vm.dispatch_until(pre_depth);
+    let yield_val = guard.vm.fiber_yield_pending.take();
+
+    let outcome = match (dispatch_result, yield_val) {
+        (Ok(_), Some(v)) => {
+            // Suspended via Fiber.yield(v).
+            *guard.vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Suspended;
+            *guard.vm.heap.fiber(fiber_id).last_value.borrow_mut() = v.clone();
+            Ok(FiberStep::Yielded(v))
+        }
+        (Ok(_), None) => {
+            // Body returned normally.
+            let v = guard.vm.stack.pop().unwrap_or(Value::Nil);
+            *guard.vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Returned;
+            *guard.vm.heap.fiber(fiber_id).last_value.borrow_mut() = v.clone();
+            Ok(FiberStep::Returned(v))
+        }
+        (Err(trap), _) => {
+            // Trap / exception out of the body. Terminal.
+            *guard.vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Returned;
+            Err(trap)
+        }
+    };
+
+    // guard drops here, restoring Vm + writing the (post-
+    // execution) snapshot back into the FiberObject.
+    drop(guard);
+    outcome
+}
+
+/// Register Fiber host fns on a Runtime. Internal API
+/// names start with `__rubyrs_fiber_*`; embedders typically
+/// wrap them in an idiomatic Ruby `Fiber` class (lands in
+/// P1c.3). For tests + the `_http_server` battery's A3β
+/// path (P2b), the host-fn surface is enough.
+///
+/// Host fns:
+/// - `__rubyrs_fiber_new(block) -> Value::Object(fiber_id)`
+/// - `__rubyrs_fiber_yield(v) -> Nil` (placeholder; the
+///   subsequent resume's arg replaces this on the stack)
+/// - `__rubyrs_fiber_resume(fiber, arg) -> Value`
+///   (the yielded / returned value)
+pub fn register_host_fns(rt: &mut crate::Runtime) {
+    use crate::error::{RubyError, Trap};
+
+    let arg_err = |msg: &str| -> Trap {
+        Trap {
+            err: RubyError::ArgumentError { msg: msg.to_string() },
+            backtrace: vec![],
+        }
+    };
+
+    // __rubyrs_fiber_new(block_value) -> Value::Object(fiber_id)
+    rt.register_fn("__rubyrs_fiber_new", move |args| {
+        let block_id = match args {
+            [Value::Block(id)] => *id,
+            _ => {
+                return Err(arg_err(
+                    "__rubyrs_fiber_new(block: Proc/Lambda) — pass a block-shaped value",
+                ));
+            }
+        };
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "internal: CURRENT_VM_PTR null in __rubyrs_fiber_new".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
+        // SAFETY: ADR 0013 — outer &mut Vm parked by
+        // invoke_host_fn; time-disjoint re-borrow.
+        let vm = unsafe { &mut *ptr };
+        let fiber_id = vm.heap.alloc_fiber(block_id);
+        Ok(Value::Object(fiber_id))
+    });
+
+    // __rubyrs_fiber_yield(v) -> Nil
+    // Sets vm.fiber_yield_pending so dispatch_until exits
+    // on its next iteration. The Nil return becomes a stack
+    // placeholder that the next resume replaces with the
+    // resume's arg (see resume_fiber's "subsequent" path).
+    rt.register_fn("__rubyrs_fiber_yield", move |args| {
+        let v = args.first().cloned().unwrap_or(Value::Nil);
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "internal: CURRENT_VM_PTR null in __rubyrs_fiber_yield".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
+        // SAFETY: same ADR 0013 contract.
+        let vm = unsafe { &mut *ptr };
+        vm.fiber_yield_pending = Some(v);
+        Ok(Value::Nil)
+    });
+
+    // __rubyrs_fiber_resume(fiber, arg) -> Value
+    // Returns the yielded value (if fiber yielded) or the
+    // body's return value (if fiber returned).
+    rt.register_fn("__rubyrs_fiber_resume", move |args| {
+        let (fiber_id, arg) = match args {
+            [Value::Object(id), arg] => (*id, arg.clone()),
+            [Value::Object(id)] => (*id, Value::Nil),
+            _ => {
+                return Err(arg_err(
+                    "__rubyrs_fiber_resume(fiber: Fiber, arg = nil)",
+                ));
+            }
+        };
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "internal: CURRENT_VM_PTR null in __rubyrs_fiber_resume".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
+        // SAFETY: same ADR 0013 contract.
+        let vm = unsafe { &mut *ptr };
+        // Sanity: the ObjId must point at a Fiber slot.
+        if !matches!(vm.heap.get(fiber_id), crate::heap::HeapObj::Fiber(_)) {
+            return Err(arg_err(
+                "__rubyrs_fiber_resume: first arg is not a Fiber",
+            ));
+        }
+        match resume_fiber(vm, fiber_id, arg)? {
+            FiberStep::Yielded(v) => Ok(v),
+            FiberStep::Returned(v) => Ok(v),
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +829,77 @@ mod tests {
             crate::value::Value::Int(n) => assert_eq!(*n, 55),
             other => panic!("expected sentinel Int(55), got {other:?}"),
         }
+    }
+
+    // ===== P1c.2c: end-to-end resume + yield via Ruby =====
+
+    /// P1c.2c: minimal round-trip — body yields once, then
+    /// returns. Asserts both values arrive through their
+    /// respective resume calls.
+    ///
+    /// This is the load-bearing integration test for P1c.2:
+    /// it exercises the FiberStashGuard swap, the
+    /// dispatch_until yield-check, the host fn → vm
+    /// CURRENT_VM_PTR bridge, and the resume_fiber state
+    /// machine all in one shot.
+    #[test]
+    fn fiber_yield_then_return_via_ruby() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            body = proc { __rubyrs_fiber_yield(:y); :done }
+            fib = __rubyrs_fiber_new(body)
+            r1 = __rubyrs_fiber_resume(fib, nil)
+            r2 = __rubyrs_fiber_resume(fib, nil)
+            "#{r1.inspect}/#{r2.inspect}"
+        "##, "p1c2c_simple.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), ":y/:done"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P1c.2c: resume's arg becomes the yielded
+    /// expression's return value in the body bytecode.
+    /// Verifies the placeholder-pop + arg-push logic in
+    /// resume_fiber's "subsequent resume" path.
+    #[test]
+    fn fiber_resume_arg_is_yield_return_value() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            body = proc {
+              v = __rubyrs_fiber_yield(:waiting)
+              v.to_s
+            }
+            fib = __rubyrs_fiber_new(body)
+            r1 = __rubyrs_fiber_resume(fib, nil)
+            r2 = __rubyrs_fiber_resume(fib, 42)
+            "#{r1.inspect}/#{r2.inspect}"
+        "##, "p1c2c_arg.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(s.to_string_lossy(), ":waiting/\"42\""),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    /// P1c.2c: resume on a returned fiber raises
+    /// FiberError ("dead fiber called").
+    #[test]
+    fn fiber_resume_on_dead_raises() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            body = proc { :once }
+            fib = __rubyrs_fiber_new(body)
+            __rubyrs_fiber_resume(fib, nil)
+            __rubyrs_fiber_resume(fib, nil)
+        "#, "p1c2c_dead.rb").expect_err("resume on dead fiber should raise");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("dead fiber called"),
+            "expected dead-fiber error, got: {msg}",
+        );
     }
 
     // ===== P1c.2b: vm.fiber_yield_pending field + dispatch_until extension =====

@@ -49,6 +49,13 @@ pub use output::StdSink;
 
 #[cfg(feature = "_http_server")]
 pub use http_server::{HttpServerConfig, register_host_fns as register_http_server_host_fns};
+/// Register Fiber host fns (`__rubyrs_fiber_new`,
+/// `__rubyrs_fiber_yield`, `__rubyrs_fiber_resume`) onto a
+/// `Runtime`. See [`vm::fiber::register_host_fns`] for the
+/// host-fn surface. cfg(_fiber)-gated per ADR 0017's
+/// Tier-2 placement.
+#[cfg(feature = "_fiber")]
+pub use vm::fiber::register_host_fns as register_fiber_host_fns;
 
 use std::io::Write;
 use std::path::Path;
