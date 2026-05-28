@@ -579,8 +579,11 @@ impl HttpServerBody {
     /// cfg(_fiber)-gated.
     #[cfg(feature = "_fiber")]
     #[allow(dead_code)] // P2b.2b.3 caller
-    pub(crate) fn streaming(fiber_id: crate::value::ObjId) -> Self {
-        Self::Streaming(FiberResponseBody::new(fiber_id))
+    pub(crate) fn streaming(
+        fiber_id: crate::value::ObjId,
+        body_for_close: Option<crate::value::Value>,
+    ) -> Self {
+        Self::Streaming(FiberResponseBody::new(fiber_id, body_for_close))
     }
 }
 
@@ -664,13 +667,27 @@ pub(crate) struct FiberResponseBody {
     /// synchronously-yielded frames would coalesce into
     /// a single TCP write and break true streaming.
     yield_next_poll: bool,
+    /// P2c (ADR 0023): the original Rack body. When the
+    /// Fiber returns or traps, we invoke `body.close`
+    /// once if the body responds to it (Rack 3 SPEC).
+    /// Taken on first close invocation so a double-poll
+    /// after `done` can't re-invoke close.
+    body_for_close: Option<crate::value::Value>,
 }
 
 #[cfg(feature = "_fiber")]
 impl FiberResponseBody {
     #[allow(dead_code)] // P2b.2b.3 caller
-    pub(crate) fn new(fiber_id: crate::value::ObjId) -> Self {
-        Self { fiber_id, done: false, yield_next_poll: false }
+    pub(crate) fn new(
+        fiber_id: crate::value::ObjId,
+        body_for_close: Option<crate::value::Value>,
+    ) -> Self {
+        Self {
+            fiber_id,
+            done: false,
+            yield_next_poll: false,
+            body_for_close,
+        }
     }
 }
 
@@ -741,10 +758,23 @@ impl hyper::body::Body for FiberResponseBody {
             }
             Ok(FiberStep::Returned(_)) => {
                 this.done = true;
+                // P2c: invoke body.close once (if it
+                // responds). Errors inside close are
+                // swallowed — see invoke_body_close.
+                if let Some(body) = this.body_for_close.take() {
+                    invoke_body_close(vm, body);
+                }
                 std::task::Poll::Ready(None)
             }
             Err(trap) => {
                 this.done = true;
+                // P2c: close still fires on Fiber trap —
+                // Rack 3 SPEC requires close after the
+                // server is done with the body, regardless
+                // of whether the body iteration succeeded.
+                if let Some(body) = this.body_for_close.take() {
+                    invoke_body_close(vm, body);
+                }
                 let err: Self::Error = format!(
                     "Rack streaming body raised: {}",
                     trap.err.message(),
@@ -941,6 +971,37 @@ pub(crate) fn parse_serve_options(
     Ok(opts)
 }
 
+/// P2c (ADR 0023): invoke `body.close` on the Rack body if
+/// the body responds to `close`. Rack 3 SPEC: the server
+/// MUST call `body.close` exactly once after the response
+/// has been fully consumed. We swallow exceptions raised
+/// inside `close` (best-effort cleanup — the response is
+/// already on the wire by the time this fires).
+///
+/// No-ops for bodies that don't respond to `close`
+/// (e.g., a literal Array — Array#close is undefined).
+pub(crate) fn invoke_body_close(
+    vm: &mut crate::vm::Vm,
+    body: crate::value::Value,
+) {
+    use crate::value::Value;
+    let class_val = vm.class_of(&body);
+    let cls = match class_val {
+        Value::Class(c) => c,
+        _ => return,
+    };
+    let close_sym = vm.interner.intern("close");
+    let method = match vm.lookup_method_uncached(&cls, close_sym) {
+        Some(m) => m,
+        None => return,
+    };
+    let pre_frames = vm.frames.len();
+    if vm.invoke_method(method, body, vec![]).is_ok() {
+        let _ = vm.dispatch_until(pre_frames);
+        let _ = vm.stack.pop();
+    }
+}
+
 pub(crate) fn marshal_rack_response(
     vm: &mut crate::vm::Vm,
     app_result: crate::value::Value,
@@ -1056,7 +1117,14 @@ pub(crate) fn marshal_rack_response(
                             other.type_name(),
                         )),
                     };
-                    return Ok((status, headers, HttpServerBody::streaming(fiber_id)));
+                    // P2c: pass the original body along so
+                    // poll_frame can invoke body.close once
+                    // the stream ends (Rack 3 SPEC).
+                    return Ok((
+                        status,
+                        headers,
+                        HttpServerBody::streaming(fiber_id, Some(body_val_for_streaming)),
+                    ));
                 }
                 // Streaming preamble missing (cfg shouldn't
                 // hit this — _fiber implies the streaming
@@ -1205,6 +1273,12 @@ pub(crate) fn marshal_rack_response(
             )),
         }
     }
+
+    // P2c: invoke body.close on the original Rack body
+    // once after the buffered path has fully consumed it
+    // (Rack 3 SPEC). `arr[2]` is the original body Value —
+    // arr was cloned up-front so this read is borrow-safe.
+    invoke_body_close(vm, arr[2].clone());
 
     Ok((status, headers, HttpServerBody::buffered(bytes::Bytes::from(body_bytes))))
 }
@@ -4478,6 +4552,229 @@ mod tests {
             first_at < Duration::from_millis(sleep_ms),
             "P2b.2b.4: FIRST_CHUNK must arrive before the sleep elapses ({sleep_ms}ms); \
              got first_at={first_at:?}. Late first-chunk indicates buffering.",
+        );
+    }
+
+    /// P2c (ADR 0023): Rack 3 SPEC requires the server to
+    /// invoke `body.close` exactly once after the response
+    /// is fully delivered. This test exercises the BUFFERED
+    /// each-shape path (`_http_server` alone — no `_fiber`).
+    /// Records `close` into a shared Vec via a test-private
+    /// host fn and asserts it fires exactly once.
+    #[test]
+    fn p2c_buffered_each_invokes_body_close() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18150";
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        let log_for_fn = Arc::clone(&log);
+        rt.register_fn("__rubyrs_test_record", move |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let tag = match args {
+                [Value::Str(s)] => s.to_string_lossy(),
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_record(tag: String)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            log_for_fn.lock().unwrap().push(tag);
+            Ok(crate::value::Value::Nil)
+        });
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class ClosableBody
+              def each
+                yield "payload"
+              end
+              def close
+                __rubyrs_test_record("close")
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, ClosableBody.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app)
+        "#), "p2c_buffered_close.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("payload"),
+            "expected body payload, got:\n{response_text}",
+        );
+        let records = log.lock().unwrap().clone();
+        assert_eq!(
+            records, vec!["close".to_string()],
+            "P2c: body.close must be invoked exactly once on buffered path; got {records:?}",
+        );
+    }
+
+    /// P2c: same close-after-stream contract for the
+    /// STREAMING (Fiber) path. Verifies close fires AFTER
+    /// the Fiber returns naturally — and only once.
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2c_streaming_each_invokes_body_close() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18151";
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        let log_for_fn = Arc::clone(&log);
+        rt.register_fn("__rubyrs_test_record", move |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let tag = match args {
+                [Value::Str(s)] => s.to_string_lossy(),
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_record(tag: String)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            log_for_fn.lock().unwrap().push(tag);
+            Ok(crate::value::Value::Nil)
+        });
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class StreamingClosable
+              def each
+                __rubyrs_test_record("chunk_a")
+                yield "chunk_a"
+                __rubyrs_test_record("chunk_b")
+                yield "chunk_b"
+              end
+              def close
+                __rubyrs_test_record("close")
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, StreamingClosable.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app)
+        "#), "p2c_streaming_close.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200, got:\n{response_text}",
+        );
+        let records = log.lock().unwrap().clone();
+        // close must come AFTER both chunk records — Rack
+        // SPEC: close fires after the body is fully consumed.
+        assert_eq!(
+            records,
+            vec!["chunk_a".to_string(), "chunk_b".to_string(), "close".to_string()],
+            "P2c streaming: chunks must record before close, and close exactly once; got {records:?}",
+        );
+    }
+
+    /// P2c: when a streaming body raises mid-iteration,
+    /// `close` must still fire (Rack SPEC §"Body" — close
+    /// is the server's "I'm done with this body" signal
+    /// regardless of iteration success).
+    #[cfg(feature = "_fiber")]
+    #[test]
+    fn p2c_streaming_close_fires_even_when_body_raises() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        let server_addr = "127.0.0.1:18152";
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut client = TcpStream::connect(server_addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client.write_all(b"GET /x HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let mut rt = crate::Runtime::new();
+        let log_for_fn = Arc::clone(&log);
+        rt.register_fn("__rubyrs_test_record", move |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let tag = match args {
+                [Value::Str(s)] => s.to_string_lossy(),
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__rubyrs_test_record(tag: String)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            log_for_fn.lock().unwrap().push(tag);
+            Ok(crate::value::Value::Nil)
+        });
+        super::register_host_fns(&mut rt);
+        rt.eval(&format!(r#"
+            class RaisingBody
+              def each
+                yield "before_error"
+                raise "boom"
+              end
+              def close
+                __rubyrs_test_record("close")
+              end
+            end
+            app = ->(env) {{
+              [200, {{"Content-Type" => "text/plain"}}, RaisingBody.new]
+            }}
+            __rubyrs_http_serve_with_app("{server_addr}", 2, app)
+        "#), "p2c_streaming_raise.rb").expect("server ran");
+
+        let _response_text = client_thread.join().expect("client thread");
+        let records = log.lock().unwrap().clone();
+        assert!(
+            records.contains(&"close".to_string()),
+            "P2c: body.close must fire even when body raises mid-stream; got {records:?}",
         );
     }
 
