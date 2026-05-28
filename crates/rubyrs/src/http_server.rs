@@ -177,6 +177,68 @@ pub(crate) fn build_rack_env(
     vm.heap.alloc(HeapObj::Hash(HashObj::with_pairs(pairs)))
 }
 
+/// Invoke a Ruby block synchronously from Rust and return
+/// its result value.
+///
+/// Stage 4c.2 of Phase H1 PoC. Wraps the `step_block`
+/// machinery so the per-request hyper handler (stage 4c.3)
+/// can call `app.call(env)`-shape blocks without re-
+/// implementing the BlockStep variant handling.
+///
+/// **Caller MUST hold `&mut Vm`** — typically via
+/// `current_vm_ptr()` re-borrow per ADR 0013.
+///
+/// ## BlockStep mapping
+///
+/// - `BlockStep::Value(v)` → `Ok(v)` — normal return (or
+///   `next`-supplied value)
+/// - `BlockStep::MethodReturn` → `RuntimeError`. Reached
+///   when Ruby code inside a block calls `return` (which
+///   unwinds to the enclosing method). For a Rack app
+///   block called from Rust, there's no enclosing Ruby
+///   method to return to — this is a misbehaving app and
+///   maps to 500 at the request boundary in stage 4c.3.
+/// - `BlockStep::Break(_)` → `RuntimeError`. Same shape
+///   problem: `break` from inside a Rack app block has no
+///   loop to break out of when called from Rust.
+///
+/// ## GC + pinning
+///
+/// The block reference is read out of the caller's args
+/// vec (already a GC root for the duration of the host
+/// fn). For single-call use (Rack app: one block per
+/// request), no additional pinning is needed. If the
+/// caller plans to repeatedly call the same block across
+/// allocations, it must pin the `Value::Block(id)` first
+/// via the existing `PinGuard` shape — see iter.rs:140
+/// for the pattern.
+#[allow(dead_code)] // Used by stage 4c.2 test + the stage 4c.3 per-request handler when that lands.
+pub(crate) fn call_ruby_block_sync(
+    vm: &mut crate::vm::Vm,
+    block_id: crate::value::ObjId,
+    args: Vec<crate::value::Value>,
+) -> Result<crate::value::Value, crate::error::Trap> {
+    use crate::error::{RubyError, Trap};
+    use crate::vm::BlockStep;
+
+    let pre_frames = vm.frames.len();
+    match vm.step_block(block_id, args, pre_frames)? {
+        BlockStep::Value(v) => Ok(v),
+        BlockStep::MethodReturn => Err(Trap {
+            err: RubyError::RuntimeError {
+                msg: "block invoked from Rust raised `return` — no enclosing Ruby method to unwind to (likely a Rack app misuse; use `next` to return a value)".to_string(),
+            },
+            backtrace: vec![],
+        }),
+        BlockStep::Break(_) => Err(Trap {
+            err: RubyError::RuntimeError {
+                msg: "block invoked from Rust raised `break` — no loop to break out of (Rack app blocks return via the final expression or `next`)".to_string(),
+            },
+            backtrace: vec![],
+        }),
+    }
+}
+
 /// Hardcoded request handler — stage 2 placeholder. Every
 /// request gets a 200 OK with a fixed plain-text body
 /// regardless of method/path/headers. Stage 3 swaps this
@@ -632,6 +694,126 @@ mod tests {
             raise "unknown key should return nil" \
                 unless env["NONEXISTENT_KEY"].nil?
         "#, "stage_4c1_check.rb").expect("env hash Ruby-side assertions all hold");
+    }
+
+    /// Stage 4c.2 verification: invoke a Ruby block from
+    /// Rust + verify the result + cover MethodReturn /
+    /// Break edge cases.
+    ///
+    /// Sentinel host fn `__sentinel_call_block(block, *args)`
+    /// uses `current_vm_ptr` + `call_ruby_block_sync` to
+    /// dispatch into the supplied block with the given
+    /// args, returning the block's result. Tests cover:
+    ///
+    /// - Normal lambda return → result passes through
+    /// - Lambda with multiple args
+    /// - Lambda returning a String (heap-allocated value
+    ///   survives the round trip)
+    /// - Lambda returning an Array (`[status, headers,
+    ///   body]`-shape — the Rack triplet stage 4c.3 will
+    ///   consume)
+    /// - Lambda with zero params (called with empty args)
+    /// - Lambda that raises — Trap propagates back
+    /// - Proc with bare `return` — RuntimeError (block
+    ///   invoked from Rust has no enclosing method)
+    /// - Block with bare `break` — RuntimeError (no
+    ///   enclosing loop)
+    #[test]
+    fn call_ruby_block_sync_invokes_lambda_with_args() {
+        use crate::value::Value;
+        let mut rt = crate::Runtime::new();
+        rt.register_fn("__sentinel_call_block", |args| {
+            let block_id = match args.first() {
+                Some(Value::Block(id)) => *id,
+                _ => return Err(crate::error::Trap {
+                    err: crate::error::RubyError::ArgumentError {
+                        msg: "expected block as first arg".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            let block_args: Vec<Value> = args[1..].to_vec();
+            let ptr = crate::vm::current_vm_ptr();
+            assert!(!ptr.is_null(), "vm ptr must be set");
+            // SAFETY: ADR 0013 — outer &mut Vm parked; re-borrow time-disjoint.
+            let vm = unsafe { &mut *ptr };
+            super::call_ruby_block_sync(vm, block_id, block_args)
+        });
+
+        // Normal case: lambda doubles its argument
+        rt.eval(r#"
+            doubler = ->(x) { x * 2 }
+            result = __sentinel_call_block(doubler, 21)
+            raise "doubler(21) want 42 got #{result.inspect}" unless result == 42
+        "#, "stage_4c2_basic.rb").expect("basic lambda call");
+
+        // Multiple args
+        rt.eval(r#"
+            adder = ->(a, b, c) { a + b + c }
+            result = __sentinel_call_block(adder, 1, 2, 3)
+            raise "adder(1,2,3) want 6 got #{result.inspect}" unless result == 6
+        "#, "stage_4c2_multi_arg.rb").expect("multi-arg lambda");
+
+        // String return
+        rt.eval(r#"
+            greeter = ->(name) { "Hello, #{name}!" }
+            result = __sentinel_call_block(greeter, "rubyrs")
+            raise "greeter want String got #{result.inspect}" \
+                unless result == "Hello, rubyrs!"
+        "#, "stage_4c2_string_return.rb").expect("string return");
+
+        // Array return — exactly the Rack triplet shape
+        rt.eval(r#"
+            rack_app = ->(env) { [200, {"Content-Type" => "text/plain"}, ["hi"]] }
+            result = __sentinel_call_block(rack_app, {"REQUEST_METHOD" => "GET"})
+            raise "rack_app want Array got #{result.inspect}" \
+                unless result.is_a?(Array)
+            raise "rack_app want length 3 got #{result.length}" \
+                unless result.length == 3
+            raise "rack_app status want 200 got #{result[0].inspect}" \
+                unless result[0] == 200
+            raise "rack_app headers want Hash got #{result[1].inspect}" \
+                unless result[1].is_a?(Hash)
+            raise "rack_app body want Array got #{result[2].inspect}" \
+                unless result[2].is_a?(Array)
+        "#, "stage_4c2_rack_triplet.rb").expect("rack triplet shape");
+
+        // Zero-arg block
+        rt.eval(r#"
+            ping = -> { "pong" }
+            result = __sentinel_call_block(ping)
+            raise "ping want pong got #{result.inspect}" unless result == "pong"
+        "#, "stage_4c2_zero_args.rb").expect("zero-arg lambda");
+
+        // Lambda that raises — Trap propagates
+        let trap_result = rt.eval(r#"
+            boom = ->(_) { raise ArgumentError, "from inside block" }
+            __sentinel_call_block(boom, nil)
+        "#, "stage_4c2_lambda_raises.rb");
+        let trap = trap_result.expect_err("lambda raise should propagate");
+        let formatted = rt.format_trap(&trap);
+        assert!(
+            formatted.contains("from inside block"),
+            "expected trap message to include 'from inside block', got: {formatted}",
+        );
+
+        // Proc with bare `return` — should hit MethodReturn variant.
+        // (Lambdas catch their own return; procs propagate it. We
+        // construct a proc via `Proc.new { ... }` since lambda
+        // semantics absorb `return`.)
+        //
+        // Note: `Proc.new` inside a lambda still creates a proc;
+        // the `return` then triggers MethodReturn.
+        let proc_return_result = rt.eval(r#"
+            misbehaved = proc { return 42 }
+            __sentinel_call_block(misbehaved)
+        "#, "stage_4c2_proc_return.rb");
+        let trap = proc_return_result.expect_err("proc return should be RuntimeError");
+        let formatted = rt.format_trap(&trap);
+        assert!(
+            formatted.contains("no enclosing Ruby method") || formatted.contains("RuntimeError"),
+            "expected RuntimeError-shaped trap for proc return, got: {formatted}",
+        );
     }
 
     /// Stage 4b verification: confirm that

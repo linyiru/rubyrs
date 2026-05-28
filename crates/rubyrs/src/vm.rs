@@ -48,6 +48,14 @@ pub(crate) use vm_ptr::with_vm_ptr_set;
 // per-request handler (stage 4c+) will drop the cfg gate.
 #[cfg(all(feature = "_http_server", test))]
 pub(crate) use vm_ptr::current_vm_ptr;
+
+// `iter::BlockStep` is the result of `step_block`. The
+// `_http_server` battery's block-invocation helper
+// (stage 4c.2) returns one of these variants. Re-export
+// behind the feature gate so http_server.rs can name it
+// without reaching into a private mod.
+#[cfg(feature = "_http_server")]
+pub(crate) use iter::BlockStep;
 pub(crate) use numeric::{floor_div_i64, floor_mod_i64, int_cmp_float_lossless};
 pub(crate) use lookup::{class_is_a, flatten_ancestors, CallCache};
 pub use lookup::IcStats;
