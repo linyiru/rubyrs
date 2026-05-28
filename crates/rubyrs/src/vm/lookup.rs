@@ -566,7 +566,11 @@ impl Vm {
                 "sort!" | "uniq!" | "compact!" | "flatten!" | "reverse!" |
                 "flat_map" | "collect_concat" | "chunk" | "filter_map" |
                 "each_slice" | "each_cons" |
-                "inspect"
+                "inspect" |
+                // `dup` / `clone` — shallow copy. Tier-1 Arrays
+                // don't model `freeze` beyond a no-op so the two
+                // are indistinguishable. (TRY_RUNS layer #26.)
+                "dup" | "clone"
             ),
             Value::Hash(_) => matches!(name,
                 "freeze" | "frozen?" |

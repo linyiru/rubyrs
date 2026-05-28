@@ -148,6 +148,7 @@ fn run_diff(name: &str) {
 #[test] fn singleton_class_class_eval() { run_diff("singleton_class_class_eval"); }
 #[test] fn proc_arity() { run_diff("proc_arity"); }
 #[test] fn kernel_array_via_method() { run_diff("kernel_array_via_method"); }
+#[test] fn array_dup_clone() { run_diff("array_dup_clone"); }
 #[test] fn op_assign() { run_diff("op_assign"); }
 #[test] fn range_enumerable() { run_diff("range_enumerable"); }
 #[test] fn string_search() { run_diff("string_search"); }
