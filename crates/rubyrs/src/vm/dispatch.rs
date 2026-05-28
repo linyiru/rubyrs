@@ -4734,6 +4734,24 @@ impl Vm {
                 Value::Sym(sid) => { 4u8.hash(&mut h); sid.0.hash(&mut h); }
                 Value::Bool(b) => { 5u8.hash(&mut h); b.hash(&mut h); }
                 Value::Nil => { 6u8.hash(&mut h); }
+                // Range hashes by content — CRuby's
+                // `(1..5).hash == (1..5).hash` is true. Without
+                // this arm we'd fall to the identity branch
+                // below, and two `(1..5)` allocations would
+                // produce different hashes (Set/Hash with Range
+                // keys would miss). Feed the recursive content
+                // hashes of begin/end (computed via `object_hash`
+                // — same salt scheme) plus the exclusive flag.
+                Value::Range(id) => {
+                    let (begin, end, excl) = {
+                        let r = self.heap.range(*id);
+                        (r.begin.clone(), r.end.clone(), r.exclusive)
+                    };
+                    8u8.hash(&mut h);
+                    object_hash(&begin, &self.heap).hash(&mut h);
+                    object_hash(&end, &self.heap).hash(&mut h);
+                    excl.hash(&mut h);
+                }
                 // Heap-managed / classes / blocks / methods —
                 // identity hash via object_id. CRuby Array/Hash
                 // override `hash` to recurse over contents; ours
@@ -7079,6 +7097,38 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
         Value::BigInt(id) => heap_id(id.0 as u64, 12),
         Value::Class(c) => heap_id(scramble_ptr(std::rc::Rc::as_ptr(c) as usize), 13),
     }
+}
+
+/// Compute the universal `Object#hash` value for `v` without
+/// going through dispatch. Used by `Range#hash` and any future
+/// container-of-content hashing arm so they recurse over their
+/// children with the same salt scheme as the top-level
+/// `Object#hash` arm. Mirrors the per-variant tags 1..7 used
+/// inline above (Int=1, Float=2, Str=3, Sym=4, Bool=5, Nil=6,
+/// heap=7); kept in lock-step with that match.
+fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match v {
+        Value::Int(n) => { 1u8.hash(&mut h); n.hash(&mut h); }
+        Value::Float(f) => { 2u8.hash(&mut h); f.to_bits().hash(&mut h); }
+        Value::Str(s) => { 3u8.hash(&mut h); s.content.borrow().hash(&mut h); }
+        Value::Sym(sid) => { 4u8.hash(&mut h); sid.0.hash(&mut h); }
+        Value::Bool(b) => { 5u8.hash(&mut h); b.hash(&mut h); }
+        Value::Nil => { 6u8.hash(&mut h); }
+        Value::Range(id) => {
+            let (begin, end, excl) = {
+                let r = heap.range(*id);
+                (r.begin.clone(), r.end.clone(), r.exclusive)
+            };
+            8u8.hash(&mut h);
+            object_hash(&begin, heap).hash(&mut h);
+            object_hash(&end, heap).hash(&mut h);
+            excl.hash(&mut h);
+        }
+        _ => { 7u8.hash(&mut h); object_id_for(v).hash(&mut h); }
+    }
+    h.finish() as i64
 }
 
 /// Scramble a raw pointer into an opaque, process-local u64
