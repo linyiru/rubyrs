@@ -1464,6 +1464,33 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             //   - `&proc_value` — block-argument forwarding.
             //     Evaluate the expression to a Value::Block at
             //     runtime and pass it as the block.
+            if let Some(ba) = bnode.as_block_argument_node() {
+                // Anonymous `inner(&)` (Ruby 3.1+ block forwarding):
+                // no expression on the BlockArgumentNode. Read the
+                // sentinel local `&` populated by the enclosing
+                // `def foo(&)` parameter and forward it as the
+                // block arg.
+                //
+                // Divergence: if the enclosing def DIDN'T have
+                // `(&)`, CRuby raises a parse-time SyntaxError
+                // ("no anonymous block parameter"). rubyrs auto-
+                // creates the local slot on read (resolving to nil),
+                // so `inner(&)` degenerates to `inner(&nil)` — i.e.
+                // the call proceeds without a block. The observable
+                // runtime outcome depends on the callee:
+                //   - ignores the block → silent success (the
+                //     real behavioral divergence; CRuby would
+                //     have caught this at parse time)
+                //   - calls `blk.call` → NoMethodError on nil.call
+                //   - uses `yield` → RuntimeError "no block given"
+                // Documented in docs/SUBSET.md.
+                if ba.expression().is_none() {
+                    let block_arg = sp(node, Expr::LVarRead("&".to_string()));
+                    return sp(node, Expr::CallWithBlockArg {
+                        receiver, name, args, block_arg: Box::new(block_arg),
+                    });
+                }
+            }
             if let Some(ba) = bnode.as_block_argument_node()
                 && let Some(expr) = ba.expression() {
                     if let Some(sn) = expr.as_symbol_node() {
@@ -1979,14 +2006,20 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         if let Some(p) = n.parameters() {
             if let Some(b) = p.block() {
                 // `def foo(&blk)`: capture the caller's block into
-                // the named slot. Anonymous form `def foo(&)` would
-                // have `b.name() == None`; CRuby uses it for
-                // forward-the-block-only, which we don't model yet
-                // — treat as no-name (skip the bind). Prism returns
+                // the named slot. Anonymous form `def foo(&)` (Ruby
+                // 3.1+ block forwarding) has `b.name() == None`;
+                // bind it to a reserved sentinel name `&` (invalid
+                // as a user identifier) so the matching `inner(&)`
+                // call site at this method level can read it via
+                // LVarRead. CRuby surfaces the same anonymous block
+                // as the Symbol `:&` in Method#parameters
+                // (`[[:block, :&]]`), so the sentinel passes through
+                // introspection unchanged — byte-for-byte parity
+                // without any unwrap. Prism returns
                 // `BlockParameterNode` directly from `p.block()`
                 // (it's an alternation node, not a generic Node);
                 // no `as_*_node` cast needed.
-                block_param = b.name().map(cid_to_string);
+                block_param = Some(b.name().map(cid_to_string).unwrap_or_else(|| "&".to_string()));
             }
             if let Some(r) = p.rest()
                 && let Some(rp) = r.as_rest_parameter_node() {

@@ -96,6 +96,7 @@ fn run_diff(name: &str) {
 #[test] fn default_superclass_object() { run_diff("default_superclass_object"); }
 #[test] fn class_compare() { run_diff("class_compare"); }
 #[test] fn sinatra_dsl_shape() { run_diff("sinatra_dsl_shape"); }
+#[test] fn anon_block_forward() { run_diff("anon_block_forward"); }
 #[test] fn hash_extras() { run_diff("hash_extras"); }
 #[test] fn rescue_by_class() { run_diff("rescue_by_class"); }
 #[test] fn default_args() { run_diff("default_args"); }

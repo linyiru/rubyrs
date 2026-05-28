@@ -1256,6 +1256,17 @@ impl Vm {
                             params.push(("keyrest", n));
                         }
                         if let Some(bname) = &proto.block_param {
+                            // For anonymous `def foo(&)` the sentinel
+                            // `"&"` round-trips here as the Symbol
+                            // `:&` — matches CRuby exactly, which
+                            // also surfaces the anonymous block as
+                            // `[[:block, :&]]` (the literal `&` is a
+                            // legal Symbol payload, just an unusual
+                            // one). No anonymization needed: passing
+                            // the sentinel through gives byte-for-
+                            // byte parity. NOT analogous to the
+                            // `__kw_rest_anon` case above, which
+                            // CRuby DOES report as nameless.
                             params.push(("block", Some(bname.clone())));
                         }
                         (arity, params)
