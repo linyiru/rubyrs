@@ -188,14 +188,15 @@ impl Vm {
                         other => resolved.push(other.as_os_str()),
                     }
                 }
-                // If the path exists, prefer `canonicalize`'s
-                // symlink-resolved form (matches CRuby on
-                // existent files); otherwise return the
-                // lexically resolved form. When the FS sandbox
-                // is on (`Config::allow_filesystem_io: false`),
-                // skip the canonicalize syscall entirely — the
-                // lexical form is what CRuby would return for a
-                // non-existent path, and it's filesystem-free.
+                // When `allow_filesystem_io` is true, prefer
+                // `canonicalize`'s symlink-resolved form (matches
+                // CRuby on existent files); on canonicalize-fail
+                // for non-existent paths, fall back to the
+                // lexically resolved form. When the FS cap is
+                // false (sandbox on), skip the canonicalize
+                // syscall entirely — return the lexical form,
+                // which is also what CRuby returns for paths
+                // that don't exist on disk.
                 let final_path = if self.allow_filesystem_io {
                     std::fs::canonicalize(&resolved).unwrap_or(resolved)
                 } else {

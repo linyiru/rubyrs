@@ -903,8 +903,16 @@ impl Runtime {
     /// - Compiled bytecode (`vm.protos`) and host-registered
     ///   functions (`vm.host_fns`).
     /// - Resource caps (`max_frames`, `max_heap_objects`,
-    ///   `max_symbols`, `max_value_bytes`) and host state
-    ///   (`env`, `pid`, `time_now`, `stress_gc`, `stdout`).
+    ///   `max_symbols`, `max_value_bytes`,
+    ///   `allow_filesystem_io`) and host state (`env`, `pid`,
+    ///   `time_now`, `stress_gc`, `stdout`). All of these are
+    ///   carried forward as-is — reset does NOT roll Config
+    ///   back to whatever was in effect at construction time.
+    ///   A host that has called `apply_config` mid-life to
+    ///   change the sandbox / cap shape keeps the most recent
+    ///   apply_config's values after reset; to re-anchor to
+    ///   construction-time Config, call `apply_config(original_cfg)`
+    ///   explicitly after reset.
     /// - `Config::fuel` and `Config::deadline` are per-`eval`:
     ///   each `eval` re-anchors `vm.fuel` from `fuel_budget`
     ///   and `vm.deadline_at` from `deadline` at entry, so

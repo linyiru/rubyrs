@@ -761,7 +761,14 @@ impl Vm {
                 }))),
             },
             #[cfg(target_os = "wasi")]
-            "require_relative" => Some(Err(self.trap(RubyError::RuntimeError {
+            "require_relative" => Some(Err(self.trap(RubyError::LoadError {
+                // LoadError, not RuntimeError — matches the non-wasi
+                // `check_load_allowed` trap class and the
+                // `Config::allow_filesystem_io` rustdoc's
+                // "rescue LoadError" promise. A wasi-target script
+                // doing `rescue LoadError` for "feature unavailable"
+                // now catches this trap the same way it would catch
+                // the sandbox cap's LoadError.
                 msg: "require_relative: file I/O not available on wasm32-wasi".into(),
             }))),
             // `Kernel#eval(string [, _binding, _file, _line])` —

@@ -2696,10 +2696,12 @@ impl Vm {
                 let fname = self.frames.last()
                     .map(|f| self.protos[f.proto_idx].filename.to_string())
                     .unwrap_or_default();
-                // With the FS sandbox on, skip the canonicalize
-                // syscall — return the lexical parent directly,
-                // matching the fallback the existing `Err(_) =>`
-                // arm already takes when canonicalize fails.
+                // When `allow_filesystem_io` is true, canonicalize
+                // for the symlink-resolved parent (matches CRuby);
+                // otherwise (sandbox on), skip the canonicalize
+                // syscall and return the lexical parent directly —
+                // the same shape the existing `Err(_) =>` fallback
+                // already produces when canonicalize fails.
                 // Empty-parent guard: `Path::new("test.rb").parent()`
                 // returns `Some("")` (not None), so a bare unwrap_or
                 // wouldn't collapse the empty case to ".". Filter the
