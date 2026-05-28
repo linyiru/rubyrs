@@ -1524,6 +1524,20 @@ impl Vm {
             // own `methods` table. Subsequent calls reuse the
             // cached shell so `A.singleton_class.equal?(A.singleton_class)`
             // holds. Layer #23 of TRY_RUNS pass series.
+            //
+            // KNOWN GAP — introspection on the shell (e.g.
+            // `A.singleton_class.instance_methods(false)`,
+            // `A.singleton_class.include?(Mod)`,
+            // `A.singleton_class.include(Mod)`) operates on the
+            // shell's OWN empty tables; redirected installs are
+            // visible only via the real class's
+            // singleton-method dispatch chain. Sinatra and the
+            // mainstream `singleton_class.class_eval` idiom
+            // don't probe the shell reflectively, so this is
+            // documented as a Tier-1 divergence rather than
+            // fixed by mirroring writes into the shell's
+            // tables. (Code-review #253 round 1 #4 / #7 —
+            // partial decline.)
             ("singleton_class", []) => {
                 let view = {
                     let mut slot = cls.singleton_view.borrow_mut();
