@@ -2822,6 +2822,17 @@ fn float_domain_error_class_and_rescue_chain() {
         ("(1.0/0.0).ceil",     "Infinity"),
         ("(-1.0/0.0).round",   "-Infinity"),
         ("(0.0/0.0).truncate", "NaN"),
+        // Precision-arg form: previously bypassed the guard
+        // because the trap arm only matched `[]`, so
+        // `Float::NAN.round` raised but `Float::NAN.round(0)`
+        // silently returned 0 (the f64-NaN-to-i64 cast). Pin both
+        // the n == 0 and the negative-n branches.
+        ("(0.0/0.0).round(0)",      "NaN"),
+        ("(0.0/0.0).round(-2)",     "NaN"),
+        ("(1.0/0.0).round(0)",      "Infinity"),
+        ("(1.0/0.0).round(-2)",     "Infinity"),
+        ("(-1.0/0.0).truncate(0)",  "-Infinity"),
+        ("(-1.0/0.0).truncate(-1)", "-Infinity"),
     ] {
         let err = rt.eval(script, "fde_to_i.rb").unwrap_err();
         // At the eval boundary the dispatcher always re-shapes a
@@ -2840,6 +2851,18 @@ fn float_domain_error_class_and_rescue_chain() {
             ref other => panic!("expected Uncaught FloatDomainError for {:?}, got {:?}", script, other),
         }
     }
+
+    // Positive-precision branch returns a Float and propagates
+    // NaN/Inf cleanly — matches CRuby (e.g. `Float::NAN.round(2)`
+    // returns NaN, not a trap). Pin so a future "trap on any
+    // NaN/Inf precision" over-correction is caught.
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (0.0/0.0).round(2); puts (1.0/0.0).truncate(3)",
+        "fde_pos_prec.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot().trim(), "NaN\nInfinity");
 }
 
 #[cfg(feature = "bignum")]

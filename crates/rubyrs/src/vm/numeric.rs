@@ -63,6 +63,20 @@ pub(crate) const FLOAT_HASH_TAG: u8 = 0x46; // 'F'
 /// Constants from <http://www.isthe.com/chongo/tech/comp/fnv/>:
 /// - offset basis: 0xcbf29ce484222325
 /// - prime: 0x100000001b3
+/// CRuby's FloatDomainError message label for a non-finite Float —
+/// `"NaN"` for NaN, `"Infinity"` for `+Infinity`, `"-Infinity"`
+/// for `-Infinity`. Used by every Float→Integer trap site so the
+/// message text stays uniform across the surface.
+pub(crate) fn float_domain_label(a: f64) -> &'static str {
+    if a.is_nan() {
+        "NaN"
+    } else if a > 0.0 {
+        "Infinity"
+    } else {
+        "-Infinity"
+    }
+}
+
 pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
@@ -1056,6 +1070,22 @@ pub(crate) fn numeric_call(
         // and returns a Float; negative `n` zeros out the
         // low-order Integer digits and returns Int. Mirrors
         // CRuby's `Float#round(n)` / `#truncate(n)` shape.
+        // The NaN/Inf guard below mirrors the no-arg arm further
+        // down — every branch in these precision-arg arms that
+        // returns `Value::Int(... as i64)` would otherwise silently
+        // clamp NaN/Infinity to 0 / i64::MIN / i64::MAX, divergent
+        // from CRuby's FloatDomainError AND asymmetric with the
+        // no-arg form (e.g. `Float::NAN.round` raised but
+        // `Float::NAN.round(0)` didn't). The positive-precision
+        // branch returns a Float and propagates NaN/Inf cleanly,
+        // matching CRuby — so we only trap n <= 0.
+        (Value::Float(a), "round" | "truncate", [Value::Int(n)])
+            if *n <= 0 && (a.is_nan() || a.is_infinite()) =>
+        {
+            return Err(RubyError::FloatDomainError {
+                msg: float_domain_label(*a).to_string(),
+            });
+        }
         (Value::Float(a), "round", [Value::Int(n)]) => {
             if *n == 0 {
                 Some(Value::Int(a.round() as i64))
@@ -1138,15 +1168,8 @@ pub(crate) fn numeric_call(
         (Value::Float(a), "to_i" | "floor" | "ceil" | "round" | "truncate", [])
             if a.is_nan() || a.is_infinite() =>
         {
-            let label = if a.is_nan() {
-                "NaN"
-            } else if *a > 0.0 {
-                "Infinity"
-            } else {
-                "-Infinity"
-            };
             return Err(RubyError::FloatDomainError {
-                msg: label.to_string(),
+                msg: float_domain_label(*a).to_string(),
             });
         }
         (Value::Float(a), "to_i", []) => Some(Value::Int(*a as i64)),
