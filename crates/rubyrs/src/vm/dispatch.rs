@@ -6960,9 +6960,18 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
     /// Heap-managed value id:
     ///   - bit 62        = heap discriminator
     ///   - bits 58..61   = type subtag (4 bits → 16 types)
-    ///   - bits 0..57    = payload (58 bits — fits both u32
-    ///                     ObjId and typical 48-bit virtual
-    ///                     pointers natively, no hash compression)
+    ///   - bits 0..57    = payload (58 bits). ObjId-backed
+    ///                     variants pass a u32 freelist index
+    ///                     here, which always fits. Rc-backed
+    ///                     variants (Str/Regex/Class) hash the
+    ///                     pointer through `scramble_ptr` first
+    ///                     to avoid leaking host addresses, and
+    ///                     the resulting 64-bit scramble is
+    ///                     masked into 58 bits — so two
+    ///                     simultaneously-live Rc allocations
+    ///                     can in principle collide
+    ///                     (~2^29 distinct live allocations
+    ///                     before a collision is likely).
     fn heap_id(payload: u64, type_subtag: u8) -> i64 {
         debug_assert!(type_subtag < 16, "type subtag must fit in 4 bits");
         let payload_masked = payload & 0x03FF_FFFF_FFFF_FFFF; // 58 bits
