@@ -10,64 +10,60 @@
 
 use rubyrs::{Config, RubyError, Runtime};
 
+/// Shared assertion shape: evaluate `code` on a default Runtime
+/// (sandbox-on via `Config::default`), expect it to trap, and
+/// verify the trap is `Uncaught { class_name == class, message
+/// contains msg_substr }`.
+///
+/// The default-deny tests share this scaffolding ~14 times.
+/// Hoisting it gives each test a one-line body and produces
+/// better failure messages than a raw `{:?}` dump.
+fn assert_blocked(code: &str, class: &str, msg_substr: &str) {
+    let mut rt = Runtime::new();
+    let trap = match rt.eval(code, "test.rb") {
+        Ok(v) => panic!("expected trap for {code:?}, got Ok({v:?})"),
+        Err(t) => t,
+    };
+    match &trap.err {
+        RubyError::Uncaught { class_name, message }
+            if class_name == class && message.contains(msg_substr) => {}
+        other => panic!(
+            "expected Uncaught {{ class_name == {class:?}, message contains {msg_substr:?} }} \
+             for {code:?}, got {other:?}",
+        ),
+    }
+}
+
 // ---------- Default-deny (allow_filesystem_io: false) ----------
 
 #[test]
 fn default_runtime_blocks_file_read() {
     // `Runtime::new()` goes through `Config::default()`, which
-    // sets `allow_filesystem_io: false`. `File.read("/etc/passwd")`
-    // (or any path) must trap before the syscall.
-    let mut rt = Runtime::new();
-    let err = rt
-        .eval(r#"File.read("/etc/passwd")"#, "test.rb")
-        .unwrap_err();
-    // Trap escaped unrescued — at the host boundary, primitive
-    // RubyError variants get re-wrapped into `Uncaught { class_name,
-    // message }` so the host pattern-matches once. The class_name
-    // preserves the original raise's class ("IOError") so rescue-
-    // capable scripts and class-aware host code agree on identity.
-    assert!(
-        matches!(&err.err, RubyError::Uncaught { class_name, message }
-            if class_name == "IOError" && message.contains("File.read blocked")),
-        "expected Uncaught/IOError 'File.read blocked', got {:?}",
-        err.err,
-    );
+    // sets `allow_filesystem_io: false`. `File.read(path)` of
+    // any path must trap before the syscall. The trap that
+    // escapes the unrescued eval is wrapped into
+    // `Uncaught { class_name: "IOError", .. }` at the dispatch
+    // boundary — see step.rs's trap-to-Uncaught conversion.
+    assert_blocked(r#"File.read("/etc/passwd")"#, "IOError", "File.read blocked");
 }
 
 #[test]
 fn sandbox_gate_runs_before_arg_type_check() {
-    // Wrong-type argument (Integer instead of String) under
-    // sandbox should trap with IOError, not TypeError — the
-    // sandbox cap is the first gate, matching the
+    // Wrong-type arg under sandbox traps with IOError, not
+    // TypeError — sandbox cap is the first gate, matching
     // require/require_relative/cext_require ordering. A script
     // probing whether a method is gated by passing wrong-typed
     // args (a small information disclosure) gets IOError too.
-    let mut rt = Runtime::new();
-    let err = rt.eval(r#"File.read(123)"#, "test.rb").unwrap_err();
-    assert!(
-        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"),
-        "expected IOError (sandbox first), got {:?}",
-        err.err,
-    );
-    let err = rt.eval(r#"File.exist?(:sym)"#, "test.rb").unwrap_err();
-    assert!(
-        matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"),
-        "expected IOError (sandbox first), got {:?}",
-        err.err,
-    );
+    assert_blocked(r#"File.read(123)"#, "IOError", "File.read blocked");
+    assert_blocked(r#"File.exist?(:sym)"#, "IOError", "File.exist? blocked");
 }
 
 #[test]
 fn default_runtime_blocks_file_write() {
-    let mut rt = Runtime::new();
-    let err = rt
-        .eval(r#"File.write("/tmp/sandbox-leak.txt", "x")"#, "test.rb")
-        .unwrap_err();
-    assert!(
-        matches!(&err.err, RubyError::Uncaught { class_name, message }
-            if class_name == "IOError" && message.contains("File.write blocked")),
-        "expected Uncaught/IOError 'File.write blocked', got {:?}",
-        err.err,
+    assert_blocked(
+        r#"File.write("/tmp/sandbox-leak.txt", "x")"#,
+        "IOError",
+        "File.write blocked",
     );
 }
 
@@ -76,45 +72,29 @@ fn default_runtime_blocks_file_exist_probe() {
     // Even READ-ONLY metadata probes leak FS structure — a
     // sandbox-bypass attacker walking `File.exist?("/etc/passwd")`,
     // `File.exist?("/var/log/wtmp")`, ... can map host layout
-    // without ever reading content. Cap must trap.
-    let mut rt = Runtime::new();
-    let err = rt
-        .eval(r#"File.exist?("/etc/passwd")"#, "test.rb")
-        .unwrap_err();
-    assert!(matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"));
-
-    // `File.exists?` (deprecated alias) and `File.file?` go
-    // through the same arm — both must trap.
-    let err = rt.eval(r#"File.exists?("/etc/passwd")"#, "test.rb").unwrap_err();
-    assert!(matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"));
-    let err = rt.eval(r#"File.file?("/etc/passwd")"#, "test.rb").unwrap_err();
-    assert!(matches!(&err.err, RubyError::Uncaught { class_name, .. } if class_name == "IOError"));
+    // without ever reading content. The three names (exist?,
+    // exists? deprecated alias, file?) go through the same
+    // dispatch arm and must all trap.
+    assert_blocked(r#"File.exist?("/etc/passwd")"#, "IOError", "File.exist? blocked");
+    assert_blocked(r#"File.exists?("/etc/passwd")"#, "IOError", "File.exists? blocked");
+    assert_blocked(r#"File.file?("/etc/passwd")"#, "IOError", "File.file? blocked");
 }
 
 #[test]
 fn default_runtime_blocks_file_directory_and_size() {
-    let mut rt = Runtime::new();
-    let err = rt.eval(r#"File.directory?("/etc")"#, "test.rb").unwrap_err();
-    assert!(matches!(&err.err, RubyError::Uncaught { class_name, message }
-        if class_name == "IOError" && message.contains("File.directory? blocked")));
-    let err = rt.eval(r#"File.size("/etc/passwd")"#, "test.rb").unwrap_err();
-    assert!(matches!(&err.err, RubyError::Uncaught { class_name, message }
-        if class_name == "IOError" && message.contains("File.size blocked")));
+    assert_blocked(r#"File.directory?("/etc")"#, "IOError", "File.directory? blocked");
+    assert_blocked(r#"File.size("/etc/passwd")"#, "IOError", "File.size blocked");
 }
 
 #[test]
 fn default_runtime_blocks_require() {
     // `require` traps with `LoadError` (matches CRuby's
     // require-failure exception class) so scripts using
-    // `rescue LoadError` catch the sandbox trap.
-    let mut rt = Runtime::new();
-    let err = rt.eval(r#"require "some-gem""#, "test.rb").unwrap_err();
-    assert!(
-        matches!(&err.err, RubyError::Uncaught { class_name, message }
-            if class_name == "LoadError" && message.contains("require blocked")),
-        "expected Uncaught/LoadError 'require blocked', got {:?}",
-        err.err,
-    );
+    // `rescue LoadError` catch the sandbox trap. The name
+    // "some-gem" is intentionally NOT in `is_stdlib_stub_name`
+    // — its absence forces the dispatch to fall through to the
+    // cext_require fallback where `check_load_allowed` fires.
+    assert_blocked(r#"require "some-gem""#, "LoadError", "require blocked");
 }
 
 #[test]
@@ -141,13 +121,10 @@ fn stdlib_stub_require_works_under_sandbox() {
 #[test]
 #[cfg(not(target_os = "wasi"))]
 fn default_runtime_blocks_require_relative() {
-    let mut rt = Runtime::new();
-    let err = rt.eval(r#"require_relative "lib/foo""#, "test.rb").unwrap_err();
-    assert!(
-        matches!(&err.err, RubyError::Uncaught { class_name, message }
-            if class_name == "LoadError" && message.contains("require_relative blocked")),
-        "expected Uncaught/LoadError 'require_relative blocked', got {:?}",
-        err.err,
+    assert_blocked(
+        r#"require_relative "lib/foo""#,
+        "LoadError",
+        "require_relative blocked",
     );
 }
 
