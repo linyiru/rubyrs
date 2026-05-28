@@ -1184,6 +1184,66 @@ mod tests {
         }
     }
 
+    // ===== P1d.1: GC stress under real allocation pressure =====
+
+    /// P1d.1 (ADR 0023 v2 §"Correctness"): allocate
+    /// thousands of garbage objects WHILE a fiber is
+    /// suspended; resume the fiber afterwards and verify
+    /// its captured state survives unchanged. Exercises
+    /// the HeapObj::Fiber GC mark arm under load.
+    ///
+    /// Setup:
+    /// 1. Suspend a fiber that captured a unique sentinel
+    ///    String in a local closure variable.
+    /// 2. Allocate a Hash with 5,000 small Strings — well
+    ///    above Heap's default next_gc threshold, so the
+    ///    allocator's `maybe_gc` will fire one or more
+    ///    full collect cycles.
+    /// 3. Resume the fiber, expect the captured sentinel
+    ///    to still equal its original value.
+    ///
+    /// Without the mark arm, the captured String's Rc would
+    /// be unreachable through the regular root walker
+    /// (vm.frames / globals / class constants) — only the
+    /// suspended FiberObject.snapshot.frames.locals holds
+    /// it. A sweep would dangle the heap slot, and resume
+    /// would read garbage.
+    #[test]
+    fn gc_stress_during_suspension_preserves_captured_values() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let r = rt.eval(r##"
+            sentinel = "p1d_unique_marker_42"
+            body = proc {
+              local_capture = sentinel  # captured into the proc's locals
+              __rubyrs_fiber_yield(:suspended)
+              local_capture              # read after resume
+            }
+            fib = __rubyrs_fiber_new(body)
+            r1 = __rubyrs_fiber_resume(fib, nil)
+
+            # Allocate 5,000 small Strings. Each Hash insert
+            # may trigger maybe_gc; over 5,000 iterations
+            # multiple full collect cycles run. If the
+            # FiberObject mark arm doesn't visit
+            # snapshot.frames.locals, sentinel's Rc<RStr>
+            # gets swept here.
+            garbage = {}
+            5000.times { |i| garbage[i.to_s] = "garbage_#{i}" }
+
+            r2 = __rubyrs_fiber_resume(fib, nil)
+            "#{r1.inspect}/#{r2}"
+        "##, "p1d_gc_stress.rb").expect("eval ok");
+        match r {
+            Value::Str(s) => assert_eq!(
+                s.to_string_lossy(),
+                ":suspended/p1d_unique_marker_42",
+                "captured String must survive GC under load",
+            ),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
     /// P1c.2c: resume on a returned fiber raises
     /// FiberError ("dead fiber called").
     #[test]
