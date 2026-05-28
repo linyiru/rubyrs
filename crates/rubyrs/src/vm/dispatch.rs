@@ -6937,13 +6937,22 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
         Value::Int(n) => match n.checked_mul(2).and_then(|m| m.checked_add(1)) {
             Some(id) => id,
             None => {
-                // Out-of-range int (|n| > 2^62 roughly): pack
-                // the raw bit pattern into the low 59 bits and
-                // set bit 59 as the type tag. Bit 59 is below
+                // Out-of-range int (|n| > 2^62 roughly): hash
+                // the full 64-bit pattern into 59 bits and set
+                // bit 59 as the type tag. A raw low-bit mask
+                // would collide on inputs with identical low 59
+                // bits (e.g. `2**62` and `-(2**62)` both have
+                // low-59 == 0). Bit 59 is below
                 // Float(60)/Sym(61)/Heap(62) so no cross-type
                 // collision; it's above the safe Int range so
                 // no collision with regular `2n+1` ids.
-                (1i64 << 59) | ((*n as u64 & 0x07FF_FFFF_FFFF_FFFF) as i64)
+                // Collision resistance ~2^30 distinct
+                // out-of-range ints — only reachable in builds
+                // without bignum promotion.
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                n.hash(&mut h);
+                (1i64 << 59) | ((h.finish() & 0x07FF_FFFF_FFFF_FFFF) as i64)
             }
         },
         Value::Bool(true) => 20,
