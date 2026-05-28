@@ -658,6 +658,17 @@ pub(crate) fn parse_serve_options(
             )));
         }
 
+        // FU6: nil value means "key not supplied" — common
+        // Ruby idiom when keys come from another Hash
+        // (`cfg[:on_error]` is nil if the user didn't set
+        // it). Skip the typed extraction; field stays at its
+        // ServeOptions::default(). The unknown-key check
+        // ABOVE still fires for typo'd keys, so this only
+        // softens the value-type check.
+        if matches!(value, Value::Nil) {
+            continue;
+        }
+
         match key_str.as_str() {
             "per_request_fuel" => {
                 let n = expect_non_neg_int(&key_str, value)?;
@@ -3790,6 +3801,53 @@ mod tests {
         assert!(
             msg.contains("unknown option 'on_worker_boot'"),
             "with_app subset must reject on_worker_boot, got: {msg}",
+        );
+    }
+
+    /// FU6: `nil` value for any allowed key is treated as
+    /// "key not supplied" — the field stays at its
+    /// default. Common Ruby idiom when keys come from
+    /// another Hash (`cfg[:on_error]` is nil if not set).
+    #[test]
+    fn parse_serve_options_treats_nil_value_as_absent() {
+        let mut rt = crate::Runtime::new();
+        register_parse_probe(&mut rt, super::SERVE_OPTION_KEYS);
+        let result = rt.eval(r#"
+            __test_parse_options({
+              on_error: nil,
+              on_worker_boot: nil,
+              per_request_fuel: nil,
+              install_signal_handler: nil,
+              idle_timeout_ms: nil,
+            })
+        "#, "fu6_nil.rb").expect("nil values must be accepted");
+        let s = match &result {
+            crate::value::Value::Str(rs) => rs.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        // Every field at its default — same shape as an
+        // empty options Hash.
+        assert!(s.contains("fuel=None"), "got: {s}");
+        assert!(s.contains("sig=false"), "got: {s}");
+        assert!(s.contains("idle=None"), "got: {s}");
+        assert!(s.contains("on_err=false"), "got: {s}");
+        assert!(s.contains("on_boot=false"), "got: {s}");
+    }
+
+    /// FU6: nil-handling is per-value, not per-key. Other
+    /// invalid values still surface the typed expect_*
+    /// errors. Regression guard for the typo-detection path.
+    #[test]
+    fn parse_serve_options_still_rejects_non_nil_type_mismatches() {
+        let mut rt = crate::Runtime::new();
+        register_parse_probe(&mut rt, super::SERVE_OPTION_KEYS);
+        let err = rt.eval(r#"
+            __test_parse_options({ on_error: 42 })
+        "#, "fu6_nonnil_mismatch.rb").expect_err("Integer-for-Block must still fail");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("'on_error' must be a Proc/Lambda"),
+            "expected on_error type error, got: {msg}",
         );
     }
 
