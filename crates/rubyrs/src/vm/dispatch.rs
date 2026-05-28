@@ -1497,9 +1497,9 @@ impl Vm {
             // one-arg arm and surface as NoMethodError. CRuby
             // raises ArgumentError instead.
             ("<" | "<=" | ">" | ">=", args_) if args_.len() != 1 => {
-                return Err(self.trap(RubyError::ArgumentError {
+                Err(self.trap(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 1)", args_.len()),
-                }));
+                }))
             }
             ("<" | "<=" | ">" | ">=", [arg]) => {
                 let Value::Class(other) = arg else {
@@ -2070,7 +2070,7 @@ impl Vm {
     // A future PR landing the 2-arg form should swap that
     // fall-through for the install arm.
     // (PR #245 Copilot round 2 #2 + round 4 #1 + round 5 #1.)
-    if &*name == "define_method"
+    if name == "define_method"
         && let Value::Class(cls) = &recv
     {
         // Same precedence rule as the block-form arm — user
