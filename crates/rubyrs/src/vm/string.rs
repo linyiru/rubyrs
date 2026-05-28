@@ -45,8 +45,16 @@ fn strip_ws_or_nul(c: char) -> bool {
 /// `String#capitalize` core — ASCII-only case fold. First
 /// char uppercase, remaining chars lowercase. Non-letters at
 /// position 0 are left as-is (`"1hello".capitalize` → same).
-/// Empty input returns empty. Unicode case-mapping options
-/// are out of subset (ADR 0020 Tier-2 Encoding).
+/// Empty input returns empty.
+///
+/// **Diverges from CRuby on non-ASCII letters.** CRuby's
+/// `String#capitalize` (no options) has been Unicode-aware
+/// since 2.4 — `"über".capitalize == "Über"`. Here
+/// `to_ascii_uppercase` / `to_ascii_lowercase` no-op on
+/// non-ASCII chars, so `"über".capitalize == "über"`. The
+/// gap covers both the option form (`:turkic` etc.) AND the
+/// default case-fold for non-ASCII letters; full Unicode
+/// support is gated on ADR 0020 Tier-2 Encoding.
 fn capitalize_ascii(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -59,6 +67,12 @@ fn capitalize_ascii(s: &str) -> String {
 
 /// `String#swapcase` core — flip ASCII letter case on each
 /// char; non-letters pass through unchanged.
+///
+/// **Diverges from CRuby on non-ASCII letters.** CRuby's
+/// `String#swapcase` (no options) flips Unicode letters too
+/// since 2.4: `"Café".swapcase == "cAFÉ"`. Here only ASCII
+/// letters flip, so `"Café".swapcase == "cAFé"`. Full
+/// Unicode support is gated on ADR 0020 Tier-2 Encoding.
 fn swapcase_ascii(s: &str) -> String {
     s.chars()
         .map(|c| {

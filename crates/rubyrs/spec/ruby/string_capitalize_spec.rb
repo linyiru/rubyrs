@@ -1,8 +1,20 @@
 # Adapted from ruby/spec core/string/capitalize_spec.rb at
 # upstream commit 448cb340 (2026-05). Hand-translated —
-# baseline ASCII case-fold shape. The Unicode case-mapping
-# options (`capitalize(:turkic)` / `:lithuanian` / `:fold` /
-# `:ascii`) are dropped (Tier-2 Encoding work — ADR 0020).
+# baseline ASCII case-fold shape.
+#
+# Two related Unicode gaps are out of subset (both gated on
+# ADR 0020 Tier-2 Encoding work):
+#
+#   1. **Option form** — `capitalize(:turkic)` /
+#      `:lithuanian` / `:fold` / `:ascii`. Surfaces as
+#      ArgumentError here; covered by the wrong-arity test.
+#   2. **Default behaviour on non-ASCII letters** — CRuby
+#      since 2.4 has been Unicode-aware in the no-option
+#      form (`"über".capitalize == "Über"`). Here the
+#      ASCII-only fold leaves non-ASCII letters unchanged
+#      (`"über".capitalize == "über"`). Pinned by the
+#      "leaves non-ASCII letters unchanged" example below
+#      so the gap is intentional, witnessed, and obvious.
 
 describe "String#capitalize" do
   it "returns a copy with the first ASCII letter upcased and the rest lowercased" do
@@ -24,6 +36,16 @@ describe "String#capitalize" do
     s = "hello"
     assert_eq(s.capitalize, "Hello")
     assert_eq(s, "hello")
+  end
+
+  it "leaves non-ASCII letters unchanged (ASCII-only fold per ADR 0020)" do
+    # Divergent from CRuby ≥ 2.4 (Unicode-aware default).
+    # CRuby returns "Über" / "École"; we return the input
+    # unchanged because `to_ascii_uppercase` no-ops on
+    # non-ASCII chars. Pinning the gap so a future Tier-2
+    # Encoding patch knows exactly which assertions to flip.
+    assert_eq("über".capitalize, "über")
+    assert_eq("école".capitalize, "école")
   end
 
   it "raises ArgumentError on any positional arg (option forms unsupported)" do

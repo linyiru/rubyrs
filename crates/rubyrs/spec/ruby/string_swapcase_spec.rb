@@ -1,8 +1,20 @@
 # Adapted from ruby/spec core/string/swapcase_spec.rb at
 # upstream commit 448cb340 (2026-05). Hand-translated —
-# baseline ASCII case-flip shape. The Unicode case-mapping
-# options (`swapcase(:turkic)` / `:lithuanian` / `:fold` /
-# `:ascii`) are dropped (Tier-2 Encoding work — ADR 0020).
+# baseline ASCII case-flip shape.
+#
+# Two related Unicode gaps are out of subset (both gated on
+# ADR 0020 Tier-2 Encoding work):
+#
+#   1. **Option form** — `swapcase(:turkic)` /
+#      `:lithuanian` / `:fold` / `:ascii`. Surfaces as
+#      ArgumentError here; covered by the wrong-arity test.
+#   2. **Default behaviour on non-ASCII letters** — CRuby
+#      since 2.4 has been Unicode-aware in the no-option
+#      form (`"Café".swapcase == "cAFÉ"`). Here the
+#      ASCII-only flip leaves non-ASCII letters unchanged
+#      (`"Café".swapcase == "cAFé"`). Pinned by the
+#      "leaves non-ASCII letters unchanged" example below
+#      so the gap is intentional, witnessed, and obvious.
 
 describe "String#swapcase" do
   it "returns a copy with each ASCII letter's case flipped" do
@@ -25,6 +37,17 @@ describe "String#swapcase" do
     s = "Hello"
     assert_eq(s.swapcase, "hELLO")
     assert_eq(s, "Hello")
+  end
+
+  it "leaves non-ASCII letters unchanged (ASCII-only flip per ADR 0020)" do
+    # Divergent from CRuby ≥ 2.4 (Unicode-aware default).
+    # CRuby returns "cAFÉ" / "üBER" (both case-flipped);
+    # we leave the non-ASCII letters untouched and only
+    # flip the ASCII letters around them. Pinning the gap
+    # so a future Tier-2 Encoding patch knows which
+    # assertions to flip.
+    assert_eq("Café".swapcase, "cAFé")    # CRuby: "cAFÉ"
+    assert_eq("Über".swapcase, "ÜBER")    # CRuby: "üBER"
   end
 
   it "raises ArgumentError on any positional arg (option forms unsupported)" do
