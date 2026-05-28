@@ -322,6 +322,17 @@ impl Vm {
                         let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
                         Some(Value::Array(pid))
                     }
+                    // BigInt arg → RangeError, mirroring
+                    // Array#first / #last at array.rs:511. A
+                    // BigInt take-count is by construction larger
+                    // than i64::MAX and can never be a meaningful
+                    // size for a heap-bound collection.
+                    #[cfg(feature = "bignum")]
+                    ("first", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
                     ("first", [Value::Int(n)]) => {
                         if *n < 0 {
                             return Err(self.trap(crate::error::RubyError::ArgumentError {

@@ -13,7 +13,7 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 128 |
-| Examples in corpus | 745 |
+| Examples in corpus | 746 |
 | Skipped `it` traces | 150 |
 
 ### Skipped traces by category
@@ -40,7 +40,7 @@ Find blocks unlocked by a future feature with e.g.
 |---|---|---|---|
 | Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
-| Hash | 31 | 102 | 48 |
+| Hash | 31 | 103 | 48 |
 | Integer | 34 | 303 | 28 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
@@ -82,7 +82,7 @@ Find blocks unlocked by a future feature with e.g.
 | `hash_empty_spec.rb` | Hash#empty? | `core/hash/empty_spec.rb` | 2 | 0 |
 | `hash_except_spec.rb` | Hash#except | `core/hash/except_spec.rb` | 3 | 1 |
 | `hash_fetch_spec.rb` | Hash#fetch | `core/hash/fetch_spec.rb` | 5 | 1 |
-| `hash_first_spec.rb` | Hash#first | `core/hash/first_spec.rb` | 6 | 0 |
+| `hash_first_spec.rb` | Hash#first | `core/hash/first_spec.rb` | 7 | 0 |
 | `hash_flat_map_spec.rb` | Hash#flat_map | `core/hash/flat_map_spec.rb` | 6 | 1 |
 | `hash_group_by_spec.rb` | Hash#group_by | `core/enumerable/group_by_spec.rb + core/hash/group_by_spec.rb` | 2 | 2 |
 | `hash_inject_spec.rb` | Hash#inject | `core/hash/inject_spec.rb` | 7 | 1 |

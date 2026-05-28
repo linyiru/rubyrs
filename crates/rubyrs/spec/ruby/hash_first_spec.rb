@@ -32,4 +32,11 @@ describe "Hash#first" do
   it "raises ArgumentError on a negative size" do
     assert_raises("ArgumentError") { {a: 1}.first(-1) }
   end
+
+  bignum_it "raises RangeError on a BigInt size (cannot fit i64)" do
+    # Mirrors Array#first(BigInt) — a take-count larger
+    # than i64::MAX can never be a meaningful collection
+    # size, so we raise rather than silently saturate.
+    assert_raises("RangeError") { {a: 1}.first(10_000_000_000_000_000_000_000) }
+  end
 end

@@ -1,9 +1,10 @@
 # Adapted from ruby/spec core/hash/{min,max}_spec.rb at
 # upstream commit 448cb340 (2026-05). Hand-translated — the
 # no-block forms compare entries via `<=>` on the `[k, v]`
-# pair Array (element-wise, key first). Block forms
-# (`h.min { |a, b| cmp }`) and `min_by`/`max_by` (already
-# implemented) are out of subset.
+# pair Array (element-wise, key first). Out of subset:
+# the block-form comparator (`h.min { |a, b| cmp }`).
+# Note: `min_by`/`max_by` are SUPPORTED via vm/iter.rs and
+# live in their own specs — they're not part of this file.
 
 describe "Hash#min" do
   it "returns the lexicographically smallest [k, v] pair" do
