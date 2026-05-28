@@ -746,15 +746,9 @@ impl PostPreambleSnapshot {
         vm.constants.clone_from(&self.constants);
         vm.toplevel_methods.clone_from(&self.toplevel_methods);
         vm.sources.clone_from(&self.sources);
-        // Per-class state — `methods` alone wasn't enough since user
-        // code can also mutate `singleton_methods` (`def self.x`),
-        // `ivars` (`@x = ...` in a class body), `includes`
-        // (`include Mod`), `prepends`, `singleton_prepends`,
-        // `class_vars` (`@@x`), and `superclass`. Each one would
-        // leak across resets if the snapshot only covered methods.
-        // Iterate the live `vm.classes` (just clone_from'd from
-        // snapshot.classes above, so the keyset matches the
-        // captured snapshot exactly).
+        // Per-class RefCells — see `PostPreambleSnapshot::class_states`
+        // for the field set rationale. Iterates live `vm.classes`
+        // (its keyset matches the snapshot's, just clone_from'd above).
         for (cls_name, cls) in &vm.classes {
             if let Some(snap) = self.class_states.get(cls_name) {
                 snap.restore_into(cls);
