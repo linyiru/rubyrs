@@ -392,7 +392,19 @@ pub(crate) fn numeric_call(
                 #[cfg(feature = "bignum")]
                 None => return Ok(None),
                 #[cfg(not(feature = "bignum"))]
-                None => Some(Value::Int((*a).wrapping_mul(*b))),
+                None => {
+                    // Under no-bignum we can't promote; replicate
+                    // lcm_i64's `|a/gcd * b|` identity with
+                    // wrapping_* so the fallback matches the
+                    // sign-positive contract of the bignum path
+                    // (the previous `(*a).wrapping_mul(*b)` skipped
+                    // the divide-by-gcd AND lost the abs, which
+                    // could return a negative result — breaking
+                    // CRuby parity on lcm's always-positive guarantee).
+                    let g = gcd_i64(*a, *b);
+                    let q = a.wrapping_div(g);
+                    Some(Value::Int(q.wrapping_mul(*b).wrapping_abs()))
+                }
             }
         }
         // `Integer#fdiv(n)` — Float division, always returns Float.
