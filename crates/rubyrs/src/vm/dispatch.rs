@@ -2662,6 +2662,19 @@ impl Vm {
         Ok(ClassOutcome::NotHandled { args, recv })
     }
 
+        /// Shim for `Op::CallKw*` — the compiler marks call sites
+        /// whose trailing arg came from `KeywordHashNode` (`foo(k: v)`
+        /// sugar) so the dispatcher can route that Hash to a dedicated
+        /// kwargs channel. Currently delegates to [`do_call`]; a
+        /// follow-up commit will pop the trailing Hash into a
+        /// `pending_kwargs` slot consumed by `primitive_call` so
+        /// primitives can read `:half` etc. without inspecting the
+        /// positional args heuristically. Wiring the opcode path
+        /// first keeps the bytecode shape stable across the
+        /// transition.
+        pub(crate) fn do_call_kw(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
+            self.do_call(name_id, argc, no_recv, cache_id)
+        }
         pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u16) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-

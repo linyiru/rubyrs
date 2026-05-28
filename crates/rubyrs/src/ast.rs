@@ -1397,8 +1397,18 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // position is conventional; CRuby allows interleaving
         // but flags it `1.9 hash` style. We accept either spot
         // but always normalize to a HashLit Expr.
-        let args: Vec<SExpr> = arg_nodes.iter().map(|c| {
+        // Track whether the FINAL arg originated from a
+        // KeywordHashNode — that's the only position CRuby treats
+        // as a kwarg sugar (preceding positions in `1.9 hash` style
+        // are accepted but interpreted as regular Hash literals).
+        // The flag is what later `Op::CallKw*` emission consults to
+        // signal "trailing arg is kwargs, not positional Hash" to
+        // the dispatcher / primitive_call kwarg channel.
+        let mut kwargs_trailing = false;
+        let last_idx = arg_nodes.len().saturating_sub(1);
+        let args: Vec<SExpr> = arg_nodes.iter().enumerate().map(|(i, c)| {
             if let Some(kh) = c.as_keyword_hash_node() {
+                if i == last_idx { kwargs_trailing = true; }
                 tr_kwhash(ctx, node, c, &kh)
             } else {
                 tr(ctx, c)
@@ -1513,7 +1523,7 @@ pub(crate) fn tr(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     });
                 }
         }
-        return sp(node, Expr::Call { receiver, name, args , kwargs_trailing: false });
+        return sp(node, Expr::Call { receiver, name, args, kwargs_trailing });
     }
     // `return`, `next`, `break` all collapse multi-arg forms
     // into a single value the same way CRuby does:

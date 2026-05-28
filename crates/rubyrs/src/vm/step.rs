@@ -986,6 +986,17 @@ impl Vm {
             Op::CallNoRecv(name_id, argc, cache_id) => {
                 self.do_call(name_id, argc as usize, true, cache_id)?;
             }
+            // Kwarg-trailing variants — argc includes the trailing
+            // kwargs Hash. The dispatcher's helper splits the Hash
+            // off into a dedicated channel before invoking the
+            // method so primitive arms can consume `:foo` keys
+            // instead of inspecting the positional Hash heuristically.
+            Op::CallKw(name_id, argc, cache_id) => {
+                self.do_call_kw(name_id, argc as usize, false, cache_id)?;
+            }
+            Op::CallKwNoRecv(name_id, argc, cache_id) => {
+                self.do_call_kw(name_id, argc as usize, true, cache_id)?;
+            }
             Op::ApplyCall(name_id, cache_id) | Op::ApplyCallNoRecv(name_id, cache_id) => {
                 // Splat-call: pop the args Array, push its
                 // elements back onto the stack as positional args,
