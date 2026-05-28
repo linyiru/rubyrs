@@ -7191,16 +7191,20 @@ fn object_hash_inner(
         // Array#hash is order-sensitive — `[1,2].hash !=
         // [2,1].hash`. Feed length plus each element's content
         // hash sequentially. On re-entry (cyclic array) emit
-        // the sentinel instead of recursing.
+        // the sentinel instead of recursing. We iterate by
+        // index + per-step `clone()` of one element rather than
+        // cloning the whole Vec up front so a 1M-element array
+        // costs O(1) extra memory per hash call.
         Value::Array(id) => {
             9u8.hash(&mut h);
             if !visited.insert(*id) {
                 HASH_RECURSION_SENTINEL.hash(&mut h);
             } else {
-                let elements: Vec<Value> = heap.array(*id).clone();
-                (elements.len() as u64).hash(&mut h);
-                for el in &elements {
-                    object_hash_inner(el, heap, visited).hash(&mut h);
+                let len = heap.array(*id).len();
+                (len as u64).hash(&mut h);
+                for i in 0..len {
+                    let el = heap.array(*id)[i].clone();
+                    object_hash_inner(&el, heap, visited).hash(&mut h);
                 }
                 visited.remove(id);
             }
@@ -7220,12 +7224,13 @@ fn object_hash_inner(
             if !visited.insert(*id) {
                 HASH_RECURSION_SENTINEL.hash(&mut h);
             } else {
-                let pairs: Vec<(Value, Value)> = heap.hash(*id).clone();
-                (pairs.len() as u64).hash(&mut h);
+                let len = heap.hash(*id).len();
+                (len as u64).hash(&mut h);
                 let mut acc: i64 = 0;
-                for (k, val) in &pairs {
-                    let kh = object_hash_inner(k, heap, visited);
-                    let vh = object_hash_inner(val, heap, visited);
+                for i in 0..len {
+                    let (k, val) = heap.hash(*id)[i].clone();
+                    let kh = object_hash_inner(&k, heap, visited);
+                    let vh = object_hash_inner(&val, heap, visited);
                     // (kh * 31 + vh) — non-commutative in kh,vh
                     // so swapping key with value changes the
                     // pair's contribution; XOR across pairs
