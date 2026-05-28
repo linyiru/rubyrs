@@ -604,6 +604,7 @@ impl Vm {
                 "compact" | "compact!" | "filter_map" |
                 "default" | "default_proc" | "count" | "each_with_object" |
                 "flat_map" | "collect_concat" | "reduce" | "inject" | "sum" |
+                "first" | "min" | "max" | "one?" | "partition" |
                 "inspect"
             ),
             Value::Range(_) => matches!(name,

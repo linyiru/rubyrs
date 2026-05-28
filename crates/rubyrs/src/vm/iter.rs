@@ -2578,6 +2578,85 @@ impl Vm {
             (Value::Hash(id), "any?", []) => Some(self.iter_hash_filter(*id, IterMode::Any, block)?),
             (Value::Hash(id), "all?", []) => Some(self.iter_hash_filter(*id, IterMode::All, block)?),
             (Value::Hash(id), "none?", []) => Some(self.iter_hash_filter(*id, IterMode::NoneM, block)?),
+            // `h.one? { |k, v| ... }` — true iff exactly one
+            // entry yields truthy. Standalone arm rather than an
+            // IterMode extension because the count-then-compare
+            // shape doesn't fit the Any/All/NoneM short-circuit
+            // loop in `iter_hash_filter`.
+            (Value::Hash(id), "one?", []) => {
+                let id = *id;
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let pre_frames = g.vm.frames.len();
+                let mut count: i64 = 0;
+                let mut early = None;
+                for (k, v) in snapshot {
+                    let r = match g.vm.step_block(block, vec![k, v], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    if r.is_truthy() {
+                        count += 1;
+                        // Short-circuit: more than one truthy
+                        // means we already know the answer.
+                        if count > 1 { break; }
+                    }
+                }
+                Some(early.unwrap_or(Value::Bool(count == 1)))
+            }
+            // `h.partition { |k, v| ... }` — returns
+            // `[truthy_pairs_array, falsy_pairs_array]`. Each
+            // pair is materialised as a fresh `[k, v]` Array
+            // (matching CRuby's "Hash#partition yields Array<[k,v]>"
+            // convention). Block yields k, v as separate args via
+            // auto-splat (matches the existing Hash#each pattern).
+            (Value::Hash(id), "partition", []) => {
+                let id = *id;
+                let mut g = PinGuard::new(self);
+                g.pin(Value::Hash(id));
+                g.pin(Value::Block(block));
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                for (k, v) in &snapshot {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let yes_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(yes_id));
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let no_id = g.vm.heap.alloc(HeapObj::Array(Vec::new()));
+                g.pin(Value::Array(no_id));
+                let pre_frames = g.vm.frames.len();
+                let mut early = None;
+                for (k, v) in snapshot {
+                    let r = match g.vm.step_block(block, vec![k.clone(), v.clone()], pre_frames)? {
+                        BlockStep::MethodReturn => break,
+                        BlockStep::Break(r) => { early = Some(r); break; }
+                        BlockStep::Value(r) => r,
+                    };
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                    let target = if r.is_truthy() { yes_id } else { no_id };
+                    g.vm.heap.array_mut(target).push(Value::Array(pair_id));
+                }
+                if let Some(e) = early { return Ok(Some(e)); }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![
+                    Value::Array(yes_id), Value::Array(no_id),
+                ]));
+                Some(Value::Array(pair_id))
+            }
             // `h.count { |k, v| pred }` — count pairs whose block
             // result is truthy. Same shape as Array#count block,
             // but the per-iter pair is the `[k, v]` Array (yielded

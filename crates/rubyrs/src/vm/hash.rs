@@ -292,6 +292,78 @@ impl Vm {
                         };
                         Some(Value::Array(nid))
                     }
+                    // `h.first` — returns the first `[k, v]` pair Array
+                    // (or nil on empty). `h.first(n)` — returns the
+                    // first n pairs as Array<[k, v]>. Mirrors
+                    // Array#first; insertion order is the Hash's
+                    // canonical iteration order.
+                    ("first", []) => {
+                        let pairs = self.heap.hash(id);
+                        if pairs.is_empty() { return Ok(Some(Value::Nil)); }
+                        let (k, v) = pairs[0].clone();
+                        self.maybe_gc();
+                        let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
+                        Some(Value::Array(pid))
+                    }
+                    ("first", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                msg: "attempt to take negative size".to_string(),
+                            }));
+                        }
+                        let take = (*n as usize).min(self.heap.hash(id).len());
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)[..take].to_vec();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(take);
+                        for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            g.pin(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
+                        g.vm.maybe_gc();
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        Some(Value::Array(aid))
+                    }
+                    // `h.min` / `h.max` (no block) — find min/max
+                    // entry via `<=>` on the `[k, v]` pair Array
+                    // (element-wise, key first). Returns nil on
+                    // empty Hash. The pair is materialised as a
+                    // fresh `[k, v]` Array. The block form
+                    // (`h.min { |a, b| ... }`) is out of subset.
+                    ("min", []) | ("max", []) => {
+                        let pairs = self.heap.hash(id).clone();
+                        if pairs.is_empty() { return Ok(Some(Value::Nil)); }
+                        let want_max = name == "max";
+                        let mut best_idx = 0usize;
+                        for i in 1..pairs.len() {
+                            let (ak, av) = pairs[best_idx].clone();
+                            let (bk, bv) = pairs[i].clone();
+                            // Compare via fresh pair Arrays so the
+                            // existing `value_cmp_v_heap` array path
+                            // does the element-wise compare.
+                            let aid = self.heap.alloc(HeapObj::Array(vec![ak, av]));
+                            let bid = self.heap.alloc(HeapObj::Array(vec![bk, bv]));
+                            let ord = crate::vm::value_cmp_v_heap(
+                                &Value::Array(aid),
+                                &Value::Array(bid),
+                                &self.interner,
+                                &self.heap,
+                            );
+                            let take_b = match ord {
+                                Some(std::cmp::Ordering::Less) => want_max,
+                                Some(std::cmp::Ordering::Greater) => !want_max,
+                                Some(std::cmp::Ordering::Equal) => false,
+                                None => return Ok(None),
+                            };
+                            if take_b { best_idx = i; }
+                        }
+                        let (k, v) = pairs[best_idx].clone();
+                        self.maybe_gc();
+                        let pid = self.heap.alloc(HeapObj::Array(vec![k, v]));
+                        Some(Value::Array(pid))
+                    }
                     ("dup", []) => {
                         // Shallow copy: clones the pair vector and
                         // re-allocates a new Hash heap slot. Pair
