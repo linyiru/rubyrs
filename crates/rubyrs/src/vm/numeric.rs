@@ -486,18 +486,35 @@ pub(crate) fn numeric_call(
             // that `(-*n) as u64` would hit in debug builds when
             // someone passes i64::MIN as the precision.
             let abs_n = n.unsigned_abs();
-            // For |n| > 38, 10^|n| overflows i128 too, so we
-            // can't apply the i128-widened round-mode arithmetic
-            // below. Under bignum: defer (surfaces as
-            // NoMethodError until a BigInt-aware path lands).
-            // Under no-bignum: return 0 as an explicit fallback —
-            // NOT a true "wrap to i64" of the mathematical answer
-            // (computing `10^|n| mod 2^64` via wrapping_pow would
-            // give some i64 with no semantic meaning). 0 is the
-            // safest concrete answer we can produce; document this
-            // is a divergence from the wrap convention rather than
-            // a coincidence.
+            // For |n| > 38, 10^|n| overflows i128 too. But |a| fits
+            // i64 (so |a| < 10^19 < 10^38), which means |a/10^|n||
+            // = 0 with remainder a — so MOST op/sign combinations
+            // give exactly 0 without needing BigInt:
+            //   - truncate, round: always 0 (|a| is far less than
+            //     half of 10^|n|, so round-half doesn't fire)
+            //   - floor with a >= 0: 0 (truncate toward -∞ leaves 0)
+            //   - ceil with a <= 0: 0 (truncate toward +∞ leaves 0)
+            //   - floor with a < 0: -10^|n| (needs BigInt)
+            //   - ceil with a > 0: 10^|n| (needs BigInt)
+            //
+            // Return Some(0) for the zero-result cases. Defer the
+            // two BigInt-requiring cases under bignum (surfaces as
+            // NoMethodError until bigint_primitive grows a negative-
+            // precision path); under no-bignum fall back to 0 as
+            // an explicit choice — the wrap convention would
+            // compute `10^|n| mod 2^64` via wrapping_pow but the
+            // resulting i64 has no semantic meaning, so 0 is the
+            // documented exception to the wrap rule for this case.
             if abs_n > 38 {
+                let zero_result = match op {
+                    "truncate" | "round" => true,
+                    "floor" => *a >= 0,
+                    "ceil"  => *a <= 0,
+                    _ => unreachable!(),
+                };
+                if zero_result {
+                    return Ok(Some(Value::Int(0)));
+                }
                 #[cfg(feature = "bignum")]
                 { return Ok(None); }
                 #[cfg(not(feature = "bignum"))]
