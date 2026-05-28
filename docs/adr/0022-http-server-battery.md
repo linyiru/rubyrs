@@ -2,23 +2,32 @@
 
 ## Status
 
-Proposed (2026-05-27). **v4** — fourth revision, closing
-3 blockers + 9 majors + 8 minors flagged by third parallel
-review of v3. v1 (commit `88564485`), v2 (commit `ea92dec1`),
-and v3 (commit `ccf9f4c7`) kept in git history. First Tier 3
-native battery ADR per [ADR 0019 v3](0019-tier2-tier3-boundary.md)
-Rule 7; establishes the template for subsequent battery ADRs.
+Proposed (2026-05-27). **v5** — fifth revision, adding 4
+DX / observability features derived from a Bun.serve API
+analysis. v1 (commit `88564485`), v2 (commit `ea92dec1`),
+v3 (commit `ccf9f4c7`), v4 (commit `2e24f153`) kept in git
+history. First Tier 3 native battery ADR per
+[ADR 0019 v3](0019-tier2-tier3-boundary.md) Rule 7;
+establishes the template for subsequent battery ADRs.
 
-**v3 → v4 fixes**: defines the previously-asserted-but-
-undefined `VmCallable` sealed trait; corrects `on_worker_boot`
-type signature (was over-constrained); documents
-ResourceExhausted-mid-cext leak semantics; removes incorrect
-Class g claim (tokio current-thread doesn't spawn a separate
-reactor thread); fixes 5+ `vm.rs` field cross-reference errors;
-adds Cowboy/BEAM and OpenResty as missing prior art; reframes
-VmBorrow's `!Send` enforcement honestly (the actual mechanism
-is the synchronous `FnOnce` closure signature, not the `!Send`
-marker on the guard).
+**v4 → v5 additions** (Bun.serve-derived):
+- `idle_timeout` config field — connection keep-alive cap,
+  distinct from `per_request_io_deadline`
+- `on_error` config — embedder-supplied Ruby proc for the
+  uncaught-exception path (default: hardcoded 500)
+- `pending_requests` runtime gauge — observability on the
+  semaphore state
+- explicit `REMOTE_ADDR` in env builder (was implicit in
+  v4's pseudocode; v5 makes it normative)
+
+**v3 → v4 fixes** (preserved): defined the previously-
+asserted-but-undefined `VmCallable` sealed trait;
+corrected `on_worker_boot` type signature; documented
+ResourceExhausted-mid-cext leak semantics; removed
+incorrect Class g claim; fixed 5+ `vm.rs` field cross-
+reference errors; added Cowboy/BEAM and OpenResty as
+prior art; reframed VmBorrow's `!Send` enforcement
+honestly.
 
 ## Context
 
@@ -155,6 +164,19 @@ pub struct HttpServerConfig {
     /// timeout (rely on hyper's keepalive timeouts).
     pub per_request_io_deadline: Option<std::time::Duration>,
 
+    /// Connection-level idle timeout — distinct from
+    /// `per_request_io_deadline`. Controls how long an
+    /// otherwise-idle keep-alive connection stays open
+    /// between requests. Without this, a slow-loris-style
+    /// attacker holding 10000 idle connections starves the
+    /// `max_concurrent_requests` semaphore.
+    ///
+    /// Bun.serve default is 10 seconds; we adopt the same
+    /// (None = 10s default; `Some(Duration::ZERO)` disables;
+    /// `Some(d)` with d > 0 sets to d). Max 255 seconds
+    /// matches Bun's wire-format constraint.
+    pub idle_timeout: Option<std::time::Duration>,
+
     /// Per-request fuel budget. Refreshed before each
     /// `app.call(env)`. None = inherits `Config::fuel`'s
     /// value (which is per-Vm-lifetime — almost always
@@ -166,6 +188,25 @@ pub struct HttpServerConfig {
     /// — embedders often own signal handling themselves.
     /// The CLI binary `rubyrs` sets this `true`.
     pub install_signal_handler: bool,
+
+    /// Uncaught-exception handler. Called when:
+    /// - The Ruby app raises an exception not caught by its
+    ///   own `rescue` blocks (mapped to HTTP 500)
+    /// - `Trap::ResourceExhausted` fires from `per_request_fuel`
+    ///   exhaustion (mapped to HTTP 503)
+    /// - Header construction failed (e.g. non-string value
+    ///   for Set-Cookie)
+    ///
+    /// The handler receives the original error + the env hash,
+    /// returns a Rack triplet `[status, headers, body]` that
+    /// becomes the actual response. None = hardcoded 500/503
+    /// with a generic message.
+    ///
+    /// Inspired by Bun.serve's `error` config field, which
+    /// has the same role for JS exceptions. Avoids forcing
+    /// embedders to learn how a Ruby exception becomes an
+    /// HTTP response — they declare the mapping explicitly.
+    pub on_error: Option<Box<dyn Fn(&Trap, &Value) -> Result<RackResponse, ()>>>,
 
     /// Worker initialisation callback fired after each
     /// `fork_workers` child process is created, before the
@@ -753,6 +794,7 @@ fn build_rack_env(
     headers: &http::HeaderMap,
     body_bytes: bytes::Bytes,
     listener: &SocketAddr,
+    peer: &SocketAddr,        // ← v5: peer addr surfaced for REMOTE_ADDR
     scheme: &str,
 ) -> Value /* Hash */ {
     let mut env = Hash::new();
@@ -767,6 +809,16 @@ fn build_rack_env(
     env.set("SERVER_PORT", listener.port().to_string());
     env.set("SCRIPT_NAME", "");
     env.set("HTTP_VERSION", "HTTP/1.1");
+
+    // Rack SPEC: REMOTE_ADDR is the client IP. Optional in
+    // the spec but ubiquitous in real apps (rate limiting,
+    // logging, geolocation, X-Forwarded-For correlation).
+    // v5 makes it normative — v4's pseudocode silently
+    // omitted it. Apps behind a reverse proxy should still
+    // consult `HTTP_X_FORWARDED_FOR` for the true client;
+    // REMOTE_ADDR here is the *immediate* peer (the proxy).
+    env.set("REMOTE_ADDR", peer.ip().to_string());
+    env.set("REMOTE_PORT", peer.port().to_string());  // non-Rack-SPEC but ubiquitous
 
     // Headers: HTTP_<UPPER_NAME_WITH_DASHES_AS_UNDERSCORES>
     // Header values may be non-UTF-8 (Latin-1 by HTTP spec);
@@ -872,8 +924,16 @@ Ruby app returns `[status, headers, body]`:
 - One Ruby class: `Rubyrs::HttpServer`
   - `.bind(addr)` — creates handle
   - `#run(rack_app)` — starts loop, blocks until shutdown
-  - `#shutdown` — graceful stop
+  - `#shutdown` — graceful stop (in-flight requests drain)
+  - `#shutdown(force: true)` — immediate stop (drop in-flight)
+  - `#pending_requests` — gauge: current in-flight count
+    (observability primitive; matches Bun.serve's
+    `server.pendingRequests`)
+  - `#bound_addr` — actual bound `(host, port)` after
+    binding (useful when `port: 0` for kernel-assigned)
   - `.fork_workers(n)` — multi-process pre-fork (Unix)
+  - Sugar: `Rubyrs::HttpServer.serve(addr) { |env| ... }`
+    — equivalent to `.bind(addr).run(->(env) { yield env })`
 - `Runtime::reset_between_requests()` API
 - `Runtime::refill_fuel(per_request)` API
 - `VmBorrow<'_>` RAII type for synchronous Vm access
@@ -1145,7 +1205,21 @@ from H3.
 - Multi-threaded tokio; Vms still single-threaded
   individually
 
-## What changes vs ADR 0022 v3 (this revision is v4)
+## What changes vs ADR 0022 v4 (this revision is v5)
+
+Narrow patch — 4 DX / observability additions derived from
+a Bun.serve API surface analysis. No design reframes; no
+blocker fixes (v4 closed all known blockers). v5 is pure
+additive.
+
+| v4 said | v5 says | Reason / Source |
+|---|---|---|
+| No `idle_timeout` field | **Added** to `HttpServerConfig` with 10s default (matches Bun.serve), max 255s. Distinct from `per_request_io_deadline` — controls keep-alive idle, not handler stall. | Bun.serve's `idleTimeout` covers a slow-loris attack class our v4 missed: 10000 idle keep-alive connections starve `max_concurrent_requests` semaphore. |
+| Uncaught Ruby exception → hardcoded 500/503 | **`on_error` config field**: embedder-supplied `Fn(&Trap, &Value) -> Result<RackResponse, ()>` that maps Rust trap + env → Rack triplet. Default = hardcoded 500/503 (existing behaviour). | Bun.serve's `error` config. Avoids forcing embedders to learn how a Ruby exception becomes an HTTP response — they declare the mapping. |
+| No observability of in-flight requests | **`Rubyrs::HttpServer#pending_requests`** gauge — reads the tokio semaphore's current acquired count. Plus `#shutdown(force: true)` for the drop-in-flight scenario and `#bound_addr` for kernel-assigned port discovery. | Bun.serve exposes `server.pendingRequests` + `server.stop(true)` + `server.requestIP(req)`. Observability is cheap and pays back day 1. |
+| `REMOTE_ADDR` not in env builder pseudocode | **Explicit `REMOTE_ADDR` + `REMOTE_PORT`** in `build_rack_env`. `peer: &SocketAddr` added to the function signature. | Rack SPEC marks `REMOTE_ADDR` optional but in practice ubiquitous (rate limiting, geolocation, logging, X-Forwarded-For correlation). v4 silently omitted; v5 normative. |
+
+## What changes vs ADR 0022 v3 (preserved from v4 — historical)
 
 | v3 said | v4 says | Reason |
 |---|---|---|
@@ -1203,7 +1277,27 @@ from H3.
 
 ## Revision log
 
-- **2026-05-27 — v4 (this revision).** Third parallel
+- **2026-05-27 — v5 (this revision).** Bun.serve API analysis
+  surfaced 4 DX / observability gaps in v4. v5 closes them
+  additively:
+  - `HttpServerConfig::idle_timeout` field (10s default,
+    matches Bun.serve; max 255s) — distinct from
+    `per_request_io_deadline`; closes slow-loris idle-
+    connection-starvation attack class
+  - `HttpServerConfig::on_error` field — embedder-supplied
+    `Fn(&Trap, &Value) -> Result<RackResponse, ()>` for
+    explicit error-mapping; default keeps hardcoded 500/503
+  - `Rubyrs::HttpServer#pending_requests` gauge,
+    `#shutdown(force: true)`, `#bound_addr` accessors —
+    observability + force-stop + dynamic-port-discovery
+    primitives parallel to `server.pendingRequests` /
+    `server.stop(true)` / `server.requestIP` in Bun
+  - `REMOTE_ADDR` + `REMOTE_PORT` explicit in env builder
+    pseudocode (was missing); `peer: &SocketAddr` added to
+    `build_rack_env` signature
+  - **Pure additive — no v4 decision reversed**
+
+- **2026-05-27 — v4 (commit `2e24f153`).** Third parallel
   review of v3 flagged 3 blockers + 9 majors + 8 minors.
   v4 closes all of them. Highlights:
   - Defined the previously-asserted `VmCallable` sealed
@@ -1357,6 +1451,13 @@ chronological order:
 - [Bun's `Bun.serve`](https://bun.com/docs/api/http) —
   marketing precedent (uses thread pool internally —
   different architecture from ours)
+- [Bun.serve full API reference](https://bun.com/docs/runtime/http/server.md)
+  — source for v5's 4 DX/observability additions
+  (`idle_timeout`, `on_error`, `pending_requests` gauge,
+  `REMOTE_ADDR`). The v5 changes mirror Bun's API names
+  conceptually (snake_case-ified) without copying its
+  Fetch-API Request/Response shape — we stay on Rack
+  triplets to preserve Ruby ecosystem compat.
 - [Falcon (Ruby Fiber-based)](https://github.com/socketry/falcon)
   — H3 reference architecture once Fiber lands
 - [Luca Guidi — 25k RPS with mruby + H2O (2015)](https://lucaguidi.com/2015/12/09/25000-requests-per-second-for-rack-json-api-with-mruby/)
