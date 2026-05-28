@@ -42,6 +42,33 @@ fn strip_ws_or_nul(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r' | '\0')
 }
 
+/// `String#capitalize` core — ASCII-only case fold. First
+/// char uppercase, remaining chars lowercase. Non-letters at
+/// position 0 are left as-is (`"1hello".capitalize` → same).
+/// Empty input returns empty. Unicode case-mapping options
+/// are out of subset (ADR 0020 Tier-2 Encoding).
+fn capitalize_ascii(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    if let Some(first) = chars.next() {
+        out.push(first.to_ascii_uppercase());
+        for c in chars { out.push(c.to_ascii_lowercase()); }
+    }
+    out
+}
+
+/// `String#swapcase` core — flip ASCII letter case on each
+/// char; non-letters pass through unchanged.
+fn swapcase_ascii(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_uppercase() { c.to_ascii_lowercase() }
+            else if c.is_ascii_lowercase() { c.to_ascii_uppercase() }
+            else { c }
+        })
+        .collect()
+}
+
 /// Try the Str primitive arms. Returns `Ok(Some(v))` on a
 /// handled call, `Ok(None)` if the receiver/method shape
 /// doesn't match.
@@ -139,6 +166,18 @@ pub(crate) fn string_call(
         (Value::Str(a), "upcase", []) => Some(Value::new_str(a.to_string_lossy().to_uppercase())),
         (Value::Str(a), "downcase", []) => Some(Value::new_str(a.to_string_lossy().to_lowercase())),
         (Value::Str(a), "reverse", []) => Some(Value::new_str(a.to_string_lossy().chars().rev().collect::<String>())),
+        // `String#capitalize` — first char uppercase, rest
+        // lowercase. ASCII-only fold (Unicode options out of
+        // subset). Empty string is a no-op. First non-letter
+        // (digit / punctuation) stays as-is.
+        (Value::Str(a), "capitalize", []) => Some(Value::new_str(
+            a.with_str_lossy(capitalize_ascii)
+        )),
+        // `String#swapcase` — every letter has its case
+        // flipped; non-letters pass through.
+        (Value::Str(a), "swapcase", []) => Some(Value::new_str(
+            a.with_str_lossy(swapcase_ascii)
+        )),
         // Destructive `!` siblings — mutate the receiver in
         // place and return self when changed, nil when the
         // input already matched the result. The frozen check
@@ -166,6 +205,34 @@ pub(crate) fn string_call(
                 });
             }
             let new_bytes = a.with_str_lossy(|s| s.to_lowercase().into_bytes());
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
+        (Value::Str(a), "capitalize!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes = a.with_str_lossy(|s| capitalize_ascii(s).into_bytes());
+            if *a.borrow() == new_bytes { Some(Value::Nil) }
+            else {
+                check(new_bytes.len())?;
+                *a.borrow_mut() = new_bytes;
+                Some(Value::Str(a.clone()))
+            }
+        }
+        (Value::Str(a), "swapcase!", []) => {
+            if a.frozen.get() {
+                return Err(RubyError::FrozenError {
+                    msg: format!("can't modify frozen String: {:?}", a.content.borrow()),
+                });
+            }
+            let new_bytes = a.with_str_lossy(|s| swapcase_ascii(s).into_bytes());
             if *a.borrow() == new_bytes { Some(Value::Nil) }
             else {
                 check(new_bytes.len())?;
