@@ -96,6 +96,27 @@ fn default_runtime_blocks_require() {
 
 #[test]
 #[cfg(not(target_os = "wasi"))]
+fn stdlib_stub_require_works_under_sandbox() {
+    // ADR 0017's Tier 1 lenient stub: `require 'uri'` materialises
+    // a constant shell (so `defined?(URI)` reports "constant") but
+    // doesn't touch the FS. The sandbox should let this through —
+    // the gate is fine-grained, only blocking branches that
+    // actually reach disk. Pre-fix, `check_load_allowed` ran at the
+    // dispatch entry, blocking this in-process path collaterally.
+    let mut rt = Runtime::new();
+    let v = rt.eval(r#"require "uri""#, "test.rb").unwrap();
+    // First load returns true; subsequent loads return false
+    // (CRuby's loaded-features dedup semantics).
+    assert!(matches!(v, rubyrs::Value::Bool(true)));
+    let v = rt.eval(r#"require "uri""#, "test.rb").unwrap();
+    assert!(matches!(v, rubyrs::Value::Bool(false)));
+    // Constant shell materialised.
+    let v = rt.eval(r#"defined?(URI)"#, "test.rb").unwrap();
+    assert!(matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"constant"));
+}
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
 fn default_runtime_blocks_require_relative() {
     let mut rt = Runtime::new();
     let err = rt.eval(r#"require_relative "lib/foo""#, "test.rb").unwrap_err();

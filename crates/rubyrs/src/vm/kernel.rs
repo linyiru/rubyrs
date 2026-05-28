@@ -546,9 +546,6 @@ impl Vm {
             // opt in by mutating `$LOAD_PATH` themselves.
             "require" => match args {
                 [Value::Str(path)] => {
-                    if let Err(t) = self.check_load_allowed("require") {
-                        return Some(Err(t));
-                    }
                     #[cfg(not(target_os = "wasi"))]
                     {
                         let path_str = path.to_string_lossy();
@@ -562,7 +559,16 @@ impl Vm {
                         // resolve to `<root>/rack/show_exceptions.rb`
                         // without forcing the script to spell out
                         // `require_relative` paths.
-                        let rb_found = self.find_ruby_source_candidate(&path_str);
+                        //
+                        // Under the FS sandbox (`Config::allow_filesystem_io:
+                        // false`), skip the probe — it'd touch the host FS
+                        // before any Ruby-level resolution decides whether
+                        // the load is in-process (stub / constant-satisfied)
+                        // or actually wants disk. The downstream `cext_require`
+                        // fallback gates separately; the stub / satisfied
+                        // branches run unblocked because they don't touch FS.
+                        let rb_found = self.allow_filesystem_io
+                            && self.find_ruby_source_candidate(&path_str);
                         if rb_found {
                             Some(self.require_ruby(&path_str))
                         } else if is_stdlib_stub_name(&path_str) {
@@ -663,6 +669,19 @@ impl Vm {
                             self.loaded_stdlib_stubs.insert(path_str.to_string());
                             Some(Ok(Value::Bool(true)))
                         } else {
+                            // Reached the FS-touching cext fallback —
+                            // gate the sandbox here, not at the dispatch
+                            // entry. Stub / satisfied-by-constant branches
+                            // above are in-process and bypass the gate;
+                            // under sandbox-on they let scripts use
+                            // `require 'uri'`-style feature detection
+                            // without tripping LoadError. `cext_require`
+                            // also gates internally — this surface-level
+                            // check fires first with a clearer
+                            // `op = "require"` message.
+                            if let Err(t) = self.check_load_allowed("require") {
+                                return Some(Err(t));
+                            }
                             #[cfg(feature = "cext")]
                             { Some(self.cext_require(&path_str)) }
                             #[cfg(not(feature = "cext"))]
