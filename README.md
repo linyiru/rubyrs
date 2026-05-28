@@ -281,6 +281,57 @@ Build with: `cargo build --features _http_server -p rubyrs`. The
 feature adds ~12-18 MB stripped to the binary; off by default per
 ADR 0019 v3 Rule 3.
 
+### Streaming responses (SSE, long-poll, large files)
+
+By default `_http_server` collects the Rack body before sending the
+response — fine for HTML, JSON, and other one-shot payloads, but
+useless for Server-Sent Events, long-poll, or any open-ended
+generator (chunks would batch into a single end-of-body write).
+
+Combining `_http_server` with the `_fiber` feature unlocks true
+async streaming: each `yield` from a Rack 3 `each`-shape body — or
+each `stream.write` from a `call`-shape body — becomes one
+HTTP/1.1 chunked frame, flushed to the socket before the next chunk
+is produced. The full design and a phased correctness argument live
+in [docs/adr/0023-true-async-streaming.md](docs/adr/0023-true-async-streaming.md).
+
+```ruby
+class SSEStream
+  def each
+    10.times { |i| yield "data: tick #{i}\n\n" }
+  end
+  def close
+    # Rack 3 SPEC: rubyrs invokes close exactly once
+    # after the stream completes, on both paths.
+  end
+end
+
+app = ->(env) {
+  [200,
+   {"Content-Type" => "text/event-stream", "Cache-Control" => "no-cache"},
+   SSEStream.new]
+}
+__rubyrs_http_serve_with_app("127.0.0.1:9292", 60, app)
+```
+
+Run [crates/rubyrs/examples/sse_server.rb](crates/rubyrs/examples/sse_server.rb)
+and connect with `curl -N` to watch each event arrive as its own
+chunked frame.
+
+**Detection order** (Rack 3 SPEC `Array → each → call → to_a`):
+
+| Body shape | `_fiber` off | `_fiber` on |
+|------------|--------------|-------------|
+| `Array<String>` | buffered (fast path) | buffered (fast path — Array bypasses Fiber) |
+| responds to `each` | buffered (P2b.1 each-helper) | **streaming Fiber** |
+| responds to `call` | buffered (P2b.1 call-helper) | **streaming Fiber** |
+| responds to `to_a` | buffered | buffered |
+
+Build with: `cargo build --features _http_server,_fiber -p rubyrs`.
+The `_fiber` feature is independently useful (Ruby `Fiber.new` /
+`Fiber.yield` / `Fiber#resume` from ADR 0017 Tier 2); enabling it
+with `_http_server` simply opts the streaming path in automatically.
+
 ## Status
 
 Experimental. See [docs/SUBSET.md](docs/SUBSET.md) for what works today

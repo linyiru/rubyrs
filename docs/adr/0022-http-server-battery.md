@@ -502,6 +502,17 @@ never depend on byte-streaming semantics.
 - Long-poll / WebSocket upgrade
 - Multi-MB upload streaming without buffering
 
+**Streaming response status (update)**: the SSE / chunked /
+long-poll items above are addressed by [ADR 0023 — True async
+streaming via Fiber](0023-true-async-streaming.md), which lands
+as opt-in feature `_fiber` paired with `_http_server`. With both
+features enabled, Rack 3 `each`- and `call`-shape bodies route
+through a per-response Fiber: each `yield` (or `stream.write`)
+becomes one chunked HTTP/1.1 frame flushed to the socket before
+the next chunk is produced. Buffered (`Array` / `to_a`) bodies
+keep using the v1 fast path unchanged. WebSocket upgrade and
+streamed uploads remain Phase H3+ scope.
+
 ### Per-request resource enforcement — uncatchable, unified with ADR 0008
 
 Per-request limits (deadline, body size, fuel) fire as
