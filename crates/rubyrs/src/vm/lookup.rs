@@ -612,7 +612,7 @@ impl Vm {
                 if matches!(name,
                     "new" | "name" | "to_s" | "inspect"
                     | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
-                    | "superclass" | "ancestors" | "include?"
+                    | "ancestors" | "include?"
                     | "<" | "<=" | ">" | ">="
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
@@ -657,6 +657,16 @@ impl Vm {
                 // TypeError, breaking `m.respond_to?(:allocate)
                 // ? m.allocate : …` on module references.
                 // PR #181 code-review #2.
+                // `Class#superclass` — fence on Modules. CRuby:
+                // `M.respond_to?(:superclass)` → false because
+                // `M.superclass` raises NoMethodError. Module
+                // receivers need to report the same truthiness so
+                // feature-detection patterns like
+                // `cls.respond_to?(:superclass) && cls.superclass`
+                // don't try-and-trip.
+                if name == "superclass" && !cls.is_module {
+                    return true;
+                }
                 if name == "allocate"
                     && !cls.is_module
                     && cls.name != "Module"
@@ -909,7 +919,7 @@ impl Vm {
             None => {
                 return Err(self.trap(crate::error::RubyError::NoMethodError {
                     method: "super called outside of method".to_string(),
-                    recv_type: self_val.type_name(),
+                    recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
                 }));
             }
         };
@@ -988,7 +998,7 @@ impl Vm {
                 None => Err(self.trap(crate::error::RubyError::NoMethodError {
                     method: format!("super: no superclass method `{}'",
                         self.interner.resolve(name_id)),
-                    recv_type: self_val.type_name(),
+                    recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
                 })),
             };
         }
@@ -1000,7 +1010,7 @@ impl Vm {
                     return Err(self.trap(crate::error::RubyError::NoMethodError {
                         method: format!("super: no superclass method `{}'",
                             self.interner.resolve(name_id)),
-                        recv_type: other.type_name(),
+                        recv_type: std::borrow::Cow::Borrowed(other.type_name()),
                     }));
                 }
             },
@@ -1018,7 +1028,7 @@ impl Vm {
             None => Err(self.trap(crate::error::RubyError::NoMethodError {
                 method: format!("super: no superclass method `{}'",
                     self.interner.resolve(name_id)),
-                recv_type: self_val.type_name(),
+                recv_type: std::borrow::Cow::Borrowed(self_val.type_name()),
             })),
         }
     }

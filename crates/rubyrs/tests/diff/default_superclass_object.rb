@@ -4,11 +4,6 @@
 # tilt's render dispatch (template.rb:257 `case scope when Object`
 # fell through to the BasicObject fallback that needs
 # `Kernel.instance_method(:class)`).
-#
-# We don't model BasicObject / Kernel, so the fixture avoids
-# `ancestors` (whose CRuby output would include both) and uses
-# `is_a?` / `===` / `superclass` chain walking instead — those
-# observe the relationship without requiring the full chain.
 
 # --- Default superclass is Object ---
 class Foo
@@ -23,8 +18,9 @@ end
 puts Bar.superclass                          # Foo
 puts Bar.new.is_a?(Foo)                      # true
 puts Bar.new.is_a?(Object)                   # true (transitive)
-# superclass chain walk: Bar → Foo → Object
+# superclass chain walk: Bar → Foo → Object → BasicObject
 puts Bar.superclass.superclass               # Object
+puts Bar.superclass.superclass.superclass    # BasicObject
 
 # --- case/when on Object catches user-class instances ---
 # (the real-world unblock — tilt scope dispatch)
@@ -34,16 +30,18 @@ result = case Foo.new
          end
 puts result                                  # matched Object
 
-# --- Modules don't get Object as superclass. CRuby raises
-#     NoMethodError on `Module#superclass`; rubyrs returns nil
-#     (documented divergence). The important parity here is that
-#     `module M; end` doesn't silently get Object grafted onto
-#     its (non-existent) chain by the new default — verify
-#     `is_a?(Module)` works without an Object detour. ---
+# --- Modules don't have a superclass. Both CRuby and rubyrs
+#     now raise NoMethodError on `Module#superclass`. ---
 module M
 end
 puts M.is_a?(Module)                         # true
 puts M.is_a?(Class)                          # false
+begin
+  M.superclass
+  puts "no raise (BAD)"
+rescue NoMethodError
+  puts "Module.superclass raises NoMethodError"
+end
 
 # --- Reopen doesn't re-default the chain ---
 class Foo

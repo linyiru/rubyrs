@@ -62,7 +62,7 @@ pub(crate) fn format_prism_errors<'a>(
 #[derive(Debug)]
 pub enum RubyError {
     SyntaxError { msg: String },
-    NoMethodError { method: String, recv_type: &'static str },
+    NoMethodError { method: String, recv_type: std::borrow::Cow<'static, str> },
     ArgumentError { msg: String },
     TypeError { msg: String },
     RuntimeError { msg: String },
