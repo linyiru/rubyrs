@@ -20,11 +20,15 @@
 #     table where builtin Method records can be installed.
 #
 # Currently `Kernel` and `BasicObject` are empty stubs — their
-# method tables don't carry the inline-handled primitives yet.
-# `Object.new.is_a?(Kernel)` returns true because the include
-# is in the chain, and `Kernel.instance_method(:respond_to?)`
-# still fails because the builtin isn't materialised. Synthesis
-# of the inline-primitive Method records is tracked as a
+# method tables don't carry the inline-handled primitives as
+# Method records. However, `Kernel.instance_method(:class)` /
+# `(:respond_to?)` etc. still work because `instance_method`
+# treats Kernel as a primitive sentinel and synthesises an
+# UnboundMethod whose dispatch routes through the receiver's
+# normal method chain. What's missing is Method-record
+# introspection: `m.arity`, `m.source_location`, `m.parameters`
+# return defaults instead of the real values. Filling in real
+# Method records on Kernel's methods table is tracked as a
 # separate follow-up.
 
 class BasicObject

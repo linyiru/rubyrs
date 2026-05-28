@@ -73,6 +73,20 @@ puts Overridden.respond_to?(:superclass)       # true
 puts SomeModule.respond_to?(:superclass)       # false
 puts Object.respond_to?(:superclass)           # true
 
+# --- Anonymous modules also raise on superclass ---
+# `Module.new` has an empty name; CRuby renders the error as
+# `for module #<Module:0x...>`. rubyrs uses a stable
+# `for module #<Module>` placeholder (no object-id modelling)
+# to keep the message actionable. We assert via include? to
+# sidestep the object-id divergence.
+anon_mod = Module.new
+begin
+  anon_mod.superclass
+rescue NoMethodError => e
+  puts e.message.include?("for module")              # true
+  puts !e.message.end_with?("for module ")           # true (no trailing space)
+end
+
 # --- BasicObject can't be re-rooted ---
 # CRuby raises TypeError on `class BasicObject < Anything`
 # to prevent the cycle Object < BasicObject < Object.

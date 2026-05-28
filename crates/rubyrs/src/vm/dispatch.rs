@@ -1434,9 +1434,20 @@ impl Vm {
                     // i.e. lowercase "module" + the actual name.
                     // Carry the dynamic name through `recv_type`'s
                     // owned-Cow form so we match CRuby exactly.
+                    // Anonymous modules (`Module.new`) have an
+                    // empty `cls.name`; CRuby renders these as
+                    // `#<Module:0x...>` in the error. We don't
+                    // model the object-id placeholder, so use a
+                    // stable `"#<Module>"` instead of letting the
+                    // message end with a trailing space.
+                    let label = if cls.name.is_empty() {
+                        "#<Module>".to_string()
+                    } else {
+                        cls.name.clone()
+                    };
                     return Err(self.trap(RubyError::NoMethodError {
                         method: "superclass".to_string(),
-                        recv_type: std::borrow::Cow::Owned(format!("module {}", cls.name)),
+                        recv_type: std::borrow::Cow::Owned(format!("module {}", label)),
                     }));
                 }
                 let v = match cls.superclass.borrow().clone() {
