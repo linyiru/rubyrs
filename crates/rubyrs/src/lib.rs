@@ -237,6 +237,10 @@ pub struct Config {
     /// harnesses, sandbox / gemspec evaluators, and any embed
     /// that processes untrusted Ruby leave the default; the
     /// filesystem is off-limits.
+    ///
+    /// See [`Config::allowed_paths`] for the second layer that
+    /// narrows an open sandbox to a set of canonicalized prefixes
+    /// (rubund's gemspec-evaluator shape).
     pub allow_filesystem_io: bool,
     /// Path-level narrowing on top of `allow_filesystem_io`. The
     /// two fields compose as a layered sandbox:
@@ -251,18 +255,24 @@ pub struct Config {
     /// that may legitimately do `File.read("Gemfile.lock")` or
     /// `require_relative "lib/version"`, but must NOT escape
     /// the gem root. `Config { allow_filesystem_io: true,
-    /// allowed_paths: Some(vec![gem_root.canonicalize()?]), .. }`
-    /// gives the gemspec exactly that scope.
+    /// allowed_paths: Some(vec![gem_root]), .. }` gives the
+    /// gemspec exactly that scope — `apply_config` canonicalizes
+    /// each entry once, so the host doesn't have to.
     ///
     /// Path matching is by `starts_with` on the canonicalized
-    /// `allowed_paths` entries vs the lexically-resolved input
-    /// path (relative inputs joined with cwd; `..`/`.` collapsed
-    /// before the prefix check). This defends against simple
-    /// traversal (`/allowed/../../etc/passwd` resolves outside
-    /// the prefix); symlink escapes are NOT defended (a host
-    /// that wants symlink-tight scoping must canonicalize the
-    /// allowed prefixes itself, AND ensure no symlinks under
-    /// them point outside).
+    /// `allowed_paths` entries. The input path is lexically
+    /// resolved (relative inputs joined with cwd; `..`/`.`
+    /// collapsed) for `File.*` ops, and canonicalized for the
+    /// `require` / `require_relative` / `cext_require` family
+    /// (which already touch disk to find the source). This
+    /// defends against simple traversal
+    /// (`/allowed/../../etc/passwd` resolves outside the prefix)
+    /// across the whole sandbox, AND defends against symlink
+    /// escapes on the load family. `File.*` does NOT canonicalize
+    /// its input by design (avoids the per-op syscall on the hot
+    /// path); a host that wants symlink-tight scoping on `File.*`
+    /// must ensure no symlinks under the allowed prefixes point
+    /// outside them.
     pub allowed_paths: Option<Vec<std::path::PathBuf>>,
 }
 
