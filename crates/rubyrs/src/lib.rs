@@ -295,10 +295,24 @@ pub struct Config {
     pub allowed_paths: Option<Vec<std::path::PathBuf>>,
 
     /// Seed `$LOAD_PATH` with these paths at Runtime construction.
-    /// Equivalent to the embedder doing `$LOAD_PATH.unshift(p)`
-    /// (in order) before any script eval, but typed and verified
-    /// at Config-construction time rather than buried in an
-    /// implicit first-eval. The canonical embedder shape:
+    /// The provided vector becomes the initial `$LOAD_PATH` in
+    /// the SAME order — `paths[0]` lands at `$LOAD_PATH[0]`,
+    /// `paths[1]` at `[1]`, and so on. (Naively writing
+    /// `$LOAD_PATH.unshift(p)` for each `p` in order would
+    /// REVERSE the input — see `seed_load_path` for the actual
+    /// reverse-insert implementation that preserves intent.)
+    ///
+    /// This gives embedders a typed configuration surface
+    /// instead of injecting a synthetic `$LOAD_PATH.unshift(...)`
+    /// as the first eval. NOTE: unlike `Config::allowed_paths`,
+    /// `load_paths` is NOT canonicalized or validated at
+    /// Config-construction time — paths are passed through to
+    /// `$LOAD_PATH` as Ruby Strings via `to_string_lossy`. The
+    /// embedder owns correctness of the paths (the require
+    /// resolver simply walks them; nonexistent entries are
+    /// silently skipped during candidate matching).
+    ///
+    /// The canonical embedder shape:
     ///
     /// ```text
     /// Config {
