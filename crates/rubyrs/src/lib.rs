@@ -667,13 +667,17 @@ pub fn take_wizer_runtime() -> Option<Runtime> {
 /// but we still want SOMETHING in the Trap message rather than a
 /// silent `<unknown>` — log the payload's type id so a host can
 /// at least correlate against its own panic site.
-fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+///
+/// Takes `&(dyn Any + Send)` rather than `&Box<dyn Any + Send>` so
+/// the helper only needs the payload reference — sidesteps Clippy's
+/// `borrowed_box` lint under the workspace's `-D warnings` policy.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
     } else if let Some(s) = payload.downcast_ref::<&'static str>() {
         s.to_string()
     } else {
-        format!("<non-string panic payload, type_id = {:?}>", (**payload).type_id())
+        format!("<non-string panic payload, type_id = {:?}>", payload.type_id())
     }
 }
 
@@ -1952,15 +1956,14 @@ RUBY_ENGINE = "ruby".freeze
     /// final expression of the script; embedders can ignore it for
     /// statements with no return value.
     ///
-    /// Panic safety: the body is wrapped in [`std::panic::catch_unwind`]
-    /// so a Rust panic anywhere below this entry point — an ICE-class
-    /// `panic!`/`.unwrap()`/`.expect()` in the VM, an OOM in a
-    /// vendored dep, a host-fn callback (registered via
-    /// [`Runtime::register_fn`] or [`Runtime::register_fn_v2`]) that
-    /// panics — is converted to a [`Trap`] with
-    /// [`RubyError::RuntimeError`] carrying the panic payload. The
-    /// host's call site sees an ordinary `Err`, not an unwind, which
-    /// matters for two cases:
+    /// Panic safety: the body is wrapped in [`std::panic::catch_unwind`],
+    /// so an UNWINDING panic anywhere below this entry point — an
+    /// ICE-class `panic!`/`.unwrap()`/`.expect()` in the VM, a host-fn
+    /// callback (registered via [`Runtime::register_fn`] or
+    /// [`Runtime::register_fn_v2`]) that panics — is converted to a
+    /// [`Trap`] with [`RubyError::RuntimeError`] carrying the panic
+    /// payload. The host's call site sees an ordinary `Err`, not an
+    /// unwind, which matters for two cases:
     ///
     ///   1. Embedders calling `eval` from `extern "C"` (without
     ///      `-unwind`) — a panic crossing that boundary is undefined
@@ -1969,6 +1972,14 @@ RUBY_ENGINE = "ruby".freeze
     ///   2. Long-running host loops (rubund batch evaluation,
     ///      `_http_server` request handlers) that need to survive a
     ///      single bad script without crashing the process.
+    ///
+    /// What this does NOT catch: ABORTING panics (allocation OOM via
+    /// `handle_alloc_error` defaults to abort, and any build with
+    /// `panic = "abort"` skips unwinding entirely), nor signals
+    /// (SIGSEGV from a misbehaving cext, SIGKILL from OOM-killer).
+    /// Hosts that need to survive those need an OS-level supervisor
+    /// — the catch here is a Rust-language-level safety net, not a
+    /// process-wide one.
     ///
     /// State guarantee is best-effort: every existing RAII guard
     /// (notably [`PreambleLiftGuard`] for sandbox caps) still runs on
@@ -1990,7 +2001,7 @@ RUBY_ENGINE = "ruby".freeze
                 err: RubyError::RuntimeError {
                     msg: format!(
                         "host-side panic during eval: {}",
-                        panic_payload_message(&payload),
+                        panic_payload_message(payload.as_ref()),
                     ),
                 },
                 backtrace: vec![],
