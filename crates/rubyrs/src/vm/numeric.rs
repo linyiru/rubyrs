@@ -36,6 +36,31 @@ pub(crate) const INT_HASH_TAG: u8 = 0x49; // 'I'
 /// `5.eql?(5.0) == false`.
 pub(crate) const FLOAT_HASH_TAG: u8 = 0x46; // 'F'
 
+/// CRuby's FloatDomainError message label for a non-finite Float —
+/// `"NaN"` for NaN, `"Infinity"` for `+Infinity`, `"-Infinity"`
+/// for `-Infinity`. Used by every Float→Integer trap site so the
+/// message text stays uniform across the surface.
+///
+/// Precondition: `a.is_nan() || a.is_infinite()`. Calling with a
+/// finite `a` (including `0.0` and any negative finite) falls
+/// through to the `"-Infinity"` branch and silently mislabels the
+/// trap — assert in debug so the contract is enforced at the
+/// helper instead of memorised at every call site.
+pub(crate) fn float_domain_label(a: f64) -> &'static str {
+    debug_assert!(
+        a.is_nan() || a.is_infinite(),
+        "float_domain_label called with finite value {}",
+        a,
+    );
+    if a.is_nan() {
+        "NaN"
+    } else if a > 0.0 {
+        "Infinity"
+    } else {
+        "-Infinity"
+    }
+}
+
 /// FNV-1a 64-bit hash. Used by `Integer#hash` / `Float#hash` for
 /// a deterministic, cross-rustc-stable digest of the tagged
 /// input bytes.
@@ -63,31 +88,6 @@ pub(crate) const FLOAT_HASH_TAG: u8 = 0x46; // 'F'
 /// Constants from <http://www.isthe.com/chongo/tech/comp/fnv/>:
 /// - offset basis: 0xcbf29ce484222325
 /// - prime: 0x100000001b3
-/// CRuby's FloatDomainError message label for a non-finite Float —
-/// `"NaN"` for NaN, `"Infinity"` for `+Infinity`, `"-Infinity"`
-/// for `-Infinity`. Used by every Float→Integer trap site so the
-/// message text stays uniform across the surface.
-///
-/// Precondition: `a.is_nan() || a.is_infinite()`. Calling with a
-/// finite `a` (including `0.0` and any negative finite) falls
-/// through to the `"-Infinity"` branch and silently mislabels the
-/// trap — assert in debug so the contract is enforced at the
-/// helper instead of memorised at every call site.
-pub(crate) fn float_domain_label(a: f64) -> &'static str {
-    debug_assert!(
-        a.is_nan() || a.is_infinite(),
-        "float_domain_label called with finite value {}",
-        a,
-    );
-    if a.is_nan() {
-        "NaN"
-    } else if a > 0.0 {
-        "Infinity"
-    } else {
-        "-Infinity"
-    }
-}
-
 pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;

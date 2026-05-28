@@ -6869,6 +6869,7 @@ impl Vm {
     ///   - The interner-cap guard applies at every lookup: a
     ///     non-interned qualified key returns Missing without
     ///     calling `intern` (defends `Config::max_symbols`).
+    ///
     /// (Copilot review #277 round 4 #3.)
     pub(crate) fn resolve_const_path(
         &mut self,
@@ -7306,8 +7307,8 @@ fn is_valid_ivar_name(s: &str) -> bool {
 ///       * Sym:   bit 61 set
 ///       * Float: bit 60 set
 ///       * Heap:  bit 62 set, with a 4-bit type subtag at
-///                bits 58..61 to distinguish Array vs Object
-///                vs Hash etc.
+///         bits 58..61 to distinguish Array vs Object
+///         vs Hash etc.
 ///   - The discriminator bits are far above the range that user
 ///     code's integer literals reach (`|n| < 2^58` for any
 ///     practical int produces an id below 2^59, well clear of
@@ -7318,17 +7319,17 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
     ///   - bit 62        = heap discriminator
     ///   - bits 58..61   = type subtag (4 bits → 16 types)
     ///   - bits 0..57    = payload (58 bits). ObjId-backed
-    ///                     variants pass a u32 freelist index
-    ///                     here, which always fits. Rc-backed
-    ///                     variants (Str/Regex/Class) hash the
-    ///                     pointer through `scramble_ptr` first
-    ///                     to avoid leaking host addresses, and
-    ///                     the resulting 64-bit scramble is
-    ///                     masked into 58 bits — so two
-    ///                     simultaneously-live Rc allocations
-    ///                     can in principle collide
-    ///                     (~2^29 distinct live allocations
-    ///                     before a collision is likely).
+    ///     variants pass a u32 freelist index
+    ///     here, which always fits. Rc-backed
+    ///     variants (Str/Regex/Class) hash the
+    ///     pointer through `scramble_ptr` first
+    ///     to avoid leaking host addresses, and
+    ///     the resulting 64-bit scramble is
+    ///     masked into 58 bits — so two
+    ///     simultaneously-live Rc allocations
+    ///     can in principle collide
+    ///     (~2^29 distinct live allocations
+    ///     before a collision is likely).
     fn heap_id(payload: u64, type_subtag: u8) -> i64 {
         debug_assert!(type_subtag < 16, "type subtag must fit in 4 bits");
         let payload_masked = payload & 0x03FF_FFFF_FFFF_FFFF; // 58 bits
@@ -7460,11 +7461,11 @@ fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
 /// process-startup entropy as the hash key.
 fn scramble_ptr(ptr: usize) -> u64 {
     use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::hash::BuildHasher;
     use std::sync::OnceLock;
     static SEED: OnceLock<RandomState> = OnceLock::new();
     let rs = SEED.get_or_init(RandomState::new);
-    let mut h = rs.build_hasher();
-    ptr.hash(&mut h);
-    h.finish()
+    
+    
+    rs.hash_one(ptr)
 }
