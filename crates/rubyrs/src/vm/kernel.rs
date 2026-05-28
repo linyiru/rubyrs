@@ -567,6 +567,42 @@ impl Vm {
                         // or actually wants disk. The downstream `cext_require`
                         // fallback gates separately; the stub / satisfied
                         // branches run unblocked because they don't touch FS.
+                        //
+                        // Scope pre-emption: when an allowlist is configured
+                        // and the script supplied an ABSOLUTE path that
+                        // lies outside every prefix, trap LoadError with the
+                        // scope-gate message immediately. Without this, an
+                        // out-of-scope absolute path would route to the cext
+                        // fallback when find_ruby_source_candidate skipped
+                        // the existence probe (closing the stat side-channel),
+                        // and the cext fallback's "cannot find C ext" trap is
+                        // RuntimeError — wrong class for `rescue LoadError`,
+                        // and a more revealing message than the scope reject.
+                        let scope_violation: Option<std::path::PathBuf> =
+                            if self.allow_filesystem_io
+                                && self.allowed_paths.is_some()
+                                && std::path::Path::new(&*path_str).is_absolute()
+                            {
+                                let resolved = crate::lexically_resolve_path(
+                                    std::path::Path::new(&*path_str),
+                                );
+                                let prefixes = self.allowed_paths.as_ref().expect("checked");
+                                if prefixes.iter().any(|pfx| resolved.starts_with(pfx)) {
+                                    None
+                                } else {
+                                    Some(resolved)
+                                }
+                            } else {
+                                None
+                            };
+                        if let Some(resolved) = scope_violation {
+                            return Some(Err(self.trap(RubyError::LoadError {
+                                msg: format!(
+                                    "require blocked: path {:?} outside Config::allowed_paths",
+                                    resolved,
+                                ),
+                            })));
+                        }
                         let rb_found = self.allow_filesystem_io
                             && self.find_ruby_source_candidate(&path_str);
                         if rb_found {
@@ -1240,9 +1276,31 @@ impl Vm {
             && ext != "rb" {
             return false;
         }
+        // When `allowed_paths` is configured, skip the `.exists()`
+        // probe for candidates whose lexically-resolved path lies
+        // outside every prefix — closes a stat side-channel where
+        // a script-controlled `require` argument could probe
+        // arbitrary host paths via timing/error-shape. Candidates
+        // inside scope still probe normally; the downstream
+        // `require_ruby` re-runs the canonicalize-then-scope check.
+        let in_scope = |c: &std::path::Path| -> bool {
+            let Some(prefixes) = self.allowed_paths.as_ref() else {
+                return true;
+            };
+            let joined = if c.is_absolute() {
+                c.to_path_buf()
+            } else {
+                match std::env::current_dir() {
+                    Ok(cwd) => cwd.join(c),
+                    Err(_) => c.to_path_buf(),
+                }
+            };
+            let resolved = crate::lexically_resolve_path(&joined);
+            prefixes.iter().any(|pfx| resolved.starts_with(pfx))
+        };
         self.ruby_source_candidates(path_str)
             .iter()
-            .any(|c| c.exists())
+            .any(|c| in_scope(c) && c.exists())
     }
 
     /// Shared load body for `require` / `require_relative` once

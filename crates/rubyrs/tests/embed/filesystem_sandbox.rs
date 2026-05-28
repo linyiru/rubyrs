@@ -848,3 +848,40 @@ fn allowlist_require_walks_candidates_past_symlink_poisoned_one() {
     let _ = std::fs::remove_dir_all(&load_dir);
     let _ = std::fs::remove_dir_all(&outside);
 }
+
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn allowlist_require_pre_empts_absolute_path_outside_scope() {
+    // Defends against the `require '/etc/foo'`-style probe under
+    // bool=true + allowed_paths=Some(other). The pre-emption at
+    // the require dispatch arm traps LoadError with the scope-
+    // gate message immediately, without routing to either the
+    // .rb-probe (find_ruby_source_candidate's .exists() stat) or
+    // the cext fallback (which would raise RuntimeError 'cannot
+    // find C ext' — wrong class for `rescue LoadError`).
+    let (allowed, _) = alloc_tempdir("require-preempt-allowed");
+    let mut rt = Runtime::with_config(Config {
+        allow_filesystem_io: true,
+        allowed_paths: Some(vec![allowed.clone()]),
+        ..Default::default()
+    });
+    // Path is absolute, doesn't lie inside `allowed`, and is
+    // contrived to not exist anywhere (closes the path-exists
+    // confound). Pre-fix without the find-scope-aware + dispatch-
+    // preempt changes: stat side-channel + RuntimeError trap.
+    // Post-fix: LoadError with scope message, no stat.
+    let err = rt
+        .eval(
+            r#"require "/nonexistent-rubyrs-test-path/foo""#,
+            "test.rb",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err.err, RubyError::Uncaught { class_name, message }
+            if class_name == "LoadError"
+            && message.contains("outside Config::allowed_paths")),
+        "expected LoadError with scope-gate message, got {:?}",
+        err.err,
+    );
+    let _ = std::fs::remove_dir_all(&allowed);
+}
