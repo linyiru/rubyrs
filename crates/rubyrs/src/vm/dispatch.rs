@@ -4640,7 +4640,7 @@ impl Vm {
         //   - Sym: SymId.0 * 8 + 0x14 (matches CRuby's symbol
         //     tag offset 0x14; multiplied to avoid collision
         //     with small Bool/Nil values).
-        //   - Bool true/false, Nil: CRuby's exact 20 / 0 / 8.
+        //   - Bool true/false, Nil: CRuby 3.x exact 20 / 0 / 4.
         //   - Float: f64-bit-pattern hash, mapped into the
         //     heap-id range so duplicate float literals share
         //     ids (CRuby parity for inline floats).
@@ -4688,7 +4688,14 @@ impl Vm {
             match &recv {
                 Value::Int(n) => n.hash(&mut h),
                 Value::Float(f) => f.to_bits().hash(&mut h),
-                Value::Str(s) => s.with_str_lossy(|raw| raw.hash(&mut h)),
+                Value::Str(s) => {
+                    // Hash raw bytes (binary-safe) — `with_str_lossy`
+                    // would replace invalid UTF-8 with U+FFFD,
+                    // collapsing distinct binary strings to the
+                    // same hash and breaking Hash key semantics
+                    // for non-UTF-8 content.
+                    s.content.borrow().hash(&mut h);
+                }
                 Value::Sym(sid) => sid.0.hash(&mut h),
                 Value::Bool(b) => b.hash(&mut h),
                 Value::Nil => 0u8.hash(&mut h),
@@ -6892,48 +6899,69 @@ fn is_valid_ivar_name(s: &str) -> bool {
 /// the contract: same value → same id, distinct values →
 /// distinct ids.
 ///
-/// Encoding (LSB-tagged to avoid cross-type collisions):
-///   - Int n:     `n * 2 + 1`     (CRuby's Integer tag)
-///   - Sym sid:   `sid * 8 + 0x14` (CRuby's Symbol tag offset)
-///   - true:      20              (CRuby 3.x)
-///   - false:     0               (CRuby 3.x)
-///   - nil:       4               (CRuby 3.x — was 8 in 2.x)
-///   - Float f:   f.to_bits() canonicalized to i64 range
-///   - All heap-managed values (Object/Array/Hash/Block/Range/
-///     Str/Regex/BoundMethod/UnboundMethod/CurriedProc): the
-///     underlying ObjId shifted up by 4 + a small per-type
-///     offset, so `Array.new.object_id != Object.new.object_id`
-///     even when their ObjIds happen to coincide.
-///   - Class: the Rc pointer cast to integer, masked into the
-///     positive i64 range.
+/// Encoding contract:
+///   - CRuby-exact for the special immediates user code is known
+///     to depend on:
+///       * nil:   4   (CRuby 3.x — was 8 in 2.x)
+///       * true:  20
+///       * false: 0
+///       * Int n: `n * 2 + 1` (CRuby's Fixnum tag — always odd)
+///   - Distinct high-bit type discriminators for the rest, so
+///     cross-type collisions are impossible:
+///       * Sym:   bit 61 set
+///       * Float: bit 60 set
+///       * Heap:  bit 62 set, with a 4-bit type subtag at
+///                bits 32..35 to distinguish Array vs Object
+///                vs Hash etc.
+///   - The discriminator bits are far above the range that user
+///     code's integer literals reach (`|n| < 2^58` for any
+///     practical int produces an id below 2^59, well clear of
+///     the Sym/Float/Heap tag bits).
 pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
     use crate::value::Value;
-    fn heap_id(raw: u32, type_offset: i64) -> i64 {
-        // raw is at most u32::MAX, shifting by 4 stays inside
-        // i64. Type offset distinguishes Array(0)/Hash(1)/...
-        // from each other when their ObjIds collide.
-        ((raw as i64) << 4) | type_offset
+    /// Heap-managed value id: bit 62 = heap-discriminator,
+    /// bits 32..35 = type subtag (0..15), bits 0..31 = ObjId or
+    /// hashed Rc-pointer.
+    fn heap_id(raw: u32, type_subtag: u8) -> i64 {
+        debug_assert!(type_subtag < 16, "type subtag must fit in 4 bits");
+        (1i64 << 62) | ((type_subtag as i64) << 32) | (raw as i64)
+    }
+    /// Hash an Rc pointer to a 32-bit slot (the type-subtag
+    /// scheme leaves only 32 bits for payload). Pointers are
+    /// typically 8-byte aligned on 64-bit hosts, so >> 3 is
+    /// lossless for the low bits; the remaining hash compresses
+    /// the high address bits into 32 bits with negligible
+    /// collision risk for the small number of long-lived
+    /// objects in a session.
+    fn ptr_to_slot(p: usize) -> u32 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (p >> 3).hash(&mut h);
+        (h.finish() as u32) ^ (h.finish() >> 32) as u32
     }
     match v {
         Value::Int(n) => n.wrapping_mul(2).wrapping_add(1),
         Value::Bool(true) => 20,
         Value::Bool(false) => 0,
         Value::Nil => 4,
-        Value::Sym(sid) => (sid.0 as i64) * 8 + 0x14,
+        // Sym: bit 61 set; bits 0..31 = SymId. Distinct from
+        // true(20) and false(0) because bit 61 is way above
+        // their bit positions.
+        Value::Sym(sid) => (1i64 << 61) | (sid.0 as i64),
+        // Float: bit 60 set; low 60 bits = a hash of the f64
+        // bit pattern. The bit pattern occupies all 64 bits
+        // (sign + 11-bit exponent + 52-bit mantissa); naive
+        // `& 0x0FFF...` would strip the sign bit and collapse
+        // `1.0` and `-1.0` to the same id. Hashing folds all 64
+        // bits into 60 with collision-resistance ~2^30 distinct
+        // floats — adequate for any practical workload.
         Value::Float(f) => {
-            // Bit-pattern; mask to positive i64. Two literals
-            // with the same bit pattern (including +0.0/-0.0
-            // distinction) share an id.
-            (f.to_bits() & 0x7FFF_FFFF_FFFF_FFFF) as i64
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            f.to_bits().hash(&mut h);
+            (1i64 << 60) | ((h.finish() & 0x0FFF_FFFF_FFFF_FFFF) as i64)
         }
-        Value::Str(s) => {
-            // Strings are Rc'd, not ObjId-tracked. Use the Rc
-            // pointer as identity — distinct String allocations
-            // get distinct ids; aliased Rc clones share an id
-            // (closer to CRuby than ObjId would be, since
-            // CRuby's frozen string literals are also shared).
-            (std::rc::Rc::as_ptr(s) as usize as i64) & 0x7FFF_FFFF_FFFF_FFFF
-        }
+        Value::Str(s) => heap_id(ptr_to_slot(std::rc::Rc::as_ptr(s) as usize), 2),
         Value::Object(id) => heap_id(id.0, 3),
         Value::Array(id) => heap_id(id.0, 4),
         Value::Hash(id) => heap_id(id.0, 5),
@@ -6943,12 +6971,9 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
         Value::UnboundMethod(id) => heap_id(id.0, 9),
         Value::CurriedProc(id) => heap_id(id.0, 10),
         #[cfg(feature = "regex")]
-        Value::Regex(_) => 11, // regex is Rc-owned, no ObjId — use type tag
+        Value::Regex(re) => heap_id(ptr_to_slot(std::rc::Rc::as_ptr(re) as usize), 11),
         #[cfg(feature = "bignum")]
         Value::BigInt(id) => heap_id(id.0, 12),
-        Value::Class(c) => {
-            // Rc pointer as identity. Cast to usize then mask.
-            (std::rc::Rc::as_ptr(c) as usize as i64) & 0x7FFF_FFFF_FFFF_FFFF
-        }
+        Value::Class(c) => heap_id(ptr_to_slot(std::rc::Rc::as_ptr(c) as usize), 13),
     }
 }

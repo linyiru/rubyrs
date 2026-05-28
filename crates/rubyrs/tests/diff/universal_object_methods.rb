@@ -21,7 +21,7 @@ puts 42.object_id == 42.object_id                  # true
 puts :foo.object_id == :foo.object_id              # true
 puts true.object_id                                # 20 (CRuby)
 puts false.object_id                               # 0
-puts nil.object_id                                 # 8
+puts nil.object_id                                 # 4 (CRuby 3.x — was 8 in 2.x)
 
 # --- hash: content-based for value types ---
 puts 42.hash == 42.hash                            # true
@@ -46,6 +46,30 @@ puts result.is_a?(Integer)                         # true
 
 hash_method = Kernel.instance_method(:hash)
 puts hash_method.bind_call(42) == 42.hash          # true
+
+# --- Collision regression guards (cycle-1 review findings) ---
+# Each pair below was a real collision in the initial encoding;
+# the high-bit type-discriminator scheme eliminates them.
+class CCol; end
+puts 1.object_id == CCol.new.object_id            # false (Int 1 → 3 was = heap Object ObjId 0)
+puts true.object_id == :length.object_id          # false (true → 20 was = first interned Sym)
+puts 1.0.object_id == (-1.0).object_id            # false (sign-bit mask collapsed them)
+puts /a/.object_id != /b/.object_id               # true  (regex used constant id 11)
+
+# respond_to? whitelist matches new universal arms
+puts Object.new.respond_to?(:object_id)           # true
+puts Object.new.respond_to?(:__id__)              # true
+puts Object.new.respond_to?(:hash)                # true
+puts Object.new.respond_to?(:frozen?)             # true
+puts Object.new.respond_to?(:inspect)             # true
+
+# Binary-safe Str hash (cycle-1 review): same content → same
+# hash; different content → different hash. The bytes path
+# (`s.content.borrow().hash`) avoids the lossy UTF-8 collapse
+# that the prior `with_str_lossy` impl would have produced for
+# non-UTF-8 binary inputs.
+puts "abc".hash == "abc".hash                     # true
+puts "ab".hash != "abc".hash                      # true
 
 # --- __send__ now reaches universal arms ---
 puts Object.new.__send__(:class).name              # "Object"
