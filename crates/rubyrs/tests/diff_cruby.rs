@@ -196,6 +196,7 @@ fn run_diff(name: &str) {
 #[test] fn private_self_receiver() { run_diff("private_self_receiver"); }
 #[test] fn method_call_block() { run_diff("method_call_block"); }
 #[test] fn yield_through_nested_block() { run_diff("yield_through_nested_block"); }
+#[test] fn p0_each_yield_composability() { run_diff("p0_each_yield_composability"); }
 #[test] fn string_dump() { run_diff("string_dump"); }
 #[test] fn string_count() { run_diff("string_count"); }
 #[test] fn class_singleton_class() { run_diff("class_singleton_class"); }
