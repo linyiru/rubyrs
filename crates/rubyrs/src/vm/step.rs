@@ -1093,7 +1093,15 @@ impl Vm {
                 // so `super` later starts its lookup from the
                 // right place. `None` for toplevel defs.
                 // Stored as Weak — see Method.defining_class docs.
-                let defining_class = self.class_stack.last().map(Rc::downgrade);
+                // When `class_stack.last()` is an eigenclass shell
+                // (from `cls.singleton_class.class_eval { ... }`),
+                // `install_method` redirects the install into
+                // `cls.singleton_methods`. `defining_class` has to
+                // point at the same `cls` so `super_lookup` walks
+                // the right ancestor chain — using the shell would
+                // miss every node in the receiver's superclass
+                // chain. (Code-review #253 round 1 #1.)
+                let defining_class = self.class_stack.last().map(|c| Rc::downgrade(&c.effective_install_class()));
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
                 let params = proto.params.clone();
                 let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
@@ -1105,7 +1113,7 @@ impl Vm {
                     visibility: std::cell::Cell::new(vis),
                     closure: None,
                 });
-                if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
+                if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 // Conservatively invalidate the inline cache — any previous
                 // cache entry could in theory be made stale by this definition.
@@ -1120,6 +1128,18 @@ impl Vm {
                 // (toplevel singleton has no well-defined target)
                 // we fall back to installing on `toplevel_methods`.
                 let proto = &self.protos[p_idx as usize];
+                // Install ALWAYS lands on `cls.singleton_methods`
+                // (see line below), so `defining_class` must match
+                // wherever the method physically lives — not the
+                // `effective_install_class`. When `cls` IS the
+                // eigenclass shell (rare: `def self.foo` inside
+                // `singleton_class.class_eval`), the method lives
+                // on the shell's `singleton_methods` (a meta-meta
+                // table); pointing `defining_class` at the
+                // underlying real class would break `super_lookup`
+                // because the method isn't in the real class's
+                // singleton chain. Keep `cls` as-is.
+                // (Code-review #253 round 2 #2.)
                 let defining_class = self.class_stack.last().map(Rc::downgrade);
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
                 let params = proto.params.clone();
@@ -1199,8 +1219,21 @@ impl Vm {
                 // The walk lets `class Child < Parent; alias_method :x,
                 // :parent_method; end` work: the source method lives
                 // on Parent, the alias name `x` lands on Child.
+                // When `class_stack.last()` is an eigenclass shell,
+                // `def`/`define_method` redirects the install into
+                // the real class's `singleton_methods` — so the
+                // source-method lookup for `alias_method` has to
+                // walk that same chain via
+                // `lookup_class_singleton_method`. Otherwise
+                // aliasing a just-defined singleton method inside
+                // `singleton_class.class_eval` would miss and
+                // raise NameError. (Code-review #253 round 2 #1.)
                 let existing = if let Some(cls) = self.class_stack.last() {
-                    self.lookup_method_uncached(cls, old_id)
+                    if let Some(real) = cls.singleton_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                        self.lookup_class_singleton_method(&real, old_id)
+                    } else {
+                        self.lookup_method_uncached(cls, old_id)
+                    }
                 } else {
                     self.toplevel_methods.get(&old_id).cloned()
                 };
@@ -1223,13 +1256,37 @@ impl Vm {
                         // arities other than 0 also forward
                         // correctly.
                         let cls_ref = self.class_stack.last().cloned();
-                        if let Some(cls) = &cls_ref
-                            && self.primitive_class_responds_to(&cls.name, old_id) {
-                            let synth = self.synth_primitive_forwarder(cls, old_id);
-                            cls.methods.borrow_mut().insert(new_id, synth);
-                            self.method_gen = self.method_gen.wrapping_add(1);
-                            self.stack.push(Value::Nil);
-                            return Ok(true);
+                        // Eigenclass-shell case: probe the underlying
+                        // real class for both the primitive-sentinel
+                        // whitelist (e.g. aliasing `:name` works
+                        // because Class.name is in the whitelist
+                        // even though "Foo" isn't a primitive class
+                        // name) AND the Class-method whitelist via
+                        // `responds_to(Value::Class(real), …)`. The
+                        // install still routes through the shell's
+                        // `install_method`, which redirects into
+                        // `real.singleton_methods`. (Code-review
+                        // #253 round 3 #1.)
+                        let probe_cls = cls_ref.as_ref().and_then(|c| {
+                            c.singleton_target
+                                .borrow()
+                                .as_ref()
+                                .and_then(std::rc::Weak::upgrade)
+                        });
+                        let shell_class_whitelist_hit = probe_cls
+                            .as_ref()
+                            .map(|real| self.responds_to(&Value::Class(real.clone()), old_id))
+                            .unwrap_or(false);
+                        if let Some(cls) = &cls_ref {
+                            let primitive_hit = self.primitive_class_responds_to(&cls.name, old_id);
+                            if primitive_hit || shell_class_whitelist_hit {
+                                let forwarder_cls = probe_cls.as_ref().unwrap_or(cls);
+                                let synth = self.synth_primitive_forwarder(forwarder_cls, old_id);
+                                cls.install_method(new_id, synth);
+                                self.method_gen = self.method_gen.wrapping_add(1);
+                                self.stack.push(Value::Nil);
+                                return Ok(true);
+                            }
                         }
                         // CRuby raises NameError ("undefined method ...")
                         // when `alias_method`'s source name isn't found
@@ -1249,7 +1306,13 @@ impl Vm {
                     }
                 };
                 if let Some(cls) = self.class_stack.last() {
-                    cls.methods.borrow_mut().insert(new_id, m);
+                    // Same eigenclass-shell redirect as Op::DefMethod:
+                    // `alias_method` inside
+                    // `cls.singleton_class.class_eval { alias :a :b }`
+                    // should install `:a` on `cls.singleton_methods`,
+                    // not the shell's instance-methods table.
+                    // (Code-review #253 round 1 #8.)
+                    cls.install_method(new_id, m);
                 } else {
                     self.toplevel_methods.insert(new_id, m);
                 }
@@ -1524,7 +1587,15 @@ impl Vm {
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
-                let defining_class = self.class_stack.last().map(Rc::downgrade);
+                // When `class_stack.last()` is an eigenclass shell
+                // (from `cls.singleton_class.class_eval { ... }`),
+                // `install_method` redirects the install into
+                // `cls.singleton_methods`. `defining_class` has to
+                // point at the same `cls` so `super_lookup` walks
+                // the right ancestor chain — using the shell would
+                // miss every node in the receiver's superclass
+                // chain. (Code-review #253 round 1 #1.)
+                let defining_class = self.class_stack.last().map(|c| Rc::downgrade(&c.effective_install_class()));
                 let vis = self.class_visibility_stack.last().copied().unwrap_or(crate::value::Visibility::Public);
                 let m = Rc::new(Method {
                     params,
@@ -1534,7 +1605,7 @@ impl Vm {
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                 });
-                if let Some(cls) = self.class_stack.last() { cls.methods.borrow_mut().insert(name_id, m); }
+                if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
                 else { self.toplevel_methods.insert(name_id, m); }
                 self.method_gen = self.method_gen.wrapping_add(1);
                 // `Op::DefMethodBlock` is emitted ONLY for the
@@ -1697,6 +1768,8 @@ impl Vm {
                     includes: RefCell::new(Vec::new()),
                     prepends: RefCell::new(Vec::new()),
                     singleton_prepends: RefCell::new(Vec::new()),
+                    singleton_view: RefCell::new(None),
+                    singleton_target: RefCell::new(None),
                     class_vars: RefCell::new(HashMap::new()),
                     #[cfg(feature = "cext")]
                     cext_alloc_func: std::cell::Cell::new(None),

@@ -1567,10 +1567,70 @@ impl Vm {
                 self.stack.push(result);
                 Ok(true)
             }
-            // Tier 1 stub — return receiver itself.
-            // See docs/SUBSET.md for the metaclass divergence.
+            // Lazy eigenclass-shell. The shell carries
+            // `singleton_target = Some(Weak(cls))`, which the 3
+            // method-install paths consult to redirect installs
+            // into `cls.singleton_methods` instead of the shell's
+            // own `methods` table. Subsequent calls reuse the
+            // cached shell so `A.singleton_class.equal?(A.singleton_class)`
+            // holds. Layer #23 of TRY_RUNS pass series.
+            //
+            // KNOWN GAP — introspection on the shell (e.g.
+            // `A.singleton_class.instance_methods(false)`,
+            // `A.singleton_class.include?(Mod)`,
+            // `A.singleton_class.include(Mod)`) operates on the
+            // shell's OWN empty tables; redirected installs are
+            // visible only via the real class's
+            // singleton-method dispatch chain. Sinatra and the
+            // mainstream `singleton_class.class_eval` idiom
+            // don't probe the shell reflectively, so this is
+            // documented as a Tier-1 divergence rather than
+            // fixed by mirroring writes into the shell's
+            // tables. (Code-review #253 round 1 #4 / #7 —
+            // partial decline.)
             ("singleton_class", []) => {
-                self.stack.push(Value::Class(cls));
+                let view = {
+                    let mut slot = cls.singleton_view.borrow_mut();
+                    if let Some(existing) = slot.as_ref() {
+                        existing.clone()
+                    } else {
+                        // Point the shell's superclass at the real
+                        // class's own superclass so
+                        // `A.singleton_class.ancestors.include?(Object)`
+                        // and `A.singleton_class.superclass`
+                        // both behave reasonably for code that
+                        // walks the metaclass chain — matches the
+                        // pre-PR Tier-1 stub's effective behavior
+                        // (the stub returned the receiver itself,
+                        // so `.superclass` was the real class's
+                        // superclass). NOT CRuby's exact metaclass
+                        // tower (`#<Class:A> < #<Class:Object> <
+                        // … < Class`), but a close-enough Tier-1
+                        // approximation that doesn't regress the
+                        // common idiom. (Code-review #253 round 9
+                        // #2.)
+                        let shell_superclass = cls.superclass.borrow().clone();
+                        let v = std::rc::Rc::new(crate::value::Class {
+                            name: format!("#<Class:{}>", cls.name),
+                            is_module: false,
+                            ivars: std::cell::RefCell::new(HashMap::new()),
+                            methods: std::cell::RefCell::new(HashMap::new()),
+                            singleton_methods: std::cell::RefCell::new(HashMap::new()),
+                            superclass: std::cell::RefCell::new(shell_superclass),
+                            includes: std::cell::RefCell::new(Vec::new()),
+                            prepends: std::cell::RefCell::new(Vec::new()),
+                            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                            singleton_view: std::cell::RefCell::new(None),
+                            singleton_target: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&cls))),
+                            class_vars: std::cell::RefCell::new(HashMap::new()),
+                            #[cfg(feature = "cext")]
+                            cext_alloc_func: std::cell::Cell::new(None),
+                        });
+                        *slot = Some(v.clone());
+                        v
+                    }
+                };
+                self.stack.push(Value::Class(view));
                 Ok(true)
             }
             ("instance_methods", args_)
@@ -1900,6 +1960,25 @@ impl Vm {
         // inside the helper now so the cluster is self-
         // contained.
         let new_id = self.interner.intern("new");
+    // Singleton-class-shell fence: `A.singleton_class.new` raises
+    // TypeError in CRuby ("can't create instance of singleton
+    // class"). Without this fence the shell falls into the
+    // default `Class.new` allocator at line 2294 and silently
+    // allocates a `Value::Object` whose class is the shell —
+    // producing an orphan instance whose every method call
+    // raises NoMethodError because the shell's method table is
+    // empty. Defensive code that `rescue TypeError`s to detect
+    // singleton-class misuse would skip; the orphan only
+    // surfaces as the confusing downstream NoMethodError.
+    // (Code-review #253 round 9 #1.)
+    if name_id == new_id
+        && let Value::Class(cls) = &recv
+        && cls.singleton_target.borrow().is_some()
+    {
+        return Err(self.trap(RubyError::TypeError {
+            msg: "can't create instance of singleton class".into(),
+        }));
+    }
     // `Hash[...]` class-method constructor. CRuby has three
     // call shapes:
     //   - `Hash[]`               → empty Hash
@@ -2090,6 +2169,8 @@ impl Vm {
             includes: std::cell::RefCell::new(Vec::new()),
             prepends: std::cell::RefCell::new(Vec::new()),
             singleton_prepends: std::cell::RefCell::new(Vec::new()),
+            singleton_view: std::cell::RefCell::new(None),
+            singleton_target: std::cell::RefCell::new(None),
             class_vars: std::cell::RefCell::new(HashMap::new()),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
@@ -2260,6 +2341,16 @@ impl Vm {
         if !args.is_empty() {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+            }));
+        }
+        // Eigenclass-shell fence — CRuby:
+        // `A.singleton_class.allocate` raises TypeError ("can't
+        // create instance of singleton class"). Without this the
+        // shell falls into the bare-instance allocator below and
+        // produces an orphan. (Code-review #253 round 9 #1.)
+        if cls.singleton_target.borrow().is_some() {
+            return Err(self.trap(RubyError::TypeError {
+                msg: "can't create instance of singleton class".into(),
             }));
         }
         // Module / Class shells are NOT user classes — a real
@@ -5493,6 +5584,8 @@ impl Vm {
                 includes: std::cell::RefCell::new(Vec::new()),
                 prepends: std::cell::RefCell::new(Vec::new()),
                 singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_view: std::cell::RefCell::new(None),
+                singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(HashMap::new()),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
@@ -5642,11 +5735,18 @@ impl Vm {
                     params,
                     proto_idx,
                     fixed_arity: None,
-                    defining_class: Some(std::rc::Rc::downgrade(&target_cls)),
+                    // When `target_cls` is an eigenclass shell from
+                    // `Class#singleton_class`, the install redirects
+                    // into the underlying real class's
+                    // singleton_methods; `defining_class` has to
+                    // resolve to the same real class so `super`
+                    // walks the right ancestor chain.
+                    // (Code-review #253 round 1 #1.)
+                    defining_class: Some(std::rc::Rc::downgrade(&target_cls.effective_install_class())),
                     visibility: std::cell::Cell::new(vis),
                     closure: Some(crate::value::MethodClosure { captured, param_start, n_params }),
                 });
-                target_cls.methods.borrow_mut().insert(name_sym, m);
+                target_cls.install_method(name_sym, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
                 self.stack.push(Value::Sym(name_sym));
                 return Ok(());
@@ -6074,6 +6174,15 @@ impl Vm {
                     msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
                 }));
             }
+            // Eigenclass-shell fence — CRuby:
+            // `A.singleton_class.allocate` raises TypeError
+            // ("can't create instance of singleton class").
+            // (Code-review #253 round 9 #1.)
+            if cls.singleton_target.borrow().is_some() {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "can't create instance of singleton class".into(),
+                }));
+            }
             if cls.is_module
                 || cls.name == "Module"
                 || cls.name == "Class"
@@ -6095,6 +6204,16 @@ impl Vm {
         let new_id = self.interner.intern("new");
         if name_id == new_id
             && let Value::Class(cls) = &recv {
+                // Eigenclass-shell fence (block-form parallel of
+                // the no-block fence in
+                // `try_dispatch_class_intrinsics`). CRuby raises
+                // TypeError for `A.singleton_class.new { … }` too.
+                // (Code-review #253 round 9 #1.)
+                if cls.singleton_target.borrow().is_some() {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: "can't create instance of singleton class".into(),
+                    }));
+                }
                 // Pin args during the alloc window — see the matching
                 // comment in `do_call`'s new-branch for the rationale.
                 // Route through `Vm::alloc_default_instance` so the
@@ -6168,6 +6287,22 @@ impl Vm {
 /// Kernel methods and stays out of false-negative territory while
 /// the synthesis cost isn't justified.
 fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
+    // Eigenclass-shell: methods installed via
+    // `singleton_class.class_eval { def foo; end }` redirect
+    // into `target.singleton_methods` rather than the shell's
+    // own `methods` table. CRuby's `shell.method_defined?(:foo)`
+    // returns true for redirected installs, so walk the
+    // target's singleton-method chain when the shell asks.
+    // (Code-review #253 round 9 #3.)
+    if let Some(target) = cls
+        .singleton_target
+        .borrow()
+        .as_ref()
+        .and_then(std::rc::Weak::upgrade)
+        && vm.lookup_class_singleton_method(&target, sid).is_some()
+    {
+        return true;
+    }
     if vm.lookup_method_uncached(cls, sid).is_some() {
         return true;
     }
