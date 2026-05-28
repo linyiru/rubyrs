@@ -1127,6 +1127,125 @@ mod tests {
         );
     }
 
+    // ===== P1e.3: Miri acceptance test for frame-stack swap =====
+
+    /// P1e.3 (ADR 0023 v2 §"Frame-stack swap invariants"
+    /// item 3) — synthetic test exercising the
+    /// `mem::swap(&mut vm.frames, &mut fiber.snapshot.frames)`
+    /// pattern documented in P1b's FiberStashGuard. Mirrors
+    /// the shape of ADR 0013's
+    /// `cext_reentrance_pattern_is_aliasing_clean` so Miri
+    /// can verify both reborrow shapes under Stacked + Tree
+    /// Borrows from the same `cargo +nightly miri test`
+    /// invocation.
+    ///
+    /// If Miri flags ANY of this as UB, the panic-safe
+    /// frame-stack swap shape FiberStashGuard depends on
+    /// collapses and we need a different design (probably
+    /// `UnsafeCell<VmState>`-based, mirroring ADR 0013's
+    /// deferred J4 refactor).
+    ///
+    /// Without `_fiber` the entire fiber module is absent,
+    /// so this test only compiles + runs under the feature.
+    /// The cext miri tests live in vm/cext.rs and gate
+    /// similarly on `cfg(feature = "cext")`.
+    #[test]
+    fn miri_frame_stack_swap_is_aliasing_clean() {
+        let mut vm = crate::vm::Vm::new(vec![], crate::intern::Interner::new());
+
+        // Seed vm.stack + vm.pinned with sentinel values so
+        // the round-trip is observable in Miri's borrow log.
+        vm.stack.push(crate::value::Value::Int(1));
+        vm.stack.push(crate::value::Value::Int(2));
+        vm.pinned.push(crate::value::Value::Int(99));
+        let outer_stack_len = vm.stack.len();
+        let outer_pinned_len = vm.pinned.len();
+
+        let fiber_id = vm.heap.alloc_fiber(crate::value::ObjId(0));
+
+        // ===== First swap cycle =====
+        {
+            let guard = FiberStashGuard::install(&mut vm, fiber_id);
+            // Fiber-side state should be empty (placeholder).
+            assert_eq!(guard.vm.stack.len(), 0);
+            assert_eq!(guard.vm.pinned.len(), 0);
+            // Mutate inside the fiber.
+            guard.vm.stack.push(crate::value::Value::Int(11));
+            guard.vm.pinned.push(crate::value::Value::Int(22));
+            // Drop fires here, restoring outer state.
+        }
+        assert_eq!(vm.stack.len(), outer_stack_len);
+        assert_eq!(vm.pinned.len(), outer_pinned_len);
+
+        // ===== Second swap cycle =====
+        // Re-install: previous fiber state should restore.
+        {
+            let guard = FiberStashGuard::install(&mut vm, fiber_id);
+            // Fiber's stack/pinned from cycle 1 are visible.
+            assert_eq!(guard.vm.stack.len(), 1);
+            assert_eq!(guard.vm.pinned.len(), 1);
+            // Mutate further; drop restores outer.
+            guard.vm.stack.push(crate::value::Value::Int(33));
+        }
+        assert_eq!(vm.stack.len(), outer_stack_len);
+        assert_eq!(vm.pinned.len(), outer_pinned_len);
+
+        // ===== Outer state untouched across multiple swaps =====
+        match &vm.stack[0] {
+            crate::value::Value::Int(n) => assert_eq!(*n, 1),
+            other => panic!("expected Int(1), got {other:?}"),
+        }
+        match &vm.stack[1] {
+            crate::value::Value::Int(n) => assert_eq!(*n, 2),
+            other => panic!("expected Int(2), got {other:?}"),
+        }
+        match &vm.pinned[0] {
+            crate::value::Value::Int(n) => assert_eq!(*n, 99),
+            other => panic!("expected Int(99), got {other:?}"),
+        }
+    }
+
+    /// P1e.3 (continued): multiple installs across the
+    /// same Vm but DIFFERENT fibers — verifies the
+    /// per-fiber snapshot storage doesn't bleed across
+    /// fiber identities. Each Drop must write back to the
+    /// correct slot.
+    #[test]
+    fn miri_multiple_fibers_swap_does_not_cross_pollinate() {
+        let mut vm = crate::vm::Vm::new(vec![], crate::intern::Interner::new());
+        let fiber_a = vm.heap.alloc_fiber(crate::value::ObjId(0));
+        let fiber_b = vm.heap.alloc_fiber(crate::value::ObjId(0));
+
+        // Fiber A pushes Int(101).
+        {
+            let guard = FiberStashGuard::install(&mut vm, fiber_a);
+            guard.vm.stack.push(crate::value::Value::Int(101));
+        }
+        // Fiber B pushes Int(202).
+        {
+            let guard = FiberStashGuard::install(&mut vm, fiber_b);
+            guard.vm.stack.push(crate::value::Value::Int(202));
+        }
+        // Re-install A — should still see Int(101) only.
+        {
+            let guard = FiberStashGuard::install(&mut vm, fiber_a);
+            assert_eq!(guard.vm.stack.len(), 1);
+            match &guard.vm.stack[0] {
+                crate::value::Value::Int(n) => assert_eq!(*n, 101),
+                other => panic!("expected Int(101), got {other:?}"),
+            }
+        }
+        // Re-install B — should still see Int(202) only.
+        {
+            let guard = FiberStashGuard::install(&mut vm, fiber_b);
+            assert_eq!(guard.vm.stack.len(), 1);
+            match &guard.vm.stack[0] {
+                crate::value::Value::Int(n) => assert_eq!(*n, 202),
+                other => panic!("expected Int(202), got {other:?}"),
+            }
+        }
+    }
+
     // ===== P1c.4: Category 3 deep tests — Fiber-scoped Vm state =====
     //
     // ADR 0023 v2 §"Fiber-scoped Vm state" lists 12 "Must
