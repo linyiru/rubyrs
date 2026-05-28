@@ -4627,25 +4627,20 @@ impl Vm {
             return Ok(());
         }
         // `Object#object_id` / `BasicObject#__id__` — universal,
-        // no args. Returns a stable integer that's unique per
-        // value within this Vm session. CRuby exact values aren't
-        // observable beyond `==` checks, so our encoding diverges
-        // from CRuby but preserves the contract:
-        //   - Heap-managed (Object/Array/Hash/Block/Range/...):
-        //     ObjId.0 shifted up by 4 + type tag (so an Array
-        //     with ObjId 0 doesn't collide with an Object with
-        //     ObjId 0).
-        //   - Int: `n * 2 + 1` (CRuby's Integer tag encoding —
-        //     keeps integer ids odd, distinct from heap ids).
-        //   - Sym: SymId.0 * 8 + 0x14 (matches CRuby's symbol
-        //     tag offset 0x14; multiplied to avoid collision
-        //     with small Bool/Nil values).
-        //   - Bool true/false, Nil: CRuby 3.x exact 20 / 0 / 4.
-        //   - Float: f64-bit-pattern hash, mapped into the
-        //     heap-id range so duplicate float literals share
-        //     ids (CRuby parity for inline floats).
-        //   - Class / BoundMethod / UnboundMethod / CurriedProc:
-        //     same Rc-pointer / ObjId encoding.
+        // no args. Delegates to `object_id_for` (defined at the
+        // bottom of this file). The encoding contract:
+        //   - CRuby-exact for nil/true/false/Int (4 / 20 / 0 /
+        //     `n*2+1`).
+        //   - High-bit type discriminators for everything else
+        //     (bit 62 = heap, 61 = Sym, 60 = Float). These bit
+        //     positions are unreachable by `n*2+1` for any
+        //     practical integer literal (`|n| < 2^58`), so
+        //     cross-type collisions are eliminated by
+        //     construction.
+        //   - 4-bit type subtag at bits 58..61 distinguishes
+        //     heap variants (Object vs Array vs Hash etc.),
+        //     leaving a 58-bit payload that fits both u32
+        //     ObjId and 48-bit virtual pointers natively.
         if (&*name == "object_id" || &*name == "__id__") && args.is_empty() {
             let id = object_id_for(&recv);
             self.stack.push(Value::Int(id));
@@ -6919,38 +6914,30 @@ fn is_valid_ivar_name(s: &str) -> bool {
 ///     the Sym/Float/Heap tag bits).
 pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
     use crate::value::Value;
-    /// Heap-managed value id: bit 62 = heap-discriminator,
-    /// bits 32..35 = type subtag (0..15), bits 0..31 = ObjId or
-    /// hashed Rc-pointer.
-    fn heap_id(raw: u32, type_subtag: u8) -> i64 {
+    /// Heap-managed value id:
+    ///   - bit 62        = heap discriminator
+    ///   - bits 58..61   = type subtag (4 bits → 16 types)
+    ///   - bits 0..57    = payload (58 bits — fits both u32
+    ///                     ObjId and typical 48-bit virtual
+    ///                     pointers natively, no hash compression)
+    fn heap_id(payload: u64, type_subtag: u8) -> i64 {
         debug_assert!(type_subtag < 16, "type subtag must fit in 4 bits");
-        (1i64 << 62) | ((type_subtag as i64) << 32) | (raw as i64)
-    }
-    /// Hash an Rc pointer to a 32-bit slot (the type-subtag
-    /// scheme leaves only 32 bits for payload). Pointers are
-    /// typically 8-byte aligned on 64-bit hosts, so >> 3 is
-    /// lossless for the low bits; the remaining hash compresses
-    /// the high address bits into 32 bits with negligible
-    /// collision risk for the small number of long-lived
-    /// objects in a session.
-    fn ptr_to_slot(p: usize) -> u32 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (p >> 3).hash(&mut h);
-        (h.finish() as u32) ^ (h.finish() >> 32) as u32
+        let payload_masked = payload & 0x03FF_FFFF_FFFF_FFFF; // 58 bits
+        (1i64 << 62) | ((type_subtag as i64) << 58) | (payload_masked as i64)
     }
     match v {
         Value::Int(n) => n.wrapping_mul(2).wrapping_add(1),
         Value::Bool(true) => 20,
         Value::Bool(false) => 0,
         Value::Nil => 4,
-        // Sym: bit 61 set; bits 0..31 = SymId. Distinct from
-        // true(20) and false(0) because bit 61 is way above
-        // their bit positions.
+        // Sym: bit 61 set; bits 0..58 = SymId. Distinct from
+        // true(20)/false(0)/nil(4) because bit 61 is way above
+        // their bit positions; distinct from heap (bit 62) and
+        // Float (bit 60).
         Value::Sym(sid) => (1i64 << 61) | (sid.0 as i64),
         // Float: bit 60 set; low 60 bits = a hash of the f64
         // bit pattern. The bit pattern occupies all 64 bits
-        // (sign + 11-bit exponent + 52-bit mantissa); naive
+        // (sign + 11-bit exponent + 52-bit mantissa); a naive
         // `& 0x0FFF...` would strip the sign bit and collapse
         // `1.0` and `-1.0` to the same id. Hashing folds all 64
         // bits into 60 with collision-resistance ~2^30 distinct
@@ -6961,19 +6948,24 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
             f.to_bits().hash(&mut h);
             (1i64 << 60) | ((h.finish() & 0x0FFF_FFFF_FFFF_FFFF) as i64)
         }
-        Value::Str(s) => heap_id(ptr_to_slot(std::rc::Rc::as_ptr(s) as usize), 2),
-        Value::Object(id) => heap_id(id.0, 3),
-        Value::Array(id) => heap_id(id.0, 4),
-        Value::Hash(id) => heap_id(id.0, 5),
-        Value::Range(id) => heap_id(id.0, 6),
-        Value::Block(id) => heap_id(id.0, 7),
-        Value::BoundMethod(id) => heap_id(id.0, 8),
-        Value::UnboundMethod(id) => heap_id(id.0, 9),
-        Value::CurriedProc(id) => heap_id(id.0, 10),
+        // Rc-backed values: use the raw pointer as identity. On
+        // typical 64-bit hosts the virtual address fits in 48
+        // bits, well within the 58-bit payload slot — no
+        // hashing, no collision risk for distinct allocations
+        // throughout their lifetime.
+        Value::Str(s) => heap_id(std::rc::Rc::as_ptr(s) as u64, 2),
+        Value::Object(id) => heap_id(id.0 as u64, 3),
+        Value::Array(id) => heap_id(id.0 as u64, 4),
+        Value::Hash(id) => heap_id(id.0 as u64, 5),
+        Value::Range(id) => heap_id(id.0 as u64, 6),
+        Value::Block(id) => heap_id(id.0 as u64, 7),
+        Value::BoundMethod(id) => heap_id(id.0 as u64, 8),
+        Value::UnboundMethod(id) => heap_id(id.0 as u64, 9),
+        Value::CurriedProc(id) => heap_id(id.0 as u64, 10),
         #[cfg(feature = "regex")]
-        Value::Regex(re) => heap_id(ptr_to_slot(std::rc::Rc::as_ptr(re) as usize), 11),
+        Value::Regex(re) => heap_id(std::rc::Rc::as_ptr(re) as u64, 11),
         #[cfg(feature = "bignum")]
-        Value::BigInt(id) => heap_id(id.0, 12),
-        Value::Class(c) => heap_id(ptr_to_slot(std::rc::Rc::as_ptr(c) as usize), 13),
+        Value::BigInt(id) => heap_id(id.0 as u64, 12),
+        Value::Class(c) => heap_id(std::rc::Rc::as_ptr(c) as u64, 13),
     }
 }
