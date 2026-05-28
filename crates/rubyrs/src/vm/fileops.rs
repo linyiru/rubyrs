@@ -75,7 +75,20 @@ impl Vm {
             }
             ("exist?", [p]) | ("exists?", [p]) | ("file?", [p]) => {
                 let path = path_arg(p)?;
-                self.check_filesystem_io_allowed(&format!("File.{name}"))?;
+                // Resolve to a `&'static str` upfront — passing
+                // `&format!("File.{name}")` would allocate a
+                // fresh String on every call even on the
+                // sandbox-off happy path where the check
+                // immediately returns Ok. Three branches; the
+                // arm-guard above guarantees the unreachable
+                // arm cannot fire.
+                let op = match name {
+                    "exist?" => "File.exist?",
+                    "exists?" => "File.exists?",
+                    "file?" => "File.file?",
+                    _ => unreachable!(),
+                };
+                self.check_filesystem_io_allowed(op)?;
                 let exists = std::fs::metadata(&path)
                     .map(|m| if name == "file?" { m.is_file() } else { true })
                     .unwrap_or(false);
