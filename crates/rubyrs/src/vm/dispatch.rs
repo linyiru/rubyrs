@@ -4695,6 +4695,69 @@ impl Vm {
                 self.stack.push(Value::new_str(rendered));
                 return Ok(());
             }
+            // BoundMethod / UnboundMethod: render
+            //   `#<Method: RecvClass#name(params)>`
+            //   `#<Method: RecvClass(DefiningClass)#name(params)>`
+            //   `#<UnboundMethod: DefiningClass#name(params)>`
+            // mirroring CRuby's form. The source-location suffix
+            // (`path:line`) CRuby tacks on is omitted — we don't
+            // track per-method definition location yet. Without
+            // this short-circuit the universal `#<Method:0xHEX>`
+            // fallback wins, losing the receiver/owner class and
+            // method name that defensive logging idioms rely on.
+            if let Value::BoundMethod(bid) = &recv {
+                let (recv_v, name_id, params, defining) = {
+                    let (rv, nid, snap) = self.heap.bound_method_full(*bid);
+                    let params = snap
+                        .as_ref()
+                        .map(|m| m.params.join(", "))
+                        .unwrap_or_default();
+                    let defining = snap
+                        .as_ref()
+                        .and_then(|m| m.defining_class.as_ref())
+                        .and_then(|w| w.upgrade())
+                        .map(|c| c.name.clone());
+                    (rv.clone(), nid, params, defining)
+                };
+                let recv_class = match self.class_of(&recv_v) {
+                    Value::Class(c) => c.name.clone(),
+                    _ => "Object".to_string(),
+                };
+                let method_name = self.interner.resolve(name_id).to_string();
+                let class_part = match defining {
+                    Some(d) if d != recv_class => format!("{}({})", recv_class, d),
+                    _ => recv_class,
+                };
+                let s = format!("#<Method: {}#{}({})>", class_part, method_name, params);
+                self.stack.push(Value::new_str(s));
+                return Ok(());
+            }
+            if let Value::UnboundMethod(uid) = &recv {
+                let (class_name, name_id, params) = {
+                    let (cls, nid, snap) = self.heap.unbound_method_full(*uid);
+                    let params = snap
+                        .as_ref()
+                        .map(|m| m.params.join(", "))
+                        .unwrap_or_default();
+                    // CRuby prints the class where the method was
+                    // *defined*, not the class it was captured on:
+                    // `B.instance_method(:foo).inspect` shows
+                    // `A#foo` when foo is inherited from A. Fall
+                    // back to the captured class when the snap is
+                    // absent or the Weak ref has been collected.
+                    let defining = snap
+                        .as_ref()
+                        .and_then(|m| m.defining_class.as_ref())
+                        .and_then(|w| w.upgrade())
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| cls.name.clone());
+                    (defining, nid, params)
+                };
+                let method_name = self.interner.resolve(name_id).to_string();
+                let s = format!("#<UnboundMethod: {}#{}({})>", class_name, method_name, params);
+                self.stack.push(Value::new_str(s));
+                return Ok(());
+            }
             let cls_name = match self.class_of(&recv) {
                 Value::Class(c) => c.name.clone(),
                 _ => "Object".to_string(),
