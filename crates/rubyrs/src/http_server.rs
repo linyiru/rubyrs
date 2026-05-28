@@ -656,7 +656,7 @@ fn error_response(status: u16, msg: String) -> Response<Full<Bytes>> {
 /// block per request instead of returning a hardcoded
 /// response. Caller supplies the block_id; the listener's
 /// connection handlers all close over the same block.
-#[allow(clippy::too_many_arguments)] // 8 args; flat for stage-by-stage growth
+#[allow(clippy::too_many_arguments)] // 9 args; flat for stage-by-stage growth
 async fn serve_with_app_until_shutdown(
     listener: TcpListener,
     block_id: crate::value::ObjId,
@@ -665,6 +665,7 @@ async fn serve_with_app_until_shutdown(
     max_request_body_bytes: usize,
     per_request_io_deadline: Option<std::time::Duration>,
     max_headers: Option<usize>,
+    idle_timeout: Option<std::time::Duration>,
     install_signal_handler: bool,
     mut shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
@@ -754,6 +755,26 @@ async fn serve_with_app_until_shutdown(
                     if let Some(n) = max_headers {
                         builder.max_headers(n);
                     }
+                    // Stage 6e idle timeout (Bun parity).
+                    //
+                    // `header_read_timeout` caps the wait
+                    // for HEADERS bytes — both on a freshly
+                    // accepted TCP connection AND between
+                    // requests on a keep-alive connection
+                    // (when the server is waiting for the
+                    // next request line). That maps exactly
+                    // to Bun's `idleTimeout`: how long an
+                    // otherwise-quiet keep-alive socket can
+                    // hold a worker slot.
+                    //
+                    // hyper requires a Timer installed for
+                    // header_read_timeout to fire — we wire
+                    // TokioTimer only on the connection path
+                    // (cheap, scoped per-conn).
+                    if let Some(d) = idle_timeout {
+                        builder.timer(hyper_util::rt::TokioTimer::new());
+                        builder.header_read_timeout(d);
+                    }
                     let _ = builder.serve_connection(io, svc).await;
                 });
             }
@@ -767,7 +788,7 @@ async fn serve_with_app_until_shutdown(
 /// Stage 4c.3 entry point — wired into the
 /// `__rubyrs_http_serve_with_app(addr, secs, app)` host fn
 /// via `register_host_fns`.
-#[allow(clippy::too_many_arguments)] // 8 args; flat for stage-by-stage growth
+#[allow(clippy::too_many_arguments)] // 9 args; flat for stage-by-stage growth
 pub(crate) fn run_blocking_for_duration_with_app(
     addr: SocketAddr,
     duration: std::time::Duration,
@@ -776,6 +797,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
     max_request_body_bytes: usize,
     per_request_io_deadline: Option<std::time::Duration>,
     max_headers: Option<usize>,
+    idle_timeout: Option<std::time::Duration>,
     install_signal_handler: bool,
 ) -> std::io::Result<SocketAddr> {
     let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -792,6 +814,7 @@ pub(crate) fn run_blocking_for_duration_with_app(
                 per_request_fuel, max_request_body_bytes,
                 per_request_io_deadline,
                 max_headers,
+                idle_timeout,
                 install_signal_handler,
                 shutdown_rx,
             ) => res?,
@@ -913,13 +936,14 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
     });
 
     rt.register_fn("__rubyrs_http_serve_with_app", |args| {
-        // Argument shape (3 / 4 / 5 / 6 / 7 / 8 args, growing):
+        // Argument shape (3 / 4 / 5 / 6 / 7 / 8 / 9 args, growing):
         //   (addr, secs, app)
         //   (addr, secs, app, per_request_fuel)
         //   (addr, secs, app, per_request_fuel, max_body_bytes)
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms)
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers)
         //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler)
+        //   (addr, secs, app, per_request_fuel, max_body_bytes, io_deadline_ms, max_headers, install_signal_handler, idle_timeout_ms)
         //
         // Each positional adds one more security knob. Per
         // ADR 0022 v5 these will eventually move into a
@@ -958,31 +982,61 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             }
             Ok(if max_h == 0 { None } else { Some(max_h as usize) })
         };
-        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, install_signal_handler) = match args {
+        // install_signal_handler validator — flag is binary
+        // today; ambiguous input surfaces ArgumentError
+        // rather than silently treating "2" as truthy.
+        let parse_sig_flag = |sig: i64| -> Result<bool, Trap> {
+            if sig != 0 && sig != 1 {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: format!("install_signal_handler must be 0 or 1, got {sig}"),
+                    },
+                    backtrace: vec![],
+                });
+            }
+            Ok(sig == 1)
+        };
+        // idle_timeout helper: 0 → no cap (rely on the
+        // OS/peer to close); >0 → header_read_timeout cap
+        // applied per-connection (covers both initial-
+        // headers wait and the inter-request gap on a
+        // keep-alive socket).
+        let parse_idle_timeout = |ms: i64| -> Result<Option<Duration>, Trap> {
+            if ms < 0 {
+                return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: format!("idle_timeout_ms must be non-negative, got {ms}"),
+                    },
+                    backtrace: vec![],
+                });
+            }
+            Ok(if ms == 0 { None } else { Some(Duration::from_millis(ms as u64)) })
+        };
+        let (addr_str, duration_secs, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, install_signal_handler, idle_timeout) = match args {
             [Value::Str(addr), Value::Int(secs), Value::Block(id)] => {
-                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None, None, false)
+                (addr.to_string_lossy(), *secs, *id, None, DEFAULT_MAX_BODY_BYTES, None, None, false, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None, None, false)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), DEFAULT_MAX_BODY_BYTES, None, None, false, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None, None, false)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, None, None, false, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
                 check_non_negative("io_deadline_ms", *io_ms)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), None, false)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), None, false, None)
             }
             [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h)] => {
                 check_non_negative("per_request_fuel", *fuel)?;
                 check_non_negative("max_body_bytes", *max_body)?;
                 check_non_negative("io_deadline_ms", *io_ms)?;
                 let max_headers = parse_max_headers(*max_h)?;
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, false)
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, false, None)
             }
             // Stage 6d: 8-arg form with install_signal_handler
             // flag. Integer 0/1 (rubyrs has no native Bool yet
@@ -996,20 +1050,27 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 check_non_negative("max_body_bytes", *max_body)?;
                 check_non_negative("io_deadline_ms", *io_ms)?;
                 let max_headers = parse_max_headers(*max_h)?;
-                if *sig != 0 && *sig != 1 {
-                    return Err(Trap {
-                        err: RubyError::ArgumentError {
-                            msg: format!("install_signal_handler must be 0 or 1, got {sig}"),
-                        },
-                        backtrace: vec![],
-                    });
-                }
-                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, *sig == 1)
+                let install_sig = parse_sig_flag(*sig)?;
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, None)
+            }
+            // Stage 6e: 9-arg form adds idle_timeout_ms.
+            // Caps keep-alive idle time per-connection via
+            // hyper's header_read_timeout (fires for both
+            // slow initial headers AND idle gap between
+            // requests on keep-alive). 0 → no cap.
+            [Value::Str(addr), Value::Int(secs), Value::Block(id), Value::Int(fuel), Value::Int(max_body), Value::Int(io_ms), Value::Int(max_h), Value::Int(sig), Value::Int(idle_ms)] => {
+                check_non_negative("per_request_fuel", *fuel)?;
+                check_non_negative("max_body_bytes", *max_body)?;
+                check_non_negative("io_deadline_ms", *io_ms)?;
+                let max_headers = parse_max_headers(*max_h)?;
+                let install_sig = parse_sig_flag(*sig)?;
+                let idle = parse_idle_timeout(*idle_ms)?;
+                (addr.to_string_lossy(), *secs, *id, Some(*fuel as u64), *max_body as usize, parse_io_deadline(*io_ms), max_headers, install_sig, idle)
             }
             _ => {
                 return Err(Trap {
                     err: RubyError::ArgumentError {
-                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0, max_headers: Integer = 0, install_signal_handler: Integer = 0)"
+                        msg: "__rubyrs_http_serve_with_app(addr: String, duration_secs: Integer, app: Proc/Lambda, per_request_fuel: Integer = nil, max_body_bytes: Integer = 16MB, io_deadline_ms: Integer = 0, max_headers: Integer = 0, install_signal_handler: Integer = 0, idle_timeout_ms: Integer = 0)"
                             .to_string(),
                     },
                     backtrace: vec![],
@@ -1035,7 +1096,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 
         let duration = Duration::from_secs(duration_secs as u64);
         let bound = run_blocking_for_duration_with_app(
-            addr, duration, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, install_signal_handler,
+            addr, duration, block_id, per_request_fuel, max_body_bytes, io_deadline, max_headers, idle_timeout, install_signal_handler,
         ).map_err(|e| Trap {
             err: RubyError::RuntimeError {
                 msg: format!("http_serve_with_app: {e}"),
@@ -1497,6 +1558,87 @@ mod tests {
         assert!(
             msg.contains("install_signal_handler must be 0 or 1"),
             "expected ArgumentError mentioning install_signal_handler, got: {msg}",
+        );
+    }
+
+    /// Stage 6e: when `idle_timeout_ms` is set, a TCP
+    /// connection that never sends headers gets closed by
+    /// the server within the cap. We connect, send
+    /// nothing, then call `read_to_end` — it should
+    /// observe EOF promptly rather than blocking until the
+    /// duration shutdown.
+    ///
+    /// `header_read_timeout` covers both the initial-
+    /// headers wait AND the inter-request idle gap on a
+    /// keep-alive connection — same knob, both shapes.
+    #[test]
+    fn idle_connection_closed_by_idle_timeout() {
+        use std::io::Read;
+        use std::net::TcpStream;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let server_addr = "127.0.0.1:18102";
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let client = TcpStream::connect(server_addr).expect("connect");
+            // Generous read timeout — we expect the server
+            // to FIN well before this fires; the assertion
+            // below catches the regression if it doesn't.
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut buf = Vec::new();
+            let started = Instant::now();
+            let result = (&client).read_to_end(&mut buf);
+            (started.elapsed(), result.is_ok(), buf.len())
+        });
+
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        // 9-arg form: idle_timeout_ms = 300
+        rt.eval(&format!(r#"
+            app = ->(env) {{ [200, {{}}, []] }}
+            __rubyrs_http_serve_with_app(
+              "{server_addr}", 2, app,
+              1_000_000, 10_000, 0, 0, 0, 300
+            )
+        "#), "stage_6e_idle_timeout.rb").expect("server ran");
+
+        let (elapsed, ok, bytes_read) = client_thread.join().expect("client thread");
+        // Server should close within ~1.5s (cap = 300ms +
+        // scheduling slack). If it took longer, the cap
+        // didn't fire and the 2s duration shutdown closed
+        // us instead — the regression we want to catch.
+        assert!(
+            ok,
+            "expected clean EOF from server idle-close, got an error",
+        );
+        assert_eq!(
+            bytes_read, 0,
+            "server should close without writing bytes; got {bytes_read} bytes",
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "expected idle close <1.5s, took {elapsed:?} — idle_timeout cap likely not firing",
+        );
+    }
+
+    /// Stage 6e: `idle_timeout_ms < 0` is an ArgumentError.
+    #[test]
+    fn idle_timeout_rejects_negative_value() {
+        let mut rt = crate::Runtime::new();
+        super::register_host_fns(&mut rt);
+        let err = rt.eval(r#"
+            app = ->(env) { [200, {}, []] }
+            __rubyrs_http_serve_with_app(
+              "127.0.0.1:0", 0, app,
+              1_000_000, 10_000, 0, 0, 0, -1
+            )
+        "#, "stage_6e_idle_neg.rb").expect_err("should reject idle=-1");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("idle_timeout_ms must be non-negative"),
+            "expected ArgumentError mentioning idle_timeout_ms, got: {msg}",
         );
     }
 
