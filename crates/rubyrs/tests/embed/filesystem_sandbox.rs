@@ -346,10 +346,25 @@ fn alloc_tempdir(tag: &str) -> (TempDirGuard, std::path::PathBuf, std::path::Pat
     let raw = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("rubyrs-allowlist-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&raw).expect("mkdir tempdir");
+    // Construct the guard against the pre-canonicalized path
+    // IMMEDIATELY after `create_dir_all` succeeds, so any panic
+    // during the remaining init steps (canonicalize, probe write,
+    // clone) still triggers cleanup on unwind. Without this
+    // early commit, a panic between mkdir and the original
+    // bottom-of-function guard construction would leak the
+    // half-initialised dir under `CARGO_TARGET_TMPDIR`.
+    //
+    // Reassigning `.path` after canonicalize is fine because the
+    // canonical form refers to the same on-disk inode that `raw`
+    // points at (`/tmp` → `/private/tmp` is just a symlink hop on
+    // macOS — same content). `remove_dir_all` on either path
+    // cleans the same dir; choosing the canonical form keeps the
+    // guard's stored path consistent with what callers see.
+    let mut guard = TempDirGuard { path: raw.clone() };
     let dir = std::fs::canonicalize(&raw).expect("canonicalize tempdir");
+    guard.path = dir.clone();
     let probe = dir.join("probe.txt");
     std::fs::write(&probe, "probe contents").expect("write probe");
-    let guard = TempDirGuard { path: dir.clone() };
     (guard, dir, probe)
 }
 
@@ -965,5 +980,43 @@ fn temp_dir_guard_cleans_up_on_panic_unwind() {
     assert!(
         !leaked_path.exists(),
         "TempDirGuard::drop did not clean up after panic — leaked {leaked_path:?}",
+    );
+}
+
+#[test]
+fn temp_dir_guard_covers_init_window_panic() {
+    // Models the failure shape that motivates the EARLY guard
+    // construction in `alloc_tempdir`: a panic that fires AFTER
+    // `create_dir_all` succeeded but BEFORE the rest of init
+    // finishes (canonicalize, probe write). With the guard
+    // committed against the raw path right after mkdir, the
+    // partial dir still gets cleaned on unwind.
+    //
+    // Pre-fix, `alloc_tempdir` constructed the guard at the
+    // bottom — so a panic in the middle leaked the dir. Post-fix,
+    // the guard commits early; this test exercises the
+    // commit-then-panic shape directly, without needing to
+    // inject a failure into stdlib calls (canonicalize / write
+    // don't take an injectable error path).
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let leaked_path: std::path::PathBuf = {
+        let mut captured = None;
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            // Mirror the helper's pre-canonicalize state: mkdir
+            // a path, then build the guard against it BEFORE any
+            // further init step. Now a panic must still clean up.
+            let raw = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("rubyrs-allowlist-init-window-{}", std::process::id()));
+            std::fs::create_dir_all(&raw).expect("mkdir");
+            captured = Some(raw.clone());
+            let _guard = TempDirGuard { path: raw };
+            // Simulate canonicalize / probe-write panicking.
+            panic!("simulated init failure");
+        }));
+        captured.expect("inner closure should have stashed the path before panicking")
+    };
+    assert!(
+        !leaked_path.exists(),
+        "early-bound TempDirGuard did not clean up after init-window panic — leaked {leaked_path:?}",
     );
 }
