@@ -292,6 +292,134 @@ impl Vm {
                         };
                         Some(Value::Array(nid))
                     }
+                    // `h.first` — returns the first `[k, v]` pair Array
+                    // (or nil on empty). `h.first(n)` — returns the
+                    // first n pairs as Array<[k, v]>. Mirrors
+                    // Array#first; insertion order is the Hash's
+                    // canonical iteration order.
+                    // `h.one?` (no block) — true iff the Hash
+                    // has exactly one entry. Every Hash entry is
+                    // truthy (a `[k, v]` pair), so the no-block
+                    // Enumerable shape collapses to a size check.
+                    // Block form lives in iter.rs.
+                    ("one?", []) => Some(Value::Bool(self.heap.hash(id).len() == 1)),
+                    ("first", []) => {
+                        let pairs = self.heap.hash(id);
+                        if pairs.is_empty() { return Ok(Some(Value::Nil)); }
+                        let (k, v) = pairs[0].clone();
+                        // Pin the receiver + the chosen k/v across
+                        // maybe_gc / check_alloc / alloc — without
+                        // an explicit pin the receiver-id from
+                        // do_call's recv-pop is held only in a
+                        // Rust local, and any heap-ref child of
+                        // k/v could be swept under STRESS_GC.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                        if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                        Some(Value::Array(pid))
+                    }
+                    // BigInt arg → RangeError, mirroring
+                    // Array#first / #last at array.rs:511. A
+                    // BigInt take-count is by construction larger
+                    // than i64::MAX and can never be a meaningful
+                    // size for a heap-bound collection.
+                    #[cfg(feature = "bignum")]
+                    ("first", [Value::BigInt(_)]) => {
+                        return Err(self.trap(RubyError::RangeError {
+                            msg: "bignum too big to convert into `long'".to_string(),
+                        }));
+                    }
+                    ("first", [Value::Int(n)]) => {
+                        if *n < 0 {
+                            return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                msg: "attempt to take negative size".to_string(),
+                            }));
+                        }
+                        // Convert via try_from + usize::MAX
+                        // saturation (mirrors Array#first(n) at
+                        // array.rs:483) so a huge `n` on a 32-bit
+                        // target (wasm32) still falls through to
+                        // "take all" rather than truncating.
+                        let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
+                        let take = n_usz.min(self.heap.hash(id).len());
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)[..take].to_vec();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        let mut pair_ids: Vec<Value> = Vec::with_capacity(take);
+                        for (k, v) in pairs {
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                            g.pin(Value::Array(pid));
+                            pair_ids.push(Value::Array(pid));
+                        }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let aid = g.vm.heap.alloc(HeapObj::Array(pair_ids));
+                        Some(Value::Array(aid))
+                    }
+                    // `h.min` / `h.max` (no block) — find min/max
+                    // entry via lexicographic compare on the
+                    // `[k, v]` pair (key first, value tiebreaker).
+                    // Returns nil on empty Hash. The pair is
+                    // materialised as a fresh `[k, v]` Array. Block
+                    // form (`h.min { |a, b| ... }`) is out of subset.
+                    //
+                    // Comparison is done inline via two
+                    // `value_cmp_v_heap` calls per step (key
+                    // first, value if keys equal) instead of
+                    // materialising a throwaway pair Array per
+                    // pairwise compare — avoids O(n) heap
+                    // allocations and the corresponding
+                    // max_live pressure.
+                    ("min", []) | ("max", []) => {
+                        let pairs = self.heap.hash(id).clone();
+                        if pairs.is_empty() { return Ok(Some(Value::Nil)); }
+                        let want_max = name == "max";
+                        let mut best_idx = 0usize;
+                        for i in 1..pairs.len() {
+                            let ord = {
+                                let (ak, av) = (&pairs[best_idx].0, &pairs[best_idx].1);
+                                let (bk, bv) = (&pairs[i].0, &pairs[i].1);
+                                let k_ord = crate::vm::value_cmp_v_heap(
+                                    ak, bk, &self.interner, &self.heap,
+                                );
+                                match k_ord {
+                                    Some(std::cmp::Ordering::Equal) => {
+                                        crate::vm::value_cmp_v_heap(
+                                            av, bv, &self.interner, &self.heap,
+                                        )
+                                    }
+                                    other => other,
+                                }
+                            };
+                            let take_b = match ord {
+                                Some(std::cmp::Ordering::Less) => want_max,
+                                Some(std::cmp::Ordering::Greater) => !want_max,
+                                Some(std::cmp::Ordering::Equal) => false,
+                                None => return Ok(None),
+                            };
+                            if take_b { best_idx = i; }
+                        }
+                        let (k, v) = pairs[best_idx].clone();
+                        // Pin receiver + winning k/v across the
+                        // final alloc — receiver is held only in
+                        // the Rust local from do_call's recv-pop,
+                        // and heap-ref k/v could otherwise be
+                        // swept by maybe_gc under STRESS_GC.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                        if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                        g.vm.maybe_gc();
+                        g.vm.check_alloc()?;
+                        let pid = g.vm.heap.alloc(HeapObj::Array(vec![k, v]));
+                        Some(Value::Array(pid))
+                    }
                     ("dup", []) => {
                         // Shallow copy: clones the pair vector and
                         // re-allocates a new Hash heap slot. Pair
