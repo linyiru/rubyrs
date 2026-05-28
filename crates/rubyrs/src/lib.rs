@@ -1080,22 +1080,27 @@ impl Runtime {
         }
         let lp_id = self.vm.ensure_load_path()
             .expect("ICE: failed to allocate $LOAD_PATH array during Config::load_paths seeding");
+        // Convert PathBuf → Ruby String upfront. `to_string_lossy`
+        // is acceptable here — paths originate from `Config` and
+        // are host-supplied (assumed well-formed). `$LOAD_PATH`
+        // entries are always Strings in Ruby; CRuby coerces non-
+        // string entries via `File.expand_path`.
+        let seeds: Vec<crate::value::Value> = paths
+            .into_iter()
+            .map(|p| crate::value::Value::new_str(p.to_string_lossy().into_owned()))
+            .collect();
+        // Splice the seeds in at index 0 in a single operation.
+        // `splice(0..0, iter)` inserts iter's elements at the
+        // start in iteration order, so `seeds[0]` lands at
+        // $LOAD_PATH[0] — same prefix-of-Array semantics as the
+        // earlier reverse-insert loop, but O(N) instead of O(N²)
+        // (the earlier `insert(0)` per element shifted the
+        // existing tail every iteration). Negligible for typical
+        // embedder configs (<10 paths) but the change is free
+        // and lifts the worst-case ceiling for hosts with
+        // large seed lists.
         let arr = self.vm.heap.array_mut(lp_id);
-        // Walk in reverse and insert at index 0 so that the FIRST
-        // path in the Vec lands at $LOAD_PATH[0], independent of
-        // whether the Array was previously empty. This is the
-        // semantics the doc promises ("paths[0] → index 0") and
-        // the only ordering that survives a future preamble
-        // change that pre-fills `$LOAD_PATH`.
-        for p in paths.into_iter().rev() {
-            // PathBuf → String via `to_string_lossy` so the value
-            // stored in the Array is a Ruby String (`$LOAD_PATH`
-            // entries are always Strings in Ruby; CRuby coerces
-            // non-string entries via `File.expand_path`). Lossy
-            // is acceptable here — paths originating from `Config`
-            // are host-supplied and assumed well-formed.
-            arr.insert(0, crate::value::Value::new_str(p.to_string_lossy().into_owned()));
-        }
+        arr.splice(0..0, seeds);
     }
 
     /// Construct a Runtime skeleton (fresh Vm, no preamble) shared
