@@ -58,8 +58,7 @@ fn default_config_has_none_load_paths() {
     // initialised to an empty Vec on first read).
     let arr = match &v {
         Value::Array(id) => rt.resolve_array(&Value::Array(*id))
-            .expect("array slot should be readable")
-            .to_vec(),
+            .expect("array slot should be readable"),
         other => panic!("expected Array, got {other:?}"),
     };
     assert!(arr.is_empty(), "default $LOAD_PATH must be empty; got {arr:?}");
@@ -82,8 +81,7 @@ fn load_paths_seed_visible_at_first_eval() {
     let v = rt.eval(r#"$LOAD_PATH"#, "test.rb").unwrap();
     let arr = match &v {
         Value::Array(id) => rt.resolve_array(&Value::Array(*id))
-            .expect("array slot readable")
-            .to_vec(),
+            .expect("array slot readable"),
         other => panic!("expected Array, got {other:?}"),
     };
     // Order matches Vec insertion order — first element of the
@@ -123,8 +121,7 @@ fn script_can_unshift_on_top_of_seed() {
         .unwrap();
     let arr = match &v {
         Value::Array(id) => rt.resolve_array(&Value::Array(*id))
-            .expect("array slot readable")
-            .to_vec(),
+            .expect("array slot readable"),
         other => panic!("expected Array, got {other:?}"),
     };
     assert_eq!(arr.len(), 2);
@@ -199,8 +196,7 @@ fn apply_config_does_not_reseed_load_paths() {
     let v = rt.eval(r#"$LOAD_PATH"#, "test.rb").unwrap();
     let arr = match &v {
         Value::Array(id) => rt.resolve_array(&Value::Array(*id))
-            .expect("array slot readable")
-            .to_vec(),
+            .expect("array slot readable"),
         other => panic!("expected Array, got {other:?}"),
     };
     // Both pre-reconfig entries survive; the new seed is dropped.
@@ -225,8 +221,7 @@ fn empty_load_paths_seed_is_noop() {
     let v = rt.eval(r#"$LOAD_PATH"#, "test.rb").unwrap();
     let arr = match &v {
         Value::Array(id) => rt.resolve_array(&Value::Array(*id))
-            .expect("array readable")
-            .to_vec(),
+            .expect("array readable"),
         other => panic!("expected Array, got {other:?}"),
     };
     assert!(arr.is_empty(), "Some(vec![]) should produce empty $LOAD_PATH");
@@ -258,8 +253,7 @@ fn load_paths_seed_survives_reset() {
     let v = rt.eval(r#"$LOAD_PATH"#, "test.rb").unwrap();
     let arr = match &v {
         Value::Array(id) => rt.resolve_array(&Value::Array(*id))
-            .expect("array readable")
-            .to_vec(),
+            .expect("array readable"),
         other => panic!("expected Array, got {other:?}"),
     };
     let strs: Vec<String> = arr.iter().map(|v| match v {
