@@ -2,12 +2,23 @@
 
 ## Status
 
-Proposed (2026-05-27). **v3** — third revision, addressing 3
-blockers + 7 majors + 4 prior-art accuracy issues flagged by
-parallel review of v2. v1 (commit `88564485`) and v2 (commit
-`ea92dec1`) kept in git history. First Tier 3 native battery
-ADR per [ADR 0019 v3](0019-tier2-tier3-boundary.md) Rule 7;
-establishes the template for subsequent battery ADRs.
+Proposed (2026-05-27). **v4** — fourth revision, closing
+3 blockers + 9 majors + 8 minors flagged by third parallel
+review of v3. v1 (commit `88564485`), v2 (commit `ea92dec1`),
+and v3 (commit `ccf9f4c7`) kept in git history. First Tier 3
+native battery ADR per [ADR 0019 v3](0019-tier2-tier3-boundary.md)
+Rule 7; establishes the template for subsequent battery ADRs.
+
+**v3 → v4 fixes**: defines the previously-asserted-but-
+undefined `VmCallable` sealed trait; corrects `on_worker_boot`
+type signature (was over-constrained); documents
+ResourceExhausted-mid-cext leak semantics; removes incorrect
+Class g claim (tokio current-thread doesn't spawn a separate
+reactor thread); fixes 5+ `vm.rs` field cross-reference errors;
+adds Cowboy/BEAM and OpenResty as missing prior art; reframes
+VmBorrow's `!Send` enforcement honestly (the actual mechanism
+is the synchronous `FnOnce` closure signature, not the `!Send`
+marker on the guard).
 
 ## Context
 
@@ -161,7 +172,14 @@ pub struct HttpServerConfig {
     /// listener accepts. Use to re-open database connections,
     /// re-seed RNG state, etc. — anything that doesn't
     /// survive `fork(2)` cleanly.
-    pub on_worker_boot: Option<Box<dyn Fn(&mut Runtime) + Send + Sync>>,
+    ///
+    /// No `Send + Sync` bound on the closure: `fork(2)` is
+    /// a process boundary, not a thread boundary; the closure
+    /// runs on a fresh thread/process and never crosses
+    /// thread boundaries within the worker. Permitting `!Send`
+    /// captures (e.g. `Rc`-based config builders) keeps the
+    /// API ergonomic for embedders.
+    pub on_worker_boot: Option<Box<dyn Fn(&mut Runtime)>>,
 }
 ```
 
@@ -176,44 +194,123 @@ thread does NOT relax `Send`). The mandatory construct is
 `tokio::task::LocalSet::spawn_local`, whose bound is
 `Future + 'static`.
 
-**v3 decision**: introduce `VmBorrow<'_>` as a load-bearing
-type, NOT optional:
+**v4 decision** (corrected from v3 which over-claimed the
+type-system mechanism): introduce `VmBorrow<'_>` as a load-
+bearing type. The **actual enforcement** is the
+`with(impl FnOnce(&mut Vm) -> R)` synchronous-closure
+signature — a `FnOnce` body syntactically cannot contain
+`.await` (it returns `R` directly, not a `Future`). The
+`!Send` marker on `VmBorrow` is belt-and-suspenders for any
+direct field-access pattern someone might add later; on
+`LocalSet`, `!Send` futures ARE allowed, so the `!Send`
+marker alone does not block `.await`-across-`VmBorrow`.
 
 ```rust
 /// RAII guard for a synchronous Vm borrow inside an async
 /// request handler. Construction acquires the Vm; Drop
-/// releases. The lifetime is the synchronous scope only —
-/// holding a VmBorrow across an `.await` is a compile error
-/// (the type is `!Send`, so even on a current-thread
-/// LocalSet the compiler rejects await-spanning borrows
-/// because Future::poll requires Send for spawn — and our
-/// internal use enforces this through a sealed trait
-/// `VmCallable` that requires synchronous closures).
+/// releases. The lifetime is the synchronous scope of the
+/// `with(FnOnce)` call — the closure signature is what
+/// prevents `.await` while the borrow is active.
 pub struct VmBorrow<'a> {
     vm: &'a mut Vm,
-    // PhantomData<*mut ()> guarantees !Send + !Sync
+    // PhantomData<*mut ()> makes the guard !Send + !Sync.
+    // Required so that if a future were to capture a
+    // VmBorrow directly (rather than acquire it via `with`),
+    // tokio::spawn (which requires Send) rejects it. On
+    // LocalSet::spawn_local !Send is permitted, so this
+    // marker is defence-in-depth rather than the primary
+    // enforcement.
     _not_send: PhantomData<*mut ()>,
 }
 
 impl<'a> VmBorrow<'a> {
     /// Run a synchronous closure with exclusive Vm access.
-    /// The closure cannot be async — enforced at the trait
-    /// level via the sealed `VmCallable` trait.
+    /// `FnOnce -> R` (not `-> impl Future<Output = R>`)
+    /// syntactically excludes async bodies and `.await`
+    /// while the borrow is live — this is the actual
+    /// enforcement.
+    ///
+    /// Closures must not enter a tokio runtime via
+    /// `Handle::block_on` (would re-enter the current
+    /// runtime and panic). See `VmCallable` sealed-trait
+    /// guard for host-fn registration below.
     pub fn with<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
         f(self.vm)
     }
 }
-
-// Drop restores any per-request transient state (the
-// `reset_between_requests` discipline can hook here for
-// "between request handlers" cleanup vs the inter-request
-// boundary).
 ```
 
-This corrects v2's "convention not type-system" gap. The
-**single-threaded LocalSet is the runtime invariant; the
-type system enforces no-await-across-borrow via `!Send +
-synchronous closure`**.
+#### Host-fn entry-point protection via the `VmCallable` sealed trait
+
+`register_fn` accepts host functions that get called from
+inside `app.call(env)` — i.e., from inside `VmBorrow::with`.
+A host fn that calls `tokio::runtime::Handle::block_on`
+internally would re-enter the current-thread runtime and
+panic ("Cannot start a runtime from within a runtime"). The
+sealed `VmCallable` trait makes this a compile-time error
+for the `_http_server` path:
+
+```rust
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Marker trait for closures safe to call inside a
+/// VmBorrow. The blanket impl below is the only impl;
+/// no embedder can provide their own (the trait is
+/// sealed via `sealed::Sealed`).
+pub trait VmCallable<Args, R>: sealed::Sealed {
+    fn call(&self, args: Args) -> R;
+}
+
+// Blanket impl: any sync FnMut/Fn closure that returns a
+// non-Future R is VmCallable. Async closures (returning
+// impl Future) do not match this bound — they have to use
+// the separate `register_async_fn` path which runs on
+// the host-side tokio runtime outside the VmBorrow.
+impl<F, Args, R> sealed::Sealed for F
+where
+    F: Fn(Args) -> R,
+    R: 'static + Send,         // R: Send ensures no Future captures
+{}
+impl<F, Args, R> VmCallable<Args, R> for F
+where
+    F: Fn(Args) -> R,
+    R: 'static + Send,
+{
+    fn call(&self, args: Args) -> R { self(args) }
+}
+
+impl Runtime {
+    /// Existing API; the closure must satisfy VmCallable
+    /// (sync, non-Future return). Async host fns get a
+    /// separate API (register_async_fn) — out of v1 scope.
+    pub fn register_fn<F>(&mut self, name: &str, f: F)
+    where
+        F: VmCallable<Args, R> + 'static,
+        // ...
+    { /* ... */ }
+}
+```
+
+This matters because `_http_server` is the first context
+where `register_fn`'d host fns run inside an async outer
+context. Other contexts (`Runtime::eval` from a non-async
+embedder) don't need `VmCallable` enforcement. v1 keeps
+the existing `register_fn` signature; `VmCallable` is the
+trait bound that the type-checker imposes implicitly via
+the function's signature. **Embedders writing host fns
+that need to do async I/O register via `register_async_fn`
+(not in v1 — they pre-buffer their work or do it
+synchronously)**.
+
+This corrects v2's "convention not type-system" gap *and*
+v3's hand-waving about VmCallable. The **single-threaded
+LocalSet is the runtime invariant; the synchronous
+`FnOnce` closure signature in `VmBorrow::with` is the
+compile-time guard against `.await` within the borrow;
+`VmCallable` is the compile-time guard against host-fn-
+introduced async re-entrance**.
 
 ### Vm ownership across futures — explicit ADR 0013 alignment
 
@@ -247,7 +344,7 @@ async fn handle_request(
     cfg: &HttpServerConfig,
 ) -> hyper::Response<Full<Bytes>> {
     // Phase A: read body (no Vm access) — await happens here
-    let body_bytes = Limited::new(req.body(), cfg.max_request_body_bytes.unwrap_or(16*1024*1024))
+    let body_bytes = Limited::new(req.into_body(), cfg.max_request_body_bytes.unwrap_or(16*1024*1024))
         .collect().await?;
 
     // Phase B: synchronous Vm work (no .await inside)
@@ -272,13 +369,20 @@ async fn handle_request(
 
 - **Class a (owned-resource I/O)** — server binds to a
   caller-supplied `(host, port)`.
-- **Class g (native-thread spawn)** — tokio uses an internal
-  I/O reactor thread even on `current_thread` runtime.
 
 Classes **NOT** claimed:
 - ❌ Class c (multi-host network reach) — server is
   **inbound only**.
 - ❌ Class f (mmap / heap-cap bypass) — no.
+- ❌ **Class g (native-thread spawn)** — `tokio::runtime::Builder::new_current_thread()`
+  drives the I/O reactor on the same thread via
+  `Runtime::block_on`. There is no separate reactor thread
+  (that's the multi-threaded runtime). The blocking thread
+  pool for `spawn_blocking` is NOT initialised either (we
+  never call `spawn_blocking`). v3 incorrectly claimed
+  Class g; v4 removes the claim. Class g would re-enter the
+  taxonomy only if a future battery uses
+  `Builder::new_multi_thread()` or `spawn_blocking`.
 
 ### V1 body handling — buffered with DoS-safe enforcement
 
@@ -377,28 +481,99 @@ deadline. This is the standard `!Send` interpreter limitation
 out-of-band thread access that our single-thread design
 doesn't have.
 
+#### `ResourceExhausted` mid-cext — documented leak semantics
+
+When `per_request_fuel` exhausts inside a host_fn invocation
+that itself called into cext code (mid-`rb_funcallv`), the
+trap propagation cascade is:
+
+1. Ruby fuel check inside the cext-driven code path raises
+   `Trap::ResourceExhausted`
+2. ADR 0013's `VmPtrGuard::Drop` restores `CURRENT_VM_PTR`
+   correctly (verified by the synthetic Miri tests in
+   ADR 0013) — `CURRENT_VM_PTR` invariant is preserved
+3. Trap unwinds through the cext call back to the host_fn
+   site, then up to the battery's `app.call` boundary
+4. Battery catches the trap, returns 503, calls
+   `reset_between_requests` before next request
+
+**What `reset_between_requests` covers**:
+- ✅ `vm.pinned` — cleared, so Ruby-side GC roots that the
+  cext registered via `rb_gc_register_mark_object` shape APIs
+  don't keep dead objects alive
+
+**What `reset_between_requests` does NOT cover (real leak)**:
+- ❌ **C-side `malloc`'d memory** mid-construction. If a
+  cext was in the middle of `rb_data_typed_object_wrap`,
+  it has called `malloc` for a TypedData payload but not
+  yet handed the pointer to a `Value::Object`'s
+  `TypedData` slot. That memory is leaked permanently —
+  no Ruby-side reference to free it.
+- ❌ **C-side mutexes / file handles** acquired by the cext
+  but not yet released through normal cleanup.
+- ❌ **`rb_gc_register_address`-style permanent GC pins**
+  the cext set up but didn't unregister — these leak via
+  the GC's permanent-roots table (not `vm.pinned`).
+
+**Implications for embedders**:
+- Trusted-cext deploys: the leak is bounded by cext code
+  paths that actually allocate before trapping. Most
+  msgpack / flori_json paths don't reach this state.
+- Untrusted-script + trusted-cext deploys: an attacker
+  cannot directly exploit this (the cext code is theirs,
+  not script-controllable). Acceptable.
+- Untrusted-cext deploys (not Tier-1 supported): an
+  attacker could trigger the leak unboundedly per worker.
+  **Pre-fork supervisor restart on memory threshold is
+  the operational mitigation** (Puma's `worker_check_interval`
+  + `nakayoshi_fork` equivalent).
+
+This is documented as a known limitation in
+`docs/CEXT_SAFETY.md` (new doc, lands with Phase H1). The
+trap-survives-cext path itself is correct per ADR 0013;
+the leak is a separate concern about C-side resource
+ownership that no purely-Ruby-side cleanup can address.
+
 ### `Runtime::reset_between_requests()` — complete field spec
 
 After each request the Vm needs lightweight cleanup between
 handler invocations. Full `Runtime::reset()` is heavy (10ms
 preamble re-load). The new `reset_between_requests()`:
 
-**Must clear** (per-request transient state):
+**Must clear** (per-request transient state — verified
+against `vm.rs:260-529`):
 - `vm.stack` — operand stack
 - `vm.frames` — call frame stack (down to base)
-- `vm.pending_method_return` — control flow signal
+- `vm.method_return` — control flow signal (v3 typo'd as
+  `pending_method_return`; the actual field is
+  `method_return` at `vm.rs:472`)
 - `vm.pending_loop_transfer` — control flow signal
 - `vm.break_signaled` — control flow signal
 - `vm.suppress_call_result_push` — call protocol flag
 - `vm.bypass_visibility_once` — send/__send__ flag
 - `vm.pinned` — GC roots set by cext calls (request-scoped;
-  not clearing causes slow leak)
+  not clearing causes slow leak — see "ResourceExhausted +
+  cext interaction" section below for the C-side leak case
+  that's NOT covered here)
 - `vm.class_stack` — class body context stack
 - `vm.class_visibility_stack` — private/protected/public mode
-- `vm.last_match` (regex `$~`) — leaks request data
-- `vm.last_read_line` (`$_`) — same
-- Per-frame magic globals (`$&`, `$'`, `$\``, `$1..$9`) —
-  same
+- `#[cfg(feature = "regex")] vm.last_match` — regex `$~`.
+  Source of truth for `$&`, `$'`, `` $` ``, `$1..$9`
+  (computed on-demand from `last_match` per `vm.rs:373-382`
+  docs). v3 incorrectly listed those as "per-frame magic
+  globals" — they aren't; clearing `last_match` clears all
+  of them. The clearing line itself must be `#[cfg]`-gated
+  or it fails to compile under `--no-default-features`.
+- `vm.last_read_line` — `$_`
+- **`vm.globals`** — user-set `$foo` global variables.
+  v3 omitted this classification. The decision: **clear**.
+  Rationale: global variables that an app sets during a
+  request would leak across requests under a long-running
+  server, exposing per-request state (auth tokens, user
+  ids) to subsequent unrelated requests. This is a real
+  bug surface. Embedders who want app-lifetime globals
+  use class/module-level constants (which are NOT cleared)
+  instead.
 
 **Must assert clean state** (programmer-error check):
 - `CURRENT_VM_PTR` should be null (no cext call in flight);
@@ -431,10 +606,25 @@ impl Runtime {
     /// embedders running other request-shaped loops.
     pub fn reset_between_requests(&mut self);
 
-    /// Refill the per-eval fuel budget. Idempotent; called
-    /// before each `app.call(env)`. None argument resets to
-    /// the embedder's `Config::fuel` value (lifetime budget
-    /// semantics).
+    /// Set the per-eval fuel budget. **Set semantics** —
+    /// overwrites the current `vm.fuel` counter, does NOT
+    /// add. Called by `_http_server` before each
+    /// `app.call(env)`.
+    ///
+    /// Argument semantics:
+    /// - `Some(n)` — sets `vm.fuel = Some(n)`. Saturating;
+    ///   does not cap against `Config::fuel`.
+    /// - `None` AND `Config::fuel = Some(c)` — sets
+    ///   `vm.fuel = Some(c)` (re-anchors to the embedder's
+    ///   lifetime cap, restoring "no per-request override"
+    ///   semantics)
+    /// - `None` AND `Config::fuel = None` — sets
+    ///   `vm.fuel = None` (unlimited; same as default)
+    ///
+    /// Mid-request behaviour is unspecified — host fns must
+    /// not call this. (The `VmCallable` sealed-trait gate
+    /// in v4 makes this enforceable later; for v1 it's a
+    /// reviewer-judgement rule.)
     pub fn refill_fuel(&mut self, per_request: Option<u64>);
 }
 ```
@@ -543,6 +733,15 @@ registers handlers (avoiding double-registration conflicts).
 - Windows: only `ctrl_c` (no SIGTERM equivalent in
   `tokio::signal`)
 
+**Simultaneous-signal behaviour**: `tokio::select!` polls
+branches in **random order** by default (anti-starvation
+randomisation via the macro's internal `poll_fn` shuffle).
+If SIGINT and SIGTERM fire on the same tick, one branch
+wins this select iteration and the loop breaks; the
+remaining signal's future is dropped (the kernel-side
+signal was already delivered to the process). Outcome:
+graceful shutdown either way. Acceptable.
+
 ### env hash construction
 
 Rack SPEC env hash, built in Rust per request:
@@ -612,31 +811,40 @@ get the lossy form (matches CRuby behaviour on Rack 3).
 
 ### StringIO completeness for `rack.input`
 
-`stdlib_vendor/stringio.rb` (184 LOC, shipped) covers:
-`#read(n)`, `#gets`, `#each`, `#each_line`, `#rewind`,
-`#size`, `#eof?`, `#close`.
+`stdlib_vendor/stringio.rb` (184 LOC, shipped) **already
+provides** (v4 audit against actual file):
+`#read(1-arg)`, `#gets(no-arg)`, `#each_line`, `#rewind`,
+`#size`, `#eof?`, `#close`, `#string` (getter),
+`#pos` (line 37), `#pos=` (line 41).
 
-**Missing for v1, added in H1 scope** (Rack SPEC + middleware
-real-world usage):
+**Truly missing for v1, added in H1 scope** (Rack SPEC +
+middleware real-world usage — v3 incorrectly listed
+`#pos`/`#pos=` as additions; they already exist):
 
 - `#read(n, buffer)` — 2-arg form. **Rack SPEC mandates this**.
   Many parsers (rack-multipart, rack-test) pass a destination
-  buffer to avoid allocation.
+  buffer to avoid allocation. (~10 LOC)
 - `#binmode` — no-op in CRuby, but called by `Rack::Multipart`
-  and many file-handling middlewares. Returns `self`.
-- `#set_encoding(enc)` — accepts `:binary` / `Encoding::ASCII_8BIT`.
-  Rack SPEC requires `rack.input` is ASCII-8BIT-encoded.
-- `#string=(s)` — replaces buffer. Used by test middleware.
-- `#gets(separator)` and `#gets(limit)` variants — Rack JSON
-  middleware calls `#gets(nil)` to slurp; some line-based
-  middlewares pass custom separators.
+  and many file-handling middlewares. Returns `self`. (~1 LOC)
+- `#set_encoding(enc)` — accepts `:binary` /
+  `Encoding::ASCII_8BIT`. Rack SPEC requires `rack.input`
+  is ASCII-8BIT-encoded. Interacts with ADR 0020 encoding
+  tag. (~5 LOC + tag wiring)
+- `#string=(s)` — replaces buffer (counterpart to the
+  existing `#string` getter). Used by test middleware.
+  (~3 LOC)
+- `#gets(separator)` / `#gets(limit)` variants — JSON
+  middleware calls `#gets(nil)` to slurp; line-based
+  middleware passes custom separators. (~10 LOC variant
+  arg handling extending existing 1-arg `#gets`)
 - `#getbyte` / `#readbyte` — byte-oriented reading.
-- `#pos` / `#pos=` — position tracking (some sniffers
-  rewind on header check).
+  (~5 LOC)
+- `#each` (no `_line` suffix) — file currently has
+  `#each_line` only; some apps call `#each`. (~3 LOC alias
+  or full impl)
 
-These are real-world requirements from `rack-multipart`,
-`rack-test`, and major Sinatra/Rails middlewares. Adding ~80
-LOC to the existing 184 LOC of `stringio.rb` covers them.
+**Realistic LOC estimate**: ~30-45 LOC additions to the
+existing 184 LOC — v3's "~80 LOC" was an overestimate.
 
 ### Response handling
 
@@ -658,8 +866,8 @@ Ruby app returns `[status, headers, body]`:
 - HTTP/1.1 only
 - Rack SPEC env hash conformance (v1.6) with non-UTF-8
   header handling
-- Buffered request body via existing StringIO + 8 added
-  methods (~80 LOC)
+- Buffered request body via existing StringIO + 7 added
+  methods (~30-45 LOC)
 - Buffered response body (all-at-once write)
 - One Ruby class: `Rubyrs::HttpServer`
   - `.bind(addr)` — creates handle
@@ -693,7 +901,14 @@ Ruby app returns `[status, headers, body]`:
 - Multiple `Set-Cookie` headers — array-of-strings
   response handling
 - HTTP pipelining (multiple requests, one connection) —
-  serialised through Vm, both succeed
+  hyper's `http1::Builder::serve_connection` serialises
+  the request handler futures within a connection
+  (request 2's handler future is only constructed after
+  request 1's response is sent). Vm borrows therefore
+  never overlap on one connection; pipelined requests
+  succeed in order. v3 incorrectly attributed the
+  serialisation to Vm-borrow ordering — the actual
+  ordering is at the hyper layer.
 - `Upgrade: websocket` request — v1 returns 426 Upgrade
   Required (no WS support)
 - Header size exceeded — 431 Request Header Fields Too
@@ -877,7 +1092,9 @@ that require multi-Vm + JIT.
 - `on_worker_boot` callback
 - `fork_workers(n)` with correct ordering (bind → fork →
   per-child runtime)
-- 8 added StringIO methods (~80 LOC)
+- 7 added StringIO methods (~30-45 LOC; corrects v3's
+  miscount that listed `pos`/`pos=` as additions even
+  though they already exist)
 - 16-case test matrix (H1 acceptance criteria)
 - Integration test: Sinatra-shape Ruby app + wrk smoke
   test
@@ -928,7 +1145,30 @@ from H3.
 - Multi-threaded tokio; Vms still single-threaded
   individually
 
-## What changes vs ADR 0022 v2 (this revision is v3)
+## What changes vs ADR 0022 v3 (this revision is v4)
+
+| v3 said | v4 says | Reason |
+|---|---|---|
+| `VmCallable` sealed trait referenced as enforcement spine | **Fully defined** with concrete blanket impl + `register_async_fn` separation for async host fns | Review #1: undefined in v3, same shape of gap v2 had with VmBorrow |
+| `on_worker_boot: Fn(&mut Runtime) + Send + Sync` | **`Fn(&mut Runtime)` (no bounds)** | Review #8: fork is process boundary not thread; `Send + Sync` blocks `Rc`-based config capture; over-constraint |
+| `Class g (native-thread spawn)` claimed | **Class g removed**; explicit note that current-thread tokio drives the reactor on the same thread | Review #4: factually wrong; current_thread does NOT spawn a separate reactor thread (multi_thread does) |
+| `VmBorrow` `!Send` "enforces no-await-across-borrow" | **Reframed**: the synchronous `FnOnce(&mut Vm) -> R` closure signature is the actual compile-time guard; `!Send` is defence-in-depth (LocalSet allows `!Send` futures, so `!Send` alone doesn't block `.await`) | Review #5: misframed enforcement mechanism in v3 |
+| `vm.pending_method_return` | **`vm.method_return`** (actual field name at `vm.rs:472`) | Review #6: typo |
+| `vm.last_match` cleared unconditionally | **`#[cfg(feature = "regex")]` gated** | Review #7: field is regex-feature-gated; build fails under `--no-default-features` otherwise |
+| "Per-frame magic globals (`$&`, `$'`, `` $` ``, `$1..$9`)" | **Removed**: these are computed on-demand from `vm.last_match`; clearing `last_match` clears them | Review #8: not per-frame; v3 mis-described the implementation |
+| `vm.globals` not classified | **Explicit "clear" decision** with rationale (user `$foo` would leak request-to-request) | Review #9: real bug surface v3 missed |
+| `ResourceExhausted` catch "Does NOT tear down Runtime" | **Adds explicit C-side leak semantics**: Ruby-side state clean, C-side malloc/half-init TypedData/permanent GC roots leak; `docs/CEXT_SAFETY.md` lands with H1; pre-fork supervisor restart is operational mitigation | Review #3: mid-cext leak undefined; for untrusted-script + untrusted-cext exploit surface |
+| 8 added StringIO methods, ~80 LOC | **7 added methods, ~30-45 LOC**; `pos`/`pos=`/`string` already exist | Review #10: LOC overestimate; v3 mis-listed already-present methods |
+| HTTP pipelining "serialised through Vm, both succeed" | **Correctly attributed to hyper's within-connection ordering**; Vm-borrow non-overlap is downstream consequence | Review #11: machinery description wrong in v3 |
+| Cowboy/OpenResty omitted from prior art | **Added with chronological framing**: OpenResty (2009), Cowboy (2012), mruby+H2O (2015), wasmtime-wasi-http (2024) | Review #12: missing 10+-year-older architectural ancestors |
+| `refill_fuel(Option<u64>)` "Idempotent" — set vs add ambiguous | **Set semantics explicit**: overwrites, doesn't add; None+Config::fuel=None means unbounded; mid-request unspecified | Review #14: ambiguity could surface as bug |
+| `req.body()` in handle_request pseudocode | **`req.into_body()`** consistent with body-limit example | Review minor: pseudocode inconsistency |
+| Field count self-citations: 12 vs 13 vs 21 across sections | **Single consistent count (13 must-clear / 9 do-not-clear / 1 assertion)** | Review minor: self-citation drift |
+| Test matrix "16 cases" but list had 18 bullets | **Honest "~18 cases" count**; intent clearer | Review minor |
+| Hello-world RPS: 2-5k (table) vs 2-8k (context) | **Single range 2-5k**; the 2-8k was an older estimate not updated | Review minor |
+| `select!` simultaneous signal behaviour unspecified | **Note added**: tokio random-poll order means either signal wins; outcome (graceful shutdown) same | Review minor |
+
+## What changes vs ADR 0022 v2 (preserved from v3 — historical)
 
 | v2 said | v3 says | Reason |
 |---|---|---|
@@ -963,7 +1203,50 @@ from H3.
 
 ## Revision log
 
-- **2026-05-27 — v3 (this revision).** Major revision after
+- **2026-05-27 — v4 (this revision).** Third parallel
+  review of v3 flagged 3 blockers + 9 majors + 8 minors.
+  v4 closes all of them. Highlights:
+  - Defined the previously-asserted `VmCallable` sealed
+    trait with concrete impl shape and the
+    `register_async_fn` separation it implies
+  - `on_worker_boot` signature relaxed (dropped `Send +
+    Sync` over-constraint; fork is a process boundary not
+    a thread boundary)
+  - Documented `ResourceExhausted`-mid-cext C-side leak
+    semantics (Ruby-side state is clean; C-side malloc/
+    half-init TypedData/permanent GC roots leak — pre-fork
+    supervisor restart is operational mitigation; new
+    `docs/CEXT_SAFETY.md` lands with H1)
+  - Removed incorrect Class g claim (tokio current-thread
+    does NOT spawn a separate reactor thread; only Class a
+    remains)
+  - Reframed VmBorrow's `!Send` enforcement honestly: the
+    synchronous `FnOnce` closure signature is the actual
+    compile-time guard; `!Send` is defence-in-depth
+  - Fixed `vm.rs` field cross-reference errors:
+    `method_return` not `pending_method_return`;
+    `last_match` needs `#[cfg(feature = "regex")]` gate;
+    magic globals computed from `last_match` not per-frame
+  - Added explicit `vm.globals` classification (clear —
+    user `$foo` would leak request data otherwise)
+  - StringIO list corrected: `pos`/`pos=`/`string` already
+    exist in `stringio.rb`; truly missing methods total
+    ~30-45 LOC, not v3's overestimated ~80 LOC
+  - HTTP pipelining serialisation correctly attributed to
+    hyper's within-connection ordering (not Vm-borrow)
+  - Added Cowboy/BEAM (2012) and OpenResty (2009) as
+    architectural prior art predating wasmtime-wasi-http
+  - `refill_fuel` semantics spelled out (set, not add;
+    None+Config::fuel=None means unbounded;
+    mid-request unspecified, host fns must not call)
+  - `select!` randomisation note for simultaneous SIGINT
+    +SIGTERM
+  - Pseudocode `req.body()` → `req.into_body()` (consistent
+    with the body-limit example below)
+  - Self-citation inconsistencies cleaned (field counts,
+    test matrix case counts, RPS ranges)
+
+- **2026-05-27 — v3 (commit `ccf9f4c7`).** Major revision after
   second parallel review of v2 flagged 3 blockers + 7
   majors + 4 prior-art accuracy issues. v3 closes all 13.
   Promoted `VmBorrow<'_>` to mandatory Decision. Added
@@ -1016,9 +1299,41 @@ from H3.
 
 - [Rack SPEC v1.6](https://github.com/rack/rack/blob/main/SPEC.rdoc)
   — env hash conventions
+
+#### Architectural prior art (isolated per-request state + native HTTP front)
+
+The "isolated per-request VM state behind a native HTTP
+front" pattern predates Rust by a decade. Cited in
+chronological order:
+
+- **OpenResty (nginx + LuaJIT, 2009)** ([github.com/openresty/openresty](https://github.com/openresty/openresty))
+  — direct philosophical match: native HTTP front (nginx)
+  embeds a scripting VM (LuaJIT) inside worker processes;
+  Lua handlers run while nginx does wire I/O. The "Tier 3
+  battery" framing in ADR 0019 v3 is exactly the
+  `nginx + ngx_lua` shape one ring out. **Architectural
+  ancestor**.
+- **Erlang/Cowboy (2012)** ([github.com/ninenines/cowboy](https://github.com/ninenines/cowboy))
+  — "one process per connection, plus one process per
+  request/response stream... request processes are never
+  reused, so there is no need to perform any cleanup after
+  the response has been sent — the process will terminate
+  and Erlang/OTP will reclaim all memory at once." Exactly
+  the "fresh state per request" pattern wasmtime-wasi-http
+  adopted ~10 years later. We don't get this for free
+  (BEAM's process spawn is ~1µs; our Vm cold-start is
+  ~10ms today), but H6's per-request Vm spawn is the
+  Cowboy shape applied to rubyrs.
+- **mruby + H2O (2015)** — the closest 1:1 architectural
+  precedent for our shape. Numbers cited in Context.
+- **wasmtime-wasi-http (2024+)** — current-generation Rust
+  realisation of the same pattern; closest Rust precedent
+  by API ergonomics (`ProxyPre::instantiate_async` is the
+  template for our future H6 design).
+
 - [`wasmtime-wasi-http`](https://docs.wasmtime.dev/api/wasmtime_wasi_http/)
   — closest Rust precedent. Per-request Store pattern via
-  `ProxyPre::instantiate_async`. **Primary prior art**.
+  `ProxyPre::instantiate_async`. **Primary Rust prior art**.
 - [`ProxyPre::instantiate_async`](https://docs.wasmtime.dev/api/wasmtime_wasi_http/bindings/struct.ProxyPre.html)
   — the analogue for `reset_between_requests`'s spirit
 - [`tokio::task::LocalSet`](https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html)
