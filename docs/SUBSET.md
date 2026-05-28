@@ -802,14 +802,17 @@ Plain.new.respond_to?(:Array) # CRuby: false; rubyrs: false (matches)
   ancestor chain finds them, but the private-visibility check
   raises `NoMethodError (private method called)` when invoked
   via an explicit receiver.
-- rubyrs's `do_call` has a Kernel-fallback that routes these
+- rubyrs `do_call` has a Kernel-fallback that routes these
   six names to `builtin_call` when normal lookup AND
   `method_missing` both miss. The fallback ignores
   private-visibility — `obj.Array(...)` silently succeeds where
   CRuby raises.
-- `respond_to?` still returns `false` for these names on a
-  non-Kernel-mixin receiver (CRuby parity); the divergence is
-  the call shape, not feature detection.
+- `respond_to?` still returns `false` for these names — CRuby
+  reaches the methods via the Kernel include (every Object is
+  Kernel-mixed), but `respond_to?` defaults to
+  `include_private: false`, which hides private methods. rubyrs
+  matches by reporting `false`. The divergence is the call
+  shape, not feature detection.
 - A user `method_missing` correctly wins over the fallback
   (matches CRuby's "private NoMethodError → method_missing
   intercepts" path); fixture `kernel_array_via_method.rb`
@@ -834,8 +837,12 @@ Plain.new.respond_to?(:Array) # CRuby: false; rubyrs: false (matches)
 ### `Module#define_method` 2-arg Proc form not implemented
 
 ```ruby
+class Foo; end
 p = proc { |x| x * 2 }
-Foo.define_method(:double, p)   # CRuby: installs :double; rubyrs: NotImplemented
+Foo.define_method(:double, p)
+# CRuby: installs :double; rubyrs: ArgumentError
+#   ("the 2-arg Proc/UnboundMethod form of `Module#define_method`
+#    is not yet supported by rubyrs Tier-1")
 Foo.define_method(:double) { |x| x * 2 }  # both: installs :double
 Foo.define_method               # both: ArgumentError (wrong arity)
 Foo.define_method(:x)           # both: ArgumentError (tried to create Proc without block)
@@ -858,9 +865,15 @@ Foo.define_method(:x)           # both: ArgumentError (tried to create Proc with
   proto/captures into an installable Method, parallel to the
   existing closure-method install in `Op::DefMethodBlock`.
 - Tests: `crates/rubyrs/tests/diff/module_define_method.rb`
-  (CRuby-shape arity errors pinned; 2-arg NotImplemented
-  surface tested via `rescue ArgumentError` with the
-  not-yet-supported message).
+  pins the CRuby-aligned arity errors (0-arg, 3+-arg wrong-arity;
+  1-arg "tried to create Proc object without a block"). The
+  2-arg form itself can't be pinned via a diff fixture — CRuby
+  installs the method and rubyrs raises ArgumentError, so the
+  outputs would diverge byte-for-byte by design. The Tier-1
+  divergence is verified via manual probe; the ArgumentError
+  message wording is asserted in
+  `crates/rubyrs/src/vm/dispatch.rs` review history (#245
+  round 6 / round 7).
 
 ### Kernel module functions reachable via `method(:name).call(...)` round-trip
 

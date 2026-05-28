@@ -13,7 +13,7 @@ re-described.
 
 ## Methodology — the "probe → layer → fix" loop
 
-1. **Probe**: run `./target/release/rubyrs /tmp/probe_pass9.rb`,
+1. **Probe**: run `./target/release/rubyrs /tmp/probe_pass8.rb`,
    where the probe script supplies minimal embedder stubs
    (Rack module skeleton, `URI`, etc.) then
    `require_relative` sinatra's `base.rb`.
