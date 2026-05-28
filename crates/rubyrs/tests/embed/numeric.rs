@@ -2772,6 +2772,149 @@ fn integer_chr_basic() {
     }
 }
 
+#[test]
+fn float_domain_error_class_and_rescue_chain() {
+    // FloatDomainError sits at FloatDomainError < RangeError <
+    // StandardError < Exception. Verify (a) the class is exposed
+    // to Ruby code (preamble loaded), (b) the ancestor chain is
+    // correct, (c) `rescue FloatDomainError`, `rescue RangeError`,
+    // and a bare `rescue` all catch a NaN-divmod trap, (d)
+    // `Float::INFINITY.to_i` / `Float::NAN.to_i` raise it (and
+    // not the silent `as i64` clamp), (e) the embed host sees
+    // the `Uncaught { class_name: "FloatDomainError" }` shape.
+    let mut rt = rubyrs::Runtime::new();
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts FloatDomainError.ancestors.inspect",
+        "fde_chain.rb",
+    ).expect("eval");
+    assert_eq!(
+        buf.snapshot().trim(),
+        "[FloatDomainError, RangeError, StandardError, Exception]",
+    );
+
+    for (script, rescue_class, expected) in [
+        ("begin; 13.divmod(0.0/0.0); rescue FloatDomainError => e; puts e.class; end",
+         "FloatDomainError", "FloatDomainError"),
+        ("begin; 13.divmod(0.0/0.0); rescue RangeError => e; puts e.class; end",
+         "RangeError", "FloatDomainError"),
+        ("begin; 13.divmod(0.0/0.0); rescue => e; puts e.class; end",
+         "bare", "FloatDomainError"),
+    ] {
+        let buf = SharedBuf::new();
+        rt.set_stdout(Box::new(buf.clone()));
+        rt.eval(script, "fde_rescue.rb").expect("eval");
+        assert_eq!(
+            buf.snapshot().trim(),
+            expected,
+            "rescue {} should catch FloatDomainError",
+            rescue_class,
+        );
+    }
+
+    // Float#to_i / floor / ceil / round / truncate on NaN / ±Inf.
+    for (script, expected_msg) in [
+        ("(0.0/0.0).to_i",     "NaN"),
+        ("(1.0/0.0).to_i",     "Infinity"),
+        ("(-1.0/0.0).to_i",    "-Infinity"),
+        ("(0.0/0.0).floor",    "NaN"),
+        ("(1.0/0.0).ceil",     "Infinity"),
+        ("(-1.0/0.0).round",   "-Infinity"),
+        ("(0.0/0.0).truncate", "NaN"),
+        // Precision-arg form: previously bypassed the guard
+        // because the trap arm only matched `[]`, so
+        // `Float::NAN.round` raised but `Float::NAN.round(0)`
+        // silently returned 0 (the f64-NaN-to-i64 cast). Pin both
+        // the n == 0 and the negative-n branches.
+        ("(0.0/0.0).round(0)",      "NaN"),
+        ("(0.0/0.0).round(-2)",     "NaN"),
+        ("(1.0/0.0).round(0)",      "Infinity"),
+        ("(1.0/0.0).round(-2)",     "Infinity"),
+        ("(-1.0/0.0).truncate(0)",  "-Infinity"),
+        ("(-1.0/0.0).truncate(-1)", "-Infinity"),
+        // BigInt-precision form — under bignum any BigInt sits
+        // outside i64, so without a dedicated arm the call
+        // surfaces NoMethodError. Pin both positive and negative
+        // BigInt-precision: NaN/Inf trap unconditionally.
+        #[cfg(feature = "bignum")]
+        ("(0.0/0.0).round(2**70)",     "NaN"),
+        #[cfg(feature = "bignum")]
+        ("(1.0/0.0).truncate(2**70)",  "Infinity"),
+        #[cfg(feature = "bignum")]
+        ("(-1.0/0.0).round(-(2**70))", "-Infinity"),
+    ] {
+        let err = rt.eval(script, "fde_to_i.rb").unwrap_err();
+        // At the eval boundary the dispatcher always re-shapes a
+        // typed trap into `Uncaught { class_name, message }` via
+        // `trap_to_exception` + `unwind_with_exception` (see
+        // vm/step.rs:289 — only ResourceExhausted / Uncaught /
+        // SyntaxError bypass that conversion). Pin the boundary
+        // shape AND that the class_name is exactly
+        // "FloatDomainError" so a regression that downgrades to
+        // a generic RangeError-shaped Uncaught fails loudly.
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "FloatDomainError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected Uncaught FloatDomainError for {:?}, got {:?}", script, other),
+        }
+    }
+
+    // sprintf %d / %b / %o / %x with NaN/±Infinity — CRuby
+    // raises FloatDomainError; previously rubyrs silently
+    // `as i64`-clamped. Mirror the unified surface.
+    for (script, expected_msg) in [
+        ("sprintf(\"%d\", 0.0/0.0)",  "NaN"),
+        ("sprintf(\"%d\", 1.0/0.0)",  "Infinity"),
+        ("sprintf(\"%d\", -1.0/0.0)", "-Infinity"),
+        ("sprintf(\"%b\", 0.0/0.0)",  "NaN"),
+        ("sprintf(\"%x\", 1.0/0.0)",  "Infinity"),
+    ] {
+        let err = rt.eval(script, "fde_sprintf.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "FloatDomainError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected Uncaught FloatDomainError for {:?}, got {:?}", script, other),
+        }
+    }
+
+    // Kernel#Integer parity — `Integer(Float::NAN)` and
+    // `Integer(Float::INFINITY)` previously raised TypeError,
+    // divergent from CRuby AND inconsistent with `Float#to_i`
+    // (which this PR routes through FloatDomainError). Pin
+    // the unified shape so the two surfaces stay aligned.
+    for (script, expected_msg) in [
+        ("Integer(0.0/0.0)",   "NaN"),
+        ("Integer(1.0/0.0)",   "Infinity"),
+        ("Integer(-1.0/0.0)",  "-Infinity"),
+    ] {
+        let err = rt.eval(script, "fde_kernel_integer.rb").unwrap_err();
+        match err.err {
+            rubyrs::RubyError::Uncaught { ref class_name, ref message, .. } => {
+                assert_eq!(class_name, "FloatDomainError", "for {:?}", script);
+                assert_eq!(message, expected_msg, "for {:?}", script);
+            }
+            ref other => panic!("expected Uncaught FloatDomainError for {:?}, got {:?}", script, other),
+        }
+    }
+
+    // Positive-precision branch returns a Float and propagates
+    // NaN/Inf cleanly — matches CRuby (e.g. `Float::NAN.round(2)`
+    // returns NaN, not a trap). Pin so a future "trap on any
+    // NaN/Inf precision" over-correction is caught.
+    let buf = SharedBuf::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "puts (0.0/0.0).round(2); puts (1.0/0.0).truncate(3)",
+        "fde_pos_prec.rb",
+    ).expect("eval");
+    assert_eq!(buf.snapshot().trim(), "NaN\nInfinity");
+}
+
 #[cfg(feature = "bignum")]
 #[test]
 fn bigint_pow_bigint_exponent_traps() {

@@ -240,6 +240,10 @@ pub static rb_eFrozenError:     super::Value = 0xE000_0000_0000_000C;
 #[unsafe(no_mangle)]
 pub static rb_eEncCompatError:  super::Value = 0xE000_0000_0000_000D;
 
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static rb_eFloatDomainError: super::Value = 0xE000_0000_0000_000E;
+
 /// Map a raised class sentinel back to the rubyrs exception-class
 /// name string used by `RubyError::*::class_name()`. Returns
 /// `"RuntimeError"` as the fallback for any unknown / future
@@ -260,6 +264,23 @@ pub fn exception_class_name_for_sentinel(class: super::Value) -> &'static str {
         x if x == rb_eEOFError        => "EOFError",
         x if x == rb_eFrozenError     => "FrozenError",
         x if x == rb_eEncCompatError  => "Encoding::CompatibilityError",
+        x if x == rb_eFloatDomainError => "FloatDomainError",
         _ => "RuntimeError",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn float_domain_sentinel_resolves() {
+        // Lock the sentinel → string mapping so a future re-ordering
+        // (or accidental deletion of the arm) is caught — without
+        // this, vm/cext.rs's "FloatDomainError" => RubyError mapping
+        // would silently become dead code.
+        assert_eq!(
+            exception_class_name_for_sentinel(rb_eFloatDomainError),
+            "FloatDomainError",
+        );
     }
 }

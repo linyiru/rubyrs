@@ -169,6 +169,8 @@ mod cext_raise_exports {
     static _RB_E_FROZEN:     &rubyrs_cext::Value = &rubyrs_cext::raise::rb_eFrozenError;
     #[used]
     static _RB_E_ENC_COMPAT: &rubyrs_cext::Value = &rubyrs_cext::raise::rb_eEncCompatError;
+    #[used]
+    static _RB_E_FLOAT_DOMAIN: &rubyrs_cext::Value = &rubyrs_cext::raise::rb_eFloatDomainError;
 }
 
 // === L3-B: TypedData ABI ===

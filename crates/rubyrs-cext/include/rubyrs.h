@@ -890,6 +890,7 @@ VALUE rb_rescue2(VALUE (*body)(VALUE), VALUE body_arg,
 extern VALUE rb_eEOFError;
 extern VALUE rb_eFrozenError;
 extern VALUE rb_eEncCompatError;
+extern VALUE rb_eFloatDomainError;
 
 /* Class / object */
 void rb_define_const(VALUE klass, const char *name, VALUE val);

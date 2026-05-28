@@ -299,9 +299,15 @@ impl Vm {
                     // here either, so we don't).
                     (Value::Int(n), None) => Ok(Value::Int(*n)),
                     (Value::Float(f), None) => {
+                        // CRuby raises FloatDomainError (a RangeError
+                        // subclass) for NaN / ±Infinity here, matching
+                        // `Float#to_i`'s shape — same message label so
+                        // `Integer(Float::NAN)` and `Float::NAN.to_i`
+                        // emit the same exception class, not divergent
+                        // ones.
                         if !f.is_finite() {
-                            Err(RubyError::TypeError {
-                                msg: format!("can't convert {} into Integer", crate::heap::format_float(*f)),
+                            Err(RubyError::FloatDomainError {
+                                msg: crate::vm::numeric::float_domain_label(*f).to_string(),
                             })
                         } else { Ok(Value::Int(*f as i64)) }
                     }

@@ -77,6 +77,14 @@ end
 ## Sits under StandardError so a bare `rescue` catches it.
 class RangeError < StandardError
 end
+## FloatDomainError — raised for IEEE-754 special values that
+## have no Integer representation: `Float::INFINITY.to_i`,
+## `Float::NAN.to_i`, divmod with NaN divisor, etc. CRuby places
+## it under RangeError so `rescue RangeError` (or a bare
+## `rescue`) still catches it; users who care specifically
+## about float-vs-other range failures can `rescue FloatDomainError`.
+class FloatDomainError < RangeError
+end
 ## LocalJumpError — raised when a control-flow keyword
 ## (`break` / `next` / `return`) escapes the wrong scope. The
 ## canonical case is `break` from inside a stored Proc (e.g. a

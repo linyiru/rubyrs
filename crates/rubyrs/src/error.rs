@@ -99,6 +99,14 @@ pub enum RubyError {
     /// (the modular inverse may not exist; we don't compute it).
     /// Rescued by `rescue RangeError`.
     RangeError { msg: String },
+    /// IEEE-754 special value (NaN / ±Infinity) where an Integer-
+    /// range value was expected. CRuby's `FloatDomainError`,
+    /// which sits under `RangeError` — so `rescue RangeError`
+    /// or a bare `rescue` still catches it; users who want to
+    /// distinguish float-vs-other domain failures can write
+    /// `rescue FloatDomainError`. Raised by e.g. divmod with a
+    /// NaN divisor, `Float::INFINITY.to_i`, `Float::NAN.to_i`.
+    FloatDomainError { msg: String },
     /// Resource limits exceeded (fuel, heap, stack depth). Used by P1-D
     /// when a Runtime was configured with caps for untrusted scripts.
     ResourceExhausted { msg: String },
@@ -151,6 +159,7 @@ const BUILTIN_EXCEPTION_PARENT: &[(&str, &str)] = &[
     ("KeyError", "IndexError"),
     ("ZeroDivisionError", "StandardError"),
     ("RangeError", "StandardError"),
+    ("FloatDomainError", "RangeError"),
     ("LocalJumpError", "StandardError"),
     ("FrozenError", "RuntimeError"),
     // Deliberately `< Exception`, NOT `< StandardError` — see
@@ -256,6 +265,7 @@ impl RubyError {
             RubyError::LocalJumpError { .. } => "LocalJumpError",
             RubyError::ZeroDivisionError { .. } => "ZeroDivisionError",
             RubyError::RangeError { .. } => "RangeError",
+            RubyError::FloatDomainError { .. } => "FloatDomainError",
             RubyError::ResourceExhausted { .. } => "ResourceExhausted",
             RubyError::IOError { .. } => "IOError",
             RubyError::LoadError { .. } => "LoadError",
@@ -279,6 +289,7 @@ impl RubyError {
             | RubyError::LocalJumpError { msg }
             | RubyError::ZeroDivisionError { msg }
             | RubyError::RangeError { msg }
+            | RubyError::FloatDomainError { msg }
             | RubyError::ResourceExhausted { msg }
             | RubyError::IOError { msg }
             | RubyError::LoadError { msg } => msg.clone(),

@@ -733,6 +733,7 @@ pub(crate) fn cext_dispatch(
                     "NameError"         => RubyError::NameError { msg },
                     "ZeroDivisionError" => RubyError::ZeroDivisionError { msg },
                     "RangeError"        => RubyError::RangeError { msg },
+                    "FloatDomainError"  => RubyError::FloatDomainError { msg },
                     other => RubyError::RuntimeError {
                         msg: format!("{}: {}", other, msg),
                     },

@@ -13,8 +13,8 @@ count below is also the passing count.
 | Metric | Count |
 |---|---|
 | Files | 121 |
-| Examples in corpus | 698 |
-| Skipped `it` traces | 147 |
+| Examples in corpus | 700 |
+| Skipped `it` traces | 146 |
 
 ### Skipped traces by category
 
@@ -22,7 +22,7 @@ count below is also the passing count.
 |---|---|
 | `divergent` | 2 |
 | `fixture` | 53 |
-| `method-not-implemented` | 73 |
+| `method-not-implemented` | 72 |
 | `mock` | 19 |
 
 Most categories come from `crates/rubyrs-spec-extract/scripts/polish.py`'s
@@ -41,7 +41,7 @@ Find blocks unlocked by a future feature with e.g.
 | Array | 18 | 72 | 49 |
 | BasicObject | 3 | 15 | 0 |
 | Hash | 24 | 62 | 43 |
-| Integer | 34 | 296 | 30 |
+| Integer | 34 | 298 | 29 |
 | Method | 12 | 61 | 1 |
 | Module | 3 | 15 | 0 |
 | String | 23 | 159 | 24 |
@@ -110,7 +110,7 @@ Find blocks unlocked by a future feature with e.g.
 | `integer_comparison_spec.rb` | Integer#<=> | `core/integer/comparison_spec.rb` | 23 | 2 |
 | `integer_complement_spec.rb` | Integer#~ | `core/integer/complement_spec.rb` | 2 | 0 |
 | `integer_digits_spec.rb` | Integer#digits | `core/integer/digits_spec.rb` | 7 | 0 |
-| `integer_divmod_spec.rb` | Integer#divmod | `core/integer/divmod_spec.rb` | 10 | 1 |
+| `integer_divmod_spec.rb` | Integer#divmod | `core/integer/divmod_spec.rb` | 12 | 0 |
 | `integer_downto_spec.rb` | Integer#downto [stop] when self and stop are Integers | `core/integer/downto_spec.rb` | 5 | 1 |
 | `integer_eql_spec.rb` | Integer#eql? | `core/integer/eql_spec.rb` | 10 | 1 |
 | `integer_equal_value_spec.rb` | Integer#== | `core/integer/equal_value_spec.rb + core/integer/shared/equal.rb` | 10 | 1 |
