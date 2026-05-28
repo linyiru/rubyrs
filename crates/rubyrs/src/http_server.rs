@@ -912,6 +912,63 @@ pub(crate) fn run_blocking_for_duration_with_app(
     Ok(bound)
 }
 
+/// Variant of `run_blocking_for_duration_with_app` that
+/// takes a pre-bound `std::net::TcpListener` instead of
+/// binding internally. Used by Stage 7's pre-fork path:
+/// each forked child constructs its own listener via
+/// `bind_reuseport_v4` and hands it here. The tokio
+/// runtime is still built inside this fn — per ADR 0022
+/// v3 §"Multi-core scaling", the runtime MUST be created
+/// post-fork in each worker, never pre-fork in the
+/// supervisor.
+///
+/// The std listener MUST already be non-blocking;
+/// `bind_reuseport_v4` sets this, so callers using that
+/// helper get it for free. If a caller hands a blocking
+/// listener, `TcpListener::from_std` returns an error.
+#[cfg(unix)]
+#[allow(dead_code)] // wired up in 7c/7d prefork host fn
+#[allow(clippy::too_many_arguments)] // 10 args; flat for stage-by-stage growth
+pub(crate) fn run_blocking_for_duration_with_app_on_listener(
+    std_listener: std::net::TcpListener,
+    duration: std::time::Duration,
+    block_id: crate::value::ObjId,
+    on_error_block: Option<crate::value::ObjId>,
+    per_request_fuel: Option<u64>,
+    max_request_body_bytes: usize,
+    per_request_io_deadline: Option<std::time::Duration>,
+    max_headers: Option<usize>,
+    idle_timeout: Option<std::time::Duration>,
+    install_signal_handler: bool,
+) -> std::io::Result<SocketAddr> {
+    let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let local = LocalSet::new();
+    let bound = rt.block_on(local.run_until(async move {
+        // Convert std → tokio listener INSIDE the runtime.
+        // `from_std` requires the underlying socket to be
+        // non-blocking; `bind_reuseport_v4` sets this.
+        let listener = TcpListener::from_std(std_listener)?;
+        let listener_addr = listener.local_addr()?;
+        tokio::select! {
+            res = serve_with_app_until_shutdown(
+                listener, block_id, on_error_block, listener_addr,
+                per_request_fuel, max_request_body_bytes,
+                per_request_io_deadline,
+                max_headers,
+                idle_timeout,
+                install_signal_handler,
+                shutdown_rx,
+            ) => res?,
+            _ = tokio::time::sleep(duration) => {}
+        }
+        Ok::<_, std::io::Error>(listener_addr)
+    }))?;
+    Ok(bound)
+}
+
 /// Bind + serve hardcoded responses for at most `duration`,
 /// then return. Stage 3 PoC entry point — used by the Ruby-
 /// side `__rubyrs_http_serve_hardcoded(addr, secs)` host fn.
@@ -2835,6 +2892,97 @@ mod tests {
             assigned.port(),
             0,
             "kernel should have assigned a non-zero port",
+        );
+    }
+
+    /// Stage 7b: `run_blocking_for_duration_with_app_on_listener`
+    /// accepts a pre-bound SO_REUSEPORT listener and serves
+    /// requests over it identically to the addr-taking
+    /// path. Proves the std → tokio listener handoff +
+    /// runtime-built-post-bind ordering work end-to-end.
+    ///
+    /// We register a one-shot test host fn that wraps the
+    /// on_listener entry — it needs the CURRENT_VM_PTR
+    /// contract (set by `invoke_host_fn`), same as the
+    /// real `__rubyrs_http_serve_with_app` path. This is
+    /// the wiring 7c/7d build on; an in-process
+    /// equivalent of what each forked child will do.
+    #[cfg(unix)]
+    #[test]
+    fn run_on_listener_serves_real_request() {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, TcpStream};
+        use std::thread;
+        use std::time::Duration;
+
+        let addr: SocketAddr = "127.0.0.1:18131".parse().unwrap();
+
+        let client_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            let mut client = TcpStream::connect(addr).expect("connect");
+            client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            client
+                .write_all(b"GET /pf HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write");
+            let mut response = Vec::new();
+            let _ = client.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        // Register a test-local host fn that:
+        //   1. Binds a SO_REUSEPORT listener
+        //   2. Hands it to the new on_listener entry
+        // This mimics what each forked child will do in
+        // 7d but without the fork.
+        let mut rt = crate::Runtime::new();
+        rt.register_fn("__test_serve_on_listener", move |args| {
+            use crate::error::{RubyError, Trap};
+            use crate::value::Value;
+            let block_id = match args {
+                [Value::Block(id)] => *id,
+                _ => return Err(Trap {
+                    err: RubyError::ArgumentError {
+                        msg: "__test_serve_on_listener(app)".to_string(),
+                    },
+                    backtrace: vec![],
+                }),
+            };
+            let listener = super::bind_reuseport_v4(addr).map_err(|e| Trap {
+                err: RubyError::RuntimeError {
+                    msg: format!("bind_reuseport: {e}"),
+                },
+                backtrace: vec![],
+            })?;
+            super::run_blocking_for_duration_with_app_on_listener(
+                listener,
+                Duration::from_secs(1),
+                block_id,
+                None,
+                Some(1_000_000),
+                super::DEFAULT_MAX_BODY_BYTES,
+                None,
+                None,
+                None,
+                false,
+            ).map_err(|e| Trap {
+                err: RubyError::RuntimeError { msg: format!("serve: {e}") },
+                backtrace: vec![],
+            })?;
+            Ok(Value::Nil)
+        });
+        rt.eval(r#"
+            app = ->(env) { [200, {"Content-Type" => "text/plain"}, ["from_listener"]] }
+            __test_serve_on_listener(app)
+        "#, "stage_7b_on_listener.rb").expect("server ran");
+
+        let response_text = client_thread.join().expect("client thread");
+        assert!(
+            response_text.contains("HTTP/1.1 200"),
+            "expected 200 from on_listener path, got:\n{response_text}",
+        );
+        assert!(
+            response_text.contains("from_listener"),
+            "expected app's body, got:\n{response_text}",
         );
     }
 
